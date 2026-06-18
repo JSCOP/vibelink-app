@@ -69,6 +69,8 @@ pub fn ensure_daemon() -> Result<DaemonStream> {
         Err(err) => {
             if should_recover_stale_daemon(&err, false, false) {
                 let _ = recover_recorded_stale_daemon()?;
+            } else if should_recover_unrecorded_stale_daemon(&err, false, false) {
+                let _ = recover_unrecorded_stale_daemon()?;
             }
             Some(err.to_string())
         }
@@ -198,6 +200,16 @@ fn should_recover_stale_daemon(
     err.should_recover_stale_daemon() && !daemon_spawned_by_this_startup && !already_recovered
 }
 
+fn should_recover_unrecorded_stale_daemon(
+    err: &StartupAttemptError,
+    daemon_spawned_by_this_startup: bool,
+    already_recovered: bool,
+) -> bool {
+    matches!(err.kind, StartupAttemptErrorKind::Connect)
+        && !daemon_spawned_by_this_startup
+        && !already_recovered
+}
+
 fn should_retry_startup_attempt(
     err: &StartupAttemptError,
     daemon_spawned_by_this_startup: bool,
@@ -277,6 +289,58 @@ fn shutdown_daemon_from_pid_file(path: &Path) -> Result<bool> {
 fn recover_recorded_stale_daemon() -> Result<bool> {
     let daemon_paths = paths::daemon_paths()?;
     shutdown_daemon_from_pid_file(&daemon_paths.pid)
+}
+
+#[cfg(windows)]
+fn recover_unrecorded_stale_daemon() -> Result<bool> {
+    let pids = find_unrecorded_daemon_pids()?;
+    for pid in &pids {
+        terminate_daemon_pid(*pid)
+            .with_context(|| format!("terminate unrecorded daemon pid {pid}"))?;
+    }
+    if !pids.is_empty() {
+        thread::sleep(DAEMON_READY_DELAY);
+    }
+    Ok(!pids.is_empty())
+}
+
+#[cfg(not(windows))]
+fn recover_unrecorded_stale_daemon() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn find_unrecorded_daemon_pids() -> Result<Vec<u32>> {
+    let exe = std::env::current_exe().context("resolve current executable for daemon recovery")?;
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            include_str!("find_daemon_pids.ps1"),
+        ])
+        .env("AWT_DAEMON_EXE", exe)
+        .stdin(Stdio::null())
+        .output()
+        .context("list unrecorded daemon processes")?;
+
+    if !output.status.success() {
+        bail!(
+            "list unrecorded daemon processes exited with {}",
+            output.status
+        );
+    }
+
+    let stdout =
+        String::from_utf8(output.stdout).context("parse daemon process list output as utf8")?;
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.parse::<u32>()
+                .with_context(|| format!("invalid daemon pid {line:?}"))
+        })
+        .collect()
 }
 
 fn read_daemon_pid(path: &Path) -> Result<Option<u32>> {
@@ -568,6 +632,27 @@ mod tests {
         assert!(should_recover_stale_daemon(&unhealthy_error, false, false));
         assert!(!should_recover_stale_daemon(&unhealthy_error, true, false));
         assert!(!should_recover_stale_daemon(&unhealthy_error, false, true));
+    }
+
+    #[test]
+    fn connect_failure_can_recover_unrecorded_orphan_once() {
+        let connect_error = StartupAttemptError::connect(anyhow!("connect failed"));
+
+        assert!(should_recover_unrecorded_stale_daemon(
+            &connect_error,
+            false,
+            false
+        ));
+        assert!(!should_recover_unrecorded_stale_daemon(
+            &connect_error,
+            true,
+            false
+        ));
+        assert!(!should_recover_unrecorded_stale_daemon(
+            &connect_error,
+            false,
+            true
+        ));
     }
 
     #[test]
