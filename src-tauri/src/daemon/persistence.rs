@@ -1,0 +1,96 @@
+use crate::protocol::PaneConfig;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{fs, io, path::Path};
+use uuid::Uuid;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedSession {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: i64,
+    pub layout_json: Option<String>,
+    pub panes: Vec<PaneConfig>,
+}
+
+pub fn load_sessions(path: &Path) -> Result<Vec<PersistedSession>> {
+    match fs::read_to_string(path) {
+        Ok(json) => serde_json::from_str(&json).context("parse sessions.json"),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(err).context("read sessions.json"),
+    }
+}
+
+pub fn save_sessions(path: &Path, sessions: &[PersistedSession]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create sessions directory")?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(sessions).context("serialize sessions.json")?;
+    fs::write(&tmp, json).context("write sessions temp file")?;
+    fs::rename(&tmp, path).context("replace sessions.json")?;
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_and_load_sessions_preserves_panes() {
+        let path = std::env::temp_dir().join(format!("awt-sessions-{}.json", Uuid::new_v4()));
+        let session = PersistedSession {
+            id: Uuid::new_v4(),
+            name: "Workspace".to_string(),
+            created_at: 123,
+            layout_json: Some("{\"grid\":true}".to_string()),
+            panes: vec![PaneConfig {
+                pane_id: Uuid::new_v4(),
+                shell: Some("cmd.exe".to_string()),
+                args: vec!["/K".to_string()],
+                cwd: Some("E:/work".to_string()),
+                env: vec![("A".to_string(), "B".to_string())],
+                title: Some("shell".to_string()),
+                cols: 100,
+                rows: 40,
+            }],
+        };
+
+        save_sessions(&path, &[session.clone()]).expect("save sessions");
+        let loaded = load_sessions(&path).expect("load sessions");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, session.id);
+        assert_eq!(loaded[0].name, session.name);
+        assert_eq!(loaded[0].layout_json, session.layout_json);
+        assert_eq!(loaded[0].panes, session.panes);
+    }
+
+    #[test]
+    fn missing_sessions_file_loads_empty() {
+        let path = std::env::temp_dir().join(format!("missing-awt-sessions-{}.json", Uuid::new_v4()));
+
+        assert_eq!(load_sessions(&path).expect("load missing"), Vec::new());
+    }
+
+    #[test]
+    fn load_sessions_preserves_persisted_panes() {
+        let path = std::env::temp_dir().join(format!("legacy-awt-sessions-{}.json", Uuid::new_v4()));
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let json = format!(
+            r#"[{{"id":"{session_id}","name":"Smoke","createdAt":123,"layoutJson":null,"panes":[{{"paneId":"{pane_id}","shell":"cmd.exe","args":["/C","echo stale"],"cwd":null,"env":[],"title":"stale","cols":80,"rows":24}}]}}]"#
+        );
+        std::fs::write(&path, json).expect("write legacy sessions");
+
+        let loaded = load_sessions(&path).expect("load legacy sessions");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].panes.len(), 1);
+        assert_eq!(loaded[0].panes[0].pane_id, pane_id);
+    }
+}

@@ -1,0 +1,36 @@
+
+:root {
+  --awt-bg: #0d0f12;
+  --awt-sidebar: #0a0c0f;
+  --awt-panel: #11161c;
+  --awt-panel-2: #151b22;
+  --awt-border: #26303a;
+  --awt-border-soft: #1c242d;
+  --awt-text: #d6deeb;
+  --awt-muted: #8b97a5;
+  --awt-accent: #7ee787;
+  --awt-danger: #ff6b6b;
+  --awt-mono: "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+.dockview-theme-abyss {
+  --dv-background-color: var(--awt-panel);
+  --dv-paneview-active-outline-color: var(--awt-accent);
+  --dv-tabs-and-actions-container-background-color: #0f141a;
+  --dv-tabs-container-background-color: #0f141a;
+  --dv-activegroup-visiblepanel-tab-background-color: #18212a;
+  --dv-activegroup-hiddenpanel-tab-background-color: #10161d;
+  --dv-inactivegroup-visiblepanel-tab-background-color: #141a21;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: #0f141a;
+  --dv-tab-divider-color: var(--awt-border);
+  --dv-activegroup-visiblepanel-tab-color: var(--awt-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--awt-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--awt-text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--awt-muted);
+  --dv-separator-border: var(--awt-border);
+  --dv-group-view-background-color: var(--awt-panel);
+  --dv-drag-over-background-color: rgba(126, 231, 135, 0.16);
+  --dv-drag-over-border-color: var(--awt-accent);
+  --dv-floating-box-shadow: 0 18px 70px rgba(0, 0, 0, 0.5);
+  font-family: var(--awt-mono);
+}
