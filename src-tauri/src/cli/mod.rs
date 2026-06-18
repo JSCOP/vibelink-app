@@ -74,10 +74,7 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             text,
             enter,
         } => {
-            let mut data = text.into_bytes();
-            if enter {
-                data.push(b'\n');
-            }
+            let data = write_payload(text, enter);
             client.send(ClientToDaemon::WritePane { pane_id, data })?;
             println!("{{\"ok\":true}}");
             Ok(())
@@ -186,6 +183,14 @@ fn usage() -> &'static str {
     "usage:\n  app.exe cli sessions\n  app.exe cli panes --session <session-id>\n  app.exe cli read --pane <pane-id>\n  app.exe cli write --pane <pane-id> --text <text> [--enter]"
 }
 
+fn write_payload(text: String, enter: bool) -> Vec<u8> {
+    let mut data = text.into_bytes();
+    if enter {
+        data.push(b'\r');
+    }
+    data
+}
+
 fn strip_ansi(text: &str) -> Cow<'_, str> {
     let Some(first_escape) = text.as_bytes().iter().position(|byte| *byte == 0x1b) else {
         return Cow::Borrowed(text);
@@ -254,6 +259,11 @@ mod tests {
                 enter: true,
             }
         );
+    }
+
+    #[test]
+    fn write_enter_appends_carriage_return() {
+        assert_eq!(write_payload("pwd".to_string(), true), b"pwd\r");
     }
 
     #[test]

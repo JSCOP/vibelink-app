@@ -9,6 +9,7 @@ describe('keybindings', () => {
     expect(defaultKeybindings.focusRight).toBe('ctrl+right')
     expect(defaultKeybindings.focusUp).toBe('ctrl+up')
     expect(defaultKeybindings.focusDown).toBe('ctrl+down')
+    expect(defaultKeybindings.copyTerminalContents).toBe('ctrl+a')
   })
 
   it('normalizes partial stored keybindings without dropping new defaults', () => {
@@ -17,6 +18,7 @@ describe('keybindings', () => {
     expect(normalized.closePane).toBe('ctrl+q')
     expect(normalized.closeWorkspace).toBe(defaultKeybindings.closeWorkspace)
     expect(normalized.focusLeft).toBe(defaultKeybindings.focusLeft)
+    expect(normalized.copyTerminalContents).toBe(defaultKeybindings.copyTerminalContents)
   })
 
   it('converts keyboard events into stable lower-case chords', () => {
@@ -26,9 +28,37 @@ describe('keybindings', () => {
   })
 
   it('finds matching actions from user settings', () => {
-    const event = keyEvent({ key: 'w', ctrlKey: true })
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'w', ctrlKey: true }))).toBe('closePane')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'a', ctrlKey: true }))).toBe('copyTerminalContents')
+  })
 
-    expect(findKeybindingAction(defaultKeybindings, event)).toBe('closePane')
+  it('handles terminal copy shortcuts from captured keydown events', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'a', ctrlKey: true })
+
+    const handled = handleCapturedKeybindingEvent(defaultKeybindings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(true)
+    expect(seen).toEqual(['copyTerminalContents'])
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+  })
+
+  it('does not consume terminal copy shortcuts when the action predicate rejects them', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'a', ctrlKey: true })
+
+    const handled = handleCapturedKeybindingEvent(
+      defaultKeybindings,
+      event,
+      (action) => seen.push(action),
+      (action) => action !== 'copyTerminalContents',
+    )
+
+    expect(handled).toBe(false)
+    expect(seen).toEqual([])
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(event.stopPropagation).not.toHaveBeenCalled()
   })
 
   it('handles configured app shortcuts from captured terminal keydown events', () => {

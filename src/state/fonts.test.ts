@@ -13,4 +13,10 @@ describe('font choices', () => {
     expect(choices).toContain('Fira Code')
     expect(choices).toContain('Custom Mono')
   })
+
+  it('prioritizes the selected Korean-capable Nerd Font when it is installed', () => {
+    const choices = normalizeFontChoices(['JetBrains Mono', 'D2CodingLigature Nerd Font Mono'], 'D2CodingLigature Nerd Font Mono')
+
+    expect(choices[0]).toBe('D2CodingLigature Nerd Font Mono')
+  })
 })

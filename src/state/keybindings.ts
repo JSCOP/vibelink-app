@@ -11,6 +11,7 @@ export const keybindingActionIds = [
   'focusRight',
   'focusUp',
   'focusDown',
+  'copyTerminalContents',
 ] as const
 
 export type KeybindingActionId = (typeof keybindingActionIds)[number]
@@ -35,6 +36,7 @@ export const keybindingDefinitions: KeybindingDefinition[] = [
   { id: 'focusRight', label: 'Focus pane right', description: 'Move focus to the pane on the right.' },
   { id: 'focusUp', label: 'Focus pane up', description: 'Move focus to the pane above.' },
   { id: 'focusDown', label: 'Focus pane down', description: 'Move focus to the pane below.' },
+  { id: 'copyTerminalContents', label: 'Copy terminal contents', description: 'Select all terminal buffer text and copy it to the clipboard.' },
 ]
 
 export const defaultKeybindings: KeybindingSettings = {
@@ -50,6 +52,7 @@ export const defaultKeybindings: KeybindingSettings = {
   focusRight: 'ctrl+right',
   focusUp: 'ctrl+up',
   focusDown: 'ctrl+down',
+  copyTerminalContents: 'ctrl+a',
 }
 
 export function normalizeKeybindings(value: unknown): KeybindingSettings {
@@ -73,10 +76,11 @@ export function handleCapturedKeybindingEvent(
   settings: KeybindingSettings,
   event: KeyboardEvent,
   onAction: (action: KeybindingActionId) => void,
+  shouldHandleAction?: (action: KeybindingActionId) => boolean,
 ): boolean {
   if (event.defaultPrevented) return false
   const action = findKeybindingAction(settings, event)
-  if (!action) return false
+  if (!action || shouldHandleAction?.(action) === false) return false
   event.preventDefault()
   event.stopPropagation()
   onAction(action)

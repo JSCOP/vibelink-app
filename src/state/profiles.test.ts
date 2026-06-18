@@ -43,6 +43,11 @@ describe('terminal profiles', () => {
     expect(fallback.terminalThemeId).toBe(defaultSettings.terminalThemeId)
   })
 
+  test('normalizes terminal scrollbar visibility setting', () => {
+    expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
+    expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
+  })
+
   test('builds pane config fields from selected profile', () => {
     const settings = normalizeSettings({
       ...defaultSettings,

@@ -33,7 +33,7 @@ pnpm tauri build
 - Templates: 1×1 through 6×2 grid presets. Applying a template is non-destructive: existing panes stay alive, missing panes are added, overflow panes are kept as tabs.
 - Pane header: split right, split down, new tab, maximize, close, and double-click title rename.
 - Pane titles follow terminal OSC 0/2 title updates from tools such as Codex, Claude Code, and OMP unless the title was manually renamed.
-- Settings dialog: installed Windows font dropdown, terminal theme presets, terminal appearance, and editable Windows Terminal-compatible keybindings that still work while terminal input is focused.
+- Settings dialog: submenu navigation, Apply/OK/Cancel staging, installed Windows font dropdown with D2CodingLigature Nerd Font Mono preference, terminal scrollbar visibility, Windows Terminal-inspired themes, and editable Windows Terminal-compatible keybindings that still work while terminal input is focused.
 
 ## CLI control
 

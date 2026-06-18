@@ -49,19 +49,28 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
     }
   }
 
+  const activatePane = () => {
+    if (paneId) actions.activatePane(paneId)
+  }
+
   const stopChromeEvent = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
     event.preventDefault()
     event.stopPropagation()
   }
 
-  const onMaximize = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
+  const activatePaneAndStop = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
+    activatePane()
     stopChromeEvent(event)
+  }
+
+  const onMaximize = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
+    activatePaneAndStop(event)
     if (api.isMaximized()) api.exitMaximized()
     else api.maximize()
   }
 
   return (
-    <div className="terminal-tab" title={title}>
+    <div className="terminal-tab" title={title} onMouseDown={activatePane} onPointerDown={activatePane}>
       {isEditing ? (
         <input
           className="terminal-tab-title-input"
@@ -70,8 +79,8 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
           onBlur={commitTitle}
           onChange={(event) => setDraftTitle(event.target.value)}
           onKeyDown={onTitleKeyDown}
-          onMouseDown={stopChromeEvent}
-          onPointerDown={stopChromeEvent}
+          onMouseDown={activatePaneAndStop}
+          onPointerDown={activatePaneAndStop}
         />
       ) : (
         <span className="terminal-tab-title" title="Double-click to rename" onDoubleClick={() => { setDraftTitle(title); setIsEditing(true) }}>
@@ -79,20 +88,20 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
         </span>
       )}
       {paneId ? (
-        <div className="terminal-tab-actions" onMouseDown={stopChromeEvent} onPointerDown={stopChromeEvent}>
-          <button type="button" title="Split right" onClick={(event) => { stopChromeEvent(event); void actions.splitPane(paneId, 'right') }}>
+        <div className="terminal-tab-actions" onMouseDown={activatePaneAndStop} onPointerDown={activatePaneAndStop}>
+          <button type="button" title="Split right" onClick={(event) => { activatePaneAndStop(event); void actions.splitPane(paneId, 'right') }}>
             <SplitSquareVertical size={12} />
           </button>
-          <button type="button" title="Split down" onClick={(event) => { stopChromeEvent(event); void actions.splitPane(paneId, 'below') }}>
+          <button type="button" title="Split down" onClick={(event) => { activatePaneAndStop(event); void actions.splitPane(paneId, 'below') }}>
             <SplitSquareHorizontal size={12} />
           </button>
-          <button type="button" title="New tab" onClick={(event) => { stopChromeEvent(event); void actions.newTab(paneId) }}>
+          <button type="button" title="New tab" onClick={(event) => { activatePaneAndStop(event); void actions.newTab(paneId) }}>
             <PanelRightClose size={12} />
           </button>
           <button type="button" title="Maximize" onClick={onMaximize}>
             <Maximize2 size={12} />
           </button>
-          <button type="button" title="Close pane" onClick={(event) => { stopChromeEvent(event); api.close() }}>
+          <button type="button" title="Close pane" onClick={(event) => { activatePaneAndStop(event); api.close() }}>
             <X size={12} />
           </button>
         </div>

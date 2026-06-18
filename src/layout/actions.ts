@@ -3,6 +3,7 @@ import { createContext, useContext } from 'react'
 export type SplitDirection = 'left' | 'right' | 'above' | 'below'
 
 export type WorkspaceActions = {
+  activatePane: (paneId: string) => void
   splitPane: (paneId: string, direction: SplitDirection) => Promise<void>
   newTab: (paneId: string) => Promise<void>
   closePane: (paneId: string) => Promise<void>

@@ -13,6 +13,7 @@ import { TEMPLATES, type GridTemplate } from './templates'
 import { planTemplateReconcile } from './templatePlan'
 import { withSuppressedPanelRemoval } from './suppression'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
+import { paneIdFromEventTarget } from './paneActivation'
 
 type PendingTemplateRequest = {
   sessionId: string
@@ -119,38 +120,51 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     }
   }, [activeSessionId, buildFallbackLayout, layoutDockview])
 
+  const activatePane = useCallback((paneId: string) => {
+    apiRef.current?.getPanel(paneId)?.api.setActive()
+  }, [])
+
+  const activatePaneFromTarget = useCallback((event: { target: EventTarget | null }) => {
+    const paneId = paneIdFromEventTarget(event.target)
+    if (paneId) activatePane(paneId)
+  }, [activatePane])
+
   const splitPane = useCallback(async (paneId: string, direction: SplitDirection) => {
     const api = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!api || !sessionId) return
+    activatePane(paneId)
     const pane = await spawnPane(sessionId)
     addTerminalPanel(api, pane, { referencePanel: paneId, direction })
     layoutDockview(api)
     persistLayoutSoon()
-  }, [addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
+  }, [activatePane, addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
 
   const newTab = useCallback(async (paneId: string) => {
     const api = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!api || !sessionId) return
+    activatePane(paneId)
     const pane = await spawnPane(sessionId)
     addTerminalPanel(api, pane, { referencePanel: paneId, direction: 'within' })
     layoutDockview(api)
     persistLayoutSoon()
-  }, [addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
+  }, [activatePane, addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
 
   const closePane = useCallback(async (paneId: string) => {
     const api = apiRef.current
     const panel = api?.getPanel(paneId)
+    activatePane(paneId)
     panel?.api.close()
-  }, [])
+  }, [activatePane])
 
   const toggleMaximize = useCallback((paneId: string) => {
     const panel = apiRef.current?.getPanel(paneId)
+    activatePane(paneId)
     if (!panel) return
     if (panel.api.isMaximized()) panel.api.exitMaximized()
     else panel.api.maximize()
-  }, [])
+  }, [activatePane])
 
   const renamePaneTitle = useCallback(async (paneId: string, title: string) => {
     await renamePaneTitleInStore(paneId, title, 'manual')
@@ -234,6 +248,9 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
       case 'focusDown':
         focusPane('down')
         break
+      case 'copyTerminalContents':
+        TerminalManager.copyContentsToClipboard(activePanelId)
+        break
     }
   }, [closePane, closeWorkspace, focusPane, newTab, splitPane, toggleMaximize])
 
@@ -289,7 +306,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     })
   }, [addTerminalPanel, layoutDockview, saveLayout, spawnPane])
 
-  const actions = useMemo(() => ({ splitPane, newTab, closePane, toggleMaximize, renamePaneTitle }), [closePane, newTab, renamePaneTitle, splitPane, toggleMaximize])
+  const actions = useMemo(() => ({ activatePane, splitPane, newTab, closePane, toggleMaximize, renamePaneTitle }), [activatePane, closePane, newTab, renamePaneTitle, splitPane, toggleMaximize])
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api
@@ -322,7 +339,12 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
       const api = apiRef.current
       const activePanelId = api?.activePanel?.id
       if (!api || !activePanelId) return
-      handleCapturedKeybindingEvent(settings.keybindings, event, (action) => runKeybindingAction(action, activePanelId))
+      handleCapturedKeybindingEvent(
+        settings.keybindings,
+        event,
+        (action) => runKeybindingAction(action, activePanelId),
+        (action) => action !== 'copyTerminalContents' || TerminalManager.containsEventTarget(activePanelId, event.target),
+      )
     }
     window.addEventListener('keydown', onKeyDown, { capture: true })
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
@@ -366,7 +388,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
             ))}
           </div>
         </div>
-        <div ref={dockRef} className="dockview-theme-abyss workspace-dock">
+        <div ref={dockRef} className="dockview-theme-abyss workspace-dock" onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
           <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" defaultTabComponent={TerminalTab} />
         </div>
       </section>

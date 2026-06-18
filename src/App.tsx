@@ -46,8 +46,9 @@ function App() {
       fontSize: settings.fontSize,
       scrollback: settings.scrollback,
       terminalThemeId: settings.terminalThemeId,
+      terminalScrollbarVisible: settings.terminalScrollbarVisible,
     })
-  }, [settings.fontFamily, settings.fontSize, settings.scrollback, settings.terminalThemeId])
+  }, [settings.fontFamily, settings.fontSize, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible])
 
   const selectSession = (sessionId: string) => {
     const currentSessionId = useWorkspaceStore.getState().activeSessionId

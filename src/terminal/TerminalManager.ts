@@ -8,6 +8,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { defaultTerminalThemeId, terminalThemeById, type TerminalThemeId } from '../state/terminalThemes'
 import { isTerminalHostMeasurable } from './geometry'
+import { copyAllTerminalContents } from './copy'
 
 const terminalTheme = terminalThemeById(defaultTerminalThemeId)
 
@@ -16,13 +17,15 @@ type TerminalVisualSettings = {
   fontSize: number
   scrollback: number
   terminalThemeId: TerminalThemeId
+  terminalScrollbarVisible: boolean
 }
 
 const defaultTerminalSettings: TerminalVisualSettings = {
-  fontFamily: '"D2CodingLigature Nerd Font Mono", "Cascadia Code", Consolas, monospace',
+  fontFamily: 'D2CodingLigature Nerd Font Mono',
   fontSize: 11,
   scrollback: 5000,
   terminalThemeId: defaultTerminalThemeId,
+  terminalScrollbarVisible: true,
 }
 
 type Entry = {
@@ -45,12 +48,18 @@ class TerminalManagerImpl {
   private settings: TerminalVisualSettings = defaultTerminalSettings
 
   applySettings(settings: TerminalVisualSettings): void {
+    const fontChanged = this.settings.fontFamily !== settings.fontFamily || this.settings.fontSize !== settings.fontSize
     this.settings = settings
     for (const entry of this.entries.values()) {
       entry.term.options.fontFamily = settings.fontFamily
       entry.term.options.fontSize = settings.fontSize
       entry.term.options.scrollback = settings.scrollback
       entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
+      this.applyScrollbarVisibility(entry)
+      if (fontChanged) {
+        this.reloadWebgl(entry)
+        this.fitAfterFontsLoad(entry)
+      }
       this.fit(entry, 0)
     }
   }
@@ -66,6 +75,7 @@ class TerminalManagerImpl {
       fontSize: this.settings.fontSize,
       lineHeight: 1.15,
       scrollback: this.settings.scrollback,
+      minimumContrastRatio: 1,
       theme: terminalThemeById(this.settings.terminalThemeId),
     })
     const fit = new FitAddon()
@@ -85,6 +95,7 @@ class TerminalManagerImpl {
   attach(paneId: string, container: HTMLElement, options?: { onTitleChange?: (title: string) => void }): void {
     const entry = this.getOrCreate(paneId)
     entry.container = container
+    this.applyScrollbarVisibility(entry)
 
     if (!entry.opened) {
       entry.term.open(container)
@@ -137,6 +148,17 @@ class TerminalManagerImpl {
     entry.term.write(bytes)
   }
 
+  copyContentsToClipboard(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    void copyAllTerminalContents(entry.term)
+  }
+
+  containsEventTarget(paneId: string, target: EventTarget | null): boolean {
+    const entry = this.entries.get(paneId)
+    return entry?.container !== undefined && target instanceof Node && entry.container.contains(target)
+  }
+
   markExited(paneId: string, exitCode?: number | null): void {
     const entry = this.entries.get(paneId)
     if (!entry) return
@@ -153,6 +175,22 @@ class TerminalManagerImpl {
     entry.webgl?.dispose()
     entry.term.dispose()
     this.entries.delete(paneId)
+  }
+
+  private applyScrollbarVisibility(entry: Entry): void {
+    entry.container?.classList.toggle('terminal-scrollbar-hidden', !this.settings.terminalScrollbarVisible)
+  }
+
+  private fitAfterFontsLoad(entry: Entry): void {
+    const fonts = document.fonts
+    if (!fonts) return
+    void fonts.ready.then(() => this.fit(entry, 0))
+  }
+
+  private reloadWebgl(entry: Entry): void {
+    entry.webgl?.dispose()
+    entry.webgl = undefined
+    if (entry.opened) this.tryLoadWebgl(entry)
   }
 
   private fit(entry: Entry, attempt: number): void {

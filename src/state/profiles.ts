@@ -19,6 +19,7 @@ export type Settings = {
   scrollback: number
   accent: string
   terminalThemeId: TerminalThemeId
+  terminalScrollbarVisible: boolean
   profiles: Profile[]
   defaultProfileId: string
   keybindings: KeybindingSettings
@@ -90,11 +91,12 @@ const defaultProfiles: Profile[] = [
 const defaultProfile = defaultProfiles[0]
 
 export const defaultSettings: Settings = {
-  fontFamily: '"D2CodingLigature Nerd Font Mono", "Cascadia Code", Consolas, monospace',
+  fontFamily: 'D2CodingLigature Nerd Font Mono',
   fontSize: 11,
   scrollback: 5000,
   accent: '#7ee787',
   terminalThemeId: defaultTerminalThemeId,
+  terminalScrollbarVisible: true,
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   keybindings: { ...defaultKeybindings },
@@ -113,6 +115,7 @@ export function normalizeSettings(value: unknown): Settings {
     scrollback: readNumber(record?.scrollback, defaultSettings.scrollback),
     accent: readString(record?.accent, defaultSettings.accent),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
+    terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     profiles,
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
@@ -193,6 +196,10 @@ function readNullableString(value: unknown, fallback: string | null): string | n
 
 function readNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
 }
 
 function readStringArray(value: unknown): string[] {
