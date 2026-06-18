@@ -11,7 +11,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -74,24 +74,32 @@ pub fn ensure_daemon() -> Result<DaemonStream> {
         }
     };
 
-    spawn_daemon_process()?;
+    let mut spawned_daemon = Some(spawn_daemon_process()?);
 
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     while Instant::now() < deadline {
         match connect_ready_daemon() {
             Ok(stream) => return Ok(stream),
-            Err(err) if err.kind == StartupAttemptErrorKind::Unhealthy => {
-                last_error = Some(err.to_string());
-                break;
-            }
             Err(err) => {
+                let should_retry = should_retry_startup_attempt(&err, true);
                 last_error = Some(err.to_string());
+                if !should_retry {
+                    break;
+                }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     break;
                 }
                 thread::sleep(DAEMON_READY_DELAY.min(remaining));
             }
+        }
+    }
+
+    if let Some(mut child) = spawned_daemon.take() {
+        let child_pid = child.id();
+        terminate_spawned_daemon(&mut child);
+        if let Ok(daemon_paths) = paths::daemon_paths() {
+            let _ = remove_pid_file_if_matching(&daemon_paths.pid, child_pid);
         }
     }
 
@@ -188,6 +196,16 @@ fn should_recover_stale_daemon(
     already_recovered: bool,
 ) -> bool {
     err.should_recover_stale_daemon() && !daemon_spawned_by_this_startup && !already_recovered
+}
+
+fn should_retry_startup_attempt(
+    err: &StartupAttemptError,
+    daemon_spawned_by_this_startup: bool,
+) -> bool {
+    match err.kind {
+        StartupAttemptErrorKind::Connect => true,
+        StartupAttemptErrorKind::Unhealthy => daemon_spawned_by_this_startup,
+    }
 }
 
 pub fn socket_name() -> io::Result<Name<'static>> {
@@ -316,15 +334,35 @@ fn terminate_daemon_pid(pid: u32) -> Result<()> {
     }
 }
 
-fn spawn_daemon_process() -> Result<()> {
+fn spawn_daemon_process() -> Result<Child> {
     match spawn_configured_daemon(true) {
-        Ok(()) => Ok(()),
+        Ok(child) => Ok(child),
         Err(err) if should_retry_without_breakaway(&err) => spawn_configured_daemon(false),
         Err(err) => Err(err),
     }
 }
 
-fn spawn_configured_daemon(include_breakaway: bool) -> Result<()> {
+fn terminate_spawned_daemon(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn remove_pid_file_if_matching(path: &Path, pid: u32) -> Result<bool> {
+    let Some(recorded_pid) = read_daemon_pid(path)? else {
+        return Ok(false);
+    };
+    if recorded_pid != pid {
+        return Ok(false);
+    }
+    fs::remove_file(path)
+        .with_context(|| format!("remove stale daemon pid file {}", path.display()))?;
+    Ok(true)
+}
+
+fn spawn_configured_daemon(include_breakaway: bool) -> Result<Child> {
     let exe = std::env::current_exe().context("resolve current executable")?;
     let mut command = Command::new(exe);
     command
@@ -334,8 +372,7 @@ fn spawn_configured_daemon(include_breakaway: bool) -> Result<()> {
         .stderr(Stdio::null());
 
     configure_detached(&mut command, include_breakaway);
-    command.spawn().context("spawn detached daemon")?;
-    Ok(())
+    command.spawn().context("spawn detached daemon")
 }
 
 #[cfg(windows)]
@@ -510,12 +547,35 @@ mod tests {
     }
 
     #[test]
+    fn spawned_daemon_cleanup_removes_only_matching_pid_file() {
+        let path = std::env::temp_dir().join(format!(
+            "awt-spawned-daemon-{}-{}.pid",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&path, "42").expect("write pid");
+
+        assert!(!remove_pid_file_if_matching(&path, 7).expect("non-matching pid check"));
+        assert!(path.exists());
+        assert!(remove_pid_file_if_matching(&path, 42).expect("matching pid check"));
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn stale_recovery_does_not_kill_daemon_spawned_by_current_startup() {
         let unhealthy_error = StartupAttemptError::unhealthy(anyhow!("probe failed"));
 
         assert!(should_recover_stale_daemon(&unhealthy_error, false, false));
         assert!(!should_recover_stale_daemon(&unhealthy_error, true, false));
         assert!(!should_recover_stale_daemon(&unhealthy_error, false, true));
+    }
+
+    #[test]
+    fn unhealthy_probe_after_spawn_keeps_retrying_until_deadline() {
+        let unhealthy_error = StartupAttemptError::unhealthy(anyhow!("probe timed out"));
+
+        assert!(should_retry_startup_attempt(&unhealthy_error, true));
+        assert!(!should_retry_startup_attempt(&unhealthy_error, false));
     }
 
     #[test]
