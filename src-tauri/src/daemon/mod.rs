@@ -385,7 +385,16 @@ fn dispatch_message(
             info!("daemon received shutdown request");
             send_ok(tx, req)?;
             shutdown.store(true, Ordering::Release);
-            Ok(())
+            
+            // Clean up all panes before exiting
+            info!("daemon shutting down, killing all panes");
+            kill_all_panes(&state);
+            if let Err(err) = persist_state(&state, sessions_path) {
+                warn!(?err, "failed to persist state during shutdown");
+            }
+            
+            // Exit the process to unblock the main thread's accept() loop
+            std::process::exit(0);
         }
     }
 }
