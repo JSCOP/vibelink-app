@@ -167,6 +167,11 @@ impl DaemonState {
         pane.resize(cols, rows)
     }
 
+    pub fn get_scrollback(&self, pane_id: Uuid) -> anyhow::Result<Vec<u8>> {
+        let pane = self.pane(pane_id)?;
+        Ok(pane.scrollback_snapshot())
+    }
+
     pub fn attach_pane(&mut self, client_id: Uuid, pane_id: Uuid) -> anyhow::Result<()> {
         let (snapshot, alive) = {
             let pane = self.pane(pane_id)?;

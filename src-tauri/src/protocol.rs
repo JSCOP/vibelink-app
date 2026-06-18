@@ -79,6 +79,10 @@ pub enum ClientToDaemon {
     Shutdown {
         req: Req,
     },
+    GetScrollback {
+        req: Req,
+        pane_id: Uuid,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +117,7 @@ pub enum ReplyResult {
         panes: Vec<PaneMeta>,
     },
     PaneSpawned(PaneMeta),
+    ScrollbackData(Vec<u8>),
     Ok,
 }
 

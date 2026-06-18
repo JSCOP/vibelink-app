@@ -381,6 +381,19 @@ fn dispatch_message(
             }
             Ok(())
         }
+        ClientToDaemon::GetScrollback { req, pane_id } => {
+            let data = state
+                .lock()
+                .expect("daemon state mutex poisoned")
+                .get_scrollback(pane_id)?;
+            send(
+                tx,
+                DaemonToClient::Reply {
+                    req,
+                    result: ReplyResult::ScrollbackData(data),
+                },
+            )
+        }
         ClientToDaemon::Shutdown { req } => {
             info!("daemon received shutdown request");
             send_ok(tx, req)?;
@@ -409,6 +422,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
+        | ClientToDaemon::GetScrollback { req, .. }
         | ClientToDaemon::Shutdown { req } => Some(*req),
         ClientToDaemon::Hello { .. }
         | ClientToDaemon::DetachSession { .. }
