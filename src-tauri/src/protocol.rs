@@ -82,6 +82,10 @@ pub enum ClientToDaemon {
         req: Req,
         pane_id: Uuid,
     },
+    ClearSession {
+        req: Req,
+        session_id: Uuid,
+    },
     Shutdown {
         req: Req,
     },

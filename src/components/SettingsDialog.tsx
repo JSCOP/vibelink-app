@@ -100,10 +100,14 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                       ))}
                     </select>
                   </label>
-                  <div className="settings-grid-3">
+                  <div className="settings-grid-4">
                     <label>
                       Font size
                       <input type="number" min="8" max="32" value={draft.fontSize} onChange={(event) => patchDraft({ fontSize: Number(event.target.value) })} />
+                    </label>
+                    <label>
+                      Font weight
+                      <input type="number" min="100" max="900" step="50" value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })} />
                     </label>
                     <label>
                       Scrollback
@@ -112,6 +116,10 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                     <label>
                       Accent
                       <input type="color" value={draft.accent} onChange={(event) => patchDraft({ accent: event.target.value })} />
+                    </label>
+                    <label>
+                      UI scale
+                      <input type="number" min="0.85" max="1.2" step="0.05" value={draft.uiScale} onChange={(event) => patchDraft({ uiScale: Number(event.target.value) })} />
                     </label>
                   </div>
                   <label className="settings-checkbox">

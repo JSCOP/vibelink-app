@@ -25,6 +25,7 @@ type WorkspaceState = {
   spawnPane: (sessionId: string, overrides?: Partial<PaneConfig>) => Promise<PaneMeta>
   closePane: (paneId: string) => Promise<void>
   saveLayout: (sessionId: string, layoutJson: string) => Promise<void>
+  clearSession: (sessionId: string) => Promise<void>
   renamePaneTitle: (paneId: string, title: string, source: 'manual' | 'auto') => Promise<void>
   applyTerminalTitle: (paneId: string, title: string) => Promise<void>
   setError: (error: string) => void
@@ -136,6 +137,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return { panes }
     })
     await get().refreshSessions()
+  },
+
+  clearSession: async (sessionId: string) => {
+    await invoke('clear_session', { sessionId })
   },
 
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {

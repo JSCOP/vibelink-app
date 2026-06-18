@@ -394,6 +394,13 @@ fn dispatch_message(
             }
             Ok(())
         }
+        ClientToDaemon::ClearSession { req, session_id } => {
+            state
+                .lock()
+                .expect("daemon state mutex poisoned")
+                .clear_session_scrollback(session_id)?;
+            send_ok(tx, req)
+        }
         ClientToDaemon::GetScrollback {
             req,
             session_id,
@@ -440,6 +447,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::SpawnPane { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
+        | ClientToDaemon::ClearSession { req, .. }
         | ClientToDaemon::GetScrollback { req, .. }
         | ClientToDaemon::Shutdown { req } => Some(*req),
         ClientToDaemon::Hello { .. }

@@ -122,6 +122,10 @@ impl Pane {
         self.scrollback.snapshot()
     }
 
+    pub fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+    }
+
     pub fn mark_exited(&mut self) {
         self.alive = false;
     }

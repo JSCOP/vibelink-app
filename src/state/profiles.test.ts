@@ -48,6 +48,13 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
   })
 
+  test('normalizes terminal font weight and UI scale settings', () => {
+    expect(normalizeSettings({ terminalFontWeight: 500 }).terminalFontWeight).toBe(500)
+    expect(normalizeSettings({ terminalFontWeight: 1200 }).terminalFontWeight).toBe(defaultSettings.terminalFontWeight)
+    expect(normalizeSettings({ uiScale: 1.1 }).uiScale).toBe(1.1)
+    expect(normalizeSettings({ uiScale: 3 }).uiScale).toBe(defaultSettings.uiScale)
+  })
+
   test('builds pane config fields from selected profile', () => {
     const settings = normalizeSettings({
       ...defaultSettings,

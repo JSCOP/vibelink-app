@@ -15,6 +15,7 @@ const terminalTheme = terminalThemeById(defaultTerminalThemeId)
 type TerminalVisualSettings = {
   fontFamily: string
   fontSize: number
+  terminalFontWeight: number
   scrollback: number
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
@@ -23,6 +24,7 @@ type TerminalVisualSettings = {
 const defaultTerminalSettings: TerminalVisualSettings = {
   fontFamily: 'D2CodingLigature Nerd Font Mono',
   fontSize: 11,
+  terminalFontWeight: 400,
   scrollback: 5000,
   terminalThemeId: defaultTerminalThemeId,
   terminalScrollbarVisible: true,
@@ -48,12 +50,14 @@ class TerminalManagerImpl {
   private settings: TerminalVisualSettings = defaultTerminalSettings
 
   applySettings(settings: TerminalVisualSettings): void {
-    const fontChanged = this.settings.fontFamily !== settings.fontFamily || this.settings.fontSize !== settings.fontSize
+    const fontChanged = this.settings.fontFamily !== settings.fontFamily || this.settings.fontSize !== settings.fontSize || this.settings.terminalFontWeight !== settings.terminalFontWeight
     const themeChanged = this.settings.terminalThemeId !== settings.terminalThemeId
     this.settings = settings
     for (const entry of this.entries.values()) {
       entry.term.options.fontFamily = settings.fontFamily
       entry.term.options.fontSize = settings.fontSize
+      entry.term.options.fontWeight = settings.terminalFontWeight
+      entry.term.options.fontWeightBold = Math.min(900, Math.max(settings.terminalFontWeight, 700))
       entry.term.options.scrollback = settings.scrollback
       entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
       this.applyScrollbarVisibility(entry)
@@ -74,6 +78,8 @@ class TerminalManagerImpl {
       cursorBlink: true,
       fontFamily: this.settings.fontFamily,
       fontSize: this.settings.fontSize,
+      fontWeight: this.settings.terminalFontWeight,
+      fontWeightBold: Math.min(900, Math.max(this.settings.terminalFontWeight, 700)),
       lineHeight: 1.15,
       scrollback: this.settings.scrollback,
       minimumContrastRatio: 1,
@@ -160,6 +166,12 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     void copyTerminalSelection(entry.term)
+  }
+
+  clear(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    entry.term.clear()
   }
 
   focus(paneId: string): void {

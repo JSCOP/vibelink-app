@@ -1,7 +1,8 @@
 import { open } from '@tauri-apps/plugin-dialog'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { TEMPLATES } from '../layout/templates'
+import { loadWorkspaceFolderHistory, rememberWorkspaceFolder, saveWorkspaceFolderHistory, toggleFavoriteWorkspaceFolder } from '../state/workspaceFolders'
 
 type WorkspaceCreateDialogProps = {
   onCreate: (name: string, templateId: string, workspaceFolder: string | null) => void
@@ -13,9 +14,19 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
   const [templateId, setTemplateId] = useState('2x2')
   const [workspaceFolder, setWorkspaceFolder] = useState('')
   const [isPickingFolder, setIsPickingFolder] = useState(false)
+  const [folderHistory, setFolderHistory] = useState(() => loadWorkspaceFolderHistory())
+  const suggestedFolders = useMemo(() => {
+    const folders = [...folderHistory.favorites, ...folderHistory.recent]
+    return folders.filter((folder, index) => folders.findIndex((candidate) => candidate.toLowerCase() === folder.toLowerCase()) === index)
+  }, [folderHistory])
 
   const submit = () => {
     const normalizedFolder = workspaceFolder.trim()
+    if (normalizedFolder) {
+      const nextHistory = rememberWorkspaceFolder(folderHistory, normalizedFolder)
+      setFolderHistory(nextHistory)
+      saveWorkspaceFolderHistory(nextHistory)
+    }
     onCreate(name.trim(), templateId, normalizedFolder.length > 0 ? normalizedFolder : null)
   }
 
@@ -27,6 +38,12 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
     } finally {
       setIsPickingFolder(false)
     }
+  }
+
+  const toggleFavorite = (folder: string) => {
+    const nextHistory = toggleFavoriteWorkspaceFolder(folderHistory, folder)
+    setFolderHistory(nextHistory)
+    saveWorkspaceFolderHistory(nextHistory)
   }
 
   return (
@@ -54,6 +71,21 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
             <button type="button" onClick={() => void browseFolder()} disabled={isPickingFolder}>{isPickingFolder ? 'Opening…' : 'Browse'}</button>
           </div>
         </label>
+
+        {suggestedFolders.length > 0 ? (
+          <div className="workspace-folder-suggestions">
+            <div className="workspace-folder-suggestions-heading">Recent / favorites</div>
+            {suggestedFolders.map((folder) => {
+              const favorite = folderHistory.favorites.some((item) => item.toLowerCase() === folder.toLowerCase())
+              return (
+                <div key={folder} className="workspace-folder-suggestion-row">
+                  <button type="button" onClick={() => setWorkspaceFolder(folder)}>{folder}</button>
+                  <button type="button" className={favorite ? 'selected' : ''} title={favorite ? 'Remove favorite' : 'Add favorite'} onClick={() => toggleFavorite(folder)}>★</button>
+                </div>
+              )
+            })}
+          </div>
+        ) : null}
 
         <div className="workspace-template-grid">
           {TEMPLATES.map((template) => (

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import type { DockviewApi } from 'dockview-react'
-import { Grid3X3, AlertTriangle, Settings2, TerminalSquare } from 'lucide-react'
+import { Grid3X3, AlertTriangle, Settings2, TerminalSquare, Eraser } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SettingsDialog } from './components/SettingsDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
@@ -31,6 +32,7 @@ function App() {
   const saveLayout = useWorkspaceStore((state) => state.saveLayout)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
+  const clearSession = useWorkspaceStore((state) => state.clearSession)
   const settings = useWorkspaceStore((state) => state.settings)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfile(settings)
@@ -45,11 +47,12 @@ function App() {
     TerminalManager.applySettings({
       fontFamily: settings.fontFamily,
       fontSize: settings.fontSize,
+      terminalFontWeight: settings.terminalFontWeight,
       scrollback: settings.scrollback,
       terminalThemeId: settings.terminalThemeId,
       terminalScrollbarVisible: settings.terminalScrollbarVisible,
     })
-  }, [settings.fontFamily, settings.fontSize, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible])
+  }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible])
 
   const selectSession = (sessionId: string) => {
     const currentSessionId = useWorkspaceStore.getState().activeSessionId
@@ -65,8 +68,17 @@ function App() {
     setIsCreateOpen(false)
   }
 
+  const clearWorkspace = async () => {
+    const sessionId = useWorkspaceStore.getState().activeSessionId
+    if (!sessionId) return
+    await clearSession(sessionId)
+    for (const paneId of Object.keys(useWorkspaceStore.getState().panes)) {
+      TerminalManager.clear(paneId)
+    }
+  }
+
   return (
-    <main className="app-shell">
+    <main className="app-shell" style={{ '--awt-ui-scale': settings.uiScale } as CSSProperties}>
       <div className="sidebar-hover-edge" onPointerEnter={() => setIsSidebarOpen(true)} />
       <Sidebar
         isOpen={isSidebarOpen}
@@ -127,6 +139,9 @@ function App() {
               ))}
             </select>
           </label>
+          <button type="button" className="topbar-text-button" disabled={!activeSessionId} title="Clear workspace terminal buffers" onClick={() => void clearWorkspace()}>
+            <Eraser size={14} /> Clear
+          </button>
           <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
             <Settings2 size={16} />
           </button>

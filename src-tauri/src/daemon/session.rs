@@ -186,6 +186,15 @@ impl DaemonState {
         Ok(pane.scrollback_snapshot())
     }
 
+    pub fn clear_session_scrollback(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        let session = self.session_mut(session_id)?;
+        for pane in session.panes.values_mut() {
+            let _ = pane.write(b"\x1b[2J\x1b[3J\x1b[H");
+            pane.clear_scrollback();
+        }
+        Ok(())
+    }
+
     pub fn attach_pane(&mut self, client_id: Uuid, pane_id: Uuid) -> anyhow::Result<()> {
         let (snapshot, alive) = {
             let pane = self.pane(pane_id)?;
@@ -449,6 +458,40 @@ mod tests {
             .expect_err("cross-session read should fail");
 
         assert!(err.to_string().contains("does not belong"));
+    }
+
+    #[test]
+    fn clear_session_scrollback_clears_only_target_workspace() {
+        let mut state = DaemonState::new();
+        let workspace_a = state.create_session("Workspace A".to_string(), None);
+        let workspace_b = state.create_session("Workspace B".to_string(), None);
+        let pane_a_id = Uuid::new_v4();
+        let pane_b_id = Uuid::new_v4();
+        let mut pane_a = Pane::for_test(test_config(pane_a_id), true);
+        let mut pane_b = Pane::for_test(test_config(pane_b_id), true);
+        pane_a.push_scrollback(b"workspace a");
+        pane_b.push_scrollback(b"workspace b");
+        state
+            .insert_pane(workspace_a.id, pane_a)
+            .expect("insert pane a");
+        state
+            .insert_pane(workspace_b.id, pane_b)
+            .expect("insert pane b");
+
+        state
+            .clear_session_scrollback(workspace_a.id)
+            .expect("clear workspace a");
+
+        assert!(state
+            .get_scrollback(workspace_a.id, pane_a_id)
+            .expect("workspace a scrollback")
+            .is_empty());
+        assert_eq!(
+            state
+                .get_scrollback(workspace_b.id, pane_b_id)
+                .expect("workspace b scrollback"),
+            b"workspace b"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanel } from 'dockview-react'
 import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
+import { createTerminalRefreshScheduler } from '../terminal/refreshScheduler'
 import { useWorkspaceStore } from '../state/store'
 import { selectedProfile } from '../state/profiles'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
@@ -38,6 +39,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
   const saveTimerRef = useRef<number | undefined>()
   const dockRef = useRef<HTMLDivElement | null>(null)
   const applyingTemplateRequestRef = useRef<number | null>(null)
+  const refreshAfterLayoutRef = useRef(createTerminalRefreshScheduler(() => TerminalManager.refreshAll()))
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const panes = useWorkspaceStore((state) => state.panes)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -65,7 +67,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     const rect = dockRef.current?.getBoundingClientRect()
     if (!rect || rect.width <= 0 || rect.height <= 0) return
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
-    refreshTerminalsAfterLayout()
+    refreshAfterLayoutRef.current()
   }, [])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
@@ -164,7 +166,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     if (!panel) return
     if (panel.api.isMaximized()) panel.api.exitMaximized()
     else panel.api.maximize()
-    refreshTerminalsAfterLayout()
+    refreshAfterLayoutRef.current()
   }, [activatePane])
 
   const renamePaneTitle = useCallback(async (paneId: string, title: string) => {
@@ -329,7 +331,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     onApiReady?.(event.api)
     event.api.onDidLayoutChange(() => {
       persistLayoutSoon()
-      refreshTerminalsAfterLayout()
+      refreshAfterLayoutRef.current()
     })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
@@ -409,13 +411,6 @@ function isTerminalCopyAction(action: KeybindingActionId): boolean {
   return action === 'copyTerminalContents' || action === 'copyTerminalSelection'
 }
 
-function refreshTerminalsAfterLayout(): void {
-  TerminalManager.refreshAll()
-  requestAnimationFrame(() => {
-    TerminalManager.refreshAll()
-    window.setTimeout(() => TerminalManager.refreshAll(), 80)
-  })
-}
 
 function getPaneRect(paneId: string): DOMRect | null {
   return document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`)?.getBoundingClientRect() ?? null

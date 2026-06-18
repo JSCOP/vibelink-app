@@ -29,11 +29,12 @@ pnpm tauri build
 ## UI
 
 - Left workspace drawer: hover the left edge to open, move away to close; create, switch, rename, delete.
-- Workspace creation opens a popup for name, native folder selection, and starting template. New panes launched in that workspace use the selected folder as their cwd.
+- Workspace creation opens a popup for name, native folder selection, recent/favorite folders, and starting template. New panes launched in that workspace use the selected folder as their cwd.
 - Templates: 1×1 through 6×2 grid presets. Applying a template is non-destructive: existing panes stay alive, missing panes are added, overflow panes are kept as tabs.
+- Topbar: template shortcuts, active font size/profile controls, workspace terminal-buffer clear, and settings.
 - Pane header: split right, split down, new tab, maximize, close, and double-click title rename.
 - Pane titles follow terminal OSC 0/2 title updates from tools such as Codex, Claude Code, and OMP unless the title was manually renamed.
-- Settings dialog: submenu navigation, Apply/OK/Cancel staging, installed Windows font dropdown with D2CodingLigature Nerd Font Mono preference, terminal scrollbar visibility, Windows Terminal-inspired themes, and editable Windows Terminal-compatible keybindings that still work while terminal input is focused.
+- Settings dialog: flat terminal-style panels, submenu navigation, Apply/OK/Cancel staging, installed Windows font dropdown with font weight, UI scale, terminal scrollbar visibility, Windows Terminal-inspired themes, and editable Windows Terminal-compatible keybindings that still work while terminal input is focused.
 
 ## CLI control
 

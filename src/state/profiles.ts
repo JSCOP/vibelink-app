@@ -17,6 +17,8 @@ export type Settings = {
   fontFamily: string
   fontSize: number
   scrollback: number
+  terminalFontWeight: number
+  uiScale: number
   accent: string
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
@@ -94,6 +96,8 @@ export const defaultSettings: Settings = {
   fontFamily: 'D2CodingLigature Nerd Font Mono',
   fontSize: 11,
   scrollback: 5000,
+  terminalFontWeight: 400,
+  uiScale: 1,
   accent: '#7ee787',
   terminalThemeId: defaultTerminalThemeId,
   terminalScrollbarVisible: true,
@@ -113,6 +117,8 @@ export function normalizeSettings(value: unknown): Settings {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
     fontSize: readNumber(record?.fontSize, defaultSettings.fontSize),
     scrollback: readNumber(record?.scrollback, defaultSettings.scrollback),
+    terminalFontWeight: readNumberInRange(record?.terminalFontWeight, defaultSettings.terminalFontWeight, 100, 900),
+    uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
     accent: readString(record?.accent, defaultSettings.accent),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
@@ -196,6 +202,10 @@ function readNullableString(value: unknown, fallback: string | null): string | n
 
 function readNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function readNumberInRange(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : fallback
 }
 
 function readBoolean(value: unknown, fallback: boolean): boolean {

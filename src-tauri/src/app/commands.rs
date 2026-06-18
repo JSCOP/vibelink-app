@@ -201,6 +201,15 @@ pub async fn close_pane(client: State<'_, DaemonClient>, pane_id: String) -> Res
 }
 
 #[tauri::command]
+pub async fn clear_session(
+    client: State<'_, DaemonClient>,
+    session_id: String,
+) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    expect_ok(client.request_reply(|req| ClientToDaemon::ClearSession { req, session_id }))
+}
+
+#[tauri::command]
 pub async fn list_installed_fonts() -> Result<Vec<String>, String> {
     list_fonts_native().map_err(to_string)
 }

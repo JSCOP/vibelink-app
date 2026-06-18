@@ -21,6 +21,7 @@ pub fn run() {
             commands::attach_pane,
             commands::attach_session,
             commands::close_pane,
+            commands::clear_session,
             commands::create_session,
             commands::delete_session,
             commands::detach_session,

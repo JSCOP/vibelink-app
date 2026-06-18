@@ -871,3 +871,132 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+.app-shell {
+  --awt-ui-scale: 1;
+}
+
+.topbar,
+.workspace-dock .dv-tabs-and-actions-container,
+.workspace-dock .dv-scrollable,
+.workspace-dock .dv-tabs-container,
+.workspace-dock .dv-tab {
+  font-size: calc(12px * var(--awt-ui-scale));
+}
+
+.topbar-text-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--awt-border-soft);
+  color: var(--awt-muted);
+  display: inline-flex;
+  font: 12px/1 var(--awt-mono);
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+}
+
+.topbar-text-button:hover:not(:disabled) {
+  border-color: var(--awt-border);
+  color: var(--awt-text);
+}
+
+.topbar-text-button:disabled {
+  opacity: 0.45;
+}
+
+.settings-backdrop,
+.workspace-create-backdrop {
+  backdrop-filter: none;
+  background: rgba(2, 6, 12, 0.72);
+}
+
+.settings-dialog,
+.workspace-create-dialog {
+  background: #0b1017;
+  border: 1px solid var(--awt-border);
+  border-radius: 4px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+  font-size: calc(12px * var(--awt-ui-scale));
+}
+
+.settings-dialog-header,
+.workspace-create-header,
+.settings-dialog-footer,
+.workspace-create-footer {
+  border-color: var(--awt-border-soft);
+  padding: 14px 16px;
+}
+
+.settings-section-nav button,
+.settings-card,
+.theme-choice-grid button,
+.workspace-template-grid button,
+.workspace-create-name input,
+.workspace-folder-row button,
+.settings-card input,
+.settings-card select,
+.primary-action,
+.secondary-action,
+.settings-preview,
+.terminal-tab-title-input {
+  border-radius: 3px;
+}
+
+.settings-card,
+.settings-card-hero,
+.theme-choice-grid button,
+.settings-section-nav button,
+.workspace-template-grid button {
+  background: #0f151d;
+}
+
+.settings-grid-4 {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.workspace-folder-suggestions {
+  display: grid;
+  gap: 6px;
+  padding: 10px 20px 0;
+}
+
+.workspace-folder-suggestions-heading {
+  color: var(--awt-muted);
+  font: 12px/1 var(--awt-mono);
+}
+
+.workspace-folder-suggestion-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 6px;
+}
+
+.workspace-folder-suggestion-row button {
+  background: #0f151d;
+  border: 1px solid var(--awt-border-soft);
+  color: var(--awt-text);
+  height: 28px;
+  overflow: hidden;
+  padding: 0 8px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-folder-suggestion-row button:last-child {
+  color: var(--awt-muted);
+  text-align: center;
+}
+
+.workspace-folder-suggestion-row button.selected {
+  color: var(--awt-accent);
+}
+
+@media (max-width: 900px) {
+  .settings-grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
