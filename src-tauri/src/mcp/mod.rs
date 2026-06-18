@@ -6,7 +6,10 @@ use crate::protocol::{ClientToDaemon, ReplyResult};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::{
+    borrow::Cow,
+    io::{self, BufRead, Write},
+};
 
 pub fn run() -> Result<()> {
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
@@ -194,12 +197,7 @@ fn tool_list_sessions(client: &DaemonClient, id: Option<Value>) -> JsonRpcRespon
         Ok(ReplyResult::Sessions(sessions)) => {
             let content = sessions
                 .iter()
-                .map(|s| {
-                    format!(
-                        "- {} (id: {}, panes: {})",
-                        s.name, s.id, s.pane_count
-                    )
-                })
+                .map(|s| format!("- {} (id: {}, panes: {})", s.name, s.id, s.pane_count))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -209,8 +207,12 @@ fn tool_list_sessions(client: &DaemonClient, id: Option<Value>) -> JsonRpcRespon
                 format!("Sessions:\n{}", content)
             }
         }
-        Ok(other) => return json_rpc_error(id, -32000, &format!("Unexpected response: {:?}", other)),
-        Err(err) => return json_rpc_error(id, -32000, &format!("Failed to list sessions: {}", err)),
+        Ok(other) => {
+            return json_rpc_error(id, -32000, &format!("Unexpected response: {:?}", other))
+        }
+        Err(err) => {
+            return json_rpc_error(id, -32000, &format!("Failed to list sessions: {}", err))
+        }
     };
 
     json_rpc_result(
@@ -261,7 +263,9 @@ fn tool_list_panes(client: &DaemonClient, id: Option<Value>, args: Value) -> Jso
                 format!("Panes:\n{}", content)
             }
         }
-        Ok(other) => return json_rpc_error(id, -32000, &format!("Unexpected response: {:?}", other)),
+        Ok(other) => {
+            return json_rpc_error(id, -32000, &format!("Unexpected response: {:?}", other))
+        }
         Err(err) => return json_rpc_error(id, -32000, &format!("Failed to list panes: {}", err)),
     };
 
@@ -294,10 +298,15 @@ fn tool_read_pane_output(client: &DaemonClient, id: Option<Value>, args: Value) 
         pane_id: pane_uuid,
     }) {
         Ok(ReplyResult::ScrollbackData(data)) => {
-            String::from_utf8_lossy(&data).to_string()
+            let text = String::from_utf8_lossy(&data);
+            strip_ansi(&text).into_owned()
         }
-        Ok(other) => return json_rpc_error(id, -32000, &format!("Unexpected response: {:?}", other)),
-        Err(err) => return json_rpc_error(id, -32000, &format!("Failed to read pane output: {}", err)),
+        Ok(other) => {
+            return json_rpc_error(id, -32000, &format!("Unexpected response: {:?}", other))
+        }
+        Err(err) => {
+            return json_rpc_error(id, -32000, &format!("Failed to read pane output: {}", err))
+        }
     };
 
     json_rpc_result(
@@ -347,4 +356,55 @@ fn tool_write_to_pane(client: &DaemonClient, id: Option<Value>, args: Value) -> 
             ]
         }),
     )
+}
+
+fn strip_ansi(text: &str) -> Cow<'_, str> {
+    let Some(first_escape) = text.as_bytes().iter().position(|byte| *byte == 0x1b) else {
+        return Cow::Borrowed(text);
+    };
+
+    let mut output = String::with_capacity(text.len());
+    output.push_str(&text[..first_escape]);
+
+    let bytes = text.as_bytes();
+    let mut index = first_escape;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && bytes[index] != 0x1b {
+                index += 1;
+            }
+            output.push_str(&text[start..index]);
+        }
+    }
+
+    Cow::Owned(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_csi_escape_sequences() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m plain\x1b[2K"), "red plain");
+    }
+
+    #[test]
+    fn strip_ansi_borrows_plain_text() {
+        assert!(matches!(
+            strip_ansi("plain text"),
+            std::borrow::Cow::Borrowed("plain text")
+        ));
+    }
 }

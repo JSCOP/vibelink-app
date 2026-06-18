@@ -245,12 +245,7 @@ impl DaemonState {
                 name: session.meta.name.clone(),
                 created_at: session.meta.created_at,
                 layout_json: session.layout_json.clone(),
-                panes: session
-                    .panes
-                    .values()
-                    .filter(|pane| pane.alive)
-                    .map(|pane| pane.config.clone())
-                    .collect(),
+                panes: Vec::new(),
             })
             .collect();
         sessions.sort_by_key(|session| session.created_at);
@@ -384,17 +379,17 @@ mod tests {
     }
 
     #[test]
-    fn persisted_sessions_include_alive_panes() {
+    fn persisted_sessions_exclude_live_panes() {
         let mut state = DaemonState::new();
         let meta = state.create_session("Workspace".to_string());
         let pane_id = Uuid::new_v4();
         let config = test_config(pane_id);
-        let pane = Pane::for_test(config.clone(), true);
+        let pane = Pane::for_test(config, true);
         state.insert_pane(meta.id, pane).expect("insert pane");
 
         let persisted = state.persisted_sessions();
 
-        assert_eq!(persisted[0].panes, vec![config]);
+        assert!(persisted[0].panes.is_empty());
     }
 
     #[test]

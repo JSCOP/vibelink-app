@@ -141,16 +141,12 @@ fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> 
                 persisted.layout_json,
             );
 
-        for cfg in persisted.panes {
-            let pane_id = cfg.pane_id;
-            if let Err(err) = spawn_pane_for_session(
-                Arc::clone(&state),
-                sessions_path.to_path_buf(),
-                persisted.id,
-                cfg,
-            ) {
-                warn!(?err, pane_id = %pane_id, "failed to reconstruct pane");
-            }
+        if !persisted.panes.is_empty() {
+            warn!(
+                pane_count = persisted.panes.len(),
+                session_id = %persisted.id,
+                "ignoring persisted pane records"
+            );
         }
     }
     Ok(())
@@ -398,14 +394,14 @@ fn dispatch_message(
             info!("daemon received shutdown request");
             send_ok(tx, req)?;
             shutdown.store(true, Ordering::Release);
-            
+
             // Clean up all panes before exiting
             info!("daemon shutting down, killing all panes");
             kill_all_panes(&state);
             if let Err(err) = persist_state(&state, sessions_path) {
                 warn!(?err, "failed to persist state during shutdown");
             }
-            
+
             // Exit the process to unblock the main thread's accept() loop
             std::process::exit(0);
         }

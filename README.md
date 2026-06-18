@@ -22,9 +22,9 @@ pnpm tauri build
 
 - React owns layout, workspace UI, dockview panels, and xterm.js rendering.
 - The Tauri app is a thin bridge. Frontend calls Rust commands via `invoke`; terminal output arrives through one `Channel` keyed by `paneId`.
-- The daemon is the same binary launched with `--daemon`. It owns PTYs, sessions, scrollback, layouts, and durable session metadata.
+- The daemon is the same binary launched with `--daemon`. It owns live PTYs, sessions, scrollback, layouts, and durable session metadata.
 - IPC uses `interprocess` local sockets with MessagePack frames and a 4-byte big-endian length prefix.
-- Sessions persist under the platform app data directory as `sessions.json`. Panes are reconstructed with the same pane IDs and fresh shells after daemon restart.
+- Sessions persist under the platform app data directory as `sessions.json`. Panes are intentionally not persisted or reconstructed after daemon restart.
 
 ## UI
 
@@ -32,6 +32,23 @@ pnpm tauri build
 - Templates: 1×1 through 6×2 grid presets.
 - Pane header: split right, split down, new tab, maximize, close.
 - Keyboard shortcuts: `Alt+Shift+=`, `Alt+Shift+-`, `Ctrl+Shift+T`, `Ctrl+Shift+W`, `Ctrl+Shift+Enter`, `Ctrl+Tab`, `Ctrl+Shift+Tab`, and `Alt+Arrow*`.
+
+## MCP server
+
+The MCP server is a separate stdio mode. The GUI does not start it automatically; configure your MCP client to launch the same binary with `--mcp` when needed.
+
+```json
+{
+  "mcpServers": {
+    "agentic-workspace-terminal": {
+      "command": "E:/VibeCodingProject/AgenticWorkspaceTerminal/src-tauri/target/debug/app.exe",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Available tools: `list_sessions`, `list_panes`, `read_pane_output`, and `write_to_pane`. `read_pane_output` returns scrollback with ANSI CSI escape sequences stripped for LLM readability.
 
 ## Daemon smoke checks
 
