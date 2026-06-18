@@ -22,36 +22,96 @@ pub type FrameResult<T> = Result<T, FrameError>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientToDaemon {
-    Hello { client_id: Uuid },
-    Ping { req: Req },
-    ListSessions { req: Req },
-    CreateSession { req: Req, name: String },
-    RenameSession { req: Req, session_id: Uuid, name: String },
-    DeleteSession { req: Req, session_id: Uuid },
-    AttachSession { req: Req, session_id: Uuid },
-    DetachSession { session_id: Uuid },
-    SaveLayout { session_id: Uuid, layout_json: String },
-    SpawnPane { req: Req, session_id: Uuid, cfg: PaneConfig },
-    AttachPane { pane_id: Uuid },
-    WritePane { pane_id: Uuid, data: Vec<u8> },
-    ResizePane { pane_id: Uuid, cols: u16, rows: u16 },
-    ClosePane { req: Req, pane_id: Uuid },
+    Hello {
+        client_id: Uuid,
+    },
+    Ping {
+        req: Req,
+    },
+    ListSessions {
+        req: Req,
+    },
+    CreateSession {
+        req: Req,
+        name: String,
+    },
+    RenameSession {
+        req: Req,
+        session_id: Uuid,
+        name: String,
+    },
+    DeleteSession {
+        req: Req,
+        session_id: Uuid,
+    },
+    AttachSession {
+        req: Req,
+        session_id: Uuid,
+    },
+    DetachSession {
+        session_id: Uuid,
+    },
+    SaveLayout {
+        session_id: Uuid,
+        layout_json: String,
+    },
+    SpawnPane {
+        req: Req,
+        session_id: Uuid,
+        cfg: PaneConfig,
+    },
+    AttachPane {
+        pane_id: Uuid,
+    },
+    WritePane {
+        pane_id: Uuid,
+        data: Vec<u8>,
+    },
+    ResizePane {
+        pane_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+    ClosePane {
+        req: Req,
+        pane_id: Uuid,
+    },
+    Shutdown {
+        req: Req,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonToClient {
-    Pong { req: Req },
-    Reply { req: Req, result: ReplyResult },
-    Error { req: Option<Req>, message: String },
-    Output { pane_id: Uuid, data: Vec<u8> },
-    PaneExited { pane_id: Uuid, exit_code: Option<i32> },
+    Pong {
+        req: Req,
+    },
+    Reply {
+        req: Req,
+        result: ReplyResult,
+    },
+    Error {
+        req: Option<Req>,
+        message: String,
+    },
+    Output {
+        pane_id: Uuid,
+        data: Vec<u8>,
+    },
+    PaneExited {
+        pane_id: Uuid,
+        exit_code: Option<i32>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplyResult {
     Sessions(Vec<SessionMeta>),
     SessionCreated(SessionMeta),
-    Attached { layout_json: Option<String>, panes: Vec<PaneMeta> },
+    Attached {
+        layout_json: Option<String>,
+        panes: Vec<PaneMeta>,
+    },
     PaneSpawned(PaneMeta),
     Ok,
 }
@@ -93,7 +153,9 @@ where
 {
     let bytes = rmp_serde::to_vec(msg)?;
     if bytes.len() > MAX_FRAME_LEN {
-        return Err(FrameError::FrameTooLarge { len: bytes.len() as u32 });
+        return Err(FrameError::FrameTooLarge {
+            len: bytes.len() as u32,
+        });
     }
 
     writer.write_all(&(bytes.len() as u32).to_be_bytes())?;
@@ -156,8 +218,11 @@ mod tests {
         let mut bytes = ((MAX_FRAME_LEN as u32) + 1).to_be_bytes().to_vec();
         bytes.extend_from_slice(&[0; 8]);
 
-        let err = read_frame::<_, DaemonToClient>(&mut Cursor::new(bytes)).expect_err("oversized frame must fail");
+        let err = read_frame::<_, DaemonToClient>(&mut Cursor::new(bytes))
+            .expect_err("oversized frame must fail");
 
-        assert!(matches!(err, FrameError::FrameTooLarge { len } if len == (MAX_FRAME_LEN as u32) + 1));
+        assert!(
+            matches!(err, FrameError::FrameTooLarge { len } if len == (MAX_FRAME_LEN as u32) + 1)
+        );
     }
 }

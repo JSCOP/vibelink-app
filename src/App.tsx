@@ -56,7 +56,6 @@ function App() {
           <div className="brand-mark"><TerminalSquare size={18} /></div>
           <div>
             <div className="crumb">WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
-            <div className="subcrumb">Detached daemon · persistent PTY sessions</div>
           </div>
           <div className="topbar-spacer" />
           <label className="setting-inline">

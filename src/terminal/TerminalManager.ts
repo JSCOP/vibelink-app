@@ -42,6 +42,7 @@ type Entry = {
   container?: HTMLElement
 }
 
+
 class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
 
@@ -71,6 +72,7 @@ class TerminalManagerImpl {
     this.entries.set(paneId, entry)
     return entry
   }
+
 
   attach(paneId: string, container: HTMLElement): void {
     const entry = this.getOrCreate(paneId)
@@ -103,6 +105,15 @@ class TerminalManagerImpl {
     entry.observer = new ResizeObserver(() => this.fit(entry))
     entry.observer.observe(container)
     this.fit(entry)
+  }
+
+  reattachToDaemon(paneIds: string[]): void {
+    for (const paneId of paneIds) {
+      const entry = this.entries.get(paneId)
+      if (!entry) continue
+      entry.daemonAttached = true
+      void invoke('attach_pane', { paneId })
+    }
   }
 
   write(paneId: string, bytes: Uint8Array): void {

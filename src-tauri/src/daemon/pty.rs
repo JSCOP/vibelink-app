@@ -1,7 +1,7 @@
 use crate::daemon::scrollback::ScrollbackRing;
 use crate::protocol::{PaneConfig, PaneMeta};
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub const DEFAULT_SCROLLBACK_CAP: usize = 1024 * 1024;
 
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
+pub type SharedKiller = Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>;
 
 pub struct SpawnedPane {
     pub pane: Pane,
@@ -23,6 +24,7 @@ pub struct Pane {
     pub config: PaneConfig,
     pub alive: bool,
     child: SharedChild,
+    killer: SharedKiller,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     scrollback: ScrollbackRing,
@@ -52,7 +54,11 @@ impl Pane {
             command.env(key, value);
         }
 
-        let child = pair.slave.spawn_command(command).context("spawn pty command")?;
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .context("spawn pty command")?;
+        let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
 
@@ -62,6 +68,7 @@ impl Pane {
                 config,
                 alive: true,
                 child: Arc::new(Mutex::new(child)),
+                killer: Arc::new(Mutex::new(killer)),
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
                 scrollback: ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP),
@@ -96,7 +103,10 @@ impl Pane {
 
     pub fn kill(&mut self) -> Result<()> {
         self.alive = false;
-        self.child.lock().expect("pty child mutex poisoned").kill()?;
+        self.killer
+            .lock()
+            .expect("pty child killer mutex poisoned")
+            .kill()?;
         Ok(())
     }
 
@@ -122,8 +132,15 @@ impl Pane {
             id: config.pane_id,
             config,
             alive,
-            child: Arc::new(Mutex::new(Box::new(FakeChild) as Box<dyn Child + Send + Sync>)),
-            writer: Arc::new(Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)),
+            child: Arc::new(Mutex::new(
+                Box::new(FakeChild) as Box<dyn Child + Send + Sync>
+            )),
+            killer: Arc::new(Mutex::new(
+                Box::new(FakeChild) as Box<dyn ChildKiller + Send + Sync>
+            )),
+            writer: Arc::new(Mutex::new(
+                Box::new(std::io::sink()) as Box<dyn Write + Send>
+            )),
             master: Box::new(FakeMaster),
             scrollback: ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP),
         }
@@ -263,7 +280,9 @@ fn known_windows_program(program: &str) -> Option<PathBuf> {
         ]
         .into_iter()
         .find(|path| path.is_file()),
-        "powershell" | "powershell.exe" => system_root_program(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+        "powershell" | "powershell.exe" => {
+            system_root_program(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+        }
         "cmd" | "cmd.exe" => std::env::var_os("COMSPEC")
             .map(PathBuf::from)
             .filter(|path| path.is_file())
@@ -293,14 +312,40 @@ mod tests {
     fn explicit_shell_wins_over_default_shell() {
         let cfg = test_config(Some("custom-shell"));
 
-        assert_eq!(command_program(&cfg, || "fallback-shell".to_string()), "custom-shell");
+        assert_eq!(
+            command_program(&cfg, || "fallback-shell".to_string()),
+            "custom-shell"
+        );
     }
 
     #[test]
     fn default_shell_fallback_is_used_when_shell_missing() {
         let cfg = test_config(None);
 
-        assert_eq!(command_program(&cfg, || "fallback-shell".to_string()), "fallback-shell");
+        assert_eq!(
+            command_program(&cfg, || "fallback-shell".to_string()),
+            "fallback-shell"
+        );
+    }
+
+    #[test]
+    fn kill_does_not_wait_for_child_lock() {
+        let pane = Pane::for_test(test_config(Some("cmd.exe")), true);
+        let child = pane.child();
+        let guard = child.lock().expect("test child mutex poisoned");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let mut pane = pane;
+            let result = pane.kill().map(|_| ());
+            let _ = tx.send(result);
+        });
+
+        let result = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop(guard);
+        handle.join().expect("kill thread panicked");
+
+        assert!(result.expect("kill blocked on child lock").is_ok());
     }
 
     fn test_config(shell: Option<&str>) -> PaneConfig {

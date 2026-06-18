@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanel } from 'dockview-react'
 import { Grid3X3 } from 'lucide-react'
+import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
 import { selectedProfile } from '../state/profiles'
@@ -25,9 +26,9 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
   const loadedSessionRef = useRef<string | null>(null)
   const suppressPanelRemovalRef = useRef(false)
   const saveTimerRef = useRef<number | undefined>()
+  const dockRef = useRef<HTMLDivElement | null>(null)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const panes = useWorkspaceStore((state) => state.panes)
-  const layoutJson = useWorkspaceStore((state) => state.layoutJson)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const closePaneInStore = useWorkspaceStore((state) => state.closePane)
   const saveLayout = useWorkspaceStore((state) => state.saveLayout)
@@ -45,6 +46,12 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
       void saveLayout(currentSessionId, JSON.stringify(currentApi.toJSON()))
     }, 400)
   }, [activeSessionId, saveLayout])
+
+  const layoutDockview = useCallback((api: DockviewApi) => {
+    const rect = dockRef.current?.getBoundingClientRect()
+    if (!rect || rect.width <= 0 || rect.height <= 0) return
+    api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
+  }, [])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
     api.addPanel({
@@ -76,6 +83,7 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
       api.clear()
       const currentPanes = Object.values(useWorkspaceStore.getState().panes)
       const paneIds = currentPanes.map((pane) => pane.id)
+      const layoutJson = useWorkspaceStore.getState().layoutJson
       if (layoutJson && shouldRestoreDockviewLayout(layoutJson, paneIds)) {
         try {
           api.fromJSON(JSON.parse(layoutJson), { reuseExistingPanels: true })
@@ -90,11 +98,12 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
       } else {
         buildFallbackLayout(api, currentPanes)
       }
+      layoutDockview(api)
       loadedSessionRef.current = activeSessionId
     } finally {
       suppressPanelRemovalRef.current = false
     }
-  }, [activeSessionId, buildFallbackLayout, layoutJson])
+  }, [activeSessionId, buildFallbackLayout, layoutDockview])
 
   const splitPane = useCallback(async (paneId: string, direction: SplitDirection) => {
     const api = apiRef.current
@@ -102,8 +111,9 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
     if (!api || !sessionId) return
     const pane = await spawnPane(sessionId)
     addTerminalPanel(api, pane, { referencePanel: paneId, direction })
+    layoutDockview(api)
     persistLayoutSoon()
-  }, [addTerminalPanel, persistLayoutSoon, spawnPane])
+  }, [addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
 
   const newTab = useCallback(async (paneId: string) => {
     const api = apiRef.current
@@ -111,8 +121,9 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
     if (!api || !sessionId) return
     const pane = await spawnPane(sessionId)
     addTerminalPanel(api, pane, { referencePanel: paneId, direction: 'within' })
+    layoutDockview(api)
     persistLayoutSoon()
-  }, [addTerminalPanel, persistLayoutSoon, spawnPane])
+  }, [addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
 
   const closePane = useCallback(async (paneId: string) => {
     const api = apiRef.current
@@ -135,11 +146,11 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
 
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       const paneIds = Object.keys(useWorkspaceStore.getState().panes)
-      api.clear()
       for (const paneId of paneIds) {
         TerminalManager.dispose(paneId)
         await closePaneInStore(paneId)
       }
+      api.clear()
 
       const topRow: string[] = []
       for (let col = 0; col < template.cols; col += 1) {
@@ -156,11 +167,12 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
           bottom = pane.id
         }
       }
+      layoutDockview(api)
 
       loadedSessionRef.current = sessionId
       await saveLayout(sessionId, JSON.stringify(api.toJSON()))
     })
-  }, [addTerminalPanel, closePaneInStore, saveLayout, spawnPane])
+  }, [addTerminalPanel, closePaneInStore, layoutDockview, saveLayout, spawnPane])
 
   const actions = useMemo(() => ({ splitPane, newTab, closePane, toggleMaximize }), [closePane, newTab, splitPane, toggleMaximize])
 
@@ -237,8 +249,8 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
             ))}
           </div>
         </div>
-        <div className="dockview-theme-abyss workspace-dock">
-          <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" />
+        <div ref={dockRef} className="dockview-theme-abyss workspace-dock">
+          <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" defaultTabComponent={TerminalTab} />
         </div>
       </section>
     </WorkspaceActionsContext.Provider>

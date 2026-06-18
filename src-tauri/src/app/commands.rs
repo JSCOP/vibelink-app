@@ -55,7 +55,11 @@ pub async fn rename_session(
     name: String,
 ) -> Result<(), String> {
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
-    expect_ok(client.request_reply(|req| ClientToDaemon::RenameSession { req, session_id, name }))
+    expect_ok(client.request_reply(|req| ClientToDaemon::RenameSession {
+        req,
+        session_id,
+        name,
+    }))
 }
 
 #[tauri::command]
@@ -101,7 +105,10 @@ pub async fn save_layout(
 ) -> Result<(), String> {
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     client
-        .send(ClientToDaemon::SaveLayout { session_id, layout_json })
+        .send(ClientToDaemon::SaveLayout {
+            session_id,
+            layout_json,
+        })
         .map_err(to_string)
 }
 
@@ -113,7 +120,11 @@ pub async fn spawn_pane(
 ) -> Result<PaneMeta, String> {
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     match client
-        .request_reply(|req| ClientToDaemon::SpawnPane { req, session_id, cfg })
+        .request_reply(|req| ClientToDaemon::SpawnPane {
+            req,
+            session_id,
+            cfg,
+        })
         .map_err(to_string)?
     {
         ReplyResult::PaneSpawned(meta) => Ok(meta),
@@ -153,7 +164,11 @@ pub async fn resize_pane(
 ) -> Result<(), String> {
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
-        .send(ClientToDaemon::ResizePane { pane_id, cols, rows })
+        .send(ClientToDaemon::ResizePane {
+            pane_id,
+            cols,
+            rows,
+        })
         .map_err(to_string)
 }
 

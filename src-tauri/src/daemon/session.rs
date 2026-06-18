@@ -3,7 +3,10 @@ use crate::daemon::pty::Pane;
 use crate::protocol::{DaemonToClient, PaneMeta, SessionMeta};
 use crossbeam_channel::Sender;
 use indexmap::IndexMap;
-use std::{collections::{HashMap, HashSet}, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 
 pub struct Session {
@@ -103,7 +106,10 @@ impl DaemonState {
         Ok(pane_ids)
     }
 
-    pub fn attach_session(&self, session_id: Uuid) -> anyhow::Result<(Option<String>, Vec<PaneMeta>)> {
+    pub fn attach_session(
+        &self,
+        session_id: Uuid,
+    ) -> anyhow::Result<(Option<String>, Vec<PaneMeta>)> {
         let session = self.session(session_id)?;
         Ok((
             session.layout_json.clone(),
@@ -135,19 +141,20 @@ impl DaemonState {
         Ok(meta)
     }
 
-    pub fn close_pane(&mut self, pane_id: Uuid) -> anyhow::Result<()> {
+    pub fn close_pane(&mut self, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
         let Some((session_id, _)) = self.find_pane(pane_id) else {
-            anyhow::bail!("unknown pane {pane_id}");
+            self.pane_clients.remove(&pane_id);
+            return Ok(None);
         };
-        let session = self.session_mut(session_id)?;
-        let mut pane = session
-            .panes
-            .shift_remove(&pane_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown pane {pane_id}"))?;
-        pane.kill()?;
+        Ok(self.remove_pane(session_id, pane_id))
+    }
+
+    fn remove_pane(&mut self, session_id: Uuid, pane_id: Uuid) -> Option<Pane> {
+        let session = self.sessions.get_mut(&session_id)?;
+        let pane = session.panes.shift_remove(&pane_id);
         session.meta.pane_count = session.panes.len();
         self.pane_clients.remove(&pane_id);
-        Ok(())
+        pane
     }
 
     pub fn write_pane(&self, pane_id: Uuid, data: &[u8]) -> anyhow::Result<()> {
@@ -167,10 +174,16 @@ impl DaemonState {
         };
         if let Some(tx) = self.clients.get(&client_id) {
             if !snapshot.is_empty() {
-                let _ = tx.send(DaemonToClient::Output { pane_id, data: snapshot });
+                let _ = tx.send(DaemonToClient::Output {
+                    pane_id,
+                    data: snapshot,
+                });
             }
             if !alive {
-                let _ = tx.send(DaemonToClient::PaneExited { pane_id, exit_code: None });
+                let _ = tx.send(DaemonToClient::PaneExited {
+                    pane_id,
+                    exit_code: None,
+                });
             }
         }
         self.attach_client_to_pane(client_id, pane_id);
@@ -178,7 +191,10 @@ impl DaemonState {
     }
 
     pub fn attach_client_to_pane(&mut self, client_id: Uuid, pane_id: Uuid) {
-        self.pane_clients.entry(pane_id).or_default().insert(client_id);
+        self.pane_clients
+            .entry(pane_id)
+            .or_default()
+            .insert(client_id);
     }
 
     #[cfg(test)]
@@ -197,15 +213,22 @@ impl DaemonState {
     }
 
     pub fn mark_exited(&mut self, pane_id: Uuid) -> Vec<Sender<DaemonToClient>> {
-        if let Ok(pane) = self.pane_mut(pane_id) {
-            pane.mark_exited();
+        let senders = self.senders_for_pane(pane_id);
+        if let Some((session_id, _)) = self.find_pane(pane_id) {
+            self.remove_pane(session_id, pane_id);
+        } else {
+            self.pane_clients.remove(&pane_id);
         }
-        self.senders_for_pane(pane_id)
+        senders
     }
 
-
     pub fn pane_metas(&self, session_id: Uuid) -> anyhow::Result<Vec<PaneMeta>> {
-        Ok(self.session(session_id)?.panes.values().map(Pane::meta).collect())
+        Ok(self
+            .session(session_id)?
+            .panes
+            .values()
+            .map(Pane::meta)
+            .collect())
     }
 
     pub fn persisted_sessions(&self) -> Vec<PersistedSession> {
@@ -268,9 +291,12 @@ impl DaemonState {
     }
 
     fn find_pane(&self, pane_id: Uuid) -> Option<(Uuid, Uuid)> {
-        self.sessions
-            .iter()
-            .find_map(|(session_id, session)| session.panes.contains_key(&pane_id).then_some((*session_id, pane_id)))
+        self.sessions.iter().find_map(|(session_id, session)| {
+            session
+                .panes
+                .contains_key(&pane_id)
+                .then_some((*session_id, pane_id))
+        })
     }
 }
 
@@ -321,14 +347,35 @@ mod tests {
     fn persisted_sessions_include_layout_metadata() {
         let mut state = DaemonState::new();
         let meta = state.create_session("Workspace".to_string());
-        state.save_layout(meta.id, "{\"layout\":true}".to_string()).expect("save layout");
+        state
+            .save_layout(meta.id, "{\"layout\":true}".to_string())
+            .expect("save layout");
 
         let persisted = state.persisted_sessions();
 
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].id, meta.id);
-        assert_eq!(persisted[0].layout_json.as_deref(), Some("{\"layout\":true}"));
+        assert_eq!(
+            persisted[0].layout_json.as_deref(),
+            Some("{\"layout\":true}")
+        );
         assert!(persisted[0].panes.is_empty());
+    }
+
+    #[test]
+    fn close_pane_removes_and_returns_pane_without_killing_inline() {
+        let mut state = DaemonState::new();
+        let meta = state.create_session("Workspace".to_string());
+        let pane_id = Uuid::new_v4();
+        let config = test_config(pane_id);
+        let pane = Pane::for_test(config.clone(), true);
+        state.insert_pane(meta.id, pane).expect("insert pane");
+
+        let closed = state.close_pane(pane_id).expect("close pane");
+
+        assert_eq!(closed.expect("closed pane").meta().config, config);
+        assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
+        assert!(state.persisted_sessions()[0].panes.is_empty());
     }
 
     #[test]
@@ -358,15 +405,40 @@ mod tests {
         let persisted = state.persisted_sessions();
         assert!(persisted[0].panes.is_empty());
     }
+    #[test]
+    fn mark_exited_removes_pane_handles_and_allows_later_close() {
+        let mut state = DaemonState::new();
+        let meta = state.create_session("Workspace".to_string());
+        let pane_id = Uuid::new_v4();
+        let pane = Pane::for_test(test_config(pane_id), true);
+        state.insert_pane(meta.id, pane).expect("insert pane");
+
+        state.mark_exited(pane_id);
+
+        assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
+        assert!(state.persisted_sessions()[0].panes.is_empty());
+        assert!(state
+            .close_pane(pane_id)
+            .expect("close exited pane")
+            .is_none());
+    }
 
     fn test_config(pane_id: Uuid) -> crate::protocol::PaneConfig {
         #[cfg(windows)]
         let (shell, args) = (
             "cmd.exe".to_string(),
-            vec!["/D".to_string(), "/Q".to_string(), "/C".to_string(), "exit 0".to_string()],
+            vec![
+                "/D".to_string(),
+                "/Q".to_string(),
+                "/C".to_string(),
+                "exit 0".to_string(),
+            ],
         );
         #[cfg(not(windows))]
-        let (shell, args) = ("/bin/sh".to_string(), vec!["-lc".to_string(), "exit 0".to_string()]);
+        let (shell, args) = (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        );
 
         crate::protocol::PaneConfig {
             pane_id,

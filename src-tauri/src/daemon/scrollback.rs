@@ -57,7 +57,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
 
-    haystack.windows(needle.len()).rposition(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
 
 #[cfg(test)]

@@ -158,7 +158,9 @@ fn probe_daemon(stream: DaemonStream) -> Result<DaemonStream> {
             "daemon startup ping timed out after {}ms",
             STARTUP_PING_TIMEOUT.as_millis()
         ),
-        Err(mpsc::RecvTimeoutError::Disconnected) => bail!("daemon startup probe stopped before returning a stream"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("daemon startup probe stopped before returning a stream")
+        }
     }
 }
 
@@ -166,8 +168,13 @@ fn ping_daemon_io<S>(stream: &mut S) -> Result<()>
 where
     S: Read + Write,
 {
-    write_frame(stream, &ClientToDaemon::Ping { req: STARTUP_PING_REQ })
-        .context("write startup ping")?;
+    write_frame(
+        stream,
+        &ClientToDaemon::Ping {
+            req: STARTUP_PING_REQ,
+        },
+    )
+    .context("write startup ping")?;
     match read_frame::<_, DaemonToClient>(stream).context("read startup pong")? {
         DaemonToClient::Pong { req } if req == STARTUP_PING_REQ => Ok(()),
         DaemonToClient::Error { message, .. } => bail!("daemon rejected startup ping: {message}"),
@@ -187,16 +194,71 @@ pub fn socket_name() -> io::Result<Name<'static>> {
     paths::socket_name_string().to_ns_name::<GenericNamespaced>()
 }
 
-fn recover_recorded_stale_daemon() -> Result<bool> {
+pub fn shutdown_daemon() -> Result<bool> {
     let daemon_paths = paths::daemon_paths()?;
-    let Some(pid) = read_daemon_pid(&daemon_paths.pid)? else {
+
+    // Try graceful shutdown via protocol message first.
+    if graceful_shutdown(&daemon_paths.pid)? {
+        return Ok(true);
+    }
+
+    // Fall back to forceful termination.
+    shutdown_daemon_from_pid_file(&daemon_paths.pid)
+}
+
+const SHUTDOWN_REQ: Req = u64::MAX;
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn graceful_shutdown(pid_path: &Path) -> Result<bool> {
+    // Only attempt if daemon is running.
+    if read_daemon_pid(pid_path)?.is_none() {
+        return Ok(false);
+    }
+
+    let stream = match connect_daemon() {
+        Ok(stream) => stream,
+        Err(_) => return Ok(false),
+    };
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("awt-shutdown".to_string())
+        .spawn(move || {
+            let mut stream = stream;
+            let result = (|| -> Result<()> {
+                write_frame(&mut stream, &ClientToDaemon::Shutdown { req: SHUTDOWN_REQ })?;
+                match read_frame::<_, DaemonToClient>(&mut stream)? {
+                    DaemonToClient::Reply { req, .. } if req == SHUTDOWN_REQ => Ok(()),
+                    DaemonToClient::Error { message, .. } => bail!("shutdown rejected: {message}"),
+                    _ => bail!("unexpected shutdown response"),
+                }
+            })();
+            let _ = tx.send(result);
+        })?;
+
+    match rx.recv_timeout(SHUTDOWN_TIMEOUT) {
+        Ok(Ok(())) => {
+            let _ = fs::remove_file(pid_path);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn shutdown_daemon_from_pid_file(path: &Path) -> Result<bool> {
+    let Some(pid) = read_daemon_pid(path)? else {
         return Ok(false);
     };
 
-    terminate_daemon_pid(pid).with_context(|| format!("terminate stale daemon pid {pid}"))?;
-    let _ = fs::remove_file(&daemon_paths.pid);
+    terminate_daemon_pid(pid).with_context(|| format!("terminate daemon pid {pid}"))?;
+    let _ = fs::remove_file(path);
     thread::sleep(DAEMON_READY_DELAY);
     Ok(true)
+}
+
+fn recover_recorded_stale_daemon() -> Result<bool> {
+    let daemon_paths = paths::daemon_paths()?;
+    shutdown_daemon_from_pid_file(&daemon_paths.pid)
 }
 
 fn read_daemon_pid(path: &Path) -> Result<Option<u32>> {
@@ -365,7 +427,9 @@ mod tests {
 
         assert_eq!(
             stream.written_message(),
-            ClientToDaemon::Ping { req: STARTUP_PING_REQ }
+            ClientToDaemon::Ping {
+                req: STARTUP_PING_REQ
+            }
         );
     }
 
@@ -375,11 +439,11 @@ mod tests {
             req: STARTUP_PING_REQ + 1,
         });
 
-        let err = ping_daemon_io(&mut stream).expect_err("mismatched pong must reject stale daemon");
+        let err =
+            ping_daemon_io(&mut stream).expect_err("mismatched pong must reject stale daemon");
 
         assert!(err.to_string().contains("unexpected startup ping response"));
     }
-
 
     #[cfg(windows)]
     #[test]
@@ -388,7 +452,10 @@ mod tests {
             windows_creation_flags(true),
             0x0800_0000 | 0x0000_0008 | 0x0000_0200 | 0x0100_0000
         );
-        assert_eq!(windows_creation_flags(false), 0x0800_0000 | 0x0000_0008 | 0x0000_0200);
+        assert_eq!(
+            windows_creation_flags(false),
+            0x0800_0000 | 0x0000_0008 | 0x0000_0200
+        );
     }
 
     #[cfg(windows)]
@@ -420,6 +487,17 @@ mod tests {
     fn parse_daemon_pid_rejects_zero_and_invalid_values() {
         assert!(parse_daemon_pid("0").is_err());
         assert!(parse_daemon_pid("not-a-pid").is_err());
+    }
+
+    #[test]
+    fn shutdown_missing_pid_file_is_noop() {
+        let path = std::env::temp_dir().join(format!(
+            "awt-missing-daemon-{}-{}.pid",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+
+        assert!(!shutdown_daemon_from_pid_file(&path).expect("missing pid is ok"));
     }
 
     #[test]

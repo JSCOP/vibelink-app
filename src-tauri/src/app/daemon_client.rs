@@ -2,7 +2,9 @@ use crate::protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, R
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use crossbeam_channel::{bounded, Sender};
-use interprocess::local_socket::{prelude::*, RecvHalf as LocalSocketRecvHalf, SendHalf as LocalSocketSendHalf};
+use interprocess::local_socket::{
+    prelude::*, RecvHalf as LocalSocketRecvHalf, SendHalf as LocalSocketSendHalf,
+};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -25,9 +27,21 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum TerminalEvent {
-    Output { pane_id: String, data_b64: String },
-    Exited { pane_id: String, exit_code: Option<i32> },
-    ConnectionLost { message: String },
+    Output {
+        #[serde(rename = "paneId")]
+        pane_id: String,
+        #[serde(rename = "dataB64")]
+        data_b64: String,
+    },
+    Exited {
+        #[serde(rename = "paneId")]
+        pane_id: String,
+        #[serde(rename = "exitCode")]
+        exit_code: Option<i32>,
+    },
+    ConnectionLost {
+        message: String,
+    },
     ConnectionRestored,
 }
 
@@ -41,6 +55,7 @@ struct ClientShared {
     output_channel: Mutex<Option<Channel<TerminalEvent>>>,
     next_req: AtomicU64,
     reconnecting: AtomicBool,
+    shutting_down: AtomicBool,
     connection_generation: AtomicU64,
 }
 
@@ -53,6 +68,7 @@ impl DaemonClient {
             output_channel: Mutex::new(None),
             next_req: AtomicU64::new(1),
             reconnecting: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             connection_generation: AtomicU64::new(0),
         });
 
@@ -84,7 +100,10 @@ impl DaemonClient {
     {
         let req = self.next_req();
         match self.request(req, make_msg(req))? {
-            DaemonToClient::Reply { req: reply_req, result } if reply_req == req => Ok(result),
+            DaemonToClient::Reply {
+                req: reply_req,
+                result,
+            } if reply_req == req => Ok(result),
             DaemonToClient::Error { message, .. } => bail!(message),
             other => bail!("unexpected daemon response: {other:?}"),
         }
@@ -92,7 +111,11 @@ impl DaemonClient {
 
     pub fn send(&self, msg: ClientToDaemon) -> Result<()> {
         let result = {
-            let mut writer = self.shared.writer.lock().expect("daemon writer mutex poisoned");
+            let mut writer = self
+                .shared
+                .writer
+                .lock()
+                .expect("daemon writer mutex poisoned");
             write_frame(&mut *writer, &msg).context("write daemon message")
         };
         if let Err(err) = result {
@@ -101,6 +124,11 @@ impl DaemonClient {
         } else {
             Ok(())
         }
+    }
+
+    pub fn prepare_shutdown(&self) {
+        self.shared.shutting_down.store(true, Ordering::Release);
+        fail_pending(&self.shared, "daemon client is shutting down".to_string());
     }
 
     fn next_req(&self) -> Req {
@@ -176,12 +204,16 @@ fn reader_loop(mut reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, mut g
                     },
                 );
                 if begin_reconnect(&shared) {
-                    let (next_reader, next_generation) = reconnect(&shared);
-                    info!("daemon reconnected");
-                    let _ = send_terminal_event(&shared, TerminalEvent::ConnectionRestored);
-                    finish_reconnect(&shared);
-                    reader = next_reader;
-                    generation = next_generation;
+                    if let Some((next_reader, next_generation)) = reconnect(&shared) {
+                        info!("daemon reconnected");
+                        let _ = send_terminal_event(&shared, TerminalEvent::ConnectionRestored);
+                        finish_reconnect(&shared);
+                        reader = next_reader;
+                        generation = next_generation;
+                    } else {
+                        finish_reconnect(&shared);
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -190,14 +222,18 @@ fn reader_loop(mut reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, mut g
     }
 }
 
-fn reconnect(shared: &Arc<ClientShared>) -> (LocalSocketRecvHalf, u64) {
+fn reconnect(shared: &Arc<ClientShared>) -> Option<(LocalSocketRecvHalf, u64)> {
     loop {
+        if shared.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+
         match ensure_daemon() {
             Ok(stream) => {
                 let (reader, writer) = split_daemon_stream(stream);
                 *shared.writer.lock().expect("daemon writer mutex poisoned") = writer;
                 let generation = shared.connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                return (reader, generation);
+                return Some((reader, generation));
             }
             Err(err) => {
                 warn!(?err, "daemon reconnect attempt failed");
@@ -217,11 +253,14 @@ fn start_background_reconnect(shared: &Arc<ClientShared>, message: String) {
     if let Err(err) = thread::Builder::new()
         .name("awt-daemon-reconnector".to_string())
         .spawn(move || {
-            let (reader, generation) = reconnect(&reconnect_shared);
-            info!("daemon reconnected");
-            let _ = send_terminal_event(&reconnect_shared, TerminalEvent::ConnectionRestored);
-            finish_reconnect(&reconnect_shared);
-            reader_loop(reader, reconnect_shared, generation);
+            if let Some((reader, generation)) = reconnect(&reconnect_shared) {
+                info!("daemon reconnected");
+                let _ = send_terminal_event(&reconnect_shared, TerminalEvent::ConnectionRestored);
+                finish_reconnect(&reconnect_shared);
+                reader_loop(reader, reconnect_shared, generation);
+            } else {
+                finish_reconnect(&reconnect_shared);
+            }
         })
     {
         finish_reconnect(shared);
@@ -230,10 +269,21 @@ fn start_background_reconnect(shared: &Arc<ClientShared>, message: String) {
 }
 
 fn begin_reconnect(shared: &ClientShared) -> bool {
+    if !reconnect_is_allowed(
+        shared.shutting_down.load(Ordering::Acquire),
+        shared.reconnecting.load(Ordering::Acquire),
+    ) {
+        return false;
+    }
+
     shared
         .reconnecting
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
+}
+
+fn reconnect_is_allowed(shutting_down: bool, reconnecting: bool) -> bool {
+    !shutting_down && !reconnecting
 }
 
 fn finish_reconnect(shared: &ClientShared) {
@@ -256,7 +306,12 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
 }
 
 fn fail_pending(shared: &ClientShared, message: String) {
-    let pending = std::mem::take(&mut *shared.pending.lock().expect("pending request mutex poisoned"));
+    let pending = std::mem::take(
+        &mut *shared
+            .pending
+            .lock()
+            .expect("pending request mutex poisoned"),
+    );
     for (req, sender) in pending {
         let _ = sender.try_send(DaemonToClient::Error {
             req: Some(req),
@@ -320,6 +375,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_event_output_uses_frontend_field_names() {
+        let value = serde_json::to_value(TerminalEvent::Output {
+            pane_id: "pane-1".to_string(),
+            data_b64: "YWJj".to_string(),
+        })
+        .expect("serialize terminal event");
+
+        assert_eq!(value["kind"], "output");
+        assert_eq!(value["paneId"], "pane-1");
+        assert_eq!(value["dataB64"], "YWJj");
+        assert!(value.get("pane_id").is_none());
+        assert!(value.get("data_b64").is_none());
+
+        let exited = serde_json::to_value(TerminalEvent::Exited {
+            pane_id: "pane-2".to_string(),
+            exit_code: Some(7),
+        })
+        .expect("serialize exited terminal event");
+
+        assert_eq!(exited["kind"], "exited");
+        assert_eq!(exited["paneId"], "pane-2");
+        assert_eq!(exited["exitCode"], 7);
+        assert!(exited.get("pane_id").is_none());
+        assert!(exited.get("exit_code").is_none());
+    }
+    #[test]
     fn request_timeout_stays_below_legacy_ten_second_hang() {
         assert!(REQUEST_TIMEOUT < Duration::from_secs(10));
     }
@@ -333,6 +414,13 @@ mod tests {
     fn stale_reader_generation_is_not_current() {
         assert!(reader_generation_is_current(3, 3));
         assert!(!reader_generation_is_current(4, 3));
+    }
+
+    #[test]
+    fn reconnect_permission_rejects_shutdown_and_existing_reconnect() {
+        assert!(reconnect_is_allowed(false, false));
+        assert!(!reconnect_is_allowed(true, false));
+        assert!(!reconnect_is_allowed(false, true));
     }
 
     #[test]

@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 
-#[path = "../src/protocol.rs"]
-mod protocol;
 #[path = "../src/daemon/paths.rs"]
 mod paths;
+#[path = "../src/protocol.rs"]
+mod protocol;
 
 use anyhow::{bail, Context, Result};
-use interprocess::local_socket::{prelude::*, GenericNamespaced, ConnectOptions, SendHalf as LocalSocketSendHalf};
+use interprocess::local_socket::{
+    prelude::*, ConnectOptions, GenericNamespaced, SendHalf as LocalSocketSendHalf,
+};
 use protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneConfig, ReplyResult};
 use std::{
     env,
@@ -116,20 +118,34 @@ fn main() -> Result<()> {
     if failures.is_empty() {
         Ok(())
     } else {
-        bail!("{} smoke case(s) failed:\n{}", failures.len(), failures.join("\n"))
+        bail!(
+            "{} smoke case(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
     }
 }
 
-
 fn create_session(daemon: &mut DaemonConnection, name: &str) -> Result<Uuid> {
-    match request_reply(daemon, 1, ClientToDaemon::CreateSession { req: 1, name: name.to_string() })? {
+    match request_reply(
+        daemon,
+        1,
+        ClientToDaemon::CreateSession {
+            req: 1,
+            name: name.to_string(),
+        },
+    )? {
         ReplyResult::SessionCreated(meta) => Ok(meta.id),
         other => bail!("unexpected create response: {other:?}"),
     }
 }
 
 fn delete_session(daemon: &mut DaemonConnection, session_id: Uuid) -> Result<()> {
-    match request_reply(daemon, 3, ClientToDaemon::DeleteSession { req: 3, session_id })? {
+    match request_reply(
+        daemon,
+        3,
+        ClientToDaemon::DeleteSession { req: 3, session_id },
+    )? {
         ReplyResult::Ok => Ok(()),
         other => bail!("unexpected delete response: {other:?}"),
     }
@@ -191,7 +207,10 @@ fn planned_cases() -> Result<Vec<PlannedCase>> {
             cases.push(PlannedCase::Run(SmokeCase {
                 name: "sh profile command".to_string(),
                 program: "/bin/sh".to_string(),
-                args: vec!["-lc".to_string(), "printf 'AWT_PROFILE_SH:%s\\n' \"$AWT_SMOKE_PROFILE\"".to_string()],
+                args: vec![
+                    "-lc".to_string(),
+                    "printf 'AWT_PROFILE_SH:%s\\n' \"$AWT_SMOKE_PROFILE\"".to_string(),
+                ],
                 env: vec![("AWT_SMOKE_PROFILE".to_string(), "sh".to_string())],
                 cwd: cwd.clone(),
                 expected: ExpectedOutput::Contains(b"AWT_PROFILE_SH:sh"),
@@ -261,14 +280,24 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         rows: 24,
     };
 
-    match request_reply(daemon, 2, ClientToDaemon::SpawnPane { req: 2, session_id, cfg })? {
+    match request_reply(
+        daemon,
+        2,
+        ClientToDaemon::SpawnPane {
+            req: 2,
+            session_id,
+            cfg,
+        },
+    )? {
         ReplyResult::PaneSpawned(meta) if meta.id == pane_id => {
             if meta.config.shell.as_ref() != Some(&case.program)
                 || meta.config.args != case.args
                 || meta.config.env != case.env
                 || meta.config.cwd != case.cwd
             {
-                bail!("spawned pane config did not preserve the requested profile fields: {meta:?}");
+                bail!(
+                    "spawned pane config did not preserve the requested profile fields: {meta:?}"
+                );
             }
         }
         other => bail!("unexpected spawn response: {other:?}"),
@@ -280,27 +309,46 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
     Ok(sample_output(&output))
 }
 
-fn request_reply(daemon: &mut DaemonConnection, req: u64, msg: ClientToDaemon) -> Result<ReplyResult> {
+fn request_reply(
+    daemon: &mut DaemonConnection,
+    req: u64,
+    msg: ClientToDaemon,
+) -> Result<ReplyResult> {
     daemon.send(&msg)?;
     loop {
         match daemon.read_next()? {
-            Some(DaemonToClient::Reply { req: reply_req, result }) if reply_req == req => return Ok(result),
+            Some(DaemonToClient::Reply {
+                req: reply_req,
+                result,
+            }) if reply_req == req => return Ok(result),
             Some(DaemonToClient::Error { message, .. }) => bail!(message),
             Some(DaemonToClient::Output { .. } | DaemonToClient::PaneExited { .. }) => {}
-            Some(other) => bail!("unexpected daemon response while waiting for req {req}: {other:?}"),
+            Some(other) => {
+                bail!("unexpected daemon response while waiting for req {req}: {other:?}")
+            }
             None => bail!("daemon request {req} timed out"),
         }
     }
 }
 
-fn collect_output(daemon: &mut DaemonConnection, pane_id: Uuid, expected: &ExpectedOutput) -> Result<String> {
+fn collect_output(
+    daemon: &mut DaemonConnection,
+    pane_id: Uuid,
+    expected: &ExpectedOutput,
+) -> Result<String> {
     let mut collected = Vec::new();
 
     for _ in 0..64 {
         match daemon.read_next()? {
-            Some(DaemonToClient::Output { pane_id: out_pane, data }) if out_pane == pane_id => {
+            Some(DaemonToClient::Output {
+                pane_id: out_pane,
+                data,
+            }) if out_pane == pane_id => {
                 collected.extend_from_slice(&data);
-                if data.windows(b"\x1b[6n".len()).any(|window| window == b"\x1b[6n") {
+                if data
+                    .windows(b"\x1b[6n".len())
+                    .any(|window| window == b"\x1b[6n")
+                {
                     daemon.send(&ClientToDaemon::WritePane {
                         pane_id,
                         data: b"\x1b[1;1R".to_vec(),
@@ -310,7 +358,9 @@ fn collect_output(daemon: &mut DaemonConnection, pane_id: Uuid, expected: &Expec
                     return Ok(String::from_utf8_lossy(&collected).into_owned());
                 }
             }
-            Some(DaemonToClient::PaneExited { pane_id: out_pane, .. }) if out_pane == pane_id => {
+            Some(DaemonToClient::PaneExited {
+                pane_id: out_pane, ..
+            }) if out_pane == pane_id => {
                 if expected.matches(&collected) {
                     return Ok(String::from_utf8_lossy(&collected).into_owned());
                 }
@@ -323,14 +373,18 @@ fn collect_output(daemon: &mut DaemonConnection, pane_id: Uuid, expected: &Expec
         }
     }
 
-    bail!("expected output was not captured; collected: {}", String::from_utf8_lossy(&collected))
+    bail!(
+        "expected output was not captured; collected: {}",
+        String::from_utf8_lossy(&collected)
+    )
 }
-
 
 impl ExpectedOutput {
     fn matches(&self, bytes: &[u8]) -> bool {
         match self {
-            ExpectedOutput::Contains(needle) => bytes.windows(needle.len()).any(|window| window == *needle),
+            ExpectedOutput::Contains(needle) => {
+                bytes.windows(needle.len()).any(|window| window == *needle)
+            }
             ExpectedOutput::AnyVisible => plain_text(bytes).chars().any(|ch| !ch.is_whitespace()),
         }
     }
@@ -423,7 +477,10 @@ fn plain_text(bytes: &[u8]) -> String {
                                 index += 1;
                                 break;
                             }
-                            if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'\\' {
+                            if bytes[index] == 0x1b
+                                && index + 1 < bytes.len()
+                                && bytes[index + 1] == b'\\'
+                            {
                                 index += 2;
                                 break;
                             }
@@ -447,4 +504,3 @@ fn plain_text(bytes: &[u8]) -> String {
 
     text
 }
-

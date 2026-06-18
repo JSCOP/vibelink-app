@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-#[path = "../src/protocol.rs"]
-mod protocol;
 #[path = "../src/daemon/paths.rs"]
 mod paths;
+#[path = "../src/protocol.rs"]
+mod protocol;
 
 use anyhow::{bail, Result};
-use interprocess::local_socket::{prelude::*, GenericNamespaced, ConnectOptions};
+use interprocess::local_socket::{prelude::*, ConnectOptions, GenericNamespaced};
 use protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient};
 
 fn main() -> Result<()> {

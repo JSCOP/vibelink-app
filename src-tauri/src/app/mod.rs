@@ -6,7 +6,7 @@ use daemon_client::DaemonClient;
 use tauri::Manager;
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .setup(|app| {
             let stream = spawn_daemon::ensure_daemon().map_err(|err| {
@@ -32,6 +32,15 @@ pub fn run() {
             commands::spawn_pane,
             commands::write_pane,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event {
+            if let Some(client) = app.try_state::<DaemonClient>() {
+                client.prepare_shutdown();
+            }
+            let _ = spawn_daemon::shutdown_daemon();
+        }
+    });
 }

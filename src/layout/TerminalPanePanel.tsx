@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { PaneHeader } from '../components/PaneHeader'
 import { TerminalManager } from '../terminal/TerminalManager'
 
 type TerminalPanelParams = {
@@ -20,9 +19,7 @@ export function TerminalPanePanel(props: IDockviewPanelProps<TerminalPanelParams
 
   return (
     <div className="terminal-panel-shell">
-      <PaneHeader paneId={paneId} title={props.params.title} />
       <div ref={hostRef} className="dock-terminal-host" />
-      <div className="pane-status-line">{props.params.title ?? 'Shell'} · live daemon session</div>
     </div>
   )
 }

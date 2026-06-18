@@ -26,13 +26,10 @@ pub fn save_sessions(path: &Path, sessions: &[PersistedSession]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("create sessions directory")?;
     }
-    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(sessions).context("serialize sessions.json")?;
-    fs::write(&tmp, json).context("write sessions temp file")?;
-    fs::rename(&tmp, path).context("replace sessions.json")?;
+    fs::write(path, json).context("write sessions.json")?;
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -70,15 +67,37 @@ mod tests {
     }
 
     #[test]
+    fn save_sessions_replaces_existing_file() {
+        let path =
+            std::env::temp_dir().join(format!("replace-awt-sessions-{}.json", Uuid::new_v4()));
+        std::fs::write(&path, "[]").expect("seed sessions file");
+        let session = PersistedSession {
+            id: Uuid::new_v4(),
+            name: "Workspace".to_string(),
+            created_at: 123,
+            layout_json: None,
+            panes: Vec::new(),
+        };
+
+        save_sessions(&path, &[session.clone()]).expect("replace existing sessions file");
+        let loaded = load_sessions(&path).expect("load replaced sessions file");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded, vec![session]);
+    }
+
+    #[test]
     fn missing_sessions_file_loads_empty() {
-        let path = std::env::temp_dir().join(format!("missing-awt-sessions-{}.json", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("missing-awt-sessions-{}.json", Uuid::new_v4()));
 
         assert_eq!(load_sessions(&path).expect("load missing"), Vec::new());
     }
 
     #[test]
     fn load_sessions_preserves_persisted_panes() {
-        let path = std::env::temp_dir().join(format!("legacy-awt-sessions-{}.json", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("legacy-awt-sessions-{}.json", Uuid::new_v4()));
         let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
         let json = format!(
