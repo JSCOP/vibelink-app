@@ -11,6 +11,8 @@ pub struct PersistedSession {
     pub name: String,
     pub created_at: i64,
     pub layout_json: Option<String>,
+    #[serde(default)]
+    pub workspace_folder: Option<String>,
     pub panes: Vec<PaneConfig>,
 }
 
@@ -43,6 +45,7 @@ mod tests {
             name: "Workspace".to_string(),
             created_at: 123,
             layout_json: Some("{\"grid\":true}".to_string()),
+            workspace_folder: None,
             panes: vec![PaneConfig {
                 pane_id: Uuid::new_v4(),
                 shell: Some("cmd.exe".to_string()),
@@ -67,6 +70,25 @@ mod tests {
     }
 
     #[test]
+    fn save_and_load_sessions_preserves_workspace_folder() {
+        let path = std::env::temp_dir().join(format!("awt-session-cwd-{}.json", Uuid::new_v4()));
+        let session = PersistedSession {
+            id: Uuid::new_v4(),
+            name: "Repo".to_string(),
+            created_at: 123,
+            layout_json: None,
+            workspace_folder: Some("C:\\".to_string()),
+            panes: Vec::new(),
+        };
+
+        save_sessions(&path, &[session.clone()]).expect("save sessions");
+        let loaded = load_sessions(&path).expect("load sessions");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded, vec![session]);
+    }
+
+    #[test]
     fn save_sessions_replaces_existing_file() {
         let path =
             std::env::temp_dir().join(format!("replace-awt-sessions-{}.json", Uuid::new_v4()));
@@ -76,6 +98,7 @@ mod tests {
             name: "Workspace".to_string(),
             created_at: 123,
             layout_json: None,
+            workspace_folder: None,
             panes: Vec::new(),
         };
 

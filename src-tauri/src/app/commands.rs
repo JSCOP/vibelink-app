@@ -2,6 +2,9 @@ use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
 use tauri::{ipc::Channel, State};
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachedSession {
@@ -38,9 +41,14 @@ pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<Sessio
 pub async fn create_session(
     client: State<'_, DaemonClient>,
     name: String,
+    workspace_folder: Option<String>,
 ) -> Result<SessionMeta, String> {
     match client
-        .request_reply(|req| ClientToDaemon::CreateSession { req, name })
+        .request_reply(|req| ClientToDaemon::CreateSession {
+            req,
+            name,
+            workspace_folder,
+        })
         .map_err(to_string)?
     {
         ReplyResult::SessionCreated(meta) => Ok(meta),
@@ -190,6 +198,96 @@ pub async fn set_pane_title(
 pub async fn close_pane(client: State<'_, DaemonClient>, pane_id: String) -> Result<(), String> {
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::ClosePane { req, pane_id }))
+}
+
+#[tauri::command]
+pub async fn pick_workspace_folder() -> Result<Option<String>, String> {
+    pick_folder_native().map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn list_installed_fonts() -> Result<Vec<String>, String> {
+    list_fonts_native().map_err(to_string)
+}
+
+#[cfg(windows)]
+fn pick_folder_native() -> anyhow::Result<Option<String>> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select workspace folder'
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dialog.SelectedPath
+}
+"#;
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("folder picker exited with status {}", output.status);
+    }
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!selected.is_empty()).then_some(selected))
+}
+
+#[cfg(not(windows))]
+fn pick_folder_native() -> anyhow::Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn list_fonts_native() -> anyhow::Result<Vec<String>> {
+    use std::collections::BTreeSet;
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let mut fonts = BTreeSet::new();
+    for hive in [
+        r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",
+        r"HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",
+    ] {
+        let output = Command::new("reg.exe")
+            .args(["query", hive])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
+        if !output.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(font) = parse_font_registry_line(line) {
+                fonts.insert(font);
+            }
+        }
+    }
+    Ok(fonts.into_iter().collect())
+}
+
+#[cfg(not(windows))]
+fn list_fonts_native() -> anyhow::Result<Vec<String>> {
+    Ok(Vec::new())
+}
+
+#[cfg(windows)]
+fn parse_font_registry_line(line: &str) -> Option<String> {
+    let name = line.split("REG_").next()?.trim();
+    if name.is_empty() || name.starts_with("HKEY_") {
+        return None;
+    }
+    let family = name
+        .split(" & ")
+        .next()
+        .unwrap_or(name)
+        .split('(')
+        .next()
+        .unwrap_or(name)
+        .trim();
+    (!family.is_empty()).then(|| family.to_string())
 }
 
 fn expect_ok(result: anyhow::Result<ReplyResult>) -> Result<(), String> {

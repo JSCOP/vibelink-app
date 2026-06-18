@@ -69,6 +69,20 @@ export function findKeybindingAction(settings: KeybindingSettings, event: Keyboa
   return keybindingActionIds.find((id) => settings[id] === chord) ?? null
 }
 
+export function handleCapturedKeybindingEvent(
+  settings: KeybindingSettings,
+  event: KeyboardEvent,
+  onAction: (action: KeybindingActionId) => void,
+): boolean {
+  if (event.defaultPrevented) return false
+  const action = findKeybindingAction(settings, event)
+  if (!action) return false
+  event.preventDefault()
+  event.stopPropagation()
+  onAction(action)
+  return true
+}
+
 export function eventToKeyChord(event: KeyboardEvent): string {
   const parts: string[] = []
   if (event.ctrlKey) parts.push('ctrl')

@@ -133,6 +133,7 @@ fn create_session(daemon: &mut DaemonConnection, name: &str) -> Result<Uuid> {
         ClientToDaemon::CreateSession {
             req: 1,
             name: name.to_string(),
+            workspace_folder: None,
         },
     )? {
         ReplyResult::SessionCreated(meta) => Ok(meta.id),

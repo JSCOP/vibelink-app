@@ -1,5 +1,6 @@
 import type { PaneConfig } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
+import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
 
 export type Profile = {
   id: string
@@ -17,6 +18,7 @@ export type Settings = {
   fontSize: number
   scrollback: number
   accent: string
+  terminalThemeId: TerminalThemeId
   profiles: Profile[]
   defaultProfileId: string
   keybindings: KeybindingSettings
@@ -92,6 +94,7 @@ export const defaultSettings: Settings = {
   fontSize: 11,
   scrollback: 5000,
   accent: '#7ee787',
+  terminalThemeId: defaultTerminalThemeId,
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   keybindings: { ...defaultKeybindings },
@@ -105,10 +108,11 @@ export function normalizeSettings(value: unknown): Settings {
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
 
   return {
-    fontFamily: readString(record?.fontFamily, defaultSettings.fontFamily),
+    fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
     fontSize: readNumber(record?.fontSize, defaultSettings.fontSize),
     scrollback: readNumber(record?.scrollback, defaultSettings.scrollback),
     accent: readString(record?.accent, defaultSettings.accent),
+    terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     profiles,
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
@@ -170,6 +174,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback
+}
+
+function readNonEmptyString(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback
+  const normalized = value.trim()
+  return normalized.length > 0 ? normalized : fallback
+}
+
+function readTerminalThemeId(value: unknown): TerminalThemeId {
+  return typeof value === 'string' && isTerminalThemeId(value) ? value : defaultSettings.terminalThemeId
 }
 
 function readNullableString(value: unknown, fallback: string | null): string | null {

@@ -41,13 +41,18 @@ impl DaemonState {
         }
     }
 
-    pub fn create_session(&mut self, name: String) -> SessionMeta {
+    pub fn create_session(
+        &mut self,
+        name: String,
+        workspace_folder: Option<String>,
+    ) -> SessionMeta {
         let id = Uuid::new_v4();
         let meta = SessionMeta {
             id,
             name,
             pane_count: 0,
             created_at: now_unix_secs(),
+            workspace_folder,
         };
         self.sessions.insert(
             id,
@@ -251,6 +256,7 @@ impl DaemonState {
                 name: session.meta.name.clone(),
                 created_at: session.meta.created_at,
                 layout_json: session.layout_json.clone(),
+                workspace_folder: session.meta.workspace_folder.clone(),
                 panes: Vec::new(),
             })
             .collect();
@@ -328,11 +334,24 @@ mod tests {
     fn create_session_updates_list_metadata() {
         let mut state = DaemonState::new();
 
-        let created = state.create_session("Workspace 1".to_string());
+        let created = state.create_session("Workspace 1".to_string(), None);
         let listed = state.list_sessions();
 
         assert_eq!(listed, vec![created]);
         assert_eq!(listed[0].pane_count, 0);
+    }
+
+    #[test]
+    fn create_session_records_workspace_folder() {
+        let mut state = DaemonState::new();
+
+        let created = state.create_session("Repo".to_string(), Some("C:\\".to_string()));
+
+        assert_eq!(created.workspace_folder.as_deref(), Some("C:\\"));
+        assert_eq!(
+            state.list_sessions()[0].workspace_folder.as_deref(),
+            Some("C:\\")
+        );
     }
 
     #[test]
@@ -352,7 +371,7 @@ mod tests {
     #[test]
     fn persisted_sessions_include_layout_metadata() {
         let mut state = DaemonState::new();
-        let meta = state.create_session("Workspace".to_string());
+        let meta = state.create_session("Workspace".to_string(), None);
         state
             .save_layout(meta.id, "{\"layout\":true}".to_string())
             .expect("save layout");
@@ -371,7 +390,7 @@ mod tests {
     #[test]
     fn close_pane_removes_and_returns_pane_without_killing_inline() {
         let mut state = DaemonState::new();
-        let meta = state.create_session("Workspace".to_string());
+        let meta = state.create_session("Workspace".to_string(), None);
         let pane_id = Uuid::new_v4();
         let config = test_config(pane_id);
         let pane = Pane::for_test(config.clone(), true);
@@ -387,7 +406,7 @@ mod tests {
     #[test]
     fn persisted_sessions_exclude_live_panes() {
         let mut state = DaemonState::new();
-        let meta = state.create_session("Workspace".to_string());
+        let meta = state.create_session("Workspace".to_string(), None);
         let pane_id = Uuid::new_v4();
         let config = test_config(pane_id);
         let pane = Pane::for_test(config, true);
@@ -401,7 +420,7 @@ mod tests {
     #[test]
     fn persisted_sessions_exclude_exited_panes() {
         let mut state = DaemonState::new();
-        let meta = state.create_session("Workspace".to_string());
+        let meta = state.create_session("Workspace".to_string(), None);
         let pane_id = Uuid::new_v4();
         let pane = Pane::for_test(test_config(pane_id), true);
         state.insert_pane(meta.id, pane).expect("insert pane");
@@ -414,7 +433,7 @@ mod tests {
     #[test]
     fn set_pane_title_updates_live_pane_metadata() {
         let mut state = DaemonState::new();
-        let meta = state.create_session("Workspace".to_string());
+        let meta = state.create_session("Workspace".to_string(), None);
         let pane_id = Uuid::new_v4();
         let pane = Pane::for_test(test_config(pane_id), true);
         state.insert_pane(meta.id, pane).expect("insert pane");
@@ -433,7 +452,7 @@ mod tests {
     #[test]
     fn mark_exited_removes_pane_handles_and_allows_later_close() {
         let mut state = DaemonState::new();
-        let meta = state.create_session("Workspace".to_string());
+        let meta = state.create_session("Workspace".to_string(), None);
         let pane_id = Uuid::new_v4();
         let pane = Pane::for_test(test_config(pane_id), true);
         state.insert_pane(meta.id, pane).expect("insert pane");

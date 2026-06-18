@@ -5,7 +5,7 @@ import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
 import { selectedProfile } from '../state/profiles'
-import { findKeybindingAction, type KeybindingActionId } from '../state/keybindings'
+import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
 import type { PaneMeta } from '../ipc/types'
 import { PlaceholderPanel, TerminalPanePanel } from './TerminalPanePanel'
 import { type SplitDirection, WorkspaceActionsContext } from './actions'
@@ -322,13 +322,10 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
       const api = apiRef.current
       const activePanelId = api?.activePanel?.id
       if (!api || !activePanelId) return
-      const action = findKeybindingAction(settings.keybindings, event)
-      if (!action) return
-      event.preventDefault()
-      runKeybindingAction(action, activePanelId)
+      handleCapturedKeybindingEvent(settings.keybindings, event, (action) => runKeybindingAction(action, activePanelId))
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
   }, [runKeybindingAction, settings.keybindings])
 
   useEffect(() => {

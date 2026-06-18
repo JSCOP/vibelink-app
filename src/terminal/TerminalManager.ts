@@ -6,41 +6,23 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { defaultTerminalThemeId, terminalThemeById, type TerminalThemeId } from '../state/terminalThemes'
+import { isTerminalHostMeasurable } from './geometry'
 
-const terminalTheme = {
-  background: '#0b0f14',
-  foreground: '#d6deeb',
-  cursor: '#7ee787',
-  cursorAccent: '#0b0f14',
-  selectionBackground: '#264f78',
-  black: '#0b0f14',
-  red: '#ff6b6b',
-  green: '#7ee787',
-  yellow: '#f2cc60',
-  blue: '#79c0ff',
-  magenta: '#d2a8ff',
-  cyan: '#76e3ea',
-  white: '#d6deeb',
-  brightBlack: '#5c6773',
-  brightRed: '#ff8f8f',
-  brightGreen: '#9ff5b7',
-  brightYellow: '#f7dc84',
-  brightBlue: '#9ecbff',
-  brightMagenta: '#e2c5ff',
-  brightCyan: '#9af0f5',
-  brightWhite: '#ffffff',
-}
+const terminalTheme = terminalThemeById(defaultTerminalThemeId)
 
 type TerminalVisualSettings = {
   fontFamily: string
   fontSize: number
   scrollback: number
+  terminalThemeId: TerminalThemeId
 }
 
 const defaultTerminalSettings: TerminalVisualSettings = {
   fontFamily: '"D2CodingLigature Nerd Font Mono", "Cascadia Code", Consolas, monospace',
   fontSize: 11,
   scrollback: 5000,
+  terminalThemeId: defaultTerminalThemeId,
 }
 
 type Entry = {
@@ -51,6 +33,7 @@ type Entry = {
   daemonAttached: boolean
   dataWired: boolean
   observer?: ResizeObserver
+  fitFrame?: number
   container?: HTMLElement
   titleDisposable?: { dispose: () => void }
   titleHandler?: (title: string) => void
@@ -67,7 +50,8 @@ class TerminalManagerImpl {
       entry.term.options.fontFamily = settings.fontFamily
       entry.term.options.fontSize = settings.fontSize
       entry.term.options.scrollback = settings.scrollback
-      this.fit(entry)
+      entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
+      this.fit(entry, 0)
     }
   }
   getOrCreate(paneId: string): Entry {
@@ -82,7 +66,7 @@ class TerminalManagerImpl {
       fontSize: this.settings.fontSize,
       lineHeight: 1.15,
       scrollback: this.settings.scrollback,
-      theme: terminalTheme,
+      theme: terminalThemeById(this.settings.terminalThemeId),
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -134,9 +118,9 @@ class TerminalManagerImpl {
     }
 
     entry.observer?.disconnect()
-    entry.observer = new ResizeObserver(() => this.fit(entry))
+    entry.observer = new ResizeObserver(() => this.fit(entry, 0))
     entry.observer.observe(container)
-    this.fit(entry)
+    this.fit(entry, 0)
   }
 
   reattachToDaemon(paneIds: string[]): void {
@@ -164,18 +148,27 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.observer?.disconnect()
+    if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     entry.titleDisposable?.dispose()
     entry.webgl?.dispose()
     entry.term.dispose()
     this.entries.delete(paneId)
   }
 
-  private fit(entry: Entry): void {
-    requestAnimationFrame(() => {
+  private fit(entry: Entry, attempt: number): void {
+    if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
+    entry.fitFrame = requestAnimationFrame(() => {
+      entry.fitFrame = undefined
+      const rect = entry.container?.getBoundingClientRect()
+      if (!rect || !isTerminalHostMeasurable(rect)) {
+        if (attempt < 10) this.fit(entry, attempt + 1)
+        return
+      }
       try {
         entry.fit.fit()
+        entry.term.refresh(0, Math.max(0, entry.term.rows - 1))
       } catch {
-        // xterm can throw while dockview is measuring hidden containers.
+        if (attempt < 10) this.fit(entry, attempt + 1)
       }
     })
   }

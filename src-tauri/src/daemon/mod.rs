@@ -137,6 +137,7 @@ fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> 
                     name: persisted.name,
                     pane_count: 0,
                     created_at: persisted.created_at,
+                    workspace_folder: persisted.workspace_folder,
                 },
                 persisted.layout_json,
             );
@@ -249,11 +250,15 @@ fn dispatch_message(
                 },
             )
         }
-        ClientToDaemon::CreateSession { req, name } => {
+        ClientToDaemon::CreateSession {
+            req,
+            name,
+            workspace_folder,
+        } => {
             let meta = state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .create_session(name);
+                .create_session(name, workspace_folder);
             persist_state(&state, sessions_path)?;
             send(
                 tx,

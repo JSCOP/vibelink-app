@@ -3,6 +3,7 @@ export type SessionMeta = {
   name: string
   paneCount: number
   createdAt: number
+  workspaceFolder?: string | null
 }
 
 export type PaneConfig = {

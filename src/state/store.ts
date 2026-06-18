@@ -19,7 +19,7 @@ type WorkspaceState = {
   bootstrap: () => Promise<void>
   refreshSessions: () => Promise<void>
   attachSession: (sessionId: string) => Promise<AttachedSession>
-  createSession: (name?: string) => Promise<SessionMeta>
+  createSession: (name?: string, workspaceFolder?: string | null) => Promise<SessionMeta>
   renameSession: (sessionId: string, name: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
   spawnPane: (sessionId: string, overrides?: Partial<PaneConfig>) => Promise<PaneMeta>
@@ -75,9 +75,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return attached
   },
 
-  createSession: async (name?: string) => {
+  createSession: async (name?: string, workspaceFolder?: string | null) => {
     const fallbackName = `Workspace ${get().sessions.length + 1}`
-    const created = await invoke<SessionMeta>('create_session', { name: name ?? fallbackName })
+    const normalizedFolder = normalizeWorkspaceFolder(workspaceFolder)
+    const created = await invoke<SessionMeta>('create_session', { name: name ?? fallbackName, workspaceFolder: normalizedFolder })
     await get().refreshSessions()
     await get().attachSession(created.id)
     await get().spawnPane(created.id)
@@ -110,11 +111,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const hasShellOverride = Boolean(overrides && 'shell' in overrides)
     const hasCwdOverride = Boolean(overrides && 'cwd' in overrides)
     const hasTitleOverride = Boolean(overrides && 'title' in overrides)
+    const sessionWorkspaceFolder = get().sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
     const cfg: PaneConfig = {
       paneId,
       shell: hasShellOverride ? overrides?.shell ?? null : profileDefaults.shell,
       args: overrides?.args ? [...overrides.args] : profileDefaults.args,
-      cwd: hasCwdOverride ? overrides?.cwd ?? null : profileDefaults.cwd,
+      cwd: hasCwdOverride ? overrides?.cwd ?? null : sessionWorkspaceFolder ?? profileDefaults.cwd,
       env: overrides?.env ? overrides.env.map(([key, value]) => [key, value]) : profileDefaults.env,
       title: hasTitleOverride ? overrides?.title ?? null : profileDefaults.title,
       cols: overrides?.cols ?? 120,
@@ -183,6 +185,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     get().updateSettings({ defaultProfileId: profileId })
   },
 }))
+
+function normalizeWorkspaceFolder(folder: string | null | undefined): string | null {
+  const normalized = folder?.trim()
+  return normalized ? normalized : null
+}
 
 function loadSettings(): Settings {
   if (typeof window === 'undefined') return defaultSettings

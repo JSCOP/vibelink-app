@@ -31,6 +31,18 @@ describe('terminal profiles', () => {
     expect(settings.keybindings.focusLeft).toBe('ctrl+left')
   })
 
+  test('normalizes terminal font and theme choices', () => {
+    const themed = normalizeSettings({ fontFamily: '  Cascadia Code  ', terminalThemeId: 'aurora' })
+
+    expect(themed.fontFamily).toBe('Cascadia Code')
+    expect(themed.terminalThemeId).toBe('aurora')
+
+    const fallback = normalizeSettings({ fontFamily: '   ', terminalThemeId: 'missing-theme' })
+
+    expect(fallback.fontFamily).toBe(defaultSettings.fontFamily)
+    expect(fallback.terminalThemeId).toBe(defaultSettings.terminalThemeId)
+  })
+
   test('builds pane config fields from selected profile', () => {
     const settings = normalizeSettings({
       ...defaultSettings,

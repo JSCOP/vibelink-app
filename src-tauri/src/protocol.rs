@@ -34,6 +34,7 @@ pub enum ClientToDaemon {
     CreateSession {
         req: Req,
         name: String,
+        workspace_folder: Option<String>,
     },
     RenameSession {
         req: Req,
@@ -146,6 +147,7 @@ pub struct SessionMeta {
     pub name: String,
     pub pane_count: usize,
     pub created_at: i64,
+    pub workspace_folder: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +215,22 @@ mod tests {
                 cols: 120,
                 rows: 32,
             },
+        };
+
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode frame");
+
+        let decoded: ClientToDaemon = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_session_workspace_folder() {
+        let message = ClientToDaemon::CreateSession {
+            req: 7,
+            name: "Repo".to_string(),
+            workspace_folder: Some("C:\\".to_string()),
         };
 
         let mut bytes = Vec::new();

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { defaultKeybindings, eventToKeyChord, findKeybindingAction, normalizeKeybindings } from './keybindings'
+import { describe, expect, it, vi } from 'vitest'
+import { defaultKeybindings, eventToKeyChord, findKeybindingAction, handleCapturedKeybindingEvent, normalizeKeybindings } from './keybindings'
 
 describe('keybindings', () => {
   it('uses Windows Terminal compatible defaults for pane close and focus movement', () => {
@@ -31,6 +31,42 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, event)).toBe('closePane')
   })
 
+  it('handles configured app shortcuts from captured terminal keydown events', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'w', ctrlKey: true })
+
+    const handled = handleCapturedKeybindingEvent(defaultKeybindings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(true)
+    expect(seen).toEqual(['closePane'])
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+  })
+
+  it('lets ordinary terminal typing pass through captured keydown events', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'a' })
+
+    const handled = handleCapturedKeybindingEvent(defaultKeybindings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(false)
+    expect(seen).toEqual([])
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(event.stopPropagation).not.toHaveBeenCalled()
+  })
+
+  it('ignores already-consumed keydown events', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'w', ctrlKey: true, defaultPrevented: true })
+
+    const handled = handleCapturedKeybindingEvent(defaultKeybindings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(false)
+    expect(seen).toEqual([])
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(event.stopPropagation).not.toHaveBeenCalled()
+  })
+
   function keyEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
     return {
       key: '',
@@ -38,6 +74,9 @@ describe('keybindings', () => {
       altKey: false,
       shiftKey: false,
       metaKey: false,
+      defaultPrevented: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
       ...overrides,
     } as KeyboardEvent
   }

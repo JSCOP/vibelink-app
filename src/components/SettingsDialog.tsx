@@ -1,6 +1,10 @@
+import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
+import { normalizeFontChoices } from '../state/fonts'
 import type { Settings } from '../state/profiles'
+import { terminalThemes } from '../state/terminalThemes'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -9,6 +13,21 @@ type SettingsDialogProps = {
 }
 
 export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogProps) {
+  const [installedFonts, setInstalledFonts] = useState<string[]>([])
+  const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, settings.fontFamily), [installedFonts, settings.fontFamily])
+
+  useEffect(() => {
+    let cancelled = false
+    void invoke<string[]>('list_installed_fonts')
+      .then((fonts) => {
+        if (!cancelled) setInstalledFonts(fonts)
+      })
+      .catch(() => {
+        if (!cancelled) setInstalledFonts([])
+      })
+    return () => { cancelled = true }
+  }, [])
+
   const updateKeybinding = (id: KeybindingActionId, chord: string) => {
     onChange({ keybindings: { ...settings.keybindings, [id]: chord } })
   }
@@ -27,12 +46,31 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
         </header>
 
         <div className="settings-dialog-body">
+          <section className="settings-card settings-card-hero">
+            <div>
+              <h3>Terminal appearance</h3>
+              <p>Font, scrollback, accent, and theme apply to live panes immediately.</p>
+            </div>
+            <div className="settings-preview" style={{ fontFamily: settings.fontFamily }}>
+              <span>PS E:\\repo&gt;</span>
+              <strong> codex --continue</strong>
+            </div>
+          </section>
+
           <section className="settings-card">
-            <h3>Terminal appearance</h3>
-            <p>Defaults mirror this machine's Windows Terminal PowerShell profile.</p>
+            <div className="settings-card-heading">
+              <div>
+                <h3>Font</h3>
+                <p>Installed Windows fonts are loaded from the system registry, with terminal fallbacks kept available.</p>
+              </div>
+            </div>
             <label>
               Font family
-              <input value={settings.fontFamily} onChange={(event) => onChange({ fontFamily: event.target.value })} />
+              <select value={settings.fontFamily} onChange={(event) => onChange({ fontFamily: event.target.value })}>
+                {fontChoices.map((font) => (
+                  <option key={font} value={font}>{font}</option>
+                ))}
+              </select>
             </label>
             <div className="settings-grid-3">
               <label>
@@ -47,6 +85,29 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                 Accent
                 <input type="color" value={settings.accent} onChange={(event) => onChange({ accent: event.target.value })} />
               </label>
+            </div>
+          </section>
+
+          <section className="settings-card">
+            <h3>Theme</h3>
+            <p>Pick the terminal color palette independently from the app chrome.</p>
+            <div className="theme-choice-grid">
+              {terminalThemes.map((theme) => (
+                <button
+                  key={theme.id}
+                  type="button"
+                  className={settings.terminalThemeId === theme.id ? 'selected' : ''}
+                  onClick={() => onChange({ terminalThemeId: theme.id })}
+                >
+                  <span className="theme-swatch" style={{ background: theme.theme.background, color: theme.theme.foreground, borderColor: theme.theme.cursor }}>
+                    Aa
+                  </span>
+                  <span>
+                    <strong>{theme.name}</strong>
+                    <small>{theme.description}</small>
+                  </span>
+                </button>
+              ))}
             </div>
           </section>
 

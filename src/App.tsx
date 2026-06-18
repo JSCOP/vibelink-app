@@ -45,8 +45,9 @@ function App() {
       fontFamily: settings.fontFamily,
       fontSize: settings.fontSize,
       scrollback: settings.scrollback,
+      terminalThemeId: settings.terminalThemeId,
     })
-  }, [settings.fontFamily, settings.fontSize, settings.scrollback])
+  }, [settings.fontFamily, settings.fontSize, settings.scrollback, settings.terminalThemeId])
 
   const selectSession = (sessionId: string) => {
     const currentSessionId = useWorkspaceStore.getState().activeSessionId
@@ -56,8 +57,8 @@ function App() {
     void attachSession(sessionId)
   }
 
-  const createWorkspace = async (name: string, templateId: string) => {
-    const created = await createSession(name || undefined)
+  const createWorkspace = async (name: string, templateId: string, workspaceFolder: string | null) => {
+    const created = await createSession(name || undefined, workspaceFolder)
     setPendingTemplate({ sessionId: created.id, templateId, requestId: Date.now() })
     setIsCreateOpen(false)
   }
@@ -123,7 +124,7 @@ function App() {
           />
         )}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
-        {isCreateOpen ? <WorkspaceCreateDialog onCreate={(name, templateId) => void createWorkspace(name, templateId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {isCreateOpen ? <WorkspaceCreateDialog onCreate={(name, templateId, workspaceFolder) => void createWorkspace(name, templateId, workspaceFolder)} onClose={() => setIsCreateOpen(false)} /> : null}
       </section>
     </main>
   )

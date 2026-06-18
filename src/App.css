@@ -272,7 +272,7 @@ button {
 }
 
 .terminal-panel-shell {
-  background: #020406;
+  background: var(--awt-bg);
   display: grid;
   grid-template-rows: 1fr;
   height: 100%;
@@ -352,13 +352,18 @@ button {
 }
 
 .dock-terminal-host {
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 5px;
+  background: var(--awt-bg);
 }
 
-.dock-terminal-host .xterm {
+.dock-terminal-host .xterm,
+.dock-terminal-host .xterm-viewport,
+.dock-terminal-host .xterm-screen {
   height: 100%;
+  background: var(--awt-bg) !important;
 }
 
 
@@ -374,7 +379,7 @@ button {
 }
 
 .workspace-create-dialog {
-  width: min(560px, 100%);
+  width: min(640px, 100%);
   border: 1px solid rgba(126, 231, 135, 0.22);
   border-radius: 18px;
   background: linear-gradient(135deg, rgba(12, 18, 28, 0.98), rgba(7, 11, 18, 0.98));
@@ -418,6 +423,21 @@ button {
   background: rgba(5, 8, 14, 0.72);
   color: var(--awt-text);
   padding: 0 10px;
+}
+
+.workspace-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.workspace-folder-row button {
+  border: 1px solid rgba(121, 192, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(121, 192, 255, 0.08);
+  color: var(--awt-text);
+  min-height: 34px;
+  padding: 0 12px;
 }
 
 .workspace-template-grid {
@@ -468,8 +488,8 @@ button {
 }
 
 .settings-dialog {
-  width: min(860px, 100%);
-  max-height: min(760px, calc(100vh - 48px));
+  width: min(1040px, calc(100vw - 48px));
+  max-height: min(840px, calc(100vh - 48px));
   overflow: hidden;
   border: 1px solid rgba(118, 227, 234, 0.24);
   border-radius: 18px;
@@ -510,10 +530,26 @@ button {
 
 .settings-dialog-body {
   display: grid;
-  gap: 14px;
-  max-height: calc(100vh - 142px);
-  overflow: auto;
-  padding: 16px;
+  gap: 16px;
+  max-height: calc(100vh - 150px);
+  overflow-y: auto;
+  padding: 18px;
+  scrollbar-color: rgba(126, 231, 135, 0.75) rgba(7, 11, 18, 0.95);
+  scrollbar-width: thin;
+}
+
+.settings-dialog-body::-webkit-scrollbar {
+  width: 12px;
+}
+
+.settings-dialog-body::-webkit-scrollbar-track {
+  background: rgba(7, 11, 18, 0.95);
+}
+
+.settings-dialog-body::-webkit-scrollbar-thumb {
+  border: 3px solid rgba(7, 11, 18, 0.95);
+  border-radius: 999px;
+  background: rgba(126, 231, 135, 0.75);
 }
 
 .settings-card {
@@ -523,6 +559,31 @@ button {
   border: 1px solid rgba(121, 192, 255, 0.14);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.035);
+}
+
+.settings-card-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.8fr);
+  align-items: center;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(126, 231, 135, 0.12), transparent 34%),
+    rgba(255, 255, 255, 0.04);
+}
+
+.settings-preview {
+  border: 1px solid rgba(126, 231, 135, 0.24);
+  border-radius: 14px;
+  background: #070b12;
+  color: #d6deeb;
+  padding: 18px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.settings-preview span {
+  color: #7ee787;
+}
+
+.settings-preview strong {
+  font-weight: 650;
 }
 
 .settings-card p {
@@ -539,13 +600,68 @@ button {
   font-size: 12px;
 }
 
-.settings-card input {
+.settings-card input,
+.settings-card select {
   height: 34px;
   border: 1px solid rgba(121, 192, 255, 0.22);
   border-radius: 10px;
   background: rgba(5, 8, 14, 0.72);
   color: var(--awt-text);
   padding: 0 10px;
+}
+
+.settings-card select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--awt-accent) 50%), linear-gradient(135deg, var(--awt-accent) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 14px, calc(100% - 12px) 14px;
+  background-repeat: no-repeat;
+  background-size: 6px 6px;
+  padding-right: 34px;
+}
+
+.theme-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.theme-choice-grid button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(121, 192, 255, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--awt-text);
+  padding: 12px;
+  text-align: left;
+}
+
+.theme-choice-grid button.selected {
+  border-color: rgba(126, 231, 135, 0.6);
+  background: rgba(126, 231, 135, 0.1);
+}
+
+.theme-swatch {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 2px solid;
+  border-radius: 12px;
+  font-family: var(--awt-mono);
+  font-weight: 800;
+}
+
+.theme-choice-grid button span:last-child {
+  display: grid;
+  gap: 4px;
+}
+
+.theme-choice-grid small {
+  color: var(--awt-muted);
+  line-height: 1.35;
 }
 
 .settings-card-heading,

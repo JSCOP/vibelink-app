@@ -1,18 +1,32 @@
+import { invoke } from '@tauri-apps/api/core'
 import { useState } from 'react'
 import { X } from 'lucide-react'
 import { TEMPLATES } from '../layout/templates'
 
 type WorkspaceCreateDialogProps = {
-  onCreate: (name: string, templateId: string) => void
+  onCreate: (name: string, templateId: string, workspaceFolder: string | null) => void
   onClose: () => void
 }
 
 export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDialogProps) {
   const [name, setName] = useState('')
   const [templateId, setTemplateId] = useState('2x2')
+  const [workspaceFolder, setWorkspaceFolder] = useState('')
+  const [isPickingFolder, setIsPickingFolder] = useState(false)
 
   const submit = () => {
-    onCreate(name.trim(), templateId)
+    const normalizedFolder = workspaceFolder.trim()
+    onCreate(name.trim(), templateId, normalizedFolder.length > 0 ? normalizedFolder : null)
+  }
+
+  const browseFolder = async () => {
+    setIsPickingFolder(true)
+    try {
+      const selected = await invoke<string | null>('pick_workspace_folder')
+      if (selected) setWorkspaceFolder(selected)
+    } finally {
+      setIsPickingFolder(false)
+    }
   }
 
   return (
@@ -31,6 +45,14 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
         <label className="workspace-create-name">
           Name
           <input autoFocus value={name} placeholder="Workspace" onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }} />
+        </label>
+
+        <label className="workspace-create-name">
+          Folder
+          <div className="workspace-folder-row">
+            <input value={workspaceFolder} placeholder="C:\\Users\\js or E:\\project" onChange={(event) => setWorkspaceFolder(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }} />
+            <button type="button" onClick={() => void browseFolder()} disabled={isPickingFolder}>{isPickingFolder ? 'Opening…' : 'Browse'}</button>
+          </div>
         </label>
 
         <div className="workspace-template-grid">
