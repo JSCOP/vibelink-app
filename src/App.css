@@ -146,6 +146,8 @@ button {
   flex: 0 0 42px;
   gap: 10px;
   padding: 0 12px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .brand-mark {
@@ -160,11 +162,37 @@ button {
   width: 28px;
 }
 
+.workspace-crumb-box {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .crumb {
   font: 700 12px/1.2 var(--awt-mono);
   letter-spacing: 0.08em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+
+.topbar-template-strip {
+  align-items: center;
+  color: var(--awt-muted);
+  display: flex;
+  flex: 0 1 auto;
+  font: 12px/1 var(--awt-mono);
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.topbar-template-strip > span {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
+}
 
 .topbar-spacer {
   flex: 1;
@@ -174,8 +202,11 @@ button {
   align-items: center;
   color: var(--awt-muted);
   display: flex;
+  flex: 0 0 auto;
   font: 12px/1 var(--awt-mono);
   gap: 7px;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .setting-inline input,
@@ -192,8 +223,12 @@ button {
   width: 58px;
 }
 
+.profile-setting {
+  min-width: 0;
+}
+
 .profile-setting select {
-  width: 150px;
+  width: 120px;
 }
 .topbar-icon-button {
   width: 32px;
@@ -235,7 +270,7 @@ button {
 .workspace-view {
   display: grid;
   flex: 1 1 auto;
-  grid-template-rows: 34px 1fr;
+  grid-template-rows: 1fr;
   min-height: 0;
 }
 
@@ -261,9 +296,21 @@ button {
   gap: 5px;
 }
 
+.template-buttons.compact {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+
 .template-buttons button {
   font: 12px/1 var(--awt-mono);
   padding: 0 8px;
+}
+
+.template-buttons.compact button {
+  height: 24px;
+  padding: 0 6px;
 }
 
 .workspace-dock {
@@ -806,8 +853,8 @@ button {
     grid-template-columns: 210px 1fr;
   }
 
-  .profile-setting {
-    display: none;
+  .profile-setting select {
+    width: 96px;
   }
 
   .settings-dialog-body {

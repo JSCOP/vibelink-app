@@ -42,11 +42,12 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 ```powershell
 .\target\debug\app.exe cli sessions
 .\target\debug\app.exe cli panes --session <session-id>
-.\target\debug\app.exe cli read --pane <pane-id>
+.\target\debug\app.exe cli read --session <session-id> --pane <pane-id>
 .\target\debug\app.exe cli write --pane <pane-id> --text "pwd" --enter
 ```
 
-`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends a newline so the terminal executes the command.
+`sessions` and `panes` print JSON. `read` requires the workspace session id and prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command.
+AWT-launched panes receive `AWT_SESSION_ID` and `AWT_PANE_ID`; agents should use those for current-workspace reads instead of scanning every workspace.
 
 ## Daemon smoke checks
 

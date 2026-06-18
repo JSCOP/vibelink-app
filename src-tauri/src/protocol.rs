@@ -87,6 +87,7 @@ pub enum ClientToDaemon {
     },
     GetScrollback {
         req: Req,
+        session_id: Uuid,
         pane_id: Uuid,
     },
 }

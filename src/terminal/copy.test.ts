@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { copyAllTerminalContents } from './copy'
+import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 
 describe('terminal copy helpers', () => {
   it('selects all terminal text before copying it to the clipboard', async () => {
@@ -17,6 +17,19 @@ describe('terminal copy helpers', () => {
     expect(terminal.selectAll).toHaveBeenCalledOnce()
     expect(terminal.getSelection).toHaveBeenCalledOnce()
     expect(clipboard.writeText).toHaveBeenCalledWith('first line\nsecond line')
+  })
+
+  it('copies only the currently selected terminal text without selecting the whole buffer', async () => {
+    const terminal = {
+      selectAll: vi.fn(),
+      getSelection: vi.fn(() => 'selected text'),
+    }
+    const clipboard = { writeText: vi.fn(async () => undefined) }
+
+    await expect(copyTerminalSelection(terminal, clipboard)).resolves.toBe(true)
+
+    expect(terminal.selectAll).not.toHaveBeenCalled()
+    expect(clipboard.writeText).toHaveBeenCalledWith('selected text')
   })
 
   it('does not write to the clipboard when the selected terminal text is empty', async () => {

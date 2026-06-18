@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import { useState } from 'react'
 import { X } from 'lucide-react'
 import { TEMPLATES } from '../layout/templates'
@@ -22,8 +22,8 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
   const browseFolder = async () => {
     setIsPickingFolder(true)
     try {
-      const selected = await invoke<string | null>('pick_workspace_folder')
-      if (selected) setWorkspaceFolder(selected)
+      const selected = await open({ directory: true, multiple: false, title: 'Select workspace folder' })
+      if (typeof selected === 'string') setWorkspaceFolder(selected)
     } finally {
       setIsPickingFolder(false)
     }

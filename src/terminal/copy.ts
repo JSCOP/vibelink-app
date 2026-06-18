@@ -22,6 +22,20 @@ export async function copyAllTerminalContents(
   return true
 }
 
+export async function copyTerminalSelection(
+  terminal: Pick<TerminalSelection, 'getSelection'>,
+  clipboard: ClipboardWriter | undefined = globalThis.navigator?.clipboard,
+): Promise<boolean> {
+  const text = terminal.getSelection()
+  if (!text) return false
+  if (clipboard) {
+    await clipboard.writeText(text)
+  } else {
+    copyTextWithTextarea(text)
+  }
+  return true
+}
+
 function copyTextWithTextarea(text: string): void {
   const textarea = document.createElement('textarea')
   textarea.value = text

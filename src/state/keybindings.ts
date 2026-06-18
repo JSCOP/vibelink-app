@@ -12,6 +12,7 @@ export const keybindingActionIds = [
   'focusUp',
   'focusDown',
   'copyTerminalContents',
+  'copyTerminalSelection',
 ] as const
 
 export type KeybindingActionId = (typeof keybindingActionIds)[number]
@@ -37,6 +38,7 @@ export const keybindingDefinitions: KeybindingDefinition[] = [
   { id: 'focusUp', label: 'Focus pane up', description: 'Move focus to the pane above.' },
   { id: 'focusDown', label: 'Focus pane down', description: 'Move focus to the pane below.' },
   { id: 'copyTerminalContents', label: 'Copy terminal contents', description: 'Select all terminal buffer text and copy it to the clipboard.' },
+  { id: 'copyTerminalSelection', label: 'Copy terminal selection', description: 'Copy the currently selected terminal text.' },
 ]
 
 export const defaultKeybindings: KeybindingSettings = {
@@ -53,6 +55,7 @@ export const defaultKeybindings: KeybindingSettings = {
   focusUp: 'ctrl+up',
   focusDown: 'ctrl+down',
   copyTerminalContents: 'ctrl+a',
+  copyTerminalSelection: 'ctrl+shift+c',
 }
 
 export function normalizeKeybindings(value: unknown): KeybindingSettings {

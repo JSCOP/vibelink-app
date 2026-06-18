@@ -14,6 +14,7 @@ enum CliCommand {
         session_id: Uuid,
     },
     Read {
+        session_id: Uuid,
         pane_id: Uuid,
     },
     Write {
@@ -58,8 +59,15 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
                 other => bail!("unexpected daemon response: {other:?}"),
             }
         }
-        CliCommand::Read { pane_id } => {
-            match client.request_reply(|req| ClientToDaemon::GetScrollback { req, pane_id })? {
+        CliCommand::Read {
+            session_id,
+            pane_id,
+        } => {
+            match client.request_reply(|req| ClientToDaemon::GetScrollback {
+                req,
+                session_id,
+                pane_id,
+            })? {
                 ReplyResult::ScrollbackData(data) => {
                     let text = String::from_utf8_lossy(&data);
                     print!("{}", strip_ansi(&text));
@@ -106,13 +114,37 @@ fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<CliComm
             let session_id = parse_required_uuid_flag(&tokens[1..], "--session")?;
             Ok(CliCommand::Panes { session_id })
         }
-        "read" => {
-            let pane_id = parse_required_uuid_flag(&tokens[1..], "--pane")?;
-            Ok(CliCommand::Read { pane_id })
-        }
+        "read" => parse_read(&tokens[1..]),
         "write" => parse_write(&tokens[1..]),
         other => bail!("usage: unknown cli command `{other}`\n{}", usage()),
     }
+}
+
+fn parse_read(tokens: &[String]) -> Result<CliCommand> {
+    let mut session_id = None;
+    let mut pane_id = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                session_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
+            "--pane" => {
+                let value = next_flag_value(tokens, index, "--pane")?;
+                pane_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
+            other => bail!("usage: unknown read option `{other}`\n{}", usage()),
+        }
+    }
+
+    Ok(CliCommand::Read {
+        session_id: session_id.ok_or_else(|| usage_error("read requires --session <uuid>"))?,
+        pane_id: pane_id.ok_or_else(|| usage_error("read requires --pane <uuid>"))?,
+    })
 }
 
 fn parse_write(tokens: &[String]) -> Result<CliCommand> {
@@ -180,7 +212,7 @@ fn print_usage(mut writer: impl Write) -> Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  app.exe cli sessions\n  app.exe cli panes --session <session-id>\n  app.exe cli read --pane <pane-id>\n  app.exe cli write --pane <pane-id> --text <text> [--enter]"
+    "usage:\n  app.exe cli sessions\n  app.exe cli panes --session <session-id>\n  app.exe cli read --session <session-id> --pane <pane-id>\n  app.exe cli write --pane <pane-id> --text <text> [--enter]"
 }
 
 fn write_payload(text: String, enter: bool) -> Vec<u8> {
@@ -230,11 +262,35 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn parse_read_requires_pane_id() {
+    fn parse_read_requires_session_and_pane_id() {
+        let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
-        let parsed = parse_args(["cli", "read", "--pane", &pane_id.to_string()]).expect("parse");
+        let parsed = parse_args([
+            "cli",
+            "read",
+            "--session",
+            &session_id.to_string(),
+            "--pane",
+            &pane_id.to_string(),
+        ])
+        .expect("parse");
 
-        assert_eq!(parsed, CliCommand::Read { pane_id });
+        assert_eq!(
+            parsed,
+            CliCommand::Read {
+                session_id,
+                pane_id
+            }
+        );
+    }
+
+    #[test]
+    fn parse_read_rejects_unscoped_pane_reads() {
+        let pane_id = Uuid::new_v4();
+        let err = parse_args(["cli", "read", "--pane", &pane_id.to_string()])
+            .expect_err("missing session should fail");
+
+        assert!(err.to_string().contains("--session"));
     }
 
     #[test]

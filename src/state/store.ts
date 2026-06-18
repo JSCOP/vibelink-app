@@ -117,7 +117,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       shell: hasShellOverride ? overrides?.shell ?? null : profileDefaults.shell,
       args: overrides?.args ? [...overrides.args] : profileDefaults.args,
       cwd: hasCwdOverride ? overrides?.cwd ?? null : sessionWorkspaceFolder ?? profileDefaults.cwd,
-      env: overrides?.env ? overrides.env.map(([key, value]) => [key, value]) : profileDefaults.env,
+      env: terminalAgentEnv(overrides?.env ? overrides.env.map(([key, value]) => [key, value]) : profileDefaults.env, sessionId, paneId),
       title: hasTitleOverride ? overrides?.title ?? null : profileDefaults.title,
       cols: overrides?.cols ?? 120,
       rows: overrides?.rows ?? 32,
@@ -185,6 +185,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     get().updateSettings({ defaultProfileId: profileId })
   },
 }))
+
+function terminalAgentEnv(env: [string, string][], sessionId: string, paneId: string): [string, string][] {
+  const withoutGenerated = env.filter(([key]) => key !== 'AWT_SESSION_ID' && key !== 'AWT_PANE_ID')
+  return [
+    ...withoutGenerated,
+    ['AWT_SESSION_ID', sessionId],
+    ['AWT_PANE_ID', paneId],
+  ]
+}
 
 function normalizeWorkspaceFolder(folder: string | null | undefined): string | null {
   const normalized = folder?.trim()

@@ -178,8 +178,11 @@ impl DaemonState {
         Ok(())
     }
 
-    pub fn get_scrollback(&self, pane_id: Uuid) -> anyhow::Result<Vec<u8>> {
-        let pane = self.pane(pane_id)?;
+    pub fn get_scrollback(&self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<Vec<u8>> {
+        let session = self.session(session_id)?;
+        let pane = session.panes.get(&pane_id).ok_or_else(|| {
+            anyhow::anyhow!("pane {pane_id} does not belong to session {session_id}")
+        })?;
         Ok(pane.scrollback_snapshot())
     }
 
@@ -430,6 +433,24 @@ mod tests {
         let persisted = state.persisted_sessions();
         assert!(persisted[0].panes.is_empty());
     }
+    #[test]
+    fn get_scrollback_rejects_panes_from_other_sessions() {
+        let mut state = DaemonState::new();
+        let workspace_a = state.create_session("Workspace A".to_string(), None);
+        let workspace_b = state.create_session("Workspace B".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let pane = Pane::for_test(test_config(pane_id), true);
+        state
+            .insert_pane(workspace_a.id, pane)
+            .expect("insert pane");
+
+        let err = state
+            .get_scrollback(workspace_b.id, pane_id)
+            .expect_err("cross-session read should fail");
+
+        assert!(err.to_string().contains("does not belong"));
+    }
+
     #[test]
     fn set_pane_title_updates_live_pane_metadata() {
         let mut state = DaemonState::new();

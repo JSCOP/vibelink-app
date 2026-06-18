@@ -8,7 +8,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { defaultTerminalThemeId, terminalThemeById, type TerminalThemeId } from '../state/terminalThemes'
 import { isTerminalHostMeasurable } from './geometry'
-import { copyAllTerminalContents } from './copy'
+import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 
 const terminalTheme = terminalThemeById(defaultTerminalThemeId)
 
@@ -49,6 +49,7 @@ class TerminalManagerImpl {
 
   applySettings(settings: TerminalVisualSettings): void {
     const fontChanged = this.settings.fontFamily !== settings.fontFamily || this.settings.fontSize !== settings.fontSize
+    const themeChanged = this.settings.terminalThemeId !== settings.terminalThemeId
     this.settings = settings
     for (const entry of this.entries.values()) {
       entry.term.options.fontFamily = settings.fontFamily
@@ -56,9 +57,9 @@ class TerminalManagerImpl {
       entry.term.options.scrollback = settings.scrollback
       entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
       this.applyScrollbarVisibility(entry)
-      if (fontChanged) {
+      if (fontChanged || themeChanged) {
         this.reloadWebgl(entry)
-        this.fitAfterFontsLoad(entry)
+        if (fontChanged) this.fitAfterFontsLoad(entry)
       }
       this.fit(entry, 0)
     }
@@ -103,6 +104,7 @@ class TerminalManagerImpl {
       this.tryLoadWebgl(entry)
     } else if (entry.term.element && entry.term.element.parentElement !== container) {
       container.appendChild(entry.term.element)
+      this.reloadWebgl(entry)
     }
 
     if (!entry.dataWired) {
@@ -152,6 +154,31 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     void copyAllTerminalContents(entry.term)
+  }
+
+  copySelectionToClipboard(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    void copyTerminalSelection(entry.term)
+  }
+
+  focus(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    entry.term.focus()
+    this.fit(entry, 0)
+  }
+
+  refresh(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    this.fit(entry, 0)
+  }
+
+  refreshAll(): void {
+    for (const entry of this.entries.values()) {
+      this.fit(entry, 0)
+    }
   }
 
   containsEventTarget(paneId: string, target: EventTarget | null): boolean {
@@ -217,6 +244,10 @@ class TerminalManagerImpl {
       webgl.onContextLoss(() => {
         webgl.dispose()
         if (entry.webgl === webgl) entry.webgl = undefined
+        requestAnimationFrame(() => {
+          this.tryLoadWebgl(entry)
+          this.fit(entry, 0)
+        })
       })
       entry.term.loadAddon(webgl)
       entry.webgl = webgl

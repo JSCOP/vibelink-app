@@ -394,11 +394,15 @@ fn dispatch_message(
             }
             Ok(())
         }
-        ClientToDaemon::GetScrollback { req, pane_id } => {
+        ClientToDaemon::GetScrollback {
+            req,
+            session_id,
+            pane_id,
+        } => {
             let data = state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .get_scrollback(pane_id)?;
+                .get_scrollback(session_id, pane_id)?;
             send(
                 tx,
                 DaemonToClient::Reply {

@@ -10,6 +10,7 @@ describe('keybindings', () => {
     expect(defaultKeybindings.focusUp).toBe('ctrl+up')
     expect(defaultKeybindings.focusDown).toBe('ctrl+down')
     expect(defaultKeybindings.copyTerminalContents).toBe('ctrl+a')
+    expect(defaultKeybindings.copyTerminalSelection).toBe('ctrl+shift+c')
   })
 
   it('normalizes partial stored keybindings without dropping new defaults', () => {
@@ -19,6 +20,7 @@ describe('keybindings', () => {
     expect(normalized.closeWorkspace).toBe(defaultKeybindings.closeWorkspace)
     expect(normalized.focusLeft).toBe(defaultKeybindings.focusLeft)
     expect(normalized.copyTerminalContents).toBe(defaultKeybindings.copyTerminalContents)
+    expect(normalized.copyTerminalSelection).toBe(defaultKeybindings.copyTerminalSelection)
   })
 
   it('converts keyboard events into stable lower-case chords', () => {
@@ -30,6 +32,7 @@ describe('keybindings', () => {
   it('finds matching actions from user settings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'w', ctrlKey: true }))).toBe('closePane')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'a', ctrlKey: true }))).toBe('copyTerminalContents')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', ctrlKey: true, shiftKey: true }))).toBe('copyTerminalSelection')
   })
 
   it('handles terminal copy shortcuts from captured keydown events', () => {
@@ -40,6 +43,18 @@ describe('keybindings', () => {
 
     expect(handled).toBe(true)
     expect(seen).toEqual(['copyTerminalContents'])
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+  })
+
+  it('handles selected terminal copy from captured keydown events before devtools shortcuts', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'c', ctrlKey: true, shiftKey: true })
+
+    const handled = handleCapturedKeybindingEvent(defaultKeybindings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(true)
+    expect(seen).toEqual(['copyTerminalSelection'])
     expect(event.preventDefault).toHaveBeenCalledOnce()
     expect(event.stopPropagation).toHaveBeenCalledOnce()
   })

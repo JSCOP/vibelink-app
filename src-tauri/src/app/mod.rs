@@ -8,6 +8,7 @@ use tauri::Manager;
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let stream = spawn_daemon::ensure_daemon().map_err(|err| {
                 let boxed: Box<dyn std::error::Error> = err.into();
@@ -26,7 +27,6 @@ pub fn run() {
             commands::init_terminal_output,
             commands::list_installed_fonts,
             commands::list_sessions,
-            commands::pick_workspace_folder,
             commands::ping,
             commands::rename_session,
             commands::resize_pane,

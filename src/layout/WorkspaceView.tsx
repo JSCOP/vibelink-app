@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanel } from 'dockview-react'
-import { Grid3X3 } from 'lucide-react'
 import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
@@ -66,6 +65,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     const rect = dockRef.current?.getBoundingClientRect()
     if (!rect || rect.width <= 0 || rect.height <= 0) return
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
+    refreshTerminalsAfterLayout()
   }, [])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
@@ -164,6 +164,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     if (!panel) return
     if (panel.api.isMaximized()) panel.api.exitMaximized()
     else panel.api.maximize()
+    refreshTerminalsAfterLayout()
   }, [activatePane])
 
   const renamePaneTitle = useCallback(async (paneId: string, title: string) => {
@@ -203,9 +204,15 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     }
 
     const target = best ? api.getPanel(best.id) : undefined
-    if (target) target.api.setActive()
-    else if (direction === 'left' || direction === 'up') api.moveToPrevious()
-    else api.moveToNext()
+    if (target) {
+      target.api.setActive()
+      TerminalManager.focus(target.id)
+    } else {
+      if (direction === 'left' || direction === 'up') api.moveToPrevious()
+      else api.moveToNext()
+      const focusedPanelId = api.activePanel?.id
+      if (focusedPanelId) TerminalManager.focus(focusedPanelId)
+    }
   }, [])
 
   const runKeybindingAction = useCallback((action: KeybindingActionId, activePanelId: string) => {
@@ -230,12 +237,18 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
       case 'toggleMaximize':
         toggleMaximize(activePanelId)
         break
-      case 'nextTab':
+      case 'nextTab': {
         api.moveToNext()
+        const nextPanelId = api.activePanel?.id
+        if (nextPanelId) TerminalManager.focus(nextPanelId)
         break
-      case 'previousTab':
+      }
+      case 'previousTab': {
         api.moveToPrevious()
+        const previousPanelId = api.activePanel?.id
+        if (previousPanelId) TerminalManager.focus(previousPanelId)
         break
+      }
       case 'focusLeft':
         focusPane('left')
         break
@@ -250,6 +263,9 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
         break
       case 'copyTerminalContents':
         TerminalManager.copyContentsToClipboard(activePanelId)
+        break
+      case 'copyTerminalSelection':
+        TerminalManager.copySelectionToClipboard(activePanelId)
         break
     }
   }, [closePane, closeWorkspace, focusPane, newTab, splitPane, toggleMaximize])
@@ -311,7 +327,10 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api
     onApiReady?.(event.api)
-    event.api.onDidLayoutChange(persistLayoutSoon)
+    event.api.onDidLayoutChange(() => {
+      persistLayoutSoon()
+      refreshTerminalsAfterLayout()
+    })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
       TerminalManager.dispose(panel.id)
@@ -343,7 +362,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
         settings.keybindings,
         event,
         (action) => runKeybindingAction(action, activePanelId),
-        (action) => action !== 'copyTerminalContents' || TerminalManager.containsEventTarget(activePanelId, event.target),
+        (action) => !isTerminalCopyAction(action) || TerminalManager.containsEventTarget(activePanelId, event.target),
       )
     }
     window.addEventListener('keydown', onKeyDown, { capture: true })
@@ -378,22 +397,24 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
   return (
     <WorkspaceActionsContext.Provider value={actions}>
       <section className="workspace-view">
-        <div className="workspace-toolbar">
-          <div className="toolbar-label"><Grid3X3 size={15} /> Templates</div>
-          <div className="template-buttons">
-            {TEMPLATES.map((template) => (
-              <button key={template.id} type="button" onClick={() => void applyTemplate(template)}>
-                {template.label}
-              </button>
-            ))}
-          </div>
-        </div>
         <div ref={dockRef} className="dockview-theme-abyss workspace-dock" onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
           <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" defaultTabComponent={TerminalTab} />
         </div>
       </section>
     </WorkspaceActionsContext.Provider>
   )
+}
+
+function isTerminalCopyAction(action: KeybindingActionId): boolean {
+  return action === 'copyTerminalContents' || action === 'copyTerminalSelection'
+}
+
+function refreshTerminalsAfterLayout(): void {
+  TerminalManager.refreshAll()
+  requestAnimationFrame(() => {
+    TerminalManager.refreshAll()
+    window.setTimeout(() => TerminalManager.refreshAll(), 80)
+  })
 }
 
 function getPaneRect(paneId: string): DOMRect | null {

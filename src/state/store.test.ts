@@ -92,11 +92,29 @@ describe('workspace store profiles', () => {
         shell: 'codex.cmd',
         args: ['--dangerously-bypass-approvals-and-sandbox'],
         cwd: 'E:/work',
-        env: [['TERM_PROGRAM', 'AgenticWorkspaceTerminal']],
+        env: [
+          ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
+          ['AWT_SESSION_ID', 'session-1'],
+          ['AWT_PANE_ID', 'pane-test'],
+        ],
         title: 'Codex',
         cols: 120,
         rows: 32,
       },
+    })
+  })
+
+  test('spawnPane exposes pane and session ids to terminal agents', async () => {
+    await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
+
+    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
+      sessionId: 'session-1',
+      cfg: expect.objectContaining({
+        env: expect.arrayContaining([
+          ['AWT_SESSION_ID', 'session-1'],
+          ['AWT_PANE_ID', 'pane-test'],
+        ]),
+      }),
     })
   })
 

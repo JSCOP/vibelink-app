@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DockviewApi } from 'dockview-react'
-import { AlertTriangle, Settings2, TerminalSquare } from 'lucide-react'
+import { Grid3X3, AlertTriangle, Settings2, TerminalSquare } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SettingsDialog } from './components/SettingsDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
+import { TEMPLATES } from './layout/templates'
 import { startTerminalOutputStream } from './ipc/output'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
@@ -81,8 +82,26 @@ function App() {
       <section className="main-surface">
         <header className="topbar">
           <div className="brand-mark"><TerminalSquare size={18} /></div>
-          <div>
+          <div className="workspace-crumb-box">
             <div className="crumb">WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
+          </div>
+          <div className="topbar-template-strip" aria-label="Workspace templates">
+            <span><Grid3X3 size={14} /> Templates</span>
+            <div className="template-buttons compact">
+              {TEMPLATES.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  disabled={!activeSessionId}
+                  onClick={() => {
+                    if (!activeSessionId) return
+                    setPendingTemplate({ sessionId: activeSessionId, templateId: template.id, requestId: Date.now() })
+                  }}
+                >
+                  {template.label}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="topbar-spacer" />
           <label className="setting-inline">

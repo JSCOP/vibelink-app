@@ -201,44 +201,8 @@ pub async fn close_pane(client: State<'_, DaemonClient>, pane_id: String) -> Res
 }
 
 #[tauri::command]
-pub async fn pick_workspace_folder() -> Result<Option<String>, String> {
-    pick_folder_native().map_err(to_string)
-}
-
-#[tauri::command]
 pub async fn list_installed_fonts() -> Result<Vec<String>, String> {
     list_fonts_native().map_err(to_string)
-}
-
-#[cfg(windows)]
-fn pick_folder_native() -> anyhow::Result<Option<String>> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    let script = r#"
-Add-Type -AssemblyName System.Windows.Forms
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = 'Select workspace folder'
-$dialog.ShowNewFolderButton = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  Write-Output $dialog.SelectedPath
-}
-"#;
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("folder picker exited with status {}", output.status);
-    }
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!selected.is_empty()).then_some(selected))
-}
-
-#[cfg(not(windows))]
-fn pick_folder_native() -> anyhow::Result<Option<String>> {
-    Ok(None)
 }
 
 #[cfg(windows)]
