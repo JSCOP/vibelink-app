@@ -29,6 +29,7 @@ pub fn run() {
             commands::rename_session,
             commands::resize_pane,
             commands::save_layout,
+            commands::set_pane_title,
             commands::spawn_pane,
             commands::write_pane,
         ])

@@ -72,6 +72,11 @@ pub enum ClientToDaemon {
         cols: u16,
         rows: u16,
     },
+    SetPaneTitle {
+        req: Req,
+        pane_id: Uuid,
+        title: String,
+    },
     ClosePane {
         req: Req,
         pane_id: Uuid,

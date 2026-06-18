@@ -7,6 +7,7 @@ export type WorkspaceActions = {
   newTab: (paneId: string) => Promise<void>
   closePane: (paneId: string) => Promise<void>
   toggleMaximize: (paneId: string) => void
+  renamePaneTitle: (paneId: string, title: string) => Promise<void>
 }
 
 export const WorkspaceActionsContext = createContext<WorkspaceActions | null>(null)

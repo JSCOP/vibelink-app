@@ -52,6 +52,8 @@ type Entry = {
   dataWired: boolean
   observer?: ResizeObserver
   container?: HTMLElement
+  titleDisposable?: { dispose: () => void }
+  titleHandler?: (title: string) => void
 }
 
 
@@ -96,7 +98,7 @@ class TerminalManagerImpl {
   }
 
 
-  attach(paneId: string, container: HTMLElement): void {
+  attach(paneId: string, container: HTMLElement, options?: { onTitleChange?: (title: string) => void }): void {
     const entry = this.getOrCreate(paneId)
     entry.container = container
 
@@ -116,6 +118,14 @@ class TerminalManagerImpl {
         void invoke('resize_pane', { paneId, cols, rows })
       })
       entry.dataWired = true
+    }
+
+    if (entry.titleHandler !== options?.onTitleChange) {
+      entry.titleDisposable?.dispose()
+      entry.titleHandler = options?.onTitleChange
+      entry.titleDisposable = options?.onTitleChange
+        ? entry.term.onTitleChange((title) => options.onTitleChange?.(title))
+        : undefined
     }
 
     if (!entry.daemonAttached) {
@@ -154,6 +164,7 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.observer?.disconnect()
+    entry.titleDisposable?.dispose()
     entry.webgl?.dispose()
     entry.term.dispose()
     this.entries.delete(paneId)

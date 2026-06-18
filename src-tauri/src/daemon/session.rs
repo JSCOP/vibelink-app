@@ -167,6 +167,12 @@ impl DaemonState {
         pane.resize(cols, rows)
     }
 
+    pub fn set_pane_title(&mut self, pane_id: Uuid, title: String) -> anyhow::Result<()> {
+        let pane = self.pane_mut(pane_id)?;
+        pane.config.title = Some(title);
+        Ok(())
+    }
+
     pub fn get_scrollback(&self, pane_id: Uuid) -> anyhow::Result<Vec<u8>> {
         let pane = self.pane(pane_id)?;
         Ok(pane.scrollback_snapshot())
@@ -405,6 +411,25 @@ mod tests {
         let persisted = state.persisted_sessions();
         assert!(persisted[0].panes.is_empty());
     }
+    #[test]
+    fn set_pane_title_updates_live_pane_metadata() {
+        let mut state = DaemonState::new();
+        let meta = state.create_session("Workspace".to_string());
+        let pane_id = Uuid::new_v4();
+        let pane = Pane::for_test(test_config(pane_id), true);
+        state.insert_pane(meta.id, pane).expect("insert pane");
+
+        state
+            .set_pane_title(pane_id, "Codex: refactor terminal".to_string())
+            .expect("set title");
+
+        let panes = state.pane_metas(meta.id).expect("pane metas");
+        assert_eq!(
+            panes[0].config.title.as_deref(),
+            Some("Codex: refactor terminal")
+        );
+    }
+
     #[test]
     fn mark_exited_removes_pane_handles_and_allows_later_close() {
         let mut state = DaemonState::new();

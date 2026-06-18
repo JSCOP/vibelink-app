@@ -1,19 +1,38 @@
 .app-shell {
   background: var(--awt-bg);
   color: var(--awt-text);
-  display: grid;
-  grid-template-columns: 260px 1fr;
+  display: block;
   height: 100vh;
   overflow: hidden;
 }
+.sidebar-hover-edge {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 32;
+  width: 10px;
+}
+
 
 .sidebar {
   background: linear-gradient(180deg, #0a0c0f 0%, #0c1014 100%);
   border-right: 1px solid var(--awt-border-soft);
+  bottom: 0;
+  box-shadow: 18px 0 48px rgba(0, 0, 0, 0.35);
   display: flex;
   flex-direction: column;
+  left: 0;
   min-width: 0;
   padding: 18px 12px;
+  position: fixed;
+  top: 0;
+  transform: translateX(-252px);
+  transition: transform 150ms ease;
+  width: 260px;
+  z-index: 35;
+}
+
+.sidebar.open {
+  transform: translateX(0);
 }
 
 .sidebar-heading {
@@ -114,6 +133,7 @@ button {
 .main-surface {
   display: flex;
   flex-direction: column;
+  height: 100vh;
   min-height: 0;
   min-width: 0;
 }
@@ -278,6 +298,25 @@ button {
   white-space: nowrap;
 }
 
+.terminal-tab-title {
+  justify-content: flex-start;
+  padding: 0;
+  text-align: left;
+}
+
+.terminal-tab-title-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  border: 1px solid var(--awt-border);
+  border-radius: 5px;
+  background: #05080e;
+  color: var(--awt-text);
+  font: 700 12px/1 var(--awt-mono);
+  padding: 0 6px;
+}
+
+
 .terminal-tab-actions {
   display: flex;
   flex: 0 0 auto;
@@ -322,6 +361,100 @@ button {
   height: 100%;
 }
 
+
+.workspace-create-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 42;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 6, 12, 0.66);
+  backdrop-filter: blur(8px);
+}
+
+.workspace-create-dialog {
+  width: min(560px, 100%);
+  border: 1px solid rgba(126, 231, 135, 0.22);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(12, 18, 28, 0.98), rgba(7, 11, 18, 0.98));
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.workspace-create-header,
+.workspace-create-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.workspace-create-header {
+  border-bottom: 1px solid rgba(126, 231, 135, 0.14);
+}
+
+.workspace-create-header h2 {
+  margin: 0;
+}
+
+.workspace-create-footer {
+  border-top: 1px solid rgba(126, 231, 135, 0.14);
+}
+
+.workspace-create-name {
+  display: grid;
+  gap: 7px;
+  padding: 16px 20px 0;
+  color: var(--awt-muted);
+  font-size: 12px;
+}
+
+.workspace-create-name input {
+  height: 34px;
+  border: 1px solid rgba(121, 192, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(5, 8, 14, 0.72);
+  color: var(--awt-text);
+  padding: 0 10px;
+}
+
+.workspace-template-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 16px 20px 20px;
+}
+
+.workspace-template-grid button {
+  display: grid;
+  gap: 5px;
+  justify-items: start;
+  border: 1px solid rgba(121, 192, 255, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--awt-text);
+  padding: 12px;
+}
+
+.workspace-template-grid button.selected {
+  border-color: rgba(126, 231, 135, 0.55);
+  background: rgba(126, 231, 135, 0.1);
+}
+
+.workspace-template-grid small {
+  color: var(--awt-muted);
+}
+
+.primary-action {
+  border: 1px solid rgba(126, 231, 135, 0.38);
+  border-radius: 10px;
+  background: rgba(126, 231, 135, 0.12);
+  color: var(--awt-text);
+  min-height: 34px;
+  padding: 0 12px;
+}
 
 .settings-backdrop {
   position: fixed;

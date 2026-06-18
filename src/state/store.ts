@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { create } from 'zustand'
 import type { AttachedSession, PaneConfig, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings, paneOverridesFromProfile, selectedProfile } from './profiles'
+import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
 
 type Status = 'booting' | 'ready' | 'error'
@@ -11,6 +12,7 @@ type WorkspaceState = {
   activeSessionId?: string
   panes: Record<string, PaneMeta>
   layoutJson?: string | null
+  manualPaneTitles: ManualPaneTitleMap
   status: Status
   error?: string
   settings: Settings
@@ -23,6 +25,8 @@ type WorkspaceState = {
   spawnPane: (sessionId: string, overrides?: Partial<PaneConfig>) => Promise<PaneMeta>
   closePane: (paneId: string) => Promise<void>
   saveLayout: (sessionId: string, layoutJson: string) => Promise<void>
+  renamePaneTitle: (paneId: string, title: string, source: 'manual' | 'auto') => Promise<void>
+  applyTerminalTitle: (paneId: string, title: string) => Promise<void>
   setError: (error: string) => void
   clearError: () => void
   updateSettings: (settings: Partial<Settings>) => void
@@ -32,6 +36,7 @@ type WorkspaceState = {
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sessions: [],
   panes: {},
+  manualPaneTitles: {},
   status: 'booting',
   settings: loadSettings(),
 
@@ -129,6 +134,33 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return { panes }
     })
     await get().refreshSessions()
+  },
+
+  renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
+    const normalized = normalizePaneTitle(title)
+    if (!normalized) return
+    await invoke('set_pane_title', { paneId, title: normalized })
+    set((state) => {
+      const pane = state.panes[paneId]
+      if (!pane) return {}
+      return {
+        panes: {
+          ...state.panes,
+          [paneId]: {
+            ...pane,
+            config: { ...pane.config, title: normalized },
+          },
+        },
+        manualPaneTitles: source === 'manual'
+          ? { ...state.manualPaneTitles, [paneId]: true }
+          : state.manualPaneTitles,
+      }
+    })
+  },
+
+  applyTerminalTitle: async (paneId: string, title: string) => {
+    if (!shouldApplyAutoTitle(paneId, get().manualPaneTitles)) return
+    await get().renamePaneTitle(paneId, title, 'auto')
   },
 
   saveLayout: async (sessionId: string, layoutJson: string) => {

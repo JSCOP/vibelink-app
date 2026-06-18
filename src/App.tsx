@@ -3,6 +3,7 @@ import type { DockviewApi } from 'dockview-react'
 import { AlertTriangle, Settings2, TerminalSquare } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SettingsDialog } from './components/SettingsDialog'
+import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
 import { startTerminalOutputStream } from './ipc/output'
 import { useWorkspaceStore } from './state/store'
@@ -14,6 +15,9 @@ import './App.css'
 function App() {
   const apiRef = useRef<DockviewApi | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [pendingTemplate, setPendingTemplate] = useState<{ sessionId: string; templateId: string; requestId: number } | null>(null)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const status = useWorkspaceStore((state) => state.status)
@@ -52,13 +56,23 @@ function App() {
     void attachSession(sessionId)
   }
 
+  const createWorkspace = async (name: string, templateId: string) => {
+    const created = await createSession(name || undefined)
+    setPendingTemplate({ sessionId: created.id, templateId, requestId: Date.now() })
+    setIsCreateOpen(false)
+  }
+
   return (
     <main className="app-shell">
+      <div className="sidebar-hover-edge" onPointerEnter={() => setIsSidebarOpen(true)} />
       <Sidebar
+        isOpen={isSidebarOpen}
         sessions={sessions}
         activeSessionId={activeSessionId}
+        onPointerEnter={() => setIsSidebarOpen(true)}
+        onPointerLeave={() => setIsSidebarOpen(false)}
         onSelect={selectSession}
-        onCreate={() => void createSession()}
+        onCreate={() => setIsCreateOpen(true)}
         onRename={(sessionId, name) => void renameSession(sessionId, name)}
         onDelete={(sessionId) => void deleteSession(sessionId)}
       />
@@ -99,8 +113,17 @@ function App() {
         {error ? (
           <div className="daemon-banner"><AlertTriangle size={16} /> {error}</div>
         ) : null}
-        {status === 'booting' ? <div className="loading-panel">Connecting to daemon…</div> : <WorkspaceView onApiReady={(api) => { apiRef.current = api }} />}
+        {status === 'booting' ? <div className="loading-panel">Connecting to daemon…</div> : (
+          <WorkspaceView
+            onApiReady={(api) => { apiRef.current = api }}
+            pendingTemplate={pendingTemplate}
+            onTemplateApplied={(requestId) => {
+              setPendingTemplate((current) => current?.requestId === requestId ? null : current)
+            }}
+          />
+        )}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
+        {isCreateOpen ? <WorkspaceCreateDialog onCreate={(name, templateId) => void createWorkspace(name, templateId)} onClose={() => setIsCreateOpen(false)} /> : null}
       </section>
     </main>
   )

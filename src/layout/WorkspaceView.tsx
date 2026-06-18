@@ -10,11 +10,20 @@ import type { PaneMeta } from '../ipc/types'
 import { PlaceholderPanel, TerminalPanePanel } from './TerminalPanePanel'
 import { type SplitDirection, WorkspaceActionsContext } from './actions'
 import { TEMPLATES, type GridTemplate } from './templates'
+import { planTemplateReconcile } from './templatePlan'
 import { withSuppressedPanelRemoval } from './suppression'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 
+type PendingTemplateRequest = {
+  sessionId: string
+  templateId: string
+  requestId: number
+}
+
 type WorkspaceViewProps = {
   onApiReady?: (api: DockviewApi) => void
+  pendingTemplate?: PendingTemplateRequest | null
+  onTemplateApplied?: (requestId: number) => void
 }
 
 const components = {
@@ -22,12 +31,13 @@ const components = {
   placeholder: PlaceholderPanel,
 }
 
-export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
+export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }: WorkspaceViewProps) {
   const apiRef = useRef<DockviewApi | null>(null)
   const loadedSessionRef = useRef<string | null>(null)
   const suppressPanelRemovalRef = useRef(false)
   const saveTimerRef = useRef<number | undefined>()
   const dockRef = useRef<HTMLDivElement | null>(null)
+  const applyingTemplateRequestRef = useRef<number | null>(null)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const panes = useWorkspaceStore((state) => state.panes)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -35,6 +45,7 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
   const saveLayout = useWorkspaceStore((state) => state.saveLayout)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
   const settings = useWorkspaceStore((state) => state.settings)
+  const renamePaneTitleInStore = useWorkspaceStore((state) => state.renamePaneTitle)
 
   const paneList = useMemo(() => Object.values(panes), [panes])
 
@@ -141,6 +152,11 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
     else panel.api.maximize()
   }, [])
 
+  const renamePaneTitle = useCallback(async (paneId: string, title: string) => {
+    await renamePaneTitleInStore(paneId, title, 'manual')
+    apiRef.current?.getPanel(paneId)?.api.setTitle(title)
+  }, [renamePaneTitleInStore])
+
   const closeWorkspace = useCallback(async () => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!sessionId) return
@@ -226,18 +242,26 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!api || !sessionId) return
     const profile = selectedProfile(useWorkspaceStore.getState().settings)
+    const targetPaneCount = template.cols * template.rows
+    const existingPanes = Object.values(useWorkspaceStore.getState().panes)
+    const initialPlan = planTemplateReconcile(existingPanes.map((pane) => pane.id), targetPaneCount)
+    const plannedPanes = [...existingPanes]
+
+    for (let index = 0; index < initialPlan.missingPaneCount; index += 1) {
+      const pane = await spawnPane(sessionId, { title: `${profile.name} ${plannedPanes.length + 1}` })
+      plannedPanes.push(pane)
+    }
+
+    const paneById = new Map(plannedPanes.map((pane) => [pane.id, pane]))
+    const plan = planTemplateReconcile(plannedPanes.map((pane) => pane.id), targetPaneCount)
 
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      const paneIds = Object.keys(useWorkspaceStore.getState().panes)
-      for (const paneId of paneIds) {
-        TerminalManager.dispose(paneId)
-        await closePaneInStore(paneId)
-      }
       api.clear()
 
       const topRow: string[] = []
       for (let col = 0; col < template.cols; col += 1) {
-        const pane = await spawnPane(sessionId, { title: `${profile.name} ${col + 1}` })
+        const pane = paneById.get(plan.gridPaneIds[col])
+        if (!pane) continue
         addTerminalPanel(api, pane, col === 0 ? undefined : { referencePanel: topRow[col - 1], direction: 'right' })
         topRow.push(pane.id)
       }
@@ -245,19 +269,27 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
       for (let col = 0; col < template.cols; col += 1) {
         let bottom = topRow[col]
         for (let row = 1; row < template.rows; row += 1) {
-          const pane = await spawnPane(sessionId, { title: `${profile.name} ${col + 1}.${row + 1}` })
+          const pane = paneById.get(plan.gridPaneIds[template.cols + col * (template.rows - 1) + (row - 1)])
+          if (!pane || !bottom) continue
           addTerminalPanel(api, pane, { referencePanel: bottom, direction: 'below' })
           bottom = pane.id
         }
       }
-      layoutDockview(api)
 
+      const overflowReference = plan.gridPaneIds.at(-1)
+      for (const paneId of plan.overflowPaneIds) {
+        const pane = paneById.get(paneId)
+        if (!pane || !overflowReference) continue
+        addTerminalPanel(api, pane, { referencePanel: overflowReference, direction: 'within', inactive: true })
+      }
+
+      layoutDockview(api)
       loadedSessionRef.current = sessionId
       await saveLayout(sessionId, JSON.stringify(api.toJSON()))
     })
-  }, [addTerminalPanel, closePaneInStore, layoutDockview, saveLayout, spawnPane])
+  }, [addTerminalPanel, layoutDockview, saveLayout, spawnPane])
 
-  const actions = useMemo(() => ({ splitPane, newTab, closePane, toggleMaximize }), [closePane, newTab, splitPane, toggleMaximize])
+  const actions = useMemo(() => ({ splitPane, newTab, closePane, toggleMaximize, renamePaneTitle }), [closePane, newTab, renamePaneTitle, splitPane, toggleMaximize])
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api
@@ -298,6 +330,31 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [runKeybindingAction, settings.keybindings])
+
+  useEffect(() => {
+    const api = apiRef.current
+    if (!api) return
+    for (const pane of Object.values(panes)) {
+      const title = pane.config.title ?? 'Shell'
+      const panel = api.getPanel(pane.id)
+      if (panel && panel.api.title !== title) panel.api.setTitle(title)
+    }
+  }, [panes])
+
+  useEffect(() => {
+    if (!pendingTemplate || pendingTemplate.sessionId !== activeSessionId) return
+    if (applyingTemplateRequestRef.current === pendingTemplate.requestId) return
+    const template = TEMPLATES.find((item) => item.id === pendingTemplate.templateId)
+    if (!template) {
+      onTemplateApplied?.(pendingTemplate.requestId)
+      return
+    }
+    applyingTemplateRequestRef.current = pendingTemplate.requestId
+    void applyTemplate(template).finally(() => {
+      applyingTemplateRequestRef.current = null
+      onTemplateApplied?.(pendingTemplate.requestId)
+    })
+  }, [activeSessionId, applyTemplate, onTemplateApplied, pendingTemplate])
 
   return (
     <WorkspaceActionsContext.Provider value={actions}>

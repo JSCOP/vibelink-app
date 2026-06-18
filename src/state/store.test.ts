@@ -34,6 +34,7 @@ describe('workspace store profiles', () => {
       sessions: [],
       activeSessionId: undefined,
       panes: {},
+      manualPaneTitles: {},
       layoutJson: null,
       status: 'ready',
       error: undefined,
@@ -72,5 +73,23 @@ describe('workspace store profiles', () => {
         rows: 32,
       },
     })
+  })
+
+  test('renamePaneTitle persists a manual title and updates local pane metadata', async () => {
+    useWorkspaceStore.setState({ panes: { 'pane-test': spawnedPane } })
+
+    await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
+
+    expect(invoke).toHaveBeenCalledWith('set_pane_title', { paneId: 'pane-test', title: 'Manual Codex' })
+    expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
+  })
+
+  test('applyTerminalTitle does not overwrite manual pane titles', async () => {
+    useWorkspaceStore.setState({ panes: { 'pane-test': spawnedPane } })
+    await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
+
+    await useWorkspaceStore.getState().applyTerminalTitle('pane-test', 'Codex: auto task')
+
+    expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
   })
 })

@@ -173,6 +173,20 @@ pub async fn resize_pane(
 }
 
 #[tauri::command]
+pub async fn set_pane_title(
+    client: State<'_, DaemonClient>,
+    pane_id: String,
+    title: String,
+) -> Result<(), String> {
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneTitle {
+        req,
+        pane_id,
+        title,
+    }))
+}
+
+#[tauri::command]
 pub async fn close_pane(client: State<'_, DaemonClient>, pane_id: String) -> Result<(), String> {
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::ClosePane { req, pane_id }))

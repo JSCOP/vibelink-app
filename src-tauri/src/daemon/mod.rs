@@ -359,6 +359,18 @@ fn dispatch_message(
                 .resize_pane(pane_id, cols, rows)?;
             Ok(())
         }
+        ClientToDaemon::SetPaneTitle {
+            req,
+            pane_id,
+            title,
+        } => {
+            state
+                .lock()
+                .expect("daemon state mutex poisoned")
+                .set_pane_title(pane_id, title)?;
+            persist_state(&state, sessions_path)?;
+            send_ok(tx, req)
+        }
         ClientToDaemon::ClosePane { req, pane_id } => {
             let pane = state
                 .lock()
@@ -417,6 +429,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::DeleteSession { req, .. }
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
+        | ClientToDaemon::SetPaneTitle { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
         | ClientToDaemon::GetScrollback { req, .. }
         | ClientToDaemon::Shutdown { req } => Some(*req),
