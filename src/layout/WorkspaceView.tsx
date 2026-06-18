@@ -5,6 +5,7 @@ import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
 import { selectedProfile } from '../state/profiles'
+import { findKeybindingAction, type KeybindingActionId } from '../state/keybindings'
 import type { PaneMeta } from '../ipc/types'
 import { PlaceholderPanel, TerminalPanePanel } from './TerminalPanePanel'
 import { type SplitDirection, WorkspaceActionsContext } from './actions'
@@ -32,6 +33,8 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const closePaneInStore = useWorkspaceStore((state) => state.closePane)
   const saveLayout = useWorkspaceStore((state) => state.saveLayout)
+  const deleteSession = useWorkspaceStore((state) => state.deleteSession)
+  const settings = useWorkspaceStore((state) => state.settings)
 
   const paneList = useMemo(() => Object.values(panes), [panes])
 
@@ -138,6 +141,86 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
     else panel.api.maximize()
   }, [])
 
+  const closeWorkspace = useCallback(async () => {
+    const sessionId = useWorkspaceStore.getState().activeSessionId
+    if (!sessionId) return
+    const api = apiRef.current
+    if (api) {
+      await saveLayout(sessionId, JSON.stringify(api.toJSON()))
+    }
+    await deleteSession(sessionId)
+  }, [deleteSession, saveLayout])
+
+  const focusPane = useCallback((direction: 'left' | 'right' | 'up' | 'down') => {
+    const api = apiRef.current
+    const activePanel = api?.activePanel
+    if (!api || !activePanel) return
+
+    const activeRect = getPaneRect(activePanel.id)
+    if (!activeRect) {
+      if (direction === 'left' || direction === 'up') api.moveToPrevious()
+      else api.moveToNext()
+      return
+    }
+
+    let best: { id: string; score: number } | null = null
+    for (const panel of api.panels) {
+      if (panel.id === activePanel.id) continue
+      const rect = getPaneRect(panel.id)
+      if (!rect || !isInDirection(activeRect, rect, direction)) continue
+      const score = directionalDistance(activeRect, rect, direction)
+      if (!best || score < best.score) best = { id: panel.id, score }
+    }
+
+    const target = best ? api.getPanel(best.id) : undefined
+    if (target) target.api.setActive()
+    else if (direction === 'left' || direction === 'up') api.moveToPrevious()
+    else api.moveToNext()
+  }, [])
+
+  const runKeybindingAction = useCallback((action: KeybindingActionId, activePanelId: string) => {
+    const api = apiRef.current
+    if (!api) return
+    switch (action) {
+      case 'splitRight':
+        void splitPane(activePanelId, 'right')
+        break
+      case 'splitDown':
+        void splitPane(activePanelId, 'below')
+        break
+      case 'newTab':
+        void newTab(activePanelId)
+        break
+      case 'closePane':
+        void closePane(activePanelId)
+        break
+      case 'closeWorkspace':
+        void closeWorkspace()
+        break
+      case 'toggleMaximize':
+        toggleMaximize(activePanelId)
+        break
+      case 'nextTab':
+        api.moveToNext()
+        break
+      case 'previousTab':
+        api.moveToPrevious()
+        break
+      case 'focusLeft':
+        focusPane('left')
+        break
+      case 'focusRight':
+        focusPane('right')
+        break
+      case 'focusUp':
+        focusPane('up')
+        break
+      case 'focusDown':
+        focusPane('down')
+        break
+    }
+  }, [closePane, closeWorkspace, focusPane, newTab, splitPane, toggleMaximize])
+
   const applyTemplate = useCallback(async (template: GridTemplate) => {
     const api = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -207,34 +290,14 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
       const api = apiRef.current
       const activePanelId = api?.activePanel?.id
       if (!api || !activePanelId) return
-      if (event.altKey && event.shiftKey && event.key === '=') {
-        event.preventDefault()
-        void splitPane(activePanelId, 'right')
-      } else if (event.altKey && event.shiftKey && event.key === '-') {
-        event.preventDefault()
-        void splitPane(activePanelId, 'below')
-      } else if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'w') {
-        event.preventDefault()
-        void closePane(activePanelId)
-      } else if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 't') {
-        event.preventDefault()
-        void newTab(activePanelId)
-      } else if (event.ctrlKey && event.shiftKey && event.key === 'Enter') {
-        event.preventDefault()
-        toggleMaximize(activePanelId)
-      } else if (event.ctrlKey && event.key === 'Tab') {
-        event.preventDefault()
-        if (event.shiftKey) api.moveToPrevious()
-        else api.moveToNext()
-      } else if (event.altKey && event.key.startsWith('Arrow')) {
-        event.preventDefault()
-        if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') api.moveToPrevious()
-        else api.moveToNext()
-      }
+      const action = findKeybindingAction(settings.keybindings, event)
+      if (!action) return
+      event.preventDefault()
+      runKeybindingAction(action, activePanelId)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [closePane, newTab, splitPane, toggleMaximize])
+  }, [runKeybindingAction, settings.keybindings])
 
   return (
     <WorkspaceActionsContext.Provider value={actions}>
@@ -255,4 +318,33 @@ export function WorkspaceView({ onApiReady }: WorkspaceViewProps) {
       </section>
     </WorkspaceActionsContext.Provider>
   )
+}
+
+function getPaneRect(paneId: string): DOMRect | null {
+  return document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`)?.getBoundingClientRect() ?? null
+}
+
+function isInDirection(active: DOMRect, candidate: DOMRect, direction: 'left' | 'right' | 'up' | 'down'): boolean {
+  if (direction === 'left') return candidate.right <= active.left
+  if (direction === 'right') return candidate.left >= active.right
+  if (direction === 'up') return candidate.bottom <= active.top
+  return candidate.top >= active.bottom
+}
+
+function directionalDistance(active: DOMRect, candidate: DOMRect, direction: 'left' | 'right' | 'up' | 'down'): number {
+  const activeCenterX = active.left + active.width / 2
+  const activeCenterY = active.top + active.height / 2
+  const candidateCenterX = candidate.left + candidate.width / 2
+  const candidateCenterY = candidate.top + candidate.height / 2
+  const primary = direction === 'left'
+    ? active.left - candidate.right
+    : direction === 'right'
+      ? candidate.left - active.right
+      : direction === 'up'
+        ? active.top - candidate.bottom
+        : candidate.top - active.bottom
+  const secondary = direction === 'left' || direction === 'right'
+    ? Math.abs(activeCenterY - candidateCenterY)
+    : Math.abs(activeCenterX - candidateCenterX)
+  return primary * 10000 + secondary
 }

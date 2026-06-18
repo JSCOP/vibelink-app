@@ -31,6 +31,18 @@ const terminalTheme = {
   brightWhite: '#ffffff',
 }
 
+type TerminalVisualSettings = {
+  fontFamily: string
+  fontSize: number
+  scrollback: number
+}
+
+const defaultTerminalSettings: TerminalVisualSettings = {
+  fontFamily: '"D2CodingLigature Nerd Font Mono", "Cascadia Code", Consolas, monospace',
+  fontSize: 11,
+  scrollback: 5000,
+}
+
 type Entry = {
   term: Terminal
   fit: FitAddon
@@ -45,7 +57,17 @@ type Entry = {
 
 class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
+  private settings: TerminalVisualSettings = defaultTerminalSettings
 
+  applySettings(settings: TerminalVisualSettings): void {
+    this.settings = settings
+    for (const entry of this.entries.values()) {
+      entry.term.options.fontFamily = settings.fontFamily
+      entry.term.options.fontSize = settings.fontSize
+      entry.term.options.scrollback = settings.scrollback
+      this.fit(entry)
+    }
+  }
   getOrCreate(paneId: string): Entry {
     const existing = this.entries.get(paneId)
     if (existing) return existing
@@ -54,10 +76,10 @@ class TerminalManagerImpl {
       allowProposedApi: true,
       convertEol: false,
       cursorBlink: true,
-      fontFamily: '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace',
-      fontSize: 13,
+      fontFamily: this.settings.fontFamily,
+      fontSize: this.settings.fontSize,
       lineHeight: 1.15,
-      scrollback: 5000,
+      scrollback: this.settings.scrollback,
       theme: terminalTheme,
     })
     const fit = new FitAddon()

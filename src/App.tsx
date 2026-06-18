@@ -1,16 +1,19 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { DockviewApi } from 'dockview-react'
-import { AlertTriangle, TerminalSquare } from 'lucide-react'
+import { AlertTriangle, Settings2, TerminalSquare } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
+import { SettingsDialog } from './components/SettingsDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
 import { startTerminalOutputStream } from './ipc/output'
 import { useWorkspaceStore } from './state/store'
+import { TerminalManager } from './terminal/TerminalManager'
 import { selectedProfile } from './state/profiles'
 import './styles/theme.css'
 import './App.css'
 
 function App() {
   const apiRef = useRef<DockviewApi | null>(null)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const status = useWorkspaceStore((state) => state.status)
@@ -32,6 +35,14 @@ function App() {
       useWorkspaceStore.getState().setError(String(caught))
     })
   }, [bootstrap])
+
+  useEffect(() => {
+    TerminalManager.applySettings({
+      fontFamily: settings.fontFamily,
+      fontSize: settings.fontSize,
+      scrollback: settings.scrollback,
+    })
+  }, [settings.fontFamily, settings.fontSize, settings.scrollback])
 
   const selectSession = (sessionId: string) => {
     const currentSessionId = useWorkspaceStore.getState().activeSessionId
@@ -81,11 +92,15 @@ function App() {
               ))}
             </select>
           </label>
+          <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
+            <Settings2 size={16} />
+          </button>
         </header>
         {error ? (
           <div className="daemon-banner"><AlertTriangle size={16} /> {error}</div>
         ) : null}
         {status === 'booting' ? <div className="loading-panel">Connecting to daemon…</div> : <WorkspaceView onApiReady={(api) => { apiRef.current = api }} />}
+        {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
       </section>
     </main>
   )

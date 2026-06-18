@@ -18,7 +18,7 @@ export function TerminalPanePanel(props: IDockviewPanelProps<TerminalPanelParams
   }, [paneId])
 
   return (
-    <div className="terminal-panel-shell">
+    <div className="terminal-panel-shell" data-pane-id={paneId}>
       <div ref={hostRef} className="dock-terminal-host" />
     </div>
   )

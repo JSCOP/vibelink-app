@@ -24,7 +24,6 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
 
   useEffect(() => {
     const disposable = api.onDidTitleChange((event) => setTitle(event.title))
-    setTitle(api.title ?? params?.title ?? 'Shell')
     return () => disposable.dispose()
   }, [api])
 

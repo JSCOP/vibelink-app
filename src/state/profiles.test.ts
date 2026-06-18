@@ -24,6 +24,13 @@ describe('terminal profiles', () => {
     expect('shell' in settings).toBe(false)
   })
 
+  test('normalizes keybinding settings with Windows Terminal compatible defaults', () => {
+    const settings = normalizeSettings({ keybindings: { closePane: 'ctrl+q' } })
+
+    expect(settings.keybindings.closePane).toBe('ctrl+q')
+    expect(settings.keybindings.focusLeft).toBe('ctrl+left')
+  })
+
   test('builds pane config fields from selected profile', () => {
     const settings = normalizeSettings({
       ...defaultSettings,

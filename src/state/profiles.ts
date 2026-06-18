@@ -1,4 +1,5 @@
 import type { PaneConfig } from '../ipc/types'
+import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 
 export type Profile = {
   id: string
@@ -18,6 +19,7 @@ export type Settings = {
   accent: string
   profiles: Profile[]
   defaultProfileId: string
+  keybindings: KeybindingSettings
 }
 
 const defaultProfiles: Profile[] = [
@@ -86,12 +88,13 @@ const defaultProfiles: Profile[] = [
 const defaultProfile = defaultProfiles[0]
 
 export const defaultSettings: Settings = {
-  fontFamily: '"Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace',
-  fontSize: 13,
+  fontFamily: '"D2CodingLigature Nerd Font Mono", "Cascadia Code", Consolas, monospace',
+  fontSize: 11,
   scrollback: 5000,
   accent: '#7ee787',
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
+  keybindings: { ...defaultKeybindings },
 }
 
 export function normalizeSettings(value: unknown): Settings {
@@ -107,6 +110,7 @@ export function normalizeSettings(value: unknown): Settings {
     scrollback: readNumber(record?.scrollback, defaultSettings.scrollback),
     accent: readString(record?.accent, defaultSettings.accent),
     profiles,
+    keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
   }
 }

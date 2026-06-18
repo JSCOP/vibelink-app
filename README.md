@@ -31,7 +31,7 @@ pnpm tauri build
 - Left sidebar: workspace create, switch, rename, delete.
 - Templates: 1×1 through 6×2 grid presets.
 - Pane header: split right, split down, new tab, maximize, close.
-- Keyboard shortcuts: `Alt+Shift+=`, `Alt+Shift+-`, `Ctrl+Shift+T`, `Ctrl+Shift+W`, `Ctrl+Shift+Enter`, `Ctrl+Tab`, `Ctrl+Shift+Tab`, and `Alt+Arrow*`.
+- Settings dialog: terminal appearance and editable keybindings. Defaults mirror supported Windows Terminal shortcuts: `Ctrl+W` close pane, `Ctrl+Shift+W` close workspace, `Ctrl+Arrow*` focus movement, `Alt+Shift+V/H` split, `Alt+Z` zoom, `Ctrl+Tab` next tab.
 
 ## CLI control
 

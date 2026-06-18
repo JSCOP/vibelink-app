@@ -124,7 +124,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   closePane: async (paneId: string) => {
     await invoke('close_pane', { paneId })
     set((state) => {
-      const { [paneId]: _removed, ...panes } = state.panes
+      const panes = { ...state.panes }
+      delete panes[paneId]
       return { panes }
     })
     await get().refreshSessions()
