@@ -2,19 +2,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod daemon;
-mod mcp;
 mod protocol;
 
 fn main() {
-    if std::env::args().any(|arg| arg == "--daemon") {
-        daemon::run();
-    } else if std::env::args().any(|arg| arg == "--mcp") {
-        if let Err(err) = mcp::run() {
-            eprintln!("MCP server error: {}", err);
-            std::process::exit(1);
+    let args = std::env::args().collect::<Vec<_>>();
+    match args.get(1).map(String::as_str) {
+        Some("--daemon") => daemon::run(),
+        Some("cli") => {
+            if let Err(err) = cli::run(args.into_iter().skip(1)) {
+                eprintln!("CLI error: {err}");
+                std::process::exit(1);
+            }
         }
-    } else {
-        app::run();
+        _ => app::run(),
     }
 }

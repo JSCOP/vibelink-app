@@ -33,22 +33,18 @@ pnpm tauri build
 - Pane header: split right, split down, new tab, maximize, close.
 - Keyboard shortcuts: `Alt+Shift+=`, `Alt+Shift+-`, `Ctrl+Shift+T`, `Ctrl+Shift+W`, `Ctrl+Shift+Enter`, `Ctrl+Tab`, `Ctrl+Shift+Tab`, and `Alt+Arrow*`.
 
-## MCP server
+## CLI control
 
-The MCP server is a separate stdio mode. The GUI does not start it automatically; configure your MCP client to launch the same binary with `--mcp` when needed.
+The same binary exposes a lightweight CLI for agents and scripts. A skill can call these commands on demand without any separate integration setup.
 
-```json
-{
-  "mcpServers": {
-    "agentic-workspace-terminal": {
-      "command": "E:/VibeCodingProject/AgenticWorkspaceTerminal/src-tauri/target/debug/app.exe",
-      "args": ["--mcp"]
-    }
-  }
-}
+```powershell
+.\target\debug\app.exe cli sessions
+.\target\debug\app.exe cli panes --session <session-id>
+.\target\debug\app.exe cli read --pane <pane-id>
+.\target\debug\app.exe cli write --pane <pane-id> --text "pwd" --enter
 ```
 
-Available tools: `list_sessions`, `list_panes`, `read_pane_output`, and `write_to_pane`. `read_pane_output` returns scrollback with ANSI CSI escape sequences stripped for LLM readability.
+`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends a newline so the terminal executes the command.
 
 ## Daemon smoke checks
 
