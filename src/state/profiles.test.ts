@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, normalizeSettings, paneOverridesFromProfile, selectedProfile } from './profiles'
+import { defaultSettings, joinCommandLine, normalizeSettings, paneOverridesFromProfile, selectedProfile, splitCommandLine } from './profiles'
 
 describe('terminal profiles', () => {
   test('normalizes empty settings with a default profile', () => {
@@ -80,5 +80,79 @@ describe('terminal profiles', () => {
       cwd: 'E:/work',
       title: 'Codex 1',
     })
+  })
+
+  test('builds SSH pane config from remote profile fields', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'remote',
+      profiles: [
+        {
+          id: 'remote',
+          name: 'Prod SSH',
+          type: 'ssh',
+          sshHost: 'box.example.com',
+          sshUser: 'deploy',
+          sshPort: 2222,
+          sshIdentityFile: 'C:/Users/me/.ssh/id_ed25519',
+          sshRemoteCommand: 'tmux attach || tmux',
+          sshOptions: '-o ServerAliveInterval=30',
+          sshAllocateTty: true,
+          env: [],
+          cwd: null,
+          color: '#76e3ea',
+          icon: 'radio-tower',
+        },
+      ],
+    })
+
+    expect(paneOverridesFromProfile(selectedProfile(settings))).toEqual({
+      shell: 'ssh',
+      args: [
+        '-o',
+        'ServerAliveInterval=30',
+        '-t',
+        '-p',
+        '2222',
+        '-i',
+        'C:/Users/me/.ssh/id_ed25519',
+        'deploy@box.example.com',
+        'tmux attach || tmux',
+      ],
+      env: [],
+      cwd: null,
+      title: 'Prod SSH',
+    })
+  })
+
+  test('builds command profiles from a quoted command line', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'dev',
+      profiles: [
+        {
+          id: 'dev',
+          name: 'Dev server',
+          type: 'command',
+          command: 'pnpm --filter "web app" dev',
+          env: [],
+          cwd: 'E:/repo',
+          color: '#f2cc60',
+          icon: 'play',
+        },
+      ],
+    })
+
+    expect(paneOverridesFromProfile(selectedProfile(settings))).toEqual({
+      shell: 'pnpm',
+      args: ['--filter', 'web app', 'dev'],
+      env: [],
+      cwd: 'E:/repo',
+      title: 'Dev server',
+    })
+  })
+
+  test('round-trips command arguments with spaces and Windows paths', () => {
+    const parts = ['tool', 'two words', 'C:\\Users\\me\\.ssh\\id_ed25519']
+
+    expect(splitCommandLine(joinCommandLine(parts))).toEqual(parts)
   })
 })

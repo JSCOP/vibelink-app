@@ -395,11 +395,23 @@ fn dispatch_message(
             Ok(())
         }
         ClientToDaemon::ClearSession { req, session_id } => {
-            state
+            let panes = state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .clear_session_scrollback(session_id)?;
-            send_ok(tx, req)
+                .close_session_panes(session_id)?;
+            persist_state(&state, sessions_path)?;
+            send_ok(tx, req)?;
+            for mut pane in panes {
+                let pane_id = pane.id;
+                thread::Builder::new()
+                    .name(format!("awt-close-pty-{pane_id}"))
+                    .spawn(move || {
+                        if let Err(err) = pane.kill() {
+                            warn!(?err, pane_id = %pane_id, "failed to kill cleared pane");
+                        }
+                    })?;
+            }
+            Ok(())
         }
         ClientToDaemon::GetScrollback {
             req,

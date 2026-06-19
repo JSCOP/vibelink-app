@@ -1,11 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type FontWeight } from '@xterm/xterm'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { defaultTerminalThemeId, terminalThemeById, type TerminalThemeId } from '../state/terminalThemes'
 import { isTerminalHostMeasurable } from './geometry'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
@@ -33,7 +32,6 @@ const defaultTerminalSettings: TerminalVisualSettings = {
 type Entry = {
   term: Terminal
   fit: FitAddon
-  webgl?: WebglAddon
   opened: boolean
   daemonAttached: boolean
   dataWired: boolean
@@ -44,10 +42,20 @@ type Entry = {
   titleHandler?: (title: string) => void
 }
 
-
 class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
   private settings: TerminalVisualSettings = defaultTerminalSettings
+
+  constructor() {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this.resumeRendering()
+      })
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', () => this.resumeRendering())
+    }
+  }
 
   applySettings(settings: TerminalVisualSettings): void {
     const fontChanged = this.settings.fontFamily !== settings.fontFamily || this.settings.fontSize !== settings.fontSize || this.settings.terminalFontWeight !== settings.terminalFontWeight
@@ -56,15 +64,13 @@ class TerminalManagerImpl {
     for (const entry of this.entries.values()) {
       entry.term.options.fontFamily = settings.fontFamily
       entry.term.options.fontSize = settings.fontSize
-      entry.term.options.fontWeight = settings.terminalFontWeight
-      entry.term.options.fontWeightBold = Math.min(900, Math.max(settings.terminalFontWeight, 700))
+      entry.term.options.fontWeight = terminalFontWeight(settings.terminalFontWeight)
+      entry.term.options.fontWeightBold = terminalBoldFontWeight(settings.terminalFontWeight)
       entry.term.options.scrollback = settings.scrollback
       entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
       this.applyScrollbarVisibility(entry)
-      if (fontChanged || themeChanged) {
-        this.reloadWebgl(entry)
-        if (fontChanged) this.fitAfterFontsLoad(entry)
-      }
+      if (fontChanged) this.fitAfterFontsLoad(entry)
+      if (fontChanged || themeChanged) this.redrawAfterNextFrame(entry)
       this.fit(entry, 0)
     }
   }
@@ -78,8 +84,8 @@ class TerminalManagerImpl {
       cursorBlink: true,
       fontFamily: this.settings.fontFamily,
       fontSize: this.settings.fontSize,
-      fontWeight: this.settings.terminalFontWeight,
-      fontWeightBold: Math.min(900, Math.max(this.settings.terminalFontWeight, 700)),
+      fontWeight: terminalFontWeight(this.settings.terminalFontWeight),
+      fontWeightBold: terminalBoldFontWeight(this.settings.terminalFontWeight),
       lineHeight: 1.15,
       scrollback: this.settings.scrollback,
       minimumContrastRatio: 1,
@@ -107,10 +113,9 @@ class TerminalManagerImpl {
     if (!entry.opened) {
       entry.term.open(container)
       entry.opened = true
-      this.tryLoadWebgl(entry)
     } else if (entry.term.element && entry.term.element.parentElement !== container) {
       container.appendChild(entry.term.element)
-      this.reloadWebgl(entry)
+      this.redraw(entry)
     }
 
     if (!entry.dataWired) {
@@ -168,12 +173,6 @@ class TerminalManagerImpl {
     void copyTerminalSelection(entry.term)
   }
 
-  clear(paneId: string): void {
-    const entry = this.entries.get(paneId)
-    if (!entry) return
-    entry.term.clear()
-  }
-
   focus(paneId: string): void {
     const entry = this.entries.get(paneId)
     if (!entry) return
@@ -181,14 +180,10 @@ class TerminalManagerImpl {
     this.fit(entry, 0)
   }
 
-  refresh(paneId: string): void {
-    const entry = this.entries.get(paneId)
-    if (!entry) return
-    this.fit(entry, 0)
-  }
 
-  refreshAll(): void {
+  resumeRendering(): void {
     for (const entry of this.entries.values()) {
+      this.redraw(entry)
       this.fit(entry, 0)
     }
   }
@@ -211,7 +206,6 @@ class TerminalManagerImpl {
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     entry.titleDisposable?.dispose()
-    entry.webgl?.dispose()
     entry.term.dispose()
     this.entries.delete(paneId)
   }
@@ -220,17 +214,22 @@ class TerminalManagerImpl {
     entry.container?.classList.toggle('terminal-scrollbar-hidden', !this.settings.terminalScrollbarVisible)
   }
 
+  private redraw(entry: Entry): void {
+    if (!entry.opened) return
+    entry.term.refresh(0, Math.max(0, entry.term.rows - 1))
+  }
+
+  private redrawAfterNextFrame(entry: Entry): void {
+    this.redraw(entry)
+    requestAnimationFrame(() => this.redraw(entry))
+  }
+
   private fitAfterFontsLoad(entry: Entry): void {
     const fonts = document.fonts
     if (!fonts) return
     void fonts.ready.then(() => this.fit(entry, 0))
   }
 
-  private reloadWebgl(entry: Entry): void {
-    entry.webgl?.dispose()
-    entry.webgl = undefined
-    if (entry.opened) this.tryLoadWebgl(entry)
-  }
 
   private fit(entry: Entry, attempt: number): void {
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
@@ -242,31 +241,25 @@ class TerminalManagerImpl {
         return
       }
       try {
+        const proposed = entry.fit.proposeDimensions()
+        const cols = proposed?.cols ?? entry.term.cols
+        const rows = proposed?.rows ?? entry.term.rows
+        if (entry.term.cols === cols && entry.term.rows === rows) return
         entry.fit.fit()
-        entry.term.refresh(0, Math.max(0, entry.term.rows - 1))
       } catch {
         if (attempt < 10) this.fit(entry, attempt + 1)
       }
     })
   }
 
-  private tryLoadWebgl(entry: Entry): void {
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => {
-        webgl.dispose()
-        if (entry.webgl === webgl) entry.webgl = undefined
-        requestAnimationFrame(() => {
-          this.tryLoadWebgl(entry)
-          this.fit(entry, 0)
-        })
-      })
-      entry.term.loadAddon(webgl)
-      entry.webgl = webgl
-    } catch {
-      entry.webgl = undefined
-    }
-  }
+}
+
+function terminalFontWeight(weight: number): FontWeight {
+  return String(weight) as FontWeight
+}
+
+function terminalBoldFontWeight(weight: number): FontWeight {
+  return String(Math.min(900, Math.max(weight, 700))) as FontWeight
 }
 
 export const TerminalManager = new TerminalManagerImpl()

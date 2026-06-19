@@ -22,7 +22,7 @@ pub type DaemonStream = LocalSocketStream;
 const STARTUP_PING_REQ: Req = 0;
 const STARTUP_PING_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
-const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const DAEMON_READY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +68,10 @@ pub fn ensure_daemon() -> Result<DaemonStream> {
         Ok(stream) => return Ok(stream),
         Err(err) => {
             if should_recover_stale_daemon(&err, false, false) {
-                let _ = recover_recorded_stale_daemon()?;
+                let recovered = recover_recorded_stale_daemon()?;
+                if !recovered {
+                    let _ = recover_unrecorded_stale_daemon()?;
+                }
             } else if should_recover_unrecorded_stale_daemon(&err, false, false) {
                 let _ = recover_unrecorded_stale_daemon()?;
             }
@@ -77,9 +80,28 @@ pub fn ensure_daemon() -> Result<DaemonStream> {
     };
 
     let mut spawned_daemon = Some(spawn_daemon_process()?);
+    let mut recovered_after_spawn_exit = false;
 
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     while Instant::now() < deadline {
+        if let Some(child) = spawned_daemon.as_mut() {
+            if let Some(status) = child
+                .try_wait()
+                .context("poll spawned daemon startup status")?
+            {
+                if !recovered_after_spawn_exit {
+                    recovered_after_spawn_exit = true;
+                    let _ = recover_unrecorded_stale_daemon()?;
+                    spawned_daemon = Some(spawn_daemon_process()?);
+                    continue;
+                }
+                last_error = Some(format!(
+                    "spawned daemon exited before becoming ready: {status}"
+                ));
+                break;
+            }
+        }
+
         match connect_ready_daemon() {
             Ok(stream) => return Ok(stream),
             Err(err) => {
@@ -100,6 +122,7 @@ pub fn ensure_daemon() -> Result<DaemonStream> {
     if let Some(mut child) = spawned_daemon.take() {
         let child_pid = child.id();
         terminate_spawned_daemon(&mut child);
+        let _ = terminate_daemon_pid(child_pid);
         if let Ok(daemon_paths) = paths::daemon_paths() {
             let _ = remove_pid_file_if_matching(&daemon_paths.pid, child_pid);
         }
@@ -205,8 +228,10 @@ fn should_recover_unrecorded_stale_daemon(
     daemon_spawned_by_this_startup: bool,
     already_recovered: bool,
 ) -> bool {
-    matches!(err.kind, StartupAttemptErrorKind::Connect)
-        && !daemon_spawned_by_this_startup
+    matches!(
+        err.kind,
+        StartupAttemptErrorKind::Connect | StartupAttemptErrorKind::Unhealthy
+    ) && !daemon_spawned_by_this_startup
         && !already_recovered
 }
 
@@ -299,7 +324,7 @@ fn recover_unrecorded_stale_daemon() -> Result<bool> {
             .with_context(|| format!("terminate unrecorded daemon pid {pid}"))?;
     }
     if !pids.is_empty() {
-        thread::sleep(DAEMON_READY_DELAY);
+        thread::sleep(Duration::from_millis(500));
     }
     Ok(!pids.is_empty())
 }
@@ -635,24 +660,15 @@ mod tests {
     }
 
     #[test]
-    fn connect_failure_can_recover_unrecorded_orphan_once() {
+    fn startup_errors_can_recover_unrecorded_orphan_once() {
         let connect_error = StartupAttemptError::connect(anyhow!("connect failed"));
+        let unhealthy_error = StartupAttemptError::unhealthy(anyhow!("probe failed"));
 
-        assert!(should_recover_unrecorded_stale_daemon(
-            &connect_error,
-            false,
-            false
-        ));
-        assert!(!should_recover_unrecorded_stale_daemon(
-            &connect_error,
-            true,
-            false
-        ));
-        assert!(!should_recover_unrecorded_stale_daemon(
-            &connect_error,
-            false,
-            true
-        ));
+        for err in [&connect_error, &unhealthy_error] {
+            assert!(should_recover_unrecorded_stale_daemon(err, false, false));
+            assert!(!should_recover_unrecorded_stale_daemon(err, true, false));
+            assert!(!should_recover_unrecorded_stale_daemon(err, false, true));
+        }
     }
 
     #[test]

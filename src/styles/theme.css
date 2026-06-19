@@ -27,7 +27,7 @@
   --dv-activegroup-hiddenpanel-tab-color: var(--awt-muted);
   --dv-inactivegroup-visiblepanel-tab-color: var(--awt-text);
   --dv-inactivegroup-hiddenpanel-tab-color: var(--awt-muted);
-  --dv-separator-border: var(--awt-border);
+  --dv-separator-border: transparent;
   --dv-group-view-background-color: var(--awt-panel);
   --dv-drag-over-background-color: rgba(126, 231, 135, 0.16);
   --dv-drag-over-border-color: var(--awt-accent);

@@ -2,11 +2,22 @@ import type { PaneConfig } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
 
+export type ProfileKind = 'local' | 'ssh' | 'command'
+
 export type Profile = {
   id: string
   name: string
+  type: ProfileKind
   shell: string | null
   args: string[]
+  command: string
+  sshHost: string
+  sshUser: string
+  sshPort: number | null
+  sshIdentityFile: string | null
+  sshRemoteCommand: string
+  sshOptions: string
+  sshAllocateTty: boolean
   env: [string, string][]
   cwd: string | null
   color: string
@@ -31,8 +42,17 @@ const defaultProfiles: Profile[] = [
   {
     id: 'default',
     name: 'Shell',
+    type: 'local',
     shell: null,
     args: [],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
     env: [],
     cwd: null,
     color: '#7ee787',
@@ -41,8 +61,17 @@ const defaultProfiles: Profile[] = [
   {
     id: 'powershell',
     name: 'PowerShell',
+    type: 'local',
     shell: 'pwsh.exe',
     args: ['-NoLogo'],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
     env: [],
     cwd: null,
     color: '#58a6ff',
@@ -51,8 +80,17 @@ const defaultProfiles: Profile[] = [
   {
     id: 'cmd',
     name: 'CMD',
+    type: 'local',
     shell: 'cmd.exe',
     args: ['/D'],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
     env: [],
     cwd: null,
     color: '#d2a8ff',
@@ -61,8 +99,17 @@ const defaultProfiles: Profile[] = [
   {
     id: 'claude',
     name: 'Claude',
+    type: 'local',
     shell: 'claude',
     args: [],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
     env: [],
     cwd: null,
     color: '#f2cc60',
@@ -71,8 +118,17 @@ const defaultProfiles: Profile[] = [
   {
     id: 'codex',
     name: 'Codex',
+    type: 'local',
     shell: 'codex',
     args: [],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
     env: [],
     cwd: null,
     color: '#7ee787',
@@ -81,8 +137,17 @@ const defaultProfiles: Profile[] = [
   {
     id: 'omp',
     name: 'OMP',
+    type: 'local',
     shell: 'omp',
     args: [],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
     env: [],
     cwd: null,
     color: '#76e3ea',
@@ -133,9 +198,10 @@ export function selectedProfile(settings: Settings): Profile {
 }
 
 export function paneOverridesFromProfile(profile: Profile, title?: string): Pick<PaneConfig, 'shell' | 'args' | 'cwd' | 'env' | 'title'> {
+  const command = commandFromProfile(profile)
   return {
-    shell: profile.shell,
-    args: [...profile.args],
+    shell: command.shell,
+    args: command.args,
     cwd: profile.cwd,
     env: profile.env.map(([key, value]) => [key, value]),
     title: title ?? profile.name,
@@ -160,8 +226,17 @@ function normalizeProfile(value: unknown, index: number): Profile {
   return {
     id,
     name,
+    type: readProfileKind(record?.type),
     shell: readNullableString(record?.shell, defaultProfile.shell),
     args: readStringArray(record?.args),
+    command: readString(record?.command, defaultProfile.command),
+    sshHost: readString(record?.sshHost, defaultProfile.sshHost),
+    sshUser: readString(record?.sshUser, defaultProfile.sshUser),
+    sshPort: readNullablePort(record?.sshPort, defaultProfile.sshPort),
+    sshIdentityFile: readNullableString(record?.sshIdentityFile, defaultProfile.sshIdentityFile),
+    sshRemoteCommand: readString(record?.sshRemoteCommand, defaultProfile.sshRemoteCommand),
+    sshOptions: readString(record?.sshOptions, defaultProfile.sshOptions),
+    sshAllocateTty: readBoolean(record?.sshAllocateTty, defaultProfile.sshAllocateTty),
     env: readEnv(record?.env),
     cwd: readNullableString(record?.cwd, defaultProfile.cwd),
     color: readString(record?.color, defaultProfile.color),
@@ -175,6 +250,80 @@ function cloneProfiles(profiles: Profile[]): Profile[] {
     args: [...profile.args],
     env: profile.env.map(([key, value]) => [key, value]),
   }))
+}
+
+function commandFromProfile(profile: Profile): Pick<PaneConfig, 'shell' | 'args'> {
+  if (profile.type === 'ssh') {
+    return { shell: 'ssh', args: sshArgsFromProfile(profile) }
+  }
+
+  if (profile.type === 'command') {
+    const [shell, ...args] = splitCommandLine(profile.command)
+    return { shell: shell ?? null, args }
+  }
+
+  return { shell: profile.shell, args: [...profile.args] }
+}
+
+function sshArgsFromProfile(profile: Profile): string[] {
+  const args = splitCommandLine(profile.sshOptions)
+  if (profile.sshAllocateTty) args.push('-t')
+  if (profile.sshPort !== null) args.push('-p', String(profile.sshPort))
+  if (profile.sshIdentityFile) args.push('-i', profile.sshIdentityFile)
+
+  const host = profile.sshHost.trim()
+  if (host.length === 0) return args
+
+  const user = profile.sshUser.trim()
+  args.push(user.length > 0 ? `${user}@${host}` : host)
+
+  const remoteCommand = profile.sshRemoteCommand.trim()
+  if (remoteCommand.length > 0) args.push(remoteCommand)
+  return args
+}
+
+export function splitCommandLine(input: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index]
+    if (quote === '"' && char === '\\' && index + 1 < input.length && (input[index + 1] === '"' || input[index + 1] === '\\')) {
+      current += input[index + 1]
+      index += 1
+      continue
+    }
+    if (quote) {
+      if (char === quote) quote = null
+      else current += char
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        parts.push(current)
+        current = ''
+      }
+      continue
+    }
+    current += char
+  }
+
+  if (current.length > 0) parts.push(current)
+  return parts
+}
+
+export function joinCommandLine(parts: string[]): string {
+  return parts.map(quoteCommandPart).join(' ')
+}
+
+function quoteCommandPart(part: string): string {
+  if (/^[^\s"']+$/.test(part)) return part
+  return `"${part.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -191,6 +340,10 @@ function readNonEmptyString(value: unknown, fallback: string): string {
   return normalized.length > 0 ? normalized : fallback
 }
 
+function readProfileKind(value: unknown): ProfileKind {
+  return value === 'ssh' || value === 'command' || value === 'local' ? value : 'local'
+}
+
 function readTerminalThemeId(value: unknown): TerminalThemeId {
   return typeof value === 'string' && isTerminalThemeId(value) ? value : defaultSettings.terminalThemeId
 }
@@ -198,6 +351,11 @@ function readTerminalThemeId(value: unknown): TerminalThemeId {
 function readNullableString(value: unknown, fallback: string | null): string | null {
   if (value === null) return null
   return typeof value === 'string' ? value : fallback
+}
+
+function readNullablePort(value: unknown, fallback: number | null): number | null {
+  if (value === null) return null
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535 ? value : fallback
 }
 
 function readNumber(value: unknown, fallback: number): number {

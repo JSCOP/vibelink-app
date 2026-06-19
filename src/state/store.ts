@@ -141,6 +141,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   clearSession: async (sessionId: string) => {
     await invoke('clear_session', { sessionId })
+    if (get().activeSessionId === sessionId) set({ panes: {} })
   },
 
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {

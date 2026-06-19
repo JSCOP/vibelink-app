@@ -122,14 +122,6 @@ impl Pane {
         self.scrollback.snapshot()
     }
 
-    pub fn clear_scrollback(&mut self) {
-        self.scrollback.clear();
-    }
-
-    pub fn mark_exited(&mut self) {
-        self.alive = false;
-    }
-
     #[cfg(test)]
     pub(crate) fn for_test(config: PaneConfig, alive: bool) -> Self {
         Self {
@@ -267,11 +259,51 @@ fn resolve_program(program: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn program_on_path(program: &str) -> Option<PathBuf> {
+    let has_extension = PathBuf::from(program).extension().is_some();
+    let extensions = if has_extension {
+        Vec::new()
+    } else {
+        windows_path_extensions()
+    };
+
     std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
+        std::env::split_paths(&path).find_map(|dir| {
+            let direct = dir.join(program);
+            if direct.is_file() {
+                return Some(direct);
+            }
+            extensions
+                .iter()
+                .map(|extension| dir.join(format!("{program}{extension}")))
+                .find(|candidate| candidate.is_file())
+        })
     })
+}
+
+#[cfg(windows)]
+fn windows_path_extensions() -> Vec<String> {
+    std::env::var_os("PATHEXT")
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .filter_map(normalize_path_extension)
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| [".COM", ".EXE", ".BAT", ".CMD"].map(String::from).to_vec())
+}
+
+#[cfg(windows)]
+fn normalize_path_extension(extension: &str) -> Option<String> {
+    let trimmed = extension.trim();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.starts_with('.') {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!(".{trimmed}"))
+    }
 }
 
 #[cfg(windows)]
@@ -291,6 +323,7 @@ fn known_windows_program(program: &str) -> Option<PathBuf> {
             .map(PathBuf::from)
             .filter(|path| path.is_file())
             .or_else(|| system_root_program(r"System32\cmd.exe")),
+        "ssh" | "ssh.exe" => system_root_program(r"System32\OpenSSH\ssh.exe"),
         _ => None,
     }
 }

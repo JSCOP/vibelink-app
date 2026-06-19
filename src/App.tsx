@@ -70,11 +70,11 @@ function App() {
 
   const clearWorkspace = async () => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
-    if (!sessionId) return
+    const api = apiRef.current
+    if (!sessionId || !api) return
     await clearSession(sessionId)
-    for (const paneId of Object.keys(useWorkspaceStore.getState().panes)) {
-      TerminalManager.clear(paneId)
-    }
+    const panels = [...api.panels]
+    for (const panel of panels) panel.api.close()
   }
 
   return (

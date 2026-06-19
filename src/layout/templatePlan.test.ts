@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planTemplateReconcile } from './templatePlan'
+import { balancedGridForPaneCount, planTemplateReconcile } from './templatePlan'
 
 describe('planTemplateReconcile', () => {
   it('keeps existing panes first and only reports missing panes', () => {
@@ -16,5 +16,11 @@ describe('planTemplateReconcile', () => {
     expect(plan.gridPaneIds).toEqual(['a', 'b'])
     expect(plan.overflowPaneIds).toEqual(['c', 'd'])
     expect(plan.missingPaneCount).toBe(0)
+  })
+
+  it('computes a balanced grid from pane count and aspect ratio', () => {
+    expect(balancedGridForPaneCount(0)).toEqual({ cols: 0, rows: 0 })
+    expect(balancedGridForPaneCount(8, 2)).toEqual({ cols: 4, rows: 2 })
+    expect(balancedGridForPaneCount(5, 1)).toEqual({ cols: 2, rows: 3 })
   })
 })

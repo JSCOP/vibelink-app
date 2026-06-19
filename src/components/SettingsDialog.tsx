@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices } from '../state/fonts'
-import type { Settings } from '../state/profiles'
+import { joinCommandLine, splitCommandLine, type Profile, type ProfileKind, type Settings } from '../state/profiles'
 import { terminalThemes } from '../state/terminalThemes'
 
 type SettingsDialogProps = {
@@ -12,19 +12,37 @@ type SettingsDialogProps = {
   onClose: () => void
 }
 
-type SettingsSection = 'appearance' | 'theme' | 'keybindings'
+type SettingsSection = 'appearance' | 'profiles' | 'theme' | 'keybindings'
 
 const sectionLabels: Record<SettingsSection, string> = {
   appearance: 'Appearance',
+  profiles: 'Profiles',
   theme: 'Theme',
   keybindings: 'Keybindings',
 }
 
+const sectionDescriptions: Record<SettingsSection, string> = {
+  appearance: 'Font and scrollback',
+  profiles: 'Shell, SSH, commands',
+  theme: 'Color palettes',
+  keybindings: 'Shortcuts',
+}
+
+const fontWeightOptions = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+const profileKindLabels: Record<ProfileKind, string> = {
+  local: 'Local shell',
+  ssh: 'SSH remote',
+  command: 'Command',
+}
+
+
 export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance')
+  const [editingProfileId, setEditingProfileId] = useState(settings.defaultProfileId)
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
   const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [installedFonts, draft.fontFamily])
+  const editingProfile = draft.profiles.find((profile) => profile.id === editingProfileId) ?? draft.profiles[0]
 
   useEffect(() => {
     let cancelled = false
@@ -38,9 +56,28 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
     return () => { cancelled = true }
   }, [])
 
+
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
   const updateKeybinding = (id: KeybindingActionId, chord: string) => {
     patchDraft({ keybindings: { ...draft.keybindings, [id]: chord } })
+  }
+  const updateProfile = (profileId: string, patch: Partial<Profile>) => {
+    setDraft((current) => ({
+      ...current,
+      profiles: current.profiles.map((profile) => profile.id === profileId ? { ...profile, ...patch } : profile),
+    }))
+  }
+  const addProfile = (type: ProfileKind) => {
+    const profile = createProfile(type, draft.profiles)
+    patchDraft({ profiles: [...draft.profiles, profile] })
+    setEditingProfileId(profile.id)
+  }
+  const deleteProfile = (profileId: string) => {
+    if (draft.profiles.length <= 1) return
+    const profiles = draft.profiles.filter((profile) => profile.id !== profileId)
+    const defaultProfileId = draft.defaultProfileId === profileId ? profiles[0].id : draft.defaultProfileId
+    patchDraft({ profiles, defaultProfileId })
+    setEditingProfileId(defaultProfileId)
   }
   const apply = () => onChange(draft)
   const ok = () => {
@@ -66,7 +103,7 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
             {(Object.keys(sectionLabels) as SettingsSection[]).map((section) => (
               <button key={section} type="button" className={activeSection === section ? 'selected' : ''} onClick={() => setActiveSection(section)}>
                 {sectionLabels[section]}
-                <span>{section === 'appearance' ? 'Font and scrollback' : section === 'theme' ? 'Color palettes' : 'Shortcuts'}</span>
+                <span>{sectionDescriptions[section]}</span>
               </button>
             ))}
           </nav>
@@ -79,9 +116,9 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                     <h3>Terminal appearance</h3>
                     <p>Font, scrollback, scrollbar, and accent apply when you press Apply or OK.</p>
                   </div>
-                  <div className="settings-preview" style={{ fontFamily: draft.fontFamily }}>
+                  <div className="settings-preview" style={{ fontFamily: draft.fontFamily, fontWeight: draft.terminalFontWeight }}>
                     <span>PS E:\\repo&gt;</span>
-                    <strong> 한글 │ Nerd Font ✓</strong>
+                    <strong style={{ fontWeight: Math.min(900, Math.max(draft.terminalFontWeight, 700)) }}> 한글 │ Nerd Font ✓</strong>
                   </div>
                 </section>
 
@@ -107,7 +144,11 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                     </label>
                     <label>
                       Font weight
-                      <input type="number" min="100" max="900" step="50" value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })} />
+                      <select value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })}>
+                        {fontWeightOptions.map((weight) => (
+                          <option key={weight} value={weight}>{weight}</option>
+                        ))}
+                      </select>
                     </label>
                     <label>
                       Scrollback
@@ -128,6 +169,137 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                   </label>
                 </section>
               </>
+            ) : null}
+
+            {activeSection === 'profiles' && editingProfile ? (
+              <section className="settings-card profile-editor-card">
+                <div className="settings-card-heading">
+                  <div>
+                    <h3>Profiles</h3>
+                    <p>Create local shell, SSH remote terminal, or arbitrary command profiles. New panes use the active topbar profile.</p>
+                  </div>
+                  <div className="profile-actions">
+                    <button type="button" onClick={() => addProfile('local')}>Add local</button>
+                    <button type="button" onClick={() => addProfile('ssh')}>Add SSH</button>
+                    <button type="button" onClick={() => addProfile('command')}>Add command</button>
+                  </div>
+                </div>
+
+                <div className="profile-editor">
+                  <div className="profile-list" aria-label="Terminal profiles">
+                    {draft.profiles.map((profile) => (
+                      <button key={profile.id} type="button" className={profile.id === editingProfile.id ? 'selected' : ''} onClick={() => setEditingProfileId(profile.id)}>
+                        <span className="profile-list-swatch" style={{ backgroundColor: profile.color, color: profile.color }} />
+                        <span>
+                          <strong>{profile.name}</strong>
+                          <small>{profileKindLabels[profile.type]}{profile.id === draft.defaultProfileId ? ' · default' : ''}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="profile-form">
+                    <div className="settings-grid-4">
+                      <label>
+                        Name
+                        <input value={editingProfile.name} onChange={(event) => updateProfile(editingProfile.id, { name: event.target.value })} />
+                      </label>
+                      <label>
+                        Type
+                        <select value={editingProfile.type} onChange={(event) => updateProfile(editingProfile.id, { type: event.target.value as ProfileKind })}>
+                          <option value="local">Local shell</option>
+                          <option value="ssh">SSH remote</option>
+                          <option value="command">Command</option>
+                        </select>
+                      </label>
+                      <label>
+                        Color
+                        <input type="color" value={editingProfile.color} onChange={(event) => updateProfile(editingProfile.id, { color: event.target.value })} />
+                      </label>
+                      <label>
+                        Icon
+                        <input value={editingProfile.icon} onChange={(event) => updateProfile(editingProfile.id, { icon: event.target.value })} />
+                      </label>
+                    </div>
+
+                    <div className="settings-grid-3">
+                      <label>
+                        Working directory
+                        <input value={editingProfile.cwd ?? ''} placeholder="Session folder or default" onChange={(event) => updateProfile(editingProfile.id, { cwd: event.target.value.trim() || null })} />
+                      </label>
+                      <button type="button" className="secondary-action" onClick={() => patchDraft({ defaultProfileId: editingProfile.id })}>Set as default</button>
+                      <button type="button" className="secondary-action danger" disabled={draft.profiles.length <= 1} onClick={() => deleteProfile(editingProfile.id)}>Delete profile</button>
+                    </div>
+
+                    {editingProfile.type === 'local' ? (
+                      <div className="profile-fieldset">
+                        <h4>Local shell</h4>
+                        <div className="settings-grid-3">
+                          <label>
+                            Executable
+                            <input value={editingProfile.shell ?? ''} placeholder="Default shell" onChange={(event) => updateProfile(editingProfile.id, { shell: event.target.value.trim() || null })} />
+                          </label>
+                          <label>
+                            Arguments
+                            <input value={joinCommandLine(editingProfile.args)} placeholder="--flag value" onChange={(event) => updateProfile(editingProfile.id, { args: splitCommandLine(event.target.value) })} />
+                          </label>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {editingProfile.type === 'ssh' ? (
+                      <div className="profile-fieldset">
+                        <h4>SSH remote terminal</h4>
+                        <div className="settings-grid-4">
+                          <label>
+                            Host
+                            <input value={editingProfile.sshHost} placeholder="server.example.com" onChange={(event) => updateProfile(editingProfile.id, { sshHost: event.target.value })} />
+                          </label>
+                          <label>
+                            User
+                            <input value={editingProfile.sshUser} placeholder="optional" onChange={(event) => updateProfile(editingProfile.id, { sshUser: event.target.value })} />
+                          </label>
+                          <label>
+                            Port
+                            <input type="number" min="1" max="65535" value={editingProfile.sshPort ?? ''} placeholder="22" onChange={(event) => updateProfile(editingProfile.id, { sshPort: readPortInput(event.target.value) })} />
+                          </label>
+                          <label>
+                            Identity file
+                            <input value={editingProfile.sshIdentityFile ?? ''} placeholder="C:\\Users\\me\\.ssh\\id_ed25519" onChange={(event) => updateProfile(editingProfile.id, { sshIdentityFile: event.target.value.trim() || null })} />
+                          </label>
+                        </div>
+                        <label>
+                          Extra SSH options
+                          <input value={editingProfile.sshOptions} placeholder="-o ServerAliveInterval=30" onChange={(event) => updateProfile(editingProfile.id, { sshOptions: event.target.value })} />
+                        </label>
+                        <label>
+                          Remote command
+                          <textarea rows={2} value={editingProfile.sshRemoteCommand} placeholder="tmux attach || tmux" onChange={(event) => updateProfile(editingProfile.id, { sshRemoteCommand: event.target.value })} />
+                        </label>
+                        <label className="settings-checkbox">
+                          <input type="checkbox" checked={editingProfile.sshAllocateTty} onChange={(event) => updateProfile(editingProfile.id, { sshAllocateTty: event.target.checked })} />
+                          <span><strong>Allocate a remote TTY</strong><small>Adds -t so remote shells and tmux behave like terminals.</small></span>
+                        </label>
+                      </div>
+                    ) : null}
+
+                    {editingProfile.type === 'command' ? (
+                      <div className="profile-fieldset">
+                        <h4>Startup command</h4>
+                        <label>
+                          Command line
+                          <textarea rows={2} value={editingProfile.command} placeholder="pnpm dev" onChange={(event) => updateProfile(editingProfile.id, { command: event.target.value })} />
+                        </label>
+                      </div>
+                    ) : null}
+
+                    <label>
+                      Environment
+                      <textarea rows={4} value={formatEnv(editingProfile.env)} placeholder="NAME=value" onChange={(event) => updateProfile(editingProfile.id, { env: parseEnv(event.target.value) })} />
+                    </label>
+                  </div>
+                </div>
+              </section>
             ) : null}
 
             {activeSection === 'theme' ? (
@@ -200,4 +372,59 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
       </section>
     </div>
   )
+}
+
+function createProfile(type: ProfileKind, existing: Profile[]): Profile {
+  const id = nextProfileId(type, existing)
+  return {
+    id,
+    name: type === 'ssh' ? 'SSH' : type === 'command' ? 'Command' : 'Shell',
+    type,
+    shell: null,
+    args: [],
+    command: '',
+    sshHost: '',
+    sshUser: '',
+    sshPort: null,
+    sshIdentityFile: null,
+    sshRemoteCommand: '',
+    sshOptions: '',
+    sshAllocateTty: true,
+    env: [],
+    cwd: null,
+    color: type === 'ssh' ? '#76e3ea' : type === 'command' ? '#f2cc60' : '#7ee787',
+    icon: type === 'ssh' ? 'radio-tower' : type === 'command' ? 'play' : 'terminal',
+  }
+}
+
+function nextProfileId(type: ProfileKind, existing: Profile[]): string {
+  const base = type === 'local' ? 'profile' : type
+  let id = base
+  let suffix = 2
+  while (existing.some((profile) => profile.id === id)) {
+    id = `${base}-${suffix}`
+    suffix += 1
+  }
+  return id
+}
+
+function readPortInput(value: string): number | null {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  const port = Number(trimmed)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
+
+function formatEnv(env: [string, string][]): string {
+  return env.map(([key, value]) => `${key}=${value}`).join('\n')
+}
+
+function parseEnv(value: string): [string, string][] {
+  return value.split(/\r?\n/).flatMap((line) => {
+    const separator = line.indexOf('=')
+    if (separator <= 0) return []
+    const key = line.slice(0, separator).trim()
+    if (key.length === 0) return []
+    return [[key, line.slice(separator + 1)] as [string, string]]
+  })
 }

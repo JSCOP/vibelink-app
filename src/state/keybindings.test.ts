@@ -5,6 +5,7 @@ describe('keybindings', () => {
   it('uses Windows Terminal compatible defaults for pane close and focus movement', () => {
     expect(defaultKeybindings.closePane).toBe('ctrl+w')
     expect(defaultKeybindings.closeWorkspace).toBe('ctrl+shift+w')
+    expect(defaultKeybindings.arrangePanes).toBe('ctrl+shift+g')
     expect(defaultKeybindings.focusLeft).toBe('ctrl+left')
     expect(defaultKeybindings.focusRight).toBe('ctrl+right')
     expect(defaultKeybindings.focusUp).toBe('ctrl+up')
@@ -18,6 +19,7 @@ describe('keybindings', () => {
 
     expect(normalized.closePane).toBe('ctrl+q')
     expect(normalized.closeWorkspace).toBe(defaultKeybindings.closeWorkspace)
+    expect(normalized.arrangePanes).toBe(defaultKeybindings.arrangePanes)
     expect(normalized.focusLeft).toBe(defaultKeybindings.focusLeft)
     expect(normalized.copyTerminalContents).toBe(defaultKeybindings.copyTerminalContents)
     expect(normalized.copyTerminalSelection).toBe(defaultKeybindings.copyTerminalSelection)

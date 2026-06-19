@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanel } from 'dockview-react'
 import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
-import { createTerminalRefreshScheduler } from '../terminal/refreshScheduler'
 import { useWorkspaceStore } from '../state/store'
 import { selectedProfile } from '../state/profiles'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
@@ -10,7 +9,7 @@ import type { PaneMeta } from '../ipc/types'
 import { PlaceholderPanel, TerminalPanePanel } from './TerminalPanePanel'
 import { type SplitDirection, WorkspaceActionsContext } from './actions'
 import { TEMPLATES, type GridTemplate } from './templates'
-import { planTemplateReconcile } from './templatePlan'
+import { balancedGridForPaneCount, planTemplateReconcile, type GridSize } from './templatePlan'
 import { withSuppressedPanelRemoval } from './suppression'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 import { paneIdFromEventTarget } from './paneActivation'
@@ -39,7 +38,6 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
   const saveTimerRef = useRef<number | undefined>()
   const dockRef = useRef<HTMLDivElement | null>(null)
   const applyingTemplateRequestRef = useRef<number | null>(null)
-  const refreshAfterLayoutRef = useRef(createTerminalRefreshScheduler(() => TerminalManager.refreshAll()))
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const panes = useWorkspaceStore((state) => state.panes)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -67,7 +65,6 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     const rect = dockRef.current?.getBoundingClientRect()
     if (!rect || rect.width <= 0 || rect.height <= 0) return
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
-    refreshAfterLayoutRef.current()
   }, [])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
@@ -89,6 +86,26 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     for (const pane of panels) {
       addTerminalPanel(api, pane, previous ? { referencePanel: previous, direction: 'right', inactive: true } : undefined)
       previous = pane.id
+    }
+  }, [addTerminalPanel])
+
+  const arrangePanelsInGrid = useCallback((api: DockviewApi, grid: GridSize, panels: PaneMeta[]) => {
+    if (grid.cols <= 0 || grid.rows <= 0 || panels.length === 0) return
+    const topRow: string[] = []
+    for (let col = 0; col < grid.cols; col += 1) {
+      const pane = panels[col]
+      if (!pane) continue
+      addTerminalPanel(api, pane, col === 0 ? undefined : { referencePanel: topRow[col - 1], direction: 'right' })
+      topRow.push(pane.id)
+    }
+    for (let col = 0; col < grid.cols; col += 1) {
+      let bottom = topRow[col]
+      for (let row = 1; row < grid.rows; row += 1) {
+        const pane = panels[grid.cols + col * (grid.rows - 1) + (row - 1)]
+        if (!pane || !bottom) continue
+        addTerminalPanel(api, pane, { referencePanel: bottom, direction: 'below' })
+        bottom = pane.id
+      }
     }
   }, [addTerminalPanel])
 
@@ -156,8 +173,18 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
   const closePane = useCallback(async (paneId: string) => {
     const api = apiRef.current
     const panel = api?.getPanel(paneId)
+    if (!api || !panel) return
+    const nextPaneId = nextPaneAfterClose(api, paneId)
     activatePane(paneId)
-    panel?.api.close()
+    panel.api.close()
+    if (nextPaneId) {
+      requestAnimationFrame(() => {
+        const nextPanel = api.getPanel(nextPaneId)
+        if (!nextPanel) return
+        nextPanel.api.setActive()
+        TerminalManager.focus(nextPanel.id)
+      })
+    }
   }, [activatePane])
 
   const toggleMaximize = useCallback((paneId: string) => {
@@ -166,7 +193,6 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     if (!panel) return
     if (panel.api.isMaximized()) panel.api.exitMaximized()
     else panel.api.maximize()
-    refreshAfterLayoutRef.current()
   }, [activatePane])
 
   const renamePaneTitle = useCallback(async (paneId: string, title: string) => {
@@ -217,6 +243,24 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     }
   }, [])
 
+  const arrangePanes = useCallback(async () => {
+    const api = apiRef.current
+    const sessionId = useWorkspaceStore.getState().activeSessionId
+    if (!api || !sessionId) return
+    const currentPanes = Object.values(useWorkspaceStore.getState().panes)
+    if (currentPanes.length === 0) return
+    const rect = dockRef.current?.getBoundingClientRect()
+    const aspectRatio = rect && rect.width > 0 && rect.height > 0 ? rect.width / rect.height : 1
+    const grid = exactTemplateGridForPaneCount(currentPanes.length, aspectRatio) ?? balancedGridForPaneCount(currentPanes.length, aspectRatio)
+    await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+      api.clear()
+      arrangePanelsInGrid(api, grid, currentPanes)
+      layoutDockview(api)
+      loadedSessionRef.current = sessionId
+      await saveLayout(sessionId, JSON.stringify(api.toJSON()))
+    })
+  }, [arrangePanelsInGrid, layoutDockview, saveLayout])
+
   const runKeybindingAction = useCallback((action: KeybindingActionId, activePanelId: string) => {
     const api = apiRef.current
     if (!api) return
@@ -238,6 +282,9 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
         break
       case 'toggleMaximize':
         toggleMaximize(activePanelId)
+        break
+      case 'arrangePanes':
+        void arrangePanes()
         break
       case 'nextTab': {
         api.moveToNext()
@@ -270,7 +317,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
         TerminalManager.copySelectionToClipboard(activePanelId)
         break
     }
-  }, [closePane, closeWorkspace, focusPane, newTab, splitPane, toggleMaximize])
+  }, [arrangePanes, closePane, closeWorkspace, focusPane, newTab, splitPane, toggleMaximize])
 
   const applyTemplate = useCallback(async (template: GridTemplate) => {
     const api = apiRef.current
@@ -293,23 +340,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       api.clear()
 
-      const topRow: string[] = []
-      for (let col = 0; col < template.cols; col += 1) {
-        const pane = paneById.get(plan.gridPaneIds[col])
-        if (!pane) continue
-        addTerminalPanel(api, pane, col === 0 ? undefined : { referencePanel: topRow[col - 1], direction: 'right' })
-        topRow.push(pane.id)
-      }
-
-      for (let col = 0; col < template.cols; col += 1) {
-        let bottom = topRow[col]
-        for (let row = 1; row < template.rows; row += 1) {
-          const pane = paneById.get(plan.gridPaneIds[template.cols + col * (template.rows - 1) + (row - 1)])
-          if (!pane || !bottom) continue
-          addTerminalPanel(api, pane, { referencePanel: bottom, direction: 'below' })
-          bottom = pane.id
-        }
-      }
+      arrangePanelsInGrid(api, template, plan.gridPaneIds.map((paneId) => paneById.get(paneId)).filter((pane): pane is PaneMeta => pane !== undefined))
 
       const overflowReference = plan.gridPaneIds.at(-1)
       for (const paneId of plan.overflowPaneIds) {
@@ -322,7 +353,8 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
       loadedSessionRef.current = sessionId
       await saveLayout(sessionId, JSON.stringify(api.toJSON()))
     })
-  }, [addTerminalPanel, layoutDockview, saveLayout, spawnPane])
+  }, [addTerminalPanel, arrangePanelsInGrid, layoutDockview, saveLayout, spawnPane])
+
 
   const actions = useMemo(() => ({ activatePane, splitPane, newTab, closePane, toggleMaximize, renamePaneTitle }), [activatePane, closePane, newTab, renamePaneTitle, splitPane, toggleMaximize])
 
@@ -331,7 +363,6 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
     onApiReady?.(event.api)
     event.api.onDidLayoutChange(() => {
       persistLayoutSoon()
-      refreshAfterLayoutRef.current()
     })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
@@ -407,10 +438,69 @@ export function WorkspaceView({ onApiReady, pendingTemplate, onTemplateApplied }
   )
 }
 
+function nextPaneAfterClose(api: DockviewApi, paneId: string): string | undefined {
+  const closingPanel = api.getPanel(paneId)
+  const candidates = api.panels.filter((panel) => panel.id !== paneId)
+  if (candidates.length === 0) return undefined
+
+  if (closingPanel) {
+    const groupPanels = closingPanel.group.panels
+    const groupIndex = groupPanels.findIndex((panel) => panel.id === paneId)
+    const sameGroupCandidates = groupPanels.filter((panel) => panel.id !== paneId)
+    if (sameGroupCandidates.length > 0) {
+      const targetIndex = groupIndex < 0 ? 0 : Math.min(groupIndex, sameGroupCandidates.length - 1)
+      return sameGroupCandidates[targetIndex]?.id
+    }
+  }
+
+  const closingRect = getPaneRect(paneId)
+  if (!closingRect) return candidates[0]?.id
+
+  let best: { id: string; score: number } | null = null
+  for (const candidate of candidates) {
+    const rect = getPaneRect(candidate.id)
+    if (!rect) continue
+    const score = closeFocusScore(closingRect, rect)
+    if (!best || score < best.score) best = { id: candidate.id, score }
+  }
+  return best?.id ?? candidates[0]?.id
+}
+
+function closeFocusScore(closing: DOMRect, candidate: DOMRect): number {
+  const horizontalGap = candidate.left > closing.right
+    ? candidate.left - closing.right
+    : closing.left > candidate.right
+      ? closing.left - candidate.right
+      : 0
+  const verticalGap = candidate.top > closing.bottom
+    ? candidate.top - closing.bottom
+    : closing.top > candidate.bottom
+      ? closing.top - candidate.bottom
+      : 0
+  const closingCenterX = closing.left + closing.width / 2
+  const closingCenterY = closing.top + closing.height / 2
+  const candidateCenterX = candidate.left + candidate.width / 2
+  const candidateCenterY = candidate.top + candidate.height / 2
+  const centerDistance = Math.abs(closingCenterX - candidateCenterX) + Math.abs(closingCenterY - candidateCenterY)
+  return (horizontalGap + verticalGap) * 1_000_000 + centerDistance
+}
+
 function isTerminalCopyAction(action: KeybindingActionId): boolean {
   return action === 'copyTerminalContents' || action === 'copyTerminalSelection'
 }
 
+
+function exactTemplateGridForPaneCount(paneCount: number, aspectRatio: number): GridSize | null {
+  const candidates = TEMPLATES.filter((template) => template.cols * template.rows === paneCount)
+  if (candidates.length === 0) return null
+  const safeAspectRatio = Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : 1
+  const best = candidates.reduce((current, candidate) => {
+    const currentScore = Math.abs(current.cols / current.rows - safeAspectRatio)
+    const candidateScore = Math.abs(candidate.cols / candidate.rows - safeAspectRatio)
+    return candidateScore < currentScore ? candidate : current
+  })
+  return { cols: best.cols, rows: best.rows }
+}
 
 function getPaneRect(paneId: string): DOMRect | null {
   return document.querySelector<HTMLElement>(`[data-pane-id="${paneId}"]`)?.getBoundingClientRect() ?? null
