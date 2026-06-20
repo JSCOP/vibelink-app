@@ -62,24 +62,29 @@ pub enum ClientToDaemon {
         cfg: PaneConfig,
     },
     AttachPane {
+        session_id: Uuid,
         pane_id: Uuid,
     },
     WritePane {
+        session_id: Uuid,
         pane_id: Uuid,
         data: Vec<u8>,
     },
     ResizePane {
+        session_id: Uuid,
         pane_id: Uuid,
         cols: u16,
         rows: u16,
     },
     SetPaneTitle {
         req: Req,
+        session_id: Uuid,
         pane_id: Uuid,
         title: String,
     },
     ClosePane {
         req: Req,
+        session_id: Uuid,
         pane_id: Uuid,
     },
     ClearSession {
@@ -141,6 +146,8 @@ pub struct PaneConfig {
     pub cwd: Option<String>,
     pub env: Vec<(String, String)>,
     pub title: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -217,6 +224,7 @@ mod tests {
                 cwd: Some("E:/work".to_string()),
                 env: vec![("TERM".to_string(), "xterm-256color".to_string())],
                 title: Some("main".to_string()),
+                icon: Some("sparkles".to_string()),
                 cols: 120,
                 rows: 32,
             },

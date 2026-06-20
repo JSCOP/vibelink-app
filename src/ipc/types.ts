@@ -13,6 +13,7 @@ export type PaneConfig = {
   cwd?: string | null
   env: [string, string][]
   title?: string | null
+  icon?: string | null
   cols: number
   rows: number
 }

@@ -141,22 +141,33 @@ pub async fn spawn_pane(
 }
 
 #[tauri::command]
-pub async fn attach_pane(client: State<'_, DaemonClient>, pane_id: String) -> Result<(), String> {
+pub async fn attach_pane(
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    pane_id: String,
+) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
-        .send(ClientToDaemon::AttachPane { pane_id })
+        .send(ClientToDaemon::AttachPane {
+            session_id,
+            pane_id,
+        })
         .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn write_pane(
     client: State<'_, DaemonClient>,
+    session_id: String,
     pane_id: String,
     data: String,
 ) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
         .send(ClientToDaemon::WritePane {
+            session_id,
             pane_id,
             data: data.into_bytes(),
         })
@@ -166,13 +177,16 @@ pub async fn write_pane(
 #[tauri::command]
 pub async fn resize_pane(
     client: State<'_, DaemonClient>,
+    session_id: String,
     pane_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
         .send(ClientToDaemon::ResizePane {
+            session_id,
             pane_id,
             cols,
             rows,
@@ -183,21 +197,33 @@ pub async fn resize_pane(
 #[tauri::command]
 pub async fn set_pane_title(
     client: State<'_, DaemonClient>,
+    session_id: String,
     pane_id: String,
     title: String,
 ) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneTitle {
         req,
+        session_id,
         pane_id,
         title,
     }))
 }
 
 #[tauri::command]
-pub async fn close_pane(client: State<'_, DaemonClient>, pane_id: String) -> Result<(), String> {
+pub async fn close_pane(
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    pane_id: String,
+) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
-    expect_ok(client.request_reply(|req| ClientToDaemon::ClosePane { req, pane_id }))
+    expect_ok(client.request_reply(|req| ClientToDaemon::ClosePane {
+        req,
+        session_id,
+        pane_id,
+    }))
 }
 
 #[tauri::command]

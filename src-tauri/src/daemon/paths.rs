@@ -2,6 +2,9 @@ use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use std::{env, fs, path::PathBuf};
 
+const PROD_APP_NAME: &str = "AgenticWorkspaceTerminal";
+const DEV_APP_NAME: &str = "AgenticWorkspaceTerminalDev";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonPaths {
     pub data_dir: PathBuf,
@@ -12,7 +15,7 @@ pub struct DaemonPaths {
 }
 
 pub fn daemon_paths() -> Result<DaemonPaths> {
-    let project_dirs = ProjectDirs::from("dev", "awt", "AgenticWorkspaceTerminal")
+    let project_dirs = ProjectDirs::from("dev", "awt", project_app_name())
         .ok_or_else(|| anyhow!("could not resolve project data directory"))?;
     let data_dir = project_dirs.data_dir().to_path_buf();
     fs::create_dir_all(&data_dir)?;
@@ -31,7 +34,27 @@ pub fn socket_name_string() -> String {
 }
 
 pub fn socket_name_for_user(username: &str) -> String {
-    format!("awt-daemon-{:016x}", fnv1a64(username.as_bytes()))
+    socket_name_for_user_and_flavor(username, app_flavor())
+}
+
+pub fn app_flavor() -> &'static str {
+    if cfg!(debug_assertions) {
+        "dev"
+    } else {
+        "prod"
+    }
+}
+
+fn project_app_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        DEV_APP_NAME
+    } else {
+        PROD_APP_NAME
+    }
+}
+
+fn socket_name_for_user_and_flavor(username: &str, flavor: &str) -> String {
+    format!("awt-{flavor}-daemon-{:016x}", fnv1a64(username.as_bytes()))
 }
 
 fn current_username() -> String {
@@ -62,15 +85,29 @@ mod tests {
         let alice_again = socket_name_for_user("alice");
         let bob = socket_name_for_user("bob");
 
-        assert!(alice.starts_with("awt-daemon-"));
+        assert!(alice.starts_with(&format!("awt-{}-daemon-", app_flavor())));
         assert_eq!(alice, alice_again);
         assert_ne!(alice, bob);
+    }
+
+    #[test]
+    fn socket_names_are_flavor_scoped() {
+        let dev = socket_name_for_user_and_flavor("alice", "dev");
+        let prod = socket_name_for_user_and_flavor("alice", "prod");
+
+        assert_ne!(dev, prod);
+        assert!(dev.starts_with("awt-dev-daemon-"));
+        assert!(prod.starts_with("awt-prod-daemon-"));
     }
 
     #[test]
     fn daemon_paths_use_project_data_dir() {
         let paths = daemon_paths().expect("project dirs available");
 
+        assert!(paths
+            .data_dir
+            .to_string_lossy()
+            .contains(project_app_name()));
         assert!(paths.sessions.ends_with("sessions.json"));
         assert!(paths.lock.ends_with("daemon.lock"));
         assert!(paths.log.ends_with("daemon.log"));

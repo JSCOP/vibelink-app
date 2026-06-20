@@ -27,6 +27,14 @@ const createdSession: SessionMeta = {
   workspaceFolder: 'E:/repo',
 }
 
+const secondSession: SessionMeta = {
+  id: 'session-other',
+  name: 'Other',
+  paneCount: 0,
+  createdAt: 124,
+  workspaceFolder: 'E:/other',
+}
+
 const localStorageStub = {
   getItem: vi.fn(() => null),
   setItem: vi.fn(),
@@ -82,6 +90,21 @@ describe('workspace store profiles', () => {
     })
   })
 
+  test('spawnPane advertises color terminal capabilities by default', async () => {
+    await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
+
+    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
+      sessionId: 'session-1',
+      cfg: expect.objectContaining({
+        env: expect.arrayContaining([
+          ['TERM', 'xterm-256color'],
+          ['COLORTERM', 'truecolor'],
+          ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
+        ]),
+      }),
+    })
+  })
+
   test('spawnPane uses the selected profile when no pane overrides are supplied', async () => {
     await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
 
@@ -94,10 +117,13 @@ describe('workspace store profiles', () => {
         cwd: 'E:/work',
         env: [
           ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
+          ['TERM', 'xterm-256color'],
+          ['COLORTERM', 'truecolor'],
           ['AWT_SESSION_ID', 'session-1'],
           ['AWT_PANE_ID', 'pane-test'],
         ],
         title: 'Codex',
+        icon: 'sparkles',
         cols: 120,
         rows: 32,
       },
@@ -139,6 +165,83 @@ describe('workspace store profiles', () => {
     })
   })
 
+  test('bootstrap loads sessions without auto-opening a workspace', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'list_sessions') return [createdSession]
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      if (command === 'spawn_pane') return spawnedPane
+      return null
+    })
+
+    await useWorkspaceStore.getState().bootstrap()
+
+    expect(useWorkspaceStore.getState().sessions).toEqual([createdSession])
+    expect(useWorkspaceStore.getState().activeSessionId).toBeUndefined()
+    expect(useWorkspaceStore.getState().status).toBe('ready')
+    expect(invoke).not.toHaveBeenCalledWith('attach_session', expect.anything())
+    expect(invoke).not.toHaveBeenCalledWith('spawn_pane', expect.anything())
+  })
+
+  test('openSession launches an empty workspace pane in the workspace folder', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      if (command === 'list_sessions') return [createdSession]
+      if (command === 'spawn_pane') return spawnedPane
+      return null
+    })
+    useWorkspaceStore.setState({ sessions: [createdSession] })
+
+    await useWorkspaceStore.getState().openSession(createdSession.id)
+
+    expect(invoke).toHaveBeenCalledWith('attach_session', { sessionId: createdSession.id })
+    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
+      sessionId: 'session-workspace',
+      cfg: expect.objectContaining({ cwd: 'E:/repo' }),
+    })
+  })
+
+  test('createSession launches the initial pane with the requested profile', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'create_session') return createdSession
+      if (command === 'list_sessions') return [createdSession]
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      if (command === 'spawn_pane') return spawnedPane
+      return null
+    })
+    useWorkspaceStore.setState({
+      settings: normalizeSettings({
+        ...defaultSettings,
+        defaultProfileId: 'agent',
+        profiles: [
+          {
+            id: 'ssh-dev',
+            name: 'SSH Dev',
+            type: 'ssh',
+            sshHost: 'dev.example.com',
+            sshUser: 'me',
+            sshRemoteCwd: '/srv/app',
+            env: [],
+            cwd: 'E:/local-ssh-launch-dir',
+            color: '#76e3ea',
+            icon: 'radio-tower',
+          },
+        ],
+      }),
+    })
+
+    await useWorkspaceStore.getState().createSession('Remote', 'E:/repo', 'ssh-dev')
+
+    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
+      sessionId: 'session-workspace',
+      cfg: expect.objectContaining({
+        shell: 'ssh',
+        args: ['-t', 'me@dev.example.com', "cd -- '/srv/app' && exec \"${SHELL:-sh}\" -l"],
+        cwd: 'E:/local-ssh-launch-dir',
+        title: 'SSH Dev',
+      }),
+    })
+  })
+
   test('spawnPane prefers the session workspace folder over the active profile cwd', async () => {
     useWorkspaceStore.setState({ sessions: [createdSession], activeSessionId: createdSession.id })
 
@@ -161,17 +264,67 @@ describe('workspace store profiles', () => {
     })
   })
 
+  test('setDefaultProfile stores the active profile per workspace', async () => {
+    useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
+      sessions: [createdSession, secondSession],
+      settings: normalizeSettings({
+        ...defaultSettings,
+        defaultProfileId: 'agent',
+        profiles: [
+          {
+            id: 'agent',
+            name: 'Codex',
+            shell: 'codex.cmd',
+            args: [],
+            env: [],
+            cwd: null,
+            color: '#7ee787',
+            icon: 'bot',
+          },
+          {
+            id: 'powershell',
+            name: 'PowerShell',
+            shell: 'pwsh.exe',
+            args: ['-NoLogo'],
+            env: [],
+            cwd: null,
+            color: '#58a6ff',
+            icon: 'terminal-square',
+          },
+        ],
+      }),
+    })
+
+    useWorkspaceStore.getState().setDefaultProfile('powershell')
+
+    expect(useWorkspaceStore.getState().settings.defaultProfileId).toBe('agent')
+    expect(useWorkspaceStore.getState().settings.workspaceProfileIds).toMatchObject({
+      [createdSession.id]: 'powershell',
+    })
+
+    await useWorkspaceStore.getState().spawnPane(createdSession.id, { paneId: 'pane-test' })
+
+    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
+      sessionId: createdSession.id,
+      cfg: expect.objectContaining({
+        shell: 'pwsh.exe',
+        title: 'PowerShell',
+      }),
+    })
+  })
+
   test('renamePaneTitle persists a manual title and updates local pane metadata', async () => {
-    useWorkspaceStore.setState({ panes: { 'pane-test': spawnedPane } })
+    useWorkspaceStore.setState({ activeSessionId: createdSession.id, panes: { 'pane-test': spawnedPane } })
 
     await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
 
-    expect(invoke).toHaveBeenCalledWith('set_pane_title', { paneId: 'pane-test', title: 'Manual Codex' })
+    expect(invoke).toHaveBeenCalledWith('set_pane_title', { sessionId: createdSession.id, paneId: 'pane-test', title: 'Manual Codex' })
     expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
   })
 
   test('applyTerminalTitle does not overwrite manual pane titles', async () => {
-    useWorkspaceStore.setState({ panes: { 'pane-test': spawnedPane } })
+    useWorkspaceStore.setState({ activeSessionId: createdSession.id, panes: { 'pane-test': spawnedPane } })
     await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
 
     await useWorkspaceStore.getState().applyTerminalTitle('pane-test', 'Codex: auto task')

@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Folder, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta } from '../ipc/types'
 
 type SidebarProps = {
@@ -26,7 +26,7 @@ export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onP
         {sessions.map((session) => (
           <div key={session.id} className={`session-row ${session.id === activeSessionId ? 'active' : ''}`}>
             <button type="button" className="session-main" onClick={() => onSelect(session.id)}>
-              <span className="session-icon" />
+              <span className="session-icon"><Folder size={14} strokeWidth={1.7} /></span>
               <span className="session-name">{session.name}</span>
               <span className="session-badge">{session.paneCount}</span>
             </button>
@@ -39,7 +39,7 @@ export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onP
                 if (name?.trim()) onRename(session.id, name.trim())
               }}
             >
-              ···
+              <Pencil size={13} strokeWidth={1.7} />
             </button>
             <button
               type="button"

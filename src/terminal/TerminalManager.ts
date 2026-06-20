@@ -6,10 +6,12 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { defaultTerminalThemeId, terminalThemeById, type TerminalThemeId } from '../state/terminalThemes'
+import { preferredFontFamily, terminalFontStack } from '../state/fonts'
 import { isTerminalHostMeasurable } from './geometry'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 
 const terminalTheme = terminalThemeById(defaultTerminalThemeId)
+const MAX_FIT_ATTEMPTS = 120
 
 type TerminalVisualSettings = {
   fontFamily: string
@@ -21,12 +23,12 @@ type TerminalVisualSettings = {
 }
 
 const defaultTerminalSettings: TerminalVisualSettings = {
-  fontFamily: 'D2CodingLigature Nerd Font Mono',
+  fontFamily: preferredFontFamily,
   fontSize: 11,
   terminalFontWeight: 400,
   scrollback: 5000,
   terminalThemeId: defaultTerminalThemeId,
-  terminalScrollbarVisible: true,
+  terminalScrollbarVisible: false,
 }
 
 type Entry = {
@@ -35,6 +37,7 @@ type Entry = {
   opened: boolean
   daemonAttached: boolean
   dataWired: boolean
+  sessionId?: string
   observer?: ResizeObserver
   fitFrame?: number
   container?: HTMLElement
@@ -62,7 +65,7 @@ class TerminalManagerImpl {
     const themeChanged = this.settings.terminalThemeId !== settings.terminalThemeId
     this.settings = settings
     for (const entry of this.entries.values()) {
-      entry.term.options.fontFamily = settings.fontFamily
+      entry.term.options.fontFamily = terminalFontStack(settings.fontFamily)
       entry.term.options.fontSize = settings.fontSize
       entry.term.options.fontWeight = terminalFontWeight(settings.terminalFontWeight)
       entry.term.options.fontWeightBold = terminalBoldFontWeight(settings.terminalFontWeight)
@@ -71,7 +74,7 @@ class TerminalManagerImpl {
       this.applyScrollbarVisibility(entry)
       if (fontChanged) this.fitAfterFontsLoad(entry)
       if (fontChanged || themeChanged) this.redrawAfterNextFrame(entry)
-      this.fit(entry, 0)
+      this.fit(entry, 0, true)
     }
   }
   getOrCreate(paneId: string): Entry {
@@ -82,7 +85,7 @@ class TerminalManagerImpl {
       allowProposedApi: true,
       convertEol: false,
       cursorBlink: true,
-      fontFamily: this.settings.fontFamily,
+      fontFamily: terminalFontStack(this.settings.fontFamily),
       fontSize: this.settings.fontSize,
       fontWeight: terminalFontWeight(this.settings.terminalFontWeight),
       fontWeightBold: terminalBoldFontWeight(this.settings.terminalFontWeight),
@@ -105,8 +108,10 @@ class TerminalManagerImpl {
   }
 
 
-  attach(paneId: string, container: HTMLElement, options?: { onTitleChange?: (title: string) => void }): void {
+  attach(paneId: string, container: HTMLElement, options: { sessionId?: string; onTitleChange?: (title: string) => void } = {}): void {
     const entry = this.getOrCreate(paneId)
+    const previousSessionId = entry.sessionId
+    entry.sessionId = options.sessionId
     entry.container = container
     this.applyScrollbarVisibility(entry)
 
@@ -120,10 +125,12 @@ class TerminalManagerImpl {
 
     if (!entry.dataWired) {
       entry.term.onData((data) => {
-        void invoke('write_pane', { paneId, data })
+        const sessionId = entry.sessionId
+        if (sessionId) void invoke('write_pane', { sessionId, paneId, data })
       })
       entry.term.onResize(({ cols, rows }) => {
-        void invoke('resize_pane', { paneId, cols, rows })
+        const sessionId = entry.sessionId
+        if (sessionId) void invoke('resize_pane', { sessionId, paneId, cols, rows })
       })
       entry.dataWired = true
     }
@@ -136,23 +143,26 @@ class TerminalManagerImpl {
         : undefined
     }
 
-    if (!entry.daemonAttached) {
+    if (options.sessionId && (!entry.daemonAttached || previousSessionId !== options.sessionId)) {
       entry.daemonAttached = true
-      void invoke('attach_pane', { paneId })
+      void invoke('attach_pane', { sessionId: options.sessionId, paneId })
     }
 
     entry.observer?.disconnect()
     entry.observer = new ResizeObserver(() => this.fit(entry, 0))
     entry.observer.observe(container)
-    this.fit(entry, 0)
+    this.reflowEntry(entry, true)
+    this.fitAfterFontsLoad(entry)
   }
 
-  reattachToDaemon(paneIds: string[]): void {
+  reattachToDaemon(sessionId: string | undefined, paneIds: string[]): void {
+    if (!sessionId) return
     for (const paneId of paneIds) {
       const entry = this.entries.get(paneId)
       if (!entry) continue
+      entry.sessionId = sessionId
       entry.daemonAttached = true
-      void invoke('attach_pane', { paneId })
+      void invoke('attach_pane', { sessionId, paneId })
     }
   }
 
@@ -177,15 +187,23 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.term.focus()
-    this.fit(entry, 0)
+    this.reflowEntry(entry, true)
   }
 
+  reflow(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    this.reflowEntry(entry)
+  }
+
+  reflowAll(forceFit = false): void {
+    for (const entry of this.entries.values()) {
+      this.reflowEntry(entry, forceFit)
+    }
+  }
 
   resumeRendering(): void {
-    for (const entry of this.entries.values()) {
-      this.redraw(entry)
-      this.fit(entry, 0)
-    }
+    this.reflowAll(true)
   }
 
   containsEventTarget(paneId: string, target: EventTarget | null): boolean {
@@ -224,30 +242,38 @@ class TerminalManagerImpl {
     requestAnimationFrame(() => this.redraw(entry))
   }
 
+  private reflowEntry(entry: Entry, forceFit = false): void {
+    this.redraw(entry)
+    this.fit(entry, 0, forceFit)
+    requestAnimationFrame(() => this.redraw(entry))
+  }
+
   private fitAfterFontsLoad(entry: Entry): void {
     const fonts = document.fonts
     if (!fonts) return
-    void fonts.ready.then(() => this.fit(entry, 0))
+    void fonts.ready.then(() => this.fit(entry, 0, true))
   }
 
 
-  private fit(entry: Entry, attempt: number): void {
+  private fit(entry: Entry, attempt: number, force = false): void {
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     entry.fitFrame = requestAnimationFrame(() => {
       entry.fitFrame = undefined
       const rect = entry.container?.getBoundingClientRect()
       if (!rect || !isTerminalHostMeasurable(rect)) {
-        if (attempt < 10) this.fit(entry, attempt + 1)
+        if (attempt < MAX_FIT_ATTEMPTS) this.fit(entry, attempt + 1, force)
         return
       }
       try {
         const proposed = entry.fit.proposeDimensions()
         const cols = proposed?.cols ?? entry.term.cols
         const rows = proposed?.rows ?? entry.term.rows
-        if (entry.term.cols === cols && entry.term.rows === rows) return
-        entry.fit.fit()
+        if (force || entry.term.cols !== cols || entry.term.rows !== rows) {
+          entry.fit.fit()
+        }
+        this.redrawAfterNextFrame(entry)
       } catch {
-        if (attempt < 10) this.fit(entry, attempt + 1)
+        if (attempt < MAX_FIT_ATTEMPTS) this.fit(entry, attempt + 1, force)
       }
     })
   }

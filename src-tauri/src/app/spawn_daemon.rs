@@ -10,7 +10,7 @@ use interprocess::{
 use std::{
     fs,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
@@ -24,6 +24,10 @@ const STARTUP_PING_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const DAEMON_READY_DELAY: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const DAEMON_BIN_DIR: &str = "daemon-bin";
+#[cfg(windows)]
+const DAEMON_EXE_PREFIX: &str = "app-daemon";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupAttemptErrorKind {
@@ -337,6 +341,7 @@ fn recover_unrecorded_stale_daemon() -> Result<bool> {
 #[cfg(windows)]
 fn find_unrecorded_daemon_pids() -> Result<Vec<u32>> {
     let exe = std::env::current_exe().context("resolve current executable for daemon recovery")?;
+    let daemon_paths = paths::daemon_paths()?;
     let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -344,6 +349,8 @@ fn find_unrecorded_daemon_pids() -> Result<Vec<u32>> {
             include_str!("find_daemon_pids.ps1"),
         ])
         .env("AWT_DAEMON_EXE", exe)
+        .env("AWT_DAEMON_DIR", daemon_bin_dir(&daemon_paths.data_dir))
+        .env("AWT_APP_FLAVOR", paths::app_flavor())
         .stdin(Stdio::null())
         .output()
         .context("list unrecorded daemon processes")?;
@@ -393,18 +400,63 @@ fn parse_daemon_pid(contents: &str) -> Result<Option<u32>> {
 
 #[cfg(windows)]
 fn terminate_daemon_pid(pid: u32) -> Result<()> {
-    let status = Command::new("taskkill")
+    let output = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .context("run taskkill for stale daemon")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("taskkill exited with {status}");
+    if output.status.success() {
+        return Ok(());
     }
+    if termination_attempt_completed(false, windows_process_exists(pid)?) {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    bail!(
+        "taskkill exited with {}: {}{}",
+        output.status,
+        stdout.trim(),
+        stderr.trim()
+    );
+}
+
+#[cfg(windows)]
+fn windows_process_exists(pid: u32) -> Result<bool> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$targetPid = [uint32]$env:AWT_PID; if (Get-CimInstance Win32_Process -Filter \"ProcessId = $targetPid\") { 'exists' } else { 'missing' }",
+        ])
+        .env("AWT_PID", pid.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .context("check whether daemon pid still exists")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "process existence check exited with {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("parse process existence output")?;
+    match stdout.trim() {
+        "exists" => Ok(true),
+        "missing" => Ok(false),
+        other => bail!("unexpected process existence output {other:?}"),
+    }
+}
+
+fn termination_attempt_completed(
+    command_succeeded: bool,
+    process_exists_after_attempt: bool,
+) -> bool {
+    command_succeeded || !process_exists_after_attempt
 }
 
 #[cfg(not(windows))]
@@ -452,7 +504,7 @@ fn remove_pid_file_if_matching(path: &Path, pid: u32) -> Result<bool> {
 }
 
 fn spawn_configured_daemon(include_breakaway: bool) -> Result<Child> {
-    let exe = std::env::current_exe().context("resolve current executable")?;
+    let exe = daemon_executable().context("prepare daemon executable")?;
     let mut command = Command::new(exe);
     command
         .arg("--daemon")
@@ -462,6 +514,144 @@ fn spawn_configured_daemon(include_breakaway: bool) -> Result<Child> {
 
     configure_detached(&mut command, include_breakaway);
     command.spawn().context("spawn detached daemon")
+}
+
+fn daemon_executable() -> Result<PathBuf> {
+    let source = std::env::current_exe().context("resolve current executable")?;
+    #[cfg(windows)]
+    {
+        prepare_daemon_executable(&source)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(source)
+    }
+}
+
+#[cfg(windows)]
+fn prepare_daemon_executable(source: &Path) -> Result<PathBuf> {
+    let daemon_paths = paths::daemon_paths()?;
+    prepare_daemon_executable_in(source, &daemon_paths.data_dir)
+}
+
+#[cfg(windows)]
+fn prepare_daemon_executable_in(source: &Path, data_dir: &Path) -> Result<PathBuf> {
+    let identity = executable_identity(source)?;
+    let dir = daemon_bin_dir(data_dir);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("create daemon executable directory {}", dir.display()))?;
+    let target = daemon_copy_path(&dir, &identity);
+
+    if !target.exists() {
+        copy_daemon_executable(source, &target)?;
+    }
+    cleanup_old_daemon_executables(&dir, &target);
+
+    Ok(target)
+}
+
+#[cfg(windows)]
+fn daemon_bin_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(DAEMON_BIN_DIR)
+}
+
+#[cfg(windows)]
+fn daemon_copy_path(dir: &Path, identity: &str) -> PathBuf {
+    dir.join(format!(
+        "{}-{}-{}.exe",
+        DAEMON_EXE_PREFIX,
+        paths::app_flavor(),
+        identity
+    ))
+}
+
+#[cfg(windows)]
+fn copy_daemon_executable(source: &Path, target: &Path) -> Result<()> {
+    let target_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("daemon executable target has no file name"))?;
+    let temp = target.with_file_name(format!(
+        "{target_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+
+    fs::copy(source, &temp).with_context(|| {
+        format!(
+            "copy daemon executable {} to {}",
+            source.display(),
+            temp.display()
+        )
+    })?;
+
+    match fs::rename(&temp, target) {
+        Ok(()) => Ok(()),
+        Err(err) if target.exists() => {
+            let _ = fs::remove_file(&temp);
+            let _ = err;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err).with_context(|| {
+                format!(
+                    "activate daemon executable copy {} as {}",
+                    temp.display(),
+                    target.display()
+                )
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+fn cleanup_old_daemon_executables(dir: &Path, current: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{}-{}-", DAEMON_EXE_PREFIX, paths::app_flavor());
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with(&prefix) && file_name.ends_with(".exe") {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn executable_identity(path: &Path) -> Result<String> {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open executable for hashing {}", path.display()))?;
+    let mut hash = OFFSET;
+    let mut len = 0_u64;
+    let mut buf = [0_u8; 64 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buf)
+            .with_context(|| format!("read executable for hashing {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        len += read as u64;
+        for byte in &buf[..read] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+
+    Ok(format!("{len:016x}-{hash:016x}"))
 }
 
 #[cfg(windows)]
@@ -616,6 +806,13 @@ mod tests {
     }
 
     #[test]
+    fn failed_termination_is_complete_when_pid_already_exited() {
+        assert!(termination_attempt_completed(false, false));
+        assert!(!termination_attempt_completed(false, true));
+        assert!(termination_attempt_completed(true, true));
+    }
+
+    #[test]
     fn shutdown_missing_pid_file_is_noop() {
         let path = std::env::temp_dir().join(format!(
             "awt-missing-daemon-{}-{}.pid",
@@ -683,6 +880,58 @@ mod tests {
     fn socket_name_converts_to_namespaced_socket_name() {
         let name = socket_name().expect("namespaced socket name");
 
-        assert!(format!("{name:?}").contains("awt-daemon"));
+        assert!(format!("{name:?}").contains(&format!("awt-{}-daemon", paths::app_flavor())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn daemon_executable_copy_uses_data_dir_instead_of_source_exe() {
+        let temp = std::env::temp_dir().join(format!(
+            "awt-daemon-copy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let source = temp.join("target").join("debug").join("app.exe");
+        let data_dir = temp.join("data");
+        fs::create_dir_all(source.parent().expect("source parent")).expect("create source dir");
+        fs::write(&source, b"fake exe bytes").expect("write source exe");
+
+        let daemon_exe =
+            prepare_daemon_executable_in(&source, &data_dir).expect("prepare daemon exe");
+
+        assert!(daemon_exe.starts_with(daemon_bin_dir(&data_dir)));
+        assert_ne!(daemon_exe, source);
+        assert_eq!(
+            fs::read(&daemon_exe).expect("read copied daemon exe"),
+            b"fake exe bytes"
+        );
+        assert!(daemon_exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("daemon exe file name")
+            .starts_with(&format!("{}-{}-", DAEMON_EXE_PREFIX, paths::app_flavor())));
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn executable_identity_changes_with_executable_bytes() {
+        let temp = std::env::temp_dir().join(format!(
+            "awt-daemon-identity-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp).expect("create temp dir");
+        let source = temp.join("app.exe");
+
+        fs::write(&source, b"one").expect("write first exe");
+        let first = executable_identity(&source).expect("hash first exe");
+        fs::write(&source, b"two").expect("write second exe");
+        let second = executable_identity(&source).expect("hash second exe");
+
+        assert_ne!(first, second);
+
+        let _ = fs::remove_dir_all(temp);
     }
 }

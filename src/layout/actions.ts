@@ -9,6 +9,8 @@ export type WorkspaceActions = {
   closePane: (paneId: string) => Promise<void>
   toggleMaximize: (paneId: string) => void
   renamePaneTitle: (paneId: string, title: string) => Promise<void>
+  swapPaneLocations: (sourcePaneId: string, targetPaneId: string) => Promise<void>
+  movePaneToPosition: (sourcePaneId: string, targetPaneId: string, position: 'left' | 'right' | 'top' | 'bottom') => Promise<void>
 }
 
 export const WorkspaceActionsContext = createContext<WorkspaceActions | null>(null)

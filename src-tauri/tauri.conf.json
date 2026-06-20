@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AgenticWorkspaceTerminal",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "identifier": "dev.awt.agenticworkspaceterminal",
   "build": {
     "frontendDist": "../dist",
@@ -17,7 +17,8 @@
         "height": 600,
         "resizable": true,
         "fullscreen": false,
-        "devtools": false
+        "devtools": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

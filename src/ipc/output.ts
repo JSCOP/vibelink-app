@@ -37,7 +37,8 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
 async function handleConnectionRestored(): Promise<void> {
   await startTerminalOutputStream({ force: true })
   await useWorkspaceStore.getState().bootstrap()
-  TerminalManager.reattachToDaemon(Object.keys(useWorkspaceStore.getState().panes))
+  const state = useWorkspaceStore.getState()
+  TerminalManager.reattachToDaemon(state.activeSessionId, Object.keys(state.panes))
 }
 
 function base64ToBytes(value: string): Uint8Array {

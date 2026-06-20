@@ -1,7 +1,9 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useEffect, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type { DockviewApi, IDockviewPanelHeaderProps } from 'dockview-react'
 import { Maximize2, PanelRightClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { useWorkspaceActions } from '../layout/actions'
+import { hasPaneDragPayload, paneDragMime } from '../layout/paneDrag'
+import { ProfileIcon } from './ProfileIcon'
 
 type TerminalTabProps = IDockviewPanelHeaderProps & {
   api: IDockviewPanelHeaderProps['api'] & {
@@ -14,6 +16,7 @@ type TerminalTabProps = IDockviewPanelHeaderProps & {
   params?: {
     paneId?: string
     title?: string | null
+    icon?: string | null
   }
 }
 
@@ -68,9 +71,36 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
     if (api.isMaximized()) api.exitMaximized()
     else api.maximize()
   }
+  const onTitleDragStart = (event: DragEvent<HTMLElement>) => {
+    if (!paneId || isEditing) {
+      event.preventDefault()
+      return
+    }
+    activatePane()
+    event.stopPropagation()
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(paneDragMime, paneId)
+  }
+
+  const onPaneDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!paneId || !hasPaneDragPayload(event.dataTransfer.types)) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+  }
+
+  const onPaneDrop = (event: DragEvent<HTMLElement>) => {
+    if (!paneId || !hasPaneDragPayload(event.dataTransfer.types)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const sourcePaneId = event.dataTransfer.getData(paneDragMime)
+    if (sourcePaneId && sourcePaneId !== paneId) void actions.swapPaneLocations(sourcePaneId, paneId)
+  }
+
 
   return (
-    <div className="terminal-tab" title={title} onMouseDown={activatePane} onPointerDown={activatePane}>
+    <div className="terminal-tab" title={title} onMouseDown={activatePane} onPointerDown={activatePane} onDragOver={onPaneDragOver} onDrop={onPaneDrop}>
+      <ProfileIcon name={params?.icon} size={13} className="terminal-tab-icon" />
       {isEditing ? (
         <input
           className="terminal-tab-title-input"
@@ -83,7 +113,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
           onPointerDown={activatePaneAndStop}
         />
       ) : (
-        <span className="terminal-tab-title" title="Double-click to rename" onDoubleClick={() => { setDraftTitle(title); setIsEditing(true) }}>
+        <span className="terminal-tab-title" title="Drag to swap panes. Double-click to rename." draggable onDragStart={onTitleDragStart} onDoubleClick={() => { setDraftTitle(title); setIsEditing(true) }}>
           {title}
         </span>
       )}

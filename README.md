@@ -6,23 +6,24 @@ Tauri v2 desktop terminal workspace with dockview splits, workspace sessions, gr
 
 ```bash
 pnpm install
-pnpm tauri dev
+pnpm tauri:dev
 ```
 
-Use the npm Tauri CLI. A global `cargo-tauri` install is not required.
+Use the npm Tauri CLI. A global `cargo-tauri` install is not required. The `tauri:dev` script merges `src-tauri/tauri.dev.conf.json` so the development app has a separate app identifier and title.
 
 ## Build
 
 ```bash
 pnpm build
-pnpm tauri build
+pnpm tauri:build
 ```
 
 ## Architecture
 
 - React owns layout, workspace UI, dockview panels, and xterm.js rendering.
 - The Tauri app is a thin bridge. Frontend calls Rust commands via `invoke`; terminal output arrives through one `Channel` keyed by `paneId`.
-- The daemon is the same binary launched with `--daemon`. It owns live PTYs, sessions, scrollback, layouts, and durable session metadata.
+- The daemon is the same executable code launched with `--daemon`. On Windows app startup copies the current executable into the app data `daemon-bin` directory first, so the detached daemon does not lock `src-tauri\target\debug\app.exe` during rebuilds.
+- Dev and production daemons are isolated. Debug builds use the `AgenticWorkspaceTerminalDev` app data directory and an `awt-dev-daemon-*` socket; release builds use `AgenticWorkspaceTerminal` and an `awt-prod-daemon-*` socket.
 - IPC uses `interprocess` local sockets with MessagePack frames and a 4-byte big-endian length prefix.
 - Sessions persist under the platform app data directory as `sessions.json`. Panes are intentionally not persisted or reconstructed after daemon restart.
 
@@ -42,13 +43,13 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 
 ```powershell
 .\target\debug\app.exe cli sessions
-.\target\debug\app.exe cli panes --session <session-id>
-.\target\debug\app.exe cli read --session <session-id> --pane <pane-id>
-.\target\debug\app.exe cli write --pane <pane-id> --text "pwd" --enter
+.\target\debug\app.exe cli panes [--session <session-id>]
+.\target\debug\app.exe cli read [--session <session-id>] --pane <pane-id>
+.\target\debug\app.exe cli write [--session <session-id>] --pane <pane-id> --text "pwd" --enter
 ```
 
-`sessions` and `panes` print JSON. `read` requires the workspace session id and prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command.
-AWT-launched panes receive `AWT_SESSION_ID` and `AWT_PANE_ID`; agents should use those for current-workspace reads instead of scanning every workspace.
+`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command.
+AWT-launched panes receive `AWT_SESSION_ID`, `AWT_PANE_ID`, `AWT_APP_EXE`, and `AWT_APP_FLAVOR`; `panes`, `read`, and `write` use `AWT_SESSION_ID` when `--session` is omitted, so agents should run `$env:AWT_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace.
 
 ## Daemon smoke checks
 

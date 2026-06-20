@@ -1,13 +1,15 @@
 {
   "name": "agenticworkspaceterminal",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-legacy-dev-locks.ps1 && tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

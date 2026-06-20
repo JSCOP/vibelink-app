@@ -37,6 +37,7 @@ pub fn run() {
 
 fn run_inner() -> Result<()> {
     let paths = paths::daemon_paths()?;
+    let app_flavor = paths::app_flavor();
     init_logging(&paths.log);
 
     let lock_file = OpenOptions::new()
@@ -61,7 +62,7 @@ fn run_inner() -> Result<()> {
     let socket_name = paths::socket_name_string();
     let name = socket_name.as_str().to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
-    info!(socket_name, data_dir = ?paths.data_dir, "daemon listening");
+    info!(socket_name, app_flavor, data_dir = ?paths.data_dir, "daemon listening");
 
     for stream in listener.incoming() {
         if shutdown.load(Ordering::Acquire) {
@@ -338,22 +339,30 @@ fn dispatch_message(
                 },
             )
         }
-        ClientToDaemon::AttachPane { pane_id } => {
-            info!(%client_id, %pane_id, "attaching pane");
+        ClientToDaemon::AttachPane {
+            session_id,
+            pane_id,
+        } => {
+            info!(%client_id, %session_id, %pane_id, "attaching pane");
             state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .attach_pane(client_id, pane_id)?;
+                .attach_pane(client_id, session_id, pane_id)?;
             Ok(())
         }
-        ClientToDaemon::WritePane { pane_id, data } => {
+        ClientToDaemon::WritePane {
+            session_id,
+            pane_id,
+            data,
+        } => {
             state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .write_pane(pane_id, &data)?;
+                .write_pane(session_id, pane_id, &data)?;
             Ok(())
         }
         ClientToDaemon::ResizePane {
+            session_id,
             pane_id,
             cols,
             rows,
@@ -361,26 +370,31 @@ fn dispatch_message(
             state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .resize_pane(pane_id, cols, rows)?;
+                .resize_pane(session_id, pane_id, cols, rows)?;
             Ok(())
         }
         ClientToDaemon::SetPaneTitle {
             req,
+            session_id,
             pane_id,
             title,
         } => {
             state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .set_pane_title(pane_id, title)?;
+                .set_pane_title(session_id, pane_id, title)?;
             persist_state(&state, sessions_path)?;
             send_ok(tx, req)
         }
-        ClientToDaemon::ClosePane { req, pane_id } => {
+        ClientToDaemon::ClosePane {
+            req,
+            session_id,
+            pane_id,
+        } => {
             let pane = state
                 .lock()
                 .expect("daemon state mutex poisoned")
-                .close_pane(pane_id)?;
+                .close_pane(session_id, pane_id)?;
             persist_state(&state, sessions_path)?;
             send_ok(tx, req)?;
             if let Some(mut pane) = pane {
@@ -596,7 +610,7 @@ fn kill_all_panes(state: &SharedState) {
         let Some(mut pane) = (match state
             .lock()
             .expect("daemon state mutex poisoned")
-            .close_pane(pane_id)
+            .close_pane_any(pane_id)
         {
             Ok(pane) => pane,
             Err(err) => {
@@ -642,6 +656,7 @@ mod tests {
                 cwd: None,
                 env: Vec::new(),
                 title: None,
+                icon: None,
                 cols: 80,
                 rows: 24,
             },

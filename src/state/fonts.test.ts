@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultFontChoices, normalizeFontChoices } from './fonts'
+import { defaultFontChoices, normalizeFontChoices, terminalFontStack } from './fonts'
 
 describe('font choices', () => {
   it('keeps fallback monospace fonts when native discovery returns nothing', () => {
@@ -18,5 +18,9 @@ describe('font choices', () => {
     const choices = normalizeFontChoices(['JetBrains Mono', 'D2CodingLigature Nerd Font Mono'], 'D2CodingLigature Nerd Font Mono')
 
     expect(choices[0]).toBe('D2CodingLigature Nerd Font Mono')
+  })
+
+  it('builds a CSS font stack with system fallbacks', () => {
+    expect(terminalFontStack('Custom Mono')).toBe("'Custom Mono', 'D2CodingLigature Nerd Font Mono', 'Cascadia Code', 'Cascadia Mono', Consolas, 'JetBrains Mono', 'Fira Code', monospace")
   })
 })

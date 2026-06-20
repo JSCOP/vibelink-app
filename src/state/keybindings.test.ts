@@ -37,6 +37,18 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', ctrlKey: true, shiftKey: true }))).toBe('copyTerminalSelection')
   })
 
+  it('does not intercept Ctrl+C so terminal interrupt reaches the PTY', () => {
+    const seen: string[] = []
+    const event = keyEvent({ key: 'c', ctrlKey: true })
+
+    const handled = handleCapturedKeybindingEvent(defaultKeybindings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(false)
+    expect(seen).toEqual([])
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(event.stopPropagation).not.toHaveBeenCalled()
+  })
+
   it('handles terminal copy shortcuts from captured keydown events', () => {
     const seen: string[] = []
     const event = keyEvent({ key: 'a', ctrlKey: true })

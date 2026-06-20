@@ -146,7 +146,25 @@ impl DaemonState {
         Ok(meta)
     }
 
-    pub fn close_pane(&mut self, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
+    pub fn close_pane(&mut self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
+        self.session(session_id)?;
+        if !self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.panes.contains_key(&pane_id))
+        {
+            if let Some((owner_session_id, _)) = self.find_pane(pane_id) {
+                anyhow::bail!(
+                    "pane {pane_id} belongs to session {owner_session_id}, not {session_id}"
+                );
+            }
+            self.pane_clients.remove(&pane_id);
+            return Ok(None);
+        }
+        Ok(self.remove_pane(session_id, pane_id))
+    }
+
+    pub fn close_pane_any(&mut self, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
         let Some((session_id, _)) = self.find_pane(pane_id) else {
             self.pane_clients.remove(&pane_id);
             return Ok(None);
@@ -162,18 +180,29 @@ impl DaemonState {
         pane
     }
 
-    pub fn write_pane(&self, pane_id: Uuid, data: &[u8]) -> anyhow::Result<()> {
-        let pane = self.pane(pane_id)?;
+    pub fn write_pane(&self, session_id: Uuid, pane_id: Uuid, data: &[u8]) -> anyhow::Result<()> {
+        let pane = self.pane_in_session(session_id, pane_id)?;
         pane.write(data)
     }
 
-    pub fn resize_pane(&self, pane_id: Uuid, cols: u16, rows: u16) -> anyhow::Result<()> {
-        let pane = self.pane(pane_id)?;
+    pub fn resize_pane(
+        &self,
+        session_id: Uuid,
+        pane_id: Uuid,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<()> {
+        let pane = self.pane_in_session(session_id, pane_id)?;
         pane.resize(cols, rows)
     }
 
-    pub fn set_pane_title(&mut self, pane_id: Uuid, title: String) -> anyhow::Result<()> {
-        let pane = self.pane_mut(pane_id)?;
+    pub fn set_pane_title(
+        &mut self,
+        session_id: Uuid,
+        pane_id: Uuid,
+        title: String,
+    ) -> anyhow::Result<()> {
+        let pane = self.pane_in_session_mut(session_id, pane_id)?;
         pane.config.title = Some(title);
         Ok(())
     }
@@ -205,9 +234,14 @@ impl DaemonState {
         Ok(removed)
     }
 
-    pub fn attach_pane(&mut self, client_id: Uuid, pane_id: Uuid) -> anyhow::Result<()> {
+    pub fn attach_pane(
+        &mut self,
+        client_id: Uuid,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<()> {
         let (snapshot, alive) = {
-            let pane = self.pane(pane_id)?;
+            let pane = self.pane_in_session(session_id, pane_id)?;
             (pane.scrollback_snapshot(), pane.alive)
         };
         if let Some(tx) = self.clients.get(&client_id) {
@@ -244,7 +278,7 @@ impl DaemonState {
     }
 
     pub fn record_output(&mut self, pane_id: Uuid, data: &[u8]) -> Vec<Sender<DaemonToClient>> {
-        if let Ok(pane) = self.pane_mut(pane_id) {
+        if let Ok(pane) = self.pane_any_mut(pane_id) {
             pane.push_scrollback(data);
         }
         self.senders_for_pane(pane_id)
@@ -308,13 +342,41 @@ impl DaemonState {
             .ok_or_else(|| anyhow::anyhow!("unknown session {session_id}"))
     }
 
-    fn pane(&self, pane_id: Uuid) -> anyhow::Result<&Pane> {
-        self.find_pane(pane_id)
-            .and_then(|(session_id, pane_id)| self.sessions.get(&session_id)?.panes.get(&pane_id))
-            .ok_or_else(|| anyhow::anyhow!("unknown pane {pane_id}"))
+    fn pane_in_session(&self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<&Pane> {
+        let session = self.session(session_id)?;
+        if let Some(pane) = session.panes.get(&pane_id) {
+            return Ok(pane);
+        }
+        if let Some((owner_session_id, _)) = self.find_pane(pane_id) {
+            anyhow::bail!("pane {pane_id} belongs to session {owner_session_id}, not {session_id}");
+        }
+        anyhow::bail!("unknown pane {pane_id} in session {session_id}");
     }
 
-    fn pane_mut(&mut self, pane_id: Uuid) -> anyhow::Result<&mut Pane> {
+    fn pane_in_session_mut(
+        &mut self,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<&mut Pane> {
+        let belongs_to_target = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.panes.contains_key(&pane_id));
+        if belongs_to_target {
+            return self
+                .sessions
+                .get_mut(&session_id)
+                .and_then(|session| session.panes.get_mut(&pane_id))
+                .ok_or_else(|| anyhow::anyhow!("unknown pane {pane_id} in session {session_id}"));
+        }
+        self.session(session_id)?;
+        if let Some((owner_session_id, _)) = self.find_pane(pane_id) {
+            anyhow::bail!("pane {pane_id} belongs to session {owner_session_id}, not {session_id}");
+        }
+        anyhow::bail!("unknown pane {pane_id} in session {session_id}");
+    }
+
+    fn pane_any_mut(&mut self, pane_id: Uuid) -> anyhow::Result<&mut Pane> {
         let Some((session_id, pane_id)) = self.find_pane(pane_id) else {
             anyhow::bail!("unknown pane {pane_id}");
         };
@@ -418,7 +480,7 @@ mod tests {
         let pane = Pane::for_test(config.clone(), true);
         state.insert_pane(meta.id, pane).expect("insert pane");
 
-        let closed = state.close_pane(pane_id).expect("close pane");
+        let closed = state.close_pane(meta.id, pane_id).expect("close pane");
 
         assert_eq!(closed.expect("closed pane").meta().config, config);
         assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
@@ -513,7 +575,7 @@ mod tests {
         state.insert_pane(meta.id, pane).expect("insert pane");
 
         state
-            .set_pane_title(pane_id, "Codex: refactor terminal".to_string())
+            .set_pane_title(meta.id, pane_id, "Codex: refactor terminal".to_string())
             .expect("set title");
 
         let panes = state.pane_metas(meta.id).expect("pane metas");
@@ -536,9 +598,27 @@ mod tests {
         assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
         assert!(state.persisted_sessions()[0].panes.is_empty());
         assert!(state
-            .close_pane(pane_id)
+            .close_pane(meta.id, pane_id)
             .expect("close exited pane")
             .is_none());
+    }
+
+    #[test]
+    fn pane_updates_reject_panes_from_other_sessions() {
+        let mut state = DaemonState::new();
+        let workspace_a = state.create_session("Workspace A".to_string(), None);
+        let workspace_b = state.create_session("Workspace B".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let pane = Pane::for_test(test_config(pane_id), true);
+        state
+            .insert_pane(workspace_a.id, pane)
+            .expect("insert pane");
+
+        let err = state
+            .set_pane_title(workspace_b.id, pane_id, "Wrong workspace".to_string())
+            .expect_err("cross-session title update should fail");
+
+        assert!(err.to_string().contains("belongs to session"));
     }
 
     fn test_config(pane_id: Uuid) -> crate::protocol::PaneConfig {
@@ -565,6 +645,7 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             title: Some("test".to_string()),
+            icon: None,
             cols: 80,
             rows: 24,
         }

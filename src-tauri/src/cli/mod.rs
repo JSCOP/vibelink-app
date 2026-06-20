@@ -18,6 +18,7 @@ enum CliCommand {
         pane_id: Uuid,
     },
     Write {
+        session_id: Uuid,
         pane_id: Uuid,
         text: String,
         enter: bool,
@@ -78,12 +79,17 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             }
         }
         CliCommand::Write {
+            session_id,
             pane_id,
             text,
             enter,
         } => {
             let data = write_payload(text, enter);
-            client.send(ClientToDaemon::WritePane { pane_id, data })?;
+            client.send(ClientToDaemon::WritePane {
+                session_id,
+                pane_id,
+                data,
+            })?;
             println!("{{\"ok\":true}}");
             Ok(())
         }
@@ -111,7 +117,7 @@ fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<CliComm
             Ok(CliCommand::Sessions)
         }
         "panes" => {
-            let session_id = parse_required_uuid_flag(&tokens[1..], "--session")?;
+            let session_id = parse_optional_session_flag_or_env(&tokens[1..], "panes")?;
             Ok(CliCommand::Panes { session_id })
         }
         "read" => parse_read(&tokens[1..]),
@@ -142,12 +148,15 @@ fn parse_read(tokens: &[String]) -> Result<CliCommand> {
     }
 
     Ok(CliCommand::Read {
-        session_id: session_id.ok_or_else(|| usage_error("read requires --session <uuid>"))?,
+        session_id: session_id
+            .or_else(session_id_from_env)
+            .ok_or_else(|| usage_error("read requires --session <uuid> or AWT_SESSION_ID"))?,
         pane_id: pane_id.ok_or_else(|| usage_error("read requires --pane <uuid>"))?,
     })
 }
 
 fn parse_write(tokens: &[String]) -> Result<CliCommand> {
+    let mut session_id = None;
     let mut pane_id = None;
     let mut text = None;
     let mut enter = false;
@@ -155,6 +164,11 @@ fn parse_write(tokens: &[String]) -> Result<CliCommand> {
 
     while index < tokens.len() {
         match tokens[index].as_str() {
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                session_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
             "--pane" => {
                 let value = next_flag_value(tokens, index, "--pane")?;
                 pane_id = Some(parse_uuid(value)?);
@@ -173,17 +187,27 @@ fn parse_write(tokens: &[String]) -> Result<CliCommand> {
     }
 
     Ok(CliCommand::Write {
+        session_id: session_id
+            .or_else(session_id_from_env)
+            .ok_or_else(|| usage_error("write requires --session <uuid> or AWT_SESSION_ID"))?,
         pane_id: pane_id.ok_or_else(|| usage_error("write requires --pane <uuid>"))?,
         text: text.ok_or_else(|| usage_error("write requires --text <text>"))?,
         enter,
     })
 }
 
-fn parse_required_uuid_flag(tokens: &[String], flag: &str) -> Result<Uuid> {
-    if tokens.len() != 2 || tokens[0] != flag {
-        bail!("usage: expected {flag} <uuid>\n{}", usage());
+fn parse_optional_session_flag_or_env(tokens: &[String], command: &str) -> Result<Uuid> {
+    if tokens.is_empty() {
+        return session_id_from_env().ok_or_else(|| {
+            usage_error(&format!(
+                "{command} requires --session <uuid> or AWT_SESSION_ID"
+            ))
+        });
     }
-    parse_uuid(&tokens[1])
+    if tokens.len() == 2 && tokens[0] == "--session" {
+        return parse_uuid(&tokens[1]);
+    }
+    bail!("usage: expected --session <uuid>\n{}", usage());
 }
 
 fn expect_no_extra(tokens: &[String]) -> Result<()> {
@@ -212,7 +236,13 @@ fn print_usage(mut writer: impl Write) -> Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  app.exe cli sessions\n  app.exe cli panes --session <session-id>\n  app.exe cli read --session <session-id> --pane <pane-id>\n  app.exe cli write --pane <pane-id> --text <text> [--enter]"
+    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]"
+}
+
+fn session_id_from_env() -> Option<Uuid> {
+    std::env::var("AWT_SESSION_ID")
+        .ok()
+        .and_then(|value| parse_uuid(&value).ok())
 }
 
 fn write_payload(text: String, enter: bool) -> Vec<u8> {
@@ -295,10 +325,13 @@ mod tests {
 
     #[test]
     fn parse_write_accepts_enter_flag() {
+        let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
         let parsed = parse_args([
             "cli",
             "write",
+            "--session",
+            &session_id.to_string(),
             "--pane",
             &pane_id.to_string(),
             "--text",
@@ -310,6 +343,7 @@ mod tests {
         assert_eq!(
             parsed,
             CliCommand::Write {
+                session_id,
                 pane_id,
                 text: "pwd".to_string(),
                 enter: true,

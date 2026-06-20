@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
+import { ProfileIcon } from './ProfileIcon'
+import { profileIconNames } from '../state/profileIcons'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
-import { normalizeFontChoices } from '../state/fonts'
+import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
 import { joinCommandLine, splitCommandLine, type Profile, type ProfileKind, type Settings } from '../state/profiles'
 import { terminalThemes } from '../state/terminalThemes'
 
@@ -12,10 +14,11 @@ type SettingsDialogProps = {
   onClose: () => void
 }
 
-type SettingsSection = 'appearance' | 'profiles' | 'theme' | 'keybindings'
+type SettingsSection = 'appearance' | 'layout' | 'profiles' | 'theme' | 'keybindings'
 
 const sectionLabels: Record<SettingsSection, string> = {
   appearance: 'Appearance',
+  layout: 'Layout',
   profiles: 'Profiles',
   theme: 'Theme',
   keybindings: 'Keybindings',
@@ -23,6 +26,7 @@ const sectionLabels: Record<SettingsSection, string> = {
 
 const sectionDescriptions: Record<SettingsSection, string> = {
   appearance: 'Font and scrollback',
+  layout: 'Pane resize',
   profiles: 'Shell, SSH, commands',
   theme: 'Color palettes',
   keybindings: 'Shortcuts',
@@ -90,11 +94,10 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="settings-dialog-header">
           <div>
-            <p className="settings-eyebrow">Control deck</p>
             <h2 id="settings-title">Settings</h2>
           </div>
           <button type="button" className="settings-close" title="Close settings" onClick={onClose}>
-            <X size={16} />
+            <X size={14} />
           </button>
         </header>
 
@@ -116,7 +119,7 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                     <h3>Terminal appearance</h3>
                     <p>Font, scrollback, scrollbar, and accent apply when you press Apply or OK.</p>
                   </div>
-                  <div className="settings-preview" style={{ fontFamily: draft.fontFamily, fontWeight: draft.terminalFontWeight }}>
+                  <div className="settings-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>
                     <span>PS E:\\repo&gt;</span>
                     <strong style={{ fontWeight: Math.min(900, Math.max(draft.terminalFontWeight, 700)) }}> 한글 │ Nerd Font ✓</strong>
                   </div>
@@ -171,6 +174,18 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
               </>
             ) : null}
 
+            {activeSection === 'layout' ? (
+              <section className="settings-card">
+                <h3>Pane resize</h3>
+                <div className="settings-grid-4">
+                  <label>
+                    Snap distance
+                    <input type="number" min="0" max="128" step="1" value={draft.resizeSnapTolerance} onChange={(event) => patchDraft({ resizeSnapTolerance: Number(event.target.value) })} />
+                  </label>
+                </div>
+              </section>
+            ) : null}
+
             {activeSection === 'profiles' && editingProfile ? (
               <section className="settings-card profile-editor-card">
                 <div className="settings-card-heading">
@@ -189,7 +204,7 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                   <div className="profile-list" aria-label="Terminal profiles">
                     {draft.profiles.map((profile) => (
                       <button key={profile.id} type="button" className={profile.id === editingProfile.id ? 'selected' : ''} onClick={() => setEditingProfileId(profile.id)}>
-                        <span className="profile-list-swatch" style={{ backgroundColor: profile.color, color: profile.color }} />
+                        <span className="profile-list-icon" style={{ color: profile.color }}><ProfileIcon name={profile.icon} size={18} /></span>
                         <span>
                           <strong>{profile.name}</strong>
                           <small>{profileKindLabels[profile.type]}{profile.id === draft.defaultProfileId ? ' · default' : ''}</small>
@@ -216,10 +231,24 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                         Color
                         <input type="color" value={editingProfile.color} onChange={(event) => updateProfile(editingProfile.id, { color: event.target.value })} />
                       </label>
-                      <label>
-                        Icon
-                        <input value={editingProfile.icon} onChange={(event) => updateProfile(editingProfile.id, { icon: event.target.value })} />
-                      </label>
+                    </div>
+                    <div className="icon-picker">
+                      <span className="icon-picker-label">Icon</span>
+                      <div className="icon-picker-grid">
+                        {profileIconNames.map((name) => (
+                          <button
+                            key={name}
+                            type="button"
+                            className={editingProfile.icon === name ? 'selected' : ''}
+                            style={editingProfile.icon === name ? { color: editingProfile.color } : undefined}
+                            title={name}
+                            aria-label={name}
+                            onClick={() => updateProfile(editingProfile.id, { icon: name })}
+                          >
+                            <ProfileIcon name={name} size={16} />
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="settings-grid-3">
@@ -241,7 +270,7 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                           </label>
                           <label>
                             Arguments
-                            <input value={joinCommandLine(editingProfile.args)} placeholder="--flag value" onChange={(event) => updateProfile(editingProfile.id, { args: splitCommandLine(event.target.value) })} />
+                            <input key={editingProfile.id} defaultValue={joinCommandLine(editingProfile.args)} placeholder="--flag value" onChange={(event) => updateProfile(editingProfile.id, { args: splitCommandLine(event.target.value) })} />
                           </label>
                         </div>
                       </div>
@@ -271,6 +300,10 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                         <label>
                           Extra SSH options
                           <input value={editingProfile.sshOptions} placeholder="-o ServerAliveInterval=30" onChange={(event) => updateProfile(editingProfile.id, { sshOptions: event.target.value })} />
+                        </label>
+                        <label>
+                          Remote folder
+                          <input value={editingProfile.sshRemoteCwd ?? ''} placeholder="/home/me/project" onChange={(event) => updateProfile(editingProfile.id, { sshRemoteCwd: event.target.value.trim() || null })} />
                         </label>
                         <label>
                           Remote command
@@ -388,6 +421,7 @@ function createProfile(type: ProfileKind, existing: Profile[]): Profile {
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, joinCommandLine, normalizeSettings, paneOverridesFromProfile, selectedProfile, splitCommandLine } from './profiles'
+import { defaultSettings, joinCommandLine, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine } from './profiles'
 
 describe('terminal profiles', () => {
   test('normalizes empty settings with a default profile', () => {
@@ -14,6 +14,40 @@ describe('terminal profiles', () => {
     const profileNames = normalizeSettings(null).profiles.map((profile) => profile.name)
 
     expect(profileNames).toEqual(expect.arrayContaining(['Shell', 'PowerShell', 'CMD', 'Claude', 'Codex', 'OMP']))
+  })
+
+  test('runs local agent tools inside PowerShell and resets terminal modes on exit', () => {
+    const settings = normalizeSettings(null)
+
+    expect(paneOverridesFromProfile(selectedProfile(settings))).toMatchObject({ shell: 'pwsh.exe', args: ['-NoLogo'] })
+    const codex = paneOverridesFromProfile(profileById(settings, 'codex'))
+    expect(codex.shell).toBe('pwsh.exe')
+    expect(codex.args.slice(0, 3)).toEqual(['-NoLogo', '-NoExit', '-Command'])
+    expect(codex.args[3]).toContain('& codex')
+    expect(codex.args[3]).toContain('finally')
+    expect(codex.args[3]).toContain('`e[?1049l')
+    expect(codex.title).toBe('Codex')
+  })
+
+  test('upgrades stored default agent profiles to reset terminal modes', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'codex',
+      profiles: [{ id: 'codex', name: 'Codex', shell: 'pwsh.exe', args: ['-NoLogo', '-NoExit', '-Command', 'codex'] }],
+    })
+
+    const codex = paneOverridesFromProfile(selectedProfile(settings))
+    expect(codex.args.slice(0, 3)).toEqual(['-NoLogo', '-NoExit', '-Command'])
+    expect(codex.args[3]).toContain('& codex')
+    expect(codex.args[3]).toContain('`e[?1049l')
+  })
+
+  test('keeps customized agent profile commands unchanged', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'codex',
+      profiles: [{ id: 'codex', name: 'Codex', shell: 'pwsh.exe', args: ['-NoLogo', '-NoExit', '-Command', 'codex --resume'] }],
+    })
+
+    expect(paneOverridesFromProfile(selectedProfile(settings)).args).toEqual(['-NoLogo', '-NoExit', '-Command', 'codex --resume'])
   })
 
   test('migrates legacy flat shell into the default profile only', () => {
@@ -43,8 +77,23 @@ describe('terminal profiles', () => {
     expect(fallback.terminalThemeId).toBe(defaultSettings.terminalThemeId)
   })
 
+  test('normalizes workspace specific profile defaults', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'powershell',
+      workspaceProfileIds: {
+        'session-a': 'codex',
+        'session-b': 'missing',
+      },
+    })
+
+    expect(settings.workspaceProfileIds).toEqual({ 'session-a': 'codex' })
+    expect(selectedProfileForWorkspace(settings, 'session-a').id).toBe('codex')
+    expect(selectedProfileForWorkspace(settings, 'session-b').id).toBe('powershell')
+  })
+
   test('normalizes terminal scrollbar visibility setting', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
+    expect(defaultSettings.terminalScrollbarVisible).toBe(false)
     expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
   })
 
@@ -53,6 +102,12 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ terminalFontWeight: 1200 }).terminalFontWeight).toBe(defaultSettings.terminalFontWeight)
     expect(normalizeSettings({ uiScale: 1.1 }).uiScale).toBe(1.1)
     expect(normalizeSettings({ uiScale: 3 }).uiScale).toBe(defaultSettings.uiScale)
+  })
+
+  test('normalizes pane resize snap tolerance', () => {
+    expect(normalizeSettings({ resizeSnapTolerance: 48 }).resizeSnapTolerance).toBe(48)
+    expect(normalizeSettings({ resizeSnapTolerance: -1 }).resizeSnapTolerance).toBe(defaultSettings.resizeSnapTolerance)
+    expect(normalizeSettings({ resizeSnapTolerance: 200 }).resizeSnapTolerance).toBe(defaultSettings.resizeSnapTolerance)
   })
 
   test('builds pane config fields from selected profile', () => {
@@ -95,6 +150,7 @@ describe('terminal profiles', () => {
           sshPort: 2222,
           sshIdentityFile: 'C:/Users/me/.ssh/id_ed25519',
           sshRemoteCommand: 'tmux attach || tmux',
+          sshRemoteCwd: '/srv/app repo',
           sshOptions: '-o ServerAliveInterval=30',
           sshAllocateTty: true,
           env: [],
@@ -116,7 +172,7 @@ describe('terminal profiles', () => {
         '-i',
         'C:/Users/me/.ssh/id_ed25519',
         'deploy@box.example.com',
-        'tmux attach || tmux',
+        "cd -- '/srv/app repo' && tmux attach || tmux",
       ],
       env: [],
       cwd: null,

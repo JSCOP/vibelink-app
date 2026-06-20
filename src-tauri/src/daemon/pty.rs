@@ -1,11 +1,14 @@
-use crate::daemon::scrollback::ScrollbackRing;
+use crate::daemon::{paths, scrollback::ScrollbackRing};
 use crate::protocol::{PaneConfig, PaneMeta};
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::{
+    env,
+    ffi::OsString,
     io::{Read, Write},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    process::Command,
+    sync::{Arc, Mutex, OnceLock},
 };
 use uuid::Uuid;
 
@@ -34,6 +37,7 @@ impl Pane {
     pub fn spawn(mut config: PaneConfig) -> Result<SpawnedPane> {
         config.cols = config.cols.max(1);
         config.rows = config.rows.max(1);
+        config.env = with_runtime_agent_env(config.env);
 
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -49,6 +53,10 @@ impl Pane {
         }
         if let Some(cwd) = &config.cwd {
             command.cwd(cwd);
+        }
+        #[cfg(windows)]
+        if let Some(path) = windows_effective_path() {
+            command.env("PATH", path);
         }
         for (key, value) in &config.env {
             command.env(key, value);
@@ -204,6 +212,26 @@ fn command_builder(config: &PaneConfig) -> CommandBuilder {
     CommandBuilder::new(command_program(config, default_shell))
 }
 
+fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut next: Vec<_> = env
+        .into_iter()
+        .filter(|(key, _)| {
+            !key.eq_ignore_ascii_case("AWT_APP_EXE") && !key.eq_ignore_ascii_case("AWT_APP_FLAVOR")
+        })
+        .collect();
+    if let Ok(exe) = env::current_exe() {
+        next.push((
+            "AWT_APP_EXE".to_string(),
+            exe.to_string_lossy().into_owned(),
+        ));
+    }
+    next.push((
+        "AWT_APP_FLAVOR".to_string(),
+        paths::app_flavor().to_string(),
+    ));
+    next
+}
+
 pub(crate) fn command_program<F>(config: &PaneConfig, default: F) -> String
 where
     F: FnOnce() -> String,
@@ -266,7 +294,7 @@ fn program_on_path(program: &str) -> Option<PathBuf> {
         windows_path_extensions()
     };
 
-    std::env::var_os("PATH").and_then(|path| {
+    windows_effective_path().and_then(|path| {
         std::env::split_paths(&path).find_map(|dir| {
             let direct = dir.join(program);
             if direct.is_file() {
@@ -336,9 +364,128 @@ fn system_root_program(relative: &str) -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
+#[cfg(windows)]
+fn windows_effective_path() -> Option<OsString> {
+    static PATH: OnceLock<Option<OsString>> = OnceLock::new();
+    PATH.get_or_init(build_windows_effective_path).clone()
+}
+
+#[cfg(windows)]
+fn build_windows_effective_path() -> Option<OsString> {
+    let mut paths = Vec::new();
+    push_path_list(&mut paths, env::var("PATH").ok().as_deref());
+    push_path_list(
+        &mut paths,
+        read_registry_string(
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            "Path",
+        )
+        .as_deref(),
+    );
+    push_path_list(
+        &mut paths,
+        read_registry_string(r"HKCU\Environment", "Path").as_deref(),
+    );
+
+    if let Ok(appdata) = env::var("APPDATA") {
+        push_path(&mut paths, format!(r"{appdata}\npm"));
+    }
+    if let Ok(localappdata) = env::var("LOCALAPPDATA") {
+        push_path(&mut paths, format!(r"{localappdata}\pnpm"));
+    }
+    if let Ok(userprofile) = env::var("USERPROFILE") {
+        push_path(&mut paths, format!(r"{userprofile}\.cargo\bin"));
+    }
+
+    (!paths.is_empty()).then(|| OsString::from(paths.join(";")))
+}
+
+#[cfg(windows)]
+fn push_path_list(paths: &mut Vec<String>, value: Option<&str>) {
+    if let Some(value) = value {
+        for path in value.split(';') {
+            push_path(paths, expand_env_vars(path.trim()));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn push_path(paths: &mut Vec<String>, path: String) {
+    let normalized = path.trim().trim_matches('"');
+    if normalized.is_empty() {
+        return;
+    }
+    if paths
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(normalized))
+    {
+        return;
+    }
+    paths.push(normalized.to_string());
+}
+
+#[cfg(windows)]
+fn read_registry_string(hive: &str, value: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new("reg.exe")
+        .args(["query", hive, "/v", value])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| parse_registry_value_line(line, value))
+}
+
+#[cfg(windows)]
+fn parse_registry_value_line(line: &str, value: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.get(..value.len())?.eq_ignore_ascii_case(value) {
+        return None;
+    }
+    let rest = trimmed[value.len()..].trim_start();
+    let rest = rest
+        .strip_prefix("REG_EXPAND_SZ")
+        .or_else(|| rest.strip_prefix("REG_SZ"))?
+        .trim_start();
+    Some(expand_env_vars(rest))
+}
+
+#[cfg(windows)]
+fn expand_env_vars(value: &str) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            expanded.push('%');
+            expanded.push_str(after_start);
+            return expanded;
+        };
+        let key = &after_start[..end];
+        if let Ok(replacement) = env::var(key) {
+            expanded.push_str(&replacement);
+        } else {
+            expanded.push('%');
+            expanded.push_str(key);
+            expanded.push('%');
+        }
+        rest = &after_start[end + 1..];
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
 #[cfg(not(windows))]
-fn program_on_path(_program: &str) -> bool {
-    false
+fn program_on_path(_program: &str) -> Option<PathBuf> {
+    None
 }
 
 #[cfg(test)]
@@ -355,6 +502,31 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn registry_path_lines_are_expanded() {
+        let userprofile = env::var("USERPROFILE").expect("USERPROFILE set");
+
+        assert_eq!(
+            parse_registry_value_line(
+                r"    Path    REG_EXPAND_SZ    %USERPROFILE%\AppData\Roaming\npm",
+                "Path"
+            ),
+            Some(format!(r"{userprofile}\AppData\Roaming\npm"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn push_path_deduplicates_case_insensitively() {
+        let mut paths = Vec::new();
+
+        push_path(&mut paths, r"C:\Tools".to_string());
+        push_path(&mut paths, r"c:\tools".to_string());
+
+        assert_eq!(paths, vec![r"C:\Tools".to_string()]);
+    }
+
     #[test]
     fn default_shell_fallback_is_used_when_shell_missing() {
         let cfg = test_config(None);
@@ -363,6 +535,27 @@ mod tests {
             command_program(&cfg, || "fallback-shell".to_string()),
             "fallback-shell"
         );
+    }
+
+    #[test]
+    fn runtime_agent_env_records_current_binary_and_flavor() {
+        let entries = with_runtime_agent_env(vec![
+            ("AWT_APP_EXE".to_string(), "wrong.exe".to_string()),
+            ("OTHER".to_string(), "value".to_string()),
+        ]);
+
+        let expected_exe = env::current_exe()
+            .expect("current exe")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
+        assert!(entries.contains(&("AWT_APP_EXE".to_string(), expected_exe)));
+        assert!(entries.contains(&(
+            "AWT_APP_FLAVOR".to_string(),
+            paths::app_flavor().to_string()
+        )));
+        assert!(!entries.contains(&("AWT_APP_EXE".to_string(), "wrong.exe".to_string())));
     }
 
     #[test]
@@ -393,6 +586,7 @@ mod tests {
             cwd: None,
             env: vec![],
             title: None,
+            icon: None,
             cols: 80,
             rows: 24,
         }

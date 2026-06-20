@@ -277,6 +277,7 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         cwd: case.cwd.clone(),
         env: case.env.clone(),
         title: Some(case.name.clone()),
+        icon: None,
         cols: 80,
         rows: 24,
     };
@@ -304,8 +305,11 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         other => bail!("unexpected spawn response: {other:?}"),
     }
 
-    daemon.send(&ClientToDaemon::AttachPane { pane_id })?;
-    let output = collect_output(daemon, pane_id, &case.expected)
+    daemon.send(&ClientToDaemon::AttachPane {
+        session_id,
+        pane_id,
+    })?;
+    let output = collect_output(daemon, session_id, pane_id, &case.expected)
         .with_context(|| format!("capture output for {}", case.name))?;
     Ok(sample_output(&output))
 }
@@ -334,6 +338,7 @@ fn request_reply(
 
 fn collect_output(
     daemon: &mut DaemonConnection,
+    session_id: Uuid,
     pane_id: Uuid,
     expected: &ExpectedOutput,
 ) -> Result<String> {
@@ -351,6 +356,7 @@ fn collect_output(
                     .any(|window| window == b"\x1b[6n")
                 {
                     daemon.send(&ClientToDaemon::WritePane {
+                        session_id,
                         pane_id,
                         data: b"\x1b[1;1R".to_vec(),
                     })?;

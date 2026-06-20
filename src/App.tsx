@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { DockviewApi } from 'dockview-react'
-import { Grid3X3, AlertTriangle, Settings2, TerminalSquare, Eraser } from 'lucide-react'
+import { AlertTriangle, Settings2, TerminalSquare, Eraser, LayoutGrid } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
+import { NewTerminalLauncher } from './components/NewTerminalLauncher'
 import { SettingsDialog } from './components/SettingsDialog'
+import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
-import { TEMPLATES } from './layout/templates'
 import { startTerminalOutputStream } from './ipc/output'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
-import { selectedProfile } from './state/profiles'
+import { selectedProfileForWorkspace } from './state/profiles'
+import { ProfileIcon } from './components/ProfileIcon'
 import './styles/theme.css'
 import './App.css'
 
@@ -18,8 +20,10 @@ function App() {
   const apiRef = useRef<DockviewApi | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [isTerminalLauncherOpen, setIsTerminalLauncherOpen] = useState(false)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const [pendingTemplate, setPendingTemplate] = useState<{ sessionId: string; templateId: string; requestId: number } | null>(null)
+  const [arrangeRequestId, setArrangeRequestId] = useState(0)
+  const [pendingTemplate, setPendingTemplate] = useState<{ sessionId: string; templateId?: string; cols: number; rows: number; profileId?: string | null; requestId: number } | null>(null)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const status = useWorkspaceStore((state) => state.status)
@@ -28,14 +32,15 @@ function App() {
   const createSession = useWorkspaceStore((state) => state.createSession)
   const renameSession = useWorkspaceStore((state) => state.renameSession)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
-  const attachSession = useWorkspaceStore((state) => state.attachSession)
+  const openSession = useWorkspaceStore((state) => state.openSession)
   const saveLayout = useWorkspaceStore((state) => state.saveLayout)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
   const clearSession = useWorkspaceStore((state) => state.clearSession)
   const settings = useWorkspaceStore((state) => state.settings)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
-  const activeProfile = selectedProfile(settings)
+  const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
+  const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('awt:lastActiveSessionId'))
 
   useEffect(() => {
     void startTerminalOutputStream().then(bootstrap).catch((caught) => {
@@ -59,12 +64,13 @@ function App() {
     if (currentSessionId && apiRef.current) {
       void saveLayout(currentSessionId, JSON.stringify(apiRef.current.toJSON()))
     }
-    void attachSession(sessionId)
+    void openSession(sessionId)
   }
 
-  const createWorkspace = async (name: string, templateId: string, workspaceFolder: string | null) => {
-    const created = await createSession(name || undefined, workspaceFolder)
-    setPendingTemplate({ sessionId: created.id, templateId, requestId: Date.now() })
+  const createWorkspace = async (name: string, templateId: string, workspaceFolder: string | null, profileId: string) => {
+    const created = await createSession(name || undefined, workspaceFolder, profileId)
+    const template = templateFromId(templateId)
+    setPendingTemplate({ sessionId: created.id, templateId, cols: template.cols, rows: template.rows, profileId, requestId: Date.now() })
     setIsCreateOpen(false)
   }
 
@@ -97,41 +103,13 @@ function App() {
           <div className="workspace-crumb-box">
             <div className="crumb">WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
           </div>
-          <div className="topbar-template-strip" aria-label="Workspace templates">
-            <span><Grid3X3 size={14} /> Templates</span>
-            <div className="template-buttons compact">
-              {TEMPLATES.map((template) => (
-                <button
-                  key={template.id}
-                  type="button"
-                  disabled={!activeSessionId}
-                  onClick={() => {
-                    if (!activeSessionId) return
-                    setPendingTemplate({ sessionId: activeSessionId, templateId: template.id, requestId: Date.now() })
-                  }}
-                >
-                  {template.label}
-                </button>
-              ))}
-            </div>
-          </div>
           <div className="topbar-spacer" />
-          <label className="setting-inline">
-            Font
-            <input
-              type="number"
-              min="10"
-              max="22"
-              value={settings.fontSize}
-              onChange={(event) => updateSettings({ fontSize: Number(event.target.value) })}
-            />
-          </label>
           <label className="setting-inline profile-setting">
             Profile
-            <span className="profile-swatch" aria-hidden="true" style={{ backgroundColor: activeProfile.color, color: activeProfile.color }} />
+            <span className="profile-swatch" aria-hidden="true" style={{ color: activeProfile.color }}><ProfileIcon name={activeProfile.icon} size={14} /></span>
             <select
               aria-label="Active terminal profile"
-              value={settings.defaultProfileId}
+              value={activeProfile.id}
               onChange={(event) => setDefaultProfile(event.target.value)}
             >
               {settings.profiles.map((profile) => (
@@ -142,6 +120,20 @@ function App() {
           <button type="button" className="topbar-text-button" disabled={!activeSessionId} title="Clear workspace terminal buffers" onClick={() => void clearWorkspace()}>
             <Eraser size={14} /> Clear
           </button>
+          <button type="button" className="topbar-text-button" disabled={!activeSessionId} title="Arrange all panes" onClick={() => setArrangeRequestId(Date.now())}>
+            <LayoutGrid size={14} /> Align
+          </button>
+          <NewTerminalLauncher
+            isOpen={isTerminalLauncherOpen}
+            disabled={!activeSessionId}
+            onToggle={() => setIsTerminalLauncherOpen((open) => !open)}
+            onClose={() => setIsTerminalLauncherOpen(false)}
+            onLaunch={(request) => {
+              if (!activeSessionId) return
+              setPendingTemplate({ sessionId: activeSessionId, ...request, profileId: activeProfile.id, requestId: Date.now() })
+              setIsTerminalLauncherOpen(false)
+            }}
+          />
           <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
             <Settings2 size={16} />
           </button>
@@ -153,16 +145,34 @@ function App() {
           <WorkspaceView
             onApiReady={(api) => { apiRef.current = api }}
             pendingTemplate={pendingTemplate}
+            arrangeRequestId={arrangeRequestId}
+            resizeSnapTolerance={settings.resizeSnapTolerance}
             onTemplateApplied={(requestId) => {
               setPendingTemplate((current) => current?.requestId === requestId ? null : current)
             }}
           />
         )}
+        {status === 'ready' && !activeSessionId && !isCreateOpen ? (
+          <StartupWorkspaceDialog
+            sessions={sessions}
+            lastActiveSessionId={startupLastActiveSessionId}
+            onOpen={selectSession}
+            onCreate={() => setIsCreateOpen(true)}
+          />
+        ) : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
-        {isCreateOpen ? <WorkspaceCreateDialog onCreate={(name, templateId, workspaceFolder) => void createWorkspace(name, templateId, workspaceFolder)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, templateId, workspaceFolder, profileId) => void createWorkspace(name, templateId, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
       </section>
     </main>
   )
+}
+
+function templateFromId(templateId: string): { cols: number; rows: number } {
+  const [cols, rows] = templateId.split('x').map(Number)
+  return {
+    cols: Number.isFinite(cols) && cols > 0 ? cols : 1,
+    rows: Number.isFinite(rows) && rows > 0 ? rows : 1,
+  }
 }
 
 export default App

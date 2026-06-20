@@ -2,17 +2,21 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { TEMPLATES } from '../layout/templates'
+import type { Profile } from '../state/profiles'
 import { loadWorkspaceFolderHistory, rememberWorkspaceFolder, saveWorkspaceFolderHistory, toggleFavoriteWorkspaceFolder } from '../state/workspaceFolders'
 
 type WorkspaceCreateDialogProps = {
-  onCreate: (name: string, templateId: string, workspaceFolder: string | null) => void
+  profiles: Profile[]
+  defaultProfileId: string
+  onCreate: (name: string, templateId: string, workspaceFolder: string | null, profileId: string) => void
   onClose: () => void
 }
 
-export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDialogProps) {
+export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, onClose }: WorkspaceCreateDialogProps) {
   const [name, setName] = useState('')
   const [templateId, setTemplateId] = useState('2x2')
   const [workspaceFolder, setWorkspaceFolder] = useState('')
+  const [profileId, setProfileId] = useState(defaultProfileId)
   const [isPickingFolder, setIsPickingFolder] = useState(false)
   const [folderHistory, setFolderHistory] = useState(() => loadWorkspaceFolderHistory())
   const suggestedFolders = useMemo(() => {
@@ -27,7 +31,7 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
       setFolderHistory(nextHistory)
       saveWorkspaceFolderHistory(nextHistory)
     }
-    onCreate(name.trim(), templateId, normalizedFolder.length > 0 ? normalizedFolder : null)
+    onCreate(name.trim(), templateId, normalizedFolder.length > 0 ? normalizedFolder : null, profileId)
   }
 
   const browseFolder = async () => {
@@ -70,6 +74,15 @@ export function WorkspaceCreateDialog({ onCreate, onClose }: WorkspaceCreateDial
             <input value={workspaceFolder} placeholder="C:\\Users\\js or E:\\project" onChange={(event) => setWorkspaceFolder(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }} />
             <button type="button" onClick={() => void browseFolder()} disabled={isPickingFolder}>{isPickingFolder ? 'Opening…' : 'Browse'}</button>
           </div>
+        </label>
+
+        <label className="workspace-create-name">
+          Profile
+          <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+            {profiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>{profile.name}</option>
+            ))}
+          </select>
         </label>
 
         {suggestedFolders.length > 0 ? (

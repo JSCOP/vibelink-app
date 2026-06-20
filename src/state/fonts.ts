@@ -10,6 +10,27 @@ export const defaultFontChoices = [
   'monospace',
 ]
 
+export function terminalFontStack(fontFamily: string): string {
+  const choices: string[] = []
+  const seen = new Set<string>()
+  const add = (value: string): void => {
+    for (const font of splitFontFamilyList(value)) {
+      const normalized = normalizeFontName(font)
+      if (!normalized || seen.has(normalized.toLocaleLowerCase())) continue
+      seen.add(normalized.toLocaleLowerCase())
+      choices.push(normalized)
+    }
+  }
+
+  add(fontFamily)
+  for (const font of defaultFontChoices) add(font)
+  return choices.map(cssFontFamilyName).join(', ')
+}
+
+function cssFontFamilyName(font: string): string {
+  return /^[a-z-]+$/i.test(font) ? font : `'${font.replace(/'/g, "\\'")}'`
+}
+
 export function normalizeFontChoices(installedFonts: string[], currentFontFamily: string): string[] {
   const choices: string[] = []
   const seen = new Set<string>()

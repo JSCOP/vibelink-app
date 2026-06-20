@@ -53,6 +53,7 @@ mod tests {
                 cwd: Some("E:/work".to_string()),
                 env: vec![("A".to_string(), "B".to_string())],
                 title: Some("shell".to_string()),
+                icon: None,
                 cols: 100,
                 rows: 40,
             }],

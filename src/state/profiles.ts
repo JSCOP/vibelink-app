@@ -1,6 +1,7 @@
 import type { PaneConfig } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
+import { preferredFontFamily } from './fonts'
 
 export type ProfileKind = 'local' | 'ssh' | 'command'
 
@@ -16,6 +17,7 @@ export type Profile = {
   sshPort: number | null
   sshIdentityFile: string | null
   sshRemoteCommand: string
+  sshRemoteCwd: string | null
   sshOptions: string
   sshAllocateTty: boolean
   env: [string, string][]
@@ -33,9 +35,17 @@ export type Settings = {
   accent: string
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
+  resizeSnapTolerance: number
   profiles: Profile[]
   defaultProfileId: string
+  workspaceProfileIds: Record<string, string>
   keybindings: KeybindingSettings
+}
+
+const terminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
+
+function agentProfileArgs(command: string): string[] {
+  return ['-NoLogo', '-NoExit', '-Command', `try { & ${command} } finally { [Console]::Out.Write("${terminalModeResetSequence}") }`]
 }
 
 const defaultProfiles: Profile[] = [
@@ -43,14 +53,15 @@ const defaultProfiles: Profile[] = [
     id: 'default',
     name: 'Shell',
     type: 'local',
-    shell: null,
-    args: [],
+    shell: 'pwsh.exe',
+    args: ['-NoLogo'],
     command: '',
     sshHost: '',
     sshUser: '',
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],
@@ -70,6 +81,7 @@ const defaultProfiles: Profile[] = [
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],
@@ -89,6 +101,7 @@ const defaultProfiles: Profile[] = [
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],
@@ -100,14 +113,15 @@ const defaultProfiles: Profile[] = [
     id: 'claude',
     name: 'Claude',
     type: 'local',
-    shell: 'claude',
-    args: [],
+    shell: 'pwsh.exe',
+    args: agentProfileArgs('claude'),
     command: '',
     sshHost: '',
     sshUser: '',
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],
@@ -119,14 +133,15 @@ const defaultProfiles: Profile[] = [
     id: 'codex',
     name: 'Codex',
     type: 'local',
-    shell: 'codex',
-    args: [],
+    shell: 'pwsh.exe',
+    args: agentProfileArgs('codex'),
     command: '',
     sshHost: '',
     sshUser: '',
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],
@@ -138,14 +153,15 @@ const defaultProfiles: Profile[] = [
     id: 'omp',
     name: 'OMP',
     type: 'local',
-    shell: 'omp',
-    args: [],
+    shell: 'pwsh.exe',
+    args: agentProfileArgs('omp'),
     command: '',
     sshHost: '',
     sshUser: '',
     sshPort: null,
     sshIdentityFile: null,
     sshRemoteCommand: '',
+    sshRemoteCwd: null,
     sshOptions: '',
     sshAllocateTty: true,
     env: [],
@@ -158,16 +174,18 @@ const defaultProfiles: Profile[] = [
 const defaultProfile = defaultProfiles[0]
 
 export const defaultSettings: Settings = {
-  fontFamily: 'D2CodingLigature Nerd Font Mono',
+  fontFamily: preferredFontFamily,
   fontSize: 11,
   scrollback: 5000,
   terminalFontWeight: 400,
   uiScale: 1,
   accent: '#7ee787',
   terminalThemeId: defaultTerminalThemeId,
-  terminalScrollbarVisible: true,
+  terminalScrollbarVisible: false,
+  resizeSnapTolerance: 32,
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
+  workspaceProfileIds: {},
   keybindings: { ...defaultKeybindings },
 }
 
@@ -177,6 +195,7 @@ export function normalizeSettings(value: unknown): Settings {
   const profiles = normalizeProfiles(record?.profiles, legacyShell)
   const requestedProfileId = readString(record?.defaultProfileId, profiles[0].id)
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
+  const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
 
   return {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
@@ -187,14 +206,25 @@ export function normalizeSettings(value: unknown): Settings {
     accent: readString(record?.accent, defaultSettings.accent),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
+    resizeSnapTolerance: readNumberInRange(record?.resizeSnapTolerance, defaultSettings.resizeSnapTolerance, 0, 128),
     profiles,
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
+    workspaceProfileIds,
   }
 }
 
 export function selectedProfile(settings: Settings): Profile {
   return settings.profiles.find((profile) => profile.id === settings.defaultProfileId) ?? settings.profiles[0]
+}
+
+export function selectedProfileForWorkspace(settings: Settings, sessionId?: string | null): Profile {
+  const profileId = sessionId ? settings.workspaceProfileIds[sessionId] : undefined
+  return profileById(settings, profileId)
+}
+
+export function profileById(settings: Settings, profileId?: string | null): Profile {
+  return settings.profiles.find((profile) => profile.id === profileId) ?? selectedProfile(settings)
 }
 
 export function paneOverridesFromProfile(profile: Profile, title?: string): Pick<PaneConfig, 'shell' | 'args' | 'cwd' | 'env' | 'title'> {
@@ -222,19 +252,23 @@ function normalizeProfile(value: unknown, index: number): Profile {
   const fallbackId = index === 0 ? defaultProfile.id : `${defaultProfile.id}-${index + 1}`
   const id = readString(record?.id, fallbackId).trim() || fallbackId
   const name = readString(record?.name, id === defaultProfile.id ? defaultProfile.name : id).trim() || defaultProfile.name
+  const type = readProfileKind(record?.type)
+
+  const args = readStringArray(record?.args)
 
   return {
     id,
     name,
-    type: readProfileKind(record?.type),
+    type,
     shell: readNullableString(record?.shell, defaultProfile.shell),
-    args: readStringArray(record?.args),
+    args: type === 'local' ? normalizeAgentProfileArgs(id, args) : args,
     command: readString(record?.command, defaultProfile.command),
     sshHost: readString(record?.sshHost, defaultProfile.sshHost),
     sshUser: readString(record?.sshUser, defaultProfile.sshUser),
     sshPort: readNullablePort(record?.sshPort, defaultProfile.sshPort),
     sshIdentityFile: readNullableString(record?.sshIdentityFile, defaultProfile.sshIdentityFile),
     sshRemoteCommand: readString(record?.sshRemoteCommand, defaultProfile.sshRemoteCommand),
+    sshRemoteCwd: readNullableString(record?.sshRemoteCwd, defaultProfile.sshRemoteCwd),
     sshOptions: readString(record?.sshOptions, defaultProfile.sshOptions),
     sshAllocateTty: readBoolean(record?.sshAllocateTty, defaultProfile.sshAllocateTty),
     env: readEnv(record?.env),
@@ -252,6 +286,16 @@ function cloneProfiles(profiles: Profile[]): Profile[] {
   }))
 }
 
+function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Record<string, string> {
+  if (!isRecord(value)) return {}
+  const profileIds = new Set(profiles.map((profile) => profile.id))
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, string] => entry[0].trim().length > 0 && typeof entry[1] === 'string' && profileIds.has(entry[1]),
+    ),
+  )
+}
+
 function commandFromProfile(profile: Profile): Pick<PaneConfig, 'shell' | 'args'> {
   if (profile.type === 'ssh') {
     return { shell: 'ssh', args: sshArgsFromProfile(profile) }
@@ -263,6 +307,29 @@ function commandFromProfile(profile: Profile): Pick<PaneConfig, 'shell' | 'args'
   }
 
   return { shell: profile.shell, args: [...profile.args] }
+}
+
+function normalizeAgentProfileArgs(id: string, args: string[]): string[] {
+  const command = defaultAgentCommand(id)
+  if (!command || !isLegacyAgentProfileArgs(args, command)) return args
+  return agentProfileArgs(command)
+}
+
+function defaultAgentCommand(id: string): string | null {
+  switch (id) {
+    case 'claude':
+      return 'claude'
+    case 'codex':
+      return 'codex'
+    case 'omp':
+      return 'omp'
+    default:
+      return null
+  }
+}
+
+function isLegacyAgentProfileArgs(args: string[], command: string): boolean {
+  return args.length === 4 && args[0] === '-NoLogo' && args[1] === '-NoExit' && args[2] === '-Command' && args[3] === command
 }
 
 function sshArgsFromProfile(profile: Profile): string[] {
@@ -277,9 +344,23 @@ function sshArgsFromProfile(profile: Profile): string[] {
   const user = profile.sshUser.trim()
   args.push(user.length > 0 ? `${user}@${host}` : host)
 
-  const remoteCommand = profile.sshRemoteCommand.trim()
+  const remoteCommand = remoteCommandFromProfile(profile)
   if (remoteCommand.length > 0) args.push(remoteCommand)
   return args
+}
+
+function remoteCommandFromProfile(profile: Profile): string {
+  const remoteCommand = profile.sshRemoteCommand.trim()
+  const remoteCwd = profile.sshRemoteCwd?.trim() ?? ''
+  if (remoteCwd.length === 0) return remoteCommand
+  const changeDirectory = `cd -- ${quoteRemoteShellArg(remoteCwd)}`
+  return remoteCommand.length > 0
+    ? `${changeDirectory} && ${remoteCommand}`
+    : `${changeDirectory} && exec "\${SHELL:-sh}" -l`
+}
+
+function quoteRemoteShellArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 export function splitCommandLine(input: string): string[] {

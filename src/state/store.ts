@@ -1,9 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import { create } from 'zustand'
 import type { AttachedSession, PaneConfig, PaneMeta, SessionMeta } from '../ipc/types'
-import { defaultSettings, normalizeSettings, paneOverridesFromProfile, selectedProfile } from './profiles'
+import { defaultSettings, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
+
+type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 
 type Status = 'booting' | 'ready' | 'error'
 
@@ -18,11 +20,12 @@ type WorkspaceState = {
   settings: Settings
   bootstrap: () => Promise<void>
   refreshSessions: () => Promise<void>
+  openSession: (sessionId: string) => Promise<AttachedSession>
   attachSession: (sessionId: string) => Promise<AttachedSession>
-  createSession: (name?: string, workspaceFolder?: string | null) => Promise<SessionMeta>
+  createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
   renameSession: (sessionId: string, name: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
-  spawnPane: (sessionId: string, overrides?: Partial<PaneConfig>) => Promise<PaneMeta>
+  spawnPane: (sessionId: string, overrides?: SpawnPaneOptions) => Promise<PaneMeta>
   closePane: (paneId: string) => Promise<void>
   saveLayout: (sessionId: string, layoutJson: string) => Promise<void>
   clearSession: (sessionId: string) => Promise<void>
@@ -50,14 +53,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         sessions = [created]
       }
 
-      const lastActive = window.localStorage.getItem('awt:lastActiveSessionId')
-      const target = sessions.find((session) => session.id === lastActive) ?? sessions[0]
-      const attached = await get().attachSession(target.id)
-      if (attached.panes.length === 0) {
-        await get().spawnPane(target.id)
-      }
-      await get().refreshSessions()
-      set({ status: 'ready' })
+      set({ sessions, activeSessionId: undefined, panes: {}, layoutJson: null, status: 'ready' })
     } catch (error) {
       set({ status: 'error', error: String(error) })
     }
@@ -68,6 +64,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ sessions })
   },
 
+  openSession: async (sessionId: string) => {
+    if (!get().sessions.some((session) => session.id === sessionId)) {
+      await get().refreshSessions()
+    }
+    const attached = await get().attachSession(sessionId)
+    if (attached.panes.length === 0) {
+      await get().spawnPane(sessionId)
+    }
+    await get().refreshSessions()
+    return attached
+  },
+
   attachSession: async (sessionId: string) => {
     const attached = await invoke<AttachedSession>('attach_session', { sessionId })
     const panes = Object.fromEntries(attached.panes.map((pane) => [pane.id, pane]))
@@ -76,13 +84,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return attached
   },
 
-  createSession: async (name?: string, workspaceFolder?: string | null) => {
+  createSession: async (name?: string, workspaceFolder?: string | null, profileId?: string | null) => {
     const fallbackName = `Workspace ${get().sessions.length + 1}`
     const normalizedFolder = normalizeWorkspaceFolder(workspaceFolder)
     const created = await invoke<SessionMeta>('create_session', { name: name ?? fallbackName, workspaceFolder: normalizedFolder })
     await get().refreshSessions()
     await get().attachSession(created.id)
-    await get().spawnPane(created.id)
+    await get().spawnPane(created.id, { profileId })
     return created
   },
 
@@ -106,13 +114,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  spawnPane: async (sessionId: string, overrides?: Partial<PaneConfig>) => {
+  spawnPane: async (sessionId: string, overrides?: SpawnPaneOptions) => {
     const paneId = overrides?.paneId ?? crypto.randomUUID()
-    const profileDefaults = paneOverridesFromProfile(selectedProfile(get().settings))
+    const profile = overrides && 'profileId' in overrides
+      ? profileById(get().settings, overrides.profileId)
+      : selectedProfileForWorkspace(get().settings, sessionId)
+    const profileDefaults = paneOverridesFromProfile(profile)
     const hasShellOverride = Boolean(overrides && 'shell' in overrides)
     const hasCwdOverride = Boolean(overrides && 'cwd' in overrides)
     const hasTitleOverride = Boolean(overrides && 'title' in overrides)
-    const sessionWorkspaceFolder = get().sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
+    const sessionWorkspaceFolder = profile.type === 'ssh' ? null : get().sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
     const cfg: PaneConfig = {
       paneId,
       shell: hasShellOverride ? overrides?.shell ?? null : profileDefaults.shell,
@@ -120,6 +131,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       cwd: hasCwdOverride ? overrides?.cwd ?? null : sessionWorkspaceFolder ?? profileDefaults.cwd,
       env: terminalAgentEnv(overrides?.env ? overrides.env.map(([key, value]) => [key, value]) : profileDefaults.env, sessionId, paneId),
       title: hasTitleOverride ? overrides?.title ?? null : profileDefaults.title,
+      icon: overrides?.icon ?? profile.icon,
       cols: overrides?.cols ?? 120,
       rows: overrides?.rows ?? 32,
     }
@@ -130,7 +142,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   closePane: async (paneId: string) => {
-    await invoke('close_pane', { paneId })
+    const sessionId = get().activeSessionId
+    if (!sessionId) return
+    await invoke('close_pane', { sessionId, paneId })
     set((state) => {
       const panes = { ...state.panes }
       delete panes[paneId]
@@ -147,7 +161,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
     const normalized = normalizePaneTitle(title)
     if (!normalized) return
-    await invoke('set_pane_title', { paneId, title: normalized })
+    const sessionId = get().activeSessionId
+    if (!sessionId) return
+    await invoke('set_pane_title', { sessionId, paneId, title: normalized })
     set((state) => {
       const pane = state.panes[paneId]
       if (!pane) return {}
@@ -188,14 +204,33 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ settings })
   },
   setDefaultProfile: (profileId: string) => {
-    get().updateSettings({ defaultProfileId: profileId })
+    const sessionId = get().activeSessionId
+    if (!sessionId) {
+      get().updateSettings({ defaultProfileId: profileId })
+      return
+    }
+    get().updateSettings({
+      workspaceProfileIds: {
+        ...get().settings.workspaceProfileIds,
+        [sessionId]: profileId,
+      },
+    })
   },
 }))
 
+const terminalCapabilityEnv: [string, string][] = [
+  ['TERM', 'xterm-256color'],
+  ['COLORTERM', 'truecolor'],
+  ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
+]
+
 function terminalAgentEnv(env: [string, string][], sessionId: string, paneId: string): [string, string][] {
   const withoutGenerated = env.filter(([key]) => key !== 'AWT_SESSION_ID' && key !== 'AWT_PANE_ID')
+  const capabilityKeys = new Set(withoutGenerated.map(([key]) => key.toUpperCase()))
+  const missingCapabilities = terminalCapabilityEnv.filter(([key]) => !capabilityKeys.has(key))
   return [
     ...withoutGenerated,
+    ...missingCapabilities,
     ['AWT_SESSION_ID', sessionId],
     ['AWT_PANE_ID', paneId],
   ]
