@@ -30,6 +30,7 @@ type DockviewLayoutLike = {
     width?: number
     height?: number
     orientation?: string
+    maximizedNode?: unknown
   }
 }
 
@@ -68,6 +69,7 @@ export function resizeConnectedBoundaryForPane(
   direction: ResizeDirection,
   amount: number,
   minSize = DEFAULT_MIN_SIZE,
+  snapTolerance = 0,
 ): unknown | null {
   const analysis = analyzeLayout(layout)
   if (!analysis) return null
@@ -88,7 +90,7 @@ export function resizeConnectedBoundaryForPane(
     ? { start: leaf.rect.y, end: leaf.rect.y + leaf.rect.height }
     : { start: leaf.rect.x, end: leaf.rect.x + leaf.rect.width }
 
-  return resizeConnectedBoundaryAt(layout, axis, coordinate, span.start, span.end, delta, minSize)
+  return resizeConnectedBoundaryAt(layout, axis, coordinate, span.start, span.end, delta, minSize, snapTolerance)
 }
 
 export function resizeConnectedBoundaryAt(
@@ -99,6 +101,7 @@ export function resizeConnectedBoundaryAt(
   end: number,
   delta: number,
   minSize = DEFAULT_MIN_SIZE,
+  snapTolerance = 0,
 ): unknown | null {
   const analysis = analyzeLayout(layout)
   if (!analysis) return null
@@ -111,7 +114,8 @@ export function resizeConnectedBoundaryAt(
   if (!root) return null
 
   const clampedDelta = clampDelta(root, selected, delta, minSize)
-  if (Math.abs(clampedDelta) < 1) return null
+  const snappedDelta = snapConnectedDelta(root, analysis.boundaries, selected, clampedDelta, minSize, snapTolerance)
+  if (Math.abs(snappedDelta) < 1) return null
 
   for (const boundary of selected) {
     const branch = nodeAtPath(root, boundary.path)
@@ -119,8 +123,8 @@ export function resizeConnectedBoundaryAt(
     const before = branch.data[boundary.index]
     const after = branch.data[boundary.index + 1]
     if (!before || !after) continue
-    before.size = Math.max(minSize, Math.round(before.size + clampedDelta))
-    after.size = Math.max(minSize, Math.round(after.size - clampedDelta))
+    before.size = Math.max(minSize, Math.round(before.size + snappedDelta))
+    after.size = Math.max(minSize, Math.round(after.size - snappedDelta))
   }
 
   return next
@@ -134,6 +138,7 @@ export function connectedResizeDeltaAt(
   end: number,
   delta: number,
   minSize = DEFAULT_MIN_SIZE,
+  snapTolerance = 0,
 ): number | null {
   const analysis = analyzeLayout(layout)
   if (!analysis) return null
@@ -144,7 +149,7 @@ export function connectedResizeDeltaAt(
   const root = (layout as DockviewLayoutLike).grid?.root
   if (!root) return null
 
-  return clampDelta(root, selected, delta, minSize)
+  return snapConnectedDelta(root, analysis.boundaries, selected, clampDelta(root, selected, delta, minSize), minSize, snapTolerance)
 }
 
 export function resizeSingleBoundaryAt(
@@ -156,11 +161,16 @@ export function resizeSingleBoundaryAt(
   minSize = DEFAULT_MIN_SIZE,
   snapTolerance = DEFAULT_SNAP_TOLERANCE,
 ): unknown | null {
-  const workingLayout = normalizeLayoutForSingleResize(layout, axis) ?? layout
+  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point)
+  if (!selectedHandle) return null
+
+  const workingLayout = normalizeLayoutForSingleResize(layout, axis, selectedHandle, snapTolerance)
+  if (!workingLayout) return null
+
   const analysis = analyzeLayout(workingLayout)
   if (!analysis) return null
 
-  const selected = selectSingleBoundary(analysis.boundaries, axis, coordinate, point)
+  const selected = selectSingleBoundary(analysis.boundaries, axis, selectedHandle.coordinate, point)
   if (!selected) return null
 
   const next = structuredClone(workingLayout) as DockviewLayoutLike
@@ -191,11 +201,16 @@ export function singleResizeDeltaAt(
   minSize = DEFAULT_MIN_SIZE,
   snapTolerance = DEFAULT_SNAP_TOLERANCE,
 ): number | null {
-  const workingLayout = normalizeLayoutForSingleResize(layout, axis) ?? layout
+  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point)
+  if (!selectedHandle) return null
+
+  const workingLayout = normalizeLayoutForSingleResize(layout, axis, selectedHandle, snapTolerance)
+  if (!workingLayout) return null
+
   const analysis = analyzeLayout(workingLayout)
   if (!analysis) return null
 
-  const selected = selectSingleBoundary(analysis.boundaries, axis, coordinate, point)
+  const selected = selectSingleBoundary(analysis.boundaries, axis, selectedHandle.coordinate, point)
   if (!selected) return null
 
   const root = (workingLayout as DockviewLayoutLike).grid?.root
@@ -210,20 +225,7 @@ export function singleResizeHandleAt(
   coordinate: number,
   point: number,
 ): ConnectedResizeHandle | null {
-  const workingLayout = normalizeLayoutForSingleResize(layout, axis) ?? layout
-  const analysis = analyzeLayout(workingLayout)
-  if (!analysis) return null
-
-  const selected = selectSingleBoundary(analysis.boundaries, axis, coordinate, point)
-  if (!selected) return null
-
-  return {
-    id: `single:${axis}:${Math.round(selected.coordinate)}:${Math.round(selected.start)}:${Math.round(selected.end)}`,
-    axis,
-    coordinate: selected.coordinate,
-    start: selected.start,
-    end: selected.end,
-  }
+  return selectSingleHandle(leafAdjacentResizeHandles(layout, axis), axis, coordinate, point)
 }
 
 export function connectedResizeHandles(layout: unknown): ConnectedResizeHandle[] {
@@ -233,22 +235,10 @@ export function connectedResizeHandles(layout: unknown): ConnectedResizeHandle[]
 }
 
 export function singleResizeHandles(layout: unknown): ConnectedResizeHandle[] {
-  const handles: ConnectedResizeHandle[] = []
-  for (const axis of ['x', 'y'] as const) {
-    const workingLayout = normalizeLayoutForSingleResize(layout, axis) ?? layout
-    const analysis = analyzeLayout(workingLayout)
-    if (!analysis) continue
-    for (const boundary of analysis.boundaries.filter((item) => item.axis === axis)) {
-      handles.push({
-        id: `single:${axis}:${Math.round(boundary.coordinate)}:${Math.round(boundary.start)}:${Math.round(boundary.end)}`,
-        axis,
-        coordinate: boundary.coordinate,
-        start: boundary.start,
-        end: boundary.end,
-      })
-    }
-  }
-  return handles
+  return [
+    ...leafAdjacentResizeHandles(layout, 'x'),
+    ...leafAdjacentResizeHandles(layout, 'y'),
+  ]
 }
 
 function analyzeLayout(layout: unknown): { leaves: LeafRect[]; boundaries: Boundary[] } | null {
@@ -256,7 +246,7 @@ function analyzeLayout(layout: unknown): { leaves: LeafRect[]; boundaries: Bound
   const root = layout.grid?.root
   const width = layout.grid?.width
   const height = layout.grid?.height
-  if (!root || !width || !height) return null
+  if (!root || !width || !height || layout.grid?.maximizedNode) return null
 
   const leaves: LeafRect[] = []
   const boundaries: Boundary[] = []
@@ -302,7 +292,12 @@ function collectLayout(
   }
 }
 
-function normalizeLayoutForSingleResize(layout: unknown, resizeAxis: SplitAxis): DockviewLayoutLike | null {
+function normalizeLayoutForSingleResize(
+  layout: unknown,
+  resizeAxis: SplitAxis,
+  selectedHandle: ConnectedResizeHandle,
+  snapTolerance: number,
+): DockviewLayoutLike | null {
   if (!isLayout(layout)) return null
   const grid = layout.grid
   const width = grid?.width
@@ -314,6 +309,61 @@ function normalizeLayoutForSingleResize(layout: unknown, resizeAxis: SplitAxis):
 
   const targetRootAxis = resizeAxis === 'x' ? 'y' : 'x'
   return rebuildRectangularLayout(layout, analysis.leaves, targetRootAxis, width, height)
+    ?? rebuildSlicedLayoutForSingleResize(layout, analysis.leaves, targetRootAxis, selectedHandle, width, height, snapTolerance)
+}
+
+function leafAdjacentResizeHandles(layout: unknown, axis: SplitAxis): ConnectedResizeHandle[] {
+  const analysis = analyzeLayout(layout)
+  if (!analysis) return []
+
+  const handles: ConnectedResizeHandle[] = []
+  const seen = new Set<string>()
+  for (let leftIndex = 0; leftIndex < analysis.leaves.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < analysis.leaves.length; rightIndex += 1) {
+      const handle = leafAdjacentResizeHandle(analysis.leaves[leftIndex], analysis.leaves[rightIndex], axis)
+      if (!handle) continue
+      if (!isSingleResizeHandleEligible(handle, analysis.boundaries)) continue
+      const key = `${handle.axis}:${Math.round(handle.coordinate)}:${Math.round(handle.start)}:${Math.round(handle.end)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      handles.push({ ...handle, id: `single:${key}` })
+    }
+  }
+
+  return handles.sort((a, b) => a.axis.localeCompare(b.axis)
+    || a.coordinate - b.coordinate
+    || a.start - b.start
+    || a.end - b.end)
+}
+
+function leafAdjacentResizeHandle(a: LeafRect, b: LeafRect, axis: SplitAxis): Omit<ConnectedResizeHandle, 'id'> | null {
+  if (axis === 'x') {
+    const aRight = a.rect.x + a.rect.width
+    const bRight = b.rect.x + b.rect.width
+    const coordinate = Math.abs(aRight - b.rect.x) <= COORDINATE_TOLERANCE
+      ? average([aRight, b.rect.x])
+      : Math.abs(bRight - a.rect.x) <= COORDINATE_TOLERANCE
+        ? average([bRight, a.rect.x])
+        : null
+    if (coordinate === null) return null
+    const start = Math.max(a.rect.y, b.rect.y)
+    const end = Math.min(a.rect.y + a.rect.height, b.rect.y + b.rect.height)
+    if (end - start <= COORDINATE_TOLERANCE) return null
+    return { axis, coordinate, start, end }
+  }
+
+  const aBottom = a.rect.y + a.rect.height
+  const bBottom = b.rect.y + b.rect.height
+  const coordinate = Math.abs(aBottom - b.rect.y) <= COORDINATE_TOLERANCE
+    ? average([aBottom, b.rect.y])
+    : Math.abs(bBottom - a.rect.y) <= COORDINATE_TOLERANCE
+      ? average([bBottom, a.rect.y])
+      : null
+  if (coordinate === null) return null
+  const start = Math.max(a.rect.x, b.rect.x)
+  const end = Math.min(a.rect.x + a.rect.width, b.rect.x + b.rect.width)
+  if (end - start <= COORDINATE_TOLERANCE) return null
+  return { axis, coordinate, start, end }
 }
 
 function rebuildRectangularLayout(
@@ -385,6 +435,126 @@ function rebuildRectangularLayout(
   return next
 }
 
+function rebuildSlicedLayoutForSingleResize(
+  layout: DockviewLayoutLike,
+  leaves: LeafRect[],
+  rootAxis: SplitAxis,
+  selectedHandle: ConnectedResizeHandle,
+  width: number,
+  height: number,
+  snapTolerance: number,
+): DockviewLayoutLike | null {
+  const rootSize = rootAxis === 'x' ? width : height
+  const nestedSize = rootAxis === 'x' ? height : width
+  const rootCoordinates = snappedCoordinatesForAxis(
+    leaves.flatMap((leaf) => rootAxis === 'x'
+      ? [leaf.rect.x, leaf.rect.x + leaf.rect.width]
+      : [leaf.rect.y, leaf.rect.y + leaf.rect.height]),
+    [0, selectedHandle.start, selectedHandle.end, rootSize],
+    Math.max(COORDINATE_TOLERANCE, snapTolerance),
+  )
+
+  if (rootCoordinates.length < 2) return null
+  if (Math.abs(rootCoordinates[0] - 0) > COORDINATE_TOLERANCE) return null
+  if (Math.abs(rootCoordinates[rootCoordinates.length - 1] - rootSize) > COORDINATE_TOLERANCE) return null
+
+  const assignments = new Map<number, LeafRect[]>()
+  const usedLeaves = new Set<LeafRect>()
+  for (const leaf of leaves) {
+    const start = rootAxis === 'x' ? leaf.rect.x : leaf.rect.y
+    const end = rootAxis === 'x' ? leaf.rect.x + leaf.rect.width : leaf.rect.y + leaf.rect.height
+    const startIndex = nearestCoordinateIndex(rootCoordinates, start, Math.max(COORDINATE_TOLERANCE, snapTolerance))
+    const endIndex = nearestCoordinateIndex(rootCoordinates, end, Math.max(COORDINATE_TOLERANCE, snapTolerance))
+    if (startIndex < 0 || endIndex < 0 || endIndex - startIndex !== 1) return null
+    const items = assignments.get(startIndex) ?? []
+    items.push(leaf)
+    assignments.set(startIndex, items)
+    usedLeaves.add(leaf)
+  }
+  if (usedLeaves.size !== leaves.length) return null
+
+  const rootChildren: SerializedNode[] = []
+  for (let index = 0; index < rootCoordinates.length - 1; index += 1) {
+    const bandLeaves = assignments.get(index)
+    if (!bandLeaves || bandLeaves.length === 0) return null
+    if (!coversNestedAxis(bandLeaves, rootAxis === 'x' ? 'y' : 'x', nestedSize)) return null
+
+    const bandSize = rootCoordinates[index + 1] - rootCoordinates[index]
+    const sortedLeaves = [...bandLeaves].sort((a, b) => rootAxis === 'x'
+      ? a.rect.y - b.rect.y
+      : a.rect.x - b.rect.x)
+
+    if (sortedLeaves.length === 1) {
+      const leaf = structuredClone(sortedLeaves[0].node)
+      leaf.size = bandSize
+      rootChildren.push(leaf)
+      continue
+    }
+
+    rootChildren.push({
+      type: 'branch',
+      size: bandSize,
+      data: sortedLeaves.map((item) => {
+        const leaf = structuredClone(item.node)
+        leaf.size = rootAxis === 'x' ? item.rect.height : item.rect.width
+        return leaf
+      }),
+    })
+  }
+
+  const next = structuredClone(layout) as DockviewLayoutLike
+  if (!next.grid) return null
+  next.grid.orientation = rootAxis === 'x' ? 'HORIZONTAL' : 'VERTICAL'
+  next.grid.root = {
+    type: 'branch',
+    size: rootSize,
+    data: rootChildren,
+  }
+  return next
+}
+
+function snappedCoordinatesForAxis(values: number[], anchors: number[], tolerance: number): number[] {
+  return sortedCoordinates([
+    ...anchors,
+    ...values.map((value) => {
+      const anchor = nearestCoordinate(anchors, value, tolerance)
+      return anchor ?? value
+    }),
+  ])
+}
+
+function nearestCoordinate(values: number[], target: number, tolerance: number): number | null {
+  let best: { value: number; distance: number } | null = null
+  for (const value of values) {
+    const distance = Math.abs(value - target)
+    if (distance > tolerance) continue
+    if (!best || distance < best.distance) best = { value, distance }
+  }
+  return best?.value ?? null
+}
+
+function nearestCoordinateIndex(values: number[], target: number, tolerance: number): number {
+  let best: { index: number; distance: number } | null = null
+  for (let index = 0; index < values.length; index += 1) {
+    const distance = Math.abs(values[index] - target)
+    if (distance > tolerance) continue
+    if (!best || distance < best.distance) best = { index, distance }
+  }
+  return best?.index ?? -1
+}
+
+function coversNestedAxis(leaves: LeafRect[], axis: SplitAxis, size: number): boolean {
+  const sorted = [...leaves].sort((a, b) => axis === 'x' ? a.rect.x - b.rect.x : a.rect.y - b.rect.y)
+  let cursor = 0
+  for (const leaf of sorted) {
+    const start = axis === 'x' ? leaf.rect.x : leaf.rect.y
+    const end = axis === 'x' ? leaf.rect.x + leaf.rect.width : leaf.rect.y + leaf.rect.height
+    if (Math.abs(start - cursor) > COORDINATE_TOLERANCE) return false
+    cursor = end
+  }
+  return Math.abs(cursor - size) <= COORDINATE_TOLERANCE
+}
+
 function sortedCoordinates(values: number[]): number[] {
   const coordinates: number[] = []
   for (const value of values.sort((a, b) => a - b)) {
@@ -440,6 +610,67 @@ function selectSingleBoundary(boundaries: Boundary[], axis: SplitAxis, coordinat
   })
 }
 
+function selectSingleHandle(handles: ConnectedResizeHandle[], axis: SplitAxis, coordinate: number, point: number): ConnectedResizeHandle | null {
+  const candidates = handles.filter((handle) =>
+    handle.axis === axis
+    && Math.abs(handle.coordinate - coordinate) <= COORDINATE_TOLERANCE
+    && point >= handle.start - SINGLE_POINT_TOLERANCE
+    && point <= handle.end + SINGLE_POINT_TOLERANCE,
+  )
+  if (candidates.length === 0) return null
+
+  return candidates.reduce((best, candidate) => {
+    const bestLength = best.end - best.start
+    const candidateLength = candidate.end - candidate.start
+    if (candidateLength !== bestLength) return candidateLength < bestLength ? candidate : best
+    return Math.abs(candidate.coordinate - coordinate) < Math.abs(best.coordinate - coordinate) ? candidate : best
+  })
+}
+
+function isSingleResizeHandleEligible(handle: Omit<ConnectedResizeHandle, 'id'>, boundaries: Boundary[]): boolean {
+  const group = selectConnectedBoundaries(boundaries, handle.axis, handle.coordinate, handle.start, handle.end)
+  if (group.length === 0) return false
+  const groupStart = Math.min(...group.map((boundary) => boundary.start))
+  const groupEnd = Math.max(...group.map((boundary) => boundary.end))
+  if (Math.abs(groupStart - handle.start) > COORDINATE_TOLERANCE) return false
+  if (Math.abs(groupEnd - handle.end) > COORDINATE_TOLERANCE) return false
+
+  return boundaries.some((boundary) =>
+    !group.includes(boundary)
+    && boundary.axis === handle.axis
+    && Math.abs(boundary.coordinate - handle.coordinate) > COORDINATE_TOLERANCE
+    && intervalsMeetAtEndpoint(boundary.start, boundary.end, handle.start, handle.end),
+  )
+}
+
+function snapConnectedDelta(root: SerializedNode, boundaries: Boundary[], selected: Boundary[], delta: number, minSize: number, snapTolerance: number): number {
+  if (Math.abs(delta) < 1) return delta
+  const tolerance = Math.max(0, snapTolerance)
+  if (tolerance <= 0) return delta
+
+  const selectedSet = new Set(selected)
+  const selectedCoordinate = average(selected.map((boundary) => boundary.coordinate))
+  const selectedStart = Math.min(...selected.map((boundary) => boundary.start))
+  const selectedEnd = Math.max(...selected.map((boundary) => boundary.end))
+  const targetCoordinate = selectedCoordinate + delta
+  const snapTarget = boundaries
+    .filter((boundary) =>
+      !selectedSet.has(boundary)
+      && boundary.axis === selected[0]?.axis
+      && Math.abs(boundary.coordinate - selectedCoordinate) > COORDINATE_TOLERANCE
+      && Math.abs(boundary.coordinate - targetCoordinate) <= tolerance
+      && sameDirection(delta, boundary.coordinate - selectedCoordinate)
+      && intervalsMeetAtEndpoint(boundary.start, boundary.end, selectedStart, selectedEnd),
+    )
+    .sort((a, b) => Math.abs(a.coordinate - targetCoordinate) - Math.abs(b.coordinate - targetCoordinate))[0]
+  if (!snapTarget) return delta
+
+  const snappedDelta = snapTarget.coordinate - selectedCoordinate
+  const clamped = clampDelta(root, selected, snappedDelta, minSize)
+  if (Math.abs(clamped - snappedDelta) > COORDINATE_TOLERANCE) return delta
+  return clamped
+}
+
 function snapSingleDelta(root: SerializedNode, boundaries: Boundary[], selected: Boundary, delta: number, minSize: number, snapTolerance: number): number {
   if (Math.abs(delta) < 1) return delta
   const tolerance = Math.max(0, snapTolerance)
@@ -449,7 +680,9 @@ function snapSingleDelta(root: SerializedNode, boundaries: Boundary[], selected:
       boundary !== selected
       && boundary.axis === selected.axis
       && Math.abs(boundary.coordinate - selected.coordinate) > COORDINATE_TOLERANCE
-      && Math.abs(boundary.coordinate - targetCoordinate) <= tolerance,
+      && Math.abs(boundary.coordinate - targetCoordinate) <= tolerance
+      && sameDirection(delta, boundary.coordinate - selected.coordinate)
+      && intervalsMeetAtEndpoint(boundary.start, boundary.end, selected.start, selected.end),
     )
     .sort((a, b) => Math.abs(a.coordinate - targetCoordinate) - Math.abs(b.coordinate - targetCoordinate))[0]
   if (!snapTarget) return delta
@@ -530,6 +763,14 @@ function nodeAtPath(root: SerializedNode, path: number[]): SerializedNode | null
 
 function intervalsTouch(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
   return aStart <= bEnd + CONNECTED_GAP_TOLERANCE && bStart <= aEnd + CONNECTED_GAP_TOLERANCE
+}
+
+function intervalsMeetAtEndpoint(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return Math.abs(aEnd - bStart) <= CONNECTED_GAP_TOLERANCE || Math.abs(bEnd - aStart) <= CONNECTED_GAP_TOLERANCE
+}
+
+function sameDirection(delta: number, targetDelta: number): boolean {
+  return (delta < 0 && targetDelta < 0) || (delta > 0 && targetDelta > 0)
 }
 
 function axisFromOrientation(orientation: string | undefined): SplitAxis {

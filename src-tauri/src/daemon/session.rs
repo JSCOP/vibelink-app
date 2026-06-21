@@ -19,6 +19,7 @@ pub struct DaemonState {
     sessions: HashMap<Uuid, Session>,
     clients: HashMap<Uuid, Sender<DaemonToClient>>,
     pane_clients: HashMap<Uuid, HashSet<Uuid>>,
+    session_clients: HashMap<Uuid, HashSet<Uuid>>,
 }
 
 impl DaemonState {
@@ -27,6 +28,7 @@ impl DaemonState {
             sessions: HashMap::new(),
             clients: HashMap::new(),
             pane_clients: HashMap::new(),
+            session_clients: HashMap::new(),
         }
     }
 
@@ -37,6 +39,9 @@ impl DaemonState {
     pub fn remove_client(&mut self, client_id: Uuid) {
         self.clients.remove(&client_id);
         for clients in self.pane_clients.values_mut() {
+            clients.remove(&client_id);
+        }
+        for clients in self.session_clients.values_mut() {
             clients.remove(&client_id);
         }
     }
@@ -108,6 +113,7 @@ impl DaemonState {
         for pane_id in &pane_ids {
             self.pane_clients.remove(pane_id);
         }
+        self.session_clients.remove(&session_id);
         Ok(pane_ids)
     }
 
@@ -124,12 +130,16 @@ impl DaemonState {
 
     pub fn detach_session(&mut self, client_id: Uuid, session_id: Uuid) {
         let Some(session) = self.sessions.get(&session_id) else {
+            self.session_clients.remove(&session_id);
             return;
         };
         for pane_id in session.panes.keys() {
             if let Some(clients) = self.pane_clients.get_mut(pane_id) {
                 clients.remove(&client_id);
             }
+        }
+        if let Some(clients) = self.session_clients.get_mut(&session_id) {
+            clients.remove(&client_id);
         }
     }
 
@@ -269,10 +279,25 @@ impl DaemonState {
             .insert(client_id);
     }
 
+    pub fn attach_client_to_session(&mut self, client_id: Uuid, session_id: Uuid) {
+        self.session_clients
+            .entry(session_id)
+            .or_default()
+            .insert(client_id);
+    }
+
     #[cfg(test)]
     pub fn attached_clients(&self, pane_id: Uuid) -> Vec<Uuid> {
         self.pane_clients
             .get(&pane_id)
+            .map(|clients| clients.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn attached_session_clients(&self, session_id: Uuid) -> Vec<Uuid> {
+        self.session_clients
+            .get(&session_id)
             .map(|clients| clients.iter().copied().collect())
             .unwrap_or_default()
     }
@@ -320,9 +345,19 @@ impl DaemonState {
         sessions
     }
 
-    fn senders_for_pane(&self, pane_id: Uuid) -> Vec<Sender<DaemonToClient>> {
+    pub fn senders_for_pane(&self, pane_id: Uuid) -> Vec<Sender<DaemonToClient>> {
         self.pane_clients
             .get(&pane_id)
+            .into_iter()
+            .flat_map(|clients| clients.iter())
+            .filter_map(|client_id| self.clients.get(client_id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn senders_for_session(&self, session_id: Uuid) -> Vec<Sender<DaemonToClient>> {
+        self.session_clients
+            .get(&session_id)
             .into_iter()
             .flat_map(|clients| clients.iter())
             .filter_map(|client_id| self.clients.get(client_id))
@@ -450,6 +485,20 @@ mod tests {
         state.remove_client(client_id);
 
         assert!(state.attached_clients(pane_id).is_empty());
+    }
+
+    #[test]
+    fn removing_client_detaches_it_from_sessions() {
+        let mut state = DaemonState::new();
+        let session_id = state.create_session("Test".to_string(), None).id;
+        let client_id = Uuid::new_v4();
+        let (tx, _rx) = unbounded();
+        state.add_client(client_id, tx);
+        state.attach_client_to_session(client_id, session_id);
+
+        state.remove_client(client_id);
+
+        assert!(state.attached_session_clients(session_id).is_empty());
     }
 
     #[test]

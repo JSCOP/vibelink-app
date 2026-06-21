@@ -1,4 +1,6 @@
-use crate::protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req};
+use crate::protocol::{
+    read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req, TaskSignal,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use crossbeam_channel::{bounded, Sender};
@@ -38,6 +40,11 @@ pub enum TerminalEvent {
         pane_id: String,
         #[serde(rename = "exitCode")]
         exit_code: Option<i32>,
+    },
+    Task {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        signal: TaskSignal,
     },
     ConnectionLost {
         message: String,
@@ -330,6 +337,10 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
             pane_id: pane_id.to_string(),
             exit_code,
         },
+        DaemonToClient::TaskEvent { session_id, event } => TerminalEvent::Task {
+            session_id: session_id.to_string(),
+            signal: event,
+        },
         other => bail!("not a terminal event: {other:?}"),
     };
 
@@ -353,7 +364,9 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
     match msg {
         DaemonToClient::Pong { req } | DaemonToClient::Reply { req, .. } => Some(*req),
         DaemonToClient::Error { req, .. } => *req,
-        DaemonToClient::Output { .. } | DaemonToClient::PaneExited { .. } => None,
+        DaemonToClient::Output { .. }
+        | DaemonToClient::PaneExited { .. }
+        | DaemonToClient::TaskEvent { .. } => None,
     }
 }
 
@@ -399,6 +412,23 @@ mod tests {
         assert_eq!(exited["exitCode"], 7);
         assert!(exited.get("pane_id").is_none());
         assert!(exited.get("exit_code").is_none());
+
+        let task = serde_json::to_value(TerminalEvent::Task {
+            session_id: "session-1".to_string(),
+            signal: TaskSignal::Done {
+                task_id: "task-1".to_string(),
+                commit_msg: Some("done".to_string()),
+                pane_id: None,
+            },
+        })
+        .expect("serialize task terminal event");
+
+        assert_eq!(task["kind"], "task");
+        assert_eq!(task["sessionId"], "session-1");
+        assert_eq!(task["signal"]["kind"], "done");
+        assert_eq!(task["signal"]["taskId"], "task-1");
+        assert_eq!(task["signal"]["commitMsg"], "done");
+        assert!(task.get("session_id").is_none());
     }
     #[test]
     fn request_timeout_stays_below_legacy_ten_second_hang() {
@@ -444,6 +474,17 @@ mod tests {
             response_req(&DaemonToClient::Output {
                 pane_id: Uuid::new_v4(),
                 data: vec![1, 2, 3],
+            }),
+            None
+        );
+        assert_eq!(
+            response_req(&DaemonToClient::TaskEvent {
+                session_id: Uuid::new_v4(),
+                event: TaskSignal::Note {
+                    task_id: "task-1".to_string(),
+                    message: "working".to_string(),
+                    pane_id: None,
+                },
             }),
             None
         );

@@ -26,6 +26,7 @@ pnpm tauri:build
 - Dev and production daemons are isolated. Debug builds use the `AgenticWorkspaceTerminalDev` app data directory and an `awt-dev-daemon-*` socket; release builds use `AgenticWorkspaceTerminal` and an `awt-prod-daemon-*` socket.
 - IPC uses `interprocess` local sockets with MessagePack frames and a 4-byte big-endian length prefix.
 - Sessions persist under the platform app data directory as `sessions.json`. Panes are intentionally not persisted or reconstructed after daemon restart.
+- The Kanban Orchestrator panel embeds Hermes Agent through ACP stdio (`hermes-acp`). Each workspace gets its own `HERMES_HOME` under app data, plus an AWT MCP server (`app.exe mcp serve`) so Hermes can list/read/write panes and update board tasks. Hermes Agent is MIT licensed: https://github.com/NousResearch/hermes-agent.
 
 ## UI
 
@@ -46,10 +47,15 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 .\target\debug\app.exe cli panes [--session <session-id>]
 .\target\debug\app.exe cli read [--session <session-id>] --pane <pane-id>
 .\target\debug\app.exe cli write [--session <session-id>] --pane <pane-id> --text "pwd" --enter
+.\target\debug\app.exe cli task done --task <task-id> [--session <session-id>] [--pane <pane-id>] [--commit-msg "summary"]
+.\target\debug\app.exe cli task note --task <task-id> --message "progress" [--session <session-id>] [--pane <pane-id>]
+.\target\debug\app.exe mcp serve
 ```
 
-`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command.
-AWT-launched panes receive `AWT_SESSION_ID`, `AWT_PANE_ID`, `AWT_APP_EXE`, and `AWT_APP_FLAVOR`; `panes`, `read`, and `write` use `AWT_SESSION_ID` when `--session` is omitted, so agents should run `$env:AWT_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace.
+`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes.
+AWT-launched panes receive `AWT_SESSION_ID`, `AWT_PANE_ID`, `AWT_APP_EXE`, and `AWT_APP_FLAVOR`; `panes`, `read`, `write`, and `task` use `AWT_SESSION_ID` when `--session` is omitted, so agents should run `$env:AWT_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace.
+
+`mcp serve` is the stdio MCP server configured in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The Orchestrator settings provision `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, store secrets only in `<HERMES_HOME>\.env`, and mirror Kanban board state to `<appData>\kanban\<session-id>.json` for MCP tools.
 
 ## Daemon smoke checks
 

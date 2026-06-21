@@ -13,6 +13,7 @@ describe('shouldRestoreDockviewLayout', () => {
 
   it('rejects a persisted layout missing a live pane panel', () => {
     const staleLayout = JSON.stringify({
+      ...layoutGrid(['pane-1']),
       panels: {
         'pane-1': { id: 'pane-1' },
       },
@@ -21,8 +22,33 @@ describe('shouldRestoreDockviewLayout', () => {
     expect(shouldRestoreDockviewLayout(staleLayout, ['pane-1', 'pane-2'])).toBe(false)
   })
 
-  it('accepts a layout that contains every live pane panel', () => {
+  it('rejects a zero-sized grid saved while the dock was hidden', () => {
+    const zeroSizedLayout = JSON.stringify({
+      ...layoutGrid(['pane-1', 'pane-2'], { width: 0, height: 0, size: 0 }),
+      panels: {
+        'pane-1': { id: 'pane-1' },
+        'pane-2': { id: 'pane-2' },
+      },
+    })
+
+    expect(shouldRestoreDockviewLayout(zeroSizedLayout, ['pane-1', 'pane-2'])).toBe(false)
+  })
+
+  it('rejects a persisted grid missing a live pane leaf', () => {
+    const missingLeafLayout = JSON.stringify({
+      ...layoutGrid(['pane-1']),
+      panels: {
+        'pane-1': { id: 'pane-1' },
+        'pane-2': { id: 'pane-2' },
+      },
+    })
+
+    expect(shouldRestoreDockviewLayout(missingLeafLayout, ['pane-1', 'pane-2'])).toBe(false)
+  })
+
+  it('accepts a layout that contains every live pane panel and grid leaf', () => {
     const layout = JSON.stringify({
+      ...layoutGrid(['pane-1', 'pane-2']),
       panels: {
         'pane-1': { id: 'pane-1' },
         'pane-2': { id: 'pane-2' },
@@ -32,3 +58,22 @@ describe('shouldRestoreDockviewLayout', () => {
     expect(shouldRestoreDockviewLayout(layout, ['pane-1', 'pane-2'])).toBe(true)
   })
 })
+
+function layoutGrid(paneIds: string[], dimensions = { width: 200, height: 100, size: 200 }) {
+  return {
+    grid: {
+      root: {
+        type: 'branch',
+        data: paneIds.map((paneId) => ({
+          type: 'leaf',
+          data: { id: `group-${paneId}`, views: [paneId], activeView: paneId },
+          size: dimensions.size / Math.max(1, paneIds.length),
+        })),
+        size: dimensions.size,
+      },
+      width: dimensions.width,
+      height: dimensions.height,
+      orientation: 'HORIZONTAL',
+    },
+  }
+}

@@ -13,6 +13,13 @@ use std::{
 use uuid::Uuid;
 
 pub const DEFAULT_SCROLLBACK_CAP: usize = 1024 * 1024;
+const TERMINAL_CAPABILITY_ENV: [(&str, &str); 5] = [
+    ("TERM", "xterm-256color"),
+    ("COLORTERM", "truecolor"),
+    ("FORCE_COLOR", "1"),
+    ("CLICOLOR_FORCE", "1"),
+    ("TERM_PROGRAM", "AgenticWorkspaceTerminal"),
+];
 
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 pub type SharedKiller = Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>;
@@ -37,7 +44,7 @@ impl Pane {
     pub fn spawn(mut config: PaneConfig) -> Result<SpawnedPane> {
         config.cols = config.cols.max(1);
         config.rows = config.rows.max(1);
-        config.env = with_runtime_agent_env(config.env);
+        config.env = with_runtime_agent_env(with_terminal_capability_env(config.env));
 
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -58,6 +65,11 @@ impl Pane {
         if let Some(path) = windows_effective_path() {
             command.env("PATH", path);
         }
+        // AWT owns a real PTY; inherited process-manager color suppression must not
+        // make terminal apps render monochrome. Explicit pane env below can still
+        // re-add these for users who intentionally want no color.
+        command.env_remove("NO_COLOR");
+        command.env_remove("NODE_DISABLE_COLORS");
         for (key, value) in &config.env {
             command.env(key, value);
         }
@@ -212,6 +224,16 @@ fn command_builder(config: &PaneConfig) -> CommandBuilder {
     CommandBuilder::new(command_program(config, default_shell))
 }
 
+fn with_terminal_capability_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut next = env;
+    for (key, value) in TERMINAL_CAPABILITY_ENV {
+        if !next.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(key)) {
+            next.push((key.to_string(), value.to_string()));
+        }
+    }
+    next
+}
+
 fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut next: Vec<_> = env
         .into_iter()
@@ -229,6 +251,18 @@ fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
         "AWT_APP_FLAVOR".to_string(),
         paths::app_flavor().to_string(),
     ));
+    next
+}
+
+pub(crate) fn inject_pane_identity(env: Vec<(String, String)>, session_id: Uuid, pane_id: Uuid) -> Vec<(String, String)> {
+    let mut next: Vec<_> = env
+        .into_iter()
+        .filter(|(key, _)| {
+            !key.eq_ignore_ascii_case("AWT_SESSION_ID") && !key.eq_ignore_ascii_case("AWT_PANE_ID")
+        })
+        .collect();
+    next.push(("AWT_SESSION_ID".to_string(), session_id.to_string()));
+    next.push(("AWT_PANE_ID".to_string(), pane_id.to_string()));
     next
 }
 
@@ -538,6 +572,22 @@ mod tests {
     }
 
     #[test]
+    fn terminal_capability_env_adds_color_defaults_without_overriding_user_values() {
+        let entries = with_terminal_capability_env(vec![
+            ("TERM".to_string(), "xterm-direct".to_string()),
+            ("OTHER".to_string(), "value".to_string()),
+        ]);
+
+        assert!(entries.contains(&("TERM".to_string(), "xterm-direct".to_string())));
+        assert!(entries.contains(&("COLORTERM".to_string(), "truecolor".to_string())));
+        assert!(entries.contains(&("FORCE_COLOR".to_string(), "1".to_string())));
+        assert!(entries.contains(&("CLICOLOR_FORCE".to_string(), "1".to_string())));
+        assert!(entries.contains(&("TERM_PROGRAM".to_string(), "AgenticWorkspaceTerminal".to_string())));
+        assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
+        assert_eq!(entries.iter().filter(|(key, _)| key.eq_ignore_ascii_case("TERM")).count(), 1);
+    }
+
+    #[test]
     fn runtime_agent_env_records_current_binary_and_flavor() {
         let entries = with_runtime_agent_env(vec![
             ("AWT_APP_EXE".to_string(), "wrong.exe".to_string()),
@@ -556,6 +606,23 @@ mod tests {
             paths::app_flavor().to_string()
         )));
         assert!(!entries.contains(&("AWT_APP_EXE".to_string(), "wrong.exe".to_string())));
+    }
+
+    #[test]
+    fn inject_pane_identity_records_session_and_pane() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let entries = inject_pane_identity(vec![
+            ("awt_session_id".to_string(), "wrong-session".to_string()),
+            ("AWT_PANE_ID".to_string(), "wrong-pane".to_string()),
+            ("OTHER".to_string(), "value".to_string()),
+        ], session_id, pane_id);
+
+        assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
+        assert!(entries.contains(&("AWT_SESSION_ID".to_string(), session_id.to_string())));
+        assert!(entries.contains(&("AWT_PANE_ID".to_string(), pane_id.to_string())));
+        assert_eq!(entries.iter().filter(|(key, _)| key.eq_ignore_ascii_case("AWT_SESSION_ID")).count(), 1);
+        assert_eq!(entries.iter().filter(|(key, _)| key.eq_ignore_ascii_case("AWT_PANE_ID")).count(), 1);
     }
 
     #[test]

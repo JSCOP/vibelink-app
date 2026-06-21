@@ -10,7 +10,7 @@ export const defaultFontChoices = [
   'monospace',
 ]
 
-export function terminalFontStack(fontFamily: string): string {
+function buildFontStack(families: string[]): string {
   const choices: string[] = []
   const seen = new Set<string>()
   const add = (value: string): void => {
@@ -22,9 +22,18 @@ export function terminalFontStack(fontFamily: string): string {
     }
   }
 
-  add(fontFamily)
-  for (const font of defaultFontChoices) add(font)
+  for (const family of families) add(family)
   return choices.map(cssFontFamilyName).join(', ')
+}
+
+export function terminalFontStack(fontFamily: string): string {
+  return buildFontStack([fontFamily, ...defaultFontChoices])
+}
+
+export const koreanFallbackFonts = ['Malgun Gothic', 'Apple SD Gothic Neo']
+
+export function uiFontStack(fontFamily: string): string {
+  return buildFontStack([fontFamily, ...defaultFontChoices.filter((font) => font !== 'monospace'), ...koreanFallbackFonts, 'monospace'])
 }
 
 function cssFontFamilyName(font: string): string {

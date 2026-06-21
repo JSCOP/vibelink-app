@@ -1,7 +1,6 @@
 export const keybindingActionIds = [
   'splitRight',
   'splitDown',
-  'newTab',
   'closePane',
   'closeWorkspace',
   'toggleMaximize',
@@ -14,6 +13,8 @@ export const keybindingActionIds = [
   'focusDown',
   'copyTerminalContents',
   'copyTerminalSelection',
+  'captureImage',
+  'captureVideo',
 ] as const
 
 export type KeybindingActionId = (typeof keybindingActionIds)[number]
@@ -28,7 +29,6 @@ export type KeybindingDefinition = {
 export const keybindingDefinitions: KeybindingDefinition[] = [
   { id: 'splitRight', label: 'Split pane right', description: 'Create a pane to the right of the active pane.' },
   { id: 'splitDown', label: 'Split pane down', description: 'Create a pane below the active pane.' },
-  { id: 'newTab', label: 'New pane tab', description: 'Create a new tab in the active pane group.' },
   { id: 'closePane', label: 'Close pane', description: 'Close the active pane.' },
   { id: 'closeWorkspace', label: 'Close workspace', description: 'Close the active workspace.' },
   { id: 'toggleMaximize', label: 'Toggle pane zoom', description: 'Maximize or restore the active pane.' },
@@ -41,12 +41,13 @@ export const keybindingDefinitions: KeybindingDefinition[] = [
   { id: 'focusDown', label: 'Focus pane down', description: 'Move focus to the pane below.' },
   { id: 'copyTerminalContents', label: 'Copy terminal contents', description: 'Select all terminal buffer text and copy it to the clipboard.' },
   { id: 'copyTerminalSelection', label: 'Copy terminal selection', description: 'Copy the currently selected terminal text.' },
+  { id: 'captureImage', label: 'Capture image', description: 'Open the region selector for a screenshot.' },
+  { id: 'captureVideo', label: 'Capture video', description: 'Open the region selector for a screen recording.' },
 ]
 
 export const defaultKeybindings: KeybindingSettings = {
   splitRight: 'alt+shift+v',
   splitDown: 'alt+shift+h',
-  newTab: 'ctrl+shift+t',
   closePane: 'ctrl+w',
   closeWorkspace: 'ctrl+shift+w',
   toggleMaximize: 'alt+z',
@@ -59,6 +60,8 @@ export const defaultKeybindings: KeybindingSettings = {
   focusDown: 'ctrl+down',
   copyTerminalContents: 'ctrl+a',
   copyTerminalSelection: 'ctrl+shift+c',
+  captureImage: 'alt+shift+c',
+  captureVideo: 'alt+shift+r',
 }
 
 export function normalizeKeybindings(value: unknown): KeybindingSettings {

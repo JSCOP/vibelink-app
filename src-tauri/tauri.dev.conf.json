@@ -11,6 +11,7 @@
         "resizable": true,
         "fullscreen": false,
         "devtools": false,
+        "backgroundColor": "#0d0f12",
         "dragDropEnabled": false
       }
     ]

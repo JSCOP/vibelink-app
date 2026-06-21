@@ -99,6 +99,11 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         pane_id: Uuid,
     },
+    TaskEvent {
+        req: Req,
+        session_id: Uuid,
+        event: TaskSignal,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +127,31 @@ pub enum DaemonToClient {
         pane_id: Uuid,
         exit_code: Option<i32>,
     },
+    TaskEvent {
+        session_id: Uuid,
+        event: TaskSignal,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TaskSignal {
+    Done {
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(rename = "commitMsg")]
+        commit_msg: Option<String>,
+        #[serde(rename = "paneId")]
+        pane_id: Option<Uuid>,
+    },
+    Note {
+        #[serde(rename = "taskId")]
+        task_id: String,
+        message: String,
+        #[serde(rename = "paneId")]
+        pane_id: Option<Uuid>,
+    },
+    BoardChanged {},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +274,28 @@ mod tests {
             req: 7,
             name: "Repo".to_string(),
             workspace_folder: Some("C:\\".to_string()),
+        };
+
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode frame");
+
+        let decoded: ClientToDaemon = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_task_event() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let message = ClientToDaemon::TaskEvent {
+            req: 8,
+            session_id,
+            event: TaskSignal::Done {
+                task_id: "task-123".to_string(),
+                commit_msg: Some("finished task".to_string()),
+                pane_id: Some(pane_id),
+            },
         };
 
         let mut bytes = Vec::new();

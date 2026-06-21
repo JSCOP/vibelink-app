@@ -5,7 +5,6 @@ export type SplitDirection = 'left' | 'right' | 'above' | 'below'
 export type WorkspaceActions = {
   activatePane: (paneId: string) => void
   splitPane: (paneId: string, direction: SplitDirection) => Promise<void>
-  newTab: (paneId: string) => Promise<void>
   closePane: (paneId: string) => Promise<void>
   toggleMaximize: (paneId: string) => void
   renamePaneTitle: (paneId: string, title: string) => Promise<void>

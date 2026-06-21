@@ -1,4 +1,4 @@
-import { Maximize2, PanelRightClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { useWorkspaceActions } from '../layout/actions'
 
 type PaneHeaderProps = {
@@ -20,9 +20,6 @@ export function PaneHeader({ paneId, title }: PaneHeaderProps) {
         </button>
         <button type="button" title="Split down" onClick={() => { activatePane(); void actions.splitPane(paneId, 'below') }}>
           <SplitSquareHorizontal size={14} />
-        </button>
-        <button type="button" title="New tab" onClick={() => { activatePane(); void actions.newTab(paneId) }}>
-          <PanelRightClose size={14} />
         </button>
         <button type="button" title="Maximize" onClick={() => { activatePane(); actions.toggleMaximize(paneId) }}>
           <Maximize2 size={14} />

@@ -66,10 +66,11 @@ describe('terminal profiles', () => {
   })
 
   test('normalizes terminal font and theme choices', () => {
-    const themed = normalizeSettings({ fontFamily: '  Cascadia Code  ', terminalThemeId: 'aurora' })
+    const themed = normalizeSettings({ fontFamily: '  Cascadia Code  ', terminalThemeId: 'tokyoNight', accent: '#ff00ff' })
 
     expect(themed.fontFamily).toBe('Cascadia Code')
-    expect(themed.terminalThemeId).toBe('aurora')
+    expect(themed.terminalThemeId).toBe('tokyoNight')
+    expect('accent' in themed).toBe(false)
 
     const fallback = normalizeSettings({ fontFamily: '   ', terminalThemeId: 'missing-theme' })
 
@@ -108,6 +109,13 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ resizeSnapTolerance: 48 }).resizeSnapTolerance).toBe(48)
     expect(normalizeSettings({ resizeSnapTolerance: -1 }).resizeSnapTolerance).toBe(defaultSettings.resizeSnapTolerance)
     expect(normalizeSettings({ resizeSnapTolerance: 200 }).resizeSnapTolerance).toBe(defaultSettings.resizeSnapTolerance)
+  })
+
+  test('normalizes pane header height setting', () => {
+    expect(defaultSettings.paneHeaderHeight).toBe(28)
+    expect(normalizeSettings({ paneHeaderHeight: 40 }).paneHeaderHeight).toBe(40)
+    expect(normalizeSettings({ paneHeaderHeight: 12 }).paneHeaderHeight).toBe(defaultSettings.paneHeaderHeight)
+    expect(normalizeSettings({ paneHeaderHeight: 80 }).paneHeaderHeight).toBe(defaultSettings.paneHeaderHeight)
   })
 
   test('builds pane config fields from selected profile', () => {

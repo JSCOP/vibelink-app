@@ -27,6 +27,18 @@ describe('createDockviewGridLayout', () => {
     })
   })
 
+  it('builds a 6x2 grid as six columns with two rows', () => {
+    const layout = createDockviewGridLayout(baseLayout(), { cols: 6, rows: 2 }, panes(12))
+    const root = layout?.grid?.root
+    expect(layout?.grid?.orientation).toBe('HORIZONTAL')
+    expect(root?.type).toBe('branch')
+    if (root?.type !== 'branch') return
+
+    expect(root.data).toHaveLength(6)
+    expect(columnViews(root.data[0])).toEqual(['pane-0', 'pane-6'])
+    expect(columnViews(root.data[5])).toEqual(['pane-5', 'pane-11'])
+  })
+
   it('builds taller templates in row-major order', () => {
     const layout = createDockviewGridLayout(baseLayout(), { cols: 2, rows: 3 }, panes(6))
     const root = layout?.grid?.root

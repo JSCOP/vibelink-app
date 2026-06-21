@@ -12,6 +12,8 @@ describe('keybindings', () => {
     expect(defaultKeybindings.focusDown).toBe('ctrl+down')
     expect(defaultKeybindings.copyTerminalContents).toBe('ctrl+a')
     expect(defaultKeybindings.copyTerminalSelection).toBe('ctrl+shift+c')
+    expect(defaultKeybindings.captureImage).toBe('alt+shift+c')
+    expect(defaultKeybindings.captureVideo).toBe('alt+shift+r')
   })
 
   it('normalizes partial stored keybindings without dropping new defaults', () => {
@@ -23,6 +25,8 @@ describe('keybindings', () => {
     expect(normalized.focusLeft).toBe(defaultKeybindings.focusLeft)
     expect(normalized.copyTerminalContents).toBe(defaultKeybindings.copyTerminalContents)
     expect(normalized.copyTerminalSelection).toBe(defaultKeybindings.copyTerminalSelection)
+    expect(normalized.captureImage).toBe(defaultKeybindings.captureImage)
+    expect(normalized.captureVideo).toBe(defaultKeybindings.captureVideo)
   })
 
   it('converts keyboard events into stable lower-case chords', () => {
@@ -35,6 +39,8 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'w', ctrlKey: true }))).toBe('closePane')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'a', ctrlKey: true }))).toBe('copyTerminalContents')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', ctrlKey: true, shiftKey: true }))).toBe('copyTerminalSelection')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', altKey: true, shiftKey: true }))).toBe('captureImage')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'r', altKey: true, shiftKey: true }))).toBe('captureVideo')
   })
 
   it('does not intercept Ctrl+C so terminal interrupt reaches the PTY', () => {

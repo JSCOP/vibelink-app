@@ -1,8 +1,9 @@
-import { useEffect, useState, type DragEvent, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type { DockviewApi, IDockviewPanelHeaderProps } from 'dockview-react'
-import { Maximize2, PanelRightClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { useWorkspaceActions } from '../layout/actions'
 import { hasPaneDragPayload, paneDragMime } from '../layout/paneDrag'
+import { useWorkspaceStore } from '../state/store'
 import { ProfileIcon } from './ProfileIcon'
 
 type TerminalTabProps = IDockviewPanelHeaderProps & {
@@ -20,12 +21,21 @@ type TerminalTabProps = IDockviewPanelHeaderProps & {
   }
 }
 
+const dragDisabledSelector = 'button, input, textarea, select, [contenteditable="true"], [data-pane-drag-disabled="true"]'
+
+function isPaneDragDisabledTarget(target: EventTarget | null): boolean {
+  const closest = (target as { closest?: (selector: string) => Element | null } | null)?.closest
+  return typeof closest === 'function' && Boolean(closest.call(target, dragDisabledSelector))
+}
+
 export function TerminalTab({ api, params }: TerminalTabProps) {
   const actions = useWorkspaceActions()
   const [title, setTitle] = useState(api.title ?? params?.title ?? 'Shell')
   const paneId = params?.paneId
+  const role = useWorkspaceStore((state) => paneId ? state.settings.paneRoles[paneId] : undefined)
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
+  const dragStartBlockedRef = useRef(false)
 
   useEffect(() => {
     const disposable = api.onDidTitleChange((event) => setTitle(event.title))
@@ -71,11 +81,20 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
     if (api.isMaximized()) api.exitMaximized()
     else api.maximize()
   }
-  const onTitleDragStart = (event: DragEvent<HTMLElement>) => {
-    if (!paneId || isEditing) {
+
+  const rememberPaneDragStartTarget = (event: { target: EventTarget | null }) => {
+    dragStartBlockedRef.current = isPaneDragDisabledTarget(event.target)
+  }
+
+  const onPaneDragStart = (event: DragEvent<HTMLElement>) => {
+    const blockedByControl = dragStartBlockedRef.current || isPaneDragDisabledTarget(event.target)
+    dragStartBlockedRef.current = false
+    if (!paneId || isEditing || blockedByControl) {
       event.preventDefault()
+      event.stopPropagation()
       return
     }
+
     activatePane()
     event.stopPropagation()
     event.dataTransfer.effectAllowed = 'move'
@@ -98,9 +117,21 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
   }
 
 
+
   return (
-    <div className="terminal-tab" title={title} onMouseDown={activatePane} onPointerDown={activatePane} onDragOver={onPaneDragOver} onDrop={onPaneDrop}>
+    <div
+      className="terminal-tab"
+      title={title}
+      data-pane-id={paneId}
+      draggable={Boolean(paneId && !isEditing)}
+      onPointerDownCapture={rememberPaneDragStartTarget}
+      onMouseDownCapture={rememberPaneDragStartTarget}
+      onDragStartCapture={onPaneDragStart}
+      onDragOver={onPaneDragOver}
+      onDrop={onPaneDrop}
+    >
       <ProfileIcon name={params?.icon} size={13} className="terminal-tab-icon" />
+      <span className={`terminal-tab-role${role ? '' : ' terminal-tab-role-unset'}`} title={role ? `Role: ${role}` : 'No role assigned'}>{role ?? 'No role'}</span>
       {isEditing ? (
         <input
           className="terminal-tab-title-input"
@@ -113,20 +144,17 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
           onPointerDown={activatePaneAndStop}
         />
       ) : (
-        <span className="terminal-tab-title" title="Drag to swap panes. Double-click to rename." draggable onDragStart={onTitleDragStart} onDoubleClick={() => { setDraftTitle(title); setIsEditing(true) }}>
+        <span className="terminal-tab-title" title="Drag to swap panes. Double-click to rename." onDoubleClick={() => { setDraftTitle(title); setIsEditing(true) }}>
           {title}
         </span>
       )}
       {paneId ? (
-        <div className="terminal-tab-actions" onMouseDown={activatePaneAndStop} onPointerDown={activatePaneAndStop}>
+        <div className="terminal-tab-actions" data-pane-drag-disabled="true" onMouseDown={activatePaneAndStop} onPointerDown={activatePaneAndStop}>
           <button type="button" title="Split right" onClick={(event) => { activatePaneAndStop(event); void actions.splitPane(paneId, 'right') }}>
             <SplitSquareVertical size={12} />
           </button>
           <button type="button" title="Split down" onClick={(event) => { activatePaneAndStop(event); void actions.splitPane(paneId, 'below') }}>
             <SplitSquareHorizontal size={12} />
-          </button>
-          <button type="button" title="New tab" onClick={(event) => { activatePaneAndStop(event); void actions.newTab(paneId) }}>
-            <PanelRightClose size={12} />
           </button>
           <button type="button" title="Maximize" onClick={onMaximize}>
             <Maximize2 size={12} />
@@ -139,3 +167,4 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
     </div>
   )
 }
+

@@ -90,6 +90,15 @@ describe('workspace store profiles', () => {
     })
   })
 
+  test('dismissError clears only the notification', () => {
+    useWorkspaceStore.setState({ status: 'error', error: 'boom' })
+
+    useWorkspaceStore.getState().dismissError()
+
+    expect(useWorkspaceStore.getState().error).toBeUndefined()
+    expect(useWorkspaceStore.getState().status).toBe('error')
+  })
+
   test('spawnPane advertises color terminal capabilities by default', async () => {
     await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
 
@@ -99,6 +108,8 @@ describe('workspace store profiles', () => {
         env: expect.arrayContaining([
           ['TERM', 'xterm-256color'],
           ['COLORTERM', 'truecolor'],
+          ['FORCE_COLOR', '1'],
+          ['CLICOLOR_FORCE', '1'],
           ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
         ]),
       }),
@@ -116,11 +127,14 @@ describe('workspace store profiles', () => {
         args: ['--dangerously-bypass-approvals-and-sandbox'],
         cwd: 'E:/work',
         env: [
-          ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
           ['TERM', 'xterm-256color'],
           ['COLORTERM', 'truecolor'],
+          ['FORCE_COLOR', '1'],
+          ['CLICOLOR_FORCE', '1'],
+          ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
           ['AWT_SESSION_ID', 'session-1'],
           ['AWT_PANE_ID', 'pane-test'],
+          ['AWT_APP_EXE', 'app.exe'],
         ],
         title: 'Codex',
         icon: 'sparkles',

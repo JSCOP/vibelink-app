@@ -290,10 +290,12 @@ fn dispatch_message(
             send_ok(tx, req)
         }
         ClientToDaemon::AttachSession { req, session_id } => {
-            let (layout_json, panes) = state
-                .lock()
-                .expect("daemon state mutex poisoned")
-                .attach_session(session_id)?;
+            let (layout_json, panes) = {
+                let mut state = state.lock().expect("daemon state mutex poisoned");
+                let attached = state.attach_session(session_id)?;
+                state.attach_client_to_session(client_id, session_id);
+                attached
+            };
             send(
                 tx,
                 DaemonToClient::Reply {
@@ -444,6 +446,24 @@ fn dispatch_message(
                 },
             )
         }
+        ClientToDaemon::TaskEvent {
+            req,
+            session_id,
+            event,
+        } => {
+            info!(%session_id, ?event, "relaying task event");
+            let senders = state
+                .lock()
+                .expect("daemon state mutex poisoned")
+                .senders_for_session(session_id);
+            for sender in senders {
+                let _ = sender.send(DaemonToClient::TaskEvent {
+                    session_id,
+                    event: event.clone(),
+                });
+            }
+            send_ok(tx, req)
+        }
         ClientToDaemon::Shutdown { req } => {
             info!("daemon received shutdown request");
             send_ok(tx, req)?;
@@ -475,6 +495,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::ClosePane { req, .. }
         | ClientToDaemon::ClearSession { req, .. }
         | ClientToDaemon::GetScrollback { req, .. }
+        | ClientToDaemon::TaskEvent { req, .. }
         | ClientToDaemon::Shutdown { req } => Some(*req),
         ClientToDaemon::Hello { .. }
         | ClientToDaemon::DetachSession { .. }
@@ -501,7 +522,7 @@ fn spawn_pane_for_session(
     state: SharedState,
     sessions_path: PathBuf,
     session_id: Uuid,
-    cfg: crate::protocol::PaneConfig,
+    mut cfg: crate::protocol::PaneConfig,
 ) -> Result<crate::protocol::PaneMeta> {
     state
         .lock()
@@ -509,6 +530,7 @@ fn spawn_pane_for_session(
         .pane_metas(session_id)?;
 
     let pane_id = cfg.pane_id;
+    cfg.env = pty::inject_pane_identity(std::mem::take(&mut cfg.env), session_id, pane_id);
     let spawned = Pane::spawn(cfg)?;
     let child = spawned.pane.child();
     let reader = spawned.reader;

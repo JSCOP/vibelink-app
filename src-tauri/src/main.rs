@@ -4,6 +4,7 @@
 mod app;
 mod cli;
 mod daemon;
+mod mcp;
 mod protocol;
 
 fn main() {
@@ -13,6 +14,12 @@ fn main() {
         Some("cli") => {
             if let Err(err) = cli::run(args.into_iter().skip(1)) {
                 eprintln!("CLI error: {err}");
+                std::process::exit(1);
+            }
+        }
+        Some("mcp") => {
+            if let Err(err) = mcp::run(args.into_iter().skip(1)) {
+                eprintln!("MCP error: {err}");
                 std::process::exit(1);
             }
         }

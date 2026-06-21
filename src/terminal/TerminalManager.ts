@@ -1,35 +1,18 @@
 import { invoke } from '@tauri-apps/api/core'
-import { Terminal, type FontWeight } from '@xterm/xterm'
+import { Terminal } from '@xterm/xterm'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import { defaultTerminalThemeId, terminalThemeById, type TerminalThemeId } from '../state/terminalThemes'
-import { preferredFontFamily, terminalFontStack } from '../state/fonts'
+import { terminalThemeById } from '../state/terminalThemes'
+import { createTerminalOptions, defaultTerminalSettings, terminalLetterSpacing, terminalLineHeight, type TerminalVisualSettings } from './options'
 import { isTerminalHostMeasurable } from './geometry'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
+import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 
-const terminalTheme = terminalThemeById(defaultTerminalThemeId)
 const MAX_FIT_ATTEMPTS = 120
 
-type TerminalVisualSettings = {
-  fontFamily: string
-  fontSize: number
-  terminalFontWeight: number
-  scrollback: number
-  terminalThemeId: TerminalThemeId
-  terminalScrollbarVisible: boolean
-}
-
-const defaultTerminalSettings: TerminalVisualSettings = {
-  fontFamily: preferredFontFamily,
-  fontSize: 11,
-  terminalFontWeight: 400,
-  scrollback: 5000,
-  terminalThemeId: defaultTerminalThemeId,
-  terminalScrollbarVisible: false,
-}
 
 type Entry = {
   term: Terminal
@@ -42,12 +25,14 @@ type Entry = {
   fitFrame?: number
   container?: HTMLElement
   titleDisposable?: { dispose: () => void }
+  linkDisposables?: { dispose(): void }[]
   titleHandler?: (title: string) => void
 }
 
 class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
   private settings: TerminalVisualSettings = defaultTerminalSettings
+  private linkActions: CaptureLinkActions = { onOpenPath: () => {}, resolveMarker: () => undefined }
 
   constructor() {
     if (typeof document !== 'undefined') {
@@ -60,16 +45,24 @@ class TerminalManagerImpl {
     }
   }
 
+  setLinkActions(actions: CaptureLinkActions): void {
+    this.linkActions = actions
+  }
+
   applySettings(settings: TerminalVisualSettings): void {
     const fontChanged = this.settings.fontFamily !== settings.fontFamily || this.settings.fontSize !== settings.fontSize || this.settings.terminalFontWeight !== settings.terminalFontWeight
     const themeChanged = this.settings.terminalThemeId !== settings.terminalThemeId
     this.settings = settings
     for (const entry of this.entries.values()) {
-      entry.term.options.fontFamily = terminalFontStack(settings.fontFamily)
-      entry.term.options.fontSize = settings.fontSize
-      entry.term.options.fontWeight = terminalFontWeight(settings.terminalFontWeight)
-      entry.term.options.fontWeightBold = terminalBoldFontWeight(settings.terminalFontWeight)
-      entry.term.options.scrollback = settings.scrollback
+      const options = createTerminalOptions(settings)
+      entry.term.options.customGlyphs = options.customGlyphs
+      entry.term.options.fontFamily = options.fontFamily
+      entry.term.options.fontSize = options.fontSize
+      entry.term.options.fontWeight = options.fontWeight
+      entry.term.options.fontWeightBold = options.fontWeightBold
+      entry.term.options.letterSpacing = terminalLetterSpacing
+      entry.term.options.lineHeight = terminalLineHeight
+      entry.term.options.scrollback = options.scrollback
       entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
       this.applyScrollbarVisibility(entry)
       if (fontChanged) this.fitAfterFontsLoad(entry)
@@ -81,19 +74,7 @@ class TerminalManagerImpl {
     const existing = this.entries.get(paneId)
     if (existing) return existing
 
-    const term = new Terminal({
-      allowProposedApi: true,
-      convertEol: false,
-      cursorBlink: true,
-      fontFamily: terminalFontStack(this.settings.fontFamily),
-      fontSize: this.settings.fontSize,
-      fontWeight: terminalFontWeight(this.settings.terminalFontWeight),
-      fontWeightBold: terminalBoldFontWeight(this.settings.terminalFontWeight),
-      lineHeight: 1.15,
-      scrollback: this.settings.scrollback,
-      minimumContrastRatio: 1,
-      theme: terminalThemeById(this.settings.terminalThemeId),
-    })
+    const term = new Terminal(createTerminalOptions(this.settings))
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.loadAddon(new SearchAddon())
@@ -104,6 +85,10 @@ class TerminalManagerImpl {
 
     const entry: Entry = { term, fit, opened: false, daemonAttached: false, dataWired: false }
     this.entries.set(paneId, entry)
+    entry.linkDisposables = [
+      term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
+      term.registerLinkProvider(createImageMarkerLinkProvider(term, paneId, () => this.linkActions)),
+    ]
     return entry
   }
 
@@ -113,6 +98,7 @@ class TerminalManagerImpl {
     const previousSessionId = entry.sessionId
     entry.sessionId = options.sessionId
     entry.container = container
+    entry.term.options.theme = terminalThemeById(this.settings.terminalThemeId)
     this.applyScrollbarVisibility(entry)
 
     if (!entry.opened) {
@@ -224,6 +210,7 @@ class TerminalManagerImpl {
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     entry.titleDisposable?.dispose()
+    entry.linkDisposables?.forEach((d) => d.dispose())
     entry.term.dispose()
     this.entries.delete(paneId)
   }
@@ -278,15 +265,8 @@ class TerminalManagerImpl {
     })
   }
 
+
 }
 
-function terminalFontWeight(weight: number): FontWeight {
-  return String(weight) as FontWeight
-}
-
-function terminalBoldFontWeight(weight: number): FontWeight {
-  return String(Math.min(900, Math.max(weight, 700))) as FontWeight
-}
 
 export const TerminalManager = new TerminalManagerImpl()
-export { terminalTheme }

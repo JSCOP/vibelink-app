@@ -70,6 +70,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
   const applyingTemplateRequestRef = useRef<number | null>(null)
   const applyingArrangeRequestRef = useRef<number | null>(null)
   const resizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
+  const resizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
   const [resizeHandles, setResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   const [resizePreview, setResizePreview] = useState<ResizePreview | null>(null)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
@@ -92,24 +93,33 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     setResizeHandles((current) => resizeHandleSetsEqual(current, next) ? current : next)
   }, [])
 
+  const clearResizeInteraction = useCallback((options?: { clearHandles?: boolean }) => {
+    resizeDragRef.current?.removeListeners()
+    resizeDragRef.current = null
+    resizeHoverRef.current = null
+    setResizePreview(null)
+    if (options?.clearHandles) setResizeHandles({ connected: [], single: [] })
+  }, [])
+
   const persistLayoutSoon = useCallback(() => {
     const api = apiRef.current
-    if (!api || !activeSessionId || suppressPanelRemovalRef.current) return
+    if (!api || !activeSessionId || suppressPanelRemovalRef.current || !isDockElementMeasurable(dockRef.current)) return
     window.clearTimeout(saveTimerRef.current)
     saveTimerRef.current = window.setTimeout(() => {
       const currentApi = apiRef.current
       const currentSessionId = useWorkspaceStore.getState().activeSessionId
-      if (!currentApi || !currentSessionId) return
+      if (!currentApi || !currentSessionId || !isDockElementMeasurable(dockRef.current)) return
       void saveLayout(currentSessionId, JSON.stringify(currentApi.toJSON()))
     }, 400)
   }, [activeSessionId, saveLayout])
 
   const layoutDockview = useCallback((api: DockviewApi) => {
-    const rect = dockRef.current?.getBoundingClientRect()
-    if (!rect || rect.width <= 0 || rect.height <= 0) return
+    const rect = measurableDockRect(dockRef.current)
+    if (!rect) return false
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
     reflowTerminalsAfterLayout()
     refreshResizeHandles(api)
+    return true
   }, [refreshResizeHandles])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
@@ -127,6 +137,17 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
   }, [])
 
   const buildFallbackLayout = useCallback((api: DockviewApi, panels: PaneMeta[]) => {
+    if (panels.length === 0) return
+
+    const rect = measurableDockRect(dockRef.current)
+    const aspectRatio = rect ? rect.width / rect.height : 1
+    const grid = exactTemplateGridForPaneCount(panels.length, aspectRatio) ?? balancedGridForPaneCount(panels.length, aspectRatio)
+    const layout = createDockviewGridLayout({}, grid, panels.map(paneToGridDescriptor), [], panels[0]?.id)
+    if (layout) {
+      api.fromJSON(layout as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
+      return
+    }
+
     let previous: string | undefined
     for (const pane of panels) {
       addTerminalPanel(api, pane, previous ? { referencePanel: previous, direction: 'right', inactive: true } : undefined)
@@ -149,7 +170,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
 
   const loadActiveSessionLayout = useCallback(() => {
     const api = apiRef.current
-    if (!api || !activeSessionId || loadedSessionRef.current === activeSessionId) return
+    if (!api || !activeSessionId || loadedSessionRef.current === activeSessionId || !isDockElementMeasurable(dockRef.current)) return
     suppressPanelRemovalRef.current = true
     try {
       api.clear()
@@ -170,8 +191,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       } else {
         buildFallbackLayout(api, currentPanes)
       }
-      layoutDockview(api)
-      loadedSessionRef.current = activeSessionId
+      if (layoutDockview(api)) loadedSessionRef.current = activeSessionId
     } finally {
       suppressPanelRemovalRef.current = false
     }
@@ -190,23 +210,15 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     const api = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!api || !sessionId) return
-    activatePane(paneId)
-    const pane = await spawnPane(sessionId)
-    addTerminalPanel(api, pane, { referencePanel: paneId, direction })
-    layoutDockview(api)
-    persistLayoutSoon()
+    await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+      activatePane(paneId)
+      const pane = await spawnPane(sessionId)
+      addTerminalPanel(api, pane, { referencePanel: paneId, direction })
+      layoutDockview(api)
+      persistLayoutSoon()
+    })
   }, [activatePane, addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
 
-  const newTab = useCallback(async (paneId: string) => {
-    const api = apiRef.current
-    const sessionId = useWorkspaceStore.getState().activeSessionId
-    if (!api || !sessionId) return
-    activatePane(paneId)
-    const pane = await spawnPane(sessionId)
-    addTerminalPanel(api, pane, { referencePanel: paneId, direction: 'within' })
-    layoutDockview(api)
-    persistLayoutSoon()
-  }, [activatePane, addTerminalPanel, layoutDockview, persistLayoutSoon, spawnPane])
 
   const closePane = useCallback(async (paneId: string) => {
     const api = apiRef.current
@@ -298,26 +310,39 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     void applyResizedLayout(nextLayout)
   }, [applyResizedLayout])
 
-  const resizeHandleForPointer = useCallback((event: ResizePointer, handle: ConnectedResizeHandle, layout: unknown): ConnectedResizeHandle => {
+  const resizeHandleForPointer = useCallback((event: ResizePointer, handle: ConnectedResizeHandle, layout: unknown): ConnectedResizeHandle | null => {
     if (isSingleResizeHandle(handle)) return handle
     if (!event.ctrlKey) return handle
     const dockRect = dockRef.current?.getBoundingClientRect()
     const point = handle.axis === 'x'
       ? event.clientY - (dockRect?.top ?? 0)
       : event.clientX - (dockRect?.left ?? 0)
-    return singleResizeHandleAt(layout, handle.axis, handle.coordinate, point) ?? handle
+    return singleResizeHandleAt(layout, handle.axis, handle.coordinate, point)
   }, [])
 
-  const previewResizeHandle = useCallback((event: ResizePointer, handle: ConnectedResizeHandle) => {
+  const showResizePreview = useCallback((pointer: ResizePointer, handle: ConnectedResizeHandle) => {
     if (resizeDragRef.current) return
     const api = apiRef.current
     if (!api) return
-    const previewHandle = resizeHandleForPointer(event, handle, api.toJSON())
+    const previewHandle = resizeHandleForPointer(pointer, handle, api.toJSON())
+    if (!previewHandle) {
+      setResizePreview(null)
+      return
+    }
     setResizePreview({ ...previewHandle, delta: 0, mode: isSingleResizeHandle(previewHandle) ? 'single' : 'connected' })
   }, [resizeHandleForPointer])
 
+  const previewResizeHandle = useCallback((event: ResizePointer, handle: ConnectedResizeHandle) => {
+    const pointer = { clientX: event.clientX, clientY: event.clientY, ctrlKey: event.ctrlKey }
+    resizeHoverRef.current = { pointer, handle }
+    showResizePreview(pointer, handle)
+  }, [showResizePreview])
+
   const clearResizePreview = useCallback(() => {
-    if (!resizeDragRef.current) setResizePreview(null)
+    if (!resizeDragRef.current) {
+      resizeHoverRef.current = null
+      setResizePreview(null)
+    }
   }, [])
 
   const startConnectedResize = useCallback((event: ReactPointerEvent, handle: ConnectedResizeHandle) => {
@@ -327,9 +352,11 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     event.stopPropagation()
 
     resizeDragRef.current?.removeListeners()
+    resizeHoverRef.current = null
     const dockRect = dockRef.current?.getBoundingClientRect()
     const startLayout = api.toJSON()
     const previewHandle = resizeHandleForPointer(event, handle, startLayout)
+    if (!previewHandle) return
     const singleSegment = event.ctrlKey || isSingleResizeHandle(previewHandle)
     const startPoint = previewHandle.axis === 'x' ? event.clientX : event.clientY
     const segmentPoint = previewHandle.axis === 'x'
@@ -344,14 +371,14 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       const rawDelta = currentPoint - startPoint
       const delta = singleSegment
         ? singleResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, rawDelta, undefined, resizeSnapTolerance) ?? 0
-        : connectedResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, rawDelta) ?? 0
+        : connectedResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, rawDelta, undefined, resizeSnapTolerance) ?? 0
 
-      const snapped = singleSegment && Math.abs(delta - rawDelta) > 2
+      const snapped = Math.abs(delta - rawDelta) > 2
       setResizePreview({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
       latestLayout = Math.abs(delta) >= 1
         ? singleSegment
           ? resizeSingleBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, delta, undefined, resizeSnapTolerance)
-          : resizeConnectedBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, delta)
+          : resizeConnectedBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, delta, undefined, resizeSnapTolerance)
         : null
     }
 
@@ -359,6 +386,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       const nextLayout = latestLayout
       resizeDragRef.current?.removeListeners()
       resizeDragRef.current = null
+      resizeHoverRef.current = null
       setResizePreview(null)
       if (!nextLayout) return
       const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -453,9 +481,6 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       case 'splitDown':
         void splitPane(activePanelId, 'below')
         break
-      case 'newTab':
-        void newTab(activePanelId)
-        break
       case 'closePane':
         void closePane(activePanelId)
         break
@@ -499,27 +524,26 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
         TerminalManager.copySelectionToClipboard(activePanelId)
         break
     }
-  }, [arrangePanes, closePane, closeWorkspace, focusPane, newTab, splitPane, toggleMaximize])
+  }, [arrangePanes, closePane, closeWorkspace, focusPane, splitPane, toggleMaximize])
 
   const applyTemplate = useCallback(async (template: GridTemplate, profileId?: string | null) => {
     const api = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!api || !sessionId) return
-    const profile = profileById(useWorkspaceStore.getState().settings, profileId)
-    const targetPaneCount = template.cols * template.rows
-    const existingPanes = Object.values(useWorkspaceStore.getState().panes)
-    const initialPlan = planTemplateReconcile(existingPanes.map((pane) => pane.id), targetPaneCount)
-    const plannedPanes = [...existingPanes]
-
-    for (let index = 0; index < initialPlan.missingPaneCount; index += 1) {
-      const pane = await spawnPane(sessionId, { profileId, title: `${profile.name} ${plannedPanes.length + 1}` })
-      plannedPanes.push(pane)
-    }
-
-    const paneById = new Map(plannedPanes.map((pane) => [pane.id, pane]))
-    const plan = planTemplateReconcile(plannedPanes.map((pane) => pane.id), targetPaneCount)
-
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+      const profile = profileById(useWorkspaceStore.getState().settings, profileId)
+      const targetPaneCount = template.cols * template.rows
+      const existingPanes = Object.values(useWorkspaceStore.getState().panes)
+      const initialPlan = planTemplateReconcile(existingPanes.map((pane) => pane.id), targetPaneCount)
+      const plannedPanes = [...existingPanes]
+
+      for (let index = 0; index < initialPlan.missingPaneCount; index += 1) {
+        const pane = await spawnPane(sessionId, { profileId, title: `${profile.name} ${plannedPanes.length + 1}` })
+        plannedPanes.push(pane)
+      }
+
+      const paneById = new Map(plannedPanes.map((pane) => [pane.id, pane]))
+      const plan = planTemplateReconcile(plannedPanes.map((pane) => pane.id), targetPaneCount)
       const gridPanes = plan.gridPaneIds.map((paneId) => paneById.get(paneId)).filter((pane): pane is PaneMeta => pane !== undefined)
       const overflowPanes = plan.overflowPaneIds.map((paneId) => paneById.get(paneId)).filter((pane): pane is PaneMeta => pane !== undefined)
       applyGridLayout(api, template, gridPanes, overflowPanes)
@@ -531,15 +555,30 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
   }, [applyGridLayout, layoutDockview, saveLayout, spawnPane])
 
 
-  const actions = useMemo(() => ({ activatePane, splitPane, newTab, closePane, toggleMaximize, renamePaneTitle, swapPaneLocations, movePaneToPosition }), [activatePane, closePane, movePaneToPosition, newTab, renamePaneTitle, splitPane, swapPaneLocations, toggleMaximize])
+  const actions = useMemo(() => ({ activatePane, splitPane, closePane, toggleMaximize, renamePaneTitle, swapPaneLocations, movePaneToPosition }), [activatePane, closePane, movePaneToPosition, renamePaneTitle, splitPane, swapPaneLocations, toggleMaximize])
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api
+    const updateActivePaneId = () => useWorkspaceStore.getState().setActivePaneId(event.api.activePanel?.id)
+    const activePanelApi = event.api as DockviewApi & { onDidActivePanelChange?: (listener: () => void) => { dispose(): void } }
+    const hasActivePanelChange = typeof activePanelApi.onDidActivePanelChange === 'function'
+    const syncMaximizedResizeState = () => {
+      const hasMaximizedGroup = event.api.hasMaximizedGroup()
+      clearResizeInteraction({ clearHandles: hasMaximizedGroup })
+      if (!hasMaximizedGroup && isDockElementMeasurable(dockRef.current)) refreshResizeHandles(event.api)
+      reflowTerminalsAfterLayout()
+    }
+
+    if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(updateActivePaneId)
+    event.api.onDidMaximizedGroupChange(syncMaximizedResizeState)
+    updateActivePaneId()
     onApiReady?.(event.api)
     event.api.onDidLayoutChange(() => {
+      if (!isDockElementMeasurable(dockRef.current)) return
       TerminalManager.reflowAll()
       refreshResizeHandles(event.api)
       persistLayoutSoon()
+      if (!hasActivePanelChange) updateActivePaneId()
     })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
@@ -548,7 +587,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     })
     loadedSessionRef.current = null
     loadActiveSessionLayout()
-  }, [closePaneInStore, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles])
+  }, [clearResizeInteraction, closePaneInStore, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles])
 
   useEffect(() => {
     loadedSessionRef.current = null
@@ -564,6 +603,41 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
   }, [activeSessionId, loadActiveSessionLayout, paneList.length])
 
   useEffect(() => {
+    const api = apiRef.current
+    if (!api || !activeSessionId || loadedSessionRef.current !== activeSessionId || suppressPanelRemovalRef.current) return
+    const hasMissing = paneList.some((pane) => !api.getPanel(pane.id))
+    if (!hasMissing) return
+    loadedSessionRef.current = null
+    loadActiveSessionLayout()
+  }, [activeSessionId, loadActiveSessionLayout, paneList])
+
+  useEffect(() => {
+    const dock = dockRef.current
+    if (!dock) return
+
+    let frame: number | undefined
+    const syncVisibleLayout = () => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        frame = undefined
+        const api = apiRef.current
+        if (!api || !isDockElementMeasurable(dock)) return
+        if (activeSessionId && loadedSessionRef.current !== activeSessionId) loadActiveSessionLayout()
+        else layoutDockview(api)
+      })
+    }
+
+    const observer = new ResizeObserver(syncVisibleLayout)
+    observer.observe(dock)
+    syncVisibleLayout()
+
+    return () => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [activeSessionId, layoutDockview, loadActiveSessionLayout])
+
+  useEffect(() => {
     if (!arrangeRequestId || applyingArrangeRequestRef.current === arrangeRequestId) return
     applyingArrangeRequestRef.current = arrangeRequestId
     void arrangePanes().finally(() => {
@@ -577,10 +651,21 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       const dock = dockRef.current
       if (dock && dock.dataset.resizeMode !== mode) dock.dataset.resizeMode = mode
     }
+    const refreshHoveredPreview = (ctrlKey: boolean) => {
+      const hovered = resizeHoverRef.current
+      if (!hovered || resizeDragRef.current) return
+      const pointer = { ...hovered.pointer, ctrlKey }
+      resizeHoverRef.current = { ...hovered, pointer }
+      showResizePreview(pointer, hovered.handle)
+    }
     const syncCtrlMode = (event: KeyboardEvent) => {
       setResizeMode(event.ctrlKey)
+      refreshHoveredPreview(event.ctrlKey)
     }
-    const resetCtrlMode = () => setResizeMode(false)
+    const resetCtrlMode = () => {
+      setResizeMode(false)
+      refreshHoveredPreview(false)
+    }
     window.addEventListener('keydown', syncCtrlMode, { capture: true })
     window.addEventListener('keyup', syncCtrlMode, { capture: true })
     window.addEventListener('blur', resetCtrlMode)
@@ -589,7 +674,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       window.removeEventListener('keyup', syncCtrlMode, { capture: true })
       window.removeEventListener('blur', resetCtrlMode)
     }
-  }, [])
+  }, [showResizePreview])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -607,7 +692,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
         settings.keybindings,
         event,
         (action) => runKeybindingAction(action, activePanelId),
-        (action) => !isTerminalCopyAction(action) || TerminalManager.containsEventTarget(activePanelId, event.target),
+        (action) => isWorkspaceKeybindingAction(action) && (!isTerminalCopyAction(action) || TerminalManager.containsEventTarget(activePanelId, event.target)),
       )
     }
     window.addEventListener('keydown', onKeyDown, { capture: true })
@@ -644,7 +729,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
   return (
     <WorkspaceActionsContext.Provider value={actions}>
       <section className="workspace-view">
-        <div ref={dockRef} className="dockview-theme-abyss workspace-dock" data-resize-mode="connected" onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
+        <div ref={dockRef} className="dockview-theme-awt workspace-dock" data-resize-mode="connected" onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
           <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" defaultTabComponent={TerminalTab} disableDnd />
           <div className="connected-resize-layer" aria-hidden="true">
             {resizeHandles.connected.map((handle) => (
@@ -681,7 +766,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
                 />
                 {resizePreview.snapped ? (
                   <div
-                    className={`connected-resize-preview connected-resize-preview-${resizePreview.axis} connected-resize-preview-snap-target`}
+                    className={`connected-resize-preview connected-resize-preview-${resizePreview.axis} connected-resize-preview-${resizePreview.mode} connected-resize-preview-snap-target`}
                     style={resizePreviewStyle(resizePreview, 6, resizePreview.delta)}
                   />
                 ) : null}
@@ -731,6 +816,17 @@ function resizeHandlesEqual(a: ConnectedResizeHandle[], b: ConnectedResizeHandle
     }
   }
   return true
+}
+
+function measurableDockRect(element: HTMLElement | null): DOMRect | null {
+  if (!isDockElementMeasurable(element)) return null
+  return element.getBoundingClientRect()
+}
+
+function isDockElementMeasurable(element: HTMLElement | null): element is HTMLElement {
+  if (!element?.isConnected || element.offsetParent === null) return false
+  const rect = element.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0
 }
 
 function reflowTerminalsAfterLayout(): void {
@@ -827,6 +923,10 @@ function closeFocusScore(closing: DOMRect, candidate: DOMRect): number {
   const candidateCenterY = candidate.top + candidate.height / 2
   const centerDistance = Math.abs(closingCenterX - candidateCenterX) + Math.abs(closingCenterY - candidateCenterY)
   return (horizontalGap + verticalGap) * 1_000_000 + centerDistance
+}
+
+function isWorkspaceKeybindingAction(action: KeybindingActionId): boolean {
+  return action !== 'captureImage' && action !== 'captureVideo'
 }
 
 function isTerminalCopyAction(action: KeybindingActionId): boolean {

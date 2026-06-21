@@ -32,14 +32,18 @@ export type Settings = {
   scrollback: number
   terminalFontWeight: number
   uiScale: number
-  accent: string
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
   resizeSnapTolerance: number
+  paneHeaderHeight: number
   profiles: Profile[]
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
+  paneRoles: Record<string, string>
   keybindings: KeybindingSettings
+  hermesCommand: string
+  captureDir: string
+  captureFfmpegPath: string
 }
 
 const terminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
@@ -179,13 +183,17 @@ export const defaultSettings: Settings = {
   scrollback: 5000,
   terminalFontWeight: 400,
   uiScale: 1,
-  accent: '#7ee787',
   terminalThemeId: defaultTerminalThemeId,
   terminalScrollbarVisible: false,
   resizeSnapTolerance: 32,
+  paneHeaderHeight: 28,
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
+  paneRoles: {},
+  hermesCommand: '',
+  captureDir: '',
+  captureFfmpegPath: '',
   keybindings: { ...defaultKeybindings },
 }
 
@@ -196,6 +204,7 @@ export function normalizeSettings(value: unknown): Settings {
   const requestedProfileId = readString(record?.defaultProfileId, profiles[0].id)
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
   const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
+  const paneRoles = normalizePaneRoles(record?.paneRoles)
 
   return {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
@@ -203,14 +212,18 @@ export function normalizeSettings(value: unknown): Settings {
     scrollback: readNumber(record?.scrollback, defaultSettings.scrollback),
     terminalFontWeight: readNumberInRange(record?.terminalFontWeight, defaultSettings.terminalFontWeight, 100, 900),
     uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
-    accent: readString(record?.accent, defaultSettings.accent),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     resizeSnapTolerance: readNumberInRange(record?.resizeSnapTolerance, defaultSettings.resizeSnapTolerance, 0, 128),
+    paneHeaderHeight: readNumberInRange(record?.paneHeaderHeight, defaultSettings.paneHeaderHeight, 24, 56),
     profiles,
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
     workspaceProfileIds,
+    paneRoles,
+    hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
+    captureDir: readString(record?.captureDir, defaultSettings.captureDir),
+    captureFfmpegPath: readString(record?.captureFfmpegPath, defaultSettings.captureFfmpegPath),
   }
 }
 
@@ -292,6 +305,16 @@ function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Reco
   return Object.fromEntries(
     Object.entries(value).filter(
       (entry): entry is [string, string] => entry[0].trim().length > 0 && typeof entry[1] === 'string' && profileIds.has(entry[1]),
+    ),
+  )
+}
+
+function normalizePaneRoles(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, string] =>
+        entry[0].trim().length > 0 && typeof entry[1] === 'string' && entry[1].trim().length > 0,
     ),
   )
 }
@@ -446,6 +469,7 @@ function readNumber(value: unknown, fallback: number): number {
 function readNumberInRange(value: unknown, fallback: number, min: number, max: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max ? value : fallback
 }
+
 
 function readBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback

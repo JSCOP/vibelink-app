@@ -1,5 +1,5 @@
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
-use crate::protocol::{ClientToDaemon, ReplyResult};
+use crate::protocol::{ClientToDaemon, ReplyResult, TaskSignal};
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
     borrow::Cow,
@@ -22,6 +22,18 @@ enum CliCommand {
         pane_id: Uuid,
         text: String,
         enter: bool,
+    },
+    TaskDone {
+        session_id: Uuid,
+        pane_id: Option<Uuid>,
+        task_id: String,
+        commit_msg: Option<String>,
+    },
+    TaskNote {
+        session_id: Uuid,
+        pane_id: Option<Uuid>,
+        task_id: String,
+        message: String,
     },
     Help,
 }
@@ -93,6 +105,50 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             println!("{{\"ok\":true}}");
             Ok(())
         }
+        CliCommand::TaskDone {
+            session_id,
+            pane_id,
+            task_id,
+            commit_msg,
+        } => {
+            match client.request_reply(|req| ClientToDaemon::TaskEvent {
+                req,
+                session_id,
+                event: TaskSignal::Done {
+                    task_id,
+                    commit_msg,
+                    pane_id,
+                },
+            })? {
+                ReplyResult::Ok => {
+                    println!("{{\"ok\":true}}");
+                    Ok(())
+                }
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
+        CliCommand::TaskNote {
+            session_id,
+            pane_id,
+            task_id,
+            message,
+        } => {
+            match client.request_reply(|req| ClientToDaemon::TaskEvent {
+                req,
+                session_id,
+                event: TaskSignal::Note {
+                    task_id,
+                    message,
+                    pane_id,
+                },
+            })? {
+                ReplyResult::Ok => {
+                    println!("{{\"ok\":true}}");
+                    Ok(())
+                }
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
         CliCommand::Help => unreachable!("handled before daemon connection"),
     }
 }
@@ -122,6 +178,7 @@ fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<CliComm
         }
         "read" => parse_read(&tokens[1..]),
         "write" => parse_write(&tokens[1..]),
+        "task" => parse_task(&tokens[1..]),
         other => bail!("usage: unknown cli command `{other}`\n{}", usage()),
     }
 }
@@ -196,6 +253,99 @@ fn parse_write(tokens: &[String]) -> Result<CliCommand> {
     })
 }
 
+fn parse_task(tokens: &[String]) -> Result<CliCommand> {
+    let Some(command) = tokens.first().map(String::as_str) else {
+        return Err(usage_error("task requires done or note"));
+    };
+    match command {
+        "done" => parse_task_done(&tokens[1..]),
+        "note" => parse_task_note(&tokens[1..]),
+        other => bail!("usage: unknown task command `{other}`\n{}", usage()),
+    }
+}
+
+fn parse_task_done(tokens: &[String]) -> Result<CliCommand> {
+    let mut session_id = None;
+    let mut pane_id = None;
+    let mut task_id = None;
+    let mut commit_msg = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                session_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
+            "--pane" => {
+                let value = next_flag_value(tokens, index, "--pane")?;
+                pane_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
+            "--task" => {
+                task_id = Some(next_flag_value(tokens, index, "--task")?.to_string());
+                index += 2;
+            }
+            "--commit-msg" => {
+                commit_msg = Some(next_flag_value(tokens, index, "--commit-msg")?.to_string());
+                index += 2;
+            }
+            other => bail!("usage: unknown task done option `{other}`\n{}", usage()),
+        }
+    }
+
+    Ok(CliCommand::TaskDone {
+        session_id: session_id
+            .or_else(session_id_from_env)
+            .ok_or_else(|| usage_error("task done requires --session <uuid> or AWT_SESSION_ID"))?,
+        pane_id: pane_id.or_else(pane_id_from_env),
+        task_id: task_id.ok_or_else(|| usage_error("task done requires --task <id>"))?,
+        commit_msg,
+    })
+}
+
+fn parse_task_note(tokens: &[String]) -> Result<CliCommand> {
+    let mut session_id = None;
+    let mut pane_id = None;
+    let mut task_id = None;
+    let mut message = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                session_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
+            "--pane" => {
+                let value = next_flag_value(tokens, index, "--pane")?;
+                pane_id = Some(parse_uuid(value)?);
+                index += 2;
+            }
+            "--task" => {
+                task_id = Some(next_flag_value(tokens, index, "--task")?.to_string());
+                index += 2;
+            }
+            "--message" => {
+                message = Some(next_flag_value(tokens, index, "--message")?.to_string());
+                index += 2;
+            }
+            other => bail!("usage: unknown task note option `{other}`\n{}", usage()),
+        }
+    }
+
+    Ok(CliCommand::TaskNote {
+        session_id: session_id
+            .or_else(session_id_from_env)
+            .ok_or_else(|| usage_error("task note requires --session <uuid> or AWT_SESSION_ID"))?,
+        pane_id: pane_id.or_else(pane_id_from_env),
+        task_id: task_id.ok_or_else(|| usage_error("task note requires --task <id>"))?,
+        message: message.ok_or_else(|| usage_error("task note requires --message <text>"))?,
+    })
+}
+
 fn parse_optional_session_flag_or_env(tokens: &[String], command: &str) -> Result<Uuid> {
     if tokens.is_empty() {
         return session_id_from_env().ok_or_else(|| {
@@ -236,7 +386,7 @@ fn print_usage(mut writer: impl Write) -> Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]"
+    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]\n  app.exe cli task done --task <id> [--session <session-id>] [--pane <pane-id>] [--commit-msg <msg>]\n  app.exe cli task note --task <id> --message <text> [--session <session-id>] [--pane <pane-id>]"
 }
 
 fn session_id_from_env() -> Option<Uuid> {
@@ -245,7 +395,13 @@ fn session_id_from_env() -> Option<Uuid> {
         .and_then(|value| parse_uuid(&value).ok())
 }
 
-fn write_payload(text: String, enter: bool) -> Vec<u8> {
+fn pane_id_from_env() -> Option<Uuid> {
+    std::env::var("AWT_PANE_ID")
+        .ok()
+        .and_then(|value| parse_uuid(&value).ok())
+}
+
+pub(crate) fn write_payload(text: String, enter: bool) -> Vec<u8> {
     let mut data = text.into_bytes();
     if enter {
         data.push(b'\r');
@@ -253,7 +409,7 @@ fn write_payload(text: String, enter: bool) -> Vec<u8> {
     data
 }
 
-fn strip_ansi(text: &str) -> Cow<'_, str> {
+pub(crate) fn strip_ansi(text: &str) -> Cow<'_, str> {
     let Some(first_escape) = text.as_bytes().iter().position(|byte| *byte == 0x1b) else {
         return Cow::Borrowed(text);
     };
@@ -349,6 +505,53 @@ mod tests {
                 enter: true,
             }
         );
+    }
+
+    #[test]
+    fn parse_task_done_accepts_optional_pane_and_commit_message() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let parsed = parse_args([
+            "cli",
+            "task",
+            "done",
+            "--session",
+            &session_id.to_string(),
+            "--pane",
+            &pane_id.to_string(),
+            "--task",
+            "task-1",
+            "--commit-msg",
+            "finished",
+        ])
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            CliCommand::TaskDone {
+                session_id,
+                pane_id: Some(pane_id),
+                task_id: "task-1".to_string(),
+                commit_msg: Some("finished".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_task_note_requires_message() {
+        let session_id = Uuid::new_v4();
+        let err = parse_args([
+            "cli",
+            "task",
+            "note",
+            "--session",
+            &session_id.to_string(),
+            "--task",
+            "task-1",
+        ])
+        .expect_err("missing message should fail");
+
+        assert!(err.to_string().contains("--message"));
     }
 
     #[test]

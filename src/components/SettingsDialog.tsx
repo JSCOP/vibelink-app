@@ -1,12 +1,16 @@
 import { invoke } from '@tauri-apps/api/core'
+import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useState } from 'react'
 import { X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
+import { HermesGatewayForm } from './HermesGatewayForm'
 import { profileIconNames } from '../state/profileIcons'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
 import { joinCommandLine, splitCommandLine, type Profile, type ProfileKind, type Settings } from '../state/profiles'
-import { terminalThemes } from '../state/terminalThemes'
+import { terminalThemeDefinitionById, terminalThemeGroups, type RequiredTerminalTheme, type TerminalThemeId } from '../state/terminalThemes'
+import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
+import { useWorkspaceStore } from '../state/store'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -14,7 +18,7 @@ type SettingsDialogProps = {
   onClose: () => void
 }
 
-type SettingsSection = 'appearance' | 'layout' | 'profiles' | 'theme' | 'keybindings'
+type SettingsSection = 'appearance' | 'layout' | 'profiles' | 'theme' | 'keybindings' | 'capture' | 'hermes'
 
 const sectionLabels: Record<SettingsSection, string> = {
   appearance: 'Appearance',
@@ -22,17 +26,22 @@ const sectionLabels: Record<SettingsSection, string> = {
   profiles: 'Profiles',
   theme: 'Theme',
   keybindings: 'Keybindings',
+  capture: 'Capture',
+  hermes: 'Hermes',
 }
 
 const sectionDescriptions: Record<SettingsSection, string> = {
   appearance: 'Font and scrollback',
-  layout: 'Pane resize',
+  layout: 'Pane resize and headers',
   profiles: 'Shell, SSH, commands',
   theme: 'Color palettes',
   keybindings: 'Shortcuts',
+  capture: 'Screenshot & recording',
+  hermes: 'Agent runtime',
 }
 
 const fontWeightOptions = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+const themePreviewAnsiKeys = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'] as const
 const profileKindLabels: Record<ProfileKind, string> = {
   local: 'Local shell',
   ssh: 'SSH remote',
@@ -45,8 +54,22 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance')
   const [editingProfileId, setEditingProfileId] = useState(settings.defaultProfileId)
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
+  const [hermesRuntime, setHermesRuntime] = useState<HermesRuntimeStatus | null>(null)
+  const [hermesRuntimeBusy, setHermesRuntimeBusy] = useState(false)
+  const [hermesRuntimeMessage, setHermesRuntimeMessage] = useState('')
+  const [agentHome, setAgentHome] = useState('')
+  const [workspaceState, setWorkspaceState] = useState<HermesWorkspaceState | null>(null)
+  const [defaultDir, setDefaultDir] = useState('')
+  const [captureFolderBusy, setCaptureFolderBusy] = useState(false)
+  const [ffmpegTestStatus, setFfmpegTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
+  const [ffmpegTestMessage, setFfmpegTestMessage] = useState('')
+  const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const sessions = useWorkspaceStore((state) => state.sessions)
   const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [installedFonts, draft.fontFamily])
   const editingProfile = draft.profiles.find((profile) => profile.id === editingProfileId) ?? draft.profiles[0]
+  const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
+  const activeSession = activeSessionId ? sessions.find((session) => session.id === activeSessionId) : undefined
+  const workspaceModel = workspaceState?.model ?? null
 
   useEffect(() => {
     let cancelled = false
@@ -59,6 +82,50 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
       })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void invoke<string>('default_capture_dir')
+      .then((dir) => {
+        if (!cancelled) setDefaultDir(dir)
+      })
+      .catch(() => {
+        if (!cancelled) setDefaultDir('')
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (activeSection !== 'hermes') return
+    let cancelled = false
+    void invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
+      .then((status) => {
+        if (!cancelled) setHermesRuntime(status)
+      })
+      .catch((error) => {
+        if (!cancelled) setHermesRuntime({ installed: false, command: draft.hermesCommand || 'hermes-acp', version: String(error) })
+      })
+    return () => { cancelled = true }
+  }, [activeSection, draft.hermesCommand])
+
+  useEffect(() => {
+    if (activeSection !== 'hermes' || !activeSessionId) return
+    let cancelled = false
+    void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId })
+      .then((state) => {
+        if (!cancelled) {
+          setWorkspaceState(state)
+          setAgentHome(state.home)
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setWorkspaceState(null)
+          setAgentHome(String(error))
+        }
+      })
+    return () => { cancelled = true }
+  }, [activeSection, activeSessionId])
 
 
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
@@ -82,6 +149,41 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
     const defaultProfileId = draft.defaultProfileId === profileId ? profiles[0].id : draft.defaultProfileId
     patchDraft({ profiles, defaultProfileId })
     setEditingProfileId(defaultProfileId)
+  }
+  const installHermesRuntime = async () => {
+    setHermesRuntimeBusy(true)
+    setHermesRuntimeMessage('Installing Hermes runtime…')
+    try {
+      const command = await invoke<string>('hermes_install_runtime')
+      const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
+      setHermesRuntime(status)
+      setHermesRuntimeMessage(`Installed: ${command}`)
+    } catch (error) {
+      setHermesRuntimeMessage(String(error))
+    } finally {
+      setHermesRuntimeBusy(false)
+    }
+  }
+  const browseCaptureDir = async () => {
+    setCaptureFolderBusy(true)
+    try {
+      const selected = await open({ directory: true, multiple: false, title: 'Select capture folder' })
+      if (typeof selected === 'string') patchDraft({ captureDir: selected })
+    } finally {
+      setCaptureFolderBusy(false)
+    }
+  }
+  const testFfmpeg = async () => {
+    setFfmpegTestStatus('testing')
+    setFfmpegTestMessage('Checking…')
+    try {
+      await invoke('check_ffmpeg', { ffmpegPath: draft.captureFfmpegPath })
+      setFfmpegTestStatus('ok')
+      setFfmpegTestMessage('OK')
+    } catch (error) {
+      setFfmpegTestStatus('error')
+      setFfmpegTestMessage(String(error))
+    }
   }
   const apply = () => onChange(draft)
   const ok = () => {
@@ -117,7 +219,7 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                 <section className="settings-card settings-card-hero">
                   <div>
                     <h3>Terminal appearance</h3>
-                    <p>Font, scrollback, scrollbar, and accent apply when you press Apply or OK.</p>
+                    <p>Font, scrollback, scrollbar, and theme apply when you press Apply or OK.</p>
                   </div>
                   <div className="settings-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>
                     <span>PS E:\\repo&gt;</span>
@@ -158,10 +260,6 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                       <input type="number" min="100" max="200000" step="100" value={draft.scrollback} onChange={(event) => patchDraft({ scrollback: Number(event.target.value) })} />
                     </label>
                     <label>
-                      Accent
-                      <input type="color" value={draft.accent} onChange={(event) => patchDraft({ accent: event.target.value })} />
-                    </label>
-                    <label>
                       UI scale
                       <input type="number" min="0.85" max="1.2" step="0.05" value={draft.uiScale} onChange={(event) => patchDraft({ uiScale: Number(event.target.value) })} />
                     </label>
@@ -176,11 +274,15 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
 
             {activeSection === 'layout' ? (
               <section className="settings-card">
-                <h3>Pane resize</h3>
+                <h3>Pane layout</h3>
                 <div className="settings-grid-4">
                   <label>
                     Snap distance
                     <input type="number" min="0" max="128" step="1" value={draft.resizeSnapTolerance} onChange={(event) => patchDraft({ resizeSnapTolerance: Number(event.target.value) })} />
+                  </label>
+                  <label>
+                    Header height
+                    <input type="number" min="24" max="56" step="1" value={draft.paneHeaderHeight} onChange={(event) => patchDraft({ paneHeaderHeight: Number(event.target.value) })} />
                   </label>
                 </div>
               </section>
@@ -338,25 +440,20 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
             {activeSection === 'theme' ? (
               <section className="settings-card">
                 <h3>Theme</h3>
-                <p>Windows Terminal-inspired palettes plus AWT custom themes.</p>
-                <div className="theme-choice-grid expanded">
-                  {terminalThemes.map((theme) => (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      className={draft.terminalThemeId === theme.id ? 'selected' : ''}
-                      onClick={() => patchDraft({ terminalThemeId: theme.id })}
-                    >
-                      <span className="theme-swatch" style={{ background: theme.theme.background, color: theme.theme.foreground, borderColor: theme.theme.cursor }}>
-                        Aa
-                      </span>
-                      <span>
-                        <strong>{theme.name}</strong>
-                        <small>{theme.description}</small>
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                <p>Choose one palette for app chrome, settings, and pane tabs. Terminal panes keep the Codex/Claude-friendly dark palette.</p>
+                <label>
+                  Theme
+                  <select value={draft.terminalThemeId} onChange={(event) => patchDraft({ terminalThemeId: event.target.value as TerminalThemeId })}>
+                    {terminalThemeGroups.map((group) => (
+                      <optgroup key={group.category} label={group.category}>
+                        {group.themes.map((theme) => (
+                          <option key={theme.id} value={theme.id}>{theme.name}</option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </label>
+                <ThemePreview theme={selectedTheme.terminal} name={selectedTheme.name} description={selectedTheme.description} />
               </section>
             ) : null}
 
@@ -391,6 +488,109 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                 </div>
               </section>
             ) : null}
+            {activeSection === 'capture' ? (
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <div>
+                    <h3>Capture</h3>
+                    <p>Choose where screenshots and recordings are saved, and optionally pin the ffmpeg executable used for video capture.</p>
+                  </div>
+                </div>
+                <div className="settings-grid-3">
+                  <label>
+                    Capture folder
+                    <input
+                      value={draft.captureDir}
+                      placeholder={defaultDir || 'Default capture folder'}
+                      onChange={(event) => patchDraft({ captureDir: event.target.value })}
+                    />
+                  </label>
+                  <button type="button" className="secondary-action" disabled={captureFolderBusy} onClick={() => void browseCaptureDir()}>
+                    {captureFolderBusy ? 'Browsing…' : 'Browse'}
+                  </button>
+                </div>
+                {!draft.captureDir && defaultDir ? <p>{`Default: ${defaultDir}\\Images and \\Video`}</p> : null}
+                <div className="settings-grid-3">
+                  <label>
+                    ffmpeg path
+                    <input
+                      value={draft.captureFfmpegPath}
+                      placeholder="ffmpeg on PATH"
+                      onChange={(event) => {
+                        patchDraft({ captureFfmpegPath: event.target.value })
+                        setFfmpegTestStatus('idle')
+                        setFfmpegTestMessage('')
+                      }}
+                    />
+                  </label>
+                  <button type="button" className="secondary-action" disabled={ffmpegTestStatus === 'testing'} onClick={() => void testFfmpeg()}>
+                    {ffmpegTestStatus === 'testing' ? 'Testing…' : 'Test'}
+                  </button>
+                  {ffmpegTestMessage ? <p role="status" aria-live="polite">{ffmpegTestStatus === 'ok' ? 'OK' : ffmpegTestMessage}</p> : null}
+                </div>
+              </section>
+            ) : null}
+
+            {activeSection === 'hermes' ? (
+              <>
+                <section className="settings-card">
+                  <div className="settings-card-heading">
+                    <div>
+                      <h3>Workspace agent{activeSession ? ` — ${activeSession.name}` : ''}</h3>
+                      <p>This workspace uses native Hermes model and auth configuration. Use Orchestrator → Configure model &amp; login to change provider, login, or model.</p>
+                    </div>
+                  </div>
+                  {activeSessionId ? (
+                    <div className="settings-grid-3">
+                      <div className="settings-status">
+                        <strong>{workspaceModel ? `${workspaceModel.provider} / ${workspaceModel.model}` : 'Not configured — use Orchestrator → Configure model & login'}</strong>
+                        <span>{workspaceModel?.baseUrl || 'Native Hermes config.yaml'}</span>
+                        <small>HERMES_HOME: {agentHome || 'resolving…'}</small>
+                      </div>
+                    </div>
+                  ) : <p>Open a workspace to inspect its agent.</p>}
+                </section>
+
+                <section className="settings-card">
+                  <div className="settings-card-heading">
+                    <div>
+                      <h3>Hermes runtime</h3>
+                      <p>AWT uses Hermes ACP for the chat UI. The managed runtime is installed under app data; Orchestrator shows the exact Hermes CLI and workspace HERMES_HOME paths.</p>
+                    </div>
+                    <button type="button" onClick={installHermesRuntime} disabled={hermesRuntimeBusy}>
+                      {hermesRuntimeBusy ? 'Installing…' : 'Install / update Hermes runtime'}
+                    </button>
+                  </div>
+                  <div className="settings-grid-4">
+                    <label>
+                      hermes-acp command override
+                      <input
+                        value={draft.hermesCommand}
+                        placeholder="hermes-acp"
+                        onChange={(event) => patchDraft({ hermesCommand: event.target.value })}
+                      />
+                    </label>
+                    <div className="settings-status">
+                      <strong>{hermesRuntime?.installed ? 'Installed' : 'Not installed'}</strong>
+                      <span>{hermesRuntime?.command ?? 'hermes-acp'}</span>
+                      {hermesRuntime?.version ? <small>{hermesRuntime.version}</small> : null}
+                      {hermesRuntimeMessage ? <small>{hermesRuntimeMessage}</small> : null}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-card">
+                  <div className="settings-card-heading">
+                    <div>
+                      <h3>Messaging gateway</h3>
+                      {activeSessionId ? <p>Configure messaging for {activeSession?.name ?? 'the active workspace'}.</p> : <p>Open a workspace to configure its messaging gateway.</p>}
+                    </div>
+                  </div>
+                  {activeSessionId ? <HermesGatewayForm sessionId={activeSessionId} /> : null}
+                </section>
+
+              </>
+            ) : null}
           </div>
         </div>
 
@@ -403,6 +603,31 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
           </div>
         </footer>
       </section>
+    </div>
+  )
+}
+
+
+function ThemePreview({ theme, name, description }: { theme: RequiredTerminalTheme; name: string; description: string }) {
+  return (
+    <div className="theme-preview-panel" style={{ background: theme.background, color: theme.foreground, borderColor: theme.selectionBackground }}>
+      <div className="theme-preview-header">
+        <span className="theme-preview-swatch" style={{ background: theme.background, color: theme.foreground, borderColor: theme.cursor }}>Aa</span>
+        <span>
+          <strong>{name}</strong>
+          <small>{description}</small>
+        </span>
+      </div>
+      <div className="theme-preview-terminal" style={{ background: theme.background, color: theme.foreground }}>
+        <span style={{ color: theme.cursor }}>PS E:\repo&gt;</span>
+        <strong> pnpm test</strong>
+        <small style={{ color: theme.brightBlack }}> 24 palettes loaded</small>
+      </div>
+      <div className="theme-preview-colors" aria-hidden="true">
+        {themePreviewAnsiKeys.map((key) => (
+          <span key={key} style={{ background: theme[key] }} />
+        ))}
+      </div>
     </div>
   )
 }

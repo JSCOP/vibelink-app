@@ -1,18 +1,25 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { DockviewApi } from 'dockview-react'
-import { AlertTriangle, Settings2, TerminalSquare, Eraser, LayoutGrid } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { AlertTriangle, Camera, Settings2, TerminalSquare, Eraser, LayoutGrid, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { NewTerminalLauncher } from './components/NewTerminalLauncher'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
+import { KanbanView } from './layout/KanbanView'
 import { startTerminalOutputStream } from './ipc/output'
+import { startHermesOutputStream } from './ipc/hermes'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { selectedProfileForWorkspace } from './state/profiles'
+import { terminalThemeDefinitionById, themeCssVariables } from './state/terminalThemes'
 import { ProfileIcon } from './components/ProfileIcon'
+import { handleCapturedKeybindingEvent } from './state/keybindings'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import './styles/theme.css'
 import './App.css'
 
@@ -24,10 +31,12 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [arrangeRequestId, setArrangeRequestId] = useState(0)
   const [pendingTemplate, setPendingTemplate] = useState<{ sessionId: string; templateId?: string; cols: number; rows: number; profileId?: string | null; requestId: number } | null>(null)
+  const [ffmpegNotice, setFfmpegNotice] = useState(false)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const status = useWorkspaceStore((state) => state.status)
   const error = useWorkspaceStore((state) => state.error)
+  const dismissError = useWorkspaceStore((state) => state.dismissError)
   const bootstrap = useWorkspaceStore((state) => state.bootstrap)
   const createSession = useWorkspaceStore((state) => state.createSession)
   const renameSession = useWorkspaceStore((state) => state.renameSession)
@@ -37,16 +46,41 @@ function App() {
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
   const clearSession = useWorkspaceStore((state) => state.clearSession)
+  const viewModes = useWorkspaceStore((state) => state.viewModes)
+  const setViewMode = useWorkspaceStore((state) => state.setViewMode)
   const settings = useWorkspaceStore((state) => state.settings)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
+  const viewMode = activeSessionId ? viewModes[activeSessionId] ?? 'terminal' : 'terminal'
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('awt:lastActiveSessionId'))
 
   useEffect(() => {
-    void startTerminalOutputStream().then(bootstrap).catch((caught) => {
+    const root = document.documentElement
+    const theme = terminalThemeDefinitionById(settings.terminalThemeId)
+    root.dataset.awtTheme = theme.id
+    root.style.colorScheme = theme.colorScheme
+    for (const [name, value] of Object.entries(themeCssVariables(theme.id))) {
+      root.style.setProperty(name, value)
+    }
+  }, [settings.terminalThemeId])
+
+  useEffect(() => {
+    void Promise.all([startTerminalOutputStream(), startHermesOutputStream()]).then(() => bootstrap()).catch((caught) => {
       useWorkspaceStore.getState().setError(String(caught))
     })
   }, [bootstrap])
+
+  useEffect(() => {
+    TerminalManager.setLinkActions({
+      onOpenPath: (path) => void invoke('open_path', { path }),
+      resolveMarker: (paneId, n) => useWorkspaceStore.getState().resolveCaptureMarker(paneId, n),
+    })
+    const unlisten = listen<{ mode: string; path: string }>('capture://saved', (event) => {
+      const state = useWorkspaceStore.getState()
+      state.recordCapture(state.activePaneId, event.payload.path)
+    })
+    return () => { void unlisten.then((dispose) => dispose()) }
+  }, [])
 
   useEffect(() => {
     TerminalManager.applySettings({
@@ -59,11 +93,27 @@ function App() {
     })
   }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible])
 
-  const selectSession = (sessionId: string) => {
+  useEffect(() => {
+    if (viewMode !== 'terminal') return
+    TerminalManager.reflowAll(true)
+    requestAnimationFrame(() => TerminalManager.reflowAll(true))
+  }, [viewMode])
+  const persistActiveTerminalLayout = () => {
     const currentSessionId = useWorkspaceStore.getState().activeSessionId
-    if (currentSessionId && apiRef.current) {
-      void saveLayout(currentSessionId, JSON.stringify(apiRef.current.toJSON()))
-    }
+    const api = apiRef.current
+    if (!currentSessionId || !api) return
+    void saveLayout(currentSessionId, JSON.stringify(api.toJSON()))
+  }
+
+  const switchWorkspaceView = (mode: 'terminal' | 'kanban') => {
+    if (!activeSessionId) return
+    if (mode === 'kanban') persistActiveTerminalLayout()
+    setViewMode(activeSessionId, mode)
+  }
+
+
+  const selectSession = (sessionId: string) => {
+    persistActiveTerminalLayout()
     void openSession(sessionId)
   }
 
@@ -83,8 +133,40 @@ function App() {
     for (const panel of panels) panel.api.close()
   }
 
+  const openImageCapture = useCallback(() => {
+    void invoke('open_capture_overlay', { mode: 'image', dir: settings.captureDir, ffmpegPath: settings.captureFfmpegPath }).catch((caught) => {
+      useWorkspaceStore.getState().setError(String(caught))
+    })
+  }, [settings.captureDir, settings.captureFfmpegPath])
+
+  const openVideoCapture = useCallback(async () => {
+    try {
+      await invoke('check_ffmpeg', { ffmpegPath: settings.captureFfmpegPath })
+      await invoke('open_capture_overlay', { mode: 'video', dir: settings.captureDir, ffmpegPath: settings.captureFfmpegPath })
+    } catch {
+      setFfmpegNotice(true)
+    }
+  }, [settings.captureDir, settings.captureFfmpegPath])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableShortcutTarget(event.target)) return
+      handleCapturedKeybindingEvent(
+        settings.keybindings,
+        event,
+        (action) => {
+          if (action === 'captureImage') openImageCapture()
+          else if (action === 'captureVideo') void openVideoCapture()
+        },
+        (action) => action === 'captureImage' || action === 'captureVideo',
+      )
+    }
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
+  }, [openImageCapture, openVideoCapture, settings.keybindings])
+
   return (
-    <main className="app-shell" style={{ '--awt-ui-scale': settings.uiScale } as CSSProperties}>
+    <main className="app-shell" style={{ '--awt-ui-scale': settings.uiScale, '--awt-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
       <div className="sidebar-hover-edge" onPointerEnter={() => setIsSidebarOpen(true)} />
       <Sidebar
         isOpen={isSidebarOpen}
@@ -104,6 +186,24 @@ function App() {
             <div className="crumb">WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
           </div>
           <div className="topbar-spacer" />
+          <div className="view-toggle" role="group" aria-label="Workspace view">
+            <button
+              type="button"
+              className={viewMode === 'terminal' ? 'active' : undefined}
+              disabled={!activeSessionId}
+              onClick={() => switchWorkspaceView('terminal')}
+            >
+              <TerminalSquare size={14} /> Terminal
+            </button>
+            <button
+              type="button"
+              className={viewMode === 'kanban' ? 'active' : undefined}
+              disabled={!activeSessionId}
+              onClick={() => switchWorkspaceView('kanban')}
+            >
+              <LayoutGrid size={14} /> Kanban
+            </button>
+          </div>
           <label className="setting-inline profile-setting">
             Profile
             <span className="profile-swatch" aria-hidden="true" style={{ color: activeProfile.color }}><ProfileIcon name={activeProfile.icon} size={14} /></span>
@@ -134,23 +234,44 @@ function App() {
               setIsTerminalLauncherOpen(false)
             }}
           />
+          <button type="button" className="topbar-icon-button" title="Capture image" onClick={openImageCapture}>
+            <Camera size={16} />
+          </button>
+          <button type="button" className="topbar-icon-button" title="Capture video" onClick={() => void openVideoCapture()}>
+            <Video size={16} />
+          </button>
           <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
             <Settings2 size={16} />
           </button>
         </header>
         {error ? (
-          <div className="daemon-banner"><AlertTriangle size={16} /> {error}</div>
+          <div className="daemon-banner">
+            <AlertTriangle size={16} />
+            <span className="daemon-banner-message">{error}</span>
+            <button type="button" className="daemon-banner-close" title="Dismiss" onClick={dismissError}>
+              <X size={14} />
+            </button>
+          </div>
         ) : null}
         {status === 'booting' ? <div className="loading-panel">Connecting to daemon…</div> : (
-          <WorkspaceView
-            onApiReady={(api) => { apiRef.current = api }}
-            pendingTemplate={pendingTemplate}
-            arrangeRequestId={arrangeRequestId}
-            resizeSnapTolerance={settings.resizeSnapTolerance}
-            onTemplateApplied={(requestId) => {
-              setPendingTemplate((current) => current?.requestId === requestId ? null : current)
-            }}
-          />
+          <div className="workspace-content">
+            <div className={`view-pane${viewMode === 'kanban' ? ' view-pane-hidden' : ' view-pane-active'}`} aria-hidden={viewMode === 'kanban'}>
+              <WorkspaceView
+                onApiReady={(api) => { apiRef.current = api }}
+                pendingTemplate={pendingTemplate}
+                arrangeRequestId={arrangeRequestId}
+                resizeSnapTolerance={settings.resizeSnapTolerance}
+                onTemplateApplied={(requestId) => {
+                  setPendingTemplate((current) => current?.requestId === requestId ? null : current)
+                }}
+              />
+            </div>
+            {activeSessionId && viewMode === 'kanban' ? (
+              <ErrorBoundary fallback={(boundaryError) => <div className="kanban-crash-panel"><AlertTriangle size={16} /> Kanban failed: {boundaryError.message}</div>}>
+                <KanbanView sessionId={activeSessionId} />
+              </ErrorBoundary>
+            ) : null}
+          </div>
         )}
         {status === 'ready' && !activeSessionId && !isCreateOpen ? (
           <StartupWorkspaceDialog
@@ -162,9 +283,40 @@ function App() {
         ) : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, templateId, workspaceFolder, profileId) => void createWorkspace(name, templateId, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {ffmpegNotice ? (
+          <div className="settings-backdrop" role="presentation" onMouseDown={() => setFfmpegNotice(false)}>
+            <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ffmpeg-title" style={{ width: 'min(520px, calc(100vw - 48px))' }} onMouseDown={(event) => event.stopPropagation()}>
+              <header className="settings-dialog-header">
+                <div>
+                  <p className="settings-eyebrow">Capture video</p>
+                  <h2 id="ffmpeg-title">ffmpeg is required</h2>
+                </div>
+                <button type="button" className="settings-close" title="Close" onClick={() => setFfmpegNotice(false)}>
+                  <X size={14} />
+                </button>
+              </header>
+              <div className="settings-dialog-body" style={{ display: 'block', maxHeight: 'none' }}>
+                <section className="settings-card">
+                  <p>Install ffmpeg, or set the ffmpeg.exe path in Settings → Capture.</p>
+                  <p><a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noreferrer">Download Windows ffmpeg builds</a></p>
+                </section>
+              </div>
+              <footer className="settings-dialog-footer">
+                <span>Image capture does not require ffmpeg.</span>
+                <button type="button" className="primary-action" onClick={() => setFfmpegNotice(false)}>Close</button>
+              </footer>
+            </section>
+          </div>
+        ) : null}
       </section>
     </main>
   )
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.classList.contains('xterm-helper-textarea')) return false
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
 }
 
 function templateFromId(templateId: string): { cols: number; rows: number } {
