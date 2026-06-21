@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { type ButtonHTMLAttributes, type ComponentType, useEffect, useMemo, useState } from 'react'
 import { KeyRound, Play, RefreshCw, RotateCcw, Settings2, Square, type LucideProps } from 'lucide-react'
-import { startHermesOutputStream } from '../ipc/hermes'
+import { startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
 import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
 import { useWorkspaceStore } from '../state/store'
 import { HermesMessage } from './HermesMessage'
@@ -135,10 +135,8 @@ export function OrchestratorChat() {
   }
 
   const start = async () => {
-    await startHermesOutputStream({ force: true })
-    setHermesStatus(sessionId, 'starting')
     try {
-      await invoke('hermes_start', {
+      await startHermesAgent({
         sessionId,
         commandOverride: settings.hermesCommand || null,
         workspaceFolder: session?.workspaceFolder ?? null,
@@ -208,7 +206,7 @@ export function OrchestratorChat() {
 
   const restart = async () => {
     await invoke('hermes_stop', { sessionId }).catch(() => undefined)
-    await start()
+    await startHermesAgent({ sessionId, commandOverride: settings.hermesCommand || null, workspaceFolder: session?.workspaceFolder ?? null })
   }
 
   const setModel = async (modelId: string) => {

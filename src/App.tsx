@@ -12,7 +12,7 @@ import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
 import { KanbanView } from './layout/KanbanView'
 import { startTerminalOutputStream } from './ipc/output'
-import { startHermesOutputStream } from './ipc/hermes'
+import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { selectedProfileForWorkspace } from './state/profiles'
@@ -92,6 +92,18 @@ function App() {
       terminalScrollbarVisible: settings.terminalScrollbarVisible,
     })
   }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible])
+
+  useEffect(() => {
+    if (!activeSessionId) return
+    const sessionId = activeSessionId
+    const workspaceFolder = activeSession?.workspaceFolder ?? null
+    const commandOverride = settings.hermesCommand || null
+    // Workspace switch work is intentionally backgrounded: the derived profile
+    // changes with activeSessionId immediately, while ACP warmup runs in parallel.
+    void startHermesAgent({ sessionId, commandOverride, workspaceFolder }).catch((caught) => {
+      useWorkspaceStore.getState().setError(String(caught))
+    })
+  }, [activeSessionId, activeSession?.workspaceFolder, settings.hermesCommand])
 
   useEffect(() => {
     if (viewMode !== 'terminal') return

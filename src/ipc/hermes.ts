@@ -18,6 +18,17 @@ export type HermesEvent =
   | { kind: 'exited'; sessionId: string }
 
 let registration: Promise<void> | undefined
+const startPromises = new Map<string, Promise<void>>()
+const DEFAULT_START_TIMEOUT_MS = 60_000
+
+type StartHermesAgentInput = {
+  sessionId: string
+  commandOverride?: string | null
+  workspaceFolder?: string | null
+  timeoutMs?: number
+  restartOnTimeout?: boolean
+}
+
 
 export async function startHermesOutputStream(options: { force?: boolean } = {}): Promise<void> {
   if (registration && !options.force) return registration
@@ -72,4 +83,60 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
   })
   registration = nextRegistration
   await nextRegistration
+}
+
+export async function startHermesAgent({ sessionId, commandOverride = null, workspaceFolder = null, timeoutMs = DEFAULT_START_TIMEOUT_MS, restartOnTimeout = true }: StartHermesAgentInput): Promise<void> {
+  const currentStatus = useWorkspaceStore.getState().hermesStatus[sessionId]
+  if (currentStatus === 'running' || currentStatus === 'busy') return
+  const existing = startPromises.get(sessionId)
+  if (existing) return existing
+
+  const task = startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs })
+    .catch(async (error) => {
+      if (!restartOnTimeout || !isStartTimeout(error)) throw error
+      await invoke('hermes_stop', { sessionId }).catch(() => undefined)
+      return startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs })
+    })
+    .finally(() => {
+      if (startPromises.get(sessionId) === task) startPromises.delete(sessionId)
+    })
+  startPromises.set(sessionId, task)
+  return task
+}
+
+async function startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs }: Required<Pick<StartHermesAgentInput, 'sessionId' | 'timeoutMs'>> & Pick<StartHermesAgentInput, 'commandOverride' | 'workspaceFolder'>): Promise<void> {
+  const store = useWorkspaceStore.getState()
+  await startHermesOutputStream({ force: true })
+  store.setHermesStatus(sessionId, 'starting')
+  await invoke('hermes_start', { sessionId, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
+  await waitForHermesReady(sessionId, timeoutMs)
+}
+
+function waitForHermesReady(sessionId: string, timeoutMs: number): Promise<void> {
+  const current = useWorkspaceStore.getState().hermesStatus[sessionId]
+  if (current === 'running') return Promise.resolve()
+  if (current === 'error') return Promise.reject(new Error('Hermes ACP startup failed'))
+
+  return new Promise((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => {
+      unsubscribe()
+      reject(new Error(`Hermes ACP session did not become ready within ${Math.round(timeoutMs / 1000)}s`))
+    }, timeoutMs)
+    const unsubscribe = useWorkspaceStore.subscribe((state) => {
+      const status = state.hermesStatus[sessionId]
+      if (status === 'running') {
+        globalThis.clearTimeout(timeout)
+        unsubscribe()
+        resolve()
+      } else if (status === 'error') {
+        globalThis.clearTimeout(timeout)
+        unsubscribe()
+        reject(new Error('Hermes ACP startup failed'))
+      }
+    })
+  })
+}
+
+function isStartTimeout(error: unknown): boolean {
+  return String(error).includes('did not become ready')
 }
