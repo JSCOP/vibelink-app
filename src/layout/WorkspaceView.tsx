@@ -738,28 +738,51 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const segmentPoint = previewHandle.axis === 'x'
       ? event.clientY - (dockRect?.top ?? 0)
       : event.clientX - (dockRect?.left ?? 0)
-    let latestLayout: unknown | null = null
+    let latestPoint: number | null = null
+    let moveFrame: number | undefined
 
     setResizePreview({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const currentPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
+    const deltaForPoint = (currentPoint: number) => {
       const rawDelta = currentPoint - startPoint
       const delta = singleSegment
         ? singleResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, rawDelta, undefined, resizeSnapTolerance, true) ?? 0
         : connectedResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, rawDelta, undefined, resizeSnapTolerance) ?? 0
-
-      const snapped = Math.abs(delta - rawDelta) > 2
-      setResizePreview({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
-      latestLayout = Math.abs(delta) >= 1
-        ? singleSegment
-          ? resizeSingleBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, delta, undefined, resizeSnapTolerance, true)
-          : resizeConnectedBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, delta, undefined, resizeSnapTolerance)
-        : null
+      return { rawDelta, delta }
     }
 
-    const onPointerUp = () => {
-      const nextLayout = latestLayout
+    // pointermove can outpace the compositor (high-Hz mice / 240Hz panels);
+    // coalesce preview updates to one per frame and defer building the
+    // committed layout tree to pointerup so the drag hot path stays cheap.
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
+      if (moveFrame !== undefined) return
+      moveFrame = requestAnimationFrame(() => {
+        moveFrame = undefined
+        if (latestPoint === null) return
+        const { rawDelta, delta } = deltaForPoint(latestPoint)
+        const snapped = Math.abs(delta - rawDelta) > 2
+        setResizePreview({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
+      })
+    }
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      if (moveFrame !== undefined) {
+        cancelAnimationFrame(moveFrame)
+        moveFrame = undefined
+      }
+      // Recompute from the release position so a fast drag-release never
+      // commits a frame-stale size. pointercancel carries no meaningful
+      // coordinates — keep the last move point there.
+      if (upEvent.type === 'pointerup') latestPoint = previewHandle.axis === 'x' ? upEvent.clientX : upEvent.clientY
+      const nextLayout = (() => {
+        if (latestPoint === null) return null
+        const { delta } = deltaForPoint(latestPoint)
+        if (Math.abs(delta) < 1) return null
+        return singleSegment
+          ? resizeSingleBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, delta, undefined, resizeSnapTolerance, true)
+          : resizeConnectedBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, delta, undefined, resizeSnapTolerance)
+      })()
       resizeDragRef.current?.removeListeners()
       resizeDragRef.current = null
       resizeHoverRef.current = null
@@ -782,6 +805,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
 
     const removeListeners = () => {
+      if (moveFrame !== undefined) {
+        cancelAnimationFrame(moveFrame)
+        moveFrame = undefined
+      }
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('pointercancel', onPointerUp)
@@ -838,28 +865,43 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const segmentPoint = previewHandle.axis === 'x'
       ? event.clientY - (dockRect?.top ?? 0)
       : event.clientX - (dockRect?.left ?? 0)
-    let latestLayout: unknown | null = null
+    let latestPoint: number | null = null
+    let moveFrame: number | undefined
 
     setTerminalResizePreview({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const currentPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
+    const deltaForPoint = (currentPoint: number) => {
       const rawDelta = currentPoint - startPoint
       const delta = singleSegment
         ? singleResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, rawDelta, undefined, resizeSnapTolerance, true) ?? 0
         : connectedResizeDeltaAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, rawDelta, undefined, resizeSnapTolerance) ?? 0
-
-      const snapped = Math.abs(delta - rawDelta) > 2
-      setTerminalResizePreview({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
-      latestLayout = Math.abs(delta) >= 1
-        ? singleSegment
-          ? resizeSingleBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, delta, undefined, resizeSnapTolerance, true)
-          : resizeConnectedBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, delta, undefined, resizeSnapTolerance)
-        : null
+      return { rawDelta, delta }
     }
 
-    const onPointerUp = () => {
-      const nextLayout = latestLayout
+    // See startConnectedResize: coalesce to one preview per frame, defer the
+    // committed layout tree to pointerup.
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
+      if (moveFrame !== undefined) return
+      moveFrame = requestAnimationFrame(() => {
+        moveFrame = undefined
+        if (latestPoint === null) return
+        const { rawDelta, delta } = deltaForPoint(latestPoint)
+        const snapped = Math.abs(delta - rawDelta) > 2
+        setTerminalResizePreview({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
+      })
+    }
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.type === 'pointerup') latestPoint = previewHandle.axis === 'x' ? upEvent.clientX : upEvent.clientY
+      const nextLayout = (() => {
+        if (latestPoint === null) return null
+        const { delta } = deltaForPoint(latestPoint)
+        if (Math.abs(delta) < 1) return null
+        return singleSegment
+          ? resizeSingleBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, delta, undefined, resizeSnapTolerance, true)
+          : resizeConnectedBoundaryAt(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, delta, undefined, resizeSnapTolerance)
+      })()
       terminalResizeDragRef.current?.removeListeners()
       terminalResizeDragRef.current = null
       terminalResizeHoverRef.current = null
@@ -882,6 +924,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
 
     const removeListeners = () => {
+      if (moveFrame !== undefined) {
+        cancelAnimationFrame(moveFrame)
+        moveFrame = undefined
+      }
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('pointercancel', onPointerUp)

@@ -122,6 +122,22 @@ class TerminalManagerImpl {
       }
       return true
     })
+    term.attachCustomWheelEventHandler((event) => {
+      // In the alternate buffer without wheel-capable mouse reporting, xterm
+      // converts wheel events into arrow-key sequences (CSI A/B). Full-screen
+      // TUIs such as OMP treat ArrowUp as prompt-history recall, so wheeling
+      // corrupts the prompt instead of scrolling — and the alternate buffer
+      // has no scrollback to scroll either. Swallow the event. TUIs that
+      // enable wheel reporting (vt200/drag/any: vim, htop, ...) still receive
+      // real wheel reports via the return-true path; x10 tracks button-down
+      // only, so it gets the same suppression.
+      const wheelReported = term.modes.mouseTrackingMode !== 'none' && term.modes.mouseTrackingMode !== 'x10'
+      if (term.buffer.active.type === 'alternate' && !wheelReported) {
+        event.preventDefault()
+        return false
+      }
+      return true
+    })
 
     const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false }
     this.entries.set(paneId, entry)
