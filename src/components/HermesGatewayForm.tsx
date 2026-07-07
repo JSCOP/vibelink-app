@@ -1,76 +1,142 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useMemo, useState } from 'react'
+import { Play, RefreshCw, Save, Square } from 'lucide-react'
 import type { HermesGatewayConfig, HermesGatewayStatus } from '../ipc/types'
 import { defaultHermesGateway } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
 
-const platforms: HermesGatewayConfig['platform'][] = ['telegram', 'discord', 'slack']
+const platforms: { id: HermesGatewayConfig['platform']; label: string; tokenEnv: string; allowedHint: string }[] = [
+  { id: 'telegram', label: 'Telegram', tokenEnv: 'TELEGRAM_BOT_TOKEN', allowedHint: 'Telegram user IDs, comma separated' },
+  { id: 'discord', label: 'Discord', tokenEnv: 'DISCORD_BOT_TOKEN', allowedHint: 'Discord user IDs, comma separated' },
+  { id: 'slack', label: 'Slack', tokenEnv: 'SLACK_BOT_TOKEN', allowedHint: 'Slack user IDs, comma separated' },
+]
 
 export function HermesGatewayForm({ sessionId }: { sessionId: string }) {
   const gateways = useWorkspaceStore((state) => state.hermesGateways)
   const setHermesGateway = useWorkspaceStore((state) => state.setHermesGateway)
   const gateway = useMemo(() => gateways[sessionId] ?? defaultHermesGateway('telegram'), [gateways, sessionId])
-  const [draft, setDraft] = useState(gateway)
-  const [token, setToken] = useState('')
-  const [status, setStatus] = useState<HermesGatewayStatus | null>(null)
-  const [message, setMessage] = useState('')
+  const gatewayKey = `${sessionId}:${gateway.platform}:${gateway.tokenEnv}:${gateway.tokenSet}:${gateway.allowedUsers}`
+  const [draftState, setDraftState] = useState<{ key: string; value: HermesGatewayConfig }>({ key: gatewayKey, value: gateway })
+  const [transientState, setTransientState] = useState<{ key: string; token: string; status: HermesGatewayStatus | null; message: string }>({
+    key: gatewayKey,
+    token: '',
+    status: null,
+    message: '',
+  })
+  const [busy, setBusy] = useState(false)
+  const draft = draftState.key === gatewayKey ? draftState.value : gateway
+  const transient = transientState.key === gatewayKey ? transientState : { key: gatewayKey, token: '', status: null, message: '' }
+  const { token, status, message } = transient
+  const selectedPlatform = platforms.find((platform) => platform.id === draft.platform) ?? platforms[0]
+
+  const setDraft = (next: HermesGatewayConfig | ((current: HermesGatewayConfig) => HermesGatewayConfig)) => {
+    setDraftState((current) => {
+      const base = current.key === gatewayKey ? current.value : gateway
+      return { key: gatewayKey, value: typeof next === 'function' ? next(base) : next }
+    })
+  }
+
+  const setTransient = (patch: Partial<Omit<typeof transient, 'key'>>) => {
+    setTransientState((current) => ({
+      ...(current.key === gatewayKey ? current : { key: gatewayKey, token: '', status: null, message: '' }),
+      ...patch,
+    }))
+  }
 
   const updatePlatform = (platform: HermesGatewayConfig['platform']) => {
     setDraft({ ...defaultHermesGateway(platform), allowedUsers: draft.allowedUsers, tokenSet: draft.platform === platform ? draft.tokenSet : false })
   }
 
   const provision = async () => {
-    const trimmed = token.trim()
-    const next = { ...draft, tokenSet: draft.tokenSet || trimmed.length > 0 }
-    await invoke('hermes_gateway_provision', { sessionId, gateway: next, token: trimmed || null })
-    setToken('')
-    setHermesGateway(sessionId, next)
-    setMessage('Gateway provisioned')
+    setBusy(true)
+    setTransient({ message: '' })
+    try {
+      const trimmed = token.trim()
+      const next = { ...draft, tokenSet: draft.tokenSet || trimmed.length > 0 }
+      await invoke('hermes_gateway_provision', { sessionId, gateway: next, token: trimmed || null })
+      setTransient({ token: '' })
+      setDraft(next)
+      setHermesGateway(sessionId, next)
+      setTransient({ message: 'Messaging gateway saved.' })
+    } catch (error) {
+      setTransient({ message: String(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   const refresh = async () => {
-    setStatus(await invoke<HermesGatewayStatus>('hermes_gateway_status', { sessionId }))
+    setBusy(true)
+    setTransient({ message: '' })
+    try {
+      setTransient({ status: await invoke<HermesGatewayStatus>('hermes_gateway_status', { sessionId }) })
+    } catch (error) {
+      setTransient({ message: String(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   const start = async () => {
-    const pid = await invoke<number>('hermes_gateway_start', { sessionId })
-    setStatus({ running: true, pid })
+    setBusy(true)
+    setTransient({ message: '' })
+    try {
+      const pid = await invoke<number>('hermes_gateway_start', { sessionId })
+      setTransient({ status: { running: true, pid }, message: `Gateway running on pid ${pid}.` })
+    } catch (error) {
+      setTransient({ message: String(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   const stop = async () => {
-    await invoke('hermes_gateway_stop', { sessionId })
-    setStatus({ running: false })
+    setBusy(true)
+    setTransient({ message: '' })
+    try {
+      await invoke('hermes_gateway_stop', { sessionId })
+      setTransient({ status: { running: false }, message: 'Gateway stopped.' })
+    } catch (error) {
+      setTransient({ message: String(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
-    <details className="hermes-gateway">
-      <summary>Messaging gateway</summary>
+    <div className="hermes-gateway">
+      <div className="hermes-gateway-platforms" role="group" aria-label="Messaging platform">
+        {platforms.map((platform) => (
+          <button
+            key={platform.id}
+            type="button"
+            className={draft.platform === platform.id ? 'selected' : undefined}
+            onClick={() => updatePlatform(platform.id)}
+          >
+            {platform.label}
+          </button>
+        ))}
+      </div>
       <label>
-        Platform
-        <select value={draft.platform} onChange={(event) => updatePlatform(event.target.value as HermesGatewayConfig['platform'])}>
-          {platforms.map((platform) => <option key={platform} value={platform}>{platform}</option>)}
-        </select>
-      </label>
-      <label>
-        Token env var
+        Token environment variable
         <input value={draft.tokenEnv} onChange={(event) => setDraft((current) => ({ ...current, tokenEnv: event.target.value }))} />
       </label>
       <label>
         Token {draft.tokenSet ? <span className="hermes-inline-note">already set</span> : null}
-        <input type="password" value={token} placeholder="Stored only in HERMES_HOME/.env" onChange={(event) => setToken(event.target.value)} />
+        <input type="password" value={token} placeholder={`Stored in HERMES_HOME/.env as ${draft.tokenEnv || selectedPlatform.tokenEnv}`} onChange={(event) => setTransient({ token: event.target.value })} />
       </label>
       <label>
         Allowed users
-        <input value={draft.allowedUsers} onChange={(event) => setDraft((current) => ({ ...current, allowedUsers: event.target.value }))} />
+        <input value={draft.allowedUsers} placeholder={selectedPlatform.allowedHint} onChange={(event) => setDraft((current) => ({ ...current, allowedUsers: event.target.value }))} />
       </label>
       <div className="hermes-permission-actions">
-        <button type="button" onClick={() => void provision()}>Provision</button>
-        <button type="button" onClick={() => void start()}>Start</button>
-        <button type="button" onClick={() => void stop()}>Stop</button>
-        <button type="button" onClick={() => void refresh()}>Status</button>
+        <button type="button" disabled={busy} onClick={() => void provision()}><Save size={14} /> Save</button>
+        <button type="button" disabled={busy} onClick={() => void start()}><Play size={14} /> Start</button>
+        <button type="button" disabled={busy} onClick={() => void stop()}><Square size={14} /> Stop</button>
+        <button type="button" disabled={busy} onClick={() => void refresh()}><RefreshCw size={14} /> Status</button>
       </div>
-      {status ? <p className="hermes-form-message">{status.running ? `Running pid ${status.pid ?? ''}` : 'Stopped'}</p> : null}
+      {status ? <p className="hermes-form-message">{status.running ? `Running pid ${status.pid ?? ''}` : status.pid ? `Stopped, last pid ${status.pid}` : 'Stopped'}</p> : null}
       {message ? <p className="hermes-form-message">{message}</p> : null}
-    </details>
+    </div>
   )
 }

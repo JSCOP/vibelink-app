@@ -1,4 +1,4 @@
-type CaptureMode = 'image' | 'video'
+export type CaptureMode = 'image' | 'quick' | 'video'
 
 type Rect = { x: number; y: number; w: number; h: number }
 type ScreenSize = { w: number; h: number }
@@ -8,7 +8,7 @@ type StylePatchTarget = {
     background: string
     backgroundColor: string
     minWidth: string
-    setProperty?: (property: string, value: string) => void
+    setProperty?: (property: string, value: string, priority?: string) => void
   }
 }
 
@@ -24,6 +24,10 @@ export function applyCaptureOverlayTransparency(doc: CaptureOverlayDocument = do
     element.style.background = 'transparent'
     element.style.backgroundColor = 'transparent'
     element.style.minWidth = '0'
+    element.style.setProperty?.('background', 'transparent', 'important')
+    element.style.setProperty?.('background-color', 'transparent', 'important')
+    element.style.setProperty?.('background-image', 'none', 'important')
+    element.style.setProperty?.('min-width', '0', 'important')
     element.style.setProperty?.('--awt-bg', 'transparent')
   }
 }
@@ -59,5 +63,5 @@ export function captureFileName(mode: CaptureMode, d = new Date()): string {
   const minutes = String(d.getMinutes()).padStart(2, '0')
   const seconds = String(d.getSeconds()).padStart(2, '0')
   const ts = `${year}${month}${day}-${hours}${minutes}${seconds}`
-  return mode === 'image' ? `capture-${ts}.png` : `recording-${ts}.mp4`
+  return mode === 'video' ? `recording-${ts}.mp4` : `capture-${ts}.png`
 }

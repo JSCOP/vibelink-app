@@ -47,6 +47,8 @@ type Boundary = {
   end: number
   path: number[]
   index: number
+  beforeLeaves: LeafRect[]
+  afterLeaves: LeafRect[]
 }
 
 export type ConnectedResizeHandle = {
@@ -160,8 +162,9 @@ export function resizeSingleBoundaryAt(
   delta: number,
   minSize = DEFAULT_MIN_SIZE,
   snapTolerance = DEFAULT_SNAP_TOLERANCE,
+  includeCleanHandles = false,
 ): unknown | null {
-  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point)
+  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point, includeCleanHandles)
   if (!selectedHandle) return null
 
   const workingLayout = normalizeLayoutForSingleResize(layout, axis, selectedHandle, snapTolerance)
@@ -200,8 +203,9 @@ export function singleResizeDeltaAt(
   delta: number,
   minSize = DEFAULT_MIN_SIZE,
   snapTolerance = DEFAULT_SNAP_TOLERANCE,
+  includeCleanHandles = false,
 ): number | null {
-  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point)
+  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point, includeCleanHandles)
   if (!selectedHandle) return null
 
   const workingLayout = normalizeLayoutForSingleResize(layout, axis, selectedHandle, snapTolerance)
@@ -224,8 +228,9 @@ export function singleResizeHandleAt(
   axis: SplitAxis,
   coordinate: number,
   point: number,
+  includeCleanHandles = false,
 ): ConnectedResizeHandle | null {
-  return selectSingleHandle(leafAdjacentResizeHandles(layout, axis), axis, coordinate, point)
+  return selectSingleHandle(leafAdjacentResizeHandles(layout, axis, includeCleanHandles), axis, coordinate, point)
 }
 
 export function connectedResizeHandles(layout: unknown): ConnectedResizeHandle[] {
@@ -234,10 +239,10 @@ export function connectedResizeHandles(layout: unknown): ConnectedResizeHandle[]
   return groupConnectedBoundaries(analysis.boundaries)
 }
 
-export function singleResizeHandles(layout: unknown): ConnectedResizeHandle[] {
+export function singleResizeHandles(layout: unknown, includeCleanHandles = false): ConnectedResizeHandle[] {
   return [
-    ...leafAdjacentResizeHandles(layout, 'x'),
-    ...leafAdjacentResizeHandles(layout, 'y'),
+    ...leafAdjacentResizeHandles(layout, 'x', includeCleanHandles),
+    ...leafAdjacentResizeHandles(layout, 'y', includeCleanHandles),
   ]
 }
 
@@ -261,21 +266,23 @@ function collectLayout(
   path: number[],
   leaves: LeafRect[],
   boundaries: Boundary[],
-): void {
+): LeafRect[] {
   if (node.type === 'leaf') {
-    leaves.push({ paneIds: node.data.views ?? [], rect, node })
-    return
+    const leaf = { paneIds: node.data.views ?? [], rect, node }
+    leaves.push(leaf)
+    return [leaf]
   }
 
   let offset = axis === 'x' ? rect.x : rect.y
   const childRects: Rect[] = []
+  const childLeaves: LeafRect[][] = []
   node.data.forEach((child, index) => {
     const size = Math.max(0, Number(child.size) || 0)
     const childRect = axis === 'x'
       ? { x: offset, y: rect.y, width: size, height: rect.height }
       : { x: rect.x, y: offset, width: rect.width, height: size }
     childRects.push(childRect)
-    collectLayout(child, childRect, oppositeAxis(axis), [...path, index], leaves, boundaries)
+    childLeaves.push(collectLayout(child, childRect, oppositeAxis(axis), [...path, index], leaves, boundaries))
     offset += size
   })
 
@@ -288,8 +295,11 @@ function collectLayout(
       end: axis === 'x' ? rect.y + rect.height : rect.x + rect.width,
       path,
       index,
+      beforeLeaves: childLeaves[index],
+      afterLeaves: childLeaves[index + 1],
     })
   }
+  return childLeaves.flat()
 }
 
 function normalizeLayoutForSingleResize(
@@ -312,18 +322,18 @@ function normalizeLayoutForSingleResize(
     ?? rebuildSlicedLayoutForSingleResize(layout, analysis.leaves, targetRootAxis, selectedHandle, width, height, snapTolerance)
 }
 
-function leafAdjacentResizeHandles(layout: unknown, axis: SplitAxis): ConnectedResizeHandle[] {
+function leafAdjacentResizeHandles(layout: unknown, axis: SplitAxis, includeCleanHandles: boolean): ConnectedResizeHandle[] {
   const analysis = analyzeLayout(layout)
   if (!analysis) return []
 
+  const eligibleKeys = includeCleanHandles ? null : eligibleSingleResizeHandleKeys(analysis.boundaries)
   const handles: ConnectedResizeHandle[] = []
   const seen = new Set<string>()
-  for (let leftIndex = 0; leftIndex < analysis.leaves.length; leftIndex += 1) {
-    for (let rightIndex = leftIndex + 1; rightIndex < analysis.leaves.length; rightIndex += 1) {
-      const handle = leafAdjacentResizeHandle(analysis.leaves[leftIndex], analysis.leaves[rightIndex], axis)
-      if (!handle) continue
-      if (!isSingleResizeHandleEligible(handle, analysis.boundaries)) continue
-      const key = `${handle.axis}:${Math.round(handle.coordinate)}:${Math.round(handle.start)}:${Math.round(handle.end)}`
+  for (const boundary of analysis.boundaries) {
+    if (boundary.axis !== axis) continue
+    for (const handle of leafAdjacentResizeHandlesForBoundary(boundary)) {
+      const key = resizeHandleKey(handle)
+      if (eligibleKeys && !eligibleKeys.has(key)) continue
       if (seen.has(key)) continue
       seen.add(key)
       handles.push({ ...handle, id: `single:${key}` })
@@ -336,34 +346,125 @@ function leafAdjacentResizeHandles(layout: unknown, axis: SplitAxis): ConnectedR
     || a.end - b.end)
 }
 
-function leafAdjacentResizeHandle(a: LeafRect, b: LeafRect, axis: SplitAxis): Omit<ConnectedResizeHandle, 'id'> | null {
-  if (axis === 'x') {
-    const aRight = a.rect.x + a.rect.width
-    const bRight = b.rect.x + b.rect.width
-    const coordinate = Math.abs(aRight - b.rect.x) <= COORDINATE_TOLERANCE
-      ? average([aRight, b.rect.x])
-      : Math.abs(bRight - a.rect.x) <= COORDINATE_TOLERANCE
-        ? average([bRight, a.rect.x])
-        : null
-    if (coordinate === null) return null
-    const start = Math.max(a.rect.y, b.rect.y)
-    const end = Math.min(a.rect.y + a.rect.height, b.rect.y + b.rect.height)
-    if (end - start <= COORDINATE_TOLERANCE) return null
-    return { axis, coordinate, start, end }
+type BoundarySegment = {
+  edge: number
+  start: number
+  end: number
+}
+
+type BoundaryGroup = {
+  axis: SplitAxis
+  coordinate: number
+  start: number
+  end: number
+  boundaries: Boundary[]
+}
+
+function leafAdjacentResizeHandlesForBoundary(boundary: Boundary): Array<Omit<ConnectedResizeHandle, 'id'>> {
+  const beforeSegments = boundary.beforeLeaves
+    .map((leaf) => boundarySegmentForLeaf(leaf, boundary, 'before'))
+    .filter((segment): segment is BoundarySegment => segment !== null)
+  const afterSegments = boundary.afterLeaves
+    .map((leaf) => boundarySegmentForLeaf(leaf, boundary, 'after'))
+    .filter((segment): segment is BoundarySegment => segment !== null)
+
+  return intersectBoundarySegments(boundary.axis, beforeSegments, afterSegments)
+}
+
+
+function boundarySegmentForLeaf(leaf: LeafRect, boundary: Boundary, side: 'before' | 'after'): BoundarySegment | null {
+  if (boundary.axis === 'x') {
+    const edge = side === 'before' ? leaf.rect.x + leaf.rect.width : leaf.rect.x
+    if (Math.abs(edge - boundary.coordinate) > COORDINATE_TOLERANCE) return null
+    return { edge, start: leaf.rect.y, end: leaf.rect.y + leaf.rect.height }
   }
 
-  const aBottom = a.rect.y + a.rect.height
-  const bBottom = b.rect.y + b.rect.height
-  const coordinate = Math.abs(aBottom - b.rect.y) <= COORDINATE_TOLERANCE
-    ? average([aBottom, b.rect.y])
-    : Math.abs(bBottom - a.rect.y) <= COORDINATE_TOLERANCE
-      ? average([bBottom, a.rect.y])
-      : null
-  if (coordinate === null) return null
-  const start = Math.max(a.rect.x, b.rect.x)
-  const end = Math.min(a.rect.x + a.rect.width, b.rect.x + b.rect.width)
-  if (end - start <= COORDINATE_TOLERANCE) return null
-  return { axis, coordinate, start, end }
+  const edge = side === 'before' ? leaf.rect.y + leaf.rect.height : leaf.rect.y
+  if (Math.abs(edge - boundary.coordinate) > COORDINATE_TOLERANCE) return null
+  return { edge, start: leaf.rect.x, end: leaf.rect.x + leaf.rect.width }
+}
+
+function intersectBoundarySegments(axis: SplitAxis, beforeSegments: BoundarySegment[], afterSegments: BoundarySegment[]): Array<Omit<ConnectedResizeHandle, 'id'>> {
+  const before = [...beforeSegments].sort((a, b) => a.start - b.start || a.end - b.end)
+  const after = [...afterSegments].sort((a, b) => a.start - b.start || a.end - b.end)
+  const handles: Array<Omit<ConnectedResizeHandle, 'id'>> = []
+  let beforeIndex = 0
+  let afterIndex = 0
+
+  while (beforeIndex < before.length && afterIndex < after.length) {
+    const first = before[beforeIndex]
+    const second = after[afterIndex]
+    const start = Math.max(first.start, second.start)
+    const end = Math.min(first.end, second.end)
+    if (end - start > COORDINATE_TOLERANCE) {
+      handles.push({ axis, coordinate: average([first.edge, second.edge]), start, end })
+    }
+
+    if (first.end < second.end - COORDINATE_TOLERANCE) beforeIndex += 1
+    else if (second.end < first.end - COORDINATE_TOLERANCE) afterIndex += 1
+    else {
+      beforeIndex += 1
+      afterIndex += 1
+    }
+  }
+
+  return handles
+}
+
+
+function eligibleSingleResizeHandleKeys(boundaries: Boundary[]): Set<string> {
+  const keys = new Set<string>()
+  const groups = connectedBoundaryGroups(boundaries)
+  for (const group of groups) {
+    const groupSet = new Set(group.boundaries)
+    const hasNeighbor = boundaries.some((boundary) =>
+      !groupSet.has(boundary)
+      && boundary.axis === group.axis
+      && Math.abs(boundary.coordinate - group.coordinate) > COORDINATE_TOLERANCE
+      && intervalsMeetAtEndpoint(boundary.start, boundary.end, group.start, group.end),
+    )
+    if (hasNeighbor) keys.add(resizeHandleKey(group))
+  }
+  return keys
+}
+
+function connectedBoundaryGroups(boundaries: Boundary[]): BoundaryGroup[] {
+  const groups: BoundaryGroup[] = []
+  const remaining = new Set(boundaries)
+
+  for (const boundary of boundaries) {
+    if (!remaining.has(boundary)) continue
+    remaining.delete(boundary)
+    const group = [boundary]
+    const queue = [boundary]
+
+    while (queue.length > 0) {
+      const current = queue.shift()
+      if (!current) continue
+      for (const candidate of [...remaining]) {
+        if (candidate.axis !== boundary.axis) continue
+        if (Math.abs(candidate.coordinate - boundary.coordinate) > COORDINATE_TOLERANCE) continue
+        if (!intervalsTouch(current.start, current.end, candidate.start, candidate.end)) continue
+        remaining.delete(candidate)
+        group.push(candidate)
+        queue.push(candidate)
+      }
+    }
+
+    groups.push({
+      axis: boundary.axis,
+      coordinate: average(group.map((item) => item.coordinate)),
+      start: Math.min(...group.map((item) => item.start)),
+      end: Math.max(...group.map((item) => item.end)),
+      boundaries: group,
+    })
+  }
+
+  return groups
+}
+
+function resizeHandleKey(handle: Omit<ConnectedResizeHandle, 'id'>): string {
+  return `${handle.axis}:${Math.round(handle.coordinate)}:${Math.round(handle.start)}:${Math.round(handle.end)}`
 }
 
 function rebuildRectangularLayout(
@@ -557,7 +658,7 @@ function coversNestedAxis(leaves: LeafRect[], axis: SplitAxis, size: number): bo
 
 function sortedCoordinates(values: number[]): number[] {
   const coordinates: number[] = []
-  for (const value of values.sort((a, b) => a - b)) {
+  for (const value of [...values].sort((a, b) => a - b)) {
     const previous = coordinates.at(-1)
     if (previous === undefined || Math.abs(previous - value) > COORDINATE_TOLERANCE) {
       coordinates.push(value)
@@ -627,21 +728,6 @@ function selectSingleHandle(handles: ConnectedResizeHandle[], axis: SplitAxis, c
   })
 }
 
-function isSingleResizeHandleEligible(handle: Omit<ConnectedResizeHandle, 'id'>, boundaries: Boundary[]): boolean {
-  const group = selectConnectedBoundaries(boundaries, handle.axis, handle.coordinate, handle.start, handle.end)
-  if (group.length === 0) return false
-  const groupStart = Math.min(...group.map((boundary) => boundary.start))
-  const groupEnd = Math.max(...group.map((boundary) => boundary.end))
-  if (Math.abs(groupStart - handle.start) > COORDINATE_TOLERANCE) return false
-  if (Math.abs(groupEnd - handle.end) > COORDINATE_TOLERANCE) return false
-
-  return boundaries.some((boundary) =>
-    !group.includes(boundary)
-    && boundary.axis === handle.axis
-    && Math.abs(boundary.coordinate - handle.coordinate) > COORDINATE_TOLERANCE
-    && intervalsMeetAtEndpoint(boundary.start, boundary.end, handle.start, handle.end),
-  )
-}
 
 function snapConnectedDelta(root: SerializedNode, boundaries: Boundary[], selected: Boundary[], delta: number, minSize: number, snapTolerance: number): number {
   if (Math.abs(delta) < 1) return delta

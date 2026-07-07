@@ -33,9 +33,6 @@ pub fn board_write_native(session_id: &str, json: &str) -> Result<()> {
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
-    if path.exists() {
-        std::fs::remove_file(&path)?;
-    }
     std::fs::rename(tmp, path)?;
     Ok(())
 }
@@ -66,7 +63,10 @@ mod tests {
     fn board_read_write_round_trips_json() {
         let session_id = format!("board-test-{}", uuid::Uuid::new_v4());
         board_write_native(&session_id, "{\"tasks\":{}}").expect("write board");
-        assert_eq!(board_read_native(&session_id).expect("read board"), "{\"tasks\":{}}");
+        assert_eq!(
+            board_read_native(&session_id).expect("read board"),
+            "{\"tasks\":{}}"
+        );
         let path = board_path(&session_id).expect("path");
         std::fs::remove_file(path).expect("cleanup board");
     }

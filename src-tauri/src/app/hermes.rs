@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{bounded, Sender};
+use rusqlite::OpenFlags;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -19,12 +20,19 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-const HERMES_ACP_BIN: &str = if cfg!(windows) { "hermes-acp.exe" } else { "hermes-acp" };
+const HERMES_ACP_BIN: &str = if cfg!(windows) {
+    "hermes-acp.exe"
+} else {
+    "hermes-acp"
+};
 #[allow(dead_code)]
-const HERMES_BIN: &str = if cfg!(windows) { "hermes.exe" } else { "hermes" };
+const HERMES_BIN: &str = if cfg!(windows) {
+    "hermes.exe"
+} else {
+    "hermes"
+};
 const HERMES_VERSION: &str = "0.17.0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +65,26 @@ pub struct HermesModelInfo {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSessionInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub source: String,
+    pub model: Option<String>,
+    pub started_at: Option<f64>,
+    pub ended_at: Option<f64>,
+    pub message_count: i64,
+    pub archived: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesHistoryTurn {
+    pub role: String,
+    pub text: String,
+    pub thoughts: String,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,11 +103,24 @@ pub struct HermesPlanEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum HermesEvent {
-    Started { session_id: String, acp_session_id: String },
-    Message { session_id: String, text: String },
-    Thought { session_id: String, text: String },
+    Started {
+        session_id: String,
+        acp_session_id: String,
+    },
+    Message {
+        session_id: String,
+        text: String,
+    },
+    Thought {
+        session_id: String,
+        text: String,
+    },
     ToolCall {
         session_id: String,
         tool_call_id: String,
@@ -93,8 +134,15 @@ pub enum HermesEvent {
         status: String,
         content: String,
     },
-    Plan { session_id: String, entries: Vec<HermesPlanEntry> },
-    Usage { session_id: String, size: u64, used: u64 },
+    Plan {
+        session_id: String,
+        entries: Vec<HermesPlanEntry>,
+    },
+    Usage {
+        session_id: String,
+        size: u64,
+        used: u64,
+    },
     Permission {
         session_id: String,
         request_id: u64,
@@ -105,10 +153,22 @@ pub enum HermesEvent {
         old_text: Option<String>,
         new_text: Option<String>,
     },
-    Models { session_id: String, available: Vec<HermesModelInfo>, current: String },
-    TurnEnded { session_id: String, stop_reason: String },
-    Error { session_id: String, message: String },
-    Exited { session_id: String },
+    Models {
+        session_id: String,
+        available: Vec<HermesModelInfo>,
+        current: String,
+    },
+    TurnEnded {
+        session_id: String,
+        stop_reason: String,
+    },
+    Error {
+        session_id: String,
+        message: String,
+    },
+    Exited {
+        session_id: String,
+    },
 }
 
 #[allow(dead_code)]
@@ -138,7 +198,6 @@ pub struct HermesGatewayStatus {
     pub pid: Option<u32>,
 }
 
-
 #[derive(Serialize)]
 struct McpServerConfig {
     command: String,
@@ -147,12 +206,13 @@ struct McpServerConfig {
     enabled: bool,
 }
 
-
 pub struct HermesManager {
     instances: Mutex<HashMap<String, Arc<HermesInstance>>>,
+    starting: Mutex<HashSet<String>>,
     output_channel: Mutex<Option<Channel<HermesEvent>>>,
     gateway_children: Mutex<HashMap<String, Child>>,
     active_prompts: Mutex<HashSet<String>>,
+    resume_replay_active: Mutex<HashSet<String>>,
 }
 
 struct HermesInstance {
@@ -161,20 +221,38 @@ struct HermesInstance {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     acp_session_id: Mutex<Option<String>>,
+    cwd: String,
+}
+
+struct ResumeReplayGuard<'manager, 'session> {
+    manager: &'manager HermesManager,
+    session_id: &'session str,
+}
+
+impl Drop for ResumeReplayGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.manager
+            .set_resume_replay_active(self.session_id, false);
+    }
 }
 
 impl HermesManager {
     pub fn new() -> Self {
         Self {
             instances: Mutex::new(HashMap::new()),
+            starting: Mutex::new(HashSet::new()),
             output_channel: Mutex::new(None),
             gateway_children: Mutex::new(HashMap::new()),
             active_prompts: Mutex::new(HashSet::new()),
+            resume_replay_active: Mutex::new(HashSet::new()),
         }
     }
 
     pub fn set_output_channel(&self, channel: Channel<HermesEvent>) {
-        *self.output_channel.lock().expect("hermes output channel poisoned") = Some(channel);
+        *self
+            .output_channel
+            .lock()
+            .expect("hermes output channel poisoned") = Some(channel);
     }
 
     pub fn start(
@@ -183,74 +261,193 @@ impl HermesManager {
         command_override: Option<String>,
         workspace_folder: Option<String>,
     ) -> Result<()> {
-        if self
-            .instances
-            .lock()
-            .expect("hermes instances poisoned")
-            .contains_key(&session_id)
         {
-            return Ok(());
+            let mut starting = self.starting.lock().expect("hermes starting poisoned");
+            let existing = self
+                .instances
+                .lock()
+                .expect("hermes instances poisoned")
+                .get(&session_id)
+                .cloned();
+            if let Some(existing) = existing {
+                if let Some(acp) = existing
+                    .acp_session_id
+                    .lock()
+                    .expect("hermes acp session poisoned")
+                    .clone()
+                {
+                    let _ = self.send_event(HermesEvent::Started {
+                        session_id: session_id.clone(),
+                        acp_session_id: acp,
+                    });
+                    return Ok(());
+                }
+                if starting.contains(&session_id) {
+                    return Ok(());
+                }
+                drop(starting);
+                let _ = self.stop(&session_id);
+                starting = self.starting.lock().expect("hermes starting poisoned");
+            } else if starting.contains(&session_id) {
+                return Ok(());
+            }
+            starting.insert(session_id.clone());
         }
 
-        let command_path = resolve_command(command_override)?;
-        let home = hermes_home(&session_id)?;
-        std::fs::create_dir_all(&home)?;
-        let cwd = resolve_workspace_cwd(workspace_folder.as_deref(), &home)?;
-        let acp_cwd = cwd.to_string_lossy().to_string();
-        let configured_model = read_workspace_state_native(&session_id)
+        let result = (|| -> Result<()> {
+            let command_path = resolve_command(command_override)?;
+            let home = hermes_home(&session_id)?;
+            std::fs::create_dir_all(&home)?;
+            let cwd = resolve_workspace_cwd(workspace_folder.as_deref(), &home)?;
+            let acp_cwd = cwd.to_string_lossy().to_string();
+            let configured_model = read_workspace_state_native(&session_id)
+                .ok()
+                .and_then(|state| state.model);
+            let mut command = Command::new(&command_path);
+            command
+                .env("HERMES_HOME", &home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            command.current_dir(&cwd);
+            apply_no_window(&mut command);
+
+            let mut child = command.spawn().with_context(|| {
+                format!(
+                    "spawn Hermes ACP command {command_path} in {}",
+                    cwd.display()
+                )
+            })?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("Hermes stdin unavailable"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow!("Hermes stdout unavailable"))?;
+            let stderr = child.stderr.take();
+            let instance = Arc::new(HermesInstance {
+                child: Mutex::new(child),
+                stdin: Mutex::new(stdin),
+                next_id: AtomicU64::new(1),
+                pending: Mutex::new(HashMap::new()),
+                acp_session_id: Mutex::new(None),
+                cwd: acp_cwd.clone(),
+            });
+
+            self.instances
+                .lock()
+                .expect("hermes instances poisoned")
+                .insert(session_id.clone(), Arc::clone(&instance));
+
+            spawn_stdout_reader(
+                session_id.clone(),
+                stdout,
+                Arc::clone(&instance),
+                Arc::clone(self),
+            );
+            if let Some(stderr) = stderr {
+                spawn_stderr_drain(session_id.clone(), stderr);
+            }
+
+            let handshake_session_id = session_id.clone();
+            let handshake_cwd = acp_cwd.clone();
+            let handshake_home = home.clone();
+            let handshake_instance = Arc::clone(&instance);
+            let handshake_manager = Arc::clone(self);
+            thread::Builder::new()
+                .name(format!("awt-hermes-handshake-{session_id}"))
+                .spawn(move || {
+                    let result = handshake(
+                        &handshake_session_id,
+                        &handshake_cwd,
+                        &handshake_home,
+                        configured_model.as_ref(),
+                        &handshake_instance,
+                        &handshake_manager,
+                    );
+                    handshake_manager
+                        .starting
+                        .lock()
+                        .expect("hermes starting poisoned")
+                        .remove(&handshake_session_id);
+                    if let Err(err) = result {
+                        let _ = handshake_manager.send_event(HermesEvent::Error {
+                            session_id: handshake_session_id.clone(),
+                            message: err.to_string(),
+                        });
+                        let _ = handshake_manager.stop(&handshake_session_id);
+                    }
+                })
+                .map_err(|err| anyhow!(err))?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.starting
+                .lock()
+                .expect("hermes starting poisoned")
+                .remove(&session_id);
+            let _ = self.stop(&session_id);
+        }
+        result
+    }
+
+    pub fn new_session(self: &Arc<Self>, session_id: &str) -> Result<String> {
+        let instance = self.instance(session_id)?;
+        let home = hermes_home(session_id)?;
+        let configured_model = read_workspace_state_native(session_id)
             .ok()
             .and_then(|state| state.model);
-        let mut command = Command::new(&command_path);
-        command
-            .env("HERMES_HOME", &home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        command.current_dir(&cwd);
-        apply_no_window(&mut command);
+        let response = new_acp_session(&instance, &instance.cwd)?;
+        let acp_id = acp_session_id_from_response(&response, None)?;
+        finalize_acp_session(
+            session_id,
+            &home,
+            configured_model.as_ref(),
+            &instance,
+            self,
+            &response,
+            Some(&acp_id),
+        )?;
+        Ok(acp_id)
+    }
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawn Hermes ACP command {command_path} in {}", cwd.display()))?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("Hermes stdin unavailable"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("Hermes stdout unavailable"))?;
-        let stderr = child.stderr.take();
-        let instance = Arc::new(HermesInstance {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
-            next_id: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::new()),
-            acp_session_id: Mutex::new(None),
-        });
-
-        self.instances
-            .lock()
-            .expect("hermes instances poisoned")
-            .insert(session_id.clone(), Arc::clone(&instance));
-
-        spawn_stdout_reader(session_id.clone(), stdout, Arc::clone(&instance), Arc::clone(self));
-        if let Some(stderr) = stderr {
-            spawn_stderr_drain(session_id.clone(), stderr);
-        }
-
-        let manager = Arc::clone(self);
-        thread::Builder::new()
-            .name(format!("awt-hermes-handshake-{session_id}"))
-            .spawn(move || {
-                if let Err(err) = handshake(&session_id, &acp_cwd, &home, configured_model.as_ref(), &instance, &manager) {
-                    let _ = manager.send_event(HermesEvent::Error {
-                        session_id: session_id.clone(),
-                        message: err.to_string(),
-                    });
-                }
-            })
-            .map_err(|err| anyhow!(err))?;
-        Ok(())
+    pub fn resume_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        acp_session_id: String,
+    ) -> Result<()> {
+        let instance = self.instance(session_id)?;
+        let home = hermes_home(session_id)?;
+        let configured_model = read_workspace_state_native(session_id)
+            .ok()
+            .and_then(|state| state.model);
+        let response = {
+            let _resume_replay = self.begin_resume_replay(session_id);
+            instance.request(
+                "session/resume",
+                json!({ "cwd": &instance.cwd, "sessionId": acp_session_id }),
+                Some(REQUEST_TIMEOUT),
+            )?
+        };
+        finalize_acp_session(
+            session_id,
+            &home,
+            configured_model.as_ref(),
+            &instance,
+            self,
+            &response,
+            Some(&acp_session_id),
+        )
     }
 
     pub fn send_message(self: &Arc<Self>, session_id: String, text: String) -> Result<()> {
         let instance = self.instance(&session_id)?;
         let acp_session_id = instance.acp_session_id()?;
+        let prompt_text =
+            crate::app::skills::augment_prompt_with_enabled_skills(&session_id, &text)?;
         let manager = Arc::clone(self);
         manager.set_prompt_active(&session_id, true);
         thread::Builder::new()
@@ -260,7 +457,7 @@ impl HermesManager {
                     "session/prompt",
                     json!({
                         "sessionId": acp_session_id,
-                        "prompt": [{ "type": "text", "text": text }],
+                        "prompt": [{ "type": "text", "text": prompt_text }],
                     }),
                     None,
                 );
@@ -272,7 +469,10 @@ impl HermesManager {
                             .and_then(Value::as_str)
                             .unwrap_or("end_turn")
                             .to_string();
-                        let _ = manager.send_event(HermesEvent::TurnEnded { session_id, stop_reason });
+                        let _ = manager.send_event(HermesEvent::TurnEnded {
+                            session_id,
+                            stop_reason,
+                        });
                     }
                     Err(err) => {
                         let _ = manager.send_event(HermesEvent::Error {
@@ -296,7 +496,12 @@ impl HermesManager {
         instance.notification("session/cancel", json!({ "sessionId": acp_session_id }))
     }
 
-    pub fn respond_permission(&self, session_id: &str, request_id: u64, option_id: String) -> Result<()> {
+    pub fn respond_permission(
+        &self,
+        session_id: &str,
+        request_id: u64,
+        option_id: String,
+    ) -> Result<()> {
         let instance = self.instance(session_id)?;
         instance.write_line(&json!({
             "jsonrpc": "2.0",
@@ -306,6 +511,7 @@ impl HermesManager {
     }
 
     pub fn set_model(&self, session_id: &str, model_id: String) -> Result<()> {
+        require_qualified_model(&model_id)?;
         let instance = self.instance(session_id)?;
         let acp_session_id = instance.acp_session_id()?;
         instance.request(
@@ -334,16 +540,26 @@ impl HermesManager {
             .expect("hermes instances poisoned")
             .remove(session_id);
         if let Some(instance) = instance {
+            instance.fail_pending("Hermes stopped");
+            self.set_prompt_active(session_id, false);
+            self.set_resume_replay_active(session_id, false);
             let mut child = instance.child.lock().expect("hermes child poisoned");
             let _ = child.kill();
             let _ = child.wait();
-            self.send_event(HermesEvent::Exited { session_id: session_id.to_string() })?;
+            self.send_event(HermesEvent::Exited {
+                session_id: session_id.to_string(),
+            })?;
         }
         Ok(())
     }
 
     pub fn gateway_start(&self, session_id: String) -> Result<u32> {
-        if let Some(child) = self.gateway_children.lock().expect("gateway children poisoned").get_mut(&session_id) {
+        if let Some(child) = self
+            .gateway_children
+            .lock()
+            .expect("gateway children poisoned")
+            .get_mut(&session_id)
+        {
             if child.try_wait()?.is_none() {
                 return Ok(child.id());
             }
@@ -359,7 +575,9 @@ impl HermesManager {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         apply_no_window(&mut command);
-        let child = command.spawn().with_context(|| format!("spawn Hermes gateway command {command_path}"))?;
+        let child = command
+            .spawn()
+            .with_context(|| format!("spawn Hermes gateway command {command_path}"))?;
         let pid = child.id();
         std::fs::write(home.join("gateway.pid"), pid.to_string())?;
         self.gateway_children
@@ -370,7 +588,12 @@ impl HermesManager {
     }
 
     pub fn gateway_stop(&self, session_id: &str) -> Result<()> {
-        if let Some(mut child) = self.gateway_children.lock().expect("gateway children poisoned").remove(session_id) {
+        if let Some(mut child) = self
+            .gateway_children
+            .lock()
+            .expect("gateway children poisoned")
+            .remove(session_id)
+        {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -378,15 +601,26 @@ impl HermesManager {
     }
 
     pub fn gateway_status(&self, session_id: &str) -> Result<HermesGatewayStatus> {
-        if let Some(child) = self.gateway_children.lock().expect("gateway children poisoned").get_mut(session_id) {
+        if let Some(child) = self
+            .gateway_children
+            .lock()
+            .expect("gateway children poisoned")
+            .get_mut(session_id)
+        {
             if child.try_wait()?.is_none() {
-                return Ok(HermesGatewayStatus { running: true, pid: Some(child.id()) });
+                return Ok(HermesGatewayStatus {
+                    running: true,
+                    pid: Some(child.id()),
+                });
             }
         }
         let pid = std::fs::read_to_string(hermes_home(session_id)?.join("gateway.pid"))
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok());
-        Ok(HermesGatewayStatus { running: false, pid })
+        Ok(HermesGatewayStatus {
+            running: false,
+            pid,
+        })
     }
 
     pub fn shutdown_all(&self) {
@@ -413,7 +647,10 @@ impl HermesManager {
     }
 
     fn set_prompt_active(&self, session_id: &str, active: bool) {
-        let mut active_prompts = self.active_prompts.lock().expect("hermes active prompts poisoned");
+        let mut active_prompts = self
+            .active_prompts
+            .lock()
+            .expect("hermes active prompts poisoned");
         if active {
             active_prompts.insert(session_id.to_string());
         } else {
@@ -425,6 +662,36 @@ impl HermesManager {
         self.active_prompts
             .lock()
             .expect("hermes active prompts poisoned")
+            .contains(session_id)
+    }
+
+    fn begin_resume_replay<'session>(
+        &self,
+        session_id: &'session str,
+    ) -> ResumeReplayGuard<'_, 'session> {
+        self.set_resume_replay_active(session_id, true);
+        ResumeReplayGuard {
+            manager: self,
+            session_id,
+        }
+    }
+
+    fn set_resume_replay_active(&self, session_id: &str, active: bool) {
+        let mut resume_replay_active = self
+            .resume_replay_active
+            .lock()
+            .expect("hermes resume replay state poisoned");
+        if active {
+            resume_replay_active.insert(session_id.to_string());
+        } else {
+            resume_replay_active.remove(session_id);
+        }
+    }
+
+    fn is_resume_replay_active(&self, session_id: &str) -> bool {
+        self.resume_replay_active
+            .lock()
+            .expect("hermes resume replay state poisoned")
             .contains(session_id)
     }
 
@@ -466,7 +733,10 @@ impl HermesInstance {
             "params": params,
         }));
         if let Err(err) = write {
-            self.pending.lock().expect("hermes pending poisoned").remove(&id);
+            self.pending
+                .lock()
+                .expect("hermes pending poisoned")
+                .remove(&id);
             return Err(err);
         }
 
@@ -474,12 +744,26 @@ impl HermesInstance {
             Some(timeout) => rx
                 .recv_timeout(timeout)
                 .map_err(|err| anyhow!("Hermes request {method} timed out or failed: {err}"))?,
-            None => rx.recv().map_err(|err| anyhow!("Hermes request {method} failed: {err}"))?,
+            None => rx
+                .recv()
+                .map_err(|err| anyhow!("Hermes request {method} failed: {err}"))?,
         };
         if let Some(error) = response.get("error") {
             bail!("Hermes request {method} failed: {error}");
         }
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    fn fail_pending(&self, message: &str) {
+        let drained: Vec<_> = self
+            .pending
+            .lock()
+            .expect("hermes pending poisoned")
+            .drain()
+            .collect();
+        for (_, tx) in drained {
+            let _ = tx.send(json!({ "error": { "code": -32000, "message": message } }));
+        }
     }
 
     fn notification(&self, method: &str, params: Value) -> Result<()> {
@@ -541,6 +825,71 @@ pub async fn hermes_start(
 }
 
 #[tauri::command]
+pub async fn hermes_new_session(
+    manager: State<'_, Arc<HermesManager>>,
+    session_id: String,
+) -> Result<String, String> {
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || manager.new_session(&session_id))
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn hermes_resume_session(
+    manager: State<'_, Arc<HermesManager>>,
+    session_id: String,
+    acp_session_id: String,
+) -> Result<(), String> {
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.resume_session(&session_id, acp_session_id)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn hermes_list_sessions(session_id: String) -> Result<Vec<HermesSessionInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = hermes_home(&session_id)?;
+        read_sessions(&home)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn hermes_session_transcript(
+    session_id: String,
+    acp_session_id: String,
+) -> Result<Vec<HermesHistoryTurn>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = hermes_home(&session_id)?;
+        read_transcript(&home, &acp_session_id)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+#[tauri::command]
+pub async fn hermes_archive_session(
+    session_id: String,
+    acp_session_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = hermes_home(&session_id)?;
+        archive_session(&home, &acp_session_id)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
 pub async fn hermes_send(
     manager: State<'_, Arc<HermesManager>>,
     session_id: String,
@@ -575,7 +924,11 @@ pub async fn hermes_set_model(
     session_id: String,
     model_id: String,
 ) -> Result<(), String> {
-    manager.set_model(&session_id, model_id).map_err(to_string)
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || manager.set_model(&session_id, model_id))
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -584,7 +937,11 @@ pub async fn hermes_set_mode(
     session_id: String,
     mode_id: String,
 ) -> Result<(), String> {
-    manager.set_mode(&session_id, mode_id).map_err(to_string)
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || manager.set_mode(&session_id, mode_id))
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -601,10 +958,12 @@ pub async fn hermes_gateway_provision(
     gateway: HermesGatewayConfig,
     token: Option<String>,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || hermes_gateway_provision_native(&session_id, &gateway, token.as_deref()))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+    tauri::async_runtime::spawn_blocking(move || {
+        hermes_gateway_provision_native(&session_id, &gateway, token.as_deref())
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -640,23 +999,32 @@ pub async fn hermes_cli_command(command_override: Option<String>) -> Result<Stri
 }
 
 #[tauri::command]
-pub async fn hermes_auth_list(session_id: String, command_override: Option<String>) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || hermes_auth_list_native(&session_id, command_override))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+pub async fn hermes_auth_list(
+    session_id: String,
+    command_override: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        hermes_auth_list_native(&session_id, command_override)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_workspace_home(session_id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || hermes_home(&session_id).map(|path| path.to_string_lossy().to_string()))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+    tauri::async_runtime::spawn_blocking(move || {
+        hermes_home(&session_id).map(|path| path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
-pub async fn hermes_runtime_status(command_override: Option<String>) -> Result<HermesRuntimeStatus, String> {
+pub async fn hermes_runtime_status(
+    command_override: Option<String>,
+) -> Result<HermesRuntimeStatus, String> {
     tauri::async_runtime::spawn_blocking(move || hermes_runtime_status_native(command_override))
         .await
         .map_err(to_string)?
@@ -676,10 +1044,12 @@ pub async fn hermes_ensure_workspace(
     session_id: String,
     workspace_folder: Option<String>,
 ) -> Result<HermesWorkspaceState, String> {
-    tauri::async_runtime::spawn_blocking(move || ensure_workspace_native(&session_id, workspace_folder.as_deref()))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_workspace_native(&session_id, workspace_folder.as_deref())
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -715,6 +1085,14 @@ fn spawn_stdout_reader(
                     }
                 }
             }
+            instance.fail_pending("Hermes process exited");
+            manager
+                .instances
+                .lock()
+                .expect("hermes instances poisoned")
+                .remove(&session_id);
+            manager.set_prompt_active(&session_id, false);
+            manager.set_resume_replay_active(&session_id, false);
             let _ = manager.send_event(HermesEvent::Exited { session_id });
         })
         .expect("spawn hermes stdout reader");
@@ -756,11 +1134,15 @@ fn handshake(
         .map(|value| value.trim().to_string());
 
     let (response, resumed_session) = if let Some(session_id) = saved_session.as_deref() {
-        match instance.request(
-            "session/resume",
-            json!({ "cwd": cwd, "sessionId": session_id }),
-            Some(REQUEST_TIMEOUT),
-        ) {
+        let resume_result = {
+            let _resume_replay = manager.begin_resume_replay(awt_session_id);
+            instance.request(
+                "session/resume",
+                json!({ "cwd": cwd, "sessionId": session_id }),
+                Some(REQUEST_TIMEOUT),
+            )
+        };
+        match resume_result {
             Ok(value) => (value, Some(session_id.to_string())),
             Err(err) => {
                 warn!(?err, "Hermes session resume failed; creating new session");
@@ -771,8 +1153,28 @@ fn handshake(
         (new_acp_session(instance, cwd)?, None)
     };
 
-    let acp_session_id = acp_session_id_from_response(&response, resumed_session.as_deref())?;
-    std::fs::write(&session_file, &acp_session_id)?;
+    finalize_acp_session(
+        awt_session_id,
+        home,
+        configured_model,
+        instance,
+        manager,
+        &response,
+        resumed_session.as_deref(),
+    )
+}
+
+fn finalize_acp_session(
+    awt_session_id: &str,
+    home: &Path,
+    configured_model: Option<&HermesConfiguredModel>,
+    instance: &HermesInstance,
+    manager: &HermesManager,
+    response: &Value,
+    resumed_session: Option<&str>,
+) -> Result<()> {
+    let acp_session_id = acp_session_id_from_response(response, resumed_session)?;
+    std::fs::write(home.join("awt-acp-session"), &acp_session_id)?;
     *instance
         .acp_session_id
         .lock()
@@ -791,9 +1193,9 @@ fn handshake(
 
     manager.send_event(HermesEvent::Started {
         session_id: awt_session_id.to_string(),
-        acp_session_id,
+        acp_session_id: acp_session_id.clone(),
     })?;
-    let models = models_from_response(&response);
+    let models = models_from_response(response);
     if !models.0.is_empty() || !models.1.is_empty() {
         manager.send_event(HermesEvent::Models {
             session_id: awt_session_id.to_string(),
@@ -844,15 +1246,28 @@ fn acp_model_id_from_configured_model(model: &HermesConfiguredModel) -> String {
     format!("{}:{}", provider.to_ascii_lowercase(), bare)
 }
 
+fn require_qualified_model(model_id: &str) -> Result<()> {
+    if !model_id.contains(':') && !model_id.contains('/') {
+        bail!("model id must be provider-qualified (provider:model), got bare {model_id}");
+    }
+    Ok(())
+}
+
 fn route_acp_message(
     awt_session_id: &str,
     value: &Value,
     instance: &HermesInstance,
     manager: &HermesManager,
 ) {
-    if value.get("id").is_some() && (value.get("result").is_some() || value.get("error").is_some()) {
+    if value.get("id").is_some() && (value.get("result").is_some() || value.get("error").is_some())
+    {
         if let Some(id) = value.get("id").and_then(Value::as_u64) {
-            if let Some(sender) = instance.pending.lock().expect("hermes pending poisoned").remove(&id) {
+            if let Some(sender) = instance
+                .pending
+                .lock()
+                .expect("hermes pending poisoned")
+                .remove(&id)
+            {
                 let _ = sender.try_send(value.clone());
             }
         }
@@ -861,6 +1276,9 @@ fn route_acp_message(
 
     if value.get("method").and_then(Value::as_str) == Some("session/update") {
         if let Some(event) = translate_update(awt_session_id, value) {
+            if should_suppress_replayable_event(&event, manager, awt_session_id) {
+                return;
+            }
             let _ = manager.send_event(event);
         }
         return;
@@ -880,6 +1298,26 @@ fn route_acp_message(
             "error": { "code": -32601, "message": "method not found" },
         }));
     }
+}
+
+fn is_replayable_content(event: &HermesEvent) -> bool {
+    matches!(
+        event,
+        HermesEvent::Message { .. }
+            | HermesEvent::Thought { .. }
+            | HermesEvent::ToolCall { .. }
+            | HermesEvent::ToolUpdate { .. }
+    )
+}
+
+fn should_suppress_replayable_event(
+    event: &HermesEvent,
+    manager: &HermesManager,
+    session_id: &str,
+) -> bool {
+    is_replayable_content(event)
+        && manager.is_resume_replay_active(session_id)
+        && !manager.is_prompt_active(session_id)
 }
 
 pub fn translate_update(awt_session_id: &str, value: &Value) -> Option<HermesEvent> {
@@ -942,9 +1380,18 @@ fn translate_permission(awt_session_id: &str, value: &Value) -> Option<HermesEve
                     .collect()
             })
             .unwrap_or_default(),
-        diff_path: tool_call.pointer("/content/path").and_then(Value::as_str).map(str::to_string),
-        old_text: tool_call.pointer("/content/oldText").and_then(Value::as_str).map(str::to_string),
-        new_text: tool_call.pointer("/content/newText").and_then(Value::as_str).map(str::to_string),
+        diff_path: tool_call
+            .pointer("/content/path")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        old_text: tool_call
+            .pointer("/content/oldText")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        new_text: tool_call
+            .pointer("/content/newText")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -982,7 +1429,15 @@ fn plan_entries(update: &Value) -> Vec<HermesPlanEntry> {
 }
 
 fn models_from_response(value: &Value) -> (Vec<HermesModelInfo>, String) {
-    let current = read_string(value, &["model", "currentModel", "currentModelId", "current_model_id"]);
+    let current = read_string(
+        value,
+        &[
+            "model",
+            "currentModel",
+            "currentModelId",
+            "current_model_id",
+        ],
+    );
     let models = value
         .get("models")
         .or_else(|| value.get("availableModels"))
@@ -993,14 +1448,18 @@ fn models_from_response(value: &Value) -> (Vec<HermesModelInfo>, String) {
                 .iter()
                 .filter_map(|model| {
                     if let Some(id) = model.as_str() {
-                        return Some(HermesModelInfo { id: id.to_string(), name: id.to_string() });
+                        return Some(HermesModelInfo {
+                            id: id.to_string(),
+                            name: id.to_string(),
+                        });
                     }
                     let id = read_string(model, &["id", "modelId", "model_id"]);
                     if id.is_empty() {
                         return None;
                     }
                     Some(HermesModelInfo {
-                        name: read_string(model, &["name", "displayName", "display_name"]).if_empty_then(id.clone()),
+                        name: read_string(model, &["name", "displayName", "display_name"])
+                            .if_empty_then(id.clone()),
                         id,
                     })
                 })
@@ -1016,7 +1475,11 @@ trait EmptyStringExt {
 
 impl EmptyStringExt for String {
     fn if_empty_then(self, fallback: String) -> String {
-        if self.is_empty() { fallback } else { self }
+        if self.is_empty() {
+            fallback
+        } else {
+            self
+        }
     }
 }
 
@@ -1042,6 +1505,66 @@ pub fn hermes_home(session_id: &str) -> Result<PathBuf> {
         .data_dir
         .join("hermes")
         .join(safe_session_id))
+}
+
+fn open_state_db(home: &Path) -> Result<rusqlite::Connection> {
+    let path = home.join("state.db");
+    rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .or_else(|_| {
+            rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        })
+        .with_context(|| format!("open hermes state.db at {}", path.display()))
+}
+
+fn read_sessions(home: &Path) -> Result<Vec<HermesSessionInfo>> {
+    let conn = open_state_db(home)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title, source, model, started_at, ended_at, \
+         COALESCE(message_count,0), COALESCE(archived,0) \
+         FROM sessions WHERE COALESCE(archived,0)=0 ORDER BY started_at DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(HermesSessionInfo {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            source: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            model: r.get(3)?,
+            started_at: r.get(4)?,
+            ended_at: r.get(5)?,
+            message_count: r.get(6)?,
+            archived: r.get::<_, i64>(7)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn read_transcript(home: &Path, acp_session_id: &str) -> Result<Vec<HermesHistoryTurn>> {
+    let conn = open_state_db(home)?;
+    let mut stmt = conn.prepare(
+        "SELECT role, COALESCE(content,''), COALESCE(reasoning_content,'') \
+         FROM messages WHERE session_id=?1 AND role IN ('user','assistant') ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([acp_session_id], |r| {
+        Ok(HermesHistoryTurn {
+            role: r.get(0)?,
+            text: r.get(1)?,
+            thoughts: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+fn archive_session(home: &Path, acp_session_id: &str) -> Result<()> {
+    let path = home.join("state.db");
+    let conn = rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .with_context(|| format!("open writable hermes state.db at {}", path.display()))?;
+    let changed = conn.execute(
+        "UPDATE sessions SET archived=1 WHERE id=?1",
+        [acp_session_id],
+    )?;
+    if changed == 0 {
+        bail!("Hermes session not found: {acp_session_id}");
+    }
+    Ok(())
 }
 
 fn resolve_workspace_cwd(workspace_folder: Option<&str>, home: &Path) -> Result<PathBuf> {
@@ -1104,7 +1627,10 @@ fn read_workspace_model(doc: &serde_yaml::Mapping) -> Option<HermesConfiguredMod
     }
 }
 
-fn ensure_workspace_native(session_id: &str, workspace_folder: Option<&str>) -> Result<HermesWorkspaceState> {
+fn ensure_workspace_native(
+    session_id: &str,
+    workspace_folder: Option<&str>,
+) -> Result<HermesWorkspaceState> {
     let home = hermes_home(session_id)?;
     std::fs::create_dir_all(&home)?;
     let cwd = resolve_workspace_cwd(workspace_folder, &home)?;
@@ -1120,7 +1646,10 @@ fn ensure_workspace_native(session_id: &str, workspace_folder: Option<&str>) -> 
         crate::daemon::paths::app_flavor(),
         &cwd_text,
     )?;
-    std::fs::write(&config_path, serde_yaml::to_string(&serde_yaml::Value::Mapping(doc.clone()))?)?;
+    std::fs::write(
+        &config_path,
+        serde_yaml::to_string(&serde_yaml::Value::Mapping(doc.clone()))?,
+    )?;
 
     Ok(HermesWorkspaceState {
         home: home.to_string_lossy().to_string(),
@@ -1152,10 +1681,13 @@ fn read_workspace_config_doc(config_path: &Path) -> Result<serde_yaml::Mapping> 
     if !config_path.exists() {
         return Ok(serde_yaml::Mapping::new());
     }
-    Ok(serde_yaml::from_str::<serde_yaml::Value>(&std::fs::read_to_string(config_path)?)
-        .ok()
-        .and_then(|value| value.as_mapping().cloned())
-        .unwrap_or_default())
+    let text = std::fs::read_to_string(config_path).context("read config.yaml")?;
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&text).with_context(|| format!("parse {}", config_path.display()))?;
+    value
+        .as_mapping()
+        .cloned()
+        .ok_or_else(|| anyhow!("config.yaml top-level is not a mapping"))
 }
 
 fn merge_awt_into_doc(
@@ -1239,10 +1771,7 @@ fn hermes_auth_list_native(session_id: &str, command_override: Option<String>) -
     std::fs::create_dir_all(&home)?;
     let command_path = resolve_hermes_command(command_override)?;
     let mut command = Command::new(command_path);
-    command
-        .arg("auth")
-        .arg("list")
-        .env("HERMES_HOME", &home);
+    command.arg("auth").arg("list").env("HERMES_HOME", &home);
     apply_no_window(&mut command);
     let output = command.output().context("run hermes auth list")?;
     if !output.status.success() {
@@ -1285,7 +1814,10 @@ fn ensure_runtime_ready(app: &AppHandle, command_override: Option<String>) -> Re
 
 fn hermes_install_runtime_native(app: &AppHandle) -> Result<String> {
     let uv = bundled_uv(app).unwrap_or_else(|_| PathBuf::from("uv"));
-    let runtime_dir = crate::daemon::paths::daemon_paths()?.data_dir.join("hermes").join("runtime");
+    let runtime_dir = crate::daemon::paths::daemon_paths()?
+        .data_dir
+        .join("hermes")
+        .join("runtime");
     let tools_dir = runtime_dir.join("tools");
     let bin_dir = runtime_dir.join("bin");
     std::fs::create_dir_all(&tools_dir)?;
@@ -1306,11 +1838,13 @@ fn hermes_install_runtime_native(app: &AppHandle) -> Result<String> {
     }
     let acp = bin_dir.join(HERMES_ACP_BIN);
     if !acp.exists() {
-        return Err(anyhow!("uv completed but {} was not created", acp.display()));
+        return Err(anyhow!(
+            "uv completed but {} was not created",
+            acp.display()
+        ));
     }
     Ok(acp.to_string_lossy().to_string())
 }
-
 
 fn hermes_gateway_provision_native(
     session_id: &str,
@@ -1322,7 +1856,10 @@ fn hermes_gateway_provision_native(
     if let Some(value) = token.and_then(non_empty_str) {
         upsert_dotenv(&home.join(".env"), &gateway.token_env, value)?;
     }
-    let allowed_key = format!("{}_ALLOWED_USERS", gateway_platform_env_prefix(&gateway.platform));
+    let allowed_key = format!(
+        "{}_ALLOWED_USERS",
+        gateway_platform_env_prefix(&gateway.platform)
+    );
     upsert_dotenv(&home.join(".env"), &allowed_key, &gateway.allowed_users)?;
     Ok(())
 }
@@ -1350,7 +1887,6 @@ fn managed_bin_path(bin: &str) -> Result<PathBuf> {
         .join(bin))
 }
 
-
 fn upsert_dotenv(path: &Path, key: &str, value: &str) -> Result<()> {
     validate_env_key(key)?;
     if value.contains('\n') || value.contains('\r') {
@@ -1375,7 +1911,6 @@ fn upsert_dotenv(path: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-
 fn validate_env_key(key: &str) -> Result<()> {
     let valid = !key.is_empty()
         && key
@@ -1392,7 +1927,6 @@ fn validate_env_key(key: &str) -> Result<()> {
     }
 }
 
-
 fn sanitize_session_id(session_id: &str) -> String {
     session_id
         .chars()
@@ -1402,12 +1936,20 @@ fn sanitize_session_id(session_id: &str) -> String {
 
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn non_empty_str(value: &str) -> Option<&str> {
     let trimmed = value.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn stdout_or_stderr(output: &std::process::Output) -> String {
@@ -1440,6 +1982,55 @@ fn to_string(err: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_instance() -> HermesInstance {
+        #[cfg(windows)]
+        let mut child = Command::new("cmd")
+            .args(["/D", "/Q", "/C", "more"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test child");
+        #[cfg(not(windows))]
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test child");
+        let stdin = child.stdin.take().expect("test child stdin");
+        HermesInstance {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            next_id: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
+            acp_session_id: Mutex::new(None),
+            cwd: String::new(),
+        }
+    }
+
+    #[test]
+    fn fail_pending_sends_error_to_waiters() {
+        let instance = test_instance();
+        let (tx, rx) = bounded(1);
+        instance
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .insert(7, tx);
+
+        instance.fail_pending("Hermes stopped");
+
+        let response = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pending error");
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["message"], "Hermes stopped");
+        assert!(instance.pending.lock().expect("pending mutex").is_empty());
+        let mut child = instance.child.lock().expect("child mutex");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[test]
     fn translate_update_maps_message_chunk() {
@@ -1481,7 +2072,13 @@ mod tests {
 
         let event = translate_update("awt-session", &value).expect("event");
         match event {
-            HermesEvent::ToolCall { session_id, tool_call_id, title, tool_kind, status } => {
+            HermesEvent::ToolCall {
+                session_id,
+                tool_call_id,
+                title,
+                tool_kind,
+                status,
+            } => {
                 assert_eq!(session_id, "awt-session");
                 assert_eq!(tool_call_id, "tool-1");
                 assert_eq!(title, "List panes");
@@ -1490,6 +2087,20 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn hermes_events_serialize_frontend_field_names() {
+        let value = serde_json::to_value(HermesEvent::Started {
+            session_id: "awt-session".to_string(),
+            acp_session_id: "acp-session".to_string(),
+        })
+        .expect("serialize event");
+
+        assert_eq!(value["kind"], "started");
+        assert_eq!(value["sessionId"], "awt-session");
+        assert_eq!(value["acpSessionId"], "acp-session");
+        assert!(value.get("session_id").is_none());
     }
 
     #[test]
@@ -1504,8 +2115,46 @@ mod tests {
     }
 
     #[test]
+    fn resume_replay_gate_suppresses_only_replay_without_prompt() {
+        let manager = HermesManager::new();
+        let event = HermesEvent::Message {
+            session_id: "session-1".to_string(),
+            text: "replayed".to_string(),
+        };
+
+        assert!(!should_suppress_replayable_event(
+            &event,
+            &manager,
+            "session-1"
+        ));
+        {
+            let _resume_replay = manager.begin_resume_replay("session-1");
+            assert!(manager.is_resume_replay_active("session-1"));
+            assert!(should_suppress_replayable_event(
+                &event,
+                &manager,
+                "session-1"
+            ));
+            manager.set_prompt_active("session-1", true);
+            assert!(!should_suppress_replayable_event(
+                &event,
+                &manager,
+                "session-1"
+            ));
+            manager.set_prompt_active("session-1", false);
+        }
+        assert!(!manager.is_resume_replay_active("session-1"));
+        assert!(!should_suppress_replayable_event(
+            &event,
+            &manager,
+            "session-1"
+        ));
+    }
+
+    #[test]
     fn acp_session_id_uses_saved_id_for_resume_ack() {
-        let session_id = acp_session_id_from_response(&json!({}), Some("saved-session")).expect("resume id");
+        let session_id =
+            acp_session_id_from_response(&json!({}), Some("saved-session")).expect("resume id");
 
         assert_eq!(session_id, "saved-session");
     }
@@ -1544,10 +2193,26 @@ mod tests {
             base_url: None,
         };
 
-        assert_eq!(acp_model_id_from_configured_model(&anthropic), "anthropic:claude-sonnet-4-6");
-        assert_eq!(acp_model_id_from_configured_model(&openrouter), "openrouter:anthropic/claude-sonnet-4.6");
-        assert_eq!(acp_model_id_from_configured_model(&codex), "openai-codex:gpt-5.5");
+        assert_eq!(
+            acp_model_id_from_configured_model(&anthropic),
+            "anthropic:claude-sonnet-4-6"
+        );
+        assert_eq!(
+            acp_model_id_from_configured_model(&openrouter),
+            "openrouter:anthropic/claude-sonnet-4.6"
+        );
+        assert_eq!(
+            acp_model_id_from_configured_model(&codex),
+            "openai-codex:gpt-5.5"
+        );
         assert_eq!(acp_model_id_from_configured_model(&no_provider), "gpt-5.5");
+    }
+
+    #[test]
+    fn require_qualified_model_rejects_bare_id() {
+        assert!(require_qualified_model("gpt-5.5").is_err());
+        assert!(require_qualified_model("openai-codex:gpt-5.5").is_ok());
+        assert!(require_qualified_model("openrouter:anthropic/claude-sonnet-4.6").is_ok());
     }
 
     #[test]
@@ -1588,6 +2253,33 @@ model:
     }
 
     #[test]
+    fn read_workspace_config_doc_rejects_corrupted_yaml() {
+        let path = std::env::temp_dir().join(format!(
+            "hermes-corrupt-config-{}.yaml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "model: [").expect("write corrupt config");
+
+        let err = read_workspace_config_doc(&path).expect_err("corrupt yaml should fail");
+
+        assert!(err.to_string().contains("parse"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "model: [");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_workspace_config_doc_rejects_non_mapping() {
+        let path =
+            std::env::temp_dir().join(format!("hermes-list-config-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "[]").expect("write list config");
+
+        let err = read_workspace_config_doc(&path).expect_err("list yaml should fail");
+
+        assert!(err.to_string().contains("top-level is not a mapping"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn merge_awt_into_doc_preserves_model_and_wires_workspace() {
         let mut doc = yaml_mapping(
             r#"
@@ -1599,7 +2291,10 @@ terminal:
   backend: remote
 "#,
         );
-        let model_before = doc.get(&serde_yaml::Value::from("model")).cloned().expect("model block");
+        let model_before = doc
+            .get(&serde_yaml::Value::from("model"))
+            .cloned()
+            .expect("model block");
 
         merge_awt_into_doc(
             &mut doc,
@@ -1610,17 +2305,88 @@ terminal:
         )
         .expect("merge");
 
-        assert_eq!(doc.get(&serde_yaml::Value::from("model")), Some(&model_before));
+        assert_eq!(
+            doc.get(&serde_yaml::Value::from("model")),
+            Some(&model_before)
+        );
         let yaml = serde_yaml::Value::Mapping(doc);
         assert_eq!(yaml["stray"].as_str(), Some("kept"));
-        assert_eq!(yaml["terminal"]["cwd"].as_str(), Some(r"E:\CityAI\IncheonProject\t2in-dev"));
+        assert_eq!(
+            yaml["terminal"]["cwd"].as_str(),
+            Some(r"E:\CityAI\IncheonProject\t2in-dev")
+        );
         assert_eq!(yaml["terminal"]["backend"].as_str(), Some("remote"));
-        assert_eq!(yaml["mcp_servers"]["awt"]["command"].as_str(), Some(r"E:\AgenticWorkspaceTerminal\app.exe"));
+        assert_eq!(
+            yaml["mcp_servers"]["awt"]["command"].as_str(),
+            Some(r"E:\AgenticWorkspaceTerminal\app.exe")
+        );
         assert_eq!(yaml["mcp_servers"]["awt"]["args"][0].as_str(), Some("mcp"));
-        assert_eq!(yaml["mcp_servers"]["awt"]["args"][1].as_str(), Some("serve"));
-        assert_eq!(yaml["mcp_servers"]["awt"]["env"]["AWT_SESSION_ID"].as_str(), Some("session-1"));
-        assert_eq!(yaml["mcp_servers"]["awt"]["env"]["AWT_APP_FLAVOR"].as_str(), Some("dev"));
+        assert_eq!(
+            yaml["mcp_servers"]["awt"]["args"][1].as_str(),
+            Some("serve")
+        );
+        assert_eq!(
+            yaml["mcp_servers"]["awt"]["env"]["AWT_SESSION_ID"].as_str(),
+            Some("session-1")
+        );
+        assert_eq!(
+            yaml["mcp_servers"]["awt"]["env"]["AWT_APP_FLAVOR"].as_str(),
+            Some("dev")
+        );
         assert_eq!(yaml["mcp_servers"]["awt"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn state_db_readers_filter_order_and_restore_transcript() {
+        let home = std::env::temp_dir().join(format!("hermes-state-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).expect("create test home");
+        let conn = rusqlite::Connection::open(home.join("state.db")).expect("open state db");
+        conn.execute_batch(
+            r#"
+CREATE TABLE sessions(id TEXT PRIMARY KEY,title TEXT,source TEXT,model TEXT,started_at REAL,ended_at REAL,message_count INTEGER,archived INTEGER,parent_session_id TEXT);
+CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,reasoning_content TEXT);
+INSERT INTO sessions(id,title,source,model,started_at,ended_at,message_count,archived,parent_session_id) VALUES
+  ('s1','First','discord','model-a',10.0,NULL,3,0,NULL),
+  ('s2',NULL,'gateway',NULL,20.0,NULL,2,0,NULL),
+  ('archived','Archived','discord','model-z',30.0,NULL,1,1,NULL);
+INSERT INTO messages(id,session_id,role,content,reasoning_content) VALUES
+  (3,'s1','assistant','answer','thought'),
+  (1,'s1','user','question',''),
+  (2,'s1','tool','hidden','hidden-thought'),
+  (4,'s2','user','other','');
+"#,
+        )
+        .expect("seed state db");
+        drop(conn);
+
+        let sessions = read_sessions(&home).expect("read sessions");
+        assert_eq!(
+            sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["s2", "s1"]
+        );
+        assert_eq!(sessions[0].title, None);
+        assert_eq!(sessions[0].source, "gateway");
+        assert_eq!(sessions[0].message_count, 2);
+        assert!(!sessions[0].archived);
+        assert_eq!(sessions[1].model.as_deref(), Some("model-a"));
+        assert_eq!(sessions[1].started_at, Some(10.0));
+
+        let transcript = read_transcript(&home, "s1").expect("read transcript");
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].role, "user");
+        assert_eq!(transcript[0].text, "question");
+        assert_eq!(transcript[1].role, "assistant");
+        assert_eq!(transcript[1].text, "answer");
+        assert_eq!(transcript[1].thoughts, "thought");
+
+        archive_session(&home, "s2").expect("archive session");
+        let sessions = read_sessions(&home).expect("read sessions after archive");
+        assert_eq!(
+            sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["s1"]
+        );
+
+        std::fs::remove_dir_all(home).expect("remove test home");
     }
 
     fn yaml_mapping(input: &str) -> serde_yaml::Mapping {
@@ -1634,7 +2400,8 @@ terminal:
     #[test]
     fn resolve_workspace_cwd_rejects_missing_workspace() {
         let home = std::env::temp_dir().join(format!("hermes-home-test-{}", uuid::Uuid::new_v4()));
-        let missing = std::env::temp_dir().join(format!("hermes-missing-workspace-{}", uuid::Uuid::new_v4()));
+        let missing =
+            std::env::temp_dir().join(format!("hermes-missing-workspace-{}", uuid::Uuid::new_v4()));
 
         let error = resolve_workspace_cwd(Some(missing.to_string_lossy().as_ref()), &home)
             .expect_err("missing workspace should be rejected")

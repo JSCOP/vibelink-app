@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { findImageMarkerMatches, findPathMatches } from './links'
+import { findImageMarkerMatches, findPathMatches, findTerminalLinkMatches, findUrlMatches } from './links'
 
 describe('terminal link matchers', () => {
   describe('findPathMatches', () => {
@@ -30,6 +30,43 @@ describe('terminal link matchers', () => {
 
     it('ignores plain prose', () => {
       expect(findPathMatches('this is just plain prose')).toEqual([])
+    })
+
+    it('matches UNC and home-relative paths', () => {
+      const line = 'open \\\\server\\share\\clip.mp4 and ~/captures/image.png'
+
+      expect(findPathMatches(line)).toEqual([
+        { index: 5, text: '\\\\server\\share\\clip.mp4' },
+        { index: 33, text: '~/captures/image.png' },
+      ])
+    })
+  })
+
+  describe('findUrlMatches', () => {
+    it('matches http, https, and file URLs', () => {
+      const line = 'see https://example.com/a?b=1 and file:///E:/captures/a.png'
+
+      expect(findUrlMatches(line)).toEqual([
+        { index: 4, text: 'https://example.com/a?b=1' },
+        { index: 34, text: 'file:///E:/captures/a.png' },
+      ])
+    })
+
+    it('trims sentence punctuation from URL bounds', () => {
+      expect(findUrlMatches('open (https://example.com/a), next')).toEqual([
+        { index: 6, text: 'https://example.com/a' },
+      ])
+    })
+  })
+
+  describe('findTerminalLinkMatches', () => {
+    it('deduplicates paths inside file URLs', () => {
+      const line = 'file file:///E:/captures/a.png and E:\\captures\\b.mp4'
+
+      expect(findTerminalLinkMatches(line)).toEqual([
+        { index: 5, text: 'file:///E:/captures/a.png' },
+        { index: 35, text: 'E:\\captures\\b.mp4' },
+      ])
     })
   })
 

@@ -6,6 +6,10 @@ export type GridPaneDescriptor = {
   icon?: string | null
 }
 
+type GridLayoutOptions = {
+  sparseMode?: 'columns' | 'rows'
+}
+
 type SerializedPanel = Record<string, unknown> & {
   id?: string
   params?: Record<string, unknown>
@@ -46,6 +50,7 @@ export function createDockviewGridLayout(
   gridPanes: GridPaneDescriptor[],
   overflowPanes: GridPaneDescriptor[] = [],
   activePaneId?: string | null,
+  options: GridLayoutOptions = {},
 ): DockviewLayoutLike | null {
   if (grid.cols <= 0 || grid.rows <= 0 || gridPanes.length === 0) return null
 
@@ -53,9 +58,12 @@ export function createDockviewGridLayout(
   const width = positiveInteger(base.grid?.width) ?? grid.cols * 100
   const height = positiveInteger(base.grid?.height) ?? grid.rows * 100
   const columnSizes = distributeSize(width, grid.cols)
+  const capacity = grid.cols * grid.rows
+  const visibleGridPanes = gridPanes.slice(0, capacity)
+  const implicitOverflowPanes = gridPanes.slice(capacity)
   const panels = buildPanels(base.panels ?? {}, [...gridPanes, ...overflowPanes])
-  const overflowIds = overflowPanes.map((pane) => pane.id)
-  const lastGridPaneId = gridPanes.at(-1)?.id
+  const overflowIds = [...implicitOverflowPanes, ...overflowPanes].map((pane) => pane.id)
+  const lastGridPaneId = visibleGridPanes.at(-1)?.id
   let groupIndex = 0
   let activeGroup: string | undefined
 
@@ -74,23 +82,36 @@ export function createDockviewGridLayout(
 
   let root: SerializedBranchNode
   let orientation: 'HORIZONTAL' | 'VERTICAL'
-  if (grid.cols === 1) {
+  const useSparseRows = options.sparseMode === 'rows' && grid.cols > 1 && visibleGridPanes.length % grid.cols !== 0
+  if (grid.cols === 1 || useSparseRows) {
     orientation = 'VERTICAL'
-    const presentPanes = gridPanes.slice(0, grid.rows)
-    const sizes = distributeSize(height, presentPanes.length)
-    const leaves: SerializedNode[] = []
-    for (let index = 0; index < presentPanes.length; index += 1) {
-      const pane = presentPanes[index]
-      if (pane) leaves.push(makeLeaf(pane, sizes[index]))
+    const presentRows = grid.cols === 1 ? Math.min(grid.rows, visibleGridPanes.length) : Math.min(grid.rows, Math.ceil(visibleGridPanes.length / grid.cols))
+    const rowSizes = distributeSize(height, presentRows)
+    const rows: SerializedNode[] = []
+    for (let row = 0; row < presentRows; row += 1) {
+      const rowPanes = grid.cols === 1
+        ? visibleGridPanes.slice(row, row + 1)
+        : visibleGridPanes.slice(row * grid.cols, row * grid.cols + grid.cols)
+      if (rowPanes.length === 0) continue
+      if (rowPanes.length === 1) {
+        rows.push(makeLeaf(rowPanes[0], rowSizes[row]))
+        continue
+      }
+      const colSizes = distributeSize(width, rowPanes.length)
+      rows.push({
+        type: 'branch',
+        data: rowPanes.map((pane, col) => makeLeaf(pane, colSizes[col])),
+        size: rowSizes[row],
+      })
     }
-    root = { type: 'branch', data: leaves, size: height }
+    root = { type: 'branch', data: rows, size: height }
   } else {
     orientation = 'HORIZONTAL'
     const columns: SerializedNode[] = []
     for (let col = 0; col < grid.cols; col += 1) {
       const columnPanes: GridPaneDescriptor[] = []
       for (let row = 0; row < grid.rows; row += 1) {
-        const pane = gridPanes[row * grid.cols + col]
+        const pane = visibleGridPanes[row * grid.cols + col]
         if (pane) columnPanes.push(pane)
       }
       if (columnPanes.length === 0) continue

@@ -4,32 +4,48 @@ import { TerminalManager } from '../terminal/TerminalManager'
 
 
 type TaskSignal =
-  | { kind: 'done'; taskId: string; commitMsg?: string | null; paneId?: string | null }
+  | { kind: 'done'; taskId: string; commitMsg?: string | null; resultSummary?: string | null; paneId?: string | null }
   | { kind: 'note'; taskId: string; message: string; paneId?: string | null }
+  | { kind: 'paneConfigured'; paneId: string; title?: string | null; role?: string | null }
   | { kind: 'boardChanged' }
 
 type TerminalEvent =
-  | { kind: 'output'; paneId: string; dataB64: string }
   | { kind: 'exited'; paneId: string; exitCode?: number | null }
+  | { kind: 'sessionChanged'; sessionId: string }
   | { kind: 'task'; sessionId: string; signal: TaskSignal }
   | { kind: 'connectionLost'; message: string }
   | { kind: 'connectionRestored' }
 
 let registration: Promise<void> | undefined
+const sessionReloadTimers = new Map<string, number>()
+let outputSocket: WebSocket | undefined
+const paneIdDecoder = new TextDecoder()
 
 export async function startTerminalOutputStream(options: { force?: boolean } = {}): Promise<void> {
   if (registration && !options.force) return registration
 
   const channel = new Channel<TerminalEvent>((event) => {
-    if (event.kind === 'output') {
-      TerminalManager.write(event.paneId, base64ToBytes(event.dataB64))
-    } else if (event.kind === 'exited') {
+    if (event.kind === 'exited') {
       TerminalManager.markExited(event.paneId, event.exitCode)
+    } else if (event.kind === 'sessionChanged') {
+      scheduleSessionReload(event.sessionId)
     } else if (event.kind === 'task') {
       if (event.signal.kind === 'done') {
-        useWorkspaceStore.getState().markTaskDone(event.signal.taskId, { commitMessage: event.signal.commitMsg ?? undefined })
+        const store = useWorkspaceStore.getState()
+        const assignedPaneId = store.kanban.tasks[event.signal.taskId]?.assignedPaneId
+        store.markTaskDone(event.signal.taskId, {
+          commitMessage: event.signal.commitMsg ?? undefined,
+          resultSummary: event.signal.resultSummary ?? undefined,
+        })
+        const paneId = event.signal.paneId ?? assignedPaneId
+        if (paneId) store.markPaneResponseComplete(paneId, 'task-done')
       } else if (event.signal.kind === 'note') {
         useWorkspaceStore.getState().noteTask(event.signal.taskId, event.signal.message)
+      } else if (event.signal.kind === 'paneConfigured') {
+        useWorkspaceStore.getState().applyPaneConfiguration(event.signal.paneId, {
+          title: event.signal.title ?? undefined,
+          role: event.signal.role ?? undefined,
+        })
       } else {
         void reloadBoard(event.sessionId)
       }
@@ -40,13 +56,43 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
     }
   })
 
-  const nextRegistration = invoke<void>('init_terminal_output', { channel }).catch((error) => {
-    if (registration === nextRegistration) registration = undefined
+  let nextRegistration: Promise<void> = Promise.resolve()
+  nextRegistration = (async () => {
+    await invoke<void>('init_terminal_output', { channel })
+    const port = await invoke<number>('terminal_ws_port')
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`)
+    if (registration !== nextRegistration) {
+      socket.close()
+      return
+    }
+    socket.binaryType = 'arraybuffer'
+    socket.onmessage = (event) => {
+      if (!(event.data instanceof ArrayBuffer)) return
+      const view = new Uint8Array(event.data)
+      if (view.byteLength < 2) return
+      const idLen = (view[0] << 8) | view[1]
+      if (view.byteLength < 2 + idLen) return
+      const paneId = paneIdDecoder.decode(view.subarray(2, 2 + idLen))
+      TerminalManager.write(paneId, view.subarray(2 + idLen))
+    }
+    socket.onclose = () => {
+      if (outputSocket === socket) outputSocket = undefined
+    }
+    const previousSocket = outputSocket
+    outputSocket = socket
+    previousSocket?.close()
+  })().catch((error) => {
+    if (registration === nextRegistration) {
+      registration = undefined
+      outputSocket?.close()
+      outputSocket = undefined
+    }
     throw error
   })
   registration = nextRegistration
   await nextRegistration
 }
+
 
 async function handleConnectionRestored(): Promise<void> {
   await startTerminalOutputStream({ force: true })
@@ -55,16 +101,30 @@ async function handleConnectionRestored(): Promise<void> {
   TerminalManager.reattachToDaemon(state.activeSessionId, Object.keys(state.panes))
 }
 
+function scheduleSessionReload(sessionId: string): void {
+  const existing = sessionReloadTimers.get(sessionId)
+  if (existing !== undefined) window.clearTimeout(existing)
+  const timer = window.setTimeout(() => {
+    sessionReloadTimers.delete(sessionId)
+    void reloadSession(sessionId)
+  }, 100)
+  sessionReloadTimers.set(sessionId, timer)
+}
+
+async function reloadSession(sessionId: string): Promise<void> {
+  try {
+    const state = useWorkspaceStore.getState()
+    await state.refreshSessions()
+    if (useWorkspaceStore.getState().activeSessionId === sessionId) {
+      await useWorkspaceStore.getState().attachSession(sessionId)
+    }
+  } catch (caught) {
+    useWorkspaceStore.getState().setError(String(caught))
+  }
+}
+
 async function reloadBoard(sessionId: string): Promise<void> {
   const json = await invoke<string>('board_read', { sessionId })
   useWorkspaceStore.getState().applyBoardSnapshot(sessionId, json)
 }
 
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes
-}

@@ -82,12 +82,16 @@ type ThemeInput<TId extends string> = Omit<TerminalThemeDefinition<TId>, 'ui'> &
 }
 
 function defineTheme<const TId extends string>(input: ThemeInput<TId>): TerminalThemeDefinition<TId> {
+  const baseUi = createAppTheme(input.colorScheme, input.terminal)
+  const ui = {
+    ...baseUi,
+    ...input.ui,
+  }
+  ui.focus = input.ui?.focus ?? ui.accent
+
   return {
     ...input,
-    ui: {
-      ...createAppTheme(input.colorScheme, input.terminal),
-      ...input.ui,
-    },
+    ui,
   }
 }
 
@@ -211,7 +215,7 @@ export const terminalThemes = [
     terminal: {
       background: '#002b36', foreground: '#839496', cursor: '#93a1a1', cursorAccent: '#002b36', selectionBackground: '#073642',
       black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900', blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
-      brightBlack: '#002b36', brightRed: '#cb4b16', brightGreen: '#586e75', brightYellow: '#657b83', brightBlue: '#839496', brightMagenta: '#6c71c4', brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
+      brightBlack: '#92a1a5', brightRed: '#cb4b16', brightGreen: '#b0bd59', brightYellow: '#cfb259', brightBlue: '#839496', brightMagenta: '#6c71c4', brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
     },
   }),
   defineTheme({
@@ -223,7 +227,7 @@ export const terminalThemes = [
     terminal: {
       background: '#fdf6e3', foreground: '#657b83', cursor: '#586e75', cursorAccent: '#fdf6e3', selectionBackground: '#eee8d5',
       black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900', blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5',
-      brightBlack: '#002b36', brightRed: '#cb4b16', brightGreen: '#586e75', brightYellow: '#657b83', brightBlue: '#839496', brightMagenta: '#6c71c4', brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
+      brightBlack: '#002b36', brightRed: '#cb4b16', brightGreen: '#647300', brightYellow: '#886700', brightBlue: '#1e6fa8', brightMagenta: '#6c71c4', brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
     },
   }),
   defineTheme({
@@ -471,6 +475,9 @@ function createAppTheme(colorScheme: TerminalColorScheme, terminal: RequiredTerm
   const input = mixHex(background, foreground, isDark ? 0.07 : 0.018)
   const inputStrong = mixHex(background, foreground, isDark ? 0.025 : 0.01)
   const accent = terminal.cursor || terminal.green
+  const muted = isDark
+    ? readableMuted(background, foreground, 0.62, 4)
+    : mixHex(foreground, '#000000', 0.15)
 
   return {
     background,
@@ -483,7 +490,7 @@ function createAppTheme(colorScheme: TerminalColorScheme, terminal: RequiredTerm
     border: rgbaFromHex(terminal.blue, isDark ? 0.28 : 0.34),
     borderSoft: rgbaFromHex(terminal.blue, isDark ? 0.16 : 0.22),
     text: foreground,
-    muted: isDark ? mixHex(background, foreground, 0.62) : mixHex(background, foreground, 0.56),
+    muted,
     accent,
     accentSoft: rgbaFromHex(accent, isDark ? 0.12 : 0.16),
     accentMuted: rgbaFromHex(accent, isDark ? 0.08 : 0.1),
@@ -530,6 +537,44 @@ function mixHex(first: string, second: string, weight: number): string {
     Math.round(a.g + (b.g - a.g) * clamped),
     Math.round(a.b + (b.b - a.b) * clamped),
   )
+}
+
+function readableMuted(background: string, foreground: string, initialWeight: number, minimumContrast: number): string {
+  const initial = mixHex(background, foreground, initialWeight)
+  if (contrastRatio(initial, background) >= minimumContrast) return initial
+
+  for (let weight = initialWeight + 0.05; weight <= 1; weight += 0.05) {
+    const candidate = mixHex(background, foreground, weight)
+    if (contrastRatio(candidate, background) >= minimumContrast) return candidate
+  }
+
+  return foreground
+}
+
+function contrastRatio(first: string, second: string): number {
+  const firstLuminance = relativeLuminance(first)
+  const secondLuminance = relativeLuminance(second)
+  if (firstLuminance === null || secondLuminance === null) return 0
+
+  const lighter = Math.max(firstLuminance, secondLuminance)
+  const darker = Math.min(firstLuminance, secondLuminance)
+
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+function relativeLuminance(hex: string): number | null {
+  const rgb = hexToRgb(hex)
+  if (!rgb) return null
+  const red = linearizeColorChannel(rgb.r)
+  const green = linearizeColorChannel(rgb.g)
+  const blue = linearizeColorChannel(rgb.b)
+
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+}
+
+function linearizeColorChannel(value: number): number {
+  const channel = value / 255
+  return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
 }
 
 function rgbaFromHex(hex: string, alpha: number): string {

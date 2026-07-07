@@ -4,6 +4,48 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const fallback = ['#0d0f12', 'dark']
+        const themes = {
+          abyss: ['#0d0f12', 'dark'],
+          aurora: ['#07131a', 'dark'],
+          paper: ['#11100f', 'dark'],
+          nightOwl: ['#011627', 'dark'],
+          campbell: ['#0c0c0c', 'dark'],
+          campbellPowershell: ['#012456', 'dark'],
+          oneHalfDark: ['#282c34', 'dark'],
+          oneHalfLight: ['#fafafa', 'light'],
+          solarizedDark: ['#002b36', 'dark'],
+          solarizedLight: ['#fdf6e3', 'light'],
+          tangoDark: ['#000000', 'dark'],
+          tangoLight: ['#ffffff', 'light'],
+          vintage: ['#000000', 'dark'],
+          dracula: ['#282a36', 'dark'],
+          nord: ['#2e3440', 'dark'],
+          catppuccinMocha: ['#1e1e2e', 'dark'],
+          monokai: ['#272822', 'dark'],
+          githubDark: ['#0d1117', 'dark'],
+          githubLight: ['#ffffff', 'light'],
+          gruvboxDark: ['#282828', 'dark'],
+          gruvboxLight: ['#fbf1c7', 'light'],
+          tokyoNight: ['#1a1b26', 'dark'],
+          kanagawaWave: ['#1f1f28', 'dark'],
+          everforestDark: ['#2d353b', 'dark'],
+        }
+        try {
+          const raw = window.localStorage.getItem('awt:settings')
+          const id = raw ? JSON.parse(raw)?.terminalThemeId : ''
+          const [background, colorScheme] = themes[id] || fallback
+          const root = document.documentElement
+          root.style.background = background
+          root.style.colorScheme = colorScheme
+        } catch {
+          document.documentElement.style.background = fallback[0]
+          document.documentElement.style.colorScheme = fallback[1]
+        }
+      })()
+    </script>
     <style>
       html,
       body,
@@ -12,17 +54,21 @@
         min-width: 320px;
         height: 100%;
         overflow: hidden;
-        background: #0d0f12;
         color: #d6deeb;
+      }
+
+      html {
+        background: #0d0f12;
         color-scheme: dark;
       }
-      body {
-        background:
-          radial-gradient(circle at 24% 16%, rgba(126, 231, 135, 0.08), transparent 30%),
-          #0d0f12;
+
+      body,
+      #root {
+        background: transparent;
+        color-scheme: inherit;
       }
     </style>
-    <title>agenticworkspaceterminal</title>
+    <title>Agentic Workspace Terminal</title>
   </head>
   <body>
     <div id="root"></div>

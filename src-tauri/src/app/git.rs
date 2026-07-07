@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 #[cfg(windows)]
@@ -96,10 +96,12 @@ pub async fn git_worktree_create(
     workspace_folder: String,
     task_id: String,
 ) -> Result<WorktreeInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || worktree_create_native(&workspace_folder, &task_id))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+    tauri::async_runtime::spawn_blocking(move || {
+        worktree_create_native(&workspace_folder, &task_id)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -133,6 +135,7 @@ fn snapshot_baseline_native(repo: &str) -> Result<String> {
 }
 
 fn changed_files_native(repo: &str, base_ref: &str) -> Result<Vec<ChangedFile>> {
+    validate_base_ref(base_ref)?;
     let mut files = parse_name_status(&git_output(
         repo,
         &["diff", "-M", "-C", "-z", "--name-status", base_ref],
@@ -168,9 +171,10 @@ fn changed_files_native(repo: &str, base_ref: &str) -> Result<Vec<ChangedFile>> 
 }
 
 fn file_contents_native(repo: &str, base_ref: &str, path: &str) -> Result<FileContents> {
-    let old_bytes = git_output_allow_fail(repo, &["show", &format!("{base_ref}:{path}")])?
-        .unwrap_or_default();
-    let new_path = Path::new(repo).join(path);
+    validate_base_ref(base_ref)?;
+    let new_path = resolve_repo_file_path(repo, path)?;
+    let old_bytes =
+        git_output_allow_fail(repo, &["show", &format!("{base_ref}:{path}")])?.unwrap_or_default();
     let new_bytes = match std::fs::read(&new_path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -202,14 +206,7 @@ fn worktree_create_native(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
     let path_string = worktree_path.to_string_lossy().to_string();
     git_output(
         repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            &path_string,
-            "HEAD",
-        ],
+        &["worktree", "add", "-b", &branch, &path_string, "HEAD"],
     )?;
     Ok(WorktreeInfo {
         worktree_path: path_string,
@@ -217,7 +214,12 @@ fn worktree_create_native(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
     })
 }
 
-fn worktree_remove_native(repo: &str, worktree_path: &str, branch: &str, force: bool) -> Result<()> {
+fn worktree_remove_native(
+    repo: &str,
+    worktree_path: &str,
+    branch: &str,
+    force: bool,
+) -> Result<()> {
     let mut remove_args = vec!["worktree", "remove"];
     if force {
         remove_args.push("--force");
@@ -301,6 +303,57 @@ fn change_type_from_status(status: char) -> ChangeType {
     }
 }
 
+fn validate_base_ref(base_ref: &str) -> Result<()> {
+    if base_ref.is_empty() {
+        bail!("git base ref must not be empty");
+    }
+    if base_ref.starts_with('-') {
+        bail!("git base ref must not start with '-'");
+    }
+    if !base_ref.chars().all(is_allowed_base_ref_char) {
+        bail!("git base ref contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn is_allowed_base_ref_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | '@' | '~' | '^')
+}
+
+fn resolve_repo_file_path(repo: &str, path: &str) -> Result<PathBuf> {
+    let relative = validate_repo_relative_path(path)?;
+    let repo_root = Path::new(repo)
+        .canonicalize()
+        .with_context(|| format!("canonicalize git repo {}", repo))?;
+    let joined = repo_root.join(relative);
+    if !joined.starts_with(&repo_root) {
+        bail!("git file path escapes workspace");
+    }
+    if let Ok(canonical) = joined.canonicalize() {
+        if !canonical.starts_with(&repo_root) {
+            bail!("git file path escapes workspace");
+        }
+        return Ok(canonical);
+    }
+    Ok(joined)
+}
+
+fn validate_repo_relative_path(path: &str) -> Result<&Path> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        bail!("git file path must be relative");
+    }
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        bail!("git file path must stay within the workspace");
+    }
+    Ok(relative)
+}
+
 fn git_output(repo: &str, args: &[&str]) -> Result<Vec<u8>> {
     let output = git_command(repo, args).output()?;
     if output.status.success() {
@@ -325,7 +378,11 @@ fn git_status(repo: &str, args: &[&str]) -> Result<std::process::ExitStatus> {
 
 fn git_command(repo: &str, args: &[&str]) -> Command {
     let mut command = Command::new("git");
-    command.arg("-C").arg(repo).arg("-c").arg("core.quotepath=false");
+    command
+        .arg("-C")
+        .arg(repo)
+        .arg("-c")
+        .arg("core.quotepath=false");
     command.args(args);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -390,12 +447,52 @@ mod tests {
             file.path == "untracked.txt" && matches!(file.change_type, ChangeType::Untracked)
         }));
 
-        let contents = file_contents_native(repo.to_str().expect("utf8 path"), &base, "tracked.txt")
-            .expect("contents");
+        let contents =
+            file_contents_native(repo.to_str().expect("utf8 path"), &base, "tracked.txt")
+                .expect("contents");
         assert!(!contents.binary);
         assert_eq!(contents.old, "old\n");
         assert_eq!(contents.new, "old\nnew\n");
 
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn file_contents_rejects_paths_outside_workspace() {
+        let repo = test_repo();
+        let repo_str = repo.to_str().expect("utf8 path");
+        let absolute = if cfg!(windows) {
+            r"C:\Windows\win.ini"
+        } else {
+            "/etc/passwd"
+        };
+
+        let absolute_err = file_contents_native(repo_str, "HEAD", absolute)
+            .expect_err("absolute path should be rejected")
+            .to_string();
+        let dotdot_err = file_contents_native(repo_str, "HEAD", "../secret.txt")
+            .expect_err("dotdot path should be rejected")
+            .to_string();
+
+        assert!(absolute_err.contains("relative"));
+        assert!(dotdot_err.contains("workspace"));
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn file_contents_rejects_unsafe_base_refs() {
+        let repo = test_repo();
+        let repo_str = repo.to_str().expect("utf8 path");
+
+        assert!(file_contents_native(repo_str, "-HEAD", "tracked.txt")
+            .expect_err("leading dash ref should be rejected")
+            .to_string()
+            .contains("must not start"));
+        assert!(file_contents_native(repo_str, "main:secret", "tracked.txt")
+            .expect_err("colon ref should be rejected")
+            .to_string()
+            .contains("unsupported"));
+        assert!(validate_base_ref("feature/foo_1-2.3@~^").is_ok());
         std::fs::remove_dir_all(repo).expect("cleanup repo");
     }
 

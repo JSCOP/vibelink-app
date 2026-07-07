@@ -27,7 +27,7 @@ describe('swapPanelIdsInDockviewLayout', () => {
     expect(Object.keys(layout.panels)).toEqual(['pane-a', 'pane-b'])
   })
 
-  it('swaps pane ids inside tab groups', () => {
+  it('does not mutate pane ids inside the same tab group', () => {
     const layout = {
       grid: {
         root: {
@@ -42,10 +42,10 @@ describe('swapPanelIdsInDockviewLayout', () => {
       },
     }
 
-    expect(swapPanelIdsInDockviewLayout(layout, 'pane-a', 'pane-c')).toBe(true)
-    expect(layout.grid.root.data.views).toEqual(['pane-c', 'pane-b', 'pane-a'])
-    expect(layout.grid.root.data.activeView).toBe('pane-a')
-    expect(layout.grid.root.data.tabGroups[0].panelIds).toEqual(['pane-c', 'pane-b', 'pane-a'])
+    expect(swapPanelIdsInDockviewLayout(layout, 'pane-a', 'pane-c')).toBe(false)
+    expect(layout.grid.root.data.views).toEqual(['pane-a', 'pane-b', 'pane-c'])
+    expect(layout.grid.root.data.activeView).toBe('pane-c')
+    expect(layout.grid.root.data.tabGroups[0].panelIds).toEqual(['pane-a', 'pane-b', 'pane-c'])
   })
 
   it('does not mutate when either pane is missing', () => {

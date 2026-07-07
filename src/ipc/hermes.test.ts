@@ -25,6 +25,8 @@ describe('Hermes ACP startup', () => {
       hermesPermissions: {},
       hermesUsage: {},
       hermesModels: {},
+      hermesCurrentSession: {},
+      hermesSessions: {},
       error: undefined,
     })
   })
@@ -43,6 +45,44 @@ describe('Hermes ACP startup', () => {
     expect(invoke).toHaveBeenCalledWith('init_hermes_output', expect.any(Object))
     expect(invoke).toHaveBeenCalledWith('hermes_start', { sessionId: 'session-a', commandOverride: 'hermes-acp', workspaceFolder: 'E:/repo' })
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
+  })
+
+  test('started event restores transcript and session list from backend', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'hermes_start') {
+        queueMicrotask(() => emitHermesEvent?.({ kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
+      }
+      if (command === 'hermes_session_transcript') return [{ role: 'user', text: 'hello', thoughts: '' }]
+      if (command === 'hermes_list_sessions') return [{ id: 'acp-a', title: null, source: 'discord', model: null, startedAt: 1, endedAt: null, messageCount: 1, archived: false }]
+      return null
+    })
+    const { startHermesAgent } = await import('./hermes')
+
+    await startHermesAgent({ sessionId: 'session-a', timeoutMs: 100 })
+    await waitUntil(() => (useWorkspaceStore.getState().hermesTranscript['session-a'] ?? []).length === 1)
+
+    expect(useWorkspaceStore.getState().hermesCurrentSession['session-a']).toBe('acp-a')
+    expect(useWorkspaceStore.getState().hermesTranscript['session-a']).toEqual([{ role: 'user', text: 'hello', thoughts: '', toolCalls: [] }])
+    expect(useWorkspaceStore.getState().hermesSessions['session-a']).toHaveLength(1)
+  })
+
+  test('explicit resume replaces transcript for the selected ACP session', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'hermes_resume_session') return null
+      if (command === 'hermes_session_transcript') return [{ role: 'assistant', text: 'restored', thoughts: 'reasoning' }]
+      return null
+    })
+    useWorkspaceStore.setState({
+      hermesStatus: { 'session-a': 'running' },
+      hermesTranscript: { 'session-a': [{ role: 'user', text: 'old', thoughts: '', toolCalls: [] }] },
+    })
+    const { hermesResumeSession } = await import('./hermes')
+
+    await hermesResumeSession({ sessionId: 'session-a', timeoutMs: 100 }, 'acp-b')
+
+    expect(invoke).toHaveBeenCalledWith('hermes_resume_session', { sessionId: 'session-a', acpSessionId: 'acp-b' })
+    expect(useWorkspaceStore.getState().hermesCurrentSession['session-a']).toBe('acp-b')
+    expect(useWorkspaceStore.getState().hermesTranscript['session-a']).toEqual([{ role: 'assistant', text: 'restored', thoughts: 'reasoning', toolCalls: [] }])
   })
 
   test('dedupes concurrent startup requests for one workspace', async () => {

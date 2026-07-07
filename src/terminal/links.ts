@@ -5,14 +5,35 @@ export type CaptureLinkActions = {
   resolveMarker(paneId: string, n: number): string | undefined
 }
 
-const PATH_RE = /"([a-zA-Z]:[\\/][^"\r\n]+)"|([a-zA-Z]:[\\/][^\s"'<>|*?\r\n]+)/g
+const URL_RE = /\b((?:https?|file):\/\/[^\s"'<>]+)/gi
+const PATH_RE = /"((?:[a-zA-Z]:[\\/]|\\\\|\/|~[\\/])[^"\r\n]+)"|((?:[a-zA-Z]:[\\/]|\\\\)[^\s"'<>|*?\r\n]+|~[\\/][^\s"'<>|*?\r\n]+)/g
 const MARKER_RE = /\[Image #(\d+)(?:,\s*\d+x\d+)?\]/g
+const TRAILING_LINK_PUNCTUATION_RE = /[.,;:!?)}\]]+$/
 
-export function findPathMatches(line: string): { index: number; text: string }[] {
-  return [...line.matchAll(PATH_RE)].map((match) => ({
-    index: match.index + (match[1] ? 1 : 0),
-    text: match[1] ?? match[2],
-  }))
+type LinkMatch = { index: number; text: string }
+
+export function findUrlMatches(line: string): LinkMatch[] {
+  return [...line.matchAll(URL_RE)].flatMap((match) => {
+    const text = match[1]
+    const trimmed = trimTrailingLinkPunctuation(text)
+    return trimmed.length > 0 ? [{ index: match.index, text: trimmed }] : []
+  })
+}
+
+export function findPathMatches(line: string): LinkMatch[] {
+  return [...line.matchAll(PATH_RE)].flatMap((match) => {
+    const quoted = match[1]
+    const text = trimTrailingLinkPunctuation(quoted ?? match[2])
+    return text.length > 0
+      ? [{ index: match.index + (quoted ? 1 : 0), text }]
+      : []
+  })
+}
+
+export function findTerminalLinkMatches(line: string): LinkMatch[] {
+  const urls = findUrlMatches(line)
+  const paths = findPathMatches(line).filter((path) => !urls.some((url) => rangesOverlap(path, url)))
+  return [...urls, ...paths].sort((a, b) => a.index - b.index)
 }
 
 export function findImageMarkerMatches(line: string): { index: number; text: string; n: number }[] {
@@ -31,7 +52,7 @@ export function createPathLinkProvider(term: Terminal, getActions: () => Capture
         callback(undefined)
         return
       }
-      const links = findPathMatches(line).map(({ index, text }) => createLink(bufferLineNumber, index, text, (event) => {
+      const links = findTerminalLinkMatches(line).map(({ index, text }) => createLink(bufferLineNumber, index, text, (event) => {
         if (!isModifiedClick(event)) return
         getActions().onOpenPath(text)
       }))
@@ -66,7 +87,7 @@ function lineText(term: Terminal, bufferLineNumber: number): string | undefined 
 }
 
 function createLink(bufferLineNumber: number, index: number, text: string, activate: (event: MouseEvent) => void): ILink {
-  const decorations = { pointerCursor: false, underline: false }
+  const decorations = { pointerCursor: true, underline: true }
   return {
     text,
     range: {
@@ -74,19 +95,18 @@ function createLink(bufferLineNumber: number, index: number, text: string, activ
       end: { x: index + text.length, y: bufferLineNumber },
     },
     decorations,
-    hover(event) {
-      const active = isModifiedClick(event)
-      decorations.pointerCursor = active
-      decorations.underline = active
-    },
-    leave() {
-      decorations.pointerCursor = false
-      decorations.underline = false
-    },
     activate,
   }
 }
 
 function isModifiedClick(event: MouseEvent): boolean {
   return event.ctrlKey || event.metaKey
+}
+
+function trimTrailingLinkPunctuation(text: string): string {
+  return text.replace(TRAILING_LINK_PUNCTUATION_RE, '')
+}
+
+function rangesOverlap(a: LinkMatch, b: LinkMatch): boolean {
+  return a.index < b.index + b.text.length && b.index < a.index + a.text.length
 }

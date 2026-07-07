@@ -5,6 +5,7 @@ export type PaneDropPosition = 'left' | 'right' | 'top' | 'bottom' | 'center'
 type RectLike = Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>
 
 const edgeActivationRatio = 0.28
+const edgeActivationEpsilon = 1e-6
 
 export function hasPaneDragPayload(types: DOMStringList | readonly string[]): boolean {
   return Array.from(types).includes(paneDragMime)
@@ -22,7 +23,7 @@ export function paneDropPositionFromPoint(rect: RectLike, clientX: number, clien
   if (yRatio <= edgeActivationRatio) candidates.push({ position: 'top', distance: yRatio })
   if (1 - yRatio <= edgeActivationRatio) candidates.push({ position: 'bottom', distance: 1 - yRatio })
 
-  return candidates.reduce((best, candidate) => candidate.distance < best.distance ? candidate : best, { position: 'center', distance: edgeActivationRatio }).position
+  return candidates.reduce((best, candidate) => candidate.distance < best.distance ? candidate : best, { position: 'center', distance: edgeActivationRatio + edgeActivationEpsilon }).position
 }
 
 function clampRatio(value: number): number {

@@ -14,6 +14,7 @@ export type PaneConfig = {
   env: [string, string][]
   title?: string | null
   icon?: string | null
+  profileId?: string | null
   cols: number
   rows: number
 }
@@ -23,6 +24,12 @@ export type PaneMeta = {
   config: PaneConfig
   alive: boolean
 }
+
+export type ResourceProc = { pid: number; memBytes: number; processCount: number }
+
+export type ResourcePane = { sessionId: string; paneId: string; rootPid: number | null; memBytes: number; processCount: number }
+
+export type ResourceSnapshot = { daemon: ResourceProc; app: ResourceProc; panes: ResourcePane[]; totalMemBytes: number }
 
 export type AttachedSession = {
   layoutJson?: string | null
@@ -81,3 +88,29 @@ export type HermesGatewayConfig = {
 }
 
 export type HermesGatewayStatus = { running: boolean; pid?: number }
+
+export type SkillScope = 'global' | 'workspace'
+
+export type SkillEntry = {
+  id: string
+  name: string
+  category: string
+  description: string
+  scope: SkillScope
+  enabled: boolean
+  updatedAt?: number | string | null
+  path?: string | null
+  readOnly?: boolean
+  content?: string | null
+}
+
+export type SkillApplyInput = {
+  content: string
+  id: string
+  name?: string | null
+  category?: string | null
+  description?: string | null
+  scope: SkillScope
+  sessionId?: string | null
+  enabled?: boolean
+}

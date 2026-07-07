@@ -1,10 +1,13 @@
 use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
+use crate::daemon::scrollback::ScrollbackRing;
 use crate::protocol::{DaemonToClient, PaneMeta, SessionMeta};
 use crossbeam_channel::Sender;
 use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
+    io::Write,
+    sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -20,6 +23,12 @@ pub struct DaemonState {
     clients: HashMap<Uuid, Sender<DaemonToClient>>,
     pane_clients: HashMap<Uuid, HashSet<Uuid>>,
     session_clients: HashMap<Uuid, HashSet<Uuid>>,
+}
+
+fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, ScrollbackRing> {
+    scrollback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl DaemonState {
@@ -95,26 +104,33 @@ impl DaemonState {
         sessions
     }
 
+    pub fn resource_targets(&self) -> Vec<(Uuid, Uuid, Option<u32>)> {
+        let mut out = Vec::new();
+        for (session_id, session) in &self.sessions {
+            for (pane_id, pane) in &session.panes {
+                out.push((*session_id, *pane_id, pane.root_pid()));
+            }
+        }
+        out
+    }
+
     pub fn rename_session(&mut self, session_id: Uuid, name: String) -> anyhow::Result<()> {
         let session = self.session_mut(session_id)?;
         session.meta.name = name;
         Ok(())
     }
 
-    pub fn delete_session(&mut self, session_id: Uuid) -> anyhow::Result<Vec<Uuid>> {
+    pub fn delete_session(&mut self, session_id: Uuid) -> anyhow::Result<Vec<Pane>> {
         let mut session = self
             .sessions
             .remove(&session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown session {session_id}"))?;
         let pane_ids: Vec<_> = session.panes.keys().copied().collect();
-        for pane in session.panes.values_mut() {
-            let _ = pane.kill();
-        }
         for pane_id in &pane_ids {
             self.pane_clients.remove(pane_id);
         }
         self.session_clients.remove(&session_id);
-        Ok(pane_ids)
+        Ok(session.panes.drain(..).map(|(_, pane)| pane).collect())
     }
 
     pub fn attach_session(
@@ -148,8 +164,20 @@ impl DaemonState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn insert_pane(&mut self, session_id: Uuid, pane: Pane) -> anyhow::Result<PaneMeta> {
-        let session = self.session_mut(session_id)?;
+        self.insert_pane_or_recover(session_id, pane)
+            .map_err(|(err, _pane)| err)
+    }
+
+    pub fn insert_pane_or_recover(
+        &mut self,
+        session_id: Uuid,
+        pane: Pane,
+    ) -> std::result::Result<PaneMeta, (anyhow::Error, Pane)> {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err((anyhow::anyhow!("unknown session {session_id}"), pane));
+        };
         let meta = pane.meta();
         session.panes.insert(meta.id, pane);
         session.meta.pane_count = session.panes.len();
@@ -190,9 +218,13 @@ impl DaemonState {
         pane
     }
 
-    pub fn write_pane(&self, session_id: Uuid, pane_id: Uuid, data: &[u8]) -> anyhow::Result<()> {
+    pub fn pane_writer(
+        &self,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<Arc<Mutex<Box<dyn Write + Send>>>> {
         let pane = self.pane_in_session(session_id, pane_id)?;
-        pane.write(data)
+        Ok(Arc::clone(&pane.writer))
     }
 
     pub fn resize_pane(
@@ -256,7 +288,7 @@ impl DaemonState {
         };
         if let Some(tx) = self.clients.get(&client_id) {
             if !snapshot.is_empty() {
-                let _ = tx.send(DaemonToClient::Output {
+                let _ = tx.try_send(DaemonToClient::Output {
                     pane_id,
                     data: snapshot,
                 });
@@ -302,9 +334,13 @@ impl DaemonState {
             .unwrap_or_default()
     }
 
-    pub fn record_output(&mut self, pane_id: Uuid, data: &[u8]) -> Vec<Sender<DaemonToClient>> {
+    pub fn record_output_and_push(
+        &mut self,
+        pane_id: Uuid,
+        bytes: &[u8],
+    ) -> Vec<Sender<DaemonToClient>> {
         if let Ok(pane) = self.pane_any_mut(pane_id) {
-            pane.push_scrollback(data);
+            lock_scrollback(&pane.scrollback).push(bytes);
         }
         self.senders_for_pane(pane_id)
     }
@@ -616,6 +652,61 @@ mod tests {
     }
 
     #[test]
+    fn delete_session_returns_panes_without_killing_inline() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let client_id = Uuid::new_v4();
+        let pane_a_id = Uuid::new_v4();
+        let pane_b_id = Uuid::new_v4();
+        let (tx, _rx) = unbounded();
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_a_id), true))
+            .expect("insert pane a");
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_b_id), true))
+            .expect("insert pane b");
+        state.attach_client_to_pane(client_id, pane_a_id);
+        state.attach_client_to_pane(client_id, pane_b_id);
+        state.attach_client_to_session(client_id, workspace.id);
+
+        let panes = state.delete_session(workspace.id).expect("delete session");
+
+        assert_eq!(panes.len(), 2);
+        assert!(panes.iter().all(|pane| pane.alive));
+        assert!(state.list_sessions().is_empty());
+        assert!(state.attached_clients(pane_a_id).is_empty());
+        assert!(state.attached_clients(pane_b_id).is_empty());
+        assert!(state.attached_session_clients(workspace.id).is_empty());
+    }
+
+    #[test]
+    fn pane_writer_can_be_used_after_state_lock_released() {
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let workspace_id = {
+            let mut guard = state.lock().expect("state mutex");
+            let workspace = guard.create_session("Workspace".to_string(), None);
+            let pane_id = Uuid::new_v4();
+            guard
+                .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+                .expect("insert pane");
+            (workspace.id, pane_id)
+        };
+
+        let writer = {
+            let guard = state.lock().expect("state mutex");
+            guard
+                .pane_writer(workspace_id.0, workspace_id.1)
+                .expect("pane writer")
+        };
+
+        assert!(state.try_lock().is_ok());
+        let mut writer = writer.lock().expect("pty writer mutex");
+        writer.write_all(b"hello").expect("write pane bytes");
+        writer.flush().expect("flush pane bytes");
+    }
+
+    #[test]
     fn set_pane_title_updates_live_pane_metadata() {
         let mut state = DaemonState::new();
         let meta = state.create_session("Workspace".to_string(), None);
@@ -631,6 +722,41 @@ mod tests {
         assert_eq!(
             panes[0].config.title.as_deref(),
             Some("Codex: refactor terminal")
+        );
+    }
+
+    #[test]
+    fn record_output_pushes_scrollback_and_returns_senders() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = unbounded();
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        state.attach_client_to_pane(client_id, pane_id);
+
+        let senders = state.record_output_and_push(pane_id, b"hello");
+
+        assert_eq!(senders.len(), 1);
+        assert_eq!(
+            state.get_scrollback(workspace.id, pane_id).unwrap(),
+            b"hello"
+        );
+        senders[0]
+            .send(DaemonToClient::Output {
+                pane_id,
+                data: b"hello".to_vec(),
+            })
+            .expect("send output");
+        assert_eq!(
+            rx.recv().expect("output event"),
+            DaemonToClient::Output {
+                pane_id,
+                data: b"hello".to_vec(),
+            }
         );
     }
 
@@ -695,6 +821,7 @@ mod tests {
             env: Vec::new(),
             title: Some("test".to_string()),
             icon: None,
+            profile_id: None,
             cols: 80,
             rows: 24,
         }

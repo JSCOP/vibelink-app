@@ -1,10 +1,10 @@
 import type { Task, TaskStatus } from '../ipc/types'
 
 export const TASK_COLUMNS: Record<TaskStatus, string> = {
-  pending: '대기중',
-  assigned: '배정됨',
-  'in-progress': '작업중',
-  done: '끝남',
+  pending: 'Pending',
+  assigned: 'Assigned',
+  'in-progress': 'In Progress',
+  done: 'Done',
 }
 
 export type KanbanData = {
@@ -32,8 +32,9 @@ export function normalizeKanban(value: unknown): KanbanData {
 
 export function tasksForSession(data: KanbanData, sessionId: string): Task[] {
   const ids = data.taskOrder[sessionId] ?? []
+  const orderedIds = new Set(ids)
   const ordered = ids.map((id) => data.tasks[id]).filter((task): task is Task => Boolean(task))
-  const missing = Object.values(data.tasks).filter((task) => task.sessionId === sessionId && !ids.includes(task.id))
+  const missing = Object.values(data.tasks).filter((task) => task.sessionId === sessionId && !orderedIds.has(task.id))
   return [...ordered, ...missing].sort((left, right) => left.createdAt - right.createdAt)
 }
 
@@ -53,22 +54,26 @@ export function composeTaskPrompt(
   ctx: { role?: string | null; sessionId: string },
 ): string {
   const short = task.id.slice(0, 8)
-  const roleLine = ctx.role ? `Role: ${ctx.role}` : undefined
-  const worktreeLine = task.worktreePath ? `Work in isolated git worktree: ${task.worktreePath}` : undefined
+  const title = inlineText(task.title)
+  const roleLine = ctx.role ? `Role: ${inlineText(ctx.role)}` : undefined
+  const worktreeLine = task.worktreePath ? `Work in isolated git worktree: ${inlineText(task.worktreePath)}` : undefined
+  const description = inlineText(task.description)
   return [
-    `[Task #${short}] ${task.title}`,
+    `[Task #${short}] ${title}`,
     roleLine,
     worktreeLine,
-    task.description.trim() ? `\n${task.description.trim()}` : undefined,
-    '',
+    description || undefined,
     'When you make progress, report a note from this AWT pane with:',
     `& $env:AWT_APP_EXE cli task note --task ${task.id} --message "<short progress note>"`,
-    '',
     'When finished, report completion from this AWT pane with:',
-    `& $env:AWT_APP_EXE cli task done --task ${task.id}`,
+    `& $env:AWT_APP_EXE cli task done --task ${task.id} --result-summary "<short result summary>"`,
   ]
     .filter((line): line is string => line !== undefined)
-    .join('\n')
+    .join(' | ')
+}
+
+function inlineText(value: string): string {
+  return value.trim().replace(/\s+/g, ' ')
 }
 
 function normalizeTask(id: string, value: unknown): [string, Task] | null {

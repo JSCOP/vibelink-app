@@ -10,12 +10,20 @@ export type HermesToolCallView = {
 
 export type HermesPlanEntry = { content: string; status: string; priority: string }
 
+export type HermesTextPartKind = 'message' | 'thought'
+
+export type HermesTranscriptPart =
+  | { kind: HermesTextPartKind; text: string }
+  | { kind: 'toolCall'; toolCallId: string }
+  | { kind: 'plan'; entries: HermesPlanEntry[] }
+
 export type HermesTurn = {
   role: 'user' | 'assistant'
   text: string
   thoughts: string
   toolCalls: HermesToolCallView[]
   plan?: HermesPlanEntry[]
+  parts?: HermesTranscriptPart[]
 }
 
 export type PendingPermission = {
@@ -31,6 +39,17 @@ export type PendingPermission = {
 export type HermesStatus = 'idle' | 'starting' | 'running' | 'busy' | 'error'
 
 export type HermesModelsState = { available: HermesModelInfo[]; current: string }
+
+export type HermesSessionInfo = {
+  id: string
+  title: string | null
+  source: string
+  model: string | null
+  startedAt: number | null
+  endedAt: number | null
+  messageCount: number
+  archived: boolean
+}
 
 
 

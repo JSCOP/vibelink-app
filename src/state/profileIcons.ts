@@ -19,6 +19,9 @@ import {
   Cpu,
   Bug,
   Globe,
+  GitCompare,
+  LayoutGrid,
+  ListTodo,
 } from 'lucide-react'
 
 type IconComponent = typeof Terminal
@@ -44,6 +47,9 @@ export const profileIcons: Record<string, IconComponent> = {
   cpu: Cpu,
   bug: Bug,
   globe: Globe,
+  'git-compare': GitCompare,
+  'layout-grid': LayoutGrid,
+  'list-todo': ListTodo,
 }
 
 export const defaultProfileIconName = 'terminal'

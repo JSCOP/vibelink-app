@@ -49,7 +49,39 @@ const requiredCssVariables = [
   '--awt-danger',
   '--awt-overlay',
   '--awt-dialog',
+  '--awt-focus',
 ] as const
+
+function contrastRatio(first: string, second: string): number {
+  const firstLuminance = relativeLuminance(first)
+  const secondLuminance = relativeLuminance(second)
+  const lighter = Math.max(firstLuminance, secondLuminance)
+  const darker = Math.min(firstLuminance, secondLuminance)
+
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+function relativeLuminance(hex: string): number {
+  const { r, g, b } = hexToRgb(hex)
+  const [red, green, blue] = [r, g, b].map((value) => {
+    const channel = value / 255
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  })
+
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex)
+  if (!match) throw new Error(`Expected hex color, received ${hex}`)
+  const value = match[1]
+
+  return {
+    r: Number.parseInt(value.slice(0, 2), 16),
+    g: Number.parseInt(value.slice(2, 4), 16),
+    b: Number.parseInt(value.slice(4, 6), 16),
+  }
+}
 
 describe('terminalThemes', () => {
   test('provides the expected curated theme count with unique ids', () => {
@@ -75,6 +107,24 @@ describe('terminalThemes', () => {
       }
       expect(variables['--awt-bg']).toBe(theme.ui.background)
       expect(variables['--awt-accent']).toBe(theme.ui.accent)
+    }
+  })
+
+  test('keeps muted text legible against theme backgrounds', () => {
+    for (const theme of terminalThemes) {
+      const minimumContrast = theme.colorScheme === 'light' ? 4.5 : 4.0
+      expect(contrastRatio(theme.ui.muted, theme.ui.background), `${theme.id}.muted`).toBeGreaterThanOrEqual(minimumContrast)
+    }
+  })
+
+  test('keeps remapped Solarized bright ANSI colors legible', () => {
+    const keys: (keyof RequiredTerminalTheme)[] = ['brightBlack', 'brightGreen', 'brightYellow', 'brightBlue']
+
+    for (const themeId of ['solarizedDark', 'solarizedLight']) {
+      const theme = terminalThemeDefinitionById(themeId)
+      for (const key of keys) {
+        expect(contrastRatio(theme.terminal[key], theme.terminal.background), `${theme.id}.${key}`).toBeGreaterThanOrEqual(4.5)
+      }
     }
   })
 

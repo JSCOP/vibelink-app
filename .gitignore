@@ -37,3 +37,12 @@ src-tauri/target/
 *.njsproj
 *.sln
 *.sw?
+
+# Agent harness session state
+.omo/
+
+# CodeGraph local index
+.codegraph/
+
+# Local dev/verify build outputs
+src-tauri/target/codex-verify/

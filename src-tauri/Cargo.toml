@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.4"
+version = "0.1.5"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -27,7 +27,7 @@ portable-pty = "0.9"
 interprocess = "2"
 directories = "6"
 xcap = "0.9.6"
-arboard = { version = "3.6.1", default-features = false }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 crossbeam-channel = "0.5"
 anyhow = "1"
@@ -35,8 +35,13 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indexmap = { version = "2", features = ["serde"] }
-base64 = "0.22"
 tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sysinfo = "0.33"
+tungstenite = "0.29"
 
 ureq = { version = "2", features = ["json"] }
+
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,5 +1,6 @@
 import type { HermesGatewayConfig } from '../ipc/types'
 import { emptyKanban, normalizeKanban, type KanbanData } from './kanban'
+import { normalizeWorkspaceTodoLists, normalizeWorkspaceTodoNotes, type WorkspaceTodoLists, type WorkspaceTodoNotes } from './workspaceTodos'
 
 export type ViewMode = 'terminal' | 'kanban'
 
@@ -9,6 +10,8 @@ export type PersistedKanbanState = {
   kanbanLayouts: Record<string, string>
   orchestratorPaneIds: Record<string, string>
   hermesGateways: Record<string, HermesGatewayConfig>
+  workspaceTodos: WorkspaceTodoLists
+  workspaceTodoNotes: WorkspaceTodoNotes
 }
 
 type KanbanBlob = PersistedKanbanState & { version: 1; layoutVersion?: number }
@@ -29,6 +32,8 @@ export function loadKanban(): PersistedKanbanState {
       kanbanLayouts: parsed.layoutVersion === layoutVersion ? normalizeStringRecord(parsed.kanbanLayouts) : {},
       orchestratorPaneIds: normalizeStringRecord(parsed.orchestratorPaneIds),
       hermesGateways: normalizeHermesGatewayRecord(parsed.hermesGateways),
+      workspaceTodos: normalizeWorkspaceTodoLists(parsed.workspaceTodos),
+      workspaceTodoNotes: normalizeWorkspaceTodoNotes(parsed.workspaceTodoNotes),
     }
   } catch {
     return emptyPersistedKanban()
@@ -45,6 +50,8 @@ export function persistKanban(state: PersistedKanbanState): void {
     kanbanLayouts: normalizeStringRecord(state.kanbanLayouts),
     orchestratorPaneIds: normalizeStringRecord(state.orchestratorPaneIds),
     hermesGateways: normalizeHermesGatewayRecord(state.hermesGateways),
+    workspaceTodos: normalizeWorkspaceTodoLists(state.workspaceTodos),
+    workspaceTodoNotes: normalizeWorkspaceTodoNotes(state.workspaceTodoNotes),
   }
   window.localStorage.setItem(storageKey, JSON.stringify(blob))
 }
@@ -56,6 +63,8 @@ function emptyPersistedKanban(): PersistedKanbanState {
     kanbanLayouts: {},
     orchestratorPaneIds: {},
     hermesGateways: {},
+    workspaceTodos: {},
+    workspaceTodoNotes: {},
   }
 }
 

@@ -35,6 +35,10 @@
   --awt-warning: #f2cc60;
   --awt-warning-soft: rgba(242, 204, 96, 0.16);
   --awt-focus: #7ee787;
+  --z-popover: 100;
+  --z-resize-layer: 110;
+  --z-overlay: 120;
+  --z-modal: 200;
   --awt-terminal-bg: #0b0f14;
   --awt-terminal-fg: #d6deeb;
   --awt-mono: "Cascadia Code", "JetBrains Mono", Menlo, Consolas, "Malgun Gothic", "Apple SD Gothic Neo", monospace;
@@ -53,7 +57,7 @@
   --dv-icon-hover-background-color: var(--awt-hover);
   --dv-floating-box-shadow: var(--awt-shadow);
   --dv-floating-border: 1px solid var(--awt-border-soft);
-  --dv-overlay-z-index: 999;
+  --dv-overlay-z-index: var(--z-overlay);
   --dv-tab-font-size: inherit;
   --dv-border-radius: 0px;
   --dv-tab-margin: 0;

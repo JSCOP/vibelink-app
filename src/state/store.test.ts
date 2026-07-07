@@ -19,6 +19,21 @@ const spawnedPane: PaneMeta = {
   alive: true,
 }
 
+const nonAgentPane: PaneMeta = {
+  id: 'pane-shell',
+  config: {
+    paneId: 'pane-shell',
+    shell: 'pwsh.exe',
+    args: ['-NoLogo'],
+    cwd: 'E:/work',
+    env: [['TERM_PROGRAM', 'AgenticWorkspaceTerminal']],
+    title: 'PowerShell',
+    cols: 120,
+    rows: 32,
+  },
+  alive: true,
+}
+
 const createdSession: SessionMeta = {
   id: 'session-workspace',
   name: 'Repo',
@@ -53,6 +68,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 describe('workspace store profiles', () => {
   beforeEach(() => {
     vi.stubGlobal('window', { localStorage: localStorageStub })
+    vi.stubGlobal('document', { hasFocus: () => false })
     localStorageStub.getItem.mockReturnValue(null)
     localStorageStub.setItem.mockClear()
     localStorageStub.removeItem.mockClear()
@@ -66,11 +82,19 @@ describe('workspace store profiles', () => {
     useWorkspaceStore.setState({
       sessions: [],
       activeSessionId: undefined,
+      activePaneId: undefined,
       panes: {},
       manualPaneTitles: {},
       layoutJson: null,
       status: 'ready',
       error: undefined,
+      hermesPendingPrompts: {},
+      hermesTranscript: {},
+      hermesCurrentSession: {},
+      paneCompletionHighlights: {},
+      capturesByPane: {},
+      recentCaptures: [],
+      hermesSessions: {},
       settings: normalizeSettings({
         ...defaultSettings,
         defaultProfileId: 'agent',
@@ -138,6 +162,7 @@ describe('workspace store profiles', () => {
         ],
         title: 'Codex',
         icon: 'sparkles',
+        profileId: 'agent',
         cols: 120,
         rows: 32,
       },
@@ -337,6 +362,28 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
   })
 
+  test('renamePaneTitle skips unchanged titles', async () => {
+    useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
+      panes: { 'pane-test': { ...spawnedPane, config: { ...spawnedPane.config, title: 'Manual Codex' } } },
+    })
+
+    await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
+
+    expect(invoke).not.toHaveBeenCalledWith('set_pane_title', expect.anything())
+  })
+
+  test('applyPaneConfiguration skips unchanged titles', () => {
+    useWorkspaceStore.setState({
+      panes: { 'pane-test': { ...spawnedPane, config: { ...spawnedPane.config, title: 'Same' } } },
+      manualPaneTitles: {},
+    })
+
+    useWorkspaceStore.getState().applyPaneConfiguration('pane-test', { title: 'Same' })
+
+    expect(useWorkspaceStore.getState().manualPaneTitles['pane-test']).toBeUndefined()
+  })
+
   test('applyTerminalTitle does not overwrite manual pane titles', async () => {
     useWorkspaceStore.setState({ activeSessionId: createdSession.id, panes: { 'pane-test': spawnedPane } })
     await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
@@ -344,5 +391,178 @@ describe('workspace store profiles', () => {
     await useWorkspaceStore.getState().applyTerminalTitle('pane-test', 'Codex: auto task')
 
     expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
+  })
+
+  test('stores Hermes session metadata and replaces transcripts', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addHermesUserMessage('session-1', 'old')
+    store.setHermesTranscript('session-1', [{ role: 'assistant', text: 'restored', thoughts: 'thinking', toolCalls: [] }])
+    store.setHermesCurrentSession('session-1', 'acp-1')
+    store.setHermesSessions('session-1', [{
+      id: 'acp-1',
+      title: null,
+      source: 'discord',
+      model: null,
+      startedAt: 1,
+      endedAt: null,
+      messageCount: 2,
+      archived: false,
+    }])
+
+    expect(useWorkspaceStore.getState().hermesTranscript['session-1']).toEqual([{ role: 'assistant', text: 'restored', thoughts: 'thinking', toolCalls: [] }])
+    expect(useWorkspaceStore.getState().hermesCurrentSession['session-1']).toBe('acp-1')
+    expect(useWorkspaceStore.getState().hermesSessions['session-1']).toHaveLength(1)
+  })
+
+  test('preserves Hermes assistant event order inside a turn', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.appendHermesText('session-1', 'message', 'before')
+    store.addHermesToolCall('session-1', { id: 'tool-1', title: 'Read file', toolKind: 'read', status: 'running' })
+    store.appendHermesText('session-1', 'message', 'after')
+    store.appendHermesText('session-1', 'thought', 'thinking')
+
+    expect(useWorkspaceStore.getState().hermesTranscript['session-1'][0].parts).toEqual([
+      { kind: 'message', text: 'before' },
+      { kind: 'toolCall', toolCallId: 'tool-1' },
+      { kind: 'message', text: 'after' },
+      { kind: 'thought', text: 'thinking' },
+    ])
+  })
+
+  test('pane completion highlights the focused active agent pane until input clears it', () => {
+    vi.stubGlobal('document', { hasFocus: () => true })
+    useWorkspaceStore.setState({
+      activePaneId: 'pane-test',
+      panes: { 'pane-test': spawnedPane },
+      paneCompletionHighlights: {},
+    })
+
+    useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
+
+    useWorkspaceStore.getState().clearPaneCompletionHighlight('pane-test')
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
+  })
+
+  test('pane completion highlights the active agent pane while the app is unfocused', () => {
+    useWorkspaceStore.setState({
+      activePaneId: 'pane-test',
+      panes: { 'pane-test': spawnedPane },
+      paneCompletionHighlights: {},
+    })
+
+    useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
+  })
+
+  test('pane completion highlights an inactive agent pane until it is activated', () => {
+    vi.stubGlobal('document', { hasFocus: () => true })
+    useWorkspaceStore.setState({
+      activePaneId: undefined,
+      panes: { 'pane-test': spawnedPane },
+      paneCompletionHighlights: {},
+    })
+
+    useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
+
+    useWorkspaceStore.getState().setActivePaneId('pane-test')
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
+  })
+
+  test('pane completion does not highlight a non-agent pane', () => {
+    useWorkspaceStore.setState({
+      activePaneId: 'pane-shell',
+      panes: { 'pane-shell': nonAgentPane },
+      paneCompletionHighlights: {},
+    })
+
+    useWorkspaceStore.getState().markPaneResponseComplete('pane-shell')
+
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-shell']).toBeUndefined()
+  })
+
+  test('deleteSession clears Hermes session browser state', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'delete_session') return null
+      if (command === 'list_sessions') return [secondSession]
+      if (command === 'attach_session') return { layoutJson: null, panes: [spawnedPane] }
+      return null
+    })
+    useWorkspaceStore.setState({
+      sessions: [createdSession, secondSession],
+      hermesCurrentSession: { [createdSession.id]: 'acp-1' },
+      hermesSessions: { [createdSession.id]: [{ id: 'acp-1', title: null, source: 'discord', model: null, startedAt: 1, endedAt: null, messageCount: 1, archived: false }] },
+      hermesTranscript: { [createdSession.id]: [{ role: 'user', text: 'hello', thoughts: '', toolCalls: [] }] },
+    })
+
+    await useWorkspaceStore.getState().deleteSession(createdSession.id)
+
+    expect(useWorkspaceStore.getState().hermesCurrentSession[createdSession.id]).toBeUndefined()
+    expect(useWorkspaceStore.getState().hermesSessions[createdSession.id]).toBeUndefined()
+    expect(useWorkspaceStore.getState().hermesTranscript[createdSession.id]).toBeUndefined()
+  })
+
+  test('setPaneRole preserves keybindings identity while updating pane roles', () => {
+    useWorkspaceStore.setState({
+      settings: normalizeSettings({
+        ...defaultSettings,
+        keybindings: { ...defaultSettings.keybindings, splitRight: 'Ctrl+Alt+Right' },
+        paneRoles: {},
+      }),
+    })
+    const keybindings = useWorkspaceStore.getState().settings.keybindings
+
+    useWorkspaceStore.getState().setPaneRole('pane-test', 'Reviewer')
+
+    expect(useWorkspaceStore.getState().settings.paneRoles).toEqual({ 'pane-test': 'Reviewer' })
+    expect(useWorkspaceStore.getState().settings.keybindings).toBe(keybindings)
+  })
+
+  test('deleteSession prunes pane keyed maps for the deleted active session', async () => {
+    const survivorPane: PaneMeta = {
+      ...spawnedPane,
+      id: 'pane-survivor',
+      config: { ...spawnedPane.config, paneId: 'pane-survivor', title: 'Survivor' },
+    }
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'delete_session') return null
+      if (command === 'list_sessions') return [secondSession]
+      if (command === 'attach_session') return { layoutJson: null, panes: [survivorPane] }
+      return null
+    })
+    useWorkspaceStore.setState({
+      sessions: [createdSession, secondSession],
+      activeSessionId: createdSession.id,
+      panes: { [spawnedPane.id]: spawnedPane, [nonAgentPane.id]: nonAgentPane },
+      manualPaneTitles: { [spawnedPane.id]: true, [nonAgentPane.id]: true, [survivorPane.id]: true },
+      capturesByPane: { [spawnedPane.id]: ['deleted.png'], [nonAgentPane.id]: ['deleted-shell.png'], [survivorPane.id]: ['keep.png'] },
+      settings: normalizeSettings({
+        ...defaultSettings,
+        paneRoles: { [spawnedPane.id]: 'Deleted agent', [nonAgentPane.id]: 'Deleted shell', [survivorPane.id]: 'Keep' },
+      }),
+    })
+
+    await useWorkspaceStore.getState().deleteSession(createdSession.id)
+
+    expect(useWorkspaceStore.getState().manualPaneTitles).toEqual({ [survivorPane.id]: true })
+    expect(useWorkspaceStore.getState().capturesByPane).toEqual({ [survivorPane.id]: ['keep.png'] })
+    expect(useWorkspaceStore.getState().settings.paneRoles).toEqual({ [survivorPane.id]: 'Keep' })
+  })
+
+  test('queues Hermes prompts FIFO and drains once', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.enqueueHermesPrompt('session-1', 'first')
+    store.enqueueHermesPrompt('session-1', 'second')
+
+    expect(useWorkspaceStore.getState().takeHermesPrompt('session-1')).toBe('first')
+    expect(useWorkspaceStore.getState().takeHermesPrompt('session-1')).toBe('second')
+    expect(useWorkspaceStore.getState().takeHermesPrompt('session-1')).toBeUndefined()
   })
 })

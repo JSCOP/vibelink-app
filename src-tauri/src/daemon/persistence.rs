@@ -1,7 +1,11 @@
 use crate::protocol::PaneConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::Path};
+use std::{
+    fs,
+    io::{self, Write},
+    path::Path,
+};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +33,15 @@ pub fn save_sessions(path: &Path, sessions: &[PersistedSession]) -> Result<()> {
         fs::create_dir_all(parent).context("create sessions directory")?;
     }
     let json = serde_json::to_string_pretty(sessions).context("serialize sessions.json")?;
-    fs::write(path, json).context("write sessions.json")?;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&tmp).context("create sessions temp file")?;
+        file.write_all(json.as_bytes())
+            .context("write sessions temp file")?;
+        file.flush().context("flush sessions temp file")?;
+        file.sync_all().context("fsync sessions temp file")?;
+    }
+    fs::rename(&tmp, path).context("rename sessions temp file")?;
     Ok(())
 }
 
@@ -54,6 +66,7 @@ mod tests {
                 env: vec![("A".to_string(), "B".to_string())],
                 title: Some("shell".to_string()),
                 icon: None,
+                profile_id: None,
                 cols: 100,
                 rows: 40,
             }],
@@ -108,6 +121,30 @@ mod tests {
         let _ = std::fs::remove_file(path);
 
         assert_eq!(loaded, vec![session]);
+    }
+
+    #[test]
+    fn save_sessions_is_atomic() {
+        let path =
+            std::env::temp_dir().join(format!("atomic-awt-sessions-{}.json", Uuid::new_v4()));
+        let tmp = path.with_extension("tmp");
+        let session = PersistedSession {
+            id: Uuid::new_v4(),
+            name: "Workspace".to_string(),
+            created_at: 123,
+            layout_json: None,
+            workspace_folder: Some("E:/work".to_string()),
+            panes: Vec::new(),
+        };
+
+        save_sessions(&path, &[session.clone()]).expect("atomic save sessions");
+        let loaded = load_sessions(&path).expect("load atomic sessions");
+
+        assert_eq!(loaded, vec![session]);
+        assert!(!tmp.exists());
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(tmp);
     }
 
     #[test]

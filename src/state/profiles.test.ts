@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, joinCommandLine, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine } from './profiles'
+import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine } from './profiles'
 
 describe('terminal profiles', () => {
   test('normalizes empty settings with a default profile', () => {
@@ -16,6 +16,46 @@ describe('terminal profiles', () => {
     expect(profileNames).toEqual(expect.arrayContaining(['Shell', 'PowerShell', 'CMD', 'Claude', 'Codex', 'OMP']))
   })
 
+  test('identifies task-assignable AI agent profiles and panes', () => {
+    const settings = normalizeSettings(null)
+    expect(isAgentProfile(profileById(settings, 'codex'))).toBe(true)
+    expect(isAgentProfile(profileById(settings, 'powershell'))).toBe(false)
+    expect(isAgentProfile({ ...profileById(settings, 'powershell'), id: 'custom-omp', name: 'Oh My Pi' })).toBe(true)
+    expect(isAgentProfile({ ...profileById(settings, 'powershell'), id: 'custom-claude-code', name: 'Claude Code' })).toBe(true)
+    expect(isAgentPane({
+      id: 'pane-1',
+      alive: true,
+      config: {
+        paneId: 'pane-1',
+        shell: 'pwsh.exe',
+        args: ['-NoLogo'],
+        cwd: null,
+        env: [],
+        title: 'Codex 1',
+        icon: 'bot',
+        profileId: 'codex',
+        cols: 120,
+        rows: 32,
+      },
+    }, settings)).toBe(true)
+    expect(isAgentPane({
+      id: 'pane-2',
+      alive: true,
+      config: {
+        paneId: 'pane-2',
+        shell: 'pwsh.exe',
+        args: ['-NoLogo'],
+        cwd: null,
+        env: [],
+        title: 'PowerShell',
+        icon: 'terminal-square',
+        profileId: 'powershell',
+        cols: 120,
+        rows: 32,
+      },
+    }, settings)).toBe(false)
+  })
+
   test('runs local agent tools inside PowerShell and resets terminal modes on exit', () => {
     const settings = normalizeSettings(null)
 
@@ -26,6 +66,8 @@ describe('terminal profiles', () => {
     expect(codex.args[3]).toContain('& codex')
     expect(codex.args[3]).toContain('finally')
     expect(codex.args[3]).toContain('`e[?1049l')
+    expect(codex.args[3]).toContain('`e[2J')
+    expect(codex.args[3]).toContain('`e[H')
     expect(codex.title).toBe('Codex')
   })
 
@@ -39,6 +81,24 @@ describe('terminal profiles', () => {
     expect(codex.args.slice(0, 3)).toEqual(['-NoLogo', '-NoExit', '-Command'])
     expect(codex.args[3]).toContain('& codex')
     expect(codex.args[3]).toContain('`e[?1049l')
+    expect(codex.args[3]).toContain('`e[2J')
+  })
+
+  test('upgrades stored managed agent profiles that only reset terminal modes', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'codex',
+      profiles: [{
+        id: 'codex',
+        name: 'Codex',
+        shell: 'pwsh.exe',
+        args: ['-NoLogo', '-NoExit', '-Command', 'try { & codex } finally { [Console]::Out.Write("`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m") }'],
+      }],
+    })
+
+    const codex = paneOverridesFromProfile(selectedProfile(settings))
+    expect(codex.args[3]).toContain('`e[?1049l')
+    expect(codex.args[3]).toContain('`e[2J')
+    expect(codex.args[3]).toContain('`e[H')
   })
 
   test('keeps customized agent profile commands unchanged', () => {
@@ -98,11 +158,44 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
   })
 
+  test('normalizes terminal cursor style settings', () => {
+    expect(defaultSettings.cursorStyle).toBe('bar')
+    expect(defaultSettings.cursorWidth).toBe(1)
+    expect(normalizeSettings({ cursorStyle: 'underline', cursorWidth: 3 })).toMatchObject({ cursorStyle: 'underline', cursorWidth: 3 })
+    expect(normalizeSettings({ cursorStyle: 'block' }).cursorStyle).toBe('block')
+    expect(normalizeSettings({ cursorStyle: 'missing', cursorWidth: 0 })).toMatchObject({
+      cursorStyle: defaultSettings.cursorStyle,
+      cursorWidth: defaultSettings.cursorWidth,
+    })
+  })
+
   test('normalizes terminal font weight and UI scale settings', () => {
     expect(normalizeSettings({ terminalFontWeight: 500 }).terminalFontWeight).toBe(500)
     expect(normalizeSettings({ terminalFontWeight: 1200 }).terminalFontWeight).toBe(defaultSettings.terminalFontWeight)
     expect(normalizeSettings({ uiScale: 1.1 }).uiScale).toBe(1.1)
     expect(normalizeSettings({ uiScale: 3 }).uiScale).toBe(defaultSettings.uiScale)
+  })
+
+  test('normalizes chat UI preferences', () => {
+    const settings = normalizeSettings({
+      chatPersonality: 'concise',
+      chatReasoningBlocks: false,
+      chatToolCalls: false,
+      chatToolCallContent: false,
+      chatImageAttachments: 'never',
+    })
+
+    expect(settings.chatPersonality).toBe('concise')
+    expect(settings.chatReasoningBlocks).toBe(false)
+    expect(settings.chatToolCalls).toBe(false)
+    expect(settings.chatToolCallContent).toBe(false)
+    expect(settings.chatImageAttachments).toBe('never')
+    expect(normalizeSettings({ chatPersonality: 'missing', chatImageAttachments: 'sometimes', chatToolCalls: 'nope', chatToolCallContent: 'nope' })).toMatchObject({
+      chatPersonality: defaultSettings.chatPersonality,
+      chatToolCalls: defaultSettings.chatToolCalls,
+      chatToolCallContent: defaultSettings.chatToolCallContent,
+      chatImageAttachments: defaultSettings.chatImageAttachments,
+    })
   })
 
   test('normalizes pane resize snap tolerance', () => {

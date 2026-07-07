@@ -1,7 +1,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { HermesModelInfo, HermesPermissionOption } from './types'
 import { useWorkspaceStore } from '../state/store'
-import type { HermesPlanEntry } from '../state/hermes'
+import type { HermesPlanEntry, HermesSessionInfo, HermesTurn } from '../state/hermes'
 
 export type HermesEvent =
   | { kind: 'started'; sessionId: string; acpSessionId: string }
@@ -17,11 +17,13 @@ export type HermesEvent =
   | { kind: 'error'; sessionId: string; message: string }
   | { kind: 'exited'; sessionId: string }
 
+type HermesHistoryTurn = { role: 'user' | 'assistant'; text: string; thoughts: string }
+
 let registration: Promise<void> | undefined
 const startPromises = new Map<string, Promise<void>>()
 const DEFAULT_START_TIMEOUT_MS = 60_000
 
-type StartHermesAgentInput = {
+export type StartHermesAgentInput = {
   sessionId: string
   commandOverride?: string | null
   workspaceFolder?: string | null
@@ -36,7 +38,18 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
   const channel = new Channel<HermesEvent>((event) => {
     const store = useWorkspaceStore.getState()
     if (event.kind === 'started') {
+      const prev = store.hermesCurrentSession[event.sessionId]
       store.setHermesStatus(event.sessionId, 'running')
+      store.setHermesCurrentSession(event.sessionId, event.acpSessionId)
+      const transcript = store.hermesTranscript[event.sessionId] ?? []
+      if (prev !== event.acpSessionId && transcript.length === 0) {
+        void invoke<HermesHistoryTurn[]>('hermes_session_transcript', { sessionId: event.sessionId, acpSessionId: event.acpSessionId })
+          .then((turns) => store.setHermesTranscript(event.sessionId, turns.map(historyToTurn)))
+          .catch(() => undefined)
+      }
+      void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: event.sessionId })
+        .then((list) => store.setHermesSessions(event.sessionId, list))
+        .catch(() => undefined)
     } else if (event.kind === 'message') {
       store.appendHermesText(event.sessionId, 'message', event.text)
     } else if (event.kind === 'thought') {
@@ -104,6 +117,32 @@ export async function startHermesAgent({ sessionId, commandOverride = null, work
   return task
 }
 
+export async function hermesNewSession(input: StartHermesAgentInput): Promise<string> {
+  await startHermesAgent(input)
+  const acpId = await invoke<string>('hermes_new_session', { sessionId: input.sessionId })
+  const store = useWorkspaceStore.getState()
+  store.setHermesCurrentSession(input.sessionId, acpId)
+  store.setHermesTranscript(input.sessionId, [])
+  void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: input.sessionId })
+    .then((list) => store.setHermesSessions(input.sessionId, list))
+    .catch(() => undefined)
+  return acpId
+}
+
+export async function hermesResumeSession(input: StartHermesAgentInput, acpSessionId: string): Promise<void> {
+  await startHermesAgent(input)
+  await invoke('hermes_resume_session', { sessionId: input.sessionId, acpSessionId })
+  const turns = await invoke<HermesHistoryTurn[]>('hermes_session_transcript', { sessionId: input.sessionId, acpSessionId })
+  const store = useWorkspaceStore.getState()
+  store.setHermesTranscript(input.sessionId, turns.map(historyToTurn))
+  store.setHermesCurrentSession(input.sessionId, acpSessionId)
+}
+
+export async function hermesRefreshSessions(sessionId: string): Promise<void> {
+  const list = await invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId })
+  useWorkspaceStore.getState().setHermesSessions(sessionId, list)
+}
+
 async function startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs }: Required<Pick<StartHermesAgentInput, 'sessionId' | 'timeoutMs'>> & Pick<StartHermesAgentInput, 'commandOverride' | 'workspaceFolder'>): Promise<void> {
   const store = useWorkspaceStore.getState()
   await startHermesOutputStream({ force: true })
@@ -135,6 +174,10 @@ function waitForHermesReady(sessionId: string, timeoutMs: number): Promise<void>
       }
     })
   })
+}
+
+function historyToTurn(history: HermesHistoryTurn): HermesTurn {
+  return { role: history.role === 'user' ? 'user' : 'assistant', text: history.text, thoughts: history.thoughts, toolCalls: [] }
 }
 
 function isStartTimeout(error: unknown): boolean {

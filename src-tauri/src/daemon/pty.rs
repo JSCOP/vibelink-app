@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     process::Command,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, LazyLock, Mutex, MutexGuard},
 };
 use uuid::Uuid;
 
@@ -24,6 +24,12 @@ const TERMINAL_CAPABILITY_ENV: [(&str, &str); 5] = [
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 pub type SharedKiller = Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>;
 
+fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, ScrollbackRing> {
+    scrollback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub struct SpawnedPane {
     pub pane: Pane,
     pub reader: Box<dyn Read + Send>,
@@ -35,9 +41,10 @@ pub struct Pane {
     pub alive: bool,
     child: SharedChild,
     killer: SharedKiller,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    root_pid: Option<u32>,
+    pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
-    scrollback: ScrollbackRing,
+    pub(crate) scrollback: Arc<Mutex<ScrollbackRing>>,
 }
 
 impl Pane {
@@ -78,6 +85,7 @@ impl Pane {
             .slave
             .spawn_command(command)
             .context("spawn pty command")?;
+        let root_pid = child.process_id();
         let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
@@ -89,9 +97,10 @@ impl Pane {
                 alive: true,
                 child: Arc::new(Mutex::new(child)),
                 killer: Arc::new(Mutex::new(killer)),
+                root_pid,
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
-                scrollback: ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP),
+                scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
             },
             reader,
         })
@@ -105,13 +114,6 @@ impl Pane {
         }
     }
 
-    pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().expect("pty writer mutex poisoned");
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        Ok(())
-    }
-
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         self.master.resize(PtySize {
             rows: rows.max(1),
@@ -123,23 +125,27 @@ impl Pane {
 
     pub fn kill(&mut self) -> Result<()> {
         self.alive = false;
-        self.killer
+        if let Some(pid) = self.root_pid {
+            crate::daemon::proc::kill_process_tree(pid);
+        }
+        let _ = self
+            .killer
             .lock()
             .expect("pty child killer mutex poisoned")
-            .kill()?;
+            .kill();
         Ok(())
+    }
+
+    pub fn root_pid(&self) -> Option<u32> {
+        self.root_pid
     }
 
     pub fn child(&self) -> SharedChild {
         Arc::clone(&self.child)
     }
 
-    pub fn push_scrollback(&mut self, bytes: &[u8]) {
-        self.scrollback.push(bytes);
-    }
-
     pub fn scrollback_snapshot(&self) -> Vec<u8> {
-        self.scrollback.snapshot()
+        lock_scrollback(&self.scrollback).snapshot()
     }
 
     #[cfg(test)]
@@ -154,11 +160,12 @@ impl Pane {
             killer: Arc::new(Mutex::new(
                 Box::new(FakeChild) as Box<dyn ChildKiller + Send + Sync>
             )),
+            root_pid: None,
             writer: Arc::new(Mutex::new(
                 Box::new(std::io::sink()) as Box<dyn Write + Send>
             )),
             master: Box::new(FakeMaster),
-            scrollback: ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP),
+            scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
         }
     }
 }
@@ -227,7 +234,10 @@ fn command_builder(config: &PaneConfig) -> CommandBuilder {
 fn with_terminal_capability_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut next = env;
     for (key, value) in TERMINAL_CAPABILITY_ENV {
-        if !next.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(key)) {
+        if !next
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(key))
+        {
             next.push((key.to_string(), value.to_string()));
         }
     }
@@ -254,7 +264,11 @@ fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
     next
 }
 
-pub(crate) fn inject_pane_identity(env: Vec<(String, String)>, session_id: Uuid, pane_id: Uuid) -> Vec<(String, String)> {
+pub(crate) fn inject_pane_identity(
+    env: Vec<(String, String)>,
+    session_id: Uuid,
+    pane_id: Uuid,
+) -> Vec<(String, String)> {
     let mut next: Vec<_> = env
         .into_iter()
         .filter(|(key, _)| {
@@ -400,8 +414,8 @@ fn system_root_program(relative: &str) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn windows_effective_path() -> Option<OsString> {
-    static PATH: OnceLock<Option<OsString>> = OnceLock::new();
-    PATH.get_or_init(build_windows_effective_path).clone()
+    static PATH: LazyLock<Option<OsString>> = LazyLock::new(build_windows_effective_path);
+    (*PATH).clone()
 }
 
 #[cfg(windows)]
@@ -582,9 +596,18 @@ mod tests {
         assert!(entries.contains(&("COLORTERM".to_string(), "truecolor".to_string())));
         assert!(entries.contains(&("FORCE_COLOR".to_string(), "1".to_string())));
         assert!(entries.contains(&("CLICOLOR_FORCE".to_string(), "1".to_string())));
-        assert!(entries.contains(&("TERM_PROGRAM".to_string(), "AgenticWorkspaceTerminal".to_string())));
+        assert!(entries.contains(&(
+            "TERM_PROGRAM".to_string(),
+            "AgenticWorkspaceTerminal".to_string()
+        )));
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
-        assert_eq!(entries.iter().filter(|(key, _)| key.eq_ignore_ascii_case("TERM")).count(), 1);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case("TERM"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -612,17 +635,33 @@ mod tests {
     fn inject_pane_identity_records_session_and_pane() {
         let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
-        let entries = inject_pane_identity(vec![
-            ("awt_session_id".to_string(), "wrong-session".to_string()),
-            ("AWT_PANE_ID".to_string(), "wrong-pane".to_string()),
-            ("OTHER".to_string(), "value".to_string()),
-        ], session_id, pane_id);
+        let entries = inject_pane_identity(
+            vec![
+                ("awt_session_id".to_string(), "wrong-session".to_string()),
+                ("AWT_PANE_ID".to_string(), "wrong-pane".to_string()),
+                ("OTHER".to_string(), "value".to_string()),
+            ],
+            session_id,
+            pane_id,
+        );
 
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
         assert!(entries.contains(&("AWT_SESSION_ID".to_string(), session_id.to_string())));
         assert!(entries.contains(&("AWT_PANE_ID".to_string(), pane_id.to_string())));
-        assert_eq!(entries.iter().filter(|(key, _)| key.eq_ignore_ascii_case("AWT_SESSION_ID")).count(), 1);
-        assert_eq!(entries.iter().filter(|(key, _)| key.eq_ignore_ascii_case("AWT_PANE_ID")).count(), 1);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case("AWT_SESSION_ID"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case("AWT_PANE_ID"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -654,6 +693,7 @@ mod tests {
             env: vec![],
             title: None,
             icon: None,
+            profile_id: None,
             cols: 80,
             rows: 24,
         }

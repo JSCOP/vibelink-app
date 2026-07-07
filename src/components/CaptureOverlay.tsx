@@ -1,12 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import { PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi'
-import { emit } from '@tauri-apps/api/event'
+import { emit, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { captureFileName, evenFloor, placeControlBar } from './captureOverlay'
 
-type CaptureMode = 'image' | 'video'
+type CaptureMode = 'image' | 'quick' | 'video'
 
 type CaptureConfig = {
   mode: CaptureMode
@@ -37,14 +37,38 @@ const SELECT_BAR_HEIGHT = 44
 const RECORDING_BAR_WIDTH = 220
 const RECORDING_BAR_HEIGHT = 44
 const MIN_REGION_SIZE = 2
-const accent = '#38bdf8'
+// The capture overlay runs in a transparent utility window before app theme tokens are available.
+const overlayPalette = {
+  accent: '#38bdf8',
+  buttonBorder: 'rgba(148, 163, 184, 0.45)',
+  buttonBorderSoft: 'rgba(148, 163, 184, 0.4)',
+  buttonBackground: 'rgba(15, 23, 42, 0.9)',
+  chromeBackground: 'rgba(15, 23, 42, 0.94)',
+  recordingBackground: 'rgba(15, 23, 42, 0.96)',
+  text: '#e5edf7',
+  textMuted: '#cbd5e1',
+  textInfo: '#e0f2fe',
+  textOnAccent: '#ffffff',
+  primaryBorder: 'rgba(56, 189, 248, 0.85)',
+  primaryBackground: 'rgba(8, 145, 178, 0.95)',
+  mask: 'rgba(0, 0, 0, 0.35)',
+  dim: 'rgba(0, 0, 0, 0.28)',
+  shadow: 'rgba(0, 0, 0, 0.35)',
+  outlineRing: 'rgba(15, 23, 42, 0.65)',
+  outlineShadow: 'rgba(56, 189, 248, 0.45)',
+  accentBorder: 'rgba(56, 189, 248, 0.65)',
+  dangerBorder: 'rgba(248, 113, 113, 0.55)',
+  dangerBackground: 'rgba(127, 29, 29, 0.92)',
+  dangerText: '#fee2e2',
+  dangerTextSoft: '#fecaca',
+} as const
 
 const baseButtonStyle: CSSProperties = {
   height: 30,
-  border: '1px solid rgba(148, 163, 184, 0.45)',
+  border: `1px solid ${overlayPalette.buttonBorder}`,
   borderRadius: 8,
-  background: 'rgba(15, 23, 42, 0.9)',
-  color: '#e5edf7',
+  background: overlayPalette.buttonBackground,
+  color: overlayPalette.text,
   cursor: 'pointer',
   font: '12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
   padding: '0 12px',
@@ -52,9 +76,9 @@ const baseButtonStyle: CSSProperties = {
 
 const primaryButtonStyle: CSSProperties = {
   ...baseButtonStyle,
-  borderColor: 'rgba(56, 189, 248, 0.85)',
-  background: 'rgba(8, 145, 178, 0.95)',
-  color: '#ffffff',
+  borderColor: overlayPalette.primaryBorder,
+  background: overlayPalette.primaryBackground,
+  color: overlayPalette.textOnAccent,
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -127,7 +151,7 @@ function formatElapsed(seconds: number): string {
 
 export default function CaptureOverlay() {
   const cfg = window.__AWT_CAPTURE__ ?? { mode: 'image', dir: '', ffmpeg: '' }
-  const mode: CaptureMode = cfg.mode === 'video' ? 'video' : 'image'
+  const mode: CaptureMode = cfg.mode === 'video' || cfg.mode === 'quick' ? cfg.mode : 'image'
   const [phase, setPhase] = useState<'select' | 'recording'>('select')
   const [rect, setRect] = useState<CaptureRect | null>(null)
   const [error, setError] = useState('')
@@ -135,6 +159,8 @@ export default function CaptureOverlay() {
   const viewport = useViewportSize()
   const dragStartRef = useRef<Point | null>(null)
   const pointerIdRef = useRef<number | null>(null)
+  const captureInProgressRef = useRef(false)
+  const localStopInProgressRef = useRef(false)
   const selectedRect = isUsableRect(rect) ? rect : null
 
   useElapsedTimer(phase, setElapsed)
@@ -143,10 +169,12 @@ export default function CaptureOverlay() {
     void (async () => {
       const win = getCurrentWindow()
       if (phase === 'recording') {
+        localStopInProgressRef.current = true
         try {
           const path = await invoke<string>('stop_video_capture')
           await emit('capture://saved', { mode: 'video', path })
         } catch (stopError) {
+          localStopInProgressRef.current = false
           void stopError
         }
       }
@@ -163,6 +191,15 @@ export default function CaptureOverlay() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [closeOverlay])
 
+  useEffect(() => {
+    if (phase !== 'recording') return undefined
+    const unlisten = listen('capture://recording-stopped', () => {
+      if (localStopInProgressRef.current) return
+      void getCurrentWindow().close()
+    })
+    return () => { void unlisten.then((dispose) => dispose()) }
+  }, [phase])
+
   const selectFullScreen = useCallback(() => {
     setError('')
     setRect({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight })
@@ -174,10 +211,14 @@ export default function CaptureOverlay() {
     return null
   }, [selectedRect])
 
-  const captureImage = useCallback(async () => {
-    const targetRect = requireRect()
-    if (!targetRect) return
+  const captureImageRect = useCallback(async (targetRect: CaptureRect, savedMode: 'image' | 'quick') => {
+    if (!isUsableRect(targetRect)) {
+      setError('Select a region first.')
+      return
+    }
+    if (captureInProgressRef.current) return
 
+    captureInProgressRef.current = true
     setError('')
     const win = getCurrentWindow()
     try {
@@ -185,7 +226,7 @@ export default function CaptureOverlay() {
       const dpr = window.devicePixelRatio || 1
       const path = await invoke<string>('capture_region_image', {
         dir: cfg.dir,
-        fileName: captureFileName('image'),
+        fileName: captureFileName(savedMode),
         monitorX: pos.x,
         monitorY: pos.y,
         x: Math.round(targetRect.x * dpr),
@@ -193,12 +234,19 @@ export default function CaptureOverlay() {
         w: Math.round(targetRect.w * dpr),
         h: Math.round(targetRect.h * dpr),
       })
-      await emit('capture://saved', { mode: 'image', path })
+      await emit('capture://saved', { mode: savedMode, path })
       await win.close()
     } catch (captureError) {
+      captureInProgressRef.current = false
       setError(formatError(captureError))
     }
-  }, [cfg.dir, requireRect])
+  }, [cfg.dir])
+
+  const captureImage = useCallback(async () => {
+    const targetRect = requireRect()
+    if (!targetRect) return
+    await captureImageRect(targetRect, 'image')
+  }, [captureImageRect, requireRect])
 
   const startVideo = useCallback(async () => {
     const targetRect = requireRect()
@@ -243,10 +291,12 @@ export default function CaptureOverlay() {
     setError('')
     const win = getCurrentWindow()
     try {
+      localStopInProgressRef.current = true
       const path = await invoke<string>('stop_video_capture')
       await emit('capture://saved', { mode: 'video', path })
       await win.close()
     } catch (stopError) {
+      localStopInProgressRef.current = false
       setError(formatError(stopError))
     }
   }, [])
@@ -272,15 +322,19 @@ export default function CaptureOverlay() {
     if (phase !== 'select' || pointerIdRef.current !== event.pointerId) return
     event.preventDefault()
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-    if (dragStartRef.current) setRect(normalizeRect(dragStartRef.current, pointFromEvent(event)))
+    const completedRect = dragStartRef.current ? normalizeRect(dragStartRef.current, pointFromEvent(event)) : null
+    if (completedRect) setRect(completedRect)
     pointerIdRef.current = null
     dragStartRef.current = null
-  }, [phase])
+    if (mode === 'quick' && completedRect && event.type === 'pointerup') {
+      void captureImageRect(completedRect, 'quick')
+    }
+  }, [captureImageRect, mode, phase])
 
   const barPosition = useMemo(() => {
-    if (!selectedRect) return null
+    if (!selectedRect || mode === 'quick') return null
     return placeControlBar(selectedRect, viewport, SELECT_BAR_WIDTH, SELECT_BAR_HEIGHT)
-  }, [selectedRect, viewport])
+  }, [mode, selectedRect, viewport])
 
   if (phase === 'recording') {
     return (
@@ -301,18 +355,18 @@ export default function CaptureOverlay() {
     >
       {rect ? <SelectionMasks rect={rect} viewport={viewport} /> : <div style={fullDimStyle} />}
       {selectedRect ? <SelectionOutline rect={selectedRect} /> : null}
-      {barPosition && selectedRect ? (
+      {mode !== 'quick' && barPosition && selectedRect ? (
         <div style={{ ...selectBarStyle, left: barPosition.x, top: barPosition.y }} onPointerDown={(event) => event.stopPropagation()}>
-          <button type="button" style={primaryButtonStyle} onClick={() => { void (mode === 'image' ? captureImage() : startVideo()) }}>
-            {mode === 'image' ? 'Capture' : 'Start'}
+          <button type="button" style={primaryButtonStyle} onClick={() => { void (mode === 'video' ? startVideo() : captureImage()) }}>
+            {mode === 'video' ? 'Start' : 'Capture'}
           </button>
           <button type="button" style={baseButtonStyle} onClick={selectFullScreen}>Full screen</button>
           <button type="button" style={baseButtonStyle} onClick={closeOverlay}>Cancel</button>
         </div>
       ) : (
         <div style={emptyStateStyle} onPointerDown={(event) => event.stopPropagation()}>
-          <span style={hintStyle}>Drag to select a region</span>
-          <button type="button" style={baseButtonStyle} onClick={selectFullScreen}>Full screen</button>
+          <span style={hintStyle}>{mode === 'quick' ? 'Drag to quick capture a region' : 'Drag to select a region'}</span>
+          {mode === 'quick' ? null : <button type="button" style={baseButtonStyle} onClick={selectFullScreen}>Full screen</button>}
           <button type="button" style={baseButtonStyle} onClick={closeOverlay}>Cancel</button>
         </div>
       )}
@@ -351,7 +405,7 @@ const rootStyle: CSSProperties = {
   cursor: 'crosshair',
   userSelect: 'none',
   background: 'transparent',
-  color: '#e5edf7',
+  color: overlayPalette.text,
   fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
 }
 
@@ -360,29 +414,29 @@ const recordingRootStyle: CSSProperties = {
   inset: 0,
   overflow: 'hidden',
   userSelect: 'none',
-  background: 'rgba(15, 23, 42, 0.96)',
-  color: '#e5edf7',
+  background: overlayPalette.recordingBackground,
+  color: overlayPalette.text,
   fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
 }
 
 const maskStyle: CSSProperties = {
   position: 'absolute',
-  background: 'rgba(0, 0, 0, 0.35)',
+  background: overlayPalette.mask,
   pointerEvents: 'none',
 }
 
 const fullDimStyle: CSSProperties = {
   position: 'absolute',
   inset: 0,
-  background: 'rgba(0, 0, 0, 0.28)',
+  background: overlayPalette.dim,
   pointerEvents: 'none',
 }
 
 const outlineStyle: CSSProperties = {
   position: 'absolute',
   boxSizing: 'border-box',
-  border: `1px solid ${accent}`,
-  boxShadow: `0 0 0 1px rgba(15, 23, 42, 0.65), 0 0 18px rgba(56, 189, 248, 0.45)`,
+  border: `1px solid ${overlayPalette.accent}`,
+  boxShadow: `0 0 0 1px ${overlayPalette.outlineRing}, 0 0 18px ${overlayPalette.outlineShadow}`,
   pointerEvents: 'none',
 }
 
@@ -390,9 +444,9 @@ const labelStyle: CSSProperties = {
   position: 'absolute',
   padding: '3px 7px',
   borderRadius: 999,
-  background: 'rgba(15, 23, 42, 0.92)',
-  border: '1px solid rgba(56, 189, 248, 0.65)',
-  color: '#e0f2fe',
+  background: overlayPalette.chromeBackground,
+  border: `1px solid ${overlayPalette.accentBorder}`,
+  color: overlayPalette.textInfo,
   fontSize: 12,
   lineHeight: 1.2,
   pointerEvents: 'none',
@@ -408,9 +462,9 @@ const selectBarStyle: CSSProperties = {
   justifyContent: 'center',
   gap: 8,
   borderRadius: 12,
-  border: '1px solid rgba(148, 163, 184, 0.4)',
-  background: 'rgba(15, 23, 42, 0.94)',
-  boxShadow: '0 18px 55px rgba(0, 0, 0, 0.35)',
+  border: `1px solid ${overlayPalette.buttonBorderSoft}`,
+  background: overlayPalette.chromeBackground,
+  boxShadow: `0 18px 55px ${overlayPalette.shadow}`,
   cursor: 'default',
 }
 
@@ -425,14 +479,14 @@ const emptyStateStyle: CSSProperties = {
   gap: 8,
   padding: '8px 10px',
   borderRadius: 12,
-  border: '1px solid rgba(148, 163, 184, 0.4)',
-  background: 'rgba(15, 23, 42, 0.94)',
-  boxShadow: '0 18px 55px rgba(0, 0, 0, 0.35)',
+  border: `1px solid ${overlayPalette.buttonBorderSoft}`,
+  background: overlayPalette.chromeBackground,
+  boxShadow: `0 18px 55px ${overlayPalette.shadow}`,
   cursor: 'default',
 }
 
 const hintStyle: CSSProperties = {
-  color: '#cbd5e1',
+  color: overlayPalette.textMuted,
   fontSize: 12,
   padding: '0 6px',
   whiteSpace: 'nowrap',
@@ -447,11 +501,11 @@ const errorStyle: CSSProperties = {
   maxWidth: 'min(680px, calc(100vw - 48px))',
   padding: '8px 12px',
   borderRadius: 10,
-  border: '1px solid rgba(248, 113, 113, 0.55)',
-  background: 'rgba(127, 29, 29, 0.92)',
-  color: '#fee2e2',
+  border: `1px solid ${overlayPalette.dangerBorder}`,
+  background: overlayPalette.dangerBackground,
+  color: overlayPalette.dangerText,
   fontSize: 12,
-  boxShadow: '0 16px 45px rgba(0, 0, 0, 0.35)',
+  boxShadow: `0 16px 45px ${overlayPalette.shadow}`,
 }
 
 const recordingShellStyle: CSSProperties = {
@@ -466,7 +520,7 @@ const recordingShellStyle: CSSProperties = {
 
 const timerStyle: CSSProperties = {
   minWidth: 44,
-  color: '#e0f2fe',
+  color: overlayPalette.textInfo,
   fontVariantNumeric: 'tabular-nums',
   fontSize: 13,
 }
@@ -479,6 +533,6 @@ const recordingErrorStyle: CSSProperties = {
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
-  color: '#fecaca',
+  color: overlayPalette.dangerTextSoft,
   fontSize: 10,
 }

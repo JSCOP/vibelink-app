@@ -1,6 +1,10 @@
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
+use crate::app::skills::{
+    apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
+};
 use crate::protocol::{ClientToDaemon, ReplyResult, TaskSignal};
 use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
 use std::{
     borrow::Cow,
     io::{self, Write},
@@ -28,12 +32,36 @@ enum CliCommand {
         pane_id: Option<Uuid>,
         task_id: String,
         commit_msg: Option<String>,
+        result_summary: Option<String>,
     },
     TaskNote {
         session_id: Uuid,
         pane_id: Option<Uuid>,
         task_id: String,
         message: String,
+    },
+    SkillList {
+        session_id: Option<String>,
+    },
+    SkillShow {
+        id: String,
+        session_id: Option<String>,
+        scope: Option<String>,
+    },
+    SkillApply {
+        id: String,
+        name: Option<String>,
+        category: Option<String>,
+        description: Option<String>,
+        content: String,
+        scope: Option<String>,
+        session_id: Option<String>,
+        enabled: Option<bool>,
+    },
+    SkillDelete {
+        id: String,
+        session_id: Option<String>,
+        scope: Option<String>,
     },
     Help,
 }
@@ -43,6 +71,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     if command == CliCommand::Help {
         print_usage(io::stdout())?;
         return Ok(());
+    }
+    if is_skill_command(&command) {
+        return execute_skill(command);
     }
 
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
@@ -110,6 +141,7 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             pane_id,
             task_id,
             commit_msg,
+            result_summary,
         } => {
             match client.request_reply(|req| ClientToDaemon::TaskEvent {
                 req,
@@ -117,6 +149,7 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
                 event: TaskSignal::Done {
                     task_id,
                     commit_msg,
+                    result_summary,
                     pane_id,
                 },
             })? {
@@ -149,8 +182,90 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
                 other => bail!("unexpected daemon response: {other:?}"),
             }
         }
+        CliCommand::SkillList { .. }
+        | CliCommand::SkillShow { .. }
+        | CliCommand::SkillApply { .. }
+        | CliCommand::SkillDelete { .. } => unreachable!("handled before daemon connection"),
         CliCommand::Help => unreachable!("handled before daemon connection"),
     }
+}
+
+fn is_skill_command(command: &CliCommand) -> bool {
+    matches!(
+        command,
+        CliCommand::SkillList { .. }
+            | CliCommand::SkillShow { .. }
+            | CliCommand::SkillApply { .. }
+            | CliCommand::SkillDelete { .. }
+    )
+}
+
+fn execute_skill(command: CliCommand) -> Result<()> {
+    match command {
+        CliCommand::SkillList { session_id } => print_json(&list_skills(session_id.as_deref())?),
+        CliCommand::SkillShow {
+            id,
+            session_id,
+            scope,
+        } => {
+            let lookup_session_id = skill_lookup_session_id(session_id, scope.as_deref())?;
+            let skill = get_skill(
+                &id,
+                lookup_session_id.as_deref(),
+                parse_skill_scope(scope.as_deref())?,
+            )?;
+            print_json(&skill)
+        }
+        CliCommand::SkillApply {
+            id,
+            name,
+            category,
+            description,
+            content,
+            scope,
+            session_id,
+            enabled,
+        } => {
+            let input = skill_apply_input(
+                id,
+                name,
+                category,
+                description,
+                content,
+                scope,
+                session_id,
+                enabled,
+            )?;
+            let skill = apply_skill(input)?;
+            print_json(&skill)
+        }
+        CliCommand::SkillDelete {
+            id,
+            session_id,
+            scope,
+        } => {
+            let lookup_session_id = skill_lookup_session_id(session_id, scope.as_deref())?;
+            delete_skill(
+                &id,
+                lookup_session_id.as_deref(),
+                parse_skill_scope(scope.as_deref())?,
+            )?;
+            print_json(&serde_json::json!({ "ok": true }))
+        }
+        CliCommand::Sessions
+        | CliCommand::Panes { .. }
+        | CliCommand::Read { .. }
+        | CliCommand::Write { .. }
+        | CliCommand::TaskDone { .. }
+        | CliCommand::TaskNote { .. }
+        | CliCommand::Help => unreachable!("not a skill command"),
+    }
+}
+
+fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
+    serde_json::to_writer_pretty(io::stdout(), value)?;
+    println!();
+    Ok(())
 }
 
 fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<CliCommand> {
@@ -179,6 +294,7 @@ fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<CliComm
         "read" => parse_read(&tokens[1..]),
         "write" => parse_write(&tokens[1..]),
         "task" => parse_task(&tokens[1..]),
+        "skill" => parse_skill(&tokens[1..]),
         other => bail!("usage: unknown cli command `{other}`\n{}", usage()),
     }
 }
@@ -269,6 +385,7 @@ fn parse_task_done(tokens: &[String]) -> Result<CliCommand> {
     let mut pane_id = None;
     let mut task_id = None;
     let mut commit_msg = None;
+    let mut result_summary = None;
     let mut index = 0;
 
     while index < tokens.len() {
@@ -291,6 +408,11 @@ fn parse_task_done(tokens: &[String]) -> Result<CliCommand> {
                 commit_msg = Some(next_flag_value(tokens, index, "--commit-msg")?.to_string());
                 index += 2;
             }
+            "--result-summary" => {
+                result_summary =
+                    Some(next_flag_value(tokens, index, "--result-summary")?.to_string());
+                index += 2;
+            }
             other => bail!("usage: unknown task done option `{other}`\n{}", usage()),
         }
     }
@@ -302,6 +424,7 @@ fn parse_task_done(tokens: &[String]) -> Result<CliCommand> {
         pane_id: pane_id.or_else(pane_id_from_env),
         task_id: task_id.ok_or_else(|| usage_error("task done requires --task <id>"))?,
         commit_msg,
+        result_summary,
     })
 }
 
@@ -346,6 +469,277 @@ fn parse_task_note(tokens: &[String]) -> Result<CliCommand> {
     })
 }
 
+fn parse_skill(tokens: &[String]) -> Result<CliCommand> {
+    let Some(command) = tokens.first().map(String::as_str) else {
+        return Err(usage_error("skill requires list, show, apply, or delete"));
+    };
+    match command {
+        "list" => parse_skill_list(&tokens[1..]),
+        "show" | "get" => parse_skill_show(&tokens[1..]),
+        "apply" => parse_skill_apply(&tokens[1..]),
+        "delete" | "rm" => parse_skill_delete(&tokens[1..]),
+        other => bail!("usage: unknown skill command `{other}`\n{}", usage()),
+    }
+}
+
+fn parse_skill_list(tokens: &[String]) -> Result<CliCommand> {
+    let mut session_id = None;
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                parse_uuid(value)?;
+                session_id = Some(value.to_string());
+                index += 2;
+            }
+            other => bail!("usage: unknown skill list option `{other}`\n{}", usage()),
+        }
+    }
+
+    Ok(CliCommand::SkillList {
+        session_id: session_id.or_else(skill_session_id_from_env),
+    })
+}
+
+fn parse_skill_show(tokens: &[String]) -> Result<CliCommand> {
+    let (id, scope, session_id) = parse_skill_lookup_options(tokens, "show")?;
+    Ok(CliCommand::SkillShow {
+        id,
+        session_id,
+        scope,
+    })
+}
+
+fn parse_skill_delete(tokens: &[String]) -> Result<CliCommand> {
+    let (id, scope, session_id) = parse_skill_lookup_options(tokens, "delete")?;
+    Ok(CliCommand::SkillDelete {
+        id,
+        session_id,
+        scope,
+    })
+}
+
+fn parse_skill_lookup_options(
+    tokens: &[String],
+    command: &str,
+) -> Result<(String, Option<String>, Option<String>)> {
+    let mut id = None;
+    let mut scope = None;
+    let mut session_id = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--id" => {
+                id = Some(next_flag_value(tokens, index, "--id")?.to_string());
+                index += 2;
+            }
+            "--scope" => {
+                scope = Some(normalize_skill_scope(next_flag_value(
+                    tokens, index, "--scope",
+                )?)?);
+                index += 2;
+            }
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                parse_uuid(value)?;
+                session_id = Some(value.to_string());
+                index += 2;
+            }
+            value if !value.starts_with('-') && id.is_none() => {
+                id = Some(value.to_string());
+                index += 1;
+            }
+            other => bail!(
+                "usage: unknown skill {command} option `{other}`\n{}",
+                usage()
+            ),
+        }
+    }
+
+    let session_id = if scope.as_deref() == Some("global") {
+        None
+    } else {
+        session_id.or_else(skill_session_id_from_env)
+    };
+
+    Ok((required_skill_id(id, command)?, scope, session_id))
+}
+
+fn parse_skill_apply(tokens: &[String]) -> Result<CliCommand> {
+    let mut id = None;
+    let mut name = None;
+    let mut category = None;
+    let mut description = None;
+    let mut content = None;
+    let mut scope = None;
+    let mut session_id = None;
+    let mut enabled = None;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--id" => {
+                id = Some(next_flag_value(tokens, index, "--id")?.to_string());
+                index += 2;
+            }
+            "--name" => {
+                name = Some(next_flag_value(tokens, index, "--name")?.to_string());
+                index += 2;
+            }
+            "--category" => {
+                category = Some(next_flag_value(tokens, index, "--category")?.to_string());
+                index += 2;
+            }
+            "--description" => {
+                description = Some(next_flag_value(tokens, index, "--description")?.to_string());
+                index += 2;
+            }
+            "--content" | "--markdown" => {
+                content = Some(next_flag_value(tokens, index, tokens[index].as_str())?.to_string());
+                index += 2;
+            }
+            "--scope" => {
+                scope = Some(normalize_skill_scope(next_flag_value(
+                    tokens, index, "--scope",
+                )?)?);
+                index += 2;
+            }
+            "--session" => {
+                let value = next_flag_value(tokens, index, "--session")?;
+                parse_uuid(value)?;
+                session_id = Some(value.to_string());
+                index += 2;
+            }
+            "--enabled" => {
+                enabled = Some(parse_bool(
+                    next_flag_value(tokens, index, "--enabled")?,
+                    "--enabled",
+                )?);
+                index += 2;
+            }
+            other => bail!("usage: unknown skill apply option `{other}`\n{}", usage()),
+        }
+    }
+
+    Ok(CliCommand::SkillApply {
+        id: required_skill_id(id, "apply")?,
+        name: clean_optional_text(name),
+        category: clean_optional_text(category),
+        description: clean_optional_text(description),
+        content: content.ok_or_else(|| usage_error("skill apply requires --content <markdown>"))?,
+        scope,
+        session_id: session_id.or_else(skill_session_id_from_env),
+        enabled,
+    })
+}
+
+fn required_skill_id(id: Option<String>, command: &str) -> Result<String> {
+    let id = id.ok_or_else(|| usage_error(&format!("skill {command} requires --id <id>")))?;
+    let id = id.trim();
+    if id.is_empty() {
+        bail!("usage: skill id must not be empty\n{}", usage());
+    }
+    Ok(id.to_string())
+}
+
+fn normalize_skill_scope(scope: &str) -> Result<String> {
+    match scope.trim().to_ascii_lowercase().as_str() {
+        "global" => Ok("global".to_string()),
+        "workspace" => Ok("workspace".to_string()),
+        other => bail!(
+            "usage: skill scope must be `global` or `workspace`, got `{other}`\n{}",
+            usage()
+        ),
+    }
+}
+
+fn parse_skill_scope(scope: Option<&str>) -> Result<Option<SkillScope>> {
+    scope
+        .map(|scope| match normalize_skill_scope(scope)?.as_str() {
+            "global" => Ok(SkillScope::Global),
+            "workspace" => Ok(SkillScope::Workspace),
+            _ => unreachable!("normalized skill scope"),
+        })
+        .transpose()
+}
+
+fn skill_lookup_session_id(
+    session_id: Option<String>,
+    scope: Option<&str>,
+) -> Result<Option<String>> {
+    if scope == Some("global") {
+        return Ok(None);
+    }
+    if scope == Some("workspace") && session_id.is_none() {
+        bail!(
+            "usage: workspace skills require --session <uuid> or AWT_SESSION_ID\n{}",
+            usage()
+        );
+    }
+    Ok(session_id)
+}
+
+fn skill_apply_input(
+    id: String,
+    name: Option<String>,
+    category: Option<String>,
+    description: Option<String>,
+    content: String,
+    scope: Option<String>,
+    session_id: Option<String>,
+    enabled: Option<bool>,
+) -> Result<SkillApplyInput> {
+    let scope = scope.unwrap_or_else(|| {
+        if session_id.is_some() {
+            "workspace".to_string()
+        } else {
+            "global".to_string()
+        }
+    });
+    let scope = parse_skill_scope(Some(&scope))?.expect("skill scope is set");
+    let session_id = if scope == SkillScope::Workspace {
+        session_id.ok_or_else(|| {
+            usage_error("workspace skills require --session <uuid> or AWT_SESSION_ID")
+        })?
+    } else {
+        String::new()
+    };
+
+    Ok(SkillApplyInput {
+        id: id.clone(),
+        name: Some(name.unwrap_or(id)),
+        category: Some(category.unwrap_or_else(|| "Custom".to_string())),
+        description: Some(description.unwrap_or_default()),
+        content,
+        scope,
+        session_id: if scope == SkillScope::Workspace {
+            Some(session_id)
+        } else {
+            None
+        },
+        enabled: Some(enabled.unwrap_or(true)),
+    })
+}
+
+fn clean_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_bool(value: &str, flag: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        other => bail!(
+            "usage: {flag} expects true or false, got `{other}`\n{}",
+            usage()
+        ),
+    }
+}
+
 fn parse_optional_session_flag_or_env(tokens: &[String], command: &str) -> Result<Uuid> {
     if tokens.is_empty() {
         return session_id_from_env().ok_or_else(|| {
@@ -386,7 +780,7 @@ fn print_usage(mut writer: impl Write) -> Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]\n  app.exe cli task done --task <id> [--session <session-id>] [--pane <pane-id>] [--commit-msg <msg>]\n  app.exe cli task note --task <id> --message <text> [--session <session-id>] [--pane <pane-id>]"
+    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]\n  app.exe cli task done --task <id> [--session <session-id>] [--pane <pane-id>] [--commit-msg <msg>] [--result-summary <text>]\n  app.exe cli task note --task <id> --message <text> [--session <session-id>] [--pane <pane-id>]\n  app.exe cli skill list [--session <session-id>]\n  app.exe cli skill show --id <id> [--scope global|workspace] [--session <session-id>]\n  app.exe cli skill apply --id <id> --content <markdown> [--name <name>] [--category <category>] [--description <text>] [--scope global|workspace] [--session <session-id>] [--enabled true|false]\n  app.exe cli skill delete --id <id> [--scope global|workspace] [--session <session-id>]"
 }
 
 fn session_id_from_env() -> Option<Uuid> {
@@ -399,6 +793,10 @@ fn pane_id_from_env() -> Option<Uuid> {
     std::env::var("AWT_PANE_ID")
         .ok()
         .and_then(|value| parse_uuid(&value).ok())
+}
+
+fn skill_session_id_from_env() -> Option<String> {
+    session_id_from_env().map(|session_id| session_id.to_string())
 }
 
 pub(crate) fn write_payload(text: String, enter: bool) -> Vec<u8> {
@@ -523,6 +921,8 @@ mod tests {
             "task-1",
             "--commit-msg",
             "finished",
+            "--result-summary",
+            "responded with greeting",
         ])
         .expect("parse");
 
@@ -533,6 +933,7 @@ mod tests {
                 pane_id: Some(pane_id),
                 task_id: "task-1".to_string(),
                 commit_msg: Some("finished".to_string()),
+                result_summary: Some("responded with greeting".to_string()),
             }
         );
     }
@@ -552,6 +953,92 @@ mod tests {
         .expect_err("missing message should fail");
 
         assert!(err.to_string().contains("--message"));
+    }
+
+    #[test]
+    fn parse_skill_apply_accepts_metadata_scope_and_enabled() {
+        let session_id = Uuid::new_v4();
+        let parsed = parse_args([
+            "cli",
+            "skill",
+            "apply",
+            "--id",
+            "rust-helper",
+            "--name",
+            "Rust Helper",
+            "--category",
+            "Coding",
+            "--description",
+            "Use Rust carefully",
+            "--content",
+            "# Rust\nDo work",
+            "--scope",
+            "workspace",
+            "--session",
+            &session_id.to_string(),
+            "--enabled",
+            "false",
+        ])
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            CliCommand::SkillApply {
+                id: "rust-helper".to_string(),
+                name: Some("Rust Helper".to_string()),
+                category: Some("Coding".to_string()),
+                description: Some("Use Rust carefully".to_string()),
+                content: "# Rust\nDo work".to_string(),
+                scope: Some("workspace".to_string()),
+                session_id: Some(session_id.to_string()),
+                enabled: Some(false),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_skill_show_accepts_positional_id_and_global_scope() {
+        let parsed = parse_args(["cli", "skill", "show", "rust-helper", "--scope", "global"])
+            .expect("parse");
+
+        assert_eq!(
+            parsed,
+            CliCommand::SkillShow {
+                id: "rust-helper".to_string(),
+                session_id: None,
+                scope: Some("global".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn skill_apply_input_defaults_global_without_session() {
+        let input = skill_apply_input(
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "# Demo".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("input");
+
+        assert_eq!(input.id, "demo");
+        assert_eq!(input.name, Some("demo".to_string()));
+        assert_eq!(input.category, Some("Custom".to_string()));
+        assert_eq!(input.scope, SkillScope::Global);
+        assert_eq!(input.session_id, None);
+        assert_eq!(input.enabled, Some(true));
+    }
+
+    #[test]
+    fn parse_skill_apply_requires_content() {
+        let err = parse_args(["cli", "skill", "apply", "--id", "demo"])
+            .expect_err("missing content should fail");
+
+        assert!(err.to_string().contains("--content"));
     }
 
     #[test]

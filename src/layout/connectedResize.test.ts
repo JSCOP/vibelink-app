@@ -54,6 +54,20 @@ describe('connected dockview resizing', () => {
     expect(singleResizeHandles(makeGrid3x2())).toEqual([])
   })
 
+  it('exposes clean connected dividers as individual handles for Ctrl resize mode', () => {
+    const handles = singleResizeHandles(makeGrid3x2(), true)
+
+    expect(handles).toContainEqual(expect.objectContaining({ axis: 'y', coordinate: 100, start: 0, end: 100 }))
+    expect(singleResizeHandleAt(makeGrid3x2(), 'y', 100, 50, true)).toMatchObject({ axis: 'y', coordinate: 100, start: 0, end: 100 })
+  })
+
+  it('can break a clean divider segment in Ctrl resize mode', () => {
+    const resized = resizeSingleBoundaryAt(makeGrid3x2(), 'y', 100, 50, 20, 50, 32, true) as TestLayout
+
+    expect(resized.grid.root.data[0].data.map((child) => child.size)).toEqual([120, 80])
+    expect(resized.grid.root.data[1].data.map((child) => child.size)).toEqual([100, 100])
+  })
+
   it('exposes individual handles only for broken divider segments that can rejoin a neighbor', () => {
     const handles = singleResizeHandles(makeBrokenHorizontalSegment())
 

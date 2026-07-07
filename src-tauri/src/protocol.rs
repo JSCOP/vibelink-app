@@ -76,6 +76,9 @@ pub enum ClientToDaemon {
         cols: u16,
         rows: u16,
     },
+    NotifySessionChanged {
+        session_id: Uuid,
+    },
     SetPaneTitle {
         req: Req,
         session_id: Uuid,
@@ -104,6 +107,9 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         event: TaskSignal,
     },
+    ResourceSnapshot {
+        req: Req,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +133,9 @@ pub enum DaemonToClient {
         pane_id: Uuid,
         exit_code: Option<i32>,
     },
+    SessionChanged {
+        session_id: Uuid,
+    },
     TaskEvent {
         session_id: Uuid,
         event: TaskSignal,
@@ -141,6 +150,8 @@ pub enum TaskSignal {
         task_id: String,
         #[serde(rename = "commitMsg")]
         commit_msg: Option<String>,
+        #[serde(rename = "resultSummary")]
+        result_summary: Option<String>,
         #[serde(rename = "paneId")]
         pane_id: Option<Uuid>,
     },
@@ -152,6 +163,12 @@ pub enum TaskSignal {
         pane_id: Option<Uuid>,
     },
     BoardChanged {},
+    PaneConfigured {
+        #[serde(rename = "paneId")]
+        pane_id: Uuid,
+        title: Option<String>,
+        role: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +182,7 @@ pub enum ReplyResult {
     PaneSpawned(PaneMeta),
     ScrollbackData(Vec<u8>),
     Ok,
+    ResourceSnapshot(ResourceSnapshotData),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +196,8 @@ pub struct PaneConfig {
     pub title: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -198,6 +218,24 @@ pub struct PaneMeta {
     pub id: Uuid,
     pub config: PaneConfig,
     pub alive: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneResource {
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub root_pid: Option<u32>,
+    pub mem_bytes: u64,
+    pub process_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSnapshotData {
+    pub daemon_pid: u32,
+    pub daemon_mem_bytes: u64,
+    pub panes: Vec<PaneResource>,
 }
 
 pub fn write_frame<W, T>(writer: &mut W, msg: &T) -> FrameResult<()>
@@ -230,8 +268,17 @@ where
         return Err(FrameError::FrameTooLarge { len });
     }
 
-    let mut bytes = vec![0_u8; len as usize];
-    reader.read_exact(&mut bytes)?;
+    const READ_CHUNK_LEN: usize = 64 * 1024;
+    let len = len as usize;
+    let mut bytes = Vec::with_capacity(len.min(READ_CHUNK_LEN));
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(READ_CHUNK_LEN);
+        let start = bytes.len();
+        bytes.resize(start + chunk_len, 0);
+        reader.read_exact(&mut bytes[start..])?;
+        remaining -= chunk_len;
+    }
     Ok(rmp_serde::from_slice(&bytes)?)
 }
 
@@ -255,6 +302,7 @@ mod tests {
                 env: vec![("TERM".to_string(), "xterm-256color".to_string())],
                 title: Some("main".to_string()),
                 icon: Some("sparkles".to_string()),
+                profile_id: Some("codex".to_string()),
                 cols: 120,
                 rows: 32,
             },
@@ -294,6 +342,7 @@ mod tests {
             event: TaskSignal::Done {
                 task_id: "task-123".to_string(),
                 commit_msg: Some("finished task".to_string()),
+                result_summary: Some("finished task successfully".to_string()),
                 pane_id: Some(pane_id),
             },
         };
@@ -302,6 +351,46 @@ mod tests {
         write_frame(&mut bytes, &message).expect("encode frame");
 
         let decoded: ClientToDaemon = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_session_changed_notification() {
+        let session_id = Uuid::new_v4();
+        let message = DaemonToClient::SessionChanged { session_id };
+
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode frame");
+
+        let decoded: DaemonToClient = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_resource_snapshot_reply() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let message = DaemonToClient::Reply {
+            req: 9,
+            result: ReplyResult::ResourceSnapshot(ResourceSnapshotData {
+                daemon_pid: 1234,
+                daemon_mem_bytes: 64 * 1024 * 1024,
+                panes: vec![PaneResource {
+                    session_id,
+                    pane_id,
+                    root_pid: Some(4321),
+                    mem_bytes: 128 * 1024 * 1024,
+                    process_count: 3,
+                }],
+            }),
+        };
+
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode frame");
+
+        let decoded: DaemonToClient = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
 
         assert_eq!(decoded, message);
     }

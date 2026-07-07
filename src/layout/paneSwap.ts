@@ -9,7 +9,25 @@ type GroupState = MutableRecord & {
 const edgeGroupKeys = ['top', 'bottom', 'left', 'right'] as const
 
 export function swapPanelIdsInDockviewLayout(layout: unknown, firstId: string, secondId: string): boolean {
-  if (firstId === secondId || !containsPanelId(layout, firstId) || !containsPanelId(layout, secondId)) return false
+  if (firstId === secondId) return false
+
+  let hasFirst = false
+  let hasSecond = false
+  let sharesGroup = false
+  visitGroups(layout, (group) => {
+    if (!isRecord(group)) return
+    const state = group as GroupState
+    const groupHasFirst = arrayContains(state.views, firstId)
+      || state.activeView === firstId
+      || (Array.isArray(state.tabGroups) && state.tabGroups.some((tabGroup) => isRecord(tabGroup) && arrayContains(tabGroup.panelIds, firstId)))
+    const groupHasSecond = arrayContains(state.views, secondId)
+      || state.activeView === secondId
+      || (Array.isArray(state.tabGroups) && state.tabGroups.some((tabGroup) => isRecord(tabGroup) && arrayContains(tabGroup.panelIds, secondId)))
+    hasFirst = hasFirst || groupHasFirst
+    hasSecond = hasSecond || groupHasSecond
+    sharesGroup = sharesGroup || (groupHasFirst && groupHasSecond)
+  })
+  if (!hasFirst || !hasSecond || sharesGroup) return false
 
   const swapId = (value: unknown) => {
     if (value === firstId) return secondId
@@ -37,17 +55,6 @@ export function swapPanelIdsInDockviewLayout(layout: unknown, firstId: string, s
   return true
 }
 
-function containsPanelId(layout: unknown, paneId: string): boolean {
-  let found = false
-  visitGroups(layout, (group) => {
-    if (found || !isRecord(group)) return
-    const state = group as GroupState
-    found = arrayContains(state.views, paneId)
-      || state.activeView === paneId
-      || (Array.isArray(state.tabGroups) && state.tabGroups.some((tabGroup) => isRecord(tabGroup) && arrayContains(tabGroup.panelIds, paneId)))
-  })
-  return found
-}
 
 function visitGroups(layout: unknown, visitor: (group: unknown) => void): void {
   if (!isRecord(layout)) return

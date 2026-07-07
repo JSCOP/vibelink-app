@@ -12,9 +12,45 @@ pub struct AttachedSession {
     pub panes: Vec<PaneMeta>,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceProc {
+    pub pid: u32,
+    pub mem_bytes: u64,
+    pub process_count: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcePane {
+    pub session_id: String,
+    pub pane_id: String,
+    pub root_pid: Option<u32>,
+    pub mem_bytes: u64,
+    pub process_count: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSnapshotDto {
+    pub daemon: ResourceProc,
+    pub app: ResourceProc,
+    pub panes: Vec<ResourcePane>,
+    pub total_mem_bytes: u64,
+}
+
 #[tauri::command]
 pub async fn ping(client: State<'_, DaemonClient>) -> Result<(), String> {
     client.ping().map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn set_keep_terminals_alive_on_close(
+    prefs: State<'_, super::KeepAlivePrefs>,
+    value: bool,
+) -> Result<(), String> {
+    prefs.0.store(value, std::sync::atomic::Ordering::Release);
+    Ok(())
 }
 
 #[tauri::command]
@@ -27,6 +63,11 @@ pub async fn init_terminal_output(
 }
 
 #[tauri::command]
+pub fn terminal_ws_port(client: State<'_, DaemonClient>) -> u16 {
+    client.ws_port()
+}
+
+#[tauri::command]
 pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<SessionMeta>, String> {
     match client
         .request_reply(|req| ClientToDaemon::ListSessions { req })
@@ -35,6 +76,61 @@ pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<Sessio
         ReplyResult::Sessions(sessions) => Ok(sessions),
         other => Err(format!("unexpected daemon response: {other:?}")),
     }
+}
+
+#[tauri::command]
+pub async fn resource_snapshot(
+    client: State<'_, DaemonClient>,
+) -> Result<ResourceSnapshotDto, String> {
+    let data = match client
+        .request_reply(|req| ClientToDaemon::ResourceSnapshot { req })
+        .map_err(to_string)?
+    {
+        ReplyResult::ResourceSnapshot(data) => data,
+        other => return Err(format!("unexpected daemon response: {other:?}")),
+    };
+
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let app_pid = std::process::id();
+    let (app_mem_bytes, app_process_count) = crate::daemon::proc::tree_metrics(&sys, app_pid);
+    let panes: Vec<_> = data
+        .panes
+        .into_iter()
+        .map(|pane| ResourcePane {
+            session_id: pane.session_id.to_string(),
+            pane_id: pane.pane_id.to_string(),
+            root_pid: pane.root_pid,
+            mem_bytes: pane.mem_bytes,
+            process_count: pane.process_count,
+        })
+        .collect();
+    let pane_mem_bytes = panes.iter().map(|pane| pane.mem_bytes).sum::<u64>();
+    let total_mem_bytes = data.daemon_mem_bytes + app_mem_bytes + pane_mem_bytes;
+
+    Ok(ResourceSnapshotDto {
+        daemon: ResourceProc {
+            pid: data.daemon_pid,
+            mem_bytes: data.daemon_mem_bytes,
+            process_count: 1,
+        },
+        app: ResourceProc {
+            pid: app_pid,
+            mem_bytes: app_mem_bytes,
+            process_count: app_process_count,
+        },
+        panes,
+        total_mem_bytes,
+    })
+}
+
+#[tauri::command]
+pub async fn restart_daemon(client: State<'_, DaemonClient>) -> Result<(), String> {
+    let client = client.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || client.restart())
+        .await
+        .map_err(|err| err.to_string())?
+        .map_err(to_string)
 }
 
 #[tauri::command]

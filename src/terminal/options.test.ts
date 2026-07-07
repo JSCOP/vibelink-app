@@ -12,6 +12,26 @@ describe('terminal options', () => {
     expect(options.customGlyphs).toBe(true)
   })
 
+  it('uses a thin bar cursor by default', () => {
+    const options = createTerminalOptions(defaultTerminalSettings)
+
+    expect(defaultTerminalSettings.cursorStyle).toBe('bar')
+    expect(defaultTerminalSettings.cursorWidth).toBe(1)
+    expect(options.cursorStyle).toBe('bar')
+    expect(options.cursorWidth).toBe(1)
+  })
+
+  it('only applies cursor width to bar cursors', () => {
+    const options = createTerminalOptions({
+      ...defaultTerminalSettings,
+      cursorStyle: 'block',
+      cursorWidth: 3,
+    })
+
+    expect(options.cursorStyle).toBe('block')
+    expect(options.cursorWidth).toBeUndefined()
+  })
+
   it('clamps bold weight without changing normal weight', () => {
     const options = createTerminalOptions({
       ...defaultTerminalSettings,

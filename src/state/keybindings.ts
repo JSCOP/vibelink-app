@@ -14,6 +14,7 @@ export const keybindingActionIds = [
   'copyTerminalContents',
   'copyTerminalSelection',
   'captureImage',
+  'captureQuickImage',
   'captureVideo',
 ] as const
 
@@ -42,6 +43,7 @@ export const keybindingDefinitions: KeybindingDefinition[] = [
   { id: 'copyTerminalContents', label: 'Copy terminal contents', description: 'Select all terminal buffer text and copy it to the clipboard.' },
   { id: 'copyTerminalSelection', label: 'Copy terminal selection', description: 'Copy the currently selected terminal text.' },
   { id: 'captureImage', label: 'Capture image', description: 'Open the region selector for a screenshot.' },
+  { id: 'captureQuickImage', label: 'Quick capture', description: 'Drag a region and instantly copy the screenshot to the clipboard.' },
   { id: 'captureVideo', label: 'Capture video', description: 'Open the region selector for a screen recording.' },
 ]
 
@@ -60,8 +62,23 @@ export const defaultKeybindings: KeybindingSettings = {
   focusDown: 'ctrl+down',
   copyTerminalContents: 'ctrl+a',
   copyTerminalSelection: 'ctrl+shift+c',
-  captureImage: 'alt+shift+c',
+  captureImage: 'alt+shift+s',
+  captureQuickImage: 'alt+s',
   captureVideo: 'alt+shift+r',
+}
+
+const shortLivedFocusKeybindings: Partial<KeybindingSettings> = {
+  focusLeft: 'alt+left',
+  focusRight: 'alt+right',
+  focusUp: 'alt+up',
+  focusDown: 'alt+down',
+}
+
+const legacyCaptureImageDefault = 'alt+shift+c'
+const globalShortcutOnlyActions: Partial<Record<KeybindingActionId, true>> = {
+  captureImage: true,
+  captureQuickImage: true,
+  captureVideo: true,
 }
 
 export function normalizeKeybindings(value: unknown): KeybindingSettings {
@@ -70,7 +87,13 @@ export function normalizeKeybindings(value: unknown): KeybindingSettings {
   for (const id of keybindingActionIds) {
     const value = record?.[id]
     if (typeof value === 'string') {
-      normalized[id] = normalizeKeyChord(value)
+      const chord = normalizeKeyChord(value)
+      if (id === 'captureImage' && chord === legacyCaptureImageDefault) {
+        normalized[id] = defaultKeybindings.captureImage
+        continue
+      }
+      const shortLivedFocusKeybinding = shortLivedFocusKeybindings[id]
+      normalized[id] = shortLivedFocusKeybinding === chord ? defaultKeybindings[id] : chord
     }
   }
   return normalized
@@ -89,7 +112,7 @@ export function handleCapturedKeybindingEvent(
 ): boolean {
   if (event.defaultPrevented) return false
   const action = findKeybindingAction(settings, event)
-  if (!action || shouldHandleAction?.(action) === false) return false
+  if (!action || globalShortcutOnlyActions[action] || shouldHandleAction?.(action) === false) return false
   event.preventDefault()
   event.stopPropagation()
   onAction(action)

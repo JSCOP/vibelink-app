@@ -24,10 +24,23 @@ const STARTUP_PING_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const DAEMON_READY_DELAY: Duration = Duration::from_millis(100);
+const RECORDED_UNHEALTHY_RECOVERY_DELAY: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const DAEMON_BIN_DIR: &str = "daemon-bin";
 #[cfg(windows)]
 const DAEMON_EXE_PREFIX: &str = "app-daemon";
+
+#[derive(Debug, Default)]
+pub(super) struct StartupRecoveryBudget {
+    unrecorded_recovery_attempted: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordedDaemonState {
+    Missing,
+    Dead,
+    Alive,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupAttemptErrorKind {
@@ -68,23 +81,31 @@ impl std::fmt::Display for StartupAttemptError {
 }
 
 pub fn ensure_daemon() -> Result<DaemonStream> {
+    let mut recovery = StartupRecoveryBudget::default();
+    ensure_daemon_with_recovery(&mut recovery)
+}
+
+pub(super) fn ensure_daemon_with_recovery(
+    recovery: &mut StartupRecoveryBudget,
+) -> Result<DaemonStream> {
+    let mut unhealthy_since = None;
     let mut last_error = match connect_ready_daemon() {
         Ok(stream) => return Ok(stream),
-        Err(err) => {
-            if should_recover_stale_daemon(&err, false, false) {
-                let recovered = recover_recorded_stale_daemon()?;
-                if !recovered {
-                    let _ = recover_unrecorded_stale_daemon()?;
+        Err(mut err) => {
+            if err.kind == StartupAttemptErrorKind::Connect {
+                thread::sleep(DAEMON_READY_DELAY);
+                match connect_ready_daemon() {
+                    Ok(stream) => return Ok(stream),
+                    Err(retry_err) => err = retry_err,
                 }
-            } else if should_recover_unrecorded_stale_daemon(&err, false, false) {
-                let _ = recover_unrecorded_stale_daemon()?;
             }
+            track_unhealthy_error(&err, &mut unhealthy_since);
+            recover_stale_daemon_for_error(&err, false, false, recovery, unhealthy_since)?;
             Some(err.to_string())
         }
     };
 
     let mut spawned_daemon = Some(spawn_daemon_process()?);
-    let mut recovered_after_spawn_exit = false;
 
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     while Instant::now() < deadline {
@@ -93,23 +114,22 @@ pub fn ensure_daemon() -> Result<DaemonStream> {
                 .try_wait()
                 .context("poll spawned daemon startup status")?
             {
-                if !recovered_after_spawn_exit {
-                    recovered_after_spawn_exit = true;
-                    let _ = recover_unrecorded_stale_daemon()?;
-                    spawned_daemon = Some(spawn_daemon_process()?);
-                    continue;
-                }
                 last_error = Some(format!(
                     "spawned daemon exited before becoming ready: {status}"
                 ));
-                break;
+                if recover_unrecorded_after_spawn_exit(recovery)? {
+                    spawned_daemon = Some(spawn_daemon_process()?);
+                    continue;
+                }
+                spawned_daemon = None;
             }
         }
 
         match connect_ready_daemon() {
             Ok(stream) => return Ok(stream),
             Err(err) => {
-                let should_retry = should_retry_startup_attempt(&err, true);
+                track_unhealthy_error(&err, &mut unhealthy_since);
+                let should_retry = should_retry_startup_attempt(&err, spawned_daemon.is_some());
                 last_error = Some(err.to_string());
                 if !should_retry {
                     break;
@@ -227,16 +247,94 @@ fn should_recover_stale_daemon(
     err.should_recover_stale_daemon() && !daemon_spawned_by_this_startup && !already_recovered
 }
 
+fn recover_stale_daemon_for_error(
+    err: &StartupAttemptError,
+    daemon_spawned_by_this_startup: bool,
+    recorded_recovery_attempted: bool,
+    recovery: &mut StartupRecoveryBudget,
+    unhealthy_since: Option<Instant>,
+) -> Result<bool> {
+    if should_recover_stale_daemon(
+        err,
+        daemon_spawned_by_this_startup,
+        recorded_recovery_attempted,
+    ) {
+        let recovered = recover_recorded_stale_daemon()?;
+        if recovered {
+            return Ok(true);
+        }
+    }
+
+    let daemon_paths = paths::daemon_paths()?;
+    let recorded_state = recorded_daemon_state(&daemon_paths.pid)?;
+    let unhealthy_elapsed = unhealthy_since.map(|since| since.elapsed());
+    if should_recover_unrecorded_stale_daemon(
+        err,
+        daemon_spawned_by_this_startup,
+        recovery.unrecorded_recovery_attempted,
+        recorded_state,
+        unhealthy_elapsed,
+    ) {
+        return recover_unrecorded_once(recovery);
+    }
+    Ok(false)
+}
+
+fn recover_unrecorded_after_spawn_exit(recovery: &mut StartupRecoveryBudget) -> Result<bool> {
+    let daemon_paths = paths::daemon_paths()?;
+    let recorded_state = recorded_daemon_state(&daemon_paths.pid)?;
+    if should_recover_unrecorded_after_spawn_exit(
+        recovery.unrecorded_recovery_attempted,
+        recorded_state,
+    ) {
+        return recover_unrecorded_once(recovery);
+    }
+    Ok(false)
+}
+
+fn recover_unrecorded_once(recovery: &mut StartupRecoveryBudget) -> Result<bool> {
+    if recovery.unrecorded_recovery_attempted {
+        return Ok(false);
+    }
+    recovery.unrecorded_recovery_attempted = true;
+    recover_unrecorded_stale_daemon()
+}
+
+fn track_unhealthy_error(err: &StartupAttemptError, unhealthy_since: &mut Option<Instant>) {
+    if err.kind == StartupAttemptErrorKind::Unhealthy {
+        unhealthy_since.get_or_insert_with(Instant::now);
+    } else {
+        *unhealthy_since = None;
+    }
+}
+
 fn should_recover_unrecorded_stale_daemon(
     err: &StartupAttemptError,
     daemon_spawned_by_this_startup: bool,
     already_recovered: bool,
+    recorded_state: RecordedDaemonState,
+    unhealthy_elapsed: Option<Duration>,
 ) -> bool {
-    matches!(
-        err.kind,
-        StartupAttemptErrorKind::Connect | StartupAttemptErrorKind::Unhealthy
-    ) && !daemon_spawned_by_this_startup
-        && !already_recovered
+    if daemon_spawned_by_this_startup || already_recovered {
+        return false;
+    }
+    match (recorded_state, err.kind) {
+        (
+            RecordedDaemonState::Dead,
+            StartupAttemptErrorKind::Connect | StartupAttemptErrorKind::Unhealthy,
+        ) => true,
+        (RecordedDaemonState::Alive, StartupAttemptErrorKind::Unhealthy) => {
+            unhealthy_elapsed.is_some_and(|elapsed| elapsed >= RECORDED_UNHEALTHY_RECOVERY_DELAY)
+        }
+        _ => false,
+    }
+}
+
+fn should_recover_unrecorded_after_spawn_exit(
+    already_recovered: bool,
+    recorded_state: RecordedDaemonState,
+) -> bool {
+    !already_recovered && recorded_state == RecordedDaemonState::Dead
 }
 
 fn should_retry_startup_attempt(
@@ -398,6 +496,17 @@ fn parse_daemon_pid(contents: &str) -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
+fn recorded_daemon_state(path: &Path) -> Result<RecordedDaemonState> {
+    let Some(pid) = read_daemon_pid(path)? else {
+        return Ok(RecordedDaemonState::Missing);
+    };
+    if process_exists(pid)? {
+        Ok(RecordedDaemonState::Alive)
+    } else {
+        Ok(RecordedDaemonState::Dead)
+    }
+}
+
 #[cfg(windows)]
 fn terminate_daemon_pid(pid: u32) -> Result<()> {
     let output = Command::new("taskkill")
@@ -450,6 +559,23 @@ fn windows_process_exists(pid: u32) -> Result<bool> {
         "missing" => Ok(false),
         other => bail!("unexpected process existence output {other:?}"),
     }
+}
+
+#[cfg(windows)]
+fn process_exists(pid: u32) -> Result<bool> {
+    windows_process_exists(pid)
+}
+
+#[cfg(not(windows))]
+fn process_exists(pid: u32) -> Result<bool> {
+    let status = Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("check whether daemon pid still exists")?;
+    Ok(status.success())
 }
 
 fn termination_attempt_completed(
@@ -857,15 +983,68 @@ mod tests {
     }
 
     #[test]
-    fn startup_errors_can_recover_unrecorded_orphan_once() {
+    fn unrecorded_recovery_requires_recorded_stale_evidence() {
         let connect_error = StartupAttemptError::connect(anyhow!("connect failed"));
         let unhealthy_error = StartupAttemptError::unhealthy(anyhow!("probe failed"));
 
-        for err in [&connect_error, &unhealthy_error] {
-            assert!(should_recover_unrecorded_stale_daemon(err, false, false));
-            assert!(!should_recover_unrecorded_stale_daemon(err, true, false));
-            assert!(!should_recover_unrecorded_stale_daemon(err, false, true));
-        }
+        assert!(!should_recover_unrecorded_stale_daemon(
+            &connect_error,
+            false,
+            false,
+            RecordedDaemonState::Missing,
+            None,
+        ));
+        assert!(should_recover_unrecorded_stale_daemon(
+            &connect_error,
+            false,
+            false,
+            RecordedDaemonState::Dead,
+            None,
+        ));
+        assert!(!should_recover_unrecorded_stale_daemon(
+            &unhealthy_error,
+            false,
+            false,
+            RecordedDaemonState::Alive,
+            Some(RECORDED_UNHEALTHY_RECOVERY_DELAY - Duration::from_millis(1)),
+        ));
+        assert!(should_recover_unrecorded_stale_daemon(
+            &unhealthy_error,
+            false,
+            false,
+            RecordedDaemonState::Alive,
+            Some(RECORDED_UNHEALTHY_RECOVERY_DELAY),
+        ));
+        assert!(!should_recover_unrecorded_stale_daemon(
+            &unhealthy_error,
+            true,
+            false,
+            RecordedDaemonState::Dead,
+            None,
+        ));
+        assert!(!should_recover_unrecorded_stale_daemon(
+            &unhealthy_error,
+            false,
+            true,
+            RecordedDaemonState::Dead,
+            None,
+        ));
+    }
+
+    #[test]
+    fn unrecorded_recovery_after_spawn_exit_requires_dead_recorded_pid() {
+        assert!(should_recover_unrecorded_after_spawn_exit(
+            false,
+            RecordedDaemonState::Dead
+        ));
+        assert!(!should_recover_unrecorded_after_spawn_exit(
+            false,
+            RecordedDaemonState::Missing
+        ));
+        assert!(!should_recover_unrecorded_after_spawn_exit(
+            true,
+            RecordedDaemonState::Dead
+        ));
     }
 
     #[test]

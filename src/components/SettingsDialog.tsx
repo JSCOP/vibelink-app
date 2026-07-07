@@ -1,16 +1,16 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useEffect, useMemo, useState } from 'react'
-import { X } from 'lucide-react'
-import { ProfileIcon } from './ProfileIcon'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Terminal, X } from 'lucide-react'
 import { HermesGatewayForm } from './HermesGatewayForm'
-import { profileIconNames } from '../state/profileIcons'
+import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
-import { joinCommandLine, splitCommandLine, type Profile, type ProfileKind, type Settings } from '../state/profiles'
-import { terminalThemeDefinitionById, terminalThemeGroups, type RequiredTerminalTheme, type TerminalThemeId } from '../state/terminalThemes'
-import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
+import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type Profile, type ProfileKind, type Settings } from '../state/profiles'
+import { profileIconNames } from '../state/profileIcons'
+import { terminalThemeDefinitionById, terminalThemeGroups, type TerminalThemeId } from '../state/terminalThemes'
 import { useWorkspaceStore } from '../state/store'
+import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -18,171 +18,256 @@ type SettingsDialogProps = {
   onClose: () => void
 }
 
-type SettingsSection = 'appearance' | 'layout' | 'profiles' | 'theme' | 'keybindings' | 'capture' | 'hermes'
+type SettingsSection =
+  | 'model'
+  | 'chat'
+  | 'appearance'
+  | 'workspace'
+  | 'safety'
+  | 'memory'
+  | 'voice'
+  | 'advanced'
+  | 'messaging'
+  | 'apiKeys'
+  | 'mcp'
+  | 'archived'
+  | 'about'
 
-const sectionLabels: Record<SettingsSection, string> = {
-  appearance: 'Appearance',
-  layout: 'Layout',
-  profiles: 'Profiles',
-  theme: 'Theme',
-  keybindings: 'Keybindings',
-  capture: 'Capture',
-  hermes: 'Hermes',
-}
-
-const sectionDescriptions: Record<SettingsSection, string> = {
-  appearance: 'Font and scrollback',
-  layout: 'Pane resize and headers',
-  profiles: 'Shell, SSH, commands',
-  theme: 'Color palettes',
-  keybindings: 'Shortcuts',
-  capture: 'Screenshot & recording',
-  hermes: 'Agent runtime',
-}
+const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[] = [
+  { id: 'model', label: 'Model', icon: Bot },
+  { id: 'chat', label: 'Chat', icon: MessageSquare },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'workspace', label: 'Workspace', icon: Monitor },
+  { id: 'safety', label: 'Safety', icon: Shield },
+  { id: 'memory', label: 'Memory & Context', icon: HardDrive },
+  { id: 'voice', label: 'Voice', icon: Mic },
+  { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
+  { id: 'messaging', label: 'Messaging', icon: MessageSquare },
+  { id: 'apiKeys', label: 'API Keys', icon: KeyRound },
+  { id: 'mcp', label: 'MCP', icon: Box },
+  { id: 'archived', label: 'Archived Chats', icon: Archive },
+  { id: 'about', label: 'About', icon: Info },
+]
 
 const fontWeightOptions = [100, 200, 300, 400, 500, 600, 700, 800, 900]
-const themePreviewAnsiKeys = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'] as const
+const chatPersonalityOptions: { value: ChatPersonality; label: string }[] = [
+  { value: 'direct', label: 'Direct' },
+  { value: 'balanced', label: 'Balanced' },
+  { value: 'concise', label: 'Concise' },
+  { value: 'exploratory', label: 'Exploratory' },
+]
+const imageAttachmentOptions: { value: ChatImageAttachmentMode; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'always', label: 'Always' },
+  { value: 'never', label: 'Never' },
+]
+const cursorStyleOptions: { value: Settings['cursorStyle']; label: string }[] = [
+  { value: 'bar', label: 'Bar' },
+  { value: 'block', label: 'Block' },
+  { value: 'underline', label: 'Underline' },
+]
+
 const profileKindLabels: Record<ProfileKind, string> = {
-  local: 'Local shell',
-  ssh: 'SSH remote',
+  local: 'Local',
+  ssh: 'SSH',
   command: 'Command',
 }
+const profileKindOptions: { value: ProfileKind; label: string }[] = [
+  { value: 'local', label: profileKindLabels.local },
+  { value: 'ssh', label: profileKindLabels.ssh },
+  { value: 'command', label: profileKindLabels.command },
+]
 
 
 export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
-  const [activeSection, setActiveSection] = useState<SettingsSection>('appearance')
-  const [editingProfileId, setEditingProfileId] = useState(settings.defaultProfileId)
+  const [activeSection, setActiveSection] = useState<SettingsSection>('model')
+  const [search, setSearch] = useState('')
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
-  const [hermesRuntime, setHermesRuntime] = useState<HermesRuntimeStatus | null>(null)
-  const [hermesRuntimeBusy, setHermesRuntimeBusy] = useState(false)
-  const [hermesRuntimeMessage, setHermesRuntimeMessage] = useState('')
-  const [agentHome, setAgentHome] = useState('')
+  const [defaultCaptureDir, setDefaultCaptureDir] = useState('')
   const [workspaceState, setWorkspaceState] = useState<HermesWorkspaceState | null>(null)
-  const [defaultDir, setDefaultDir] = useState('')
-  const [captureFolderBusy, setCaptureFolderBusy] = useState(false)
-  const [ffmpegTestStatus, setFfmpegTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
-  const [ffmpegTestMessage, setFfmpegTestMessage] = useState('')
+  const [runtime, setRuntime] = useState<HermesRuntimeStatus | null>(null)
+  const [authList, setAuthList] = useState('')
+  const [authBusy, setAuthBusy] = useState(false)
+  const [ffmpegStatus, setFfmpegStatus] = useState('')
+  const [runtimeBusy, setRuntimeBusy] = useState(false)
+  const [runtimeMessage, setRuntimeMessage] = useState('')
+  const [terminalMessage, setTerminalMessage] = useState('')
+  const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
-  const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [installedFonts, draft.fontFamily])
-  const editingProfile = draft.profiles.find((profile) => profile.id === editingProfileId) ?? draft.profiles[0]
-  const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
+  const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const activeSession = activeSessionId ? sessions.find((session) => session.id === activeSessionId) : undefined
-  const workspaceModel = workspaceState?.model ?? null
+  const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [draft.fontFamily, installedFonts])
+  const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
+  const filteredSections = sections.filter((section) => section.label.toLowerCase().includes(search.trim().toLowerCase()))
 
   useEffect(() => {
     let cancelled = false
     void invoke<string[]>('list_installed_fonts')
-      .then((fonts) => {
-        if (!cancelled) setInstalledFonts(fonts)
-      })
-      .catch(() => {
-        if (!cancelled) setInstalledFonts([])
-      })
-    return () => { cancelled = true }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
+      .then((fonts) => { if (!cancelled) setInstalledFonts(fonts) })
+      .catch(() => { if (!cancelled) setInstalledFonts([]) })
     void invoke<string>('default_capture_dir')
-      .then((dir) => {
-        if (!cancelled) setDefaultDir(dir)
-      })
-      .catch(() => {
-        if (!cancelled) setDefaultDir('')
-      })
+      .then((dir) => { if (!cancelled) setDefaultCaptureDir(dir) })
+      .catch(() => { if (!cancelled) setDefaultCaptureDir('') })
     return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
-    if (activeSection !== 'hermes') return
     let cancelled = false
     void invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
-      .then((status) => {
-        if (!cancelled) setHermesRuntime(status)
-      })
-      .catch((error) => {
-        if (!cancelled) setHermesRuntime({ installed: false, command: draft.hermesCommand || 'hermes-acp', version: String(error) })
-      })
+      .then((next) => { if (!cancelled) setRuntime(next) })
+      .catch((error) => { if (!cancelled) setRuntime({ installed: false, command: draft.hermesCommand || 'hermes-acp', version: String(error) }) })
+    if (activeSessionId) {
+      void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId })
+        .then((state) => { if (!cancelled) setWorkspaceState(state) })
+        .catch(() => { if (!cancelled) setWorkspaceState(null) })
+    }
     return () => { cancelled = true }
-  }, [activeSection, draft.hermesCommand])
-
-  useEffect(() => {
-    if (activeSection !== 'hermes' || !activeSessionId) return
-    let cancelled = false
-    void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId })
-      .then((state) => {
-        if (!cancelled) {
-          setWorkspaceState(state)
-          setAgentHome(state.home)
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setWorkspaceState(null)
-          setAgentHome(String(error))
-        }
-      })
-    return () => { cancelled = true }
-  }, [activeSection, activeSessionId])
-
+  }, [activeSection, activeSessionId, draft.hermesCommand])
 
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
-  const updateKeybinding = (id: KeybindingActionId, chord: string) => {
-    patchDraft({ keybindings: { ...draft.keybindings, [id]: chord } })
-  }
+  const updateKeybinding = (id: KeybindingActionId, chord: string) => patchDraft({ keybindings: { ...draft.keybindings, [id]: chord } })
   const updateProfile = (profileId: string, patch: Partial<Profile>) => {
     setDraft((current) => ({
       ...current,
       profiles: current.profiles.map((profile) => profile.id === profileId ? { ...profile, ...patch } : profile),
     }))
   }
-  const addProfile = (type: ProfileKind) => {
-    const profile = createProfile(type, draft.profiles)
+  const addProfile = () => {
+    const profile = createProfile(draft)
     patchDraft({ profiles: [...draft.profiles, profile] })
-    setEditingProfileId(profile.id)
+    setExpandedProfileId(profile.id)
   }
   const deleteProfile = (profileId: string) => {
-    if (draft.profiles.length <= 1) return
-    const profiles = draft.profiles.filter((profile) => profile.id !== profileId)
-    const defaultProfileId = draft.defaultProfileId === profileId ? profiles[0].id : draft.defaultProfileId
-    patchDraft({ profiles, defaultProfileId })
-    setEditingProfileId(defaultProfileId)
+    setDraft((current) => {
+      if (!canDeleteProfile(current, profileId)) return current
+      const profiles = current.profiles.filter((profile) => profile.id !== profileId)
+      const workspaceProfileIds = Object.fromEntries(Object.entries(current.workspaceProfileIds).filter(([, boundProfileId]) => boundProfileId !== profileId))
+      return {
+        ...current,
+        profiles,
+        defaultProfileId: current.defaultProfileId === profileId ? profiles[0].id : current.defaultProfileId,
+        workspaceProfileIds,
+      }
+    })
+    setExpandedProfileId((current) => current === profileId ? null : current)
   }
-  const installHermesRuntime = async () => {
-    setHermesRuntimeBusy(true)
-    setHermesRuntimeMessage('Installing Hermes runtime…')
+  const changeProfileType = (profile: Profile, type: ProfileKind) => {
+    if (profile.type === type) return
+    const defaults = createProfile({ ...draft, profiles: draft.profiles.filter((candidate) => candidate.id !== profile.id) }, { type, id: profile.id, name: profile.name })
+    const patch: Partial<Profile> = { type }
+    if (type === 'local') {
+      patch.shell = profile.shell ?? defaults.shell
+      patch.args = profile.args.length > 0 ? profile.args : defaults.args
+    } else if (type === 'command') {
+      patch.command = profile.command.trim().length > 0 ? profile.command : defaults.command
+    } else {
+      patch.shell = null
+      patch.args = []
+      if (profile.icon === 'terminal') patch.icon = defaults.icon
+    }
+    updateProfile(profile.id, patch)
+  }
+  const updateSshPort = (profileId: string, value: string) => {
+    if (value.trim().length === 0) {
+      updateProfile(profileId, { sshPort: null })
+      return
+    }
+    const port = Number(value)
+    updateProfile(profileId, { sshPort: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null })
+  }
+  const refreshAuthList = async () => {
+    if (!activeSessionId) return
+    setAuthBusy(true)
+    try {
+      const output = await invoke<string>('hermes_auth_list', { sessionId: activeSessionId, commandOverride: draft.hermesCommand || null })
+      setAuthList(output)
+    } catch (error) {
+      setAuthList(String(error))
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+  const refreshHermesState = async () => {
+    setTerminalMessage('')
+    try {
+      const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
+      setRuntime(status)
+      if (activeSessionId) {
+        const state = await invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId })
+        setWorkspaceState(state)
+      }
+    } catch (error) {
+      setTerminalMessage(String(error))
+    }
+  }
+  const installRuntime = async () => {
+    setRuntimeBusy(true)
+    setRuntimeMessage('Installing...')
     try {
       const command = await invoke<string>('hermes_install_runtime')
       const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
-      setHermesRuntime(status)
-      setHermesRuntimeMessage(`Installed: ${command}`)
+      setRuntime(status)
+      setRuntimeMessage(`Installed: ${command}`)
     } catch (error) {
-      setHermesRuntimeMessage(String(error))
+      setRuntimeMessage(String(error))
     } finally {
-      setHermesRuntimeBusy(false)
+      setRuntimeBusy(false)
+    }
+  }
+  const openHermesTerminal = async (mode: 'model' | 'custom-provider' | 'auth' | 'status') => {
+    if (!activeSessionId) return
+    setTerminalMessage('Opening Hermes CLI terminal...')
+    try {
+      const state = await invoke<HermesWorkspaceState>('hermes_ensure_workspace', {
+        sessionId: activeSessionId,
+        workspaceFolder: activeSession?.workspaceFolder ?? null,
+      })
+      setWorkspaceState(state)
+      const hermesCommand = await invoke<string>('hermes_cli_command', { commandOverride: draft.hermesCommand || null })
+      const intro = mode === 'custom-provider'
+        ? 'Custom provider setup is owned by native Hermes. Use the model setup flow and choose/add the custom provider there.'
+        : mode === 'model'
+          ? 'Use native Hermes model setup to select provider, model, and provider-specific options.'
+          : mode === 'auth'
+            ? 'Use native Hermes auth for provider login and credential refresh.'
+            : 'Use native Hermes status commands for this workspace.'
+      const action = mode === 'auth'
+        ? `& ${quotePowerShellString(hermesCommand)} auth`
+        : mode === 'status'
+          ? `& ${quotePowerShellString(hermesCommand)} status`
+          : `& ${quotePowerShellString(hermesCommand)} model`
+      const script = [
+        `$env:HERMES_HOME=${quotePowerShellString(state.home)}`,
+        `Write-Host ${quotePowerShellString(`HERMES_HOME: ${state.home}`)}`,
+        `Write-Host ${quotePowerShellString(`Hermes CLI: ${hermesCommand}`)}`,
+        `Write-Host ${quotePowerShellString(intro)}`,
+        action,
+      ].join('; ')
+      await spawnPane(activeSessionId, {
+        shell: 'pwsh.exe',
+        args: ['-NoLogo', '-NoExit', '-Command', script],
+        cwd: activeSession?.workspaceFolder ?? null,
+        title: mode === 'auth' ? 'Hermes auth CLI' : mode === 'status' ? 'Hermes status CLI' : 'Hermes model setup',
+        icon: 'sparkles',
+      })
+      setTerminalMessage('Hermes CLI terminal opened.')
+    } catch (error) {
+      setTerminalMessage(String(error))
     }
   }
   const browseCaptureDir = async () => {
-    setCaptureFolderBusy(true)
-    try {
-      const selected = await open({ directory: true, multiple: false, title: 'Select capture folder' })
-      if (typeof selected === 'string') patchDraft({ captureDir: selected })
-    } finally {
-      setCaptureFolderBusy(false)
-    }
+    const selected = await open({ directory: true, multiple: false, title: 'Select capture folder' })
+    if (typeof selected === 'string') patchDraft({ captureDir: selected })
   }
   const testFfmpeg = async () => {
-    setFfmpegTestStatus('testing')
-    setFfmpegTestMessage('Checking…')
+    setFfmpegStatus('Checking...')
     try {
       await invoke('check_ffmpeg', { ffmpegPath: draft.captureFfmpegPath })
-      setFfmpegTestStatus('ok')
-      setFfmpegTestMessage('OK')
+      setFfmpegStatus('OK')
     } catch (error) {
-      setFfmpegTestStatus('error')
-      setFfmpegTestMessage(String(error))
+      setFfmpegStatus(String(error))
     }
   }
   const apply = () => onChange(draft)
@@ -192,498 +277,368 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   }
 
   return (
-    <div className="settings-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="settings-dialog-header">
-          <div>
-            <h2 id="settings-title">Settings</h2>
+    <div className="settings-backdrop awt-settings-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="settings-dialog awt-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+        <aside className="awt-settings-nav">
+          <div className="awt-settings-search">
+            <Search size={14} />
+            <input value={search} placeholder="Search settings..." onChange={(event) => setSearch(event.target.value)} />
           </div>
-          <button type="button" className="settings-close" title="Close settings" onClick={onClose}>
-            <X size={14} />
-          </button>
-        </header>
-
-        <div className="settings-dialog-body">
-          <nav className="settings-section-nav" aria-label="Settings sections">
-            {(Object.keys(sectionLabels) as SettingsSection[]).map((section) => (
-              <button key={section} type="button" className={activeSection === section ? 'selected' : ''} onClick={() => setActiveSection(section)}>
-                {sectionLabels[section]}
-                <span>{sectionDescriptions[section]}</span>
-              </button>
-            ))}
+          <nav aria-label="Settings sections">
+            {filteredSections.map((section) => {
+              const Icon = section.icon
+              return (
+                <button key={section.id} type="button" className={activeSection === section.id ? 'selected' : undefined} onClick={() => setActiveSection(section.id)}>
+                  <Icon size={15} />
+                  {section.label}
+                </button>
+              )
+            })}
           </nav>
+        </aside>
 
-          <div className="settings-section-content">
+        <main className="awt-settings-content">
+          <header className="awt-settings-header">
+            <h2 id="settings-title">{sections.find((section) => section.id === activeSection)?.label ?? 'Settings'}</h2>
+            <button type="button" className="settings-close" title="Close settings" onClick={onClose}>
+              <X size={15} />
+            </button>
+          </header>
+
+          <div className="awt-settings-scroll">
+            {activeSection === 'model' ? (
+              <SettingsGroup title="Main model" description="Native Hermes owns provider, login, and model configuration. AWT displays the active workspace state.">
+                <ReadonlyRow label="Workspace" value={activeSession?.name ?? 'No workspace'} />
+                <ReadonlyRow label="Provider" value={workspaceState?.model?.provider ?? 'Not configured'} />
+                <ReadonlyRow label="Model" value={workspaceState?.model?.model ?? 'Not configured'} />
+                <ReadonlyRow label="Base URL" value={workspaceState?.model?.baseUrl || 'Native provider default'} mono />
+                <ReadonlyRow label="HERMES_HOME" value={workspaceState?.home ?? 'Open a workspace to resolve'} mono />
+                <ReadonlyRow label="Runtime" value={`${runtime?.installed ? 'Installed' : 'Not installed'} · ${runtime?.command ?? 'hermes-acp'}`} mono />
+                <label>
+                  hermes-acp override
+                  <input value={draft.hermesCommand} placeholder="hermes-acp" onChange={(event) => patchDraft({ hermesCommand: event.target.value })} />
+                </label>
+                <div className="awt-settings-actions">
+                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('model')}>
+                    <Settings2 size={14} /> Configure model
+                  </button>
+                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('custom-provider')}>
+                    <Terminal size={14} /> Custom provider
+                  </button>
+                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('auth')}>
+                    <KeyRound size={14} /> Login / auth
+                  </button>
+                  <button type="button" onClick={() => void refreshHermesState()}>
+                    <RefreshCw size={14} /> Refresh
+                  </button>
+                </div>
+                <div className="awt-settings-actions">
+                  <button type="button" disabled={runtimeBusy} onClick={() => void installRuntime()}>
+                    <Play size={14} /> {runtimeBusy ? 'Installing...' : 'Install / update runtime'}
+                  </button>
+                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('status')}>
+                    <Terminal size={14} /> Open status CLI
+                  </button>
+                </div>
+                {runtime?.version || runtimeMessage || terminalMessage ? (
+                  <div className="awt-settings-note">
+                    {runtime?.version ? <span>{runtime.version}</span> : null}
+                    {runtimeMessage ? <span>{runtimeMessage}</span> : null}
+                    {terminalMessage ? <span>{terminalMessage}</span> : null}
+                  </div>
+                ) : null}
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'chat' ? (
+              <SettingsGroup title="Chat" description="New AWT Agent chats use these local UI preferences.">
+                <SettingsSelect label="Personality" value={draft.chatPersonality} options={chatPersonalityOptions} onChange={(value) => patchDraft({ chatPersonality: value as ChatPersonality })} />
+                <ReadonlyRow label="Timezone" value={Intl.DateTimeFormat().resolvedOptions().timeZone || 'System'} />
+                <SettingsToggle label="Show thinking / reasoning" checked={draft.chatReasoningBlocks} onChange={(checked) => patchDraft({ chatReasoningBlocks: checked })} />
+                <SettingsToggle label="Show tool calls" checked={draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCalls: checked })} />
+                <SettingsToggle label="Show tool call contents" checked={draft.chatToolCallContent} disabled={!draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCallContent: checked })} />
+                <SettingsSelect label="Image attachments" value={draft.chatImageAttachments} options={imageAttachmentOptions} onChange={(value) => patchDraft({ chatImageAttachments: value as ChatImageAttachmentMode })} />
+              </SettingsGroup>
+            ) : null}
+
             {activeSection === 'appearance' ? (
               <>
-                <section className="settings-card settings-card-hero">
-                  <div>
-                    <h3>Terminal appearance</h3>
-                    <p>Font, scrollback, scrollbar, and theme apply when you press Apply or OK.</p>
-                  </div>
-                  <div className="settings-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>
-                    <span>PS E:\\repo&gt;</span>
-                    <strong style={{ fontWeight: Math.min(900, Math.max(draft.terminalFontWeight, 700)) }}> 한글 │ Nerd Font ✓</strong>
-                  </div>
-                </section>
-
-                <section className="settings-card">
-                  <div className="settings-card-heading">
-                    <div>
-                      <h3>Font</h3>
-                      <p>Installed Windows fonts are loaded from the system registry. D2CodingLigature Nerd Font Mono is preferred for Korean and Nerd Font glyphs.</p>
-                    </div>
-                  </div>
+                <SettingsGroup title="Font" description="Applies to terminal panes and AWT chrome after Apply or OK.">
                   <label>
                     Font family
                     <select value={draft.fontFamily} onChange={(event) => patchDraft({ fontFamily: event.target.value })}>
-                      {fontChoices.map((font) => (
-                        <option key={font} value={font}>{font}</option>
+                      {fontChoices.map((font) => <option key={font} value={font}>{font}</option>)}
+                    </select>
+                  </label>
+                  <div className="awt-settings-grid">
+                    <label>Font size<input type="number" min="8" max="32" value={draft.fontSize} onChange={(event) => patchDraft({ fontSize: Number(event.target.value) })} /></label>
+                    <label>Font weight<select value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })}>{fontWeightOptions.map((weight) => <option key={weight} value={weight}>{weight}</option>)}</select></label>
+                    <label>Cursor style<select value={draft.cursorStyle} onChange={(event) => patchDraft({ cursorStyle: event.target.value as Settings['cursorStyle'] })}>{cursorStyleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+                    <label>UI scale<input type="number" min="0.85" max="1.2" step="0.05" value={draft.uiScale} onChange={(event) => patchDraft({ uiScale: Number(event.target.value) })} /></label>
+                  </div>
+                  <div className="awt-settings-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>PS E:\repo&gt; AWT Agent ready</div>
+                </SettingsGroup>
+                <SettingsGroup title="Theme" description="One palette drives app chrome, settings, tabs, and terminal colors.">
+                  <label>
+                    Theme
+                    <select value={draft.terminalThemeId} onChange={(event) => patchDraft({ terminalThemeId: event.target.value as TerminalThemeId })}>
+                      {terminalThemeGroups.map((group) => (
+                        <optgroup key={group.category} label={group.category}>
+                          {group.themes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}
+                        </optgroup>
                       ))}
                     </select>
                   </label>
-                  <div className="settings-grid-4">
-                    <label>
-                      Font size
-                      <input type="number" min="8" max="32" value={draft.fontSize} onChange={(event) => patchDraft({ fontSize: Number(event.target.value) })} />
-                    </label>
-                    <label>
-                      Font weight
-                      <select value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })}>
-                        {fontWeightOptions.map((weight) => (
-                          <option key={weight} value={weight}>{weight}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Scrollback
-                      <input type="number" min="100" max="200000" step="100" value={draft.scrollback} onChange={(event) => patchDraft({ scrollback: Number(event.target.value) })} />
-                    </label>
-                    <label>
-                      UI scale
-                      <input type="number" min="0.85" max="1.2" step="0.05" value={draft.uiScale} onChange={(event) => patchDraft({ uiScale: Number(event.target.value) })} />
-                    </label>
+                  <div className="awt-theme-preview" style={{ background: selectedTheme.terminal.background, color: selectedTheme.terminal.foreground }}>
+                    <span>{selectedTheme.name}</span>
+                    <small>{selectedTheme.description}</small>
                   </div>
-                  <label className="settings-checkbox">
-                    <input type="checkbox" checked={draft.terminalScrollbarVisible} onChange={(event) => patchDraft({ terminalScrollbarVisible: event.target.checked })} />
-                    <span><strong>Show terminal scrollbars</strong><small>Hide only the visual scrollbar; scrollback remains available.</small></span>
-                  </label>
-                </section>
+                </SettingsGroup>
               </>
             ) : null}
 
-            {activeSection === 'layout' ? (
-              <section className="settings-card">
-                <h3>Pane layout</h3>
-                <div className="settings-grid-4">
-                  <label>
-                    Snap distance
-                    <input type="number" min="0" max="128" step="1" value={draft.resizeSnapTolerance} onChange={(event) => patchDraft({ resizeSnapTolerance: Number(event.target.value) })} />
-                  </label>
-                  <label>
-                    Header height
-                    <input type="number" min="24" max="56" step="1" value={draft.paneHeaderHeight} onChange={(event) => patchDraft({ paneHeaderHeight: Number(event.target.value) })} />
-                  </label>
-                </div>
-              </section>
-            ) : null}
-
-            {activeSection === 'profiles' && editingProfile ? (
-              <section className="settings-card profile-editor-card">
-                <div className="settings-card-heading">
-                  <div>
-                    <h3>Profiles</h3>
-                    <p>Create local shell, SSH remote terminal, or arbitrary command profiles. New panes use the active topbar profile.</p>
-                  </div>
-                  <div className="profile-actions">
-                    <button type="button" onClick={() => addProfile('local')}>Add local</button>
-                    <button type="button" onClick={() => addProfile('ssh')}>Add SSH</button>
-                    <button type="button" onClick={() => addProfile('command')}>Add command</button>
-                  </div>
-                </div>
-
-                <div className="profile-editor">
-                  <div className="profile-list" aria-label="Terminal profiles">
-                    {draft.profiles.map((profile) => (
-                      <button key={profile.id} type="button" className={profile.id === editingProfile.id ? 'selected' : ''} onClick={() => setEditingProfileId(profile.id)}>
-                        <span className="profile-list-icon" style={{ color: profile.color }}><ProfileIcon name={profile.icon} size={18} /></span>
-                        <span>
-                          <strong>{profile.name}</strong>
-                          <small>{profileKindLabels[profile.type]}{profile.id === draft.defaultProfileId ? ' · default' : ''}</small>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="profile-form">
-                    <div className="settings-grid-4">
-                      <label>
-                        Name
-                        <input value={editingProfile.name} onChange={(event) => updateProfile(editingProfile.id, { name: event.target.value })} />
-                      </label>
-                      <label>
-                        Type
-                        <select value={editingProfile.type} onChange={(event) => updateProfile(editingProfile.id, { type: event.target.value as ProfileKind })}>
-                          <option value="local">Local shell</option>
-                          <option value="ssh">SSH remote</option>
-                          <option value="command">Command</option>
-                        </select>
-                      </label>
-                      <label>
-                        Color
-                        <input type="color" value={editingProfile.color} onChange={(event) => updateProfile(editingProfile.id, { color: event.target.value })} />
-                      </label>
-                    </div>
-                    <div className="icon-picker">
-                      <span className="icon-picker-label">Icon</span>
-                      <div className="icon-picker-grid">
-                        {profileIconNames.map((name) => (
-                          <button
-                            key={name}
-                            type="button"
-                            className={editingProfile.icon === name ? 'selected' : ''}
-                            style={editingProfile.icon === name ? { color: editingProfile.color } : undefined}
-                            title={name}
-                            aria-label={name}
-                            onClick={() => updateProfile(editingProfile.id, { icon: name })}
-                          >
-                            <ProfileIcon name={name} size={16} />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="settings-grid-3">
-                      <label>
-                        Working directory
-                        <input value={editingProfile.cwd ?? ''} placeholder="Session folder or default" onChange={(event) => updateProfile(editingProfile.id, { cwd: event.target.value.trim() || null })} />
-                      </label>
-                      <button type="button" className="secondary-action" onClick={() => patchDraft({ defaultProfileId: editingProfile.id })}>Set as default</button>
-                      <button type="button" className="secondary-action danger" disabled={draft.profiles.length <= 1} onClick={() => deleteProfile(editingProfile.id)}>Delete profile</button>
-                    </div>
-
-                    {editingProfile.type === 'local' ? (
-                      <div className="profile-fieldset">
-                        <h4>Local shell</h4>
-                        <div className="settings-grid-3">
-                          <label>
-                            Executable
-                            <input value={editingProfile.shell ?? ''} placeholder="Default shell" onChange={(event) => updateProfile(editingProfile.id, { shell: event.target.value.trim() || null })} />
-                          </label>
-                          <label>
-                            Arguments
-                            <input key={editingProfile.id} defaultValue={joinCommandLine(editingProfile.args)} placeholder="--flag value" onChange={(event) => updateProfile(editingProfile.id, { args: splitCommandLine(event.target.value) })} />
-                          </label>
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {editingProfile.type === 'ssh' ? (
-                      <div className="profile-fieldset">
-                        <h4>SSH remote terminal</h4>
-                        <div className="settings-grid-4">
-                          <label>
-                            Host
-                            <input value={editingProfile.sshHost} placeholder="server.example.com" onChange={(event) => updateProfile(editingProfile.id, { sshHost: event.target.value })} />
-                          </label>
-                          <label>
-                            User
-                            <input value={editingProfile.sshUser} placeholder="optional" onChange={(event) => updateProfile(editingProfile.id, { sshUser: event.target.value })} />
-                          </label>
-                          <label>
-                            Port
-                            <input type="number" min="1" max="65535" value={editingProfile.sshPort ?? ''} placeholder="22" onChange={(event) => updateProfile(editingProfile.id, { sshPort: readPortInput(event.target.value) })} />
-                          </label>
-                          <label>
-                            Identity file
-                            <input value={editingProfile.sshIdentityFile ?? ''} placeholder="C:\\Users\\me\\.ssh\\id_ed25519" onChange={(event) => updateProfile(editingProfile.id, { sshIdentityFile: event.target.value.trim() || null })} />
-                          </label>
-                        </div>
-                        <label>
-                          Extra SSH options
-                          <input value={editingProfile.sshOptions} placeholder="-o ServerAliveInterval=30" onChange={(event) => updateProfile(editingProfile.id, { sshOptions: event.target.value })} />
-                        </label>
-                        <label>
-                          Remote folder
-                          <input value={editingProfile.sshRemoteCwd ?? ''} placeholder="/home/me/project" onChange={(event) => updateProfile(editingProfile.id, { sshRemoteCwd: event.target.value.trim() || null })} />
-                        </label>
-                        <label>
-                          Remote command
-                          <textarea rows={2} value={editingProfile.sshRemoteCommand} placeholder="tmux attach || tmux" onChange={(event) => updateProfile(editingProfile.id, { sshRemoteCommand: event.target.value })} />
-                        </label>
-                        <label className="settings-checkbox">
-                          <input type="checkbox" checked={editingProfile.sshAllocateTty} onChange={(event) => updateProfile(editingProfile.id, { sshAllocateTty: event.target.checked })} />
-                          <span><strong>Allocate a remote TTY</strong><small>Adds -t so remote shells and tmux behave like terminals.</small></span>
-                        </label>
-                      </div>
-                    ) : null}
-
-                    {editingProfile.type === 'command' ? (
-                      <div className="profile-fieldset">
-                        <h4>Startup command</h4>
-                        <label>
-                          Command line
-                          <textarea rows={2} value={editingProfile.command} placeholder="pnpm dev" onChange={(event) => updateProfile(editingProfile.id, { command: event.target.value })} />
-                        </label>
-                      </div>
-                    ) : null}
-
-                    <label>
-                      Environment
-                      <textarea rows={4} value={formatEnv(editingProfile.env)} placeholder="NAME=value" onChange={(event) => updateProfile(editingProfile.id, { env: parseEnv(event.target.value) })} />
-                    </label>
-                  </div>
-                </div>
-              </section>
-            ) : null}
-
-            {activeSection === 'theme' ? (
-              <section className="settings-card">
-                <h3>Theme</h3>
-                <p>Choose one palette for app chrome, settings, and pane tabs. Terminal panes keep the Codex/Claude-friendly dark palette.</p>
-                <label>
-                  Theme
-                  <select value={draft.terminalThemeId} onChange={(event) => patchDraft({ terminalThemeId: event.target.value as TerminalThemeId })}>
-                    {terminalThemeGroups.map((group) => (
-                      <optgroup key={group.category} label={group.category}>
-                        {group.themes.map((theme) => (
-                          <option key={theme.id} value={theme.id}>{theme.name}</option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </label>
-                <ThemePreview theme={selectedTheme.terminal} name={selectedTheme.name} description={selectedTheme.description} />
-              </section>
-            ) : null}
-
-            {activeSection === 'keybindings' ? (
-              <section className="settings-card">
-                <div className="settings-card-heading">
-                  <div>
-                    <h3>Keybindings</h3>
-                    <p>Click a shortcut field, press the new key combination, then Apply or OK.</p>
-                  </div>
-                  <button type="button" onClick={() => patchDraft({ keybindings: { ...defaultKeybindings } })}>Reset</button>
-                </div>
-                <div className="keybinding-list">
-                  {keybindingDefinitions.map((definition) => (
-                    <div key={definition.id} className="keybinding-row">
-                      <div>
-                        <strong>{definition.label}</strong>
-                        <span>{definition.description}</span>
-                      </div>
-                      <input
-                        aria-label={`${definition.label} shortcut`}
-                        value={draft.keybindings[definition.id]}
-                        onChange={(event) => updateKeybinding(definition.id, event.target.value)}
-                        onKeyDown={(event) => {
-                          event.preventDefault()
-                          event.stopPropagation()
-                          updateKeybinding(definition.id, eventToKeyChord(event.nativeEvent))
-                        }}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ) : null}
-            {activeSection === 'capture' ? (
-              <section className="settings-card">
-                <div className="settings-card-heading">
-                  <div>
-                    <h3>Capture</h3>
-                    <p>Choose where screenshots and recordings are saved, and optionally pin the ffmpeg executable used for video capture.</p>
-                  </div>
-                </div>
-                <div className="settings-grid-3">
-                  <label>
-                    Capture folder
-                    <input
-                      value={draft.captureDir}
-                      placeholder={defaultDir || 'Default capture folder'}
-                      onChange={(event) => patchDraft({ captureDir: event.target.value })}
-                    />
-                  </label>
-                  <button type="button" className="secondary-action" disabled={captureFolderBusy} onClick={() => void browseCaptureDir()}>
-                    {captureFolderBusy ? 'Browsing…' : 'Browse'}
-                  </button>
-                </div>
-                {!draft.captureDir && defaultDir ? <p>{`Default: ${defaultDir}\\Images and \\Video`}</p> : null}
-                <div className="settings-grid-3">
-                  <label>
-                    ffmpeg path
-                    <input
-                      value={draft.captureFfmpegPath}
-                      placeholder="ffmpeg on PATH"
-                      onChange={(event) => {
-                        patchDraft({ captureFfmpegPath: event.target.value })
-                        setFfmpegTestStatus('idle')
-                        setFfmpegTestMessage('')
-                      }}
-                    />
-                  </label>
-                  <button type="button" className="secondary-action" disabled={ffmpegTestStatus === 'testing'} onClick={() => void testFfmpeg()}>
-                    {ffmpegTestStatus === 'testing' ? 'Testing…' : 'Test'}
-                  </button>
-                  {ffmpegTestMessage ? <p role="status" aria-live="polite">{ffmpegTestStatus === 'ok' ? 'OK' : ffmpegTestMessage}</p> : null}
-                </div>
-              </section>
-            ) : null}
-
-            {activeSection === 'hermes' ? (
+            {activeSection === 'workspace' ? (
               <>
-                <section className="settings-card">
-                  <div className="settings-card-heading">
-                    <div>
-                      <h3>Workspace agent{activeSession ? ` — ${activeSession.name}` : ''}</h3>
-                      <p>This workspace uses native Hermes model and auth configuration. Use Orchestrator → Configure model &amp; login to change provider, login, or model.</p>
-                    </div>
+                <SettingsGroup title="Layout" description="Controls workspace window panes, tab height, and terminal restore behavior.">
+                  <div className="awt-settings-grid">
+                    <label>Pane header height<input type="number" min="24" max="56" value={draft.paneHeaderHeight} onChange={(event) => patchDraft({ paneHeaderHeight: Number(event.target.value) })} /></label>
+                    <label>Resize snap<input type="number" min="0" max="128" value={draft.resizeSnapTolerance} onChange={(event) => patchDraft({ resizeSnapTolerance: Number(event.target.value) })} /></label>
+                    <label>Scrollback<input type="number" min="100" max="200000" step="100" value={draft.scrollback} onChange={(event) => patchDraft({ scrollback: Number(event.target.value) })} /></label>
                   </div>
-                  {activeSessionId ? (
-                    <div className="settings-grid-3">
-                      <div className="settings-status">
-                        <strong>{workspaceModel ? `${workspaceModel.provider} / ${workspaceModel.model}` : 'Not configured — use Orchestrator → Configure model & login'}</strong>
-                        <span>{workspaceModel?.baseUrl || 'Native Hermes config.yaml'}</span>
-                        <small>HERMES_HOME: {agentHome || 'resolving…'}</small>
-                      </div>
-                    </div>
-                  ) : <p>Open a workspace to inspect its agent.</p>}
-                </section>
-
-                <section className="settings-card">
-                  <div className="settings-card-heading">
-                    <div>
-                      <h3>Hermes runtime</h3>
-                      <p>AWT uses Hermes ACP for the chat UI. The managed runtime is installed under app data; Orchestrator shows the exact Hermes CLI and workspace HERMES_HOME paths.</p>
-                    </div>
-                    <button type="button" onClick={installHermesRuntime} disabled={hermesRuntimeBusy}>
-                      {hermesRuntimeBusy ? 'Installing…' : 'Install / update Hermes runtime'}
-                    </button>
+                  <SettingsToggle label="Show terminal scrollbars" checked={draft.terminalScrollbarVisible} onChange={(checked) => patchDraft({ terminalScrollbarVisible: checked })} />
+                  <SettingsToggle label="Keep terminals alive after window close" checked={draft.keepTerminalsAliveOnClose} onChange={(checked) => patchDraft({ keepTerminalsAliveOnClose: checked })} />
+                </SettingsGroup>
+                <SettingsGroup title="Profiles" description="Create local shell, command, and SSH terminal profiles.">
+                  <div className="awt-profile-toolbar">
+                    <button type="button" onClick={addProfile}>Add profile</button>
                   </div>
-                  <div className="settings-grid-4">
-                    <label>
-                      hermes-acp command override
-                      <input
-                        value={draft.hermesCommand}
-                        placeholder="hermes-acp"
-                        onChange={(event) => patchDraft({ hermesCommand: event.target.value })}
-                      />
-                    </label>
-                    <div className="settings-status">
-                      <strong>{hermesRuntime?.installed ? 'Installed' : 'Not installed'}</strong>
-                      <span>{hermesRuntime?.command ?? 'hermes-acp'}</span>
-                      {hermesRuntime?.version ? <small>{hermesRuntime.version}</small> : null}
-                      {hermesRuntimeMessage ? <small>{hermesRuntimeMessage}</small> : null}
-                    </div>
+                  <div className="awt-profile-list">
+                    {draft.profiles.map((profile) => {
+                      const isExpanded = expandedProfileId === profile.id
+                      const isDefault = profile.id === draft.defaultProfileId
+                      const deleteDisabled = !canDeleteProfile(draft, profile.id)
+                      return (
+                        <section key={profile.id} className="awt-profile-card">
+                          <div className="awt-profile-row">
+                            <button type="button" className="awt-profile-summary" aria-expanded={isExpanded} onClick={() => setExpandedProfileId(isExpanded ? null : profile.id)}>
+                              <ProfileIcon name={profile.icon} color={profile.color} size={16} />
+                              <span className="awt-profile-name">{profile.name || profile.id}</span>
+                              <span className="awt-profile-type-badge">{profileKindLabels[profile.type]}</span>
+                            </button>
+                            <button type="button" onClick={() => patchDraft({ defaultProfileId: profile.id })} disabled={isDefault}>{isDefault ? 'Default' : 'Set default'}</button>
+                            <button type="button" onClick={() => deleteProfile(profile.id)} disabled={deleteDisabled} title={deleteDisabled ? 'At least one profile is required' : 'Delete profile'}>Delete</button>
+                          </div>
+                          {isExpanded ? (
+                            <div className="awt-profile-editor">
+                              <div className="awt-settings-grid">
+                                <label>Name<input value={profile.name} onChange={(event) => updateProfile(profile.id, { name: event.target.value })} /></label>
+                                <label>
+                                  Type
+                                  <select value={profile.type} onChange={(event) => changeProfileType(profile, event.target.value as ProfileKind)}>
+                                    {profileKindOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                                  </select>
+                                </label>
+                                <label>
+                                  Icon
+                                  <span className="awt-profile-icon-field">
+                                    <ProfileIcon name={profile.icon} color={profile.color} size={16} />
+                                    <select value={profile.icon} onChange={(event) => updateProfile(profile.id, { icon: event.target.value })}>
+                                      {profileIconNames.map((iconName) => <option key={iconName} value={iconName}>{iconName}</option>)}
+                                    </select>
+                                  </span>
+                                </label>
+                                <label>Color<input type="color" value={profile.color} onChange={(event) => updateProfile(profile.id, { color: event.target.value })} /></label>
+                              </div>
+                              {profile.type === 'local' ? (
+                                <div className="awt-settings-grid">
+                                  <label>Shell<input value={profile.shell ?? ''} placeholder="pwsh.exe" onChange={(event) => updateProfile(profile.id, { shell: event.target.value || null })} /></label>
+                                  <label>Arguments<input value={joinCommandLine(profile.args)} placeholder="-NoLogo" onChange={(event) => updateProfile(profile.id, { args: splitCommandLine(event.target.value) })} /></label>
+                                  <label>Working directory<input value={profile.cwd ?? ''} placeholder="Optional local cwd" onChange={(event) => updateProfile(profile.id, { cwd: event.target.value || null })} /></label>
+                                </div>
+                              ) : null}
+                              {profile.type === 'command' ? (
+                                <label className="awt-profile-field-wide">Command line<input value={profile.command} placeholder="pnpm dev" onChange={(event) => updateProfile(profile.id, { command: event.target.value })} /></label>
+                              ) : null}
+                              {profile.type === 'ssh' ? (
+                                <div className="awt-profile-editor-grid">
+                                  <label>Host<input value={profile.sshHost} placeholder="100.98.54.122" onChange={(event) => updateProfile(profile.id, { sshHost: event.target.value })} /></label>
+                                  <label>User<input value={profile.sshUser} placeholder="js" onChange={(event) => updateProfile(profile.id, { sshUser: event.target.value })} /></label>
+                                  <label>Port<input type="number" min="1" max="65535" value={profile.sshPort ?? ''} placeholder="22" onChange={(event) => updateSshPort(profile.id, event.target.value)} /></label>
+                                  <label>Identity file<input value={profile.sshIdentityFile ?? ''} placeholder="C:\\Users\\js\\.ssh\\id_ed25519" onChange={(event) => updateProfile(profile.id, { sshIdentityFile: event.target.value || null })} /></label>
+                                  <label>Remote cwd default<input value={profile.sshRemoteCwd ?? ''} placeholder="/home/js/projects/app" onChange={(event) => updateProfile(profile.id, { sshRemoteCwd: event.target.value || null })} /></label>
+                                  <label>Remote command<input value={profile.sshRemoteCommand} placeholder={'exec "${SHELL:-sh}" -l'} onChange={(event) => updateProfile(profile.id, { sshRemoteCommand: event.target.value })} /></label>
+                                  <label className="awt-profile-field-wide">Extra SSH options<input value={profile.sshOptions} placeholder="-o ServerAliveInterval=30" onChange={(event) => updateProfile(profile.id, { sshOptions: event.target.value })} /></label>
+                                  <label className="awt-settings-toggle awt-profile-toggle"><span>Allocate TTY (-t)</span><input type="checkbox" checked={profile.sshAllocateTty} onChange={(event) => updateProfile(profile.id, { sshAllocateTty: event.target.checked })} /></label>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </section>
+                      )
+                    })}
                   </div>
-                </section>
-
-                <section className="settings-card">
-                  <div className="settings-card-heading">
-                    <div>
-                      <h3>Messaging gateway</h3>
-                      {activeSessionId ? <p>Configure messaging for {activeSession?.name ?? 'the active workspace'}.</p> : <p>Open a workspace to configure its messaging gateway.</p>}
-                    </div>
-                  </div>
-                  {activeSessionId ? <HermesGatewayForm sessionId={activeSessionId} /> : null}
-                </section>
-
+                </SettingsGroup>
               </>
             ) : null}
-          </div>
-        </div>
 
-        <footer className="settings-dialog-footer">
-          <span>Changes are staged until Apply or OK.</span>
-          <div className="settings-dialog-footer-actions">
-            <button type="button" className="secondary-action" onClick={onClose}>Cancel</button>
-            <button type="button" className="secondary-action" onClick={apply}>Apply</button>
-            <button type="button" className="primary-action" onClick={ok}>OK</button>
+            {activeSection === 'safety' ? (
+              <SettingsGroup title="Safety" description="AWT follows workspace-scoped process and agent safety rules.">
+                <SettingsToggle label="Scoped process cleanup only" checked />
+                <ReadonlyRow label="Policy" value="Never kill broad process image names; prove exact workspace ownership first." />
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'memory' ? (
+              <SettingsGroup title="Memory & Context" description="Native Hermes manages durable memory and compression.">
+                <SettingsToggle label="Persistent memory" checked />
+                <SettingsToggle label="Auto-compression" checked />
+                <ReadonlyRow label="Context engine" value="Native Hermes / compressor" />
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'voice' ? (
+              <SettingsGroup title="Voice" description="Voice controls are reserved for a future AWT Agent provider.">
+                <SettingsToggle label="Voice input" checked={false} disabled />
+                <SettingsToggle label="Voice output" checked={false} disabled />
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'advanced' ? (
+              <>
+                <SettingsGroup title="Capture" description="Screenshots use the capture folder; recordings auto-download ffmpeg on first use unless you set an override path.">
+                  <label>Capture folder<input value={draft.captureDir} placeholder={defaultCaptureDir || 'Default capture folder'} onChange={(event) => patchDraft({ captureDir: event.target.value })} /></label>
+                  <button type="button" onClick={() => void browseCaptureDir()}>Browse</button>
+                  <label>ffmpeg path<input value={draft.captureFfmpegPath} placeholder="ffmpeg on PATH" onChange={(event) => patchDraft({ captureFfmpegPath: event.target.value })} /></label>
+                  <button type="button" onClick={() => void testFfmpeg()}>Test ffmpeg</button>
+                  {ffmpegStatus ? <ReadonlyRow label="ffmpeg" value={ffmpegStatus} /> : null}
+                </SettingsGroup>
+                <SettingsGroup title="Keybindings" description="Click a shortcut field and press the new combination.">
+                  <button type="button" onClick={() => patchDraft({ keybindings: { ...defaultKeybindings } })}>Reset keybindings</button>
+                  <div className="awt-keybinding-list">
+                    {keybindingDefinitions.map((definition) => (
+                      <label key={definition.id}>
+                        {definition.label}
+                        <input
+                          value={draft.keybindings[definition.id]}
+                          onChange={(event) => updateKeybinding(definition.id, event.target.value)}
+                          onKeyDown={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            updateKeybinding(definition.id, eventToKeyChord(event.nativeEvent))
+                          }}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </SettingsGroup>
+              </>
+            ) : null}
+
+            {activeSection === 'messaging' ? (
+              <SettingsGroup title="Messaging" description="Choose the chat platform that can deliver prompts to AWT Agent for this workspace.">
+                {activeSessionId ? <HermesGatewayForm sessionId={activeSessionId} /> : <p>Open a workspace to configure messaging.</p>}
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'apiKeys' ? (
+              <SettingsGroup title="API Keys" description="AWT does not store provider API keys. Native Hermes auth remains the source of truth.">
+                <button type="button" disabled={!activeSessionId || authBusy} onClick={() => void refreshAuthList()}><RefreshCw size={14} /> Refresh auth list</button>
+                <pre className="awt-settings-pre">{authList || 'No auth list loaded.'}</pre>
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'mcp' ? (
+              <SettingsGroup title="MCP servers" description="AWT injects only its workspace MCP bridge into native Hermes config.">
+                <ReadonlyRow label="Server" value="awt" />
+                <ReadonlyRow label="Command" value="app.exe mcp serve" mono />
+                <ReadonlyRow label="Scope" value={activeSessionId ? `AWT_SESSION_ID=${activeSessionId}` : 'Open a workspace'} mono />
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'archived' ? (
+              <SettingsGroup title="Archived Chats" description="Archived agent chats remain in native Hermes state.db.">
+                <ReadonlyRow label="Management" value="Use the AWT Agent session list to remove or resume sessions." />
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'about' ? (
+              <SettingsGroup title="About" description="Agentic Workspace Terminal">
+                <ReadonlyRow label="Product" value="AWT Agent / Agentic Workspace Terminal" />
+                <ReadonlyRow label="Runtime" value={runtime?.version ?? 'Unknown'} mono />
+              </SettingsGroup>
+            ) : null}
           </div>
-        </footer>
+
+          <footer className="awt-settings-footer">
+            <span>Changes are staged until Apply or OK.</span>
+            <div>
+              <button type="button" className="secondary-action" onClick={onClose}>Cancel</button>
+              <button type="button" className="secondary-action" onClick={apply}>Apply</button>
+              <button type="button" className="primary-action" onClick={ok}>OK</button>
+            </div>
+          </footer>
+        </main>
       </section>
     </div>
   )
 }
 
-
-function ThemePreview({ theme, name, description }: { theme: RequiredTerminalTheme; name: string; description: string }) {
+function SettingsGroup({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return (
-    <div className="theme-preview-panel" style={{ background: theme.background, color: theme.foreground, borderColor: theme.selectionBackground }}>
-      <div className="theme-preview-header">
-        <span className="theme-preview-swatch" style={{ background: theme.background, color: theme.foreground, borderColor: theme.cursor }}>Aa</span>
-        <span>
-          <strong>{name}</strong>
-          <small>{description}</small>
-        </span>
-      </div>
-      <div className="theme-preview-terminal" style={{ background: theme.background, color: theme.foreground }}>
-        <span style={{ color: theme.cursor }}>PS E:\repo&gt;</span>
-        <strong> pnpm test</strong>
-        <small style={{ color: theme.brightBlack }}> 24 palettes loaded</small>
-      </div>
-      <div className="theme-preview-colors" aria-hidden="true">
-        {themePreviewAnsiKeys.map((key) => (
-          <span key={key} style={{ background: theme[key] }} />
-        ))}
-      </div>
+    <section className="awt-settings-group">
+      <header>
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </header>
+      <div className="awt-settings-group-body">{children}</div>
+    </section>
+  )
+}
+
+function ReadonlyRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="awt-settings-row">
+      <span>{label}</span>
+      <strong className={mono ? 'mono' : undefined}>{value}</strong>
     </div>
   )
 }
 
-function createProfile(type: ProfileKind, existing: Profile[]): Profile {
-  const id = nextProfileId(type, existing)
-  return {
-    id,
-    name: type === 'ssh' ? 'SSH' : type === 'command' ? 'Command' : 'Shell',
-    type,
-    shell: null,
-    args: [],
-    command: '',
-    sshHost: '',
-    sshUser: '',
-    sshPort: null,
-    sshIdentityFile: null,
-    sshRemoteCommand: '',
-    sshRemoteCwd: null,
-    sshOptions: '',
-    sshAllocateTty: true,
-    env: [],
-    cwd: null,
-    color: type === 'ssh' ? '#76e3ea' : type === 'command' ? '#f2cc60' : '#7ee787',
-    icon: type === 'ssh' ? 'radio-tower' : type === 'command' ? 'play' : 'terminal',
-  }
+function SettingsToggle({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange?: (checked: boolean) => void }) {
+  return (
+    <label className="awt-settings-toggle">
+      <span>{label}</span>
+      <input type="checkbox" checked={checked} disabled={disabled || !onChange} onChange={(event) => onChange?.(event.target.checked)} />
+    </label>
+  )
 }
 
-function nextProfileId(type: ProfileKind, existing: Profile[]): string {
-  const base = type === 'local' ? 'profile' : type
-  let id = base
-  let suffix = 2
-  while (existing.some((profile) => profile.id === id)) {
-    id = `${base}-${suffix}`
-    suffix += 1
-  }
-  return id
+function SettingsSelect({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: string
+  options: { value: string; label: string }[]
+  disabled?: boolean
+  onChange: (value: string) => void
+}) {
+  return (
+    <label>
+      {label}
+      <span className="awt-settings-select-shell">
+        <select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+          {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+        <ChevronDown size={14} />
+      </span>
+    </label>
+  )
 }
 
-function readPortInput(value: string): number | null {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) return null
-  const port = Number(trimmed)
-  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
-}
-
-function formatEnv(env: [string, string][]): string {
-  return env.map(([key, value]) => `${key}=${value}`).join('\n')
-}
-
-function parseEnv(value: string): [string, string][] {
-  return value.split(/\r?\n/).flatMap((line) => {
-    const separator = line.indexOf('=')
-    if (separator <= 0) return []
-    const key = line.slice(0, separator).trim()
-    if (key.length === 0) return []
-    return [[key, line.slice(separator + 1)] as [string, string]]
-  })
+function quotePowerShellString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
 }

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useWorkspaceStore } from '../state/store'
+import { isAgentPane } from '../state/profiles'
 
 type TaskCreateDialogProps = {
   sessionId: string
@@ -9,9 +10,9 @@ type TaskCreateDialogProps = {
 export function TaskCreateDialog({ sessionId, onClose }: TaskCreateDialogProps) {
   const createTask = useWorkspaceStore((state) => state.createTask)
   const panesRecord = useWorkspaceStore((state) => state.panes)
-  const paneRoles = useWorkspaceStore((state) => state.settings.paneRoles)
+  const settings = useWorkspaceStore((state) => state.settings)
   const assignTask = useWorkspaceStore((state) => state.assignTask)
-  const panes = useMemo(() => Object.values(panesRecord).filter((pane) => pane.alive), [panesRecord])
+  const panes = useMemo(() => Object.values(panesRecord).filter((pane) => pane.alive && isAgentPane(pane, settings)), [panesRecord, settings])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [targetPaneId, setTargetPaneId] = useState('')
@@ -39,9 +40,9 @@ export function TaskCreateDialog({ sessionId, onClose }: TaskCreateDialogProps) 
         <label>
           Assign to terminal
           <select value={targetPaneId} onChange={(event) => setTargetPaneId(event.target.value)}>
-            <option value="">Leave in 대기중 (no terminal)</option>
+            <option value="">Leave in Pending</option>
             {panes.map((pane) => (
-              <option key={pane.id} value={pane.id}>{paneRoles[pane.id] ?? 'No role'} · {pane.config.title ?? 'Shell'}</option>
+              <option key={pane.id} value={pane.id}>{settings.paneRoles[pane.id] ?? 'No role'} · {pane.config.title ?? 'Agent'}</option>
             ))}
           </select>
         </label>

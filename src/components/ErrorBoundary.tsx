@@ -1,12 +1,28 @@
-import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { Component, type CSSProperties, type ErrorInfo, type ReactNode } from 'react'
 
 type ErrorBoundaryProps = {
   children: ReactNode
-  fallback: (error: Error) => ReactNode
+  fallback?: (error: Error) => ReactNode
+  label?: string
 }
 
 type ErrorBoundaryState = {
   error: Error | null
+}
+
+const fallbackStyle: CSSProperties = {
+  display: 'grid',
+  gap: 6,
+  alignContent: 'start',
+  padding: 12,
+  color: 'var(--awt-text)',
+  background: 'var(--awt-panel)',
+  font: '12px/1.4 var(--awt-sans)',
+}
+
+const fallbackMessageStyle: CSSProperties = {
+  color: 'var(--awt-muted)',
+  overflowWrap: 'anywhere',
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
@@ -21,7 +37,17 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   render(): ReactNode {
-    if (this.state.error) return this.props.fallback(this.state.error)
+    if (this.state.error) return this.props.fallback?.(this.state.error) ?? this.renderDefaultFallback(this.state.error)
     return this.props.children
+  }
+
+  private renderDefaultFallback(error: Error): ReactNode {
+    const label = this.props.label ?? 'Panel'
+    return (
+      <div role="alert" style={fallbackStyle}>
+        <strong>{label} crashed</strong>
+        <span style={fallbackMessageStyle}>{error.message || String(error)}</span>
+      </div>
+    )
   }
 }

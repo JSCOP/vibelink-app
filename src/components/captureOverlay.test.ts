@@ -77,6 +77,12 @@ describe('captureFileName', () => {
 
     expect(captureFileName('image', d)).toBe('capture-20260102-030405.png')
   })
+
+  it('formats quick capture names as image files', () => {
+    const d = new Date(2026, 0, 2, 3, 4, 5)
+
+    expect(captureFileName('quick', d)).toBe('capture-20260102-030405.png')
+  })
 })
 
 describe('applyCaptureOverlayTransparency', () => {

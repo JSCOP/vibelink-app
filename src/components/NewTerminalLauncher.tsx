@@ -1,37 +1,93 @@
 import { Grid3X3, Plus } from 'lucide-react'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { TEMPLATES } from '../layout/templates'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { Profile } from '../state/profiles'
+import { clampGridCols, clampGridRows, defaultTerminalGridSelection, displayGridSize, occupiedGridForPaneCount, selectedNewPaneCount, terminalGridCellState, terminalGridSelectionFromCell, terminalGridSelectionFromDimensions, terminalOccupancyGridCellState, type GridSize, type TerminalOccupancyGrid } from './newTerminalGrid'
 
 type LaunchRequest = {
-  templateId?: string
   cols: number
   rows: number
+  occupiedGrid?: GridSize
+  profileId?: string | null
 }
 
 type NewTerminalLauncherProps = {
   isOpen: boolean
   disabled?: boolean
+  existingPaneCount: number
+  profiles: Profile[]
+  activeProfileId: string
+  preferredGrid?: GridSize | null
+  occupancyMatrix?: TerminalOccupancyGrid | null
   onToggle: () => void
   onClose: () => void
   onLaunch: (request: LaunchRequest) => void
+  onSelectionCommit?: (selection: GridSize) => void
 }
 
-export function NewTerminalLauncher({ isOpen, disabled, onToggle, onClose, onLaunch }: NewTerminalLauncherProps) {
+type SelectionState = {
+  key: string
+  grid: GridSize
+}
+
+function selectionStateKey(paneCount: number, preferred?: GridSize | null, occupancyMatrix?: TerminalOccupancyGrid | null): string {
+  const matrixKey = occupancyMatrix
+    ? `${occupancyMatrix.cols}:${occupancyMatrix.rows}:${occupancyMatrix.cells.map((row) => row.map((cell) => (cell ? '1' : '0')).join('')).join('/')}`
+    : 'none'
+  return `${Math.max(0, Math.floor(Number.isFinite(paneCount) ? paneCount : 0))}:${preferred?.cols ?? 0}:${preferred?.rows ?? 0}:${matrixKey}`
+}
+
+export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, preferredGrid = null, occupancyMatrix = null, profiles, activeProfileId, onToggle, onClose, onLaunch, onSelectionCommit }: NewTerminalLauncherProps) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
-  const [cols, setCols] = useState(2)
-  const [rows, setRows] = useState(2)
+  const [occupiedPreference, setOccupiedPreference] = useState<GridSize | null>(() => preferredGrid)
+  const [selectionState, setSelectionState] = useState<SelectionState>(() => ({
+    key: selectionStateKey(existingPaneCount, preferredGrid, occupancyMatrix),
+    grid: occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : defaultTerminalGridSelection(existingPaneCount, preferredGrid),
+  }))
+  const [previewSelection, setPreviewSelection] = useState<GridSize | null>(null)
+  const [isPointerSelecting, setIsPointerSelecting] = useState(false)
+  const [selectedProfileId, setSelectedProfileId] = useState(activeProfileId)
   const [popoverPosition, setPopoverPosition] = useState({ top: 42, right: 12 })
+  const occupied = useMemo(
+    () => occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : occupiedGridForPaneCount(existingPaneCount, occupiedPreference),
+    [existingPaneCount, occupancyMatrix, occupiedPreference],
+  )
+  const currentSelectionKey = selectionStateKey(existingPaneCount, occupiedPreference, occupancyMatrix)
+  const selection = selectionState.key === currentSelectionKey
+    ? selectionState.grid
+    : occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : defaultTerminalGridSelection(existingPaneCount, occupiedPreference)
+  const display = useMemo(() => displayGridSize(), [])
+  const visibleSelection = previewSelection ?? selection
+  const newPaneCount = selectedNewPaneCount(existingPaneCount, selection)
+  const effectiveProfileId = profiles.some((profile) => profile.id === selectedProfileId) ? selectedProfileId : activeProfileId
+  const closeLauncher = useCallback(() => {
+    setIsPointerSelecting(false)
+    setPreviewSelection(null)
+    onClose()
+  }, [onClose])
 
   useEffect(() => {
     if (!isOpen) return
     const onPointerDown = (event: PointerEvent) => {
       if (rootRef.current?.contains(event.target as Node | null)) return
-      onClose()
+      closeLauncher()
     }
     window.addEventListener('pointerdown', onPointerDown)
     return () => window.removeEventListener('pointerdown', onPointerDown)
-  }, [isOpen, onClose])
+  }, [closeLauncher, isOpen])
+  useEffect(() => {
+    if (!isOpen) return
+    const endPointerSelection = () => {
+      setIsPointerSelecting(false)
+      setPreviewSelection(null)
+    }
+    window.addEventListener('pointerup', endPointerSelection)
+    window.addEventListener('pointercancel', endPointerSelection)
+    return () => {
+      window.removeEventListener('pointerup', endPointerSelection)
+      window.removeEventListener('pointercancel', endPointerSelection)
+    }
+  }, [isOpen])
 
   useLayoutEffect(() => {
     if (!isOpen) return
@@ -50,51 +106,117 @@ export function NewTerminalLauncher({ isOpen, disabled, onToggle, onClose, onLau
     return () => window.removeEventListener('resize', updatePosition)
   }, [isOpen])
 
-  const launchCustom = () => {
-    onLaunch({ cols: clampGridValue(cols), rows: clampGridValue(rows) })
+
+  const selectionFromCell = (col: number, row: number) => terminalGridSelectionFromCell(occupied, col, row)
+  const previewCell = (col: number, row: number, commit = false) => {
+    const next = selectionFromCell(col, row)
+    setPreviewSelection(next)
+    if (commit) commitSelection(next)
+  }
+  const commitSelection = (next: GridSize) => {
+    setSelectionState({ key: currentSelectionKey, grid: next })
+    onSelectionCommit?.(next)
+  }
+
+  const commitCell = (col: number, row: number) => {
+    const next = selectionFromCell(col, row)
+    setIsPointerSelecting(true)
+    setPreviewSelection(next)
+    commitSelection(next)
+  }
+  const clearCellPreview = () => {
+    if (!isPointerSelecting) setPreviewSelection(null)
+  }
+
+  const commitDimensions = (cols: number, rows: number) => {
+    const next = terminalGridSelectionFromDimensions(occupied, cols, rows)
+    setPreviewSelection(null)
+    commitSelection(next)
+  }
+
+  const launchSelection = () => {
+    if (newPaneCount <= 0) return
+    onLaunch({ cols: selection.cols, rows: selection.rows, occupiedGrid: occupied, profileId: effectiveProfileId })
+  }
+
+  const toggleLauncher = () => {
+    setIsPointerSelecting(false)
+    setPreviewSelection(null)
+    if (!isOpen) {
+      setOccupiedPreference(preferredGrid)
+      setSelectionState({
+        key: selectionStateKey(existingPaneCount, preferredGrid, occupancyMatrix),
+        grid: occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : defaultTerminalGridSelection(existingPaneCount, preferredGrid),
+      })
+      setSelectedProfileId(activeProfileId)
+    }
+    onToggle()
   }
 
   return (
     <div ref={rootRef} className="new-terminal-launcher">
-      <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Create terminals from a template" onClick={onToggle}>
+      <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Add terminals by dragging over free grid cells" onClick={toggleLauncher}>
         <Plus size={14} /> New
       </button>
       {isOpen ? (
-        <section className="new-terminal-popover" style={popoverPosition} aria-label="New terminal template">
+        <section className="new-terminal-popover" style={popoverPosition} aria-label="Add terminal panes">
           <header className="new-terminal-popover-header">
             <Grid3X3 size={14} />
-            <span>Template</span>
+            <span>Add panes</span>
           </header>
-          <div className="new-terminal-template-grid">
-            {TEMPLATES.map((template) => (
-              <button
-                key={template.id}
-                type="button"
-                onClick={() => onLaunch({ templateId: template.id, cols: template.cols, rows: template.rows })}
-              >
-                <span>{template.label}</span>
-                <small>{template.cols * template.rows} panes</small>
-              </button>
+          <label className="new-terminal-profile">
+            Profile
+            <select value={effectiveProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
+              {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+            </select>
+          </label>
+          <div className="new-terminal-summary">
+            <strong>{selection.cols}×{selection.rows}</strong>
+            <span>{existingPaneCount} occupied · {newPaneCount} new panes</span>
+          </div>
+          <div
+            className="new-terminal-occupancy-grid"
+            style={{ gridTemplateColumns: `repeat(${display.cols}, minmax(0, 1fr))` }}
+            onPointerLeave={clearCellPreview}
+          >
+            {Array.from({ length: display.rows }).flatMap((_, row) => (
+              Array.from({ length: display.cols }).map((__, col) => {
+                const state = occupancyMatrix ? terminalOccupancyGridCellState(occupancyMatrix, visibleSelection, col, row) : terminalGridCellState(existingPaneCount, occupied, visibleSelection, col, row)
+                const label = `${col + 1}×${row + 1} ${state}`
+                return (
+                  <button
+                    key={`${row}:${col}`}
+                    type="button"
+                    className="new-terminal-cell"
+                    data-state={state}
+                    aria-label={label}
+                    onPointerDown={(event) => { event.preventDefault(); setIsPointerSelecting(true); commitCell(col, row) }}
+                    onPointerEnter={(event) => previewCell(col, row, isPointerSelecting || event.buttons > 0)}
+                    onPointerMove={(event) => previewCell(col, row, isPointerSelecting || event.buttons > 0)}
+                    onFocus={() => setPreviewSelection(selectionFromCell(col, row))}
+                  />
+                )
+              })
             ))}
+          </div>
+          <div className="new-terminal-legend" aria-hidden="true">
+            <span data-state="occupied">Occupied</span>
+            <span data-state="available">Available</span>
+            <span data-state="selected">Selected</span>
           </div>
           <div className="new-terminal-custom">
             <label>
               X
-              <input type="number" min="1" max="8" value={cols} onChange={(event) => setCols(Number(event.target.value))} />
+              <input type="number" min="1" max="20" value={selection.cols} onChange={(event) => commitDimensions(clampGridCols(Number(event.target.value)), selection.rows)} />
             </label>
             <label>
               Y
-              <input type="number" min="1" max="8" value={rows} onChange={(event) => setRows(Number(event.target.value))} />
+              <input type="number" min="1" max="10" value={selection.rows} onChange={(event) => commitDimensions(selection.cols, clampGridRows(Number(event.target.value)))} />
             </label>
-            <button type="button" className="primary-action" onClick={launchCustom}>Create</button>
+            <button type="button" className="primary-action" disabled={newPaneCount <= 0} onClick={launchSelection}>Create</button>
           </div>
         </section>
       ) : null}
     </div>
   )
-}
-
-function clampGridValue(value: number): number {
-  if (!Number.isFinite(value)) return 1
-  return Math.max(1, Math.min(8, Math.floor(value)))
 }

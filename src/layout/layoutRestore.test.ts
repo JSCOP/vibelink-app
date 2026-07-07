@@ -46,6 +46,30 @@ describe('shouldRestoreDockviewLayout', () => {
     expect(shouldRestoreDockviewLayout(missingLeafLayout, ['pane-1', 'pane-2'])).toBe(false)
   })
 
+  it('rejects a persisted layout containing a dead pane leaf and panel', () => {
+    const deadPaneLayout = JSON.stringify({
+      ...layoutGrid(['pane-1', 'pane-dead']),
+      panels: {
+        'pane-1': { id: 'pane-1' },
+        'pane-dead': { id: 'pane-dead' },
+      },
+    })
+
+    expect(shouldRestoreDockviewLayout(deadPaneLayout, ['pane-1'])).toBe(false)
+  })
+
+  it('accepts allowlisted non-terminal panels in restored layouts', () => {
+    const mixedLayout = JSON.stringify({
+      ...layoutGrid(['pane-1', 'terminal-window']),
+      panels: {
+        'pane-1': { id: 'pane-1' },
+        'terminal-window': { id: 'terminal-window', contentComponent: 'terminalWindow' },
+      },
+    })
+
+    expect(shouldRestoreDockviewLayout(mixedLayout, ['pane-1'], ['terminal-window'])).toBe(true)
+  })
+
   it('accepts a layout that contains every live pane panel and grid leaf', () => {
     const layout = JSON.stringify({
       ...layoutGrid(['pane-1', 'pane-2']),

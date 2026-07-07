@@ -33,6 +33,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
   const [title, setTitle] = useState(api.title ?? params?.title ?? 'Shell')
   const paneId = params?.paneId
   const role = useWorkspaceStore((state) => paneId ? state.settings.paneRoles[paneId] : undefined)
+  const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
   const dragStartBlockedRef = useRef(false)
@@ -120,8 +121,8 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
 
   return (
     <div
-      className="terminal-tab"
-      title={title}
+      className={`terminal-tab${completionHighlight ? ' terminal-tab-response-complete' : ''}`}
+      title={completionHighlight ? `${title} · response complete` : title}
       data-pane-id={paneId}
       draggable={Boolean(paneId && !isEditing)}
       onPointerDownCapture={rememberPaneDragStartTarget}

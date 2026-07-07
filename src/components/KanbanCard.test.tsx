@@ -29,7 +29,7 @@ describe('KanbanCard', () => {
     })
   })
 
-  test('keeps dense card fields behind clickable summaries and short action labels', () => {
+  test('keeps board cards compact and leaves details for the edit dialog', () => {
     const task: Task = {
       id: 'task-1',
       sessionId: 'session-1',
@@ -45,15 +45,15 @@ describe('KanbanCard', () => {
 
     const html = renderToString(<KanbanCard task={task} onAssign={() => undefined} onEdit={() => undefined} />)
 
-    expect(html).toContain('kanban-card-details')
-    expect(html).toContain('내용')
-    expect(html).toContain('시간')
-    expect(html).toContain('결과')
+    expect(html).not.toContain('kanban-card-details')
+    expect(html).not.toContain('Long task description')
+    expect(html).not.toContain('Diff baseline unavailable')
     expect(html).toContain('title="View task diff"')
     expect(html).toContain('>Diff</span>')
-    expect(html).toContain('title="Advance task to next status"')
-    expect(html).toContain('>Next</span>')
-    expect(html).not.toContain('>View diff</button>')
-    expect(html).not.toContain('>Advance')
+    expect(html).toContain('title="Delete task"')
+    expect(html).toContain('>Delete</span>')
+    expect(html).toContain('title="Reopen task"')
+    expect(html).not.toContain('title="Advance task to next status"')
+    expect(html).not.toContain('title="Move task to previous status"')
   })
 })

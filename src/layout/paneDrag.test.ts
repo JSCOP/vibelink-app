@@ -15,6 +15,10 @@ describe('pane drag helpers', () => {
     expect(paneDropPositionFromPoint(rect, 300, 340)).toBe('bottom')
   })
 
+  it('activates an edge split at the exact threshold', () => {
+    expect(paneDropPositionFromPoint(rect, rect.left + rect.width * 0.28, 200)).toBe('left')
+  })
+
   it('chooses the closest edge near corners', () => {
     expect(paneDropPositionFromPoint(rect, 102, 100)).toBe('left')
     expect(paneDropPositionFromPoint(rect, 160, 52)).toBe('top')

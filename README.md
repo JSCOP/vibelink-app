@@ -49,13 +49,17 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 .\target\debug\app.exe cli write [--session <session-id>] --pane <pane-id> --text "pwd" --enter
 .\target\debug\app.exe cli task done --task <task-id> [--session <session-id>] [--pane <pane-id>] [--commit-msg "summary"]
 .\target\debug\app.exe cli task note --task <task-id> --message "progress" [--session <session-id>] [--pane <pane-id>]
+.\target\debug\app.exe cli skill list [--session <session-id>]
+.\target\debug\app.exe cli skill apply --id <skill-id> --content "# Skill\n\nInstructions" [--scope global|workspace] [--session <session-id>]
+.\target\debug\app.exe cli skill show <skill-id> [--scope global|workspace] [--session <session-id>]
+.\target\debug\app.exe cli skill delete <skill-id> [--scope global|workspace] [--session <session-id>]
 .\target\debug\app.exe mcp serve
 ```
 
-`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes.
-AWT-launched panes receive `AWT_SESSION_ID`, `AWT_PANE_ID`, `AWT_APP_EXE`, and `AWT_APP_FLAVOR`; `panes`, `read`, `write`, and `task` use `AWT_SESSION_ID` when `--session` is omitted, so agents should run `$env:AWT_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace.
+`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage AWT-owned Markdown skills under app data; enabled persisted skills are injected into AWT Agent prompts for the matching workspace.
+AWT-launched panes receive `AWT_SESSION_ID`, `AWT_PANE_ID`, `AWT_APP_EXE`, and `AWT_APP_FLAVOR`; `panes`, `read`, `write`, `task`, and workspace-scoped `skill` commands use `AWT_SESSION_ID` when `--session` is omitted, so agents should run `$env:AWT_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace.
 
-`mcp serve` is the stdio MCP server configured in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The Orchestrator settings provision `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, store secrets only in `<HERMES_HOME>\.env`, and mirror Kanban board state to `<appData>\kanban\<session-id>.json` for MCP tools.
+`mcp serve` is the stdio MCP server configured in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The Orchestrator settings provision `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, store secrets only in `<HERMES_HOME>\.env`, mirror Kanban board state to `<appData>\kanban\<session-id>.json`, and expose pane/task/skill MCP tools.
 
 ## Daemon smoke checks
 

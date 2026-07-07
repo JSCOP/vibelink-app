@@ -67,6 +67,15 @@ describe('createDockviewGridLayout', () => {
     expect(layout?.activeGroup).toBe(lastLeaf.data.id)
   })
 
+  it('keeps one-column panes beyond grid capacity as tabs on the last leaf', () => {
+    const layout = createDockviewGridLayout(baseLayout(), { cols: 1, rows: 10 }, panes(11))
+    const root = layout?.grid?.root
+    expect(root?.type).toBe('branch')
+    if (root?.type !== 'branch') return
+
+    expect(root.data.flatMap((node) => node.type === 'leaf' ? node.data.views : [])).toEqual(panes(11).map((pane) => pane.id))
+  })
+
   it('fills sparse columns instead of leaving blank grid rows', () => {
     const layout = createDockviewGridLayout(baseLayout(), { cols: 3, rows: 2 }, panes(5))
     const root = layout?.grid?.root
@@ -78,6 +87,19 @@ describe('createDockviewGridLayout', () => {
     if (sparseColumn.type !== 'branch') return
     expect(sparseColumn.data).toHaveLength(1)
     expect(sparseColumn.data[0].size).toBe(200)
+  })
+
+  it('can place incomplete overflow as an extra vertical row', () => {
+    const layout = createDockviewGridLayout(baseLayout(), { cols: 4, rows: 4 }, panes(13), [], null, { sparseMode: 'rows' })
+    const root = layout?.grid?.root
+    expect(layout?.grid?.orientation).toBe('VERTICAL')
+    expect(root?.type).toBe('branch')
+    if (root?.type !== 'branch') return
+
+    expect(root.data).toHaveLength(4)
+    expect(rowViews(root.data[0])).toEqual(['pane-0', 'pane-1', 'pane-2', 'pane-3'])
+    expect(rowViews(root.data[2])).toEqual(['pane-8', 'pane-9', 'pane-10', 'pane-11'])
+    expect(rowViews(root.data[3])).toEqual(['pane-12'])
   })
 })
 
@@ -113,6 +135,12 @@ type TestNode =
   | { type: 'branch'; data: TestNode[] }
 
 function columnViews(node: TestNode | undefined): string[] {
+  if (!node) return []
+  if (node.type === 'leaf') return node.data.views
+  return node.data.flatMap((child) => child.type === 'leaf' ? child.data.views[0] : [])
+}
+
+function rowViews(node: TestNode | undefined): string[] {
   if (!node) return []
   if (node.type === 'leaf') return node.data.views
   return node.data.flatMap((child) => child.type === 'leaf' ? child.data.views[0] : [])

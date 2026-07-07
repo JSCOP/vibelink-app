@@ -2,6 +2,8 @@ import type { FontWeight, ITerminalOptions } from '@xterm/xterm'
 import { terminalThemeById, defaultTerminalThemeId, type TerminalThemeId } from '../state/terminalThemes'
 import { preferredFontFamily, terminalFontStack } from '../state/fonts'
 
+export type TerminalCursorStyle = 'bar' | 'block' | 'underline'
+
 export type TerminalVisualSettings = {
   fontFamily: string
   fontSize: number
@@ -9,6 +11,8 @@ export type TerminalVisualSettings = {
   scrollback: number
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
+  cursorStyle: TerminalCursorStyle
+  cursorWidth: number
 }
 
 export const terminalLineHeight = 1
@@ -21,6 +25,8 @@ export const defaultTerminalSettings: TerminalVisualSettings = {
   scrollback: 5000,
   terminalThemeId: defaultTerminalThemeId,
   terminalScrollbarVisible: false,
+  cursorStyle: 'bar',
+  cursorWidth: 1,
 }
 
 export function createTerminalOptions(settings: TerminalVisualSettings): ITerminalOptions {
@@ -28,6 +34,7 @@ export function createTerminalOptions(settings: TerminalVisualSettings): ITermin
     allowProposedApi: true,
     convertEol: false,
     cursorBlink: true,
+    cursorStyle: settings.cursorStyle,
     customGlyphs: true,
     fontFamily: terminalFontStack(settings.fontFamily),
     fontSize: settings.fontSize,
@@ -38,6 +45,7 @@ export function createTerminalOptions(settings: TerminalVisualSettings): ITermin
     scrollback: settings.scrollback,
     minimumContrastRatio: 1,
     theme: terminalThemeById(settings.terminalThemeId),
+    ...(settings.cursorStyle === 'bar' ? { cursorWidth: settings.cursorWidth } : {}),
   }
 }
 

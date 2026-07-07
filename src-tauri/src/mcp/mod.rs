@@ -1,11 +1,19 @@
 use crate::app::board::{board_read_native, board_write_native};
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
-use crate::cli::{strip_ansi, write_payload};
-use crate::protocol::{ClientToDaemon, ReplyResult, TaskSignal};
+use crate::app::skills::{
+    apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
+};
+use crate::cli::write_payload;
+use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, TaskSignal};
 use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 use uuid::Uuid;
+
+const MAX_TERMINAL_GRID_COLS: usize = 20;
+const MAX_TERMINAL_GRID_ROWS: usize = 10;
 
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     let mut args = args.into_iter();
@@ -30,19 +38,40 @@ fn serve() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let request: Value = serde_json::from_str(&line)?;
-        if is_notification(&request) {
-            // JSON-RPC notifications (e.g. notifications/initialized) never get a reply.
-            let _ = handle_notification(&client, session_id, &request);
-            continue;
+        if let Some(response) = handle_line(&client, session_id, &line) {
+            serde_json::to_writer(&mut stdout, &response)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
         }
-        let response = handle_message(&client, session_id, &request)
-            .unwrap_or_else(|err| error_response(request.get("id").cloned().unwrap_or(Value::Null), -32000, err.to_string()));
-        serde_json::to_writer(&mut stdout, &response)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
     }
     Ok(())
+}
+
+/// Returns Some(response_value) to write to stdout, or None when no reply is due.
+fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
+    let request: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(err) => {
+            return Some(error_response(
+                Value::Null,
+                -32700,
+                format!("Parse error: {err}"),
+            ));
+        }
+    };
+    if is_notification(&request) {
+        let _ = handle_notification(client, session_id, &request);
+        return None;
+    }
+    Some(
+        handle_message(client, session_id, &request).unwrap_or_else(|err| {
+            error_response(
+                request.get("id").cloned().unwrap_or(Value::Null),
+                -32000,
+                err.to_string(),
+            )
+        }),
+    )
 }
 
 fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
@@ -57,30 +86,54 @@ fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> R
                 "capabilities": { "tools": {} }
             }
         })),
-        Some("tools/list") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tool_schemas() } })),
+        Some("tools/list") => {
+            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tool_schemas() } }))
+        }
         Some("tools/call") => {
-            let params = request.get("params").ok_or_else(|| anyhow!("tools/call missing params"))?;
-            let name = params.get("name").and_then(Value::as_str).ok_or_else(|| anyhow!("tools/call missing name"))?;
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let params = request
+                .get("params")
+                .ok_or_else(|| anyhow!("tools/call missing params"))?;
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("tools/call missing name"))?;
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let text = call_tool(client, session_id, name, &args)?;
-            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }))
+            Ok(
+                json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }),
+            )
         }
         Some("ping") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
-        Some(other) => Ok(error_response(id, -32601, format!("method not found: {other}"))),
+        Some(other) => Ok(error_response(
+            id,
+            -32601,
+            format!("method not found: {other}"),
+        )),
         None => Ok(error_response(id, -32600, "missing method")),
     }
 }
 
 fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) -> Result<String> {
     match name {
-        "awt_pane_list" => match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
-            ReplyResult::Attached { panes, .. } => Ok(serde_json::to_string(&panes)?),
-            other => bail!("unexpected daemon response: {other:?}"),
-        },
+        "awt_pane_list" => {
+            match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
+                ReplyResult::Attached { panes, .. } => Ok(serde_json::to_string(&panes)?),
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
         "awt_pane_read" => {
             let pane_id = required_uuid(args, "paneId")?;
-            match client.request_reply(|req| ClientToDaemon::GetScrollback { req, session_id, pane_id })? {
-                ReplyResult::ScrollbackData(data) => Ok(strip_ansi(&String::from_utf8_lossy(&data)).into_owned()),
+            match client.request_reply(|req| ClientToDaemon::GetScrollback {
+                req,
+                session_id,
+                pane_id,
+            })? {
+                ReplyResult::ScrollbackData(data) => {
+                    Ok(strip_ansi(&String::from_utf8_lossy(&data)).into_owned())
+                }
                 other => bail!("unexpected daemon response: {other:?}"),
             }
         }
@@ -88,13 +141,99 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             let pane_id = required_uuid(args, "paneId")?;
             let text = required_str(args, "text")?.to_string();
             let enter = args.get("enter").and_then(Value::as_bool).unwrap_or(false);
-            client.send(ClientToDaemon::WritePane { session_id, pane_id, data: write_payload(text, enter) })?;
+            let split_submit = if enter {
+                attached_panes(client, session_id)?
+                    .iter()
+                    .find(|pane| pane.id == pane_id)
+                    .is_some_and(is_codex_pane)
+            } else {
+                false
+            };
+            let payloads = pane_write_payloads(&text, enter, split_submit);
+            for (index, payload) in payloads.into_iter().enumerate() {
+                if index > 0 {
+                    std::thread::sleep(Duration::from_millis(120));
+                }
+                client.send(ClientToDaemon::WritePane {
+                    session_id,
+                    pane_id,
+                    data: payload,
+                })?;
+            }
+            Ok(json!({ "ok": true }).to_string())
+        }
+        "awt_pane_configure" => {
+            let pane_id = required_uuid(args, "paneId")?;
+            let title = optional_non_empty_string(args, "title");
+            let role = optional_non_empty_string(args, "role");
+            if title.is_none() && role.is_none() {
+                bail!("provide title or role");
+            }
+            if let Some(title) = title.clone() {
+                match client.request_reply(|req| ClientToDaemon::SetPaneTitle {
+                    req,
+                    session_id,
+                    pane_id,
+                    title,
+                })? {
+                    ReplyResult::Ok => {}
+                    other => bail!("unexpected daemon response: {other:?}"),
+                }
+                client.send(ClientToDaemon::NotifySessionChanged { session_id })?;
+            }
+            relay_task_event(
+                client,
+                session_id,
+                TaskSignal::PaneConfigured {
+                    pane_id,
+                    title,
+                    role,
+                },
+            )
+        }
+        "awt_terminal_grid_launch" => launch_terminal_grid(client, session_id, args),
+        "awt_skill_list" => {
+            let session_id = skill_session_id_arg(args, Some(&session_id.to_string()))?;
+            let skills = list_skills(session_id.as_deref())?;
+            Ok(serde_json::to_string(&skills)?)
+        }
+        "awt_skill_get" => {
+            let id = required_non_empty_string(args, "id")?;
+            let scope_text = optional_skill_scope(args)?;
+            let session_id = skill_lookup_session_id(
+                args,
+                Some(&session_id.to_string()),
+                scope_text.as_deref(),
+            )?;
+            let scope = deserialize_skill_scope(scope_text.as_deref())?;
+            let skill = get_skill(&id, session_id.as_deref(), scope)?;
+            Ok(serde_json::to_string(&skill)?)
+        }
+        "awt_skill_apply" => {
+            let default_session_id = session_id.to_string();
+            let input = skill_apply_input(args, Some(default_session_id.as_str()))?;
+            let skill = apply_skill(input)?;
+            Ok(serde_json::to_string(&skill)?)
+        }
+        "awt_skill_delete" => {
+            let id = required_non_empty_string(args, "id")?;
+            let scope_text = optional_skill_scope(args)?;
+            let session_id = skill_lookup_session_id(
+                args,
+                Some(&session_id.to_string()),
+                scope_text.as_deref(),
+            )?;
+            let scope = deserialize_skill_scope(scope_text.as_deref())?;
+            delete_skill(&id, session_id.as_deref(), scope)?;
             Ok(json!({ "ok": true }).to_string())
         }
         "awt_task_list" => board_read_native(&session_id.to_string()),
         "awt_task_create" => {
             let title = required_str(args, "title")?;
-            let description = args.get("description").and_then(Value::as_str).unwrap_or_default();
+            let description = args
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let mut board = read_board_value(session_id)?;
             let task_id = Uuid::new_v4().to_string();
             let now = current_millis();
@@ -106,6 +245,14 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
         "awt_task_assign" => {
             let task_id = required_str(args, "taskId")?;
             let pane_id = required_uuid(args, "paneId")?;
+            let panes = attached_panes(client, session_id)?;
+            let pane = panes
+                .iter()
+                .find(|pane| pane.id == pane_id)
+                .ok_or_else(|| anyhow!("pane not found in this workspace: {pane_id}"))?;
+            if !is_agent_pane(pane) {
+                bail!("task assignment requires an AI agent pane such as Codex, Claude, or OMP");
+            }
             let role = args
                 .get("role")
                 .and_then(Value::as_str)
@@ -115,9 +262,19 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             let now = current_millis();
             let mut board = read_board_value(session_id)?;
             let (title, description) = {
-                let task = board.pointer_mut(&format!("/tasks/{task_id}")).ok_or_else(|| anyhow!("task not found: {task_id}"))?;
-                let title = task.get("title").and_then(Value::as_str).unwrap_or("Task").to_string();
-                let description = task.get("description").and_then(Value::as_str).unwrap_or_default().to_string();
+                let task = board
+                    .pointer_mut(&format!("/tasks/{task_id}"))
+                    .ok_or_else(|| anyhow!("task not found: {task_id}"))?;
+                let title = task
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Task")
+                    .to_string();
+                let description = task
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 task["assignedPaneId"] = json!(pane_id.to_string());
                 if let Some(role) = &role {
                     task["assignedRole"] = json!(role);
@@ -135,38 +292,719 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             let prompt = compose_task_prompt(task_id, &title, &description, role.as_deref());
             write_board_value(session_id, &board)?;
             emit_board_changed(client, session_id)?;
-            client.send(ClientToDaemon::WritePane { session_id, pane_id, data: write_payload(prompt, true) })?;
+            let payloads = task_assign_payloads(&prompt);
+            client.send(ClientToDaemon::WritePane {
+                session_id,
+                pane_id,
+                data: payloads[0].clone(),
+            })?;
+            std::thread::sleep(Duration::from_millis(120));
+            client.send(ClientToDaemon::WritePane {
+                session_id,
+                pane_id,
+                data: payloads[1].clone(),
+            })?;
             Ok(json!({ "ok": true }).to_string())
         }
         "awt_task_done" => {
             let task_id = required_str(args, "taskId")?.to_string();
-            let commit_msg = args.get("commitMsg").and_then(Value::as_str).map(str::to_string);
-            relay_task_event(client, session_id, TaskSignal::Done { task_id, commit_msg, pane_id: None })
+            let commit_msg = args
+                .get("commitMsg")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let result_summary = args
+                .get("resultSummary")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            relay_task_event(
+                client,
+                session_id,
+                TaskSignal::Done {
+                    task_id,
+                    commit_msg,
+                    result_summary,
+                    pane_id: None,
+                },
+            )
         }
         "awt_task_note" => {
             let task_id = required_str(args, "taskId")?.to_string();
             let message = required_str(args, "message")?.to_string();
-            relay_task_event(client, session_id, TaskSignal::Note { task_id, message, pane_id: None })
+            relay_task_event(
+                client,
+                session_id,
+                TaskSignal::Note {
+                    task_id,
+                    message,
+                    pane_id: None,
+                },
+            )
         }
         other => bail!("unknown tool: {other}"),
     }
 }
 
+fn strip_ansi(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut output: Option<String> = None;
+    let mut last_keep = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b => {
+                let next = ansi_sequence_end(bytes, index);
+                let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+                output.push_str(&text[last_keep..index]);
+                index = next;
+                last_keep = index;
+            }
+            byte if is_stripped_c0(byte) => {
+                let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+                output.push_str(&text[last_keep..index]);
+                index += 1;
+                last_keep = index;
+            }
+            _ => index += 1,
+        }
+    }
+
+    match output {
+        Some(mut output) => {
+            output.push_str(&text[last_keep..]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(text),
+    }
+}
+
+fn is_stripped_c0(byte: u8) -> bool {
+    byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')
+}
+
+fn ansi_sequence_end(bytes: &[u8], start: usize) -> usize {
+    if start + 1 >= bytes.len() {
+        return start + 1;
+    }
+    match bytes[start + 1] {
+        b'[' => csi_sequence_end(bytes, start + 2),
+        b']' => ansi_string_sequence_end(bytes, start + 2, true),
+        b'P' | b'^' | b'_' => ansi_string_sequence_end(bytes, start + 2, false),
+        _ => start + 1,
+    }
+}
+
+fn csi_sequence_end(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+        if (0x40..=0x7e).contains(&byte) {
+            break;
+        }
+    }
+    index
+}
+
+fn ansi_string_sequence_end(bytes: &[u8], mut index: usize, bel_terminates: bool) -> usize {
+    while index < bytes.len() {
+        if bel_terminates && bytes[index] == 0x07 {
+            return index + 1;
+        }
+        if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'\\' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
 fn tool_schemas() -> Vec<Value> {
     vec![
-        tool_schema("awt_pane_list", "List panes in this AWT workspace", json!({ "type": "object", "properties": {} })),
-        tool_schema("awt_pane_read", "Read a pane scrollback", json!({ "type": "object", "properties": { "paneId": { "type": "string" } }, "required": ["paneId"] })),
-        tool_schema("awt_pane_write", "Write text to a pane", json!({ "type": "object", "properties": { "paneId": { "type": "string" }, "text": { "type": "string" }, "enter": { "type": "boolean" } }, "required": ["paneId", "text"] })),
-        tool_schema("awt_task_list", "List Kanban tasks in this workspace", json!({ "type": "object", "properties": {} })),
-        tool_schema("awt_task_create", "Create a Kanban task", json!({ "type": "object", "properties": { "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["title"] })),
-        tool_schema("awt_task_assign", "Assign a task to a pane", json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "paneId": { "type": "string" }, "role": { "type": "string" } }, "required": ["taskId", "paneId"] })),
-        tool_schema("awt_task_done", "Mark a task done", json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "commitMsg": { "type": "string" } }, "required": ["taskId"] })),
-        tool_schema("awt_task_note", "Append a note to a task", json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "message": { "type": "string" } }, "required": ["taskId", "message"] })),
+        tool_schema(
+            "awt_pane_list",
+            "List panes in this AWT workspace",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool_schema(
+            "awt_pane_read",
+            "Read a pane scrollback",
+            json!({ "type": "object", "properties": { "paneId": { "type": "string" } }, "required": ["paneId"] }),
+        ),
+        tool_schema(
+            "awt_pane_write",
+            "Write text to a pane",
+            json!({ "type": "object", "properties": { "paneId": { "type": "string" }, "text": { "type": "string" }, "enter": { "type": "boolean" } }, "required": ["paneId", "text"] }),
+        ),
+        tool_schema(
+            "awt_pane_configure",
+            "Set a terminal pane's title and/or orchestration role metadata only. Does not change shell, args, profile, or the running process — a pane launched as Codex stays Codex even if retitled 'Claude'. Use this before assigning work so panes are labeled by responsibility.",
+            json!({ "type": "object", "properties": { "paneId": { "type": "string" }, "title": { "type": "string" }, "role": { "type": "string" } }, "required": ["paneId"] }),
+        ),
+        tool_schema(
+            "awt_terminal_grid_launch",
+            "Create or expand this workspace to a terminal grid and run one command in every grid pane. One launch = one agent kind; to mix agents, call again (e.g. a codex row then a claude row). Valid agent commands are claude, codex, and omp — do not invent other names such as claudie.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "cols": { "type": "integer", "minimum": 1, "maximum": MAX_TERMINAL_GRID_COLS },
+                    "rows": { "type": "integer", "minimum": 1, "maximum": MAX_TERMINAL_GRID_ROWS },
+                    "command": { "type": "string", "description": "Optional command to type and submit, for example codex or claude." },
+                    "enter": { "type": "boolean", "description": "Submit the command with Enter. Defaults to true when command is set." },
+                    "writeToExisting": { "type": "boolean", "description": "When command is set, also write it to existing panes in the grid. Defaults to true." },
+                    "cwd": { "type": "string", "description": "Optional working directory for newly spawned panes. Defaults to the workspace folder." },
+                    "titlePrefix": { "type": "string", "description": "Optional title prefix for newly spawned panes." }
+                },
+                "required": ["cols", "rows"]
+            }),
+        ),
+        tool_schema(
+            "awt_skill_list",
+            "List persisted AWT-owned skills available to this workspace. Returns JSON text.",
+            json!({ "type": "object", "properties": { "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace." } } }),
+        ),
+        tool_schema(
+            "awt_skill_get",
+            "Get one persisted AWT-owned skill by id. Returns JSON text.",
+            json!({ "type": "object", "properties": { "id": { "type": "string" }, "scope": { "type": "string", "enum": ["global", "workspace"] }, "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace unless scope is global." } }, "required": ["id"] }),
+        ),
+        tool_schema(
+            "awt_skill_apply",
+            "Create or replace an AWT-owned Markdown skill. Returns the persisted skill as JSON text.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Stable skill id; sanitized by the skill registry." },
+                    "name": { "type": "string" },
+                    "category": { "type": "string" },
+                    "description": { "type": "string" },
+                    "content": { "type": "string", "description": "Markdown instructions to write to SKILL.md." },
+                    "scope": { "type": "string", "enum": ["global", "workspace"], "description": "Defaults to workspace for MCP calls." },
+                    "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace." },
+                    "enabled": { "type": "boolean", "description": "Defaults to true." }
+                },
+                "required": ["id", "content"]
+            }),
+        ),
+        tool_schema(
+            "awt_skill_delete",
+            "Delete an AWT-owned persisted skill by id. Returns JSON text.",
+            json!({ "type": "object", "properties": { "id": { "type": "string" }, "scope": { "type": "string", "enum": ["global", "workspace"] }, "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace unless scope is global." } }, "required": ["id"] }),
+        ),
+        tool_schema(
+            "awt_task_list",
+            "List Kanban tasks in this workspace",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool_schema(
+            "awt_task_create",
+            "Create a Kanban task",
+            json!({ "type": "object", "properties": { "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["title"] }),
+        ),
+        tool_schema(
+            "awt_task_assign",
+            "Assign a task to an AI agent pane",
+            json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "paneId": { "type": "string" }, "role": { "type": "string" } }, "required": ["taskId", "paneId"] }),
+        ),
+        tool_schema(
+            "awt_task_done",
+            "Mark a task done",
+            json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "commitMsg": { "type": "string" }, "resultSummary": { "type": "string" } }, "required": ["taskId"] }),
+        ),
+        tool_schema(
+            "awt_task_note",
+            "Append a note to a task",
+            json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "message": { "type": "string" } }, "required": ["taskId", "message"] }),
+        ),
     ]
 }
 
 fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": input_schema })
+}
+
+fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -> Result<String> {
+    let cols = required_grid_dimension(args, "cols", MAX_TERMINAL_GRID_COLS)?;
+    let rows = required_grid_dimension(args, "rows", MAX_TERMINAL_GRID_ROWS)?;
+    let target_count = cols
+        .checked_mul(rows)
+        .ok_or_else(|| anyhow!("grid size overflow"))?;
+    let command = optional_non_empty_string(args, "command");
+    let enter = args
+        .get("enter")
+        .and_then(Value::as_bool)
+        .unwrap_or(command.is_some());
+    let write_to_existing = args
+        .get("writeToExisting")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let cwd = optional_non_empty_string(args, "cwd")
+        .or_else(|| session_workspace_folder(client, session_id).ok().flatten());
+    let title_prefix = optional_non_empty_string(args, "titlePrefix")
+        .or_else(|| command.as_deref().and_then(command_title_prefix))
+        .unwrap_or_else(|| "Shell".to_string());
+    let icon = command.as_deref().and_then(command_icon);
+    let profile_id = command.as_deref().and_then(command_profile_id);
+
+    let mut panes = attached_panes(client, session_id)?;
+    let existing_count = panes.len();
+    let missing_count = target_count.saturating_sub(existing_count);
+    let mut created_pane_ids = Vec::new();
+
+    for _ in 0..missing_count {
+        let pane_id = Uuid::new_v4();
+        let ordinal = panes.len() + 1;
+        let cfg = PaneConfig {
+            pane_id,
+            shell: None,
+            args: Vec::new(),
+            cwd: cwd.clone(),
+            env: Vec::new(),
+            title: Some(format!("{title_prefix} {ordinal}")),
+            icon: icon.clone(),
+            profile_id: profile_id.clone(),
+            cols: 120,
+            rows: 32,
+        };
+        let pane = match client.request_reply(|req| ClientToDaemon::SpawnPane {
+            req,
+            session_id,
+            cfg,
+        })? {
+            ReplyResult::PaneSpawned(meta) => meta,
+            other => bail!("unexpected daemon response: {other:?}"),
+        };
+        created_pane_ids.push(pane.id);
+        panes.push(pane);
+    }
+
+    let grid_panes = panes.iter().take(target_count).cloned().collect::<Vec<_>>();
+    let overflow_panes = panes.iter().skip(target_count).cloned().collect::<Vec<_>>();
+    let active_pane_id = grid_panes.first().map(|pane| pane.id);
+    let layout = dockview_grid_layout(cols, rows, &grid_panes, &overflow_panes, active_pane_id)?;
+    client.send(ClientToDaemon::SaveLayout {
+        session_id,
+        layout_json: serde_json::to_string(&layout)?,
+    })?;
+
+    let mut command_pane_ids = Vec::new();
+    if let Some(command) = command {
+        let created_id_set = created_pane_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let payload = write_payload(command.clone(), enter);
+        for pane in &grid_panes {
+            if !write_to_existing && !created_id_set.contains(&pane.id) {
+                continue;
+            }
+            client.send(ClientToDaemon::WritePane {
+                session_id,
+                pane_id: pane.id,
+                data: payload.clone(),
+            })?;
+            command_pane_ids.push(pane.id.to_string());
+        }
+    }
+
+    client.send(ClientToDaemon::NotifySessionChanged { session_id })?;
+
+    Ok(json!({
+        "ok": true,
+        "cols": cols,
+        "rows": rows,
+        "targetPaneCount": target_count,
+        "existingPaneCount": existing_count,
+        "createdPaneCount": created_pane_ids.len(),
+        "paneIds": grid_panes.iter().map(|pane| pane.id.to_string()).collect::<Vec<_>>(),
+        "commandPaneIds": command_pane_ids,
+    })
+    .to_string())
+}
+
+fn attached_panes(client: &DaemonClient, session_id: Uuid) -> Result<Vec<PaneMeta>> {
+    match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
+        ReplyResult::Attached { panes, .. } => Ok(panes),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn session_workspace_folder(client: &DaemonClient, session_id: Uuid) -> Result<Option<String>> {
+    match client.request_reply(|req| ClientToDaemon::ListSessions { req })? {
+        ReplyResult::Sessions(sessions) => Ok(sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.workspace_folder)),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn required_grid_dimension(args: &Value, key: &str, max: usize) -> Result<usize> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing integer argument {key}"))?;
+    let value = usize::try_from(value).map_err(|_| anyhow!("{key} is too large"))?;
+    if value == 0 || value > max {
+        bail!("{key} must be between 1 and {max}");
+    }
+    Ok(value)
+}
+
+fn optional_non_empty_string(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn required_non_empty_string(args: &Value, key: &str) -> Result<String> {
+    let value = required_str(args, key)?.trim();
+    if value.is_empty() {
+        bail!("{key} must not be empty");
+    }
+    Ok(value.to_string())
+}
+
+fn optional_raw_non_empty_string(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn skill_session_id_arg(args: &Value, default_session_id: Option<&str>) -> Result<Option<String>> {
+    let session_id = optional_non_empty_string(args, "sessionId")
+        .or_else(|| default_session_id.map(str::to_string));
+    if let Some(session_id) = &session_id {
+        parse_uuid(session_id)?;
+    }
+    Ok(session_id)
+}
+
+fn skill_lookup_session_id(
+    args: &Value,
+    default_session_id: Option<&str>,
+    scope: Option<&str>,
+) -> Result<Option<String>> {
+    if scope == Some("global") {
+        return Ok(None);
+    }
+    let session_id = skill_session_id_arg(args, default_session_id)?;
+    if scope == Some("workspace") && session_id.is_none() {
+        bail!("workspace skills require sessionId");
+    }
+    Ok(session_id)
+}
+
+fn optional_skill_scope(args: &Value) -> Result<Option<String>> {
+    optional_non_empty_string(args, "scope")
+        .map(|scope| normalize_skill_scope(&scope))
+        .transpose()
+}
+
+fn normalize_skill_scope(scope: &str) -> Result<String> {
+    match scope.trim().to_ascii_lowercase().as_str() {
+        "global" => Ok("global".to_string()),
+        "workspace" => Ok("workspace".to_string()),
+        other => bail!("skill scope must be `global` or `workspace`, got `{other}`"),
+    }
+}
+
+fn deserialize_skill_scope(scope: Option<&str>) -> Result<Option<SkillScope>> {
+    scope
+        .map(|scope| {
+            serde_json::from_value(json!(scope))
+                .with_context(|| format!("invalid skill scope `{scope}`"))
+        })
+        .transpose()
+}
+
+fn skill_apply_input(args: &Value, default_session_id: Option<&str>) -> Result<SkillApplyInput> {
+    let id = required_non_empty_string(args, "id")?;
+    let content = optional_raw_non_empty_string(args, "content")
+        .or_else(|| optional_raw_non_empty_string(args, "markdown"))
+        .ok_or_else(|| anyhow!("skill apply requires content"))?;
+    let session_id = skill_session_id_arg(args, default_session_id)?;
+    let scope = optional_skill_scope(args)?.unwrap_or_else(|| {
+        if session_id.is_some() {
+            "workspace".to_string()
+        } else {
+            "global".to_string()
+        }
+    });
+    if scope == "workspace" && session_id.is_none() {
+        bail!("workspace skills require sessionId");
+    }
+
+    let scope = deserialize_skill_scope(Some(&scope))?.expect("skill scope is set");
+    let session_id = if scope == SkillScope::Workspace {
+        session_id
+    } else {
+        None
+    };
+
+    Ok(SkillApplyInput {
+        id: id.clone(),
+        name: Some(optional_non_empty_string(args, "name").unwrap_or(id)),
+        category: Some(
+            optional_non_empty_string(args, "category").unwrap_or_else(|| "Custom".to_string()),
+        ),
+        description: Some(optional_non_empty_string(args, "description").unwrap_or_default()),
+        content,
+        scope,
+        session_id,
+        enabled: Some(args.get("enabled").and_then(Value::as_bool).unwrap_or(true)),
+    })
+}
+
+fn command_title_prefix(command: &str) -> Option<String> {
+    command.split_whitespace().next().map(str::to_string)
+}
+
+fn command_icon(command: &str) -> Option<String> {
+    match command
+        .split_whitespace()
+        .next()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "codex" => Some("bot".to_string()),
+        "claude" => Some("sparkles".to_string()),
+        _ => Some("terminal".to_string()),
+    }
+}
+
+fn command_profile_id(command: &str) -> Option<String> {
+    match command
+        .split_whitespace()
+        .next()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "codex" => Some("codex".to_string()),
+        "claude" => Some("claude".to_string()),
+        "omp" => Some("omp".to_string()),
+        _ => None,
+    }
+}
+
+fn is_agent_pane(pane: &PaneMeta) -> bool {
+    let Some(profile_id) = pane.config.profile_id.as_deref() else {
+        return is_agent_icon(pane.config.icon.as_deref()) || is_agent_command(&pane.config);
+    };
+    matches!(
+        profile_id.to_ascii_lowercase().as_str(),
+        "codex" | "claude" | "omp"
+    ) || is_agent_icon(pane.config.icon.as_deref())
+        || is_agent_command(&pane.config)
+}
+
+fn is_agent_icon(icon: Option<&str>) -> bool {
+    matches!(icon, Some("bot" | "sparkles" | "zap"))
+}
+
+fn is_agent_command(config: &PaneConfig) -> bool {
+    let haystack = std::iter::once(config.title.as_deref().unwrap_or_default())
+        .chain(std::iter::once(config.shell.as_deref().unwrap_or_default()))
+        .chain(config.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    ["codex", "claude", "omp", "opencode"]
+        .iter()
+        .any(|command| command_token_matches(&haystack, command))
+}
+
+fn command_token_matches(haystack: &str, command: &str) -> bool {
+    haystack
+        .split(|ch: char| {
+            ch.is_whitespace()
+                || ch == '\\'
+                || ch == '/'
+                || ch == '"'
+                || ch == '\''
+                || ch == '&'
+                || ch == '|'
+        })
+        .any(|token| {
+            token == command
+                || token.strip_suffix(".cmd") == Some(command)
+                || token.strip_suffix(".exe") == Some(command)
+        })
+}
+
+fn dockview_grid_layout(
+    cols: usize,
+    rows: usize,
+    grid_panes: &[PaneMeta],
+    overflow_panes: &[PaneMeta],
+    active_pane_id: Option<Uuid>,
+) -> Result<Value> {
+    if cols == 0 || rows == 0 || grid_panes.is_empty() {
+        bail!("grid layout requires positive dimensions and at least one pane");
+    }
+
+    let width = cols * 100;
+    let height = rows * 100;
+    let overflow_ids = overflow_panes
+        .iter()
+        .map(|pane| pane.id.to_string())
+        .collect::<Vec<_>>();
+    let last_grid_pane_id = grid_panes.last().map(|pane| pane.id);
+    let mut group_index = 0_usize;
+    let mut active_group = None;
+
+    let root = if cols == 1 {
+        let row_count = rows.min(grid_panes.len());
+        let row_sizes = distribute_size(height, row_count);
+        let mut children = Vec::new();
+        for (row, pane) in grid_panes.iter().take(row_count).enumerate() {
+            children.push(make_grid_leaf(
+                pane,
+                row_sizes[row],
+                &overflow_ids,
+                last_grid_pane_id,
+                active_pane_id,
+                &mut group_index,
+                &mut active_group,
+            ));
+        }
+        json!({ "type": "branch", "data": children, "size": height })
+    } else {
+        let column_sizes = distribute_size(width, cols);
+        let mut columns = Vec::new();
+        for col in 0..cols {
+            let column_panes = (0..rows)
+                .filter_map(|row| grid_panes.get(row * cols + col))
+                .collect::<Vec<_>>();
+            if column_panes.is_empty() {
+                continue;
+            }
+            if rows == 1 {
+                columns.push(make_grid_leaf(
+                    column_panes[0],
+                    column_sizes[col],
+                    &overflow_ids,
+                    last_grid_pane_id,
+                    active_pane_id,
+                    &mut group_index,
+                    &mut active_group,
+                ));
+                continue;
+            }
+
+            let row_sizes = distribute_size(height, column_panes.len());
+            let leaves = column_panes
+                .iter()
+                .enumerate()
+                .map(|(row, pane)| {
+                    make_grid_leaf(
+                        pane,
+                        row_sizes[row],
+                        &overflow_ids,
+                        last_grid_pane_id,
+                        active_pane_id,
+                        &mut group_index,
+                        &mut active_group,
+                    )
+                })
+                .collect::<Vec<_>>();
+            columns.push(json!({ "type": "branch", "data": leaves, "size": column_sizes[col] }));
+        }
+        json!({ "type": "branch", "data": columns, "size": width })
+    };
+
+    let mut panels = Map::new();
+    for pane in grid_panes.iter().chain(overflow_panes.iter()) {
+        let id = pane.id.to_string();
+        let title = pane
+            .config
+            .title
+            .clone()
+            .unwrap_or_else(|| "Shell".to_string());
+        panels.insert(
+            id.clone(),
+            json!({
+                "id": id,
+                "contentComponent": "terminal",
+                "tabComponent": "props.defaultTabComponent",
+                "params": {
+                    "paneId": id,
+                    "title": title,
+                    "icon": pane.config.icon.clone(),
+                },
+                "title": title,
+                "renderer": "always",
+            }),
+        );
+    }
+
+    Ok(json!({
+        "grid": {
+            "root": root,
+            "width": width,
+            "height": height,
+            "orientation": if cols == 1 { "VERTICAL" } else { "HORIZONTAL" },
+        },
+        "panels": panels,
+        "activeGroup": active_group.or_else(|| first_leaf_group_id(&root)),
+    }))
+}
+
+fn make_grid_leaf(
+    pane: &PaneMeta,
+    size: usize,
+    overflow_ids: &[String],
+    last_grid_pane_id: Option<Uuid>,
+    active_pane_id: Option<Uuid>,
+    group_index: &mut usize,
+    active_group: &mut Option<String>,
+) -> Value {
+    let group_id = format!("grid-{group_index}");
+    *group_index += 1;
+    let mut views = vec![pane.id.to_string()];
+    if Some(pane.id) == last_grid_pane_id {
+        views.extend(overflow_ids.iter().cloned());
+    }
+    let active_view = active_pane_id
+        .map(|pane_id| pane_id.to_string())
+        .filter(|pane_id| views.contains(pane_id))
+        .unwrap_or_else(|| views[0].clone());
+    if views.contains(&active_view)
+        && active_pane_id.is_some_and(|pane_id| pane_id.to_string() == active_view)
+    {
+        *active_group = Some(group_id.clone());
+    }
+    json!({
+        "type": "leaf",
+        "data": { "views": views, "activeView": active_view, "id": group_id },
+        "size": size,
+    })
+}
+
+fn distribute_size(total: usize, count: usize) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let base = total / count;
+    let remainder = total - base * count;
+    (0..count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+fn first_leaf_group_id(node: &Value) -> Option<String> {
+    if node.get("type").and_then(Value::as_str) == Some("leaf") {
+        return node
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    node.get("data")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(first_leaf_group_id)
 }
 
 fn read_board_value(session_id: Uuid) -> Result<Value> {
@@ -187,7 +1025,14 @@ fn write_board_value(session_id: Uuid, value: &Value) -> Result<()> {
     board_write_native(&session_id.to_string(), &serde_json::to_string(value)?)
 }
 
-fn board_create_task(board: &mut Value, task_id: &str, session_id: Uuid, title: &str, description: &str, now: u64) {
+fn board_create_task(
+    board: &mut Value,
+    task_id: &str,
+    session_id: Uuid,
+    title: &str,
+    description: &str,
+    now: u64,
+) {
     board["tasks"][task_id] = json!({
         "id": task_id,
         "sessionId": session_id.to_string(),
@@ -197,28 +1042,84 @@ fn board_create_task(board: &mut Value, task_id: &str, session_id: Uuid, title: 
         "createdAt": now,
         "updatedAt": now,
     });
-    board["taskOrder"].as_array_mut().expect("taskOrder array").push(json!(task_id));
+    board["taskOrder"]
+        .as_array_mut()
+        .expect("taskOrder array")
+        .push(json!(task_id));
 }
 
-fn compose_task_prompt(task_id: &str, title: &str, description: &str, role: Option<&str>) -> String {
+fn compose_task_prompt(
+    task_id: &str,
+    title: &str,
+    description: &str,
+    role: Option<&str>,
+) -> String {
     let short = task_id.get(..8).unwrap_or(task_id);
-    let mut lines = vec![format!("[Task #{short}] {title}")];
+    let mut lines = vec![format!("[Task #{short}] {}", inline_text(title))];
     if let Some(role) = role {
-        lines.push(format!("Role: {role}"));
+        lines.push(format!("Role: {}", inline_text(role)));
     }
-    let description = description.trim();
+    let description = inline_text(description);
     if !description.is_empty() {
-        lines.push(format!("\n{description}"));
+        lines.push(description);
     }
     lines.extend([
-        "".to_string(),
         "When you make progress, report a note from this AWT pane with:".to_string(),
-        format!("& $env:AWT_APP_EXE cli task note --task {task_id} --message \"<short progress note>\""),
-        "".to_string(),
+        format!(
+            "& $env:AWT_APP_EXE cli task note --task {task_id} --message \"<short progress note>\""
+        ),
         "When finished, report completion from this AWT pane with:".to_string(),
-        format!("& $env:AWT_APP_EXE cli task done --task {task_id}"),
+        format!(
+            "& $env:AWT_APP_EXE cli task done --task {task_id} --result-summary \"<short result summary>\""
+        ),
     ]);
-    lines.join("\n")
+    lines.join(" | ")
+}
+
+fn inline_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn task_assign_payloads(prompt: &str) -> [Vec<u8>; 2] {
+    [
+        write_payload(prompt.to_string(), false),
+        agent_submit_payload(),
+    ]
+}
+
+fn pane_write_payloads(text: &str, enter: bool, split_submit: bool) -> Vec<Vec<u8>> {
+    if enter && split_submit {
+        let mut payloads = Vec::with_capacity(2);
+        if !text.is_empty() {
+            payloads.push(write_payload(text.to_string(), false));
+        }
+        payloads.push(agent_submit_payload());
+        payloads
+    } else {
+        vec![write_payload(text.to_string(), enter)]
+    }
+}
+
+fn agent_submit_payload() -> Vec<u8> {
+    write_payload(String::new(), true)
+}
+
+fn is_codex_pane(pane: &PaneMeta) -> bool {
+    pane.config
+        .profile_id
+        .as_deref()
+        .is_some_and(|profile_id| profile_id.eq_ignore_ascii_case("codex"))
+        || {
+            let haystack = std::iter::once(pane.config.title.as_deref().unwrap_or_default())
+                .chain(std::iter::once(
+                    pane.config.shell.as_deref().unwrap_or_default(),
+                ))
+                .chain(pane.config.args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+            command_token_matches(&haystack, "codex")
+        }
 }
 
 fn emit_board_changed(client: &DaemonClient, session_id: Uuid) -> Result<()> {
@@ -226,14 +1127,20 @@ fn emit_board_changed(client: &DaemonClient, session_id: Uuid) -> Result<()> {
 }
 
 fn relay_task_event(client: &DaemonClient, session_id: Uuid, event: TaskSignal) -> Result<String> {
-    match client.request_reply(|req| ClientToDaemon::TaskEvent { req, session_id, event })? {
+    match client.request_reply(|req| ClientToDaemon::TaskEvent {
+        req,
+        session_id,
+        event,
+    })? {
         ReplyResult::Ok => Ok(json!({ "ok": true }).to_string()),
         other => bail!("unexpected daemon response: {other:?}"),
     }
 }
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    args.get(key).and_then(Value::as_str).ok_or_else(|| anyhow!("missing string argument {key}"))
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing string argument {key}"))
 }
 
 fn required_uuid(args: &Value, key: &str) -> Result<Uuid> {
@@ -265,23 +1172,152 @@ mod tests {
     use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
 
     #[test]
-    fn tools_list_contains_pane_and_task_tools() {
+    fn tools_list_contains_pane_task_and_skill_tools() {
         let tools = tool_schemas();
-        let names: Vec<&str> = tools.iter().filter_map(|tool| tool.get("name").and_then(Value::as_str)).collect();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
         assert!(names.contains(&"awt_pane_list"));
+        assert!(names.contains(&"awt_pane_configure"));
+        assert!(names.contains(&"awt_terminal_grid_launch"));
         assert!(names.contains(&"awt_task_create"));
+        assert!(names.contains(&"awt_skill_list"));
+        assert!(names.contains(&"awt_skill_get"));
+        assert!(names.contains(&"awt_skill_apply"));
+        assert!(names.contains(&"awt_skill_delete"));
+    }
+
+    #[test]
+    fn skill_apply_input_defaults_to_workspace_for_mcp_session() {
+        let session_id = Uuid::new_v4().to_string();
+        let input = skill_apply_input(
+            &json!({ "id": "demo", "markdown": "# Demo", "sessionId": session_id, "enabled": false }),
+            None,
+        )
+        .expect("input");
+
+        assert_eq!(input.id, "demo");
+        assert_eq!(input.content, "# Demo");
+        assert_eq!(input.scope, SkillScope::Workspace);
+        assert_eq!(input.session_id, Some(session_id));
+        assert_eq!(input.enabled, Some(false));
+    }
+
+    #[test]
+    fn skill_apply_input_global_scope_ignores_mcp_session_default() {
+        let default_session_id = Uuid::new_v4().to_string();
+        let input = skill_apply_input(
+            &json!({ "id": "demo", "content": "# Demo", "scope": "global" }),
+            Some(default_session_id.as_str()),
+        )
+        .expect("input");
+
+        assert_eq!(input.scope, SkillScope::Global);
+        assert_eq!(input.session_id, None);
+    }
+
+    #[test]
+    fn agent_pane_detection_uses_profile_id_icon_and_command() {
+        let mut panes = test_panes(3);
+        panes[0].config.profile_id = Some("codex".to_string());
+        panes[1].config.icon = Some("sparkles".to_string());
+        panes[2].config.title = Some("PowerShell".to_string());
+        panes[2].config.icon = Some("terminal".to_string());
+
+        assert!(is_agent_pane(&panes[0]));
+        assert!(is_agent_pane(&panes[1]));
+        assert!(!is_agent_pane(&panes[2]));
+    }
+
+    #[test]
+    fn codex_pane_detection_uses_profile_id_or_command_only() {
+        let mut panes = test_panes(3);
+        panes[0].config.profile_id = Some("codex".to_string());
+        panes[1].config.args = vec!["-NoExit".to_string(), "try { & codex }".to_string()];
+        panes[2].config.profile_id = Some("claude".to_string());
+        panes[2].config.args = vec!["try { & claude }".to_string()];
+
+        assert!(is_codex_pane(&panes[0]));
+        assert!(is_codex_pane(&panes[1]));
+        assert!(!is_codex_pane(&panes[2]));
+    }
+
+    #[test]
+    fn command_profile_id_maps_known_agent_commands() {
+        assert_eq!(
+            command_profile_id("codex --danger"),
+            Some("codex".to_string())
+        );
+        assert_eq!(command_profile_id("claude"), Some("claude".to_string()));
+        assert_eq!(command_profile_id("pwsh"), None);
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_dcs_and_c0_controls() {
+        let text = "pre\x1b]0;title\x07mid\x1b]8;;https://example.invalid\x1b\\link\x1b]8;;\x1b\\post\x1bPignored\x1b\\done\x08!";
+
+        assert_eq!(strip_ansi(text), "premidlinkpostdone!");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_newlines_tabs_and_plain_borrow() {
+        assert_eq!(strip_ansi("a\n\tb\r"), "a\n\tb\r");
+        assert_eq!(strip_ansi("a\x1bb"), "ab");
+        assert!(matches!(strip_ansi("plain"), Cow::Borrowed("plain")));
     }
 
     #[test]
     fn is_notification_tracks_absent_id_only() {
-        assert!(is_notification(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })));
-        assert!(!is_notification(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" })));
+        assert!(is_notification(
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+        ));
+        assert!(!is_notification(
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" })
+        ));
+    }
+
+    #[test]
+    fn handle_line_parse_error_returns_json_rpc_error() {
+        let response = handle_line(&placeholder_client(), Uuid::nil(), "{").expect("parse error");
+
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], -32700);
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("Parse error"));
+    }
+
+    #[test]
+    fn handle_line_notification_returns_no_response() {
+        let response = handle_line(
+            &placeholder_client(),
+            Uuid::nil(),
+            r#"{ "jsonrpc": "2.0", "method": "notifications/initialized" }"#,
+        );
+
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn handle_line_request_returns_response() {
+        let response = handle_line(
+            &placeholder_client(),
+            Uuid::nil(),
+            r#"{ "jsonrpc": "2.0", "id": "ping-1", "method": "ping" }"#,
+        )
+        .expect("ping response");
+
+        assert_eq!(response["id"], "ping-1");
+        assert_eq!(response["result"], json!({}));
     }
 
     #[test]
     fn handle_message_ping_returns_empty_result() {
         let request = json!({ "jsonrpc": "2.0", "id": "ping-1", "method": "ping" });
-        let response = handle_message(&placeholder_client(), Uuid::nil(), &request).expect("ping response");
+        let response =
+            handle_message(&placeholder_client(), Uuid::nil(), &request).expect("ping response");
 
         assert_eq!(response["id"], "ping-1");
         assert_eq!(response["result"], json!({}));
@@ -290,7 +1326,8 @@ mod tests {
     #[test]
     fn handle_message_unknown_method_returns_method_not_found() {
         let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "unknown" });
-        let response = handle_message(&placeholder_client(), Uuid::nil(), &request).expect("error response");
+        let response =
+            handle_message(&placeholder_client(), Uuid::nil(), &request).expect("error response");
 
         assert_eq!(response["id"], 7);
         assert_eq!(response["error"]["code"], -32601);
@@ -298,10 +1335,22 @@ mod tests {
 
     fn placeholder_client() -> DaemonClient {
         let socket_name = format!("awt-mcp-test-{}", Uuid::new_v4());
-        let listener_name = socket_name.as_str().to_ns_name::<GenericNamespaced>().expect("listener name");
-        let connect_name = socket_name.as_str().to_ns_name::<GenericNamespaced>().expect("connect name");
-        let listener = ListenerOptions::new().name(listener_name).create_sync().expect("test listener");
-        let stream = interprocess::local_socket::ConnectOptions::new().name(connect_name).connect_sync().expect("test connect");
+        let listener_name = socket_name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("listener name");
+        let connect_name = socket_name
+            .as_str()
+            .to_ns_name::<GenericNamespaced>()
+            .expect("connect name");
+        let listener = ListenerOptions::new()
+            .name(listener_name)
+            .create_sync()
+            .expect("test listener");
+        let stream = interprocess::local_socket::ConnectOptions::new()
+            .name(connect_name)
+            .connect_sync()
+            .expect("test connect");
         let _peer = listener.accept().expect("test accept");
         DaemonClient::new(stream)
     }
@@ -312,18 +1361,129 @@ mod tests {
         let mut board = json!({ "tasks": {}, "taskOrder": [] });
         board_create_task(&mut board, "task-1", session_id, "SMOKE", "desc", 42);
         assert_eq!(board["tasks"]["task-1"]["title"], "SMOKE");
-        assert_eq!(board["tasks"]["task-1"]["sessionId"], session_id.to_string());
+        assert_eq!(
+            board["tasks"]["task-1"]["sessionId"],
+            session_id.to_string()
+        );
         assert_eq!(board["taskOrder"][0], "task-1");
     }
 
     #[test]
     fn compose_task_prompt_includes_role_and_callbacks() {
-        let prompt = compose_task_prompt("12345678-aaaa", "Fix bug", "Do the thing", Some("Reviewer"));
+        let prompt =
+            compose_task_prompt("12345678-aaaa", "Fix bug", "Do the thing", Some("Reviewer"));
 
         assert!(prompt.contains("[Task #12345678] Fix bug"));
         assert!(prompt.contains("Role: Reviewer"));
         assert!(prompt.contains("Do the thing"));
+        assert!(!prompt.contains('\n'));
         assert!(prompt.contains("& $env:AWT_APP_EXE cli task note --task 12345678-aaaa"));
         assert!(prompt.contains("& $env:AWT_APP_EXE cli task done --task 12345678-aaaa"));
+        assert!(prompt.contains("--result-summary \"<short result summary>\""));
+    }
+
+    #[test]
+    fn task_assign_payloads_split_prompt_and_submit_key() {
+        let payloads = task_assign_payloads("multi\nline prompt");
+
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], b"multi\nline prompt".to_vec());
+        assert_eq!(payloads[1], b"\r".to_vec());
+    }
+
+    #[test]
+    fn task_assign_payloads_uses_carriage_return_for_non_codex_agents() {
+        let payloads = task_assign_payloads("prompt");
+
+        assert_eq!(payloads[0], b"prompt".to_vec());
+        assert_eq!(payloads[1], b"\r".to_vec());
+    }
+
+    #[test]
+    fn pane_write_payloads_split_codex_text_and_submit_key() {
+        let payloads = pane_write_payloads("prompt", true, true);
+
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], b"prompt".to_vec());
+        assert_eq!(payloads[1], b"\r".to_vec());
+    }
+
+    #[test]
+    fn pane_write_payloads_can_submit_existing_codex_composer() {
+        let payloads = pane_write_payloads("", true, true);
+
+        assert_eq!(payloads, vec![b"\r".to_vec()]);
+    }
+
+    #[test]
+    fn pane_write_payloads_keeps_carriage_return_for_non_codex_panes() {
+        let payloads = pane_write_payloads("prompt", true, false);
+
+        assert_eq!(payloads, vec![b"prompt\r".to_vec()]);
+    }
+
+    #[test]
+    fn dockview_grid_layout_builds_six_by_four() {
+        let panes = test_panes(24);
+        let layout =
+            dockview_grid_layout(6, 4, &panes, &[], Some(panes[0].id)).expect("grid layout");
+
+        assert_eq!(layout["grid"]["orientation"], "HORIZONTAL");
+        assert_eq!(layout["grid"]["width"], 600);
+        assert_eq!(layout["grid"]["height"], 400);
+        assert_eq!(
+            layout["panels"].as_object().expect("panels object").len(),
+            24
+        );
+
+        let root = &layout["grid"]["root"];
+        assert_eq!(root["data"].as_array().expect("columns").len(), 6);
+        assert_eq!(
+            root["data"][0]["data"][0]["data"]["views"][0],
+            panes[0].id.to_string()
+        );
+        assert_eq!(
+            root["data"][5]["data"][3]["data"]["views"][0],
+            panes[23].id.to_string()
+        );
+    }
+
+    #[test]
+    fn compose_task_prompt_collapses_multiline_input_for_submit() {
+        let prompt = compose_task_prompt(
+            "12345678-aaaa",
+            "Fix\n bug",
+            "Line one\nLine two",
+            Some("Code\nReviewer"),
+        );
+
+        assert!(!prompt.contains('\n'));
+        assert!(prompt.contains("[Task #12345678] Fix bug"));
+        assert!(prompt.contains("Role: Code Reviewer"));
+        assert!(prompt.contains("Line one Line two"));
+    }
+
+    fn test_panes(count: usize) -> Vec<PaneMeta> {
+        (0..count)
+            .map(|index| {
+                let pane_id = Uuid::new_v4();
+                PaneMeta {
+                    id: pane_id,
+                    config: PaneConfig {
+                        pane_id,
+                        shell: None,
+                        args: Vec::new(),
+                        cwd: None,
+                        env: Vec::new(),
+                        title: Some(format!("Pane {}", index + 1)),
+                        icon: Some("terminal".to_string()),
+                        profile_id: None,
+                        cols: 120,
+                        rows: 32,
+                    },
+                    alive: true,
+                }
+            })
+            .collect()
     }
 }

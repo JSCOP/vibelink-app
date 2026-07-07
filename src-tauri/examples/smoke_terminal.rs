@@ -278,6 +278,7 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         env: case.env.clone(),
         title: Some(case.name.clone()),
         icon: None,
+        profile_id: None,
         cols: 80,
         rows: 24,
     };

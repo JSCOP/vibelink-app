@@ -4,6 +4,7 @@ import { KanbanBoard } from '../components/KanbanBoard'
 import { OrchestratorChat } from '../components/OrchestratorChat'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { useWorkspaceStore } from '../state/store'
+import { shouldRestoreDockviewLayout } from './layoutRestore'
 import '../styles/kanban.css'
 
 const components = {
@@ -36,18 +37,19 @@ export function KanbanView({ sessionId }: KanbanViewProps) {
   const [missing, setMissing] = useState<KanbanPanelId[]>([])
 
   const layoutDockview = useCallback((api: DockviewApi) => {
-    const rect = dockRef.current?.getBoundingClientRect()
-    if (!rect || rect.width <= 0 || rect.height <= 0) return
+    const rect = measurableDockRect(dockRef.current)
+    if (!rect) return false
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
+    return true
   }, [])
 
   const persistLayoutSoon = useCallback(() => {
     const api = apiRef.current
-    if (!api) return
+    if (!api || !isDockElementMeasurable(dockRef.current)) return
     window.clearTimeout(saveTimerRef.current)
     saveTimerRef.current = window.setTimeout(() => {
       const currentApi = apiRef.current
-      if (!currentApi) return
+      if (!currentApi || !isDockElementMeasurable(dockRef.current)) return
       setKanbanLayout(sessionId, JSON.stringify(currentApi.toJSON()))
     }, 400)
   }, [sessionId, setKanbanLayout])
@@ -67,17 +69,18 @@ export function KanbanView({ sessionId }: KanbanViewProps) {
 
   const loadLayout = useCallback(() => {
     const api = apiRef.current
-    if (!api || loadedSessionRef.current === sessionId) return
+    if (!api || loadedSessionRef.current === sessionId || !isDockElementMeasurable(dockRef.current)) return
     try {
-      if (layoutJson) api.fromJSON(JSON.parse(layoutJson), { reuseExistingPanels: true })
+      if (layoutJson && shouldRestoreDockviewLayout(layoutJson, [...DEFAULT_PANEL_IDS])) api.fromJSON(JSON.parse(layoutJson), { reuseExistingPanels: true })
       else buildDefaultLayout(api)
       if (api.totalPanels === 0) buildDefaultLayout(api)
     } catch {
       buildDefaultLayout(api)
     }
-    layoutDockview(api)
-    refreshMissing()
-    loadedSessionRef.current = sessionId
+    if (layoutDockview(api)) {
+      refreshMissing()
+      loadedSessionRef.current = sessionId
+    }
   }, [buildDefaultLayout, layoutDockview, layoutJson, refreshMissing, sessionId])
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
@@ -96,12 +99,32 @@ export function KanbanView({ sessionId }: KanbanViewProps) {
   }, [loadLayout, sessionId])
 
   useEffect(() => {
-    const onResize = () => {
-      if (apiRef.current) layoutDockview(apiRef.current)
+    const dock = dockRef.current
+    if (!dock) return
+
+    let frame: number | undefined
+    const syncVisibleLayout = () => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        frame = undefined
+        const api = apiRef.current
+        if (!api || !isDockElementMeasurable(dock)) return
+        if (loadedSessionRef.current !== sessionId) loadLayout()
+        else {
+          layoutDockview(api)
+          refreshMissing()
+        }
+      })
     }
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [layoutDockview])
+
+    const observer = new ResizeObserver(syncVisibleLayout)
+    observer.observe(dock)
+    syncVisibleLayout()
+    return () => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [layoutDockview, loadLayout, refreshMissing, sessionId])
 
   const resetLayout = () => {
     setKanbanLayout(sessionId, null)
@@ -133,4 +156,15 @@ export function KanbanView({ sessionId }: KanbanViewProps) {
       </div>
     </section>
   )
+}
+
+function measurableDockRect(element: HTMLElement | null): DOMRect | null {
+  if (!isDockElementMeasurable(element)) return null
+  return element.getBoundingClientRect()
+}
+
+function isDockElementMeasurable(element: HTMLElement | null): element is HTMLElement {
+  if (!element?.isConnected || element.offsetParent === null) return false
+  const rect = element.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0
 }

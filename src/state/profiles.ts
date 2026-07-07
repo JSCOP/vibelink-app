@@ -1,9 +1,13 @@
-import type { PaneConfig } from '../ipc/types'
+import type { PaneConfig, PaneMeta } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
 import { preferredFontFamily } from './fonts'
 
 export type ProfileKind = 'local' | 'ssh' | 'command'
+export type ChatPersonality = 'direct' | 'balanced' | 'concise' | 'exploratory'
+export type ChatImageAttachmentMode = 'auto' | 'always' | 'never'
+export type TerminalCursorStyle = 'bar' | 'block' | 'underline'
+
 
 export type Profile = {
   id: string
@@ -26,6 +30,11 @@ export type Profile = {
   icon: string
 }
 
+const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
+const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
+const agentNamePhrasePattern = /\b(?:claude code|oh my pi|oh-my-pi|ohmypi)\b/
+const agentProfileIcons = new Set(['bot', 'sparkles', 'zap'])
+
 export type Settings = {
   fontFamily: string
   fontSize: number
@@ -34,6 +43,9 @@ export type Settings = {
   uiScale: number
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
+  cursorStyle: TerminalCursorStyle
+  cursorWidth: number
+  keepTerminalsAliveOnClose: boolean
   resizeSnapTolerance: number
   paneHeaderHeight: number
   profiles: Profile[]
@@ -42,14 +54,20 @@ export type Settings = {
   paneRoles: Record<string, string>
   keybindings: KeybindingSettings
   hermesCommand: string
+  chatPersonality: ChatPersonality
+  chatReasoningBlocks: boolean
+  chatToolCalls: boolean
+  chatToolCallContent: boolean
+  chatImageAttachments: ChatImageAttachmentMode
   captureDir: string
   captureFfmpegPath: string
 }
 
-const terminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
+const legacyTerminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
+const terminalModeResetSequence = '`e[?1049l`e[2J`e[3J`e[H`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
 
 function agentProfileArgs(command: string): string[] {
-  return ['-NoLogo', '-NoExit', '-Command', `try { & ${command} } finally { [Console]::Out.Write("${terminalModeResetSequence}") }`]
+  return ['-NoLogo', '-NoExit', '-Command', agentProfileCommand(command, terminalModeResetSequence)]
 }
 
 const defaultProfiles: Profile[] = [
@@ -185,6 +203,9 @@ export const defaultSettings: Settings = {
   uiScale: 1,
   terminalThemeId: defaultTerminalThemeId,
   terminalScrollbarVisible: false,
+  cursorStyle: 'bar',
+  cursorWidth: 1,
+  keepTerminalsAliveOnClose: false,
   resizeSnapTolerance: 32,
   paneHeaderHeight: 28,
   profiles: cloneProfiles(defaultProfiles),
@@ -192,6 +213,11 @@ export const defaultSettings: Settings = {
   workspaceProfileIds: {},
   paneRoles: {},
   hermesCommand: '',
+  chatPersonality: 'direct',
+  chatReasoningBlocks: true,
+  chatToolCalls: true,
+  chatToolCallContent: true,
+  chatImageAttachments: 'auto',
   captureDir: '',
   captureFfmpegPath: '',
   keybindings: { ...defaultKeybindings },
@@ -214,6 +240,9 @@ export function normalizeSettings(value: unknown): Settings {
     uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
+    cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
+    cursorWidth: readNumberInRange(record?.cursorWidth, defaultSettings.cursorWidth, 1, 10),
+    keepTerminalsAliveOnClose: readBoolean(record?.keepTerminalsAliveOnClose, defaultSettings.keepTerminalsAliveOnClose),
     resizeSnapTolerance: readNumberInRange(record?.resizeSnapTolerance, defaultSettings.resizeSnapTolerance, 0, 128),
     paneHeaderHeight: readNumberInRange(record?.paneHeaderHeight, defaultSettings.paneHeaderHeight, 24, 56),
     profiles,
@@ -222,6 +251,11 @@ export function normalizeSettings(value: unknown): Settings {
     workspaceProfileIds,
     paneRoles,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
+    chatPersonality: readChatPersonality(record?.chatPersonality),
+    chatReasoningBlocks: readBoolean(record?.chatReasoningBlocks, defaultSettings.chatReasoningBlocks),
+    chatToolCalls: readBoolean(record?.chatToolCalls, defaultSettings.chatToolCalls),
+    chatToolCallContent: readBoolean(record?.chatToolCallContent, defaultSettings.chatToolCallContent),
+    chatImageAttachments: readChatImageAttachmentMode(record?.chatImageAttachments),
     captureDir: readString(record?.captureDir, defaultSettings.captureDir),
     captureFfmpegPath: readString(record?.captureFfmpegPath, defaultSettings.captureFfmpegPath),
   }
@@ -240,8 +274,27 @@ export function profileById(settings: Settings, profileId?: string | null): Prof
   return settings.profiles.find((profile) => profile.id === profileId) ?? selectedProfile(settings)
 }
 
-export function paneOverridesFromProfile(profile: Profile, title?: string): Pick<PaneConfig, 'shell' | 'args' | 'cwd' | 'env' | 'title'> {
-  const command = commandFromProfile(profile)
+export function createProfile(settings: Settings, seed: Partial<Profile> = {}): Profile {
+  const type = readProfileKind(seed.type)
+  const defaults = profileDefaultsForType(type)
+  const name = readString(seed.name, defaults.name).trim() || defaults.name
+  const requestedId = readString(seed.id, '').trim()
+  const baseId = slugifyProfileId(requestedId || name) || `profile-${randomProfileSuffix()}`
+  const id = uniqueProfileId(baseId, new Set(settings.profiles.map((profile) => profile.id)))
+
+  return normalizeProfile({ ...defaults, ...seed, id, name, type }, settings.profiles.length)
+}
+
+export function canDeleteProfile(settings: Settings, profileId: string): boolean {
+  return settings.profiles.length > 1 && settings.profiles.some((profile) => profile.id === profileId)
+}
+
+export function paneOverridesFromProfile(
+  profile: Profile,
+  title?: string,
+  options: { remoteCwd?: string | null } = {},
+): Pick<PaneConfig, 'shell' | 'args' | 'cwd' | 'env' | 'title'> {
+  const command = commandFromProfile(profile, options.remoteCwd)
   return {
     shell: command.shell,
     args: command.args,
@@ -249,6 +302,26 @@ export function paneOverridesFromProfile(profile: Profile, title?: string): Pick
     env: profile.env.map(([key, value]) => [key, value]),
     title: title ?? profile.name,
   }
+}
+
+export function isAgentProfile(profile: Profile): boolean {
+  if (builtInAgentProfileIds.has(profile.id.toLowerCase())) return true
+  const haystack = [profile.id, profile.name, profile.command, profile.shell ?? '', ...profile.args].join(' ').toLowerCase()
+  return agentNamePhrasePattern.test(haystack) || agentCommandNames.some((command) => new RegExp(`(^|[\\s\\\\/"'])${command}([\\s\\\\/"']|$|\\.)`).test(haystack))
+}
+
+export function isAgentPane(pane: PaneMeta, settings: Settings): boolean {
+  const profileId = pane.config.profileId?.trim()
+  if (profileId) {
+    const profile = settings.profiles.find((candidate) => candidate.id === profileId)
+    if (profile) return isAgentProfile(profile)
+  }
+  const haystack = [
+    pane.config.title ?? '',
+    pane.config.shell ?? '',
+    ...(pane.config.args ?? []),
+  ].join(' ').toLowerCase()
+  return agentProfileIcons.has(pane.config.icon ?? '') || agentNamePhrasePattern.test(haystack) || agentCommandNames.some((command) => new RegExp(`(^|[\\s\\\\/"'])${command}([\\s\\\\/"']|$|\\.)`).test(haystack))
 }
 
 function normalizeProfiles(value: unknown, legacyShell: string | null): Profile[] {
@@ -299,6 +372,89 @@ function cloneProfiles(profiles: Profile[]): Profile[] {
   }))
 }
 
+function profileDefaultsForType(type: ProfileKind): Profile {
+  switch (type) {
+    case 'ssh':
+      return {
+        ...defaultProfile,
+        id: '',
+        name: 'SSH profile',
+        type,
+        shell: null,
+        args: [],
+        command: '',
+        sshHost: '',
+        sshUser: '',
+        sshPort: null,
+        sshIdentityFile: null,
+        sshRemoteCommand: '',
+        sshRemoteCwd: null,
+        sshOptions: '',
+        sshAllocateTty: true,
+        env: [],
+        cwd: null,
+        color: '#76e3ea',
+        icon: 'radio-tower',
+      }
+    case 'command':
+      return {
+        ...defaultProfile,
+        id: '',
+        name: 'Command profile',
+        type,
+        shell: null,
+        args: [],
+        command: joinCommandLine([defaultProfile.shell ?? 'pwsh.exe', ...defaultProfile.args]),
+        sshHost: '',
+        sshUser: '',
+        sshPort: null,
+        sshIdentityFile: null,
+        sshRemoteCommand: '',
+        sshRemoteCwd: null,
+        sshOptions: '',
+        sshAllocateTty: true,
+        env: [],
+        cwd: null,
+        color: '#f2cc60',
+        icon: 'command',
+      }
+    default:
+      return {
+        ...defaultProfile,
+        id: '',
+        name: 'Local profile',
+        type: 'local',
+        args: [...defaultProfile.args],
+        env: [],
+      }
+  }
+}
+
+function uniqueProfileId(baseId: string, existingIds: Set<string>): string {
+  let candidate = baseId
+  let attempts = 0
+  while (existingIds.has(candidate)) {
+    attempts += 1
+    const suffix = randomProfileSuffix()
+    candidate = attempts > 8 ? `${baseId}-${suffix}-${attempts}` : `${baseId}-${suffix}`
+  }
+  return candidate
+}
+
+function slugifyProfileId(value: string): string {
+  const slug = value.trim().toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug
+}
+
+function randomProfileSuffix(): string {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  if (uuid) return uuid.slice(0, 8)
+  return Math.random().toString(36).slice(2, 10) || Date.now().toString(36)
+}
+
 function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Record<string, string> {
   if (!isRecord(value)) return {}
   const profileIds = new Set(profiles.map((profile) => profile.id))
@@ -319,9 +475,9 @@ function normalizePaneRoles(value: unknown): Record<string, string> {
   )
 }
 
-function commandFromProfile(profile: Profile): Pick<PaneConfig, 'shell' | 'args'> {
+function commandFromProfile(profile: Profile, remoteCwd?: string | null): Pick<PaneConfig, 'shell' | 'args'> {
   if (profile.type === 'ssh') {
-    return { shell: 'ssh', args: sshArgsFromProfile(profile) }
+    return { shell: 'ssh', args: sshArgsFromProfile(profile, remoteCwd) }
   }
 
   if (profile.type === 'command') {
@@ -334,7 +490,7 @@ function commandFromProfile(profile: Profile): Pick<PaneConfig, 'shell' | 'args'
 
 function normalizeAgentProfileArgs(id: string, args: string[]): string[] {
   const command = defaultAgentCommand(id)
-  if (!command || !isLegacyAgentProfileArgs(args, command)) return args
+  if (!command || !isManagedAgentProfileArgs(args, command)) return args
   return agentProfileArgs(command)
 }
 
@@ -351,11 +507,16 @@ function defaultAgentCommand(id: string): string | null {
   }
 }
 
-function isLegacyAgentProfileArgs(args: string[], command: string): boolean {
-  return args.length === 4 && args[0] === '-NoLogo' && args[1] === '-NoExit' && args[2] === '-Command' && args[3] === command
+function isManagedAgentProfileArgs(args: string[], command: string): boolean {
+  if (args.length !== 4 || args[0] !== '-NoLogo' || args[1] !== '-NoExit' || args[2] !== '-Command') return false
+  return args[3] === command || args[3] === agentProfileCommand(command, legacyTerminalModeResetSequence) || args[3] === agentProfileCommand(command, terminalModeResetSequence)
 }
 
-function sshArgsFromProfile(profile: Profile): string[] {
+function agentProfileCommand(command: string, resetSequence: string): string {
+  return `try { & ${command} } finally { [Console]::Out.Write("${resetSequence}") }`
+}
+
+function sshArgsFromProfile(profile: Profile, remoteCwdOverride?: string | null): string[] {
   const args = splitCommandLine(profile.sshOptions)
   if (profile.sshAllocateTty) args.push('-t')
   if (profile.sshPort !== null) args.push('-p', String(profile.sshPort))
@@ -367,14 +528,16 @@ function sshArgsFromProfile(profile: Profile): string[] {
   const user = profile.sshUser.trim()
   args.push(user.length > 0 ? `${user}@${host}` : host)
 
-  const remoteCommand = remoteCommandFromProfile(profile)
+  const remoteCommand = remoteCommandFromProfile(profile, remoteCwdOverride)
   if (remoteCommand.length > 0) args.push(remoteCommand)
   return args
 }
 
-function remoteCommandFromProfile(profile: Profile): string {
+function remoteCommandFromProfile(profile: Profile, remoteCwdOverride?: string | null): string {
   const remoteCommand = profile.sshRemoteCommand.trim()
-  const remoteCwd = profile.sshRemoteCwd?.trim() ?? ''
+  const remoteCwd = typeof remoteCwdOverride === 'string' && remoteCwdOverride.trim().length > 0
+    ? remoteCwdOverride.trim()
+    : profile.sshRemoteCwd?.trim() ?? ''
   if (remoteCwd.length === 0) return remoteCommand
   const changeDirectory = `cd -- ${quoteRemoteShellArg(remoteCwd)}`
   return remoteCommand.length > 0
@@ -450,6 +613,22 @@ function readProfileKind(value: unknown): ProfileKind {
 
 function readTerminalThemeId(value: unknown): TerminalThemeId {
   return typeof value === 'string' && isTerminalThemeId(value) ? value : defaultSettings.terminalThemeId
+}
+
+function readTerminalCursorStyle(value: unknown): TerminalCursorStyle {
+  return value === 'bar' || value === 'block' || value === 'underline' ? value : defaultSettings.cursorStyle
+}
+
+function readChatPersonality(value: unknown): ChatPersonality {
+  return value === 'direct' || value === 'balanced' || value === 'concise' || value === 'exploratory'
+    ? value
+    : defaultSettings.chatPersonality
+}
+
+function readChatImageAttachmentMode(value: unknown): ChatImageAttachmentMode {
+  return value === 'auto' || value === 'always' || value === 'never'
+    ? value
+    : defaultSettings.chatImageAttachments
 }
 
 function readNullableString(value: unknown, fallback: string | null): string | null {
