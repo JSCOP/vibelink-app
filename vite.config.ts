@@ -11,5 +11,9 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      // Cargo holds locks on target/ artifacts; watching them crashes vite (EBUSY).
+      ignored: ['**/src-tauri/target/**'],
+    },
   },
 })
