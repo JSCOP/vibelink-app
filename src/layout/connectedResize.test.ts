@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { connectedResizeDeltaAt, connectedResizeHandles, resizeConnectedBoundaryAt, resizeConnectedBoundaryForPane, resizeSingleBoundaryAt, singleResizeDeltaAt, singleResizeHandleAt, singleResizeHandles } from './connectedResize'
+import { connectedResizeDeltaAt, connectedResizeHandles, createConnectedResizeDragSession, createSingleResizeDragSession, resizeConnectedBoundaryAt, resizeConnectedBoundaryForPane, resizeSingleBoundaryAt, singleResizeDeltaAt, singleResizeHandleAt, singleResizeHandles } from './connectedResize'
+
+const RAW_DELTAS = [-500, -40, -3, 0, 3, 35, 500] as const
+const SNAP_TOLERANCES = [0, 32] as const
 
 describe('connected dockview resizing', () => {
   it('resizes a connected vertical column boundary across rows', () => {
@@ -138,6 +141,139 @@ describe('connected dockview resizing', () => {
     expect(singleResizeHandleAt(makeBrokenHorizontalSegment(), 'x', 100, 50)).toBeNull()
   })
 
+  it('keeps connected drag sessions in parity with connected resize math', () => {
+    const cases = [
+      { name: '2x2 rectangular grid', layout: makeGrid2x2(), axis: 'x' as const, coordinate: 120, start: 0, end: 200 },
+      { name: 'split-column boundary', layout: makeThreeColumnWithSplitColumn(), axis: 'x' as const, coordinate: 100, start: 0, end: 200 },
+      { name: 'snapping broken horizontal segment', layout: makeBrokenHorizontalSegment(104), axis: 'y' as const, coordinate: 104, start: 0, end: 100 },
+    ]
+
+    for (const resizeCase of cases) {
+      for (const snapTolerance of SNAP_TOLERANCES) {
+        const session = createConnectedResizeDragSession(
+          resizeCase.layout,
+          resizeCase.axis,
+          resizeCase.coordinate,
+          resizeCase.start,
+          resizeCase.end,
+          undefined,
+          snapTolerance,
+        )
+
+        expect(session, `${resizeCase.name} session`).not.toBeNull()
+        if (!session) continue
+
+        for (const rawDelta of RAW_DELTAS) {
+          const expectedDelta = connectedResizeDeltaAt(
+            resizeCase.layout,
+            resizeCase.axis,
+            resizeCase.coordinate,
+            resizeCase.start,
+            resizeCase.end,
+            rawDelta,
+            undefined,
+            snapTolerance,
+          )
+          const actualDelta = session.deltaFor(rawDelta)
+
+          expect(actualDelta, `${resizeCase.name} raw ${rawDelta} tolerance ${snapTolerance}`).toBe(expectedDelta)
+          expect(session.layoutFor(actualDelta), `${resizeCase.name} layout raw ${rawDelta} tolerance ${snapTolerance}`).toEqual(
+            resizeConnectedBoundaryAt(
+              resizeCase.layout,
+              resizeCase.axis,
+              resizeCase.coordinate,
+              resizeCase.start,
+              resizeCase.end,
+              actualDelta,
+              undefined,
+              snapTolerance,
+            ),
+          )
+        }
+
+        expect(session.layoutFor(0), `${resizeCase.name} zero layout`).toBeNull()
+      }
+    }
+  })
+
+  it('keeps single drag sessions in parity with single resize math', () => {
+    const cases = [
+      { name: 'split-column segment', layout: makeThreeColumnWithSplitColumn(), axis: 'y' as const, coordinate: 100, point: 50 },
+      { name: 'snapping broken horizontal segment', layout: makeBrokenHorizontalSegment(104), axis: 'y' as const, coordinate: 104, point: 50 },
+    ]
+
+    for (const resizeCase of cases) {
+      for (const snapTolerance of SNAP_TOLERANCES) {
+        const session = createSingleResizeDragSession(
+          resizeCase.layout,
+          resizeCase.axis,
+          resizeCase.coordinate,
+          resizeCase.point,
+          undefined,
+          snapTolerance,
+          true,
+        )
+
+        expect(session, `${resizeCase.name} session`).not.toBeNull()
+        if (!session) continue
+
+        for (const rawDelta of RAW_DELTAS) {
+          const expectedDelta = singleResizeDeltaAt(
+            resizeCase.layout,
+            resizeCase.axis,
+            resizeCase.coordinate,
+            resizeCase.point,
+            rawDelta,
+            undefined,
+            snapTolerance,
+            true,
+          )
+          const actualDelta = session.deltaFor(rawDelta)
+
+          expect(actualDelta, `${resizeCase.name} raw ${rawDelta} tolerance ${snapTolerance}`).toBe(expectedDelta)
+          expect(session.layoutFor(actualDelta), `${resizeCase.name} layout raw ${rawDelta} tolerance ${snapTolerance}`).toEqual(
+            resizeSingleBoundaryAt(
+              resizeCase.layout,
+              resizeCase.axis,
+              resizeCase.coordinate,
+              resizeCase.point,
+              actualDelta,
+              undefined,
+              snapTolerance,
+              true,
+            ),
+          )
+        }
+
+        expect(session.layoutFor(0), `${resizeCase.name} zero layout`).toBeNull()
+      }
+    }
+  })
+
+  it('keeps clamped-out drags in parity and skips zero-delta layouts', () => {
+    const connectedLayout = makeGrid2x2()
+    const connectedSession = createConnectedResizeDragSession(connectedLayout, 'x', 120, 0, 200, undefined, 32)
+    expect(connectedSession).not.toBeNull()
+    if (connectedSession) {
+      const delta = connectedSession.deltaFor(500)
+
+      expect(delta).toBe(connectedResizeDeltaAt(connectedLayout, 'x', 120, 0, 200, 500, undefined, 32))
+      expect(connectedSession.layoutFor(delta)).toEqual(resizeConnectedBoundaryAt(connectedLayout, 'x', 120, 0, 200, delta, undefined, 32))
+      expect(connectedSession.layoutFor(0)).toBeNull()
+    }
+
+    const singleLayout = makeThreeColumnWithSplitColumn()
+    const singleSession = createSingleResizeDragSession(singleLayout, 'y', 100, 50, undefined, 32, true)
+    expect(singleSession).not.toBeNull()
+    if (singleSession) {
+      const delta = singleSession.deltaFor(-500)
+
+      expect(delta).toBe(singleResizeDeltaAt(singleLayout, 'y', 100, 50, -500, undefined, 32, true))
+      expect(singleSession.layoutFor(delta)).toEqual(resizeSingleBoundaryAt(singleLayout, 'y', 100, 50, delta, undefined, 32, true))
+      expect(singleSession.layoutFor(0)).toBeNull()
+    }
+  })
+
   it('disables resize handles and deltas while a pane is maximized', () => {
     const layout = makeGrid3x2() as TestLayout
     layout.grid.maximizedNode = { location: [0, 0] }
@@ -186,6 +322,62 @@ function makeGrid3x2() {
           column('pane-0', 'pane-3'),
           column('pane-1', 'pane-4'),
           column('pane-2', 'pane-5'),
+        ],
+      },
+      width: 300,
+      height: 200,
+      orientation: 'HORIZONTAL',
+    },
+  }
+}
+
+function makeGrid2x2() {
+  const leaf = (id: string, size = 100) => ({
+    type: 'leaf' as const,
+    size,
+    data: { views: [id] },
+  })
+
+  const column = (top: string, bottom: string) => ({
+    type: 'branch' as const,
+    size: 120,
+    data: [leaf(top), leaf(bottom)],
+  })
+
+  return {
+    grid: {
+      root: {
+        type: 'branch' as const,
+        size: 240,
+        data: [column('pane-0', 'pane-2'), column('pane-1', 'pane-3')],
+      },
+      width: 240,
+      height: 200,
+      orientation: 'HORIZONTAL',
+    },
+  }
+}
+
+function makeThreeColumnWithSplitColumn() {
+  const leaf = (id: string, size = 100) => ({
+    type: 'leaf' as const,
+    size,
+    data: { views: [id] },
+  })
+
+  return {
+    grid: {
+      root: {
+        type: 'branch' as const,
+        size: 300,
+        data: [
+          {
+            type: 'branch' as const,
+            size: 100,
+            data: [leaf('pane-0'), leaf('pane-3')],
+          },
+          leaf('pane-1'),
+          leaf('pane-2'),
         ],
       },
       width: 300,

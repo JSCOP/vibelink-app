@@ -223,6 +223,103 @@ export function singleResizeDeltaAt(
   return snapSingleDelta(root, analysis.boundaries, selected, clampDelta(root, [selected], delta, minSize), minSize, snapTolerance)
 }
 
+export type ResizeDragSession = {
+  handle: ConnectedResizeHandle
+  /** Snap+clamp a raw pointer delta. Cheap: no cloning, no re-analysis. */
+  deltaFor(rawDelta: number): number
+  /** Build the resized layout tree for a final delta. Clones — call once, on commit. */
+  layoutFor(delta: number): unknown | null
+}
+
+/** Precompute everything a connected-boundary drag needs. The per-move path
+ *  (deltaFor) only walks the selected boundaries; the expensive clone+apply
+ *  (layoutFor) runs once on pointerup. */
+export function createConnectedResizeDragSession(
+  layout: unknown,
+  axis: SplitAxis,
+  coordinate: number,
+  start: number,
+  end: number,
+  minSize = DEFAULT_MIN_SIZE,
+  snapTolerance = 0,
+): ResizeDragSession | null {
+  const analysis = analyzeLayout(layout)
+  if (!analysis) return null
+  const selected = selectConnectedBoundaries(analysis.boundaries, axis, coordinate, start, end)
+  if (selected.length === 0) return null
+  const root = (layout as DockviewLayoutLike).grid?.root
+  if (!root) return null
+
+  const deltaFor = (rawDelta: number) =>
+    snapConnectedDelta(root, analysis.boundaries, selected, clampDelta(root, selected, rawDelta, minSize), minSize, snapTolerance)
+
+  return {
+    handle: { id: `session:${axis}:${Math.round(coordinate)}`, axis, coordinate, start, end },
+    deltaFor,
+    layoutFor(delta: number): unknown | null {
+      if (Math.abs(delta) < 1) return null
+      const next = structuredClone(layout) as DockviewLayoutLike
+      const nextRoot = next.grid?.root
+      if (!nextRoot) return null
+      for (const boundary of selected) {
+        const branch = nodeAtPath(nextRoot, boundary.path)
+        if (!branch || branch.type !== 'branch') continue
+        const before = branch.data[boundary.index]
+        const after = branch.data[boundary.index + 1]
+        if (!before || !after) continue
+        before.size = Math.max(minSize, Math.round(before.size + delta))
+        after.size = Math.max(minSize, Math.round(after.size - delta))
+      }
+      return next
+    },
+  }
+}
+
+/** Single-boundary variant. Normalization (which clones) happens once here,
+ *  not per pointermove. */
+export function createSingleResizeDragSession(
+  layout: unknown,
+  axis: SplitAxis,
+  coordinate: number,
+  point: number,
+  minSize = DEFAULT_MIN_SIZE,
+  snapTolerance = DEFAULT_SNAP_TOLERANCE,
+  includeCleanHandles = false,
+): ResizeDragSession | null {
+  const selectedHandle = singleResizeHandleAt(layout, axis, coordinate, point, includeCleanHandles)
+  if (!selectedHandle) return null
+  const workingLayout = normalizeLayoutForSingleResize(layout, axis, selectedHandle, snapTolerance)
+  if (!workingLayout) return null
+  const analysis = analyzeLayout(workingLayout)
+  if (!analysis) return null
+  const selected = selectSingleBoundary(analysis.boundaries, axis, selectedHandle.coordinate, point)
+  if (!selected) return null
+  const root = workingLayout.grid?.root
+  if (!root) return null
+
+  const deltaFor = (rawDelta: number) =>
+    snapSingleDelta(root, analysis.boundaries, selected, clampDelta(root, [selected], rawDelta, minSize), minSize, snapTolerance)
+
+  return {
+    handle: selectedHandle,
+    deltaFor,
+    layoutFor(delta: number): unknown | null {
+      if (Math.abs(delta) < 1) return null
+      const next = structuredClone(workingLayout) as DockviewLayoutLike
+      const nextRoot = next.grid?.root
+      if (!nextRoot) return null
+      const branch = nodeAtPath(nextRoot, selected.path)
+      if (!branch || branch.type !== 'branch') return null
+      const before = branch.data[selected.index]
+      const after = branch.data[selected.index + 1]
+      if (!before || !after) return null
+      before.size = Math.max(minSize, Math.round(before.size + delta))
+      after.size = Math.max(minSize, Math.round(after.size - delta))
+      return next
+    },
+  }
+}
+
 export function singleResizeHandleAt(
   layout: unknown,
   axis: SplitAxis,
