@@ -246,6 +246,15 @@ class TerminalManagerImpl {
     this.scheduleVisibleRecovery(entry, 0)
   }
 
+  /** Force-fit + WebGL atlas reset for every pane once its host is measurable.
+   *  Use after dockview maximize/restore, where plain reflowAll leaves stale
+   *  glyph textures until the pane is clicked. */
+  recoverAllVisiblePanes(): void {
+    for (const entry of this.entries.values()) {
+      this.scheduleVisibleRecovery(entry, 0)
+    }
+  }
+
   reflowAll(forceFit = false): void {
     for (const entry of this.entries.values()) {
       this.reflowEntry(entry, forceFit)

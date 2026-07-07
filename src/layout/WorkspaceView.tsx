@@ -294,6 +294,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       cancelAnimationFrame(layoutReflowFrameRef.current)
       layoutReflowFrameRef.current = undefined
     }
+    if (terminalDockLayoutFrameRef.current !== undefined) {
+      cancelAnimationFrame(terminalDockLayoutFrameRef.current)
+      terminalDockLayoutFrameRef.current = undefined
+    }
   }, [clearResizeInteraction, clearTerminalResizeInteraction])
 
   const persistLayoutSoon = useCallback(() => {
@@ -332,6 +336,19 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     refreshTerminalResizeHandles(api)
     return true
   }, [refreshTerminalResizeHandles])
+
+  const terminalDockLayoutFrameRef = useRef<number | undefined>()
+  // The outer dockview repositions the terminal window's overlay container on
+  // its own rAF after a layout change; measuring the terminal dock in the same
+  // tick reads stale (half-transition) geometry and can persist a collapsed
+  // inner grid. Always defer the inner layout by one frame and coalesce.
+  const scheduleTerminalDockLayout = useCallback(() => {
+    if (terminalDockLayoutFrameRef.current !== undefined) cancelAnimationFrame(terminalDockLayoutFrameRef.current)
+    terminalDockLayoutFrameRef.current = requestAnimationFrame(() => {
+      terminalDockLayoutFrameRef.current = undefined
+      if (terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
+    })
+  }, [layoutTerminalDockview])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
     api.addPanel({
@@ -1215,7 +1232,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const hasMaximizedGroup = event.api.hasMaximizedGroup()
       clearTerminalResizeInteraction({ clearHandles: hasMaximizedGroup })
       if (!hasMaximizedGroup && isDockElementMeasurable(terminalDockRef.current)) refreshTerminalResizeHandles(event.api)
-      reflowTerminalsAfterLayout({ syncPty: true })
+      // Dockview's maximize transition leaves group geometry stale until the
+      // next layout pass; force one first, then reflow + recover panes so
+      // xterm refits against the real container size.
+      scheduleTerminalDockLayout()
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       persistLayoutSoon()
     })
     event.api.onDidLayoutChange(() => {
@@ -1237,7 +1258,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
     loadedTerminalPageRef.current = null
     requestAnimationFrame(() => loadTerminalPaneLayout())
-  }, [clearTerminalResizeInteraction, closePaneInStore, loadTerminalPaneLayout, persistLayoutSoon, refreshTerminalResizeHandles, scheduleLayoutReflow, setActivePaneFromApis])
+  }, [clearTerminalResizeInteraction, closePaneInStore, loadTerminalPaneLayout, persistLayoutSoon, refreshTerminalResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis])
 
   const terminalWindowBridge = useMemo<TerminalWindowBridge>(() => ({
     onReady: handleTerminalReady,
@@ -1260,7 +1281,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const hasMaximizedGroup = event.api.hasMaximizedGroup()
       clearResizeInteraction({ clearHandles: hasMaximizedGroup })
       if (!hasMaximizedGroup && isDockElementMeasurable(dockRef.current)) refreshResizeHandles(event.api)
-      reflowTerminalsAfterLayout({ syncPty: true })
+      // See handleTerminalReady: force a layout pass before pane recovery.
+      requestAnimationFrame(() => layoutDockview(event.api))
+      scheduleTerminalDockLayout()
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
     }
 
     if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(updateActivePaneId)
@@ -1277,7 +1301,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       if (!isDockElementMeasurable(dockRef.current)) return
       scheduleLayoutReflow()
       refreshResizeHandles(event.api)
-      if (terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
+      scheduleTerminalDockLayout()
       persistLayoutSoon()
       if (!hasActivePanelChange) updateActivePaneId()
     })
@@ -1294,7 +1318,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     loadedSessionRef.current = null
     loadedPageRef.current = null
     loadActiveSessionLayout()
-  }, [clearResizeInteraction, closePaneInStore, layoutTerminalDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, setActivePaneFromApis, syncChromeState])
+  }, [clearResizeInteraction, closePaneInStore, layoutDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, syncChromeState])
 
   useEffect(() => {
     loadActiveSessionLayout()
@@ -1376,7 +1400,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         if (activeSessionId && (loadedSessionRef.current !== activeSessionId || loadedPageRef.current !== activeLayoutPageId)) loadActiveSessionLayout()
         else {
           layoutDockview(api)
-          if (terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
+          scheduleTerminalDockLayout()
         }
       })
     }
@@ -1389,7 +1413,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       if (frame !== undefined) cancelAnimationFrame(frame)
       observer.disconnect()
     }
-  }, [activeLayoutPageId, activeSessionId, layoutDockview, layoutTerminalDockview, loadActiveSessionLayout])
+  }, [activeLayoutPageId, activeSessionId, layoutDockview, loadActiveSessionLayout, scheduleTerminalDockLayout])
 
   useEffect(() => {
     if (!arrangeRequestId || applyingArrangeRequestRef.current === arrangeRequestId) return
@@ -1678,17 +1702,24 @@ function isDockElementMeasurable(element: HTMLElement | null): element is HTMLEl
 
 let terminalLayoutReflowFrame: number | undefined
 let terminalLayoutReflowSyncPty = false
+let terminalLayoutReflowRecover = false
 
-function reflowTerminalsAfterLayout(options: { syncPty?: boolean } = {}): void {
+function reflowTerminalsAfterLayout(options: { syncPty?: boolean; recover?: boolean } = {}): void {
   terminalLayoutReflowSyncPty = terminalLayoutReflowSyncPty || options.syncPty === true
+  terminalLayoutReflowRecover = terminalLayoutReflowRecover || options.recover === true
   if (terminalLayoutReflowFrame !== undefined) cancelAnimationFrame(terminalLayoutReflowFrame)
   terminalLayoutReflowFrame = requestAnimationFrame(() => {
     terminalLayoutReflowFrame = requestAnimationFrame(() => {
       terminalLayoutReflowFrame = undefined
       const syncPty = terminalLayoutReflowSyncPty
+      const recover = terminalLayoutReflowRecover
       terminalLayoutReflowSyncPty = false
+      terminalLayoutReflowRecover = false
       TerminalManager.reflowAll(true)
       if (syncPty) TerminalManager.syncAllPtySizes()
+      // reflowAll never clears the WebGL glyph atlas; after dockview
+      // maximize/restore that leaves stale textures until a pane is clicked.
+      if (recover) TerminalManager.recoverAllVisiblePanes()
     })
   })
 }

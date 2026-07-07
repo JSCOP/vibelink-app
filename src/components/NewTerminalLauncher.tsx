@@ -156,7 +156,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   return (
     <div ref={rootRef} className="new-terminal-launcher">
       <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Add terminals by dragging over free grid cells" onClick={toggleLauncher}>
-        <Plus size={14} /> New
+        <Plus size={14} /> <span>New</span>
       </button>
       {isOpen ? (
         <section className="new-terminal-popover" style={popoverPosition} aria-label="Add terminal panes">

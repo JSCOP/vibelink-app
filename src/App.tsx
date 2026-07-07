@@ -418,13 +418,12 @@ function App() {
       />
       <section className="main-surface">
         <header className="topbar" data-tauri-drag-region>
-          <div className="brand-mark" data-tauri-drag-region><TerminalSquare size={18} /></div>
           <div className="workspace-crumb-box" data-tauri-drag-region>
-            <div className="crumb" data-tauri-drag-region>WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
+            <div className="crumb" data-tauri-drag-region>{activeSession?.name ?? 'Loading'}</div>
           </div>
           <div className="window-menu" ref={windowMenuRef}>
             <button type="button" className="topbar-text-button" disabled={!activeSessionId} aria-haspopup="menu" aria-expanded={isWindowMenuOpen} onClick={() => setIsWindowMenuOpen((open) => !open)}>
-              <LayoutGrid size={14} /> Window
+              <LayoutGrid size={14} /> <span>Window</span>
             </button>
             {isWindowMenuOpen ? (
               <div className="window-menu-popover" role="menu">

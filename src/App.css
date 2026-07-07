@@ -163,21 +163,9 @@ button {
   z-index: 25;
 }
 
-.brand-mark {
-  align-items: center;
-  background: var(--awt-accent-soft);
-  border: 1px solid var(--awt-accent-border);
-  border-radius: 8px;
-  color: var(--awt-accent);
-  display: flex;
-  height: 24px;
-  justify-content: center;
-  width: 24px;
-  flex: 0 0 auto;
-}
-
 .workspace-crumb-box {
-  min-width: 0;
+  flex: 0 1 auto;
+  min-width: 24px;
   overflow: hidden;
 }
 
@@ -187,6 +175,47 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Right side of the topbar must never be pushed off-screen: middle zones
+   shrink first (crumb, page strip, terminal toolbar), fixed controls last. */
+.topbar-icon-button,
+.window-controls,
+.topbar .window-menu {
+  flex-shrink: 0;
+}
+
+/* Narrow window: drop text labels, keep icons + fixed controls clickable. */
+@media (max-width: 1100px) {
+  .topbar .topbar-text-button > span,
+  .topbar .terminal-titlebar-button > span,
+  .topbar .terminal-titlebar-profile > span {
+    display: none;
+  }
+  .topbar .terminal-titlebar-profile select {
+    max-width: 80px;
+  }
+}
+
+@media (max-width: 860px) {
+  .topbar .terminal-titlebar-profile {
+    display: none;
+  }
+  .topbar .layout-page-strip {
+    min-width: 44px;
+  }
+  .topbar .layout-page-strip button {
+    max-width: 72px;
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar button[title="Capture image"],
+  .topbar button[title="Capture video"],
+  .topbar button[title="Resource monitor"],
+  .topbar .terminal-titlebar-toolbar {
+    display: none;
+  }
 }
 
 
@@ -2053,7 +2082,8 @@ button {
 .terminal-titlebar-toolbar {
   align-items: center;
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  overflow: hidden;
   gap: 5px;
   min-width: 0;
   padding-right: 6px;
