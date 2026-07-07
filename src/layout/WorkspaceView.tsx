@@ -324,6 +324,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const rect = measurableDockRect(dockRef.current)
     if (!rect) return false
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
+    // api.layout() resizes groups but overlay containers (defaultRenderer
+    // "always") only reposition on per-panel dimension events, which do not
+    // fire for groups whose size survived the layout — e.g. the terminal
+    // window after closing a sibling. Force a reposition pass.
+    forceOverlayReposition(api)
     reflowTerminalsAfterLayout()
     refreshResizeHandles(api)
     return true
@@ -333,21 +338,30 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const rect = measurableDockRect(terminalDockRef.current)
     if (!rect) return false
     api.layout(Math.floor(rect.width), Math.floor(rect.height), true)
+    forceOverlayReposition(api)
     reflowTerminalsAfterLayout({ syncPty: true })
     refreshTerminalResizeHandles(api)
     return true
   }, [refreshTerminalResizeHandles])
 
   const terminalDockLayoutFrameRef = useRef<number | undefined>()
-  // The outer dockview repositions the terminal window's overlay container on
-  // its own rAF after a layout change; measuring the terminal dock in the same
-  // tick reads stale (half-transition) geometry and can persist a collapsed
-  // inner grid. Always defer the inner layout by one frame and coalesce.
+  // The outer dockview repositions the terminal window's render overlay in a
+  // rAF-deferred pass that only runs on per-panel dimension events — after a
+  // sibling window closes, the terminal window's own dimensions "didn't
+  // change" and the overlay silently keeps its stale rect (one-step-behind
+  // geometry). Sequence explicitly: force the outer overlay reposition, then
+  // measure the terminal dock ONE FRAME LATER so it reads the corrected host.
   const scheduleTerminalDockLayout = useCallback(() => {
     if (terminalDockLayoutFrameRef.current !== undefined) cancelAnimationFrame(terminalDockLayoutFrameRef.current)
     terminalDockLayoutFrameRef.current = requestAnimationFrame(() => {
-      terminalDockLayoutFrameRef.current = undefined
-      if (terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
+      // Dockview's overlay resize registers its own rAF inside this call…
+      if (apiRef.current) forceOverlayReposition(apiRef.current)
+      // …which runs first in the next frame (registration order), so this
+      // nested callback measures post-reposition geometry.
+      terminalDockLayoutFrameRef.current = requestAnimationFrame(() => {
+        terminalDockLayoutFrameRef.current = undefined
+        if (terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
+      })
     })
   }, [layoutTerminalDockview])
 
@@ -1334,10 +1348,21 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       if (suppressPanelRemovalRef.current) return
       if (!useWorkspaceStore.getState().panes[panel.id]) {
         // Closing a workspace window (Agent/Kanban/...) resizes and can
-        // re-host the terminal window; re-layout the inner dock and recover
-        // pane content, or survivors keep stale geometry/glyphs.
-        scheduleTerminalDockLayout()
-        reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+        // re-host the terminal window, and dockview's own overlay reposition
+        // can read half-transition geometry. Force the OUTER layout first,
+        // then — a frame later, once the overlay has followed — re-layout the
+        // inner dock against the corrected host and recover pane content.
+        // Sequencing matters: scheduling both in the same frame would measure
+        // the terminal dock against the stale pre-close overlay size.
+        requestAnimationFrame(() => {
+          layoutDockview(event.api)
+          // scheduleTerminalDockLayout defers one more frame internally, so
+          // the inner dock measures the post-layout overlay, not this frame's.
+          requestAnimationFrame(() => {
+            scheduleTerminalDockLayout()
+            reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+          })
+        })
         persistLayoutSoon()
         return
       }
@@ -1731,6 +1756,23 @@ function isDockElementMeasurable(element: HTMLElement | null): element is HTMLEl
   if (!element?.isConnected || element.offsetParent === null) return false
   const rect = element.getBoundingClientRect()
   return rect.width > 0 && rect.height > 0
+}
+
+/** dockview overlay containers (defaultRenderer "always") only reposition on
+ *  per-panel dimension events, which never fire for groups whose size
+ *  survived an api.layout() pass — leaving their overlays stuck at stale
+ *  rects. Force a full reposition through the component's private
+ *  OverlayRenderContainer; narrowed step-by-step so a dockview internals
+ *  change degrades to a no-op instead of a crash. */
+function forceOverlayReposition(api: DockviewApi): void {
+  const holder: unknown = api
+  if (!holder || typeof holder !== 'object' || !('component' in holder)) return
+  const component = holder.component
+  if (!component || typeof component !== 'object' || !('overlayRenderContainer' in component)) return
+  const container = component.overlayRenderContainer
+  if (!container || typeof container !== 'object' || !('updateAllPositions' in container)) return
+  if (typeof container.updateAllPositions !== 'function') return
+  container.updateAllPositions()
 }
 
 let terminalLayoutReflowFrame: number | undefined
