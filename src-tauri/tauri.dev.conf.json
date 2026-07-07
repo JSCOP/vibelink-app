@@ -9,6 +9,7 @@
         "width": 800,
         "height": 600,
         "resizable": true,
+        "decorations": false,
         "fullscreen": false,
         "devtools": false,
         "backgroundColor": "#0d0f12",

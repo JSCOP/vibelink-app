@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderToString } from 'react-dom/server'
-import type { IDockviewHeaderActionsProps } from 'dockview-react'
-import { WorkspaceWindowHeaderActions } from './WorkspaceWindowHeaderActions'
-import { WorkspaceWindowActionsContext, type WorkspaceWindowActions } from '../layout/windowActions'
-import { workspaceWindowDescriptors } from '../layout/workspaceLayoutModel'
+import { TerminalTopbarActions } from './TerminalTopbarActions'
+import type { WorkspaceWindowActions } from '../layout/windowActions'
 import { defaultTerminalGridSelection, terminalAlignGridForNewPaneBasis } from './newTerminalGrid'
 
 const actions: WorkspaceWindowActions = {
@@ -20,32 +18,20 @@ const actions: WorkspaceWindowActions = {
   getTerminalLayoutSnapshot: vi.fn(() => null),
 }
 
-function renderHeaderActions(activePanelId: string) {
-  const props = {
-    activePanel: { id: activePanelId },
-    panels: [],
-    isGroupActive: true,
-    headerPosition: 'top',
-  } as unknown as IDockviewHeaderActionsProps
-  return renderToString(
-    <WorkspaceWindowActionsContext.Provider value={actions}>
-      <WorkspaceWindowHeaderActions {...props} />
-    </WorkspaceWindowActionsContext.Provider>,
-  )
+function renderTopbarActions(providedActions: WorkspaceWindowActions | null = actions) {
+  return renderToString(<TerminalTopbarActions actions={providedActions} />)
 }
 
-describe('WorkspaceWindowHeaderActions', () => {
-  it('renders terminal launcher controls for the terminal window', () => {
-    const html = renderHeaderActions(workspaceWindowDescriptors.terminal.panelId)
+describe('TerminalTopbarActions', () => {
+  it('renders the terminal toolbar when actions are provided', () => {
+    const html = renderTopbarActions()
 
     expect(html).toContain('Profile')
     expect(html).toContain('New')
   })
 
-  it('does not render terminal launcher controls for other windows', () => {
-    const html = renderHeaderActions(workspaceWindowDescriptors.agent.panelId)
-
-    expect(html).not.toContain('New')
+  it('renders nothing when actions are null', () => {
+    expect(renderTopbarActions(null)).toBe('')
   })
 })
 

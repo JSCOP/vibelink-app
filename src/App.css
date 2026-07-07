@@ -154,9 +154,9 @@ button {
   background: var(--awt-panel);
   border-bottom: 1px solid var(--awt-border-soft);
   display: flex;
-  flex: 0 0 42px;
-  gap: 10px;
-  padding: 0 12px;
+  flex: 0 0 36px;
+  gap: 8px;
+  padding: 0 0 0 10px;
   min-width: 0;
   overflow: visible;
   position: relative;
@@ -167,12 +167,13 @@ button {
   align-items: center;
   background: var(--awt-accent-soft);
   border: 1px solid var(--awt-accent-border);
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--awt-accent);
   display: flex;
-  height: 28px;
+  height: 24px;
   justify-content: center;
-  width: 28px;
+  width: 24px;
+  flex: 0 0 auto;
 }
 
 .workspace-crumb-box {
@@ -955,6 +956,13 @@ button {
 .workspace-dock .dv-react-part {
   height: 100%;
 }
+/* Single-window mode: hide the outer workspace tab row. The :not() guard
+   keeps every nested dockview header (terminal panes, kanban) visible. */
+.workspace-dock[data-single-window='true']
+  .dv-tabs-and-actions-container:not(.workspace-window-panel .dv-tabs-and-actions-container) {
+  display: none;
+}
+
 
 .dock-terminal-host {
   height: 100%;
@@ -2051,13 +2059,32 @@ button {
   padding-right: 6px;
 }
 
-.workspace-dock .dv-right-actions-container > .dv-react-part {
-  width: auto !important;
+.window-controls {
+  align-items: stretch;
+  align-self: stretch;
+  display: flex;
+  flex: 0 0 auto;
+  margin-left: 4px;
 }
 
-.workspace-window-header-actions {
-  height: 100%;
-  margin-left: 8px;
+.window-control-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--awt-muted);
+  display: inline-flex;
+  justify-content: center;
+  width: 40px;
+}
+
+.window-control-button:hover {
+  background: var(--awt-hover);
+  color: var(--awt-text);
+}
+
+.window-control-close:hover {
+  background: var(--awt-danger);
+  color: #fff;
 }
 
 .terminal-titlebar-profile {

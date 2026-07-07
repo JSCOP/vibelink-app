@@ -2,16 +2,19 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { DockviewApi } from 'dockview-react'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Camera, Copy, Edit2, GitCompare, LayoutGrid, ListTodo, Plus, Save, Settings2, TerminalSquare, Trash2, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Camera, Copy, Edit2, Ellipsis, GitCompare, LayoutGrid, ListTodo, Minus, Plus, Save, Settings2, Square, TerminalSquare, Trash2, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
+import { TerminalTopbarActions } from './components/TerminalTopbarActions'
 import { WorkspaceView } from './layout/WorkspaceView'
+import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
 import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import { useWorkspaceStore } from './state/store'
@@ -36,9 +39,13 @@ type CaptureRecordingEvent = { startedAtMs: number; path: string }
 function App() {
   const apiRef = useRef<DockviewApi | null>(null)
   const windowMenuRef = useRef<HTMLDivElement | null>(null)
+  const pageMenuRef = useRef<HTMLDivElement | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
   const [isWindowMenuOpen, setIsWindowMenuOpen] = useState(false)
+  const [isPageMenuOpen, setIsPageMenuOpen] = useState(false)
+  const [windowActions, setWindowActions] = useState<WorkspaceWindowActions | null>(null)
+  const [chromeState, setChromeState] = useState<WorkspaceChromeState | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
@@ -371,14 +378,18 @@ function App() {
   }, [keybindings.captureImage, keybindings.captureQuickImage, keybindings.captureVideo])
 
   useEffect(() => {
-    if (!isWindowMenuOpen) return
+    if (!isWindowMenuOpen && !isPageMenuOpen) return
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target
-      if (target instanceof Node && windowMenuRef.current?.contains(target)) return
+      if (target instanceof Node && (windowMenuRef.current?.contains(target) || pageMenuRef.current?.contains(target))) return
       setIsWindowMenuOpen(false)
+      setIsPageMenuOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsWindowMenuOpen(false)
+      if (event.key === 'Escape') {
+        setIsWindowMenuOpen(false)
+        setIsPageMenuOpen(false)
+      }
     }
     window.addEventListener('pointerdown', onPointerDown, { capture: true })
     window.addEventListener('keydown', onKeyDown, { capture: true })
@@ -386,7 +397,7 @@ function App() {
       window.removeEventListener('pointerdown', onPointerDown, { capture: true })
       window.removeEventListener('keydown', onKeyDown, { capture: true })
     }
-  }, [isWindowMenuOpen])
+  }, [isWindowMenuOpen, isPageMenuOpen])
 
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
@@ -406,10 +417,10 @@ function App() {
         onDelete={(sessionId) => void deleteSession(sessionId)}
       />
       <section className="main-surface">
-        <header className="topbar">
-          <div className="brand-mark"><TerminalSquare size={18} /></div>
-          <div className="workspace-crumb-box">
-            <div className="crumb">WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
+        <header className="topbar" data-tauri-drag-region>
+          <div className="brand-mark" data-tauri-drag-region><TerminalSquare size={18} /></div>
+          <div className="workspace-crumb-box" data-tauri-drag-region>
+            <div className="crumb" data-tauri-drag-region>WORKSPACE › {activeSession?.name ?? 'Loading'}</div>
           </div>
           <div className="window-menu" ref={windowMenuRef}>
             <button type="button" className="topbar-text-button" disabled={!activeSessionId} aria-haspopup="menu" aria-expanded={isWindowMenuOpen} onClick={() => setIsWindowMenuOpen((open) => !open)}>
@@ -453,22 +464,32 @@ function App() {
               <Plus size={13} />
             </button>
           </div>
-          <button type="button" className="topbar-icon-button" disabled={!activeSessionId} title="Save current layout" onClick={() => setSaveLayoutRequestId((id) => id + 1)}>
-            <Save size={15} />
-          </button>
-          <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !activeLayoutPage} title="Rename layout page" onClick={renameCurrentLayoutPage}>
-            <Edit2 size={15} />
-          </button>
-          <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !activeLayoutPage} title="Duplicate layout page" onClick={duplicateCurrentLayoutPage}>
-            <Copy size={15} />
-          </button>
-          <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !activeLayoutPage} title="Reset layout page" onClick={resetCurrentLayoutPage}>
-            <Eraser size={15} />
-          </button>
-          <button type="button" className="topbar-icon-button" disabled={!activeSessionId || (activeWorkspaceLayout?.pages.length ?? 0) <= 1} title="Delete layout page" onClick={deleteCurrentLayoutPage}>
-            <Trash2 size={15} />
-          </button>
-          <div className="topbar-spacer" />
+          <div className="window-menu" ref={pageMenuRef}>
+            <button type="button" className="topbar-icon-button" disabled={!activeSessionId} title="Layout page actions" aria-haspopup="menu" aria-expanded={isPageMenuOpen} onClick={() => setIsPageMenuOpen((open) => !open)}>
+              <Ellipsis size={15} />
+            </button>
+            {isPageMenuOpen ? (
+              <div className="window-menu-popover" role="menu">
+                <button type="button" role="menuitem" onClick={() => { setSaveLayoutRequestId((id) => id + 1); setIsPageMenuOpen(false) }}>
+                  <Save size={14} /> Save layout
+                </button>
+                <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); renameCurrentLayoutPage() }}>
+                  <Edit2 size={14} /> Rename page
+                </button>
+                <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); duplicateCurrentLayoutPage() }}>
+                  <Copy size={14} /> Duplicate page
+                </button>
+                <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); resetCurrentLayoutPage() }}>
+                  <Eraser size={14} /> Reset page
+                </button>
+                <button type="button" role="menuitem" disabled={(activeWorkspaceLayout?.pages.length ?? 0) <= 1} onClick={() => { setIsPageMenuOpen(false); deleteCurrentLayoutPage() }}>
+                  <Trash2 size={14} /> Delete page
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="topbar-spacer" data-tauri-drag-region />
+          {chromeState?.activeWindowKind === 'terminal' ? <TerminalTopbarActions actions={windowActions} /> : null}
           <button type="button" className="topbar-icon-button" title="Capture image" onClick={openImageCapture}>
             <Camera size={16} />
           </button>
@@ -481,6 +502,17 @@ function App() {
           <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
             <Settings2 size={16} />
           </button>
+          <div className="window-controls">
+            <button type="button" className="window-control-button" title="Minimize" onClick={() => void getCurrentWindow().minimize()}>
+              <Minus size={14} />
+            </button>
+            <button type="button" className="window-control-button" title="Maximize" onClick={() => void getCurrentWindow().toggleMaximize()}>
+              <Square size={12} />
+            </button>
+            <button type="button" className="window-control-button window-control-close" title="Close" onClick={() => void getCurrentWindow().close()}>
+              <X size={14} />
+            </button>
+          </div>
         </header>
         {error ? (
           <div className="daemon-banner">
@@ -495,6 +527,8 @@ function App() {
           <div className="workspace-content">
             <WorkspaceView
               onApiReady={(api) => { apiRef.current = api }}
+              onActionsReady={setWindowActions}
+              onChromeStateChange={setChromeState}
               pendingTemplate={pendingTemplate}
               arrangeGrid={terminalGridPreference}
               resizeSnapTolerance={settings.resizeSnapTolerance}

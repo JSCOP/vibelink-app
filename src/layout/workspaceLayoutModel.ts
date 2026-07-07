@@ -80,6 +80,10 @@ export const workspaceWindowDescriptors: Record<WorkspaceWindowKind, WorkspaceWi
   },
 }
 
+export const workspaceWindowKindByPanelId: Record<string, WorkspaceWindowKind> = Object.fromEntries(
+  Object.values(workspaceWindowDescriptors).map((descriptor) => [descriptor.panelId, descriptor.kind]),
+)
+
 const fallbackPageId = 'workspace'
 
 export function normalizeWorkspaceLayoutState(raw: string | null | undefined, options: NormalizeOptions = {}): WorkspaceLayoutState {

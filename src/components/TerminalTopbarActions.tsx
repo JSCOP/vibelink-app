@@ -1,17 +1,17 @@
-import { useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
-import type { IDockviewHeaderActionsProps } from 'dockview-react'
+import { useState } from 'react'
 import { Eraser, LayoutGrid } from 'lucide-react'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
 import { occupancyFromDockLayout, terminalAlignGridForNewPaneBasis, type GridSize, type TerminalOccupancyGrid } from './newTerminalGrid'
 import { ProfileIcon } from './ProfileIcon'
-import { useWorkspaceWindowActions } from '../layout/windowActions'
-import { workspaceWindowDescriptors } from '../layout/workspaceLayoutModel'
+import type { WorkspaceWindowActions } from '../layout/windowActions'
 import { selectedProfileForWorkspace } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 
+type TerminalTopbarActionsProps = {
+  actions: WorkspaceWindowActions | null
+}
 
-export function WorkspaceWindowHeaderActions({ activePanel }: IDockviewHeaderActionsProps) {
-  const actions = useWorkspaceWindowActions()
+export function TerminalTopbarActions({ actions }: TerminalTopbarActionsProps) {
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const panes = useWorkspaceStore((state) => state.panes)
   const settings = useWorkspaceStore((state) => state.settings)
@@ -19,16 +19,12 @@ export function WorkspaceWindowHeaderActions({ activePanel }: IDockviewHeaderAct
   const [launcherOpen, setLauncherOpen] = useState(false)
   const [preferredGrid, setPreferredGrid] = useState<GridSize | null>(null)
   const [occupancyMatrix, setOccupancyMatrix] = useState<TerminalOccupancyGrid | null>(null)
-  const isTerminalWindowActive = activePanel?.id === workspaceWindowDescriptors.terminal.panelId
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const paneCount = Object.values(panes).filter((pane) => pane.alive).length
   const alignGrid = terminalAlignGridForNewPaneBasis(paneCount, preferredGrid)
 
-  if (!isTerminalWindowActive) return null
+  if (!actions) return null
 
-  const stopHeaderEvent = (event: ReactMouseEvent<HTMLElement> | ReactPointerEvent<HTMLElement>) => {
-    event.stopPropagation()
-  }
   const toggleLauncher = () => {
     setLauncherOpen((open) => {
       if (!open) setOccupancyMatrix(occupancyFromDockLayout(actions.getTerminalLayoutSnapshot()))
@@ -36,15 +32,8 @@ export function WorkspaceWindowHeaderActions({ activePanel }: IDockviewHeaderAct
     })
   }
 
-
   return (
-    <div
-      className="terminal-titlebar-toolbar workspace-window-header-actions"
-      data-window-drag-disabled="true"
-      onClick={stopHeaderEvent}
-      onMouseDown={stopHeaderEvent}
-      onPointerDown={stopHeaderEvent}
-    >
+    <div className="terminal-titlebar-toolbar">
       <label className="terminal-titlebar-profile">
         <span>Profile</span>
         <ProfileIcon name={activeProfile.icon} size={13} color={activeProfile.color} />

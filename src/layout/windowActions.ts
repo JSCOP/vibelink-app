@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { WindowDropPosition } from './windowDrag'
+import type { WorkspaceWindowKind } from './workspaceLayoutModel'
 import type { SplitDirection } from './actions'
 import type { GridSize } from './templatePlan'
 
@@ -22,6 +23,11 @@ export type WorkspaceWindowActions = {
   arrangeTerminals: (grid?: GridSize | null) => void
   launchTerminalGrid: (request: TerminalGridLaunchRequest) => void
   getTerminalLayoutSnapshot: () => unknown | null
+}
+
+export type WorkspaceChromeState = {
+  windowCount: number
+  activeWindowKind: WorkspaceWindowKind | null
 }
 
 export const WorkspaceWindowActionsContext = createContext<WorkspaceWindowActions | null>(null)

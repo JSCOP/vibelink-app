@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanel, type IDockviewPanelProps } from 'dockview-react'
 import { WorkspaceWindowTab } from '../components/WorkspaceWindowTab'
-import { WorkspaceWindowHeaderActions } from '../components/WorkspaceWindowHeaderActions'
 import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
@@ -10,7 +9,7 @@ import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state
 import type { PaneMeta } from '../ipc/types'
 import { PlaceholderPanel, TerminalPanePanel } from './TerminalPanePanel'
 import { WorkspaceActionsContext, type WorkspaceActions, type SplitDirection } from './actions'
-import { WorkspaceWindowActionsContext, type WorkspaceWindowActions } from './windowActions'
+import { WorkspaceWindowActionsContext, type WorkspaceChromeState, type WorkspaceWindowActions } from './windowActions'
 import { TEMPLATES, type GridTemplate } from './templates'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { withSuppressedPanelRemoval } from './suppression'
@@ -22,7 +21,7 @@ import { shouldShowResizeGuide } from './resizePreviewPolicy'
 import { createDockviewGridLayout, type GridPaneDescriptor } from './gridLayout'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
-import { activeWorkspaceLayoutPage, workspaceWindowDescriptors, type WorkspaceWindowKind } from './workspaceLayoutModel'
+import { activeWorkspaceLayoutPage, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
@@ -42,6 +41,8 @@ type PendingTemplateRequest = {
 
 type WorkspaceViewProps = {
   onApiReady?: (api: DockviewApi) => void
+  onActionsReady?: (actions: WorkspaceWindowActions) => void
+  onChromeStateChange?: (state: WorkspaceChromeState) => void
   pendingTemplate?: PendingTemplateRequest | null
   arrangeRequestId?: number
   arrangeGrid?: GridSize | null
@@ -176,7 +177,7 @@ function DiffWindowPanel(props: IDockviewPanelProps) {
   )
 }
 
-export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 0, arrangeGrid = null, resizeSnapTolerance = 32, windowRequest = null, saveLayoutRequestId = 0, onTemplateApplied }: WorkspaceViewProps) {
+export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange, pendingTemplate, arrangeRequestId = 0, arrangeGrid = null, resizeSnapTolerance = 32, windowRequest = null, saveLayoutRequestId = 0, onTemplateApplied }: WorkspaceViewProps) {
   const apiRef = useRef<DockviewApi | null>(null)
   const terminalApiRef = useRef<DockviewApi | null>(null)
   const loadedSessionRef = useRef<string | null>(null)
@@ -203,6 +204,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
   const [terminalResizeHandles, setTerminalResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   const [terminalResizePreview, setTerminalResizePreview] = useState<ResizePreview | null>(null)
   const [terminalGridPreference, setTerminalGridPreference] = useState<GridSize | null>(null)
+  const [chromeWindowCount, setChromeWindowCount] = useState(0)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const panes = useWorkspaceStore((state) => state.panes)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -1156,6 +1158,32 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     getTerminalLayoutSnapshot: () => terminalApiRef.current?.toJSON() ?? null,
   }), [activatePane, arrangePanes, clearTerminalPanes, closeWindow, launchTerminalGrid, movePaneToPosition, renamePaneTitle, splitPane, swapPaneLocations, toggleMaximize])
 
+  useEffect(() => {
+    onActionsReady?.(windowActions)
+  }, [onActionsReady, windowActions])
+
+  const onChromeStateChangeRef = useRef(onChromeStateChange)
+  useEffect(() => {
+    onChromeStateChangeRef.current = onChromeStateChange
+  }, [onChromeStateChange])
+
+  const syncChromeState = useCallback(() => {
+    const api = apiRef.current
+    if (!api) return
+    const windowCount = api.panels.length
+    setChromeWindowCount(windowCount)
+    onChromeStateChangeRef.current?.({
+      windowCount,
+      activeWindowKind: workspaceWindowKindByPanelId[api.activePanel?.id ?? ''] ?? null,
+    })
+  }, [])
+
+  const isSingleWindow = chromeWindowCount === 1
+  useEffect(() => {
+    // data-single-window toggles outer group header visibility; re-fit terminals.
+    reflowTerminalsAfterLayout({ syncPty: true })
+  }, [isSingleWindow])
+
   const setActivePaneFromApis = useCallback(() => {
     const terminalWindowIsActive = apiRef.current?.activePanel?.id === workspaceWindowDescriptors.terminal.panelId
     const activeTerminalPanelId = terminalApiRef.current?.activePanel?.id
@@ -1238,8 +1266,14 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(updateActivePaneId)
     event.api.onDidMaximizedGroupChange(syncMaximizedResizeState)
     updateActivePaneId()
+    event.api.onDidAddPanel(syncChromeState)
+    event.api.onDidRemovePanel(syncChromeState)
+    if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(syncChromeState)
+    event.api.onDidLayoutFromJSON(syncChromeState)
+    syncChromeState()
     onApiReady?.(event.api)
     event.api.onDidLayoutChange(() => {
+      syncChromeState()
       if (!isDockElementMeasurable(dockRef.current)) return
       scheduleLayoutReflow()
       refreshResizeHandles(event.api)
@@ -1260,7 +1294,7 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
     loadedSessionRef.current = null
     loadedPageRef.current = null
     loadActiveSessionLayout()
-  }, [clearResizeInteraction, closePaneInStore, layoutTerminalDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, setActivePaneFromApis])
+  }, [clearResizeInteraction, closePaneInStore, layoutTerminalDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, setActivePaneFromApis, syncChromeState])
 
   useEffect(() => {
     loadActiveSessionLayout()
@@ -1479,13 +1513,12 @@ export function WorkspaceView({ onApiReady, pendingTemplate, arrangeRequestId = 
       <WorkspaceWindowActionsContext.Provider value={windowActions}>
         <TerminalWindowContext.Provider value={terminalWindowBridge}>
           <section className="workspace-view">
-            <div ref={dockRef} className="dockview-theme-awt workspace-dock" data-resize-mode="connected" onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
+            <div ref={dockRef} className="dockview-theme-awt workspace-dock" data-resize-mode="connected" data-single-window={isSingleWindow ? 'true' : undefined} onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
               <DockviewReact
                 components={components}
                 onReady={handleReady}
                 defaultRenderer="always"
                 defaultTabComponent={WorkspaceWindowTab}
-                rightHeaderActionsComponent={WorkspaceWindowHeaderActions}
                 disableDnd
               />
               <ConnectedResizeLayer
