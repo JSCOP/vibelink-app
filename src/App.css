@@ -837,6 +837,10 @@ button {
   height: 100%;
 }
 
+main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-container {
+  display: none;
+}
+
 .terminal-panel-shell::after,
 .workspace-window-panel::after {
   border: 2px solid transparent;

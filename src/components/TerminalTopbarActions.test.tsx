@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderToString } from 'react-dom/server'
 import { TerminalTopbarActions } from './TerminalTopbarActions'
 import type { WorkspaceWindowActions } from '../layout/windowActions'
+import { defaultSettings, normalizeSettings } from '../state/profiles'
+import { useWorkspaceStore } from '../state/store'
 import { defaultTerminalGridSelection, terminalAlignGridForNewPaneBasis } from './newTerminalGrid'
 
 const actions: WorkspaceWindowActions = {
@@ -18,6 +20,20 @@ const actions: WorkspaceWindowActions = {
   getTerminalLayoutSnapshot: vi.fn(() => null),
 }
 
+beforeEach(() => {
+  useWorkspaceStore.setState({
+    activeSessionId: 'session-test',
+    panes: {
+      'pane-test': {
+        id: 'pane-test',
+        config: { paneId: 'pane-test', shell: 'pwsh.exe', args: [], cwd: null, env: [], title: 'PowerShell', cols: 80, rows: 24 },
+        alive: true,
+      },
+    },
+    settings: normalizeSettings(defaultSettings),
+  })
+})
+
 function renderTopbarActions(providedActions: WorkspaceWindowActions | null = actions) {
   return renderToString(<TerminalTopbarActions actions={providedActions} />)
 }
@@ -28,6 +44,16 @@ describe('TerminalTopbarActions', () => {
 
     expect(html).toContain('Profile')
     expect(html).toContain('New')
+  })
+
+  it('renders a pane tab visibility toggle wired to the persisted setting', () => {
+    const visibleHtml = renderTopbarActions()
+
+    expect(visibleHtml).toContain('Tabs')
+    expect(visibleHtml).toContain('Hide pane tabs')
+
+    useWorkspaceStore.getState().toggleTerminalTabsVisible()
+    expect(useWorkspaceStore.getState().settings.terminalTabsVisible).toBe(false)
   })
 
   it('renders nothing when actions are null', () => {

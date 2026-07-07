@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { findImageMarkerMatches, findPathMatches, findTerminalLinkMatches, findUrlMatches } from './links'
+import type { ILink, Terminal } from '@xterm/xterm'
+import { createPathLinkProvider, findImageMarkerMatches, findPathMatches, findTerminalLinkMatches, findUrlMatches } from './links'
 
 describe('terminal link matchers', () => {
   describe('findPathMatches', () => {
@@ -16,6 +17,14 @@ describe('terminal link matchers', () => {
 
       expect(findPathMatches(line)).toEqual([
         { index: 6, text: 'E:\\a b\\c.png' },
+      ])
+    })
+
+    it('matches a single-quoted path without including the quotes', () => {
+      const line = "open 'C:\\Program Files\\nodejs\\node.EXE' now"
+
+      expect(findPathMatches(line)).toEqual([
+        { index: 6, text: 'C:\\Program Files\\nodejs\\node.EXE' },
       ])
     })
 
@@ -68,6 +77,14 @@ describe('terminal link matchers', () => {
         { index: 35, text: 'E:\\captures\\b.mp4' },
       ])
     })
+
+    it('matches a path in joined wrapped text', () => {
+      const line = 'run C:\\very\\deep\\x.png'
+
+      expect(findTerminalLinkMatches(line)).toEqual([
+        { index: 4, text: 'C:\\very\\deep\\x.png' },
+      ])
+    })
   })
 
   describe('findImageMarkerMatches', () => {
@@ -80,4 +97,56 @@ describe('terminal link matchers', () => {
       ])
     })
   })
+
+  describe('createPathLinkProvider', () => {
+    it('returns one multi-row link for a soft-wrapped path', () => {
+      const term = stubTerminal(12, [
+        { text: 'run C:\\very\\' },
+        { text: 'deep\\x.png', isWrapped: true },
+      ])
+      const provider = createPathLinkProvider(term, () => ({
+        onOpenPath: () => {},
+        resolveMarker: () => undefined,
+      }))
+      let firstRowLinks: ILink[] | undefined
+      let continuationLinks: ILink[] | undefined
+
+      provider.provideLinks(1, (links) => {
+        firstRowLinks = links
+      })
+      provider.provideLinks(2, (links) => {
+        continuationLinks = links
+      })
+
+      expect(firstRowLinks).toHaveLength(1)
+      expect(firstRowLinks?.[0]).toMatchObject({
+        text: 'C:\\very\\deep\\x.png',
+        range: {
+          start: { x: 5, y: 1 },
+          end: { x: 10, y: 2 },
+        },
+      })
+      expect(continuationLinks).toBe(firstRowLinks)
+    })
+  })
 })
+
+function stubTerminal(cols: number, rows: { text: string; isWrapped?: boolean }[]): Terminal {
+  const lines = rows.map(({ text, isWrapped }) => ({
+    isWrapped: Boolean(isWrapped),
+    translateToString: (trimRight = false, startColumn = 0, endColumn = text.length) => {
+      const value = text.slice(startColumn, endColumn)
+      return trimRight ? value.replace(/\s+$/, '') : value
+    },
+  }))
+
+  return {
+    cols,
+    buffer: {
+      active: {
+        length: lines.length,
+        getLine: (index: number) => lines[index],
+      },
+    },
+  } as unknown as Terminal
+}

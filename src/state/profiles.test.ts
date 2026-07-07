@@ -152,10 +152,13 @@ describe('terminal profiles', () => {
     expect(selectedProfileForWorkspace(settings, 'session-b').id).toBe('powershell')
   })
 
-  test('normalizes terminal scrollbar visibility setting', () => {
+  test('normalizes terminal visibility settings', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
     expect(defaultSettings.terminalScrollbarVisible).toBe(false)
     expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
+    expect(normalizeSettings({ terminalTabsVisible: false }).terminalTabsVisible).toBe(false)
+    expect(defaultSettings.terminalTabsVisible).toBe(true)
+    expect(normalizeSettings({ terminalTabsVisible: 'nope' }).terminalTabsVisible).toBe(defaultSettings.terminalTabsVisible)
   })
 
   test('normalizes terminal cursor style settings', () => {

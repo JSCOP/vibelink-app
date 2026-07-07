@@ -1106,6 +1106,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       case 'copyTerminalSelection':
         if (useWorkspaceStore.getState().panes[activePanelId]) TerminalManager.copySelectionToClipboard(activePanelId)
         break
+      case 'toggleTerminalTabs':
+        useWorkspaceStore.getState().toggleTerminalTabsVisible()
+        break
     }
   }, [arrangePanes, closePane, closeWorkspace, focusPane, panelApiForId, splitPane, toggleMaximize])
 
@@ -1289,6 +1292,27 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       }
       TerminalManager.dispose(panel.id)
       void closePaneInStore(panel.id)
+      // Deterministic normalization: with 0–1 survivors there is exactly one
+      // valid layout. Persisted layouts can carry a damaged split (collapsed
+      // branch, stale sizes), so rebuild instead of trusting dockview's
+      // incremental collapse. 2+ survivors keep their custom arrangement.
+      const survivors = event.api.panels.filter((p) => p.id !== panel.id)
+      if (survivors.length === 1) {
+        const paneMeta = useWorkspaceStore.getState().panes[survivors[0].id]
+        if (paneMeta) {
+          void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+            applyGridLayout(event.api, { cols: 1, rows: 1 }, [paneMeta])
+          })
+        }
+      } else if (survivors.length === 0) {
+        // Drop dockview's leftover empty grid (ghost sashes/split lines), not
+        // just our handle overlays.
+        void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+          event.api.clear()
+        })
+        clearTerminalResizeInteraction({ clearHandles: true })
+      }
+      persistLayoutSoon()
       // Closing a pane resizes every survivor; without a forced re-layout +
       // WebGL recovery the remaining panes keep stale geometry and glyph
       // atlases (visible as garbled rendering until a click).
@@ -1297,7 +1321,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
     loadedTerminalPageRef.current = null
     requestAnimationFrame(() => loadTerminalPaneLayout())
-  }, [clearTerminalResizeInteraction, closePaneInStore, loadTerminalPaneLayout, persistLayoutSoon, refreshTerminalResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis])
+  }, [applyGridLayout, clearTerminalResizeInteraction, closePaneInStore, loadTerminalPaneLayout, persistLayoutSoon, refreshTerminalResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis])
 
   const terminalWindowBridge = useMemo<TerminalWindowBridge>(() => ({
     onReady: handleTerminalReady,

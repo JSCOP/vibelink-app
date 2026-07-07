@@ -15,6 +15,7 @@ describe('keybindings', () => {
     expect(defaultKeybindings.captureImage).toBe('alt+shift+s')
     expect(defaultKeybindings.captureQuickImage).toBe('alt+s')
     expect(defaultKeybindings.captureVideo).toBe('alt+shift+r')
+    expect(defaultKeybindings.toggleTerminalTabs).toBe('alt+shift+t')
   })
 
   it('normalizes partial stored keybindings without dropping new defaults', () => {
@@ -29,6 +30,7 @@ describe('keybindings', () => {
     expect(normalized.captureImage).toBe(defaultKeybindings.captureImage)
     expect(normalized.captureVideo).toBe(defaultKeybindings.captureVideo)
     expect(normalized.captureQuickImage).toBe(defaultKeybindings.captureQuickImage)
+    expect(normalized.toggleTerminalTabs).toBe(defaultKeybindings.toggleTerminalTabs)
   })
 
   it('migrates short-lived Alt+arrow focus bindings back to Ctrl+arrow defaults', () => {
@@ -73,6 +75,7 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true, shiftKey: true }))).toBe('captureImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true }))).toBe('captureQuickImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'r', altKey: true, shiftKey: true }))).toBe('captureVideo')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 't', altKey: true, shiftKey: true }))).toBe('toggleTerminalTabs')
   })
 
   it('does not intercept Ctrl+C so terminal interrupt reaches the PTY', () => {

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Eraser, LayoutGrid } from 'lucide-react'
+import { Eraser, LayoutGrid, PanelTopClose, PanelTopOpen } from 'lucide-react'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
 import { occupancyFromDockLayout, terminalAlignGridForNewPaneBasis, type GridSize, type TerminalOccupancyGrid } from './newTerminalGrid'
 import { ProfileIcon } from './ProfileIcon'
@@ -16,12 +16,14 @@ export function TerminalTopbarActions({ actions }: TerminalTopbarActionsProps) {
   const panes = useWorkspaceStore((state) => state.panes)
   const settings = useWorkspaceStore((state) => state.settings)
   const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
+  const toggleTerminalTabsVisible = useWorkspaceStore((state) => state.toggleTerminalTabsVisible)
   const [launcherOpen, setLauncherOpen] = useState(false)
   const [preferredGrid, setPreferredGrid] = useState<GridSize | null>(null)
   const [occupancyMatrix, setOccupancyMatrix] = useState<TerminalOccupancyGrid | null>(null)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const paneCount = Object.values(panes).filter((pane) => pane.alive).length
   const alignGrid = terminalAlignGridForNewPaneBasis(paneCount, preferredGrid)
+  const TerminalTabsIcon = settings.terminalTabsVisible ? PanelTopClose : PanelTopOpen
 
   if (!actions) return null
 
@@ -53,6 +55,9 @@ export function TerminalTopbarActions({ actions }: TerminalTopbarActionsProps) {
       </button>
       <button type="button" className="terminal-titlebar-button" disabled={!activeSessionId || paneCount === 0} title="Arrange terminal panes" onClick={() => actions.arrangeTerminals(alignGrid)}>
         <LayoutGrid size={13} /> <span>Align</span>
+      </button>
+      <button type="button" className="terminal-titlebar-button" disabled={!activeSessionId} title={settings.terminalTabsVisible ? 'Hide pane tabs' : 'Show pane tabs'} onClick={toggleTerminalTabsVisible}>
+        <TerminalTabsIcon size={13} /> <span>Tabs</span>
       </button>
       <NewTerminalLauncher
         isOpen={launcherOpen}

@@ -43,6 +43,7 @@ export type Settings = {
   uiScale: number
   terminalThemeId: TerminalThemeId
   terminalScrollbarVisible: boolean
+  terminalTabsVisible: boolean
   cursorStyle: TerminalCursorStyle
   cursorWidth: number
   keepTerminalsAliveOnClose: boolean
@@ -203,6 +204,7 @@ export const defaultSettings: Settings = {
   uiScale: 1,
   terminalThemeId: defaultTerminalThemeId,
   terminalScrollbarVisible: false,
+  terminalTabsVisible: true,
   cursorStyle: 'bar',
   cursorWidth: 1,
   keepTerminalsAliveOnClose: false,
@@ -240,6 +242,7 @@ export function normalizeSettings(value: unknown): Settings {
     uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
+    terminalTabsVisible: readBoolean(record?.terminalTabsVisible, defaultSettings.terminalTabsVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
     cursorWidth: readNumberInRange(record?.cursorWidth, defaultSettings.cursorWidth, 1, 10),
     keepTerminalsAliveOnClose: readBoolean(record?.keepTerminalsAliveOnClose, defaultSettings.keepTerminalsAliveOnClose),

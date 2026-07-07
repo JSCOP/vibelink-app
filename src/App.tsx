@@ -188,6 +188,12 @@ function App() {
   }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible, settings.cursorStyle, settings.cursorWidth])
 
   useEffect(() => {
+    requestAnimationFrame(() => {
+      TerminalManager.reflowAll(true)
+    })
+  }, [settings.terminalTabsVisible])
+
+  useEffect(() => {
     if (!activeSessionId) return
     const sessionId = activeSessionId
     const workspaceFolder = activeSession?.workspaceFolder ?? null
@@ -403,7 +409,7 @@ function App() {
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
 
   return (
-    <main className="app-shell" style={{ '--awt-ui-scale': settings.uiScale, '--awt-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
+    <main className="app-shell" data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--awt-ui-scale': settings.uiScale, '--awt-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
       <div className="sidebar-hover-edge" onPointerEnter={() => setIsSidebarOpen(true)} />
       <Sidebar
         isOpen={isSidebarOpen}
