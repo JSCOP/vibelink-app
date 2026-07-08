@@ -18,10 +18,14 @@ const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
-// After a renderer reset is requested, wait this long for the TUI to redraw at
-// the restored size before rebuilding the renderer. If output arrives sooner the
-// reset runs right after that write; this bounds the wait when nothing arrives.
-const RENDERER_RESET_SETTLE_MS = 120
+// Last-resort fallback: rebuild the renderer even if the TUI never emits output
+// after the restore. The normal path fires from writeTerminalOutput's write()
+// callback the moment the TUI's resize redraw lands; this timeout only covers a
+// pane that produces no output at all. Keep it long enough that the resize_pane
+// IPC round-trip and the TUI's redraw comfortably win the race first, otherwise
+// the rebuild captures a stale cursor position and leaves a ghost. A slightly
+// delayed rebuild on a truly silent pane is harmless (it is a recovery path).
+const RENDERER_RESET_SETTLE_MS = 1000
 
 
 
