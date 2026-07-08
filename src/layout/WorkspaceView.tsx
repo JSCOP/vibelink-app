@@ -2101,14 +2101,27 @@ function exactTemplateGridForPaneCount(paneCount: number, aspectRatio: number): 
 }
 
 function getPaneRect(paneId: string): DOMRect | null {
-  return document.querySelector<HTMLElement>(`[data-window-panel-id="${paneId}"], [data-pane-id="${paneId}"]`)?.getBoundingClientRect() ?? null
+  // Both the tab strip (.terminal-tab / window tab) and the content shell carry
+  // data-pane-id / data-window-panel-id. A bare attribute selector returns the
+  // tab (it renders first in document order), whose rect is a small cell in the
+  // horizontal tab strip — useless for directional pane navigation. Scope to the
+  // content shells so geometry compares actual pane rectangles.
+  const el = document.querySelector<HTMLElement>(
+    `.terminal-panel-shell[data-pane-id="${paneId}"], .workspace-window-panel[data-window-panel-id="${paneId}"]`,
+  )
+  return el?.getBoundingClientRect() ?? null
 }
 
 function isInDirection(active: DOMRect, candidate: DOMRect, direction: 'left' | 'right' | 'up' | 'down'): boolean {
-  if (direction === 'left') return candidate.right <= active.left
-  if (direction === 'right') return candidate.left >= active.right
-  if (direction === 'up') return candidate.bottom <= active.top
-  return candidate.top >= active.bottom
+  // getBoundingClientRect returns fractional px; adjacent dockview panes share a
+  // seam where candidate.left can round a hair under active.right. A small
+  // tolerance keeps the true neighbor in the running without admitting panes in
+  // other columns/rows (which sit hundreds of px away).
+  const TOL = 2
+  if (direction === 'left') return candidate.right <= active.left + TOL
+  if (direction === 'right') return candidate.left >= active.right - TOL
+  if (direction === 'up') return candidate.bottom <= active.top + TOL
+  return candidate.top >= active.bottom - TOL
 }
 
 function directionalDistance(active: DOMRect, candidate: DOMRect, direction: 'left' | 'right' | 'up' | 'down'): number {
