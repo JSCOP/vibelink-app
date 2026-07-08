@@ -824,6 +824,13 @@ button {
   position: relative;
 }
 
+.terminal-panel-shell {
+  /* Visual inset around the terminal content. Lives here (not on
+     .dock-terminal-host) so it is NOT counted by FitAddon's height measurement,
+     which would otherwise over-allocate a row and clip the prompt line. */
+  padding: 5px;
+}
+
 .workspace-window-terminal {
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
@@ -1036,7 +1043,12 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: 5px;
+  /* No padding here: FitAddon measures this element (xterm's parent) via
+     getComputedStyle(height), which returns the BORDER-BOX height under the
+     global `box-sizing: border-box`. Any padding here is counted as usable
+     space, so FitAddon allocates one row too many and the bottom prompt line
+     clips. The visual inset lives on .terminal-panel-shell instead. */
+  padding: 0;
   background: var(--awt-terminal-bg);
 }
 
