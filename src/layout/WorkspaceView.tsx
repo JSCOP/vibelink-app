@@ -603,10 +603,18 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
     if (panel.api.isMaximized()) {
       panel.api.exitMaximized()
-      reflowTerminalsAfterLayout({ syncPty: true })
+      // Restoring un-hides every sibling that was collapsed to 0x0 while this
+      // pane was maximized; they lost their WebGL context and need a forced
+      // repaint (recover), not just a refit. onDidMaximizedGroupChange also runs
+      // recover, but the dockview event can coalesce/skip, so drive it here too.
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       requestAnimationFrame(() => requestAnimationFrame(syncActivePane))
     } else {
       panel.api.maximize()
+      // Maximizing hides the siblings; recover them on the way back is handled
+      // above, but the maximized pane itself was just re-parented and needs a
+      // repaint against its new full-size geometry.
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       requestAnimationFrame(syncActivePane)
     }
   }, [activatePane, panelApiForId])

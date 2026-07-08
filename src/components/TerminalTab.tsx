@@ -78,9 +78,12 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
   }
 
   const onMaximize = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
-    activatePaneAndStop(event)
-    if (api.isMaximized()) api.exitMaximized()
-    else api.maximize()
+    stopChromeEvent(event)
+    // Route through the workspace action, which recovers every sibling pane's
+    // renderer after the maximize/restore re-parents them. Calling the dockview
+    // api directly here bypasses that recovery and leaves siblings blank until a
+    // click (they lose their WebGL context while hidden at 0x0).
+    if (paneId) actions.toggleMaximize(paneId)
   }
 
   const rememberPaneDragStartTarget = (event: { target: EventTarget | null }) => {

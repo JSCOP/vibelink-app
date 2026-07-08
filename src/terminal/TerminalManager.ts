@@ -18,6 +18,14 @@ const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
+// A real terminal is never this small. If FitAddon proposes fewer than these,
+// the container is mid-layout (transiently ~1px during a dockview maximize/
+// restore) and fitting would reflow-corrupt the buffer — skip and retry.
+const MIN_FIT_COLS = 10
+const MIN_FIT_ROWS = 3
+// Delay before retrying a fit that proposed degenerate dimensions (container
+// still mid-layout). Bounded by MAX_FIT_ATTEMPTS so a stuck pane cannot spin.
+const DEGENERATE_FIT_RETRY_MS = 32
 // Last-resort fallback: rebuild the renderer even if the TUI never emits output
 // after the restore. The normal path fires from writeTerminalOutput's write()
 // callback the moment the TUI's resize redraw lands; this timeout only covers a
@@ -41,7 +49,6 @@ type Entry = {
   fitFrame?: number
   visibleRecoveryFrame?: number
   visibleRecoveryRefreshFrame?: number
-  rendererReloadFrame?: number
   rendererReloadPending?: boolean
   rendererReloadTimer?: number
   outputFrame?: number
@@ -329,7 +336,6 @@ class TerminalManagerImpl {
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     if (entry.visibleRecoveryFrame !== undefined) cancelAnimationFrame(entry.visibleRecoveryFrame)
     if (entry.visibleRecoveryRefreshFrame !== undefined) cancelAnimationFrame(entry.visibleRecoveryRefreshFrame)
-    if (entry.rendererReloadFrame !== undefined) cancelAnimationFrame(entry.rendererReloadFrame)
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadPending = false
     this.cancelScheduledOutputFlush(entry)
@@ -450,9 +456,33 @@ class TerminalManagerImpl {
     })
   }
 
-  private forceFitAndRepaint(entry: Entry): void {
+  // Fit only when FitAddon proposes sane dimensions. During dockview's maximize/
+  // restore the container can be transiently ~1px (measurable by width/height > 0,
+  // but not yet laid out), and FitAddon then proposes something like 2x1. Resizing
+  // xterm to that reflows the buffer into thousands of 2-column rows and destroys
+  // the content — so every fit path must go through this guard, not entry.fit.fit()
+  // directly. Returns true when a fit was applied (or none was needed).
+  private safeFit(entry: Entry, force = false): boolean {
+    const proposed = entry.fit.proposeDimensions()
+    if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
+    if (force || entry.term.cols !== proposed.cols || entry.term.rows !== proposed.rows) entry.fit.fit()
+    return true
+  }
+
+  private forceFitAndRepaint(entry: Entry, attempt = 0): void {
     const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
-    entry.fit.fit()
+    // safeFit skips a degenerate proposal (container mid-layout). If it could not
+    // fit, retry on a bounded delay once the real geometry settles rather than
+    // fitting to 2x1 and corrupting the buffer.
+    if (!this.safeFit(entry, true)) {
+      entry.forceFitOnNextMeasure = true
+      if (attempt < MAX_FIT_ATTEMPTS) {
+        window.setTimeout(() => {
+          if (this.entries.get(entry.paneId) === entry && entry.opened) this.forceFitAndRepaint(entry, attempt + 1)
+        }, DEGENERATE_FIT_RETRY_MS)
+      }
+      return
+    }
     if (wasAtBottom) entry.term.scrollToBottom()
     this.redraw(entry, { clearWebglTextureAtlas: entry.webgl !== undefined })
     this.forceGlyphRepaint(entry)
@@ -463,84 +493,104 @@ class TerminalManagerImpl {
   }
 
   // After dockview re-parents a pane's container (maximize/restore, pane swap),
-  // xterm's renderer keeps its per-cell glyph cache but its draw surface is
-  // desynced: refresh(), clearTextureAtlas(), theme re-apply, and handleResize
-  // all fail to repaint the text (only the cursor layer redraws) — the pane
-  // looks blank or shows a misplaced cursor/selection though its buffer is
-  // intact. Two cases need two different repairs:
+  // xterm's renderer holds stale per-cell glyphs against a desynced draw surface:
+  // refresh(), clearTextureAtlas(), theme re-apply, and handleResize all fail to
+  // repaint the text (only the cursor layer redraws) — the pane looks blank
+  // though its buffer is intact. The repair depends on WHO repaints after resize:
   //
-  //  1. Panes with scrollback (a shell showing command history): a one-line
-  //     scroll nudge marks every visible row dirty and forces a full glyph
-  //     re-upload. Cheap and preserves the WebGL renderer.
-  //  2. Panes WITHOUT scrollback (a fresh TUI / alternate-screen agent whose
-  //     buffer.baseY === 0): scrollLines() cannot move, so the nudge is a no-op
-  //     and the stale glyph/cursor/selection layers survive. These panes also
-  //     lost their WebGL context while hidden at 0x0 during the sibling's
-  //     maximize. Reset the renderer instead: reloading the WebGL addon runs
-  //     RenderService.setRenderer(), which forces _needsSelectionRefresh + a
-  //     full refresh, repainting glyph, cursor, and selection layers regardless
-  //     of scrollback.
+  //  - NORMAL buffer (a plain shell like PowerShell): the program does not redraw
+  //    on resize — the text lives only in xterm's buffer — so rebuild the renderer
+  //    immediately and re-upload every glyph from the buffer we already hold. (A
+  //    scroll nudge is cheaper but only re-marks visible rows dirty and proved to
+  //    intermittently leave the pane blank after a maximize/restore, so we always
+  //    rebuild here — see forceGlyphRepaint.)
+  //  - ALTERNATE buffer (a full-screen TUI/agent like omp/claude/codex): the app
+  //    owns the screen and redraws itself on SIGWINCH after the resize. Rebuilding
+  //    immediately races that redraw and captures the stale cursor, leaving a
+  //    ghost. Defer the rebuild until the app's resize redraw lands
+  //    (writeTerminalOutput's write() callback) with a timeout fallback.
   private forceGlyphRepaint(entry: Entry): void {
     if (!entry.opened) return
-    const buffer = entry.term.buffer.active
-    const canScroll = buffer.baseY > 0
-    if (!canScroll) {
-      this.resetRenderer(entry)
+    // Alternate-buffer TUIs (omp/claude/codex) redraw themselves on SIGWINCH, so
+    // defer the renderer swap until that redraw lands (writeTerminalOutput's
+    // callback) — swapping mid-redraw can leave stale prompt-box glyphs.
+    if (entry.term.buffer.active.type === 'alternate') {
+      this.resetRenderer(entry, { immediate: false })
       return
     }
-    // Nudge one line, then return on a LATER frame. The two scrolls must land in
-    // separate render frames: within one frame the debouncer coalesces them and
-    // no glyph re-upload happens. Direction chosen by available room so the
-    // round trip is a no-op at the top/bottom boundary.
-    const down = buffer.viewportY <= 0 && buffer.baseY > buffer.viewportY
-    entry.term.scrollLines(down ? 1 : -1)
-    requestAnimationFrame(() => {
-      if (this.entries.get(entry.paneId) !== entry || !entry.opened) return
-      entry.term.scrollLines(down ? -1 : 1)
-    })
+    // Normal-buffer shells (PowerShell etc.) do not redraw on resize; their text
+    // lives only in xterm's buffer. Swap now.
+    this.resetRenderer(entry, { immediate: true })
   }
 
-  // Request a renderer rebuild to force a full repaint of glyph, cursor, and
-  // selection layers. Rebuilding immediately races the TUI: xterm's buffer still
-  // holds the pre-restore cursor position, so the fresh renderer paints a cursor
-  // ghost in a static screen region the TUI never repaints. Instead we mark the
-  // reset pending and let the caller send the PTY resize; the rebuild then runs
-  // right after the TUI's resize redraw lands (performRendererReload, driven by
-  // writeTerminalOutput) or after a short settle timeout if no output arrives.
-  private resetRenderer(entry: Entry): void {
+  // Repaint a pane whose WebGL glyphs went stale after a maximize/restore by
+  // dropping to xterm's DOM renderer. Disposing the WebGL addon calls
+  // RenderService.setRenderer(), which sets _needsSelectionRefresh and forces a
+  // full refresh — the DOM renderer then paints every visible cell from the
+  // buffer we still hold. This is the reliable repaint.
+  //
+  // We do NOT re-upgrade to WebGL afterwards: a freshly created GL context paints
+  // a blank surface for an idle pane (it never re-emits the existing buffer even
+  // after a full refresh), which is the blank-pane bug. The DOM renderer stays;
+  // it is more than adequate for a terminal pane. WebGL is only re-acquired if
+  // the pane is disposed and recreated.
+  //
+  //  - immediate (normal shell): swap now.
+  //  - deferred (alternate TUI): swap after the app's resize redraw arrives, so
+  //    the DOM renderer captures the settled frame, not a transitional one.
+  private resetRenderer(entry: Entry, options: { immediate: boolean }): void {
     if (!entry.opened || !entry.container) return
+    if (options.immediate) {
+      this.dropToDomRenderer(entry)
+      this.redraw(entry)
+      return
+    }
     if (entry.rendererReloadPending) return
     entry.rendererReloadPending = true
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadTimer = window.setTimeout(() => this.performRendererReload(entry), RENDERER_RESET_SETTLE_MS)
   }
 
-  // Actually rebuild the renderer. Disposing the WebGL addon swaps xterm back to
-  // the DOM renderer via RenderService.setRenderer() (sets _needsSelectionRefresh
-  // and full-refreshes); we then re-upgrade to WebGL next frame so future output
-  // stays fast. The webglAttempted guard in loadWebglRenderer would make the
-  // reload a no-op, so clear it first. Coalesced: only one reload runs even if
-  // output and the settle timeout both fire.
+  // Force the pane onto a fresh DOM renderer and full-refresh it. Two cases:
+  //  - WebGL still attached: disposing the addon calls RenderService.setRenderer()
+  //    with a fresh DOM renderer (sets _needsSelectionRefresh + full refresh).
+  //  - WebGL already gone (its context was lost while the pane was hidden at 0x0,
+  //    so onContextLoss already disposed it): there is nothing to dispose, and the
+  //    DOM renderer xterm swapped in was created against the 0x0 host and is stale.
+  //    Re-install a fresh DOM renderer directly through xterm core so it lays out
+  //    at the real size and full-refreshes — otherwise the pane stays blank.
+  private dropToDomRenderer(entry: Entry): void {
+    if (entry.webgl) {
+      entry.webglContextLossDisposable?.dispose()
+      entry.webglContextLossDisposable = undefined
+      entry.webgl.dispose()
+      entry.webgl = undefined
+      return
+    }
+    const core = (entry.term as unknown as {
+      _core?: {
+        _renderService?: { setRenderer?: (r: unknown) => void }
+        _createRenderer?: () => unknown
+      }
+    })._core
+    const renderService = core?._renderService
+    const createRenderer = core?._createRenderer
+    if (renderService?.setRenderer && createRenderer) {
+      renderService.setRenderer(createRenderer.call(core))
+    }
+  }
+
+  // Deferred swap for alternate-buffer TUIs. Fires from writeTerminalOutput after
+  // the app's resize redraw has landed (or a settle timeout), so the DOM renderer
+  // full-refreshes the settled frame rather than a transitional one.
   private performRendererReload(entry: Entry): void {
     if (!entry.rendererReloadPending) return
     entry.rendererReloadPending = false
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadTimer = undefined
     if (this.entries.get(entry.paneId) !== entry || !entry.opened || !entry.container) return
-    if (entry.webgl) {
-      entry.webglContextLossDisposable?.dispose()
-      entry.webglContextLossDisposable = undefined
-      entry.webgl.dispose()
-      entry.webgl = undefined
-    }
-    entry.webglAttempted = false
-    if (entry.rendererReloadFrame !== undefined) cancelAnimationFrame(entry.rendererReloadFrame)
-    entry.rendererReloadFrame = requestAnimationFrame(() => {
-      entry.rendererReloadFrame = undefined
-      if (this.entries.get(entry.paneId) !== entry || !entry.opened) return
-      this.loadWebglRenderer(entry)
-      this.redraw(entry)
-    })
+    this.dropToDomRenderer(entry)
+    this.redraw(entry)
   }
 
   private fitAfterFontsLoad(entry: Entry): void {
@@ -625,11 +675,17 @@ class TerminalManagerImpl {
   }
 
   private writeTerminalOutput(entry: Entry, bytes: Uint8Array): void {
+    // Drop output that a hard clear later in the same chunk would erase anyway,
+    // but do NOT call entry.term.clear(): the retained bytes still start with the
+    // clear sequence, and xterm interprets it natively and correctly — ESC[2J /
+    // ESC[H ESC[J erase only the viewport (scrollback preserved), ESC[3J / RIS
+    // clear scrollback too. term.clear() instead wiped scrollback unconditionally,
+    // which destroyed a shell's history whenever it merely repainted on a resize
+    // (e.g. a hidden pane getting SIGWINCH during a sibling's maximize).
     const output = terminalOutputAfterLastHardClear(bytes)
-    if (output.clear) entry.term.clear()
-    // write() parses asynchronously; run any pending renderer reload only after
-    // xterm has applied this output (the TUI's resize redraw), so the rebuilt
-    // renderer captures the settled cursor position instead of a stale ghost.
+    // write() parses asynchronously; run any pending (deferred, alternate-buffer)
+    // renderer reload only after xterm has applied this output — the app's resize
+    // redraw — so the rebuilt renderer captures the settled cursor, not a ghost.
     entry.term.write(output.bytes, entry.rendererReloadPending ? () => this.performRendererReload(entry) : undefined)
   }
 
@@ -641,8 +697,7 @@ class TerminalManagerImpl {
     let fitSucceeded = false
     if (measurement.measurable) {
       try {
-        entry.fit.fit()
-        fitSucceeded = true
+        fitSucceeded = this.safeFit(entry)
       } catch {
         // The scheduled fit retry path handles transient layout races.
       }
@@ -684,11 +739,12 @@ class TerminalManagerImpl {
       }
       try {
         const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
-        const proposed = entry.fit.proposeDimensions()
-        const cols = proposed?.cols ?? entry.term.cols
-        const rows = proposed?.rows ?? entry.term.rows
-        if (forceFit || entry.term.cols !== cols || entry.term.rows !== rows) {
-          entry.fit.fit()
+        // safeFit no-ops on a degenerate proposal; retry once geometry settles so
+        // we never resize to 2x1 and corrupt the buffer.
+        if (!this.safeFit(entry, forceFit)) {
+          if (attempt < MAX_FIT_ATTEMPTS) this.fit(entry, attempt + 1, forceFit)
+          else entry.forceFitOnNextMeasure = true
+          return
         }
         // Pin to bottom ONLY when the viewport already sat at bottom. A forced
         // fit re-measures geometry; it must never yank the viewport away from a
@@ -703,7 +759,6 @@ class TerminalManagerImpl {
       }
     })
   }
-
 }
 
 function concatUint8Arrays(chunks: Uint8Array[], byteLength: number): Uint8Array {
