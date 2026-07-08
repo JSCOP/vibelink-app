@@ -247,7 +247,10 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.term.focus()
-    this.reflowEntry(entry, true)
+    // Non-forced reflow: refresh the renderer and correct geometry only if it
+    // actually changed. A plain click must not force-fit (forced fits are for
+    // recovery paths: notifyPaneVisible / recoverAllVisiblePanes).
+    this.reflowEntry(entry)
   }
 
   reflow(paneId: string): void {
@@ -580,7 +583,10 @@ class TerminalManagerImpl {
         if (forceFit || entry.term.cols !== cols || entry.term.rows !== rows) {
           entry.fit.fit()
         }
-        if (forceFit || wasAtBottom) entry.term.scrollToBottom()
+        // Pin to bottom ONLY when the viewport already sat at bottom. A forced
+        // fit re-measures geometry; it must never yank the viewport away from a
+        // user who scrolled up (click-to-select, split, tab toggle, resize).
+        if (wasAtBottom) entry.term.scrollToBottom()
         const resetRenderer = Boolean(entry.rendererResetPending)
         this.redrawAfterNextFrame(entry, { clearWebglTextureAtlas: resetRenderer })
         entry.forceFitOnNextMeasure = false
