@@ -9,11 +9,11 @@ type StartupWorkspaceDialogProps = {
 }
 
 export function StartupWorkspaceDialog({ sessions, lastActiveSessionId, onOpen, onCreate }: StartupWorkspaceDialogProps) {
-  const sortedSessions = [...sessions].sort((left, right) => {
-    if (left.id === lastActiveSessionId) return -1
-    if (right.id === lastActiveSessionId) return 1
-    return right.createdAt - left.createdAt
-  })
+  // sessions arrive already in the user's workspace order; only pin the
+  // last-active workspace to the top, preserving that order otherwise.
+  const lastActive = sessions.filter((session) => session.id === lastActiveSessionId)
+  const rest = sessions.filter((session) => session.id !== lastActiveSessionId)
+  const sortedSessions = [...lastActive, ...rest]
 
   return (
     <div className="startup-workspace-backdrop" role="presentation">

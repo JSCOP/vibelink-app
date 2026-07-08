@@ -19,7 +19,7 @@ import { startTerminalOutputStream } from './ipc/output'
 import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
-import { isAgentPane, selectedProfileForWorkspace } from './state/profiles'
+import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { terminalThemeDefinitionById, themeCssVariables } from './state/terminalThemes'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import './styles/theme.css'
@@ -85,7 +85,9 @@ function App() {
   const duplicateLayoutPage = useWorkspaceStore((state) => state.duplicateLayoutPage)
   const resetLayoutPage = useWorkspaceStore((state) => state.resetLayoutPage)
   const settings = useWorkspaceStore((state) => state.settings)
+  const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
+  const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const activeWorkspaceLayout = activeSessionId ? workspaceLayouts[activeSessionId] : undefined
@@ -407,7 +409,7 @@ function App() {
       <div className="sidebar-hover-edge" onPointerEnter={() => setIsSidebarOpen(true)} />
       <Sidebar
         isOpen={isSidebarOpen}
-        sessions={sessions}
+        sessions={orderedSessions}
         activeSessionId={activeSessionId}
         onPointerEnter={() => setIsSidebarOpen(true)}
         onPointerLeave={() => setIsSidebarOpen(false)}
@@ -415,6 +417,7 @@ function App() {
         onCreate={() => setIsCreateOpen(true)}
         onRename={(sessionId, name) => void renameSession(sessionId, name)}
         onDelete={(sessionId) => void deleteSession(sessionId)}
+        onReorder={reorderWorkspaces}
       />
       <section className="main-surface">
         <header className="topbar" data-tauri-drag-region>
@@ -541,7 +544,7 @@ function App() {
         )}
         {status === 'ready' && !activeSessionId && !isCreateOpen ? (
           <StartupWorkspaceDialog
-            sessions={sessions}
+            sessions={orderedSessions}
             lastActiveSessionId={startupLastActiveSessionId}
             onOpen={selectSession}
             onCreate={() => setIsCreateOpen(true)}

@@ -102,11 +102,46 @@ button {
   border-left-color: var(--awt-accent);
 }
 
+.session-row {
+  position: relative;
+}
+
+.session-row.dragging {
+  opacity: 0.4;
+}
+
+.session-row.drop-before::before,
+.session-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: var(--awt-accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.session-row.drop-before::before {
+  top: -1px;
+}
+
+.session-row.drop-after::after {
+  bottom: -1px;
+}
+
 .session-main {
+  align-items: center;
+  display: flex;
   gap: 8px;
   min-width: 0;
   padding: 8px 6px;
   text-align: left;
+  cursor: grab;
+}
+
+.session-row.dragging .session-main {
+  cursor: grabbing;
 }
 
 .session-icon {

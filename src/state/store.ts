@@ -95,6 +95,7 @@ type WorkspaceState = {
   dismissError: () => void
   updateSettings: (settings: Partial<Settings>) => void
   toggleTerminalTabsVisible: () => void
+  reorderWorkspaces: (orderedIds: string[]) => void
   setDefaultProfile: (profileId: string) => void
   setViewMode: (sessionId: string, mode: ViewMode) => void
   createTask: (sessionId: string, input: { title: string; description: string }) => Task
@@ -488,6 +489,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   toggleTerminalTabsVisible: () => {
     get().updateSettings({ terminalTabsVisible: !get().settings.terminalTabsVisible })
+  },
+  reorderWorkspaces: (orderedIds: string[]) => {
+    get().updateSettings({ workspaceOrder: orderedIds })
   },
   setDefaultProfile: (profileId: string) => {
     const sessionId = get().activeSessionId

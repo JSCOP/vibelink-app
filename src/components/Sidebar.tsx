@@ -1,3 +1,4 @@
+import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Folder, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta } from '../ipc/types'
 
@@ -9,11 +10,109 @@ type SidebarProps = {
   onCreate: () => void
   onRename: (sessionId: string, name: string) => void
   onDelete: (sessionId: string) => void
+  onReorder: (orderedIds: string[]) => void
   onPointerEnter: () => void
   onPointerLeave: () => void
 }
 
-export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onPointerLeave, onSelect, onCreate, onRename, onDelete }: SidebarProps) {
+// Drag past this many pixels before a press becomes a reorder (below it, the
+// gesture stays a click that selects the workspace).
+const DRAG_THRESHOLD_PX = 4
+
+type DragState = {
+  id: string
+  pointerId: number
+  startY: number
+  active: boolean
+}
+
+type DropTarget = { id: string; place: 'before' | 'after' }
+
+function reorderIds(ids: string[], sourceId: string, targetId: string, place: 'before' | 'after'): string[] {
+  if (sourceId === targetId) return ids
+  const without = ids.filter((id) => id !== sourceId)
+  const targetIndex = without.indexOf(targetId)
+  if (targetIndex === -1) return ids
+  const insertAt = place === 'before' ? targetIndex : targetIndex + 1
+  without.splice(insertAt, 0, sourceId)
+  return without
+}
+
+// Hit-test the pointer against the rendered rows to find the drop slot: which
+// row the pointer is over and whether it sits in that row's top or bottom half.
+function dropTargetFromPoint(list: HTMLElement, clientY: number, draggingId: string): DropTarget | null {
+  const rows = [...list.querySelectorAll<HTMLElement>('[data-session-id]')]
+  for (const row of rows) {
+    const id = row.dataset.sessionId
+    if (!id || id === draggingId) continue
+    const rect = row.getBoundingClientRect()
+    if (clientY < rect.top || clientY > rect.bottom) continue
+    return { id, place: clientY < rect.top + rect.height / 2 ? 'before' : 'after' }
+  }
+  // Past the last row → drop after the last non-dragging row.
+  const last = rows.reverse().find((row) => row.dataset.sessionId && row.dataset.sessionId !== draggingId)
+  if (last && clientY > last.getBoundingClientRect().bottom) {
+    return { id: last.dataset.sessionId as string, place: 'after' }
+  }
+  return null
+}
+
+export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onPointerLeave, onSelect, onCreate, onRename, onDelete, onReorder }: SidebarProps) {
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<DragState | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
+
+  const onRowPointerDown = (event: ReactPointerEvent<HTMLDivElement>, sessionId: string) => {
+    // Only a primary (left) button press starts a reorder; ignore the small
+    // action buttons so rename/delete keep working.
+    if (event.button !== 0) return
+    if ((event.target as HTMLElement).closest('.session-small-action')) return
+    dragRef.current = { id: sessionId, pointerId: event.pointerId, startY: event.clientY, active: false }
+    // Capture immediately so a fast drag that leaves the source row before the
+    // first move still routes its pointer events here and can activate.
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const onRowPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    if (!drag.active) {
+      if (Math.abs(event.clientY - drag.startY) < DRAG_THRESHOLD_PX) return
+      drag.active = true
+      setDraggingId(drag.id)
+    }
+    const list = listRef.current
+    if (!list) return
+    setDropTarget(dropTargetFromPoint(list, event.clientY, drag.id))
+  }
+
+  const finishDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (!drag) return
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    const target = dropTarget
+    setDraggingId(null)
+    setDropTarget(null)
+    // A press that never crossed the threshold is a plain click → select.
+    if (!drag.active) {
+      onSelect(drag.id)
+      return
+    }
+    if (!target) return
+    const next = reorderIds(sessions.map((session) => session.id), drag.id, target.id, target.place)
+    if (next.some((id, index) => id !== sessions[index]?.id)) onReorder(next)
+  }
+
+  const onRowPointerCancel = () => {
+    dragRef.current = null
+    setDraggingId(null)
+    setDropTarget(null)
+  }
+
   return (
     <aside className={`sidebar ${isOpen ? 'open' : ''}`} onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave}>
       <div className="sidebar-heading">
@@ -22,35 +121,52 @@ export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onP
           <Plus size={14} />
         </button>
       </div>
-      <div className="session-list">
-        {sessions.map((session) => (
-          <div key={session.id} className={`session-row ${session.id === activeSessionId ? 'active' : ''}`}>
-            <button type="button" className="session-main" onClick={() => onSelect(session.id)}>
-              <span className="session-icon"><Folder size={14} strokeWidth={1.7} /></span>
-              <span className="session-name">{session.name}</span>
-              <span className="session-badge">{session.paneCount}</span>
-            </button>
-            <button
-              type="button"
-              title="Rename workspace"
-              className="session-small-action"
-              onClick={() => {
-                const name = window.prompt('Rename workspace', session.name)
-                if (name?.trim()) onRename(session.id, name.trim())
-              }}
+      <div className="session-list" ref={listRef}>
+        {sessions.map((session) => {
+          const isDropTarget = dropTarget?.id === session.id
+          const rowClass = [
+            'session-row',
+            session.id === activeSessionId ? 'active' : '',
+            draggingId === session.id ? 'dragging' : '',
+            isDropTarget ? `drop-${dropTarget.place}` : '',
+          ].filter(Boolean).join(' ')
+          return (
+            <div
+              key={session.id}
+              className={rowClass}
+              data-session-id={session.id}
+              onPointerDown={(event) => onRowPointerDown(event, session.id)}
+              onPointerMove={onRowPointerMove}
+              onPointerUp={finishDrag}
+              onPointerCancel={onRowPointerCancel}
             >
-              <Pencil size={13} strokeWidth={1.7} />
-            </button>
-            <button
-              type="button"
-              title="Delete workspace"
-              className="session-small-action danger"
-              onClick={() => onDelete(session.id)}
-            >
-              <Trash2 size={13} />
-            </button>
-          </div>
-        ))}
+              <div className="session-main">
+                <span className="session-icon"><Folder size={14} strokeWidth={1.7} /></span>
+                <span className="session-name">{session.name}</span>
+                <span className="session-badge">{session.paneCount}</span>
+              </div>
+              <button
+                type="button"
+                title="Rename workspace"
+                className="session-small-action"
+                onClick={() => {
+                  const name = window.prompt('Rename workspace', session.name)
+                  if (name?.trim()) onRename(session.id, name.trim())
+                }}
+              >
+                <Pencil size={13} strokeWidth={1.7} />
+              </button>
+              <button
+                type="button"
+                title="Delete workspace"
+                className="session-small-action danger"
+                onClick={() => onDelete(session.id)}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          )
+        })}
       </div>
     </aside>
   )

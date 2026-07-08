@@ -53,6 +53,7 @@ export type Settings = {
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
   paneRoles: Record<string, string>
+  workspaceOrder: string[]
   keybindings: KeybindingSettings
   hermesCommand: string
   chatPersonality: ChatPersonality
@@ -214,6 +215,7 @@ export const defaultSettings: Settings = {
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
   paneRoles: {},
+  workspaceOrder: [],
   hermesCommand: '',
   chatPersonality: 'direct',
   chatReasoningBlocks: true,
@@ -233,6 +235,7 @@ export function normalizeSettings(value: unknown): Settings {
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
   const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
+  const workspaceOrder = normalizeWorkspaceOrder(record?.workspaceOrder)
 
   return {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
@@ -253,6 +256,7 @@ export function normalizeSettings(value: unknown): Settings {
     defaultProfileId,
     workspaceProfileIds,
     paneRoles,
+    workspaceOrder,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
     chatPersonality: readChatPersonality(record?.chatPersonality),
     chatReasoningBlocks: readBoolean(record?.chatReasoningBlocks, defaultSettings.chatReasoningBlocks),
@@ -476,6 +480,42 @@ function normalizePaneRoles(value: unknown): Record<string, string> {
         entry[0].trim().length > 0 && typeof entry[1] === 'string' && entry[1].trim().length > 0,
     ),
   )
+}
+
+function normalizeWorkspaceOrder(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const order: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim()
+    if (id.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    order.push(id)
+  }
+  return order
+}
+
+/** Order sessions by the persisted `workspaceOrder`: ids present in the saved
+ *  order come first (in that order), then any sessions not yet in the order
+ *  (newly created or never dragged) in their incoming order. Deleted ids in the
+ *  saved order are skipped. */
+export function orderSessions<T extends { id: string }>(sessions: T[], order: string[]): T[] {
+  if (order.length === 0) return sessions
+  const byId = new Map(sessions.map((session) => [session.id, session]))
+  const ordered: T[] = []
+  const used = new Set<string>()
+  for (const id of order) {
+    const session = byId.get(id)
+    if (session && !used.has(id)) {
+      ordered.push(session)
+      used.add(id)
+    }
+  }
+  for (const session of sessions) {
+    if (!used.has(session.id)) ordered.push(session)
+  }
+  return ordered
 }
 
 function commandFromProfile(profile: Profile, remoteCwd?: string | null): Pick<PaneConfig, 'shell' | 'args'> {

@@ -1,5 +1,45 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine } from './profiles'
+import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine } from './profiles'
+
+describe('orderSessions', () => {
+  const sessions = [
+    { id: 'a', name: 'Alpha' },
+    { id: 'b', name: 'Beta' },
+    { id: 'c', name: 'Gamma' },
+  ]
+
+  test('returns the incoming sessions unchanged when there is no saved order', () => {
+    const ordered = orderSessions(sessions, [])
+
+    expect(ordered).toBe(sessions)
+    expect(ordered.map((session) => session.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  test('places sessions in the complete saved order', () => {
+    const ordered = orderSessions(sessions, ['c', 'a', 'b'])
+
+    expect(ordered.map((session) => session.id)).toEqual(['c', 'a', 'b'])
+  })
+
+  test('skips deleted session ids and appends unordered sessions', () => {
+    const ordered = orderSessions(sessions, ['x', 'c', 'a'])
+
+    expect(ordered.map((session) => session.id)).toEqual(['c', 'a', 'b'])
+  })
+
+  test('appends sessions missing from the saved order in incoming order', () => {
+    const extendedSessions = [...sessions, { id: 'd', name: 'Delta' }]
+    const ordered = orderSessions(extendedSessions, ['c', 'a'])
+
+    expect(ordered.map((session) => session.id)).toEqual(['c', 'a', 'b', 'd'])
+  })
+
+  test('uses each saved session id at most once', () => {
+    const ordered = orderSessions(sessions, ['c', 'c', 'a'])
+
+    expect(ordered.map((session) => session.id)).toEqual(['c', 'a', 'b'])
+  })
+})
 
 describe('terminal profiles', () => {
   test('normalizes empty settings with a default profile', () => {
@@ -152,13 +192,16 @@ describe('terminal profiles', () => {
     expect(selectedProfileForWorkspace(settings, 'session-b').id).toBe('powershell')
   })
 
-  test('normalizes terminal visibility settings', () => {
+  test('normalizes terminal visibility and workspace order settings', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
     expect(defaultSettings.terminalScrollbarVisible).toBe(false)
     expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
     expect(normalizeSettings({ terminalTabsVisible: false }).terminalTabsVisible).toBe(false)
     expect(defaultSettings.terminalTabsVisible).toBe(true)
     expect(normalizeSettings({ terminalTabsVisible: 'nope' }).terminalTabsVisible).toBe(defaultSettings.terminalTabsVisible)
+    expect(normalizeSettings({ workspaceOrder: ['a', 'a', ' b ', '', 3, 'c'] }).workspaceOrder).toEqual(['a', 'b', 'c'])
+    expect(normalizeSettings({ workspaceOrder: 'nope' }).workspaceOrder).toEqual([])
+    expect(defaultSettings.workspaceOrder).toEqual([])
   })
 
   test('normalizes terminal cursor style settings', () => {
