@@ -188,12 +188,6 @@ function App() {
   }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible, settings.cursorStyle, settings.cursorWidth])
 
   useEffect(() => {
-    requestAnimationFrame(() => {
-      TerminalManager.reflowAll(true)
-    })
-  }, [settings.terminalTabsVisible])
-
-  useEffect(() => {
     if (!activeSessionId) return
     const sessionId = activeSessionId
     const workspaceFolder = activeSession?.workspaceFolder ?? null

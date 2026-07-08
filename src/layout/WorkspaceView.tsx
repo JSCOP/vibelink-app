@@ -188,6 +188,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const applyingWindowRequestRef = useRef<number | null>(null)
   const applyingSaveRequestRef = useRef<number | null>(null)
   const nullLayoutReloadRef = useRef<string | null>(null)
+  const prevTabsVisibleRef = useRef<boolean | null>(null)
   const resizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
   const resizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
   const terminalResizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
@@ -1466,6 +1467,24 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       persistLayoutSoon()
     })
   }, [layoutTerminalDockview, persistLayoutSoon, paneList])
+
+  useEffect(() => {
+    // Skip the mount run: only react to an actual toggle, not initial layout.
+    if (prevTabsVisibleRef.current === null) {
+      prevTabsVisibleRef.current = settings.terminalTabsVisible
+      return
+    }
+    if (prevTabsVisibleRef.current === settings.terminalTabsVisible) return
+    prevTabsVisibleRef.current = settings.terminalTabsVisible
+    // The tab strip is toggled by a CSS attribute on <main>; dockview's own
+    // grid model is unchanged, so overlay containers keep their stale geometry
+    // (offset by the now-hidden tab-strip height) until a forced reposition.
+    // Plain xterm refit alone fits into that stale overlay, so panes only grow
+    // into the reclaimed vertical space after a manual click. Run the dock
+    // layout pipeline to reposition overlays, then refit + recover.
+    scheduleTerminalDockLayout()
+    reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+  }, [scheduleTerminalDockLayout, settings.terminalTabsVisible])
 
   useEffect(() => {
     const dock = dockRef.current
