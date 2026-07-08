@@ -441,10 +441,34 @@ class TerminalManagerImpl {
     entry.fit.fit()
     if (wasAtBottom) entry.term.scrollToBottom()
     this.redraw(entry, { clearWebglTextureAtlas: entry.webgl !== undefined })
+    this.forceGlyphRepaint(entry)
     entry.forceFitOnNextMeasure = false
     entry.rendererResetPending = false
     const sessionId = entry.sessionId
     if (sessionId) void invoke('resize_pane', { sessionId, paneId: entry.paneId, cols: entry.term.cols, rows: entry.term.rows })
+  }
+
+  // After dockview re-parents a pane's container (maximize/restore, pane swap),
+  // xterm's renderer keeps its per-cell glyph cache but its GL/DOM draw surface
+  // is desynced: refresh(), clearTextureAtlas(), theme re-apply, and
+  // handleResize all fail to repaint the text (only the cursor layer redraws) —
+  // the pane looks blank though its buffer is intact. A one-line scroll nudge
+  // marks every visible row dirty and forces a full glyph re-upload. The nudge
+  // returns to the exact viewport position, using whichever direction has room
+  // so it is a no-op-safe round trip at the top/bottom boundaries.
+  private forceGlyphRepaint(entry: Entry): void {
+    if (!entry.opened) return
+    const buffer = entry.term.buffer.active
+    // Nudge one line, then return on a LATER frame. The two scrolls must land in
+    // separate render frames: within one frame the debouncer coalesces them and
+    // no glyph re-upload happens. Direction chosen by available room so the
+    // round trip is a no-op at the top/bottom boundary.
+    const down = buffer.viewportY <= 0 && buffer.baseY > buffer.viewportY
+    entry.term.scrollLines(down ? 1 : -1)
+    requestAnimationFrame(() => {
+      if (this.entries.get(entry.paneId) !== entry || !entry.opened) return
+      entry.term.scrollLines(down ? -1 : 1)
+    })
   }
 
   private fitAfterFontsLoad(entry: Entry): void {
