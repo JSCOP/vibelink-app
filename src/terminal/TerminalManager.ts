@@ -347,6 +347,14 @@ class TerminalManagerImpl {
         if (entry.webglContextLossDisposable === contextLossDisposable) entry.webglContextLossDisposable = undefined
         if (entry.webgl === addon) entry.webgl = undefined
         addon.dispose()
+        // addon.dispose() swaps xterm back to the DOM renderer but only calls
+        // renderService.handleResize — a no-op for a hidden pane (0×0 while a
+        // sibling is maximized). Nothing repaints the buffer, so the pane shows
+        // blank until a click. Mark it dirty and schedule recovery so the DOM
+        // renderer repaints once the pane is measurable again.
+        entry.forceFitOnNextMeasure = true
+        entry.rendererResetPending = true
+        this.scheduleVisibleRecovery(entry, 0)
       })
       entry.term.loadAddon(addon)
       entry.webgl = addon
