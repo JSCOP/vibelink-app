@@ -27,7 +27,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
 }
 
 fn serve() -> Result<()> {
-    let session_id = std::env::var("AWT_SESSION_ID").context("AWT_SESSION_ID is required")?;
+    let session_id =
+        std::env::var("VIBELINK_SESSION_ID").context("VIBELINK_SESSION_ID is required")?;
     let session_id = parse_uuid(&session_id)?;
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
     let client = DaemonClient::new(stream);
@@ -82,7 +83,7 @@ fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> R
             "id": id,
             "result": {
                 "protocolVersion": "2025-06-18",
-                "serverInfo": { "name": "awt", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "vibelink", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "tools": {} }
             }
         })),
@@ -118,13 +119,13 @@ fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> R
 
 fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) -> Result<String> {
     match name {
-        "awt_pane_list" => {
+        "vibelink_pane_list" => {
             match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
                 ReplyResult::Attached { panes, .. } => Ok(serde_json::to_string(&panes)?),
                 other => bail!("unexpected daemon response: {other:?}"),
             }
         }
-        "awt_pane_read" => {
+        "vibelink_pane_read" => {
             let pane_id = required_uuid(args, "paneId")?;
             match client.request_reply(|req| ClientToDaemon::GetScrollback {
                 req,
@@ -137,7 +138,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 other => bail!("unexpected daemon response: {other:?}"),
             }
         }
-        "awt_pane_write" => {
+        "vibelink_pane_write" => {
             let pane_id = required_uuid(args, "paneId")?;
             let text = required_str(args, "text")?.to_string();
             let enter = args.get("enter").and_then(Value::as_bool).unwrap_or(false);
@@ -162,7 +163,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             }
             Ok(json!({ "ok": true }).to_string())
         }
-        "awt_pane_configure" => {
+        "vibelink_pane_configure" => {
             let pane_id = required_uuid(args, "paneId")?;
             let title = optional_non_empty_string(args, "title");
             let role = optional_non_empty_string(args, "role");
@@ -191,13 +192,13 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 },
             )
         }
-        "awt_terminal_grid_launch" => launch_terminal_grid(client, session_id, args),
-        "awt_skill_list" => {
+        "vibelink_terminal_grid_launch" => launch_terminal_grid(client, session_id, args),
+        "vibelink_skill_list" => {
             let session_id = skill_session_id_arg(args, Some(&session_id.to_string()))?;
             let skills = list_skills(session_id.as_deref())?;
             Ok(serde_json::to_string(&skills)?)
         }
-        "awt_skill_get" => {
+        "vibelink_skill_get" => {
             let id = required_non_empty_string(args, "id")?;
             let scope_text = optional_skill_scope(args)?;
             let session_id = skill_lookup_session_id(
@@ -209,13 +210,13 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             let skill = get_skill(&id, session_id.as_deref(), scope)?;
             Ok(serde_json::to_string(&skill)?)
         }
-        "awt_skill_apply" => {
+        "vibelink_skill_apply" => {
             let default_session_id = session_id.to_string();
             let input = skill_apply_input(args, Some(default_session_id.as_str()))?;
             let skill = apply_skill(input)?;
             Ok(serde_json::to_string(&skill)?)
         }
-        "awt_skill_delete" => {
+        "vibelink_skill_delete" => {
             let id = required_non_empty_string(args, "id")?;
             let scope_text = optional_skill_scope(args)?;
             let session_id = skill_lookup_session_id(
@@ -227,8 +228,8 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             delete_skill(&id, session_id.as_deref(), scope)?;
             Ok(json!({ "ok": true }).to_string())
         }
-        "awt_task_list" => board_read_native(&session_id.to_string()),
-        "awt_task_create" => {
+        "vibelink_task_list" => board_read_native(&session_id.to_string()),
+        "vibelink_task_create" => {
             let title = required_str(args, "title")?;
             let description = args
                 .get("description")
@@ -242,7 +243,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             emit_board_changed(client, session_id)?;
             Ok(json!({ "taskId": task_id }).to_string())
         }
-        "awt_task_assign" => {
+        "vibelink_task_assign" => {
             let task_id = required_str(args, "taskId")?;
             let pane_id = required_uuid(args, "paneId")?;
             let panes = attached_panes(client, session_id)?;
@@ -306,7 +307,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             })?;
             Ok(json!({ "ok": true }).to_string())
         }
-        "awt_task_done" => {
+        "vibelink_task_done" => {
             let task_id = required_str(args, "taskId")?.to_string();
             let commit_msg = args
                 .get("commitMsg")
@@ -327,7 +328,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 },
             )
         }
-        "awt_task_note" => {
+        "vibelink_task_note" => {
             let task_id = required_str(args, "taskId")?.to_string();
             let message = required_str(args, "message")?.to_string();
             relay_task_event(
@@ -421,27 +422,27 @@ fn ansi_string_sequence_end(bytes: &[u8], mut index: usize, bel_terminates: bool
 fn tool_schemas() -> Vec<Value> {
     vec![
         tool_schema(
-            "awt_pane_list",
-            "List panes in this AWT workspace",
+            "vibelink_pane_list",
+            "List panes in this VibeLink workspace",
             json!({ "type": "object", "properties": {} }),
         ),
         tool_schema(
-            "awt_pane_read",
+            "vibelink_pane_read",
             "Read a pane scrollback",
             json!({ "type": "object", "properties": { "paneId": { "type": "string" } }, "required": ["paneId"] }),
         ),
         tool_schema(
-            "awt_pane_write",
+            "vibelink_pane_write",
             "Write text to a pane",
             json!({ "type": "object", "properties": { "paneId": { "type": "string" }, "text": { "type": "string" }, "enter": { "type": "boolean" } }, "required": ["paneId", "text"] }),
         ),
         tool_schema(
-            "awt_pane_configure",
+            "vibelink_pane_configure",
             "Set a terminal pane's title and/or orchestration role metadata only. Does not change shell, args, profile, or the running process — a pane launched as Codex stays Codex even if retitled 'Claude'. Use this before assigning work so panes are labeled by responsibility.",
             json!({ "type": "object", "properties": { "paneId": { "type": "string" }, "title": { "type": "string" }, "role": { "type": "string" } }, "required": ["paneId"] }),
         ),
         tool_schema(
-            "awt_terminal_grid_launch",
+            "vibelink_terminal_grid_launch",
             "Create or expand this workspace to a terminal grid and run one command in every grid pane. One launch = one agent kind; to mix agents, call again (e.g. a codex row then a claude row). Valid agent commands are claude, codex, and omp — do not invent other names such as claudie.",
             json!({
                 "type": "object",
@@ -458,18 +459,18 @@ fn tool_schemas() -> Vec<Value> {
             }),
         ),
         tool_schema(
-            "awt_skill_list",
-            "List persisted AWT-owned skills available to this workspace. Returns JSON text.",
+            "vibelink_skill_list",
+            "List persisted VibeLink-owned skills available to this workspace. Returns JSON text.",
             json!({ "type": "object", "properties": { "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace." } } }),
         ),
         tool_schema(
-            "awt_skill_get",
-            "Get one persisted AWT-owned skill by id. Returns JSON text.",
+            "vibelink_skill_get",
+            "Get one persisted VibeLink-owned skill by id. Returns JSON text.",
             json!({ "type": "object", "properties": { "id": { "type": "string" }, "scope": { "type": "string", "enum": ["global", "workspace"] }, "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace unless scope is global." } }, "required": ["id"] }),
         ),
         tool_schema(
-            "awt_skill_apply",
-            "Create or replace an AWT-owned Markdown skill. Returns the persisted skill as JSON text.",
+            "vibelink_skill_apply",
+            "Create or replace a VibeLink-owned Markdown skill. Returns the persisted skill as JSON text.",
             json!({
                 "type": "object",
                 "properties": {
@@ -486,32 +487,32 @@ fn tool_schemas() -> Vec<Value> {
             }),
         ),
         tool_schema(
-            "awt_skill_delete",
-            "Delete an AWT-owned persisted skill by id. Returns JSON text.",
+            "vibelink_skill_delete",
+            "Delete a VibeLink-owned persisted skill by id. Returns JSON text.",
             json!({ "type": "object", "properties": { "id": { "type": "string" }, "scope": { "type": "string", "enum": ["global", "workspace"] }, "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace unless scope is global." } }, "required": ["id"] }),
         ),
         tool_schema(
-            "awt_task_list",
+            "vibelink_task_list",
             "List Kanban tasks in this workspace",
             json!({ "type": "object", "properties": {} }),
         ),
         tool_schema(
-            "awt_task_create",
+            "vibelink_task_create",
             "Create a Kanban task",
             json!({ "type": "object", "properties": { "title": { "type": "string" }, "description": { "type": "string" } }, "required": ["title"] }),
         ),
         tool_schema(
-            "awt_task_assign",
+            "vibelink_task_assign",
             "Assign a task to an AI agent pane",
             json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "paneId": { "type": "string" }, "role": { "type": "string" } }, "required": ["taskId", "paneId"] }),
         ),
         tool_schema(
-            "awt_task_done",
+            "vibelink_task_done",
             "Mark a task done",
             json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "commitMsg": { "type": "string" }, "resultSummary": { "type": "string" } }, "required": ["taskId"] }),
         ),
         tool_schema(
-            "awt_task_note",
+            "vibelink_task_note",
             "Append a note to a task",
             json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "message": { "type": "string" } }, "required": ["taskId", "message"] }),
         ),
@@ -1065,13 +1066,13 @@ fn compose_task_prompt(
         lines.push(description);
     }
     lines.extend([
-        "When you make progress, report a note from this AWT pane with:".to_string(),
+        "When you make progress, report a note from this VibeLink pane with:".to_string(),
         format!(
-            "& $env:AWT_APP_EXE cli task note --task {task_id} --message \"<short progress note>\""
+            "& $env:VIBELINK_APP_EXE cli task note --task {task_id} --message \"<short progress note>\""
         ),
-        "When finished, report completion from this AWT pane with:".to_string(),
+        "When finished, report completion from this VibeLink pane with:".to_string(),
         format!(
-            "& $env:AWT_APP_EXE cli task done --task {task_id} --result-summary \"<short result summary>\""
+            "& $env:VIBELINK_APP_EXE cli task done --task {task_id} --result-summary \"<short result summary>\""
         ),
     ]);
     lines.join(" | ")
@@ -1179,14 +1180,14 @@ mod tests {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect();
-        assert!(names.contains(&"awt_pane_list"));
-        assert!(names.contains(&"awt_pane_configure"));
-        assert!(names.contains(&"awt_terminal_grid_launch"));
-        assert!(names.contains(&"awt_task_create"));
-        assert!(names.contains(&"awt_skill_list"));
-        assert!(names.contains(&"awt_skill_get"));
-        assert!(names.contains(&"awt_skill_apply"));
-        assert!(names.contains(&"awt_skill_delete"));
+        assert!(names.contains(&"vibelink_pane_list"));
+        assert!(names.contains(&"vibelink_pane_configure"));
+        assert!(names.contains(&"vibelink_terminal_grid_launch"));
+        assert!(names.contains(&"vibelink_task_create"));
+        assert!(names.contains(&"vibelink_skill_list"));
+        assert!(names.contains(&"vibelink_skill_get"));
+        assert!(names.contains(&"vibelink_skill_apply"));
+        assert!(names.contains(&"vibelink_skill_delete"));
     }
 
     #[test]
@@ -1335,7 +1336,7 @@ mod tests {
     }
 
     fn placeholder_client() -> DaemonClient {
-        let socket_name = format!("awt-mcp-test-{}", Uuid::new_v4());
+        let socket_name = format!("vibelink-mcp-test-{}", Uuid::new_v4());
         let listener_name = socket_name
             .as_str()
             .to_ns_name::<GenericNamespaced>()
@@ -1378,8 +1379,8 @@ mod tests {
         assert!(prompt.contains("Role: Reviewer"));
         assert!(prompt.contains("Do the thing"));
         assert!(!prompt.contains('\n'));
-        assert!(prompt.contains("& $env:AWT_APP_EXE cli task note --task 12345678-aaaa"));
-        assert!(prompt.contains("& $env:AWT_APP_EXE cli task done --task 12345678-aaaa"));
+        assert!(prompt.contains("& $env:VIBELINK_APP_EXE cli task note --task 12345678-aaaa"));
+        assert!(prompt.contains("& $env:VIBELINK_APP_EXE cli task done --task 12345678-aaaa"));
         assert!(prompt.contains("--result-summary \"<short result summary>\""));
     }
 

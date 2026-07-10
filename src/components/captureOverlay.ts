@@ -28,7 +28,7 @@ export function applyCaptureOverlayTransparency(doc: CaptureOverlayDocument = do
     element.style.setProperty?.('background-color', 'transparent', 'important')
     element.style.setProperty?.('background-image', 'none', 'important')
     element.style.setProperty?.('min-width', '0', 'important')
-    element.style.setProperty?.('--awt-bg', 'transparent')
+    element.style.setProperty?.('--vibelink-bg', 'transparent')
   }
 }
 

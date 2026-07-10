@@ -233,7 +233,7 @@ impl DaemonClient {
 
 fn spawn_reader_loop(reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, generation: u64) {
     thread::Builder::new()
-        .name("awt-daemon-reader".to_string())
+        .name("vibelink-daemon-reader".to_string())
         .spawn(move || reader_loop(reader, shared, generation))
         .expect("spawn daemon reader thread");
 }
@@ -316,7 +316,7 @@ fn start_background_reconnect(shared: &Arc<ClientShared>, message: String) {
     let _ = send_terminal_event(shared, TerminalEvent::ConnectionLost { message });
     let reconnect_shared = Arc::clone(shared);
     if let Err(err) = thread::Builder::new()
-        .name("awt-daemon-reconnector".to_string())
+        .name("vibelink-daemon-reconnector".to_string())
         .spawn(move || {
             if let Some((reader, generation)) = reconnect(&reconnect_shared) {
                 info!("daemon reconnected");
@@ -381,7 +381,7 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
 
 fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShared>) {
     thread::Builder::new()
-        .name("awt-term-ws-accept".to_string())
+        .name("vibelink-term-ws-accept".to_string())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else {
@@ -389,7 +389,7 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
                 };
                 let shared = Arc::clone(&shared);
                 let _ = thread::Builder::new()
-                    .name("awt-term-ws-conn".to_string())
+                    .name("vibelink-term-ws-conn".to_string())
                     .spawn(move || {
                         let mut ws = match tungstenite::accept(stream) {
                             Ok(ws) => ws,
@@ -516,7 +516,7 @@ mod tests {
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 
     fn test_client() -> (DaemonClient, DaemonStream) {
-        let socket_name = format!("awt-daemon-client-test-{}", Uuid::new_v4());
+        let socket_name = format!("vibelink-daemon-client-test-{}", Uuid::new_v4());
         let listener_name = socket_name
             .as_str()
             .to_ns_name::<GenericNamespaced>()

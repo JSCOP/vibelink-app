@@ -1,5 +1,5 @@
 {
-  "name": "agenticworkspaceterminal",
+  "name": "vibelink",
   "private": true,
   "version": "0.1.7",
   "type": "module",
@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-legacy-dev-locks.ps1 && tauri dev --config src-tauri/tauri.dev.conf.json",
-    "tauri:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/awt.ps1 -Action installer-release"
+    "tauri:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vibelink.ps1 -Action installer-release"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

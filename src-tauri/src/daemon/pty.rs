@@ -18,7 +18,7 @@ const TERMINAL_CAPABILITY_ENV: [(&str, &str); 5] = [
     ("COLORTERM", "truecolor"),
     ("FORCE_COLOR", "1"),
     ("CLICOLOR_FORCE", "1"),
-    ("TERM_PROGRAM", "AgenticWorkspaceTerminal"),
+    ("TERM_PROGRAM", "VibeLink"),
 ];
 
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
@@ -72,7 +72,7 @@ impl Pane {
         if let Some(path) = windows_effective_path() {
             command.env("PATH", path);
         }
-        // AWT owns a real PTY; inherited process-manager color suppression must not
+        // VibeLink owns a real PTY; inherited process-manager color suppression must not
         // make terminal apps render monochrome. Explicit pane env below can still
         // re-add these for users who intentionally want no color.
         command.env_remove("NO_COLOR");
@@ -259,17 +259,18 @@ fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut next: Vec<_> = env
         .into_iter()
         .filter(|(key, _)| {
-            !key.eq_ignore_ascii_case("AWT_APP_EXE") && !key.eq_ignore_ascii_case("AWT_APP_FLAVOR")
+            !key.eq_ignore_ascii_case("VIBELINK_APP_EXE")
+                && !key.eq_ignore_ascii_case("VIBELINK_APP_FLAVOR")
         })
         .collect();
     if let Ok(exe) = env::current_exe() {
         next.push((
-            "AWT_APP_EXE".to_string(),
+            "VIBELINK_APP_EXE".to_string(),
             exe.to_string_lossy().into_owned(),
         ));
     }
     next.push((
-        "AWT_APP_FLAVOR".to_string(),
+        "VIBELINK_APP_FLAVOR".to_string(),
         paths::app_flavor().to_string(),
     ));
     next
@@ -283,11 +284,12 @@ pub(crate) fn inject_pane_identity(
     let mut next: Vec<_> = env
         .into_iter()
         .filter(|(key, _)| {
-            !key.eq_ignore_ascii_case("AWT_SESSION_ID") && !key.eq_ignore_ascii_case("AWT_PANE_ID")
+            !key.eq_ignore_ascii_case("VIBELINK_SESSION_ID")
+                && !key.eq_ignore_ascii_case("VIBELINK_PANE_ID")
         })
         .collect();
-    next.push(("AWT_SESSION_ID".to_string(), session_id.to_string()));
-    next.push(("AWT_PANE_ID".to_string(), pane_id.to_string()));
+    next.push(("VIBELINK_SESSION_ID".to_string(), session_id.to_string()));
+    next.push(("VIBELINK_PANE_ID".to_string(), pane_id.to_string()));
     next
 }
 
@@ -607,10 +609,7 @@ mod tests {
         assert!(entries.contains(&("COLORTERM".to_string(), "truecolor".to_string())));
         assert!(entries.contains(&("FORCE_COLOR".to_string(), "1".to_string())));
         assert!(entries.contains(&("CLICOLOR_FORCE".to_string(), "1".to_string())));
-        assert!(entries.contains(&(
-            "TERM_PROGRAM".to_string(),
-            "AgenticWorkspaceTerminal".to_string()
-        )));
+        assert!(entries.contains(&("TERM_PROGRAM".to_string(), "VibeLink".to_string())));
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
         assert_eq!(
             entries
@@ -624,7 +623,7 @@ mod tests {
     #[test]
     fn runtime_agent_env_records_current_binary_and_flavor() {
         let entries = with_runtime_agent_env(vec![
-            ("AWT_APP_EXE".to_string(), "wrong.exe".to_string()),
+            ("VIBELINK_APP_EXE".to_string(), "wrong.exe".to_string()),
             ("OTHER".to_string(), "value".to_string()),
         ]);
 
@@ -634,12 +633,12 @@ mod tests {
             .into_owned();
 
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
-        assert!(entries.contains(&("AWT_APP_EXE".to_string(), expected_exe)));
+        assert!(entries.contains(&("VIBELINK_APP_EXE".to_string(), expected_exe)));
         assert!(entries.contains(&(
-            "AWT_APP_FLAVOR".to_string(),
+            "VIBELINK_APP_FLAVOR".to_string(),
             paths::app_flavor().to_string()
         )));
-        assert!(!entries.contains(&("AWT_APP_EXE".to_string(), "wrong.exe".to_string())));
+        assert!(!entries.contains(&("VIBELINK_APP_EXE".to_string(), "wrong.exe".to_string())));
     }
 
     #[test]
@@ -648,8 +647,11 @@ mod tests {
         let pane_id = Uuid::new_v4();
         let entries = inject_pane_identity(
             vec![
-                ("awt_session_id".to_string(), "wrong-session".to_string()),
-                ("AWT_PANE_ID".to_string(), "wrong-pane".to_string()),
+                (
+                    "vibelink_session_id".to_string(),
+                    "wrong-session".to_string(),
+                ),
+                ("VIBELINK_PANE_ID".to_string(), "wrong-pane".to_string()),
                 ("OTHER".to_string(), "value".to_string()),
             ],
             session_id,
@@ -657,19 +659,19 @@ mod tests {
         );
 
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
-        assert!(entries.contains(&("AWT_SESSION_ID".to_string(), session_id.to_string())));
-        assert!(entries.contains(&("AWT_PANE_ID".to_string(), pane_id.to_string())));
+        assert!(entries.contains(&("VIBELINK_SESSION_ID".to_string(), session_id.to_string())));
+        assert!(entries.contains(&("VIBELINK_PANE_ID".to_string(), pane_id.to_string())));
         assert_eq!(
             entries
                 .iter()
-                .filter(|(key, _)| key.eq_ignore_ascii_case("AWT_SESSION_ID"))
+                .filter(|(key, _)| key.eq_ignore_ascii_case("VIBELINK_SESSION_ID"))
                 .count(),
             1
         );
         assert_eq!(
             entries
                 .iter()
-                .filter(|(key, _)| key.eq_ignore_ascii_case("AWT_PANE_ID"))
+                .filter(|(key, _)| key.eq_ignore_ascii_case("VIBELINK_PANE_ID"))
                 .count(),
             1
         );

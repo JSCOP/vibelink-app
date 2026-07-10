@@ -31,8 +31,8 @@ export function FontPicker({ value, installedFonts, onPreview, onSelect, onCance
       entriesForFilter={entriesForFilter}
       renderItem={(item) => (
         <>
-          <span className="awt-quick-pick-name" style={{ fontFamily: terminalFontStack(item.id) }}>{item.name}</span>
-          <span className="awt-quick-pick-description" style={{ fontFamily: terminalFontStack(item.id) }}>
+          <span className="vibelink-quick-pick-name" style={{ fontFamily: terminalFontStack(item.id) }}>{item.name}</span>
+          <span className="vibelink-quick-pick-description" style={{ fontFamily: terminalFontStack(item.id) }}>
             AaBb 0123 <span style={{ fontFamily: hangulSampleFontFamily(item.id) }}>가나다</span> =&gt; -&gt;
           </span>
         </>

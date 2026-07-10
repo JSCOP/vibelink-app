@@ -48,9 +48,9 @@ export const workspaceWindowDescriptors: Record<WorkspaceWindowKind, WorkspaceWi
   },
   agent: {
     kind: 'agent',
-    panelId: 'awt-agent',
+    panelId: 'vibelink-agent',
     component: 'agent',
-    title: 'AWT Agent',
+    title: 'VibeLink Agent',
     icon: 'bot',
     singleton: true,
   },
@@ -225,7 +225,7 @@ function normalizeWorkspaceDockLayoutJson(raw: string | null, terminalPaneIds: s
   const layout = parseJson(raw)
   if (!isRecord(layout) || !isRecord(layout.panels)) return raw
   if (layoutHasTopLevelTerminalPanes(layout, terminalPaneIds)) return wrapTerminalLayout(raw) ?? raw
-  if (isRecord(layout.awtTerminalLayout) && !isRecord(layout.panels[workspaceWindowDescriptors.terminal.panelId])) {
+  if (isRecord(layout.vibelinkTerminalLayout) && !isRecord(layout.panels[workspaceWindowDescriptors.terminal.panelId])) {
     const migrated = structuredClone(layout)
     rewritePanel(migrated, workspaceWindowDescriptors.terminal)
     appendPanelToLeft(migrated, workspaceWindowDescriptors.terminal.panelId)
@@ -249,7 +249,7 @@ function wrapTerminalLayout(raw: string): string | null {
   const layout = parseJson(raw)
   if (!isRecord(layout) || !isRecord(layout.grid) || !isRecord(layout.panels)) return null
   const wrapped: Record<string, unknown> = {
-    awtTerminalLayout: layout,
+    vibelinkTerminalLayout: layout,
     panels: {},
   }
   rewritePanel(wrapped, workspaceWindowDescriptors.terminal)

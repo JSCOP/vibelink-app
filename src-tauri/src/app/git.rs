@@ -199,7 +199,7 @@ fn file_contents_native(repo: &str, base_ref: &str, path: &str) -> Result<FileCo
 
 fn worktree_create_native(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
     let short = short_task_id(task_id);
-    let branch = format!("awt/task-{short}");
+    let branch = format!("vibelink/task-{short}");
     let data_dir = crate::daemon::paths::daemon_paths()?.data_dir;
     let worktree_path = data_dir.join("worktrees").join(&short);
     std::fs::create_dir_all(parent_dir(&worktree_path)?)?;
@@ -497,11 +497,11 @@ mod tests {
     }
 
     fn test_repo() -> PathBuf {
-        let repo = std::env::temp_dir().join(format!("awt-git-test-{}", Uuid::new_v4()));
+        let repo = std::env::temp_dir().join(format!("vibelink-git-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&repo).expect("create repo");
         run_git_at(&repo, &["init"]);
-        run_git(&repo, &["config", "user.email", "awt@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "AWT Test"]);
+        run_git(&repo, &["config", "user.email", "vibelink@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "VibeLink Test"]);
         repo
     }
 

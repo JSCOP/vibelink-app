@@ -267,7 +267,7 @@ describe('terminal profiles', () => {
           name: 'Codex',
           shell: 'codex.cmd',
           args: ['--dangerously-bypass-approvals-and-sandbox'],
-          env: [['TERM_PROGRAM', 'AgenticWorkspaceTerminal']],
+          env: [['TERM_PROGRAM', 'VibeLink']],
           cwd: 'E:/work',
           color: '#7ee787',
           icon: 'sparkles',
@@ -278,7 +278,7 @@ describe('terminal profiles', () => {
     expect(paneOverridesFromProfile(selectedProfile(settings), 'Codex 1')).toEqual({
       shell: 'codex.cmd',
       args: ['--dangerously-bypass-approvals-and-sandbox'],
-      env: [['TERM_PROGRAM', 'AgenticWorkspaceTerminal']],
+      env: [['TERM_PROGRAM', 'VibeLink']],
       cwd: 'E:/work',
       title: 'Codex 1',
     })

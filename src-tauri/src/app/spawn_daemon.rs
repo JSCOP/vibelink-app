@@ -166,7 +166,7 @@ pub fn connect_daemon() -> io::Result<DaemonStream> {
 fn connect_daemon_with_timeout(name: Name<'static>, timeout: Duration) -> io::Result<DaemonStream> {
     let (tx, rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("awt-daemon-connect".to_string())
+        .name("vibelink-daemon-connect".to_string())
         .spawn(move || {
             let result = interprocess::local_socket::ConnectOptions::new()
                 .name(name)
@@ -201,7 +201,7 @@ fn connect_ready_daemon() -> std::result::Result<DaemonStream, StartupAttemptErr
 fn probe_daemon(stream: DaemonStream) -> Result<DaemonStream> {
     let (tx, rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("awt-daemon-probe".to_string())
+        .name("vibelink-daemon-probe".to_string())
         .spawn(move || {
             let mut stream = stream;
             let result = ping_daemon_io(&mut stream).map(|()| stream);
@@ -379,7 +379,7 @@ fn graceful_shutdown(pid_path: &Path) -> Result<bool> {
 
     let (tx, rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("awt-shutdown".to_string())
+        .name("vibelink-shutdown".to_string())
         .spawn(move || {
             let mut stream = stream;
             let result = (|| -> Result<()> {
@@ -446,9 +446,12 @@ fn find_unrecorded_daemon_pids() -> Result<Vec<u32>> {
             "-Command",
             include_str!("find_daemon_pids.ps1"),
         ])
-        .env("AWT_DAEMON_EXE", exe)
-        .env("AWT_DAEMON_DIR", daemon_bin_dir(&daemon_paths.data_dir))
-        .env("AWT_APP_FLAVOR", paths::app_flavor())
+        .env("VIBELINK_DAEMON_EXE", exe)
+        .env(
+            "VIBELINK_DAEMON_DIR",
+            daemon_bin_dir(&daemon_paths.data_dir),
+        )
+        .env("VIBELINK_APP_FLAVOR", paths::app_flavor())
         .stdin(Stdio::null())
         .output()
         .context("list unrecorded daemon processes")?;
@@ -537,9 +540,9 @@ fn windows_process_exists(pid: u32) -> Result<bool> {
         .args([
             "-NoProfile",
             "-Command",
-            "$targetPid = [uint32]$env:AWT_PID; if (Get-CimInstance Win32_Process -Filter \"ProcessId = $targetPid\") { 'exists' } else { 'missing' }",
+            "$targetPid = [uint32]$env:VIBELINK_PID; if (Get-CimInstance Win32_Process -Filter \"ProcessId = $targetPid\") { 'exists' } else { 'missing' }",
         ])
-        .env("AWT_PID", pid.to_string())
+        .env("VIBELINK_PID", pid.to_string())
         .stdin(Stdio::null())
         .output()
         .context("check whether daemon pid still exists")?;
@@ -941,7 +944,7 @@ mod tests {
     #[test]
     fn shutdown_missing_pid_file_is_noop() {
         let path = std::env::temp_dir().join(format!(
-            "awt-missing-daemon-{}-{}.pid",
+            "vibelink-missing-daemon-{}-{}.pid",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -961,7 +964,7 @@ mod tests {
     #[test]
     fn spawned_daemon_cleanup_removes_only_matching_pid_file() {
         let path = std::env::temp_dir().join(format!(
-            "awt-spawned-daemon-{}-{}.pid",
+            "vibelink-spawned-daemon-{}-{}.pid",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -1059,14 +1062,14 @@ mod tests {
     fn socket_name_converts_to_namespaced_socket_name() {
         let name = socket_name().expect("namespaced socket name");
 
-        assert!(format!("{name:?}").contains(&format!("awt-{}-daemon", paths::app_flavor())));
+        assert!(format!("{name:?}").contains(&format!("vibelink-{}-daemon", paths::app_flavor())));
     }
 
     #[cfg(windows)]
     #[test]
     fn daemon_executable_copy_uses_data_dir_instead_of_source_exe() {
         let temp = std::env::temp_dir().join(format!(
-            "awt-daemon-copy-{}-{}",
+            "vibelink-daemon-copy-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -1097,7 +1100,7 @@ mod tests {
     #[test]
     fn executable_identity_changes_with_executable_bytes() {
         let temp = std::env::temp_dir().join(format!(
-            "awt-daemon-identity-{}-{}",
+            "vibelink-daemon-identity-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));

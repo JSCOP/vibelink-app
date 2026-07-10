@@ -81,12 +81,12 @@ fn default_capture_root() -> PathBuf {
         let base = user_dirs
             .picture_dir()
             .unwrap_or_else(|| user_dirs.home_dir());
-        return base.join("AgenticWorkspaceTerminal");
+        return base.join("VibeLink");
     }
 
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join("AgenticWorkspaceTerminal")
+        .join("VibeLink")
 }
 
 fn resolve_dir(dir: &str, sub: &str) -> std::io::Result<PathBuf> {
@@ -240,10 +240,7 @@ fn finish_ffmpeg_provision(
 fn download_ffmpeg_zip(app: &tauri::AppHandle, zip_path: &Path) -> Result<(), String> {
     emit_ffmpeg_progress(app, 0, None);
     let response = ureq::get(FFMPEG_DOWNLOAD_URL)
-        .set(
-            "User-Agent",
-            "AgenticWorkspaceTerminal/0.1 ffmpeg-provisioner",
-        )
+        .set("User-Agent", "VibeLink/0.1 ffmpeg-provisioner")
         .call()
         .map_err(|error| format!("download ffmpeg: {error}"))?;
     let total = response
@@ -496,8 +493,9 @@ pub async fn open_capture_overlay(
     let mode_json = serde_json::to_string(&mode).map_err(to_string)?;
     let dir_json = serde_json::to_string(&dir).map_err(to_string)?;
     let ffmpeg_json = serde_json::to_string(&ffmpeg_path).map_err(to_string)?;
-    let initialization_script =
-        format!("window.__AWT_CAPTURE__={{mode:{mode_json},dir:{dir_json},ffmpeg:{ffmpeg_json}}};");
+    let initialization_script = format!(
+        "window.__VIBELINK_CAPTURE__={{mode:{mode_json},dir:{dir_json},ffmpeg:{ffmpeg_json}}};"
+    );
 
     let window = WebviewWindowBuilder::new(
         &app,
@@ -755,7 +753,8 @@ mod tests {
 
     #[test]
     fn read_capture_file_allows_only_files_inside_images_dir() {
-        let root = std::env::temp_dir().join(format!("awt-capture-read-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("vibelink-capture-read-{}", uuid::Uuid::new_v4()));
         let images = root.join("Images");
         std::fs::create_dir_all(&images).expect("create image dir");
         let inside = images.join("inside.png");

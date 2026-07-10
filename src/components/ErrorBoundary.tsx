@@ -15,13 +15,13 @@ const fallbackStyle: CSSProperties = {
   gap: 6,
   alignContent: 'start',
   padding: 12,
-  color: 'var(--awt-text)',
-  background: 'var(--awt-panel)',
-  font: '12px/1.4 var(--awt-sans)',
+  color: 'var(--vibelink-text)',
+  background: 'var(--vibelink-panel)',
+  font: '12px/1.4 var(--vibelink-sans)',
 }
 
 const fallbackMessageStyle: CSSProperties = {
-  color: 'var(--awt-muted)',
+  color: 'var(--vibelink-muted)',
   overflowWrap: 'anywhere',
 }
 
@@ -33,7 +33,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    console.error('AWT panel crashed', error, info)
+    console.error('VibeLink panel crashed', error, info)
   }
 
   render(): ReactNode {

@@ -1,4 +1,4 @@
-# Agentic Workspace Terminal
+# VibeLink
 
 Tauri v2 desktop terminal workspace with dockview splits, workspace sessions, grid templates, xterm.js rendering, and a detached Rust PTY daemon.
 
@@ -9,7 +9,7 @@ pnpm install
 pnpm tauri:dev
 ```
 
-Use the npm Tauri CLI. A global `cargo-tauri` install is not required. The `tauri:dev` script merges `src-tauri/tauri.dev.conf.json` so the development app has a separate app identifier and title.
+Use the npm Tauri CLI. A global `cargo-tauri` install is not required. The `tauri:dev` script merges `src-tauri/tauri.dev.conf.json`, so development runs as **VibeLink Dev** with identifier `com.vibelink.desktop.dev`; production uses **VibeLink** with identifier `com.vibelink.desktop`.
 
 ## Build
 
@@ -18,15 +18,17 @@ pnpm build
 pnpm tauri:build
 ```
 
+`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release`. Versioned Windows bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.7_x64_en-US.msi` and `VibeLink_0.1.7_x64-setup.exe`.
+
 ## Architecture
 
 - React owns layout, workspace UI, dockview panels, and xterm.js rendering.
 - The Tauri app is a thin bridge. Frontend calls Rust commands via `invoke`; terminal output arrives through one `Channel` keyed by `paneId`.
 - The daemon is the same executable code launched with `--daemon`. On Windows app startup copies the current executable into the app data `daemon-bin` directory first, so the detached daemon does not lock `src-tauri\target\debug\app.exe` during rebuilds.
-- Dev and production daemons are isolated. Debug builds use the `AgenticWorkspaceTerminalDev` app data directory and an `awt-dev-daemon-*` socket; release builds use `AgenticWorkspaceTerminal` and an `awt-prod-daemon-*` socket.
+- Dev and production daemons are isolated. `ProjectDirs::from("com", "vibelink", ...)` resolves production under `C:\Users\<user>\AppData\Roaming\vibelink\VibeLink\data` and development under `C:\Users\<user>\AppData\Roaming\vibelink\VibeLink Dev\data`; their sockets are `vibelink-prod-daemon-*` and `vibelink-dev-daemon-*`.
 - IPC uses `interprocess` local sockets with MessagePack frames and a 4-byte big-endian length prefix.
-- Sessions persist under the platform app data directory as `sessions.json`. Panes are intentionally not persisted or reconstructed after daemon restart.
-- The Kanban Orchestrator panel embeds Hermes Agent through ACP stdio (`hermes-acp`). Each workspace gets its own `HERMES_HOME` under app data, plus an AWT MCP server (`app.exe mcp serve`) so Hermes can list/read/write panes and update board tasks. Hermes Agent is MIT licensed: https://github.com/NousResearch/hermes-agent.
+- Sessions persist under the flavor-specific data root as `sessions.json`. Panes are intentionally not persisted or reconstructed after daemon restart.
+- The Kanban Orchestrator panel embeds Hermes Agent through ACP stdio (`hermes-acp`). Each workspace gets its own `HERMES_HOME` under app data, plus `mcp_servers.vibelink` running `app.exe mcp serve` so Hermes can list/read/write panes and update board tasks. Hermes Agent is MIT licensed: https://github.com/NousResearch/hermes-agent.
 
 ## UI
 
@@ -56,10 +58,10 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 .\target\debug\app.exe mcp serve
 ```
 
-`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage AWT-owned Markdown skills under app data; enabled persisted skills are injected into AWT Agent prompts for the matching workspace.
-AWT-launched panes receive `AWT_SESSION_ID`, `AWT_PANE_ID`, `AWT_APP_EXE`, and `AWT_APP_FLAVOR`; `panes`, `read`, `write`, `task`, and workspace-scoped `skill` commands use `AWT_SESSION_ID` when `--session` is omitted, so agents should run `$env:AWT_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace.
+`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage VibeLink-owned Markdown skills under app data; enabled persisted skills are injected into VibeLink Agent prompts for the matching workspace. The built-in terminal integration skill is `vibelink-terminal`.
+VibeLink-launched panes receive `VIBELINK_SESSION_ID`, `VIBELINK_PANE_ID`, `VIBELINK_APP_EXE`, and `VIBELINK_APP_FLAVOR`; `panes`, `read`, `write`, `task`, and workspace-scoped `skill` commands use `VIBELINK_SESSION_ID` when `--session` is omitted, so agents should run `$env:VIBELINK_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace. Spawned PTYs advertise `TERM_PROGRAM=VibeLink`.
 
-`mcp serve` is the stdio MCP server configured in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The Orchestrator settings provision `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, store secrets only in `<HERMES_HOME>\.env`, mirror Kanban board state to `<appData>\kanban\<session-id>.json`, and expose pane/task/skill MCP tools.
+`mcp serve` is the stdio MCP server configured as `mcp_servers.vibelink` in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The server requires `VIBELINK_SESSION_ID`, receives `VIBELINK_APP_FLAVOR`, and exposes `vibelink_pane_*`, `vibelink_terminal_grid_launch`, `vibelink_skill_*`, and `vibelink_task_*` tools. The Orchestrator provisions `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, stores secrets only in `<HERMES_HOME>\.env`, and mirrors Kanban board state to `<appData>\kanban\<session-id>.json`.
 
 ## Daemon smoke checks
 
@@ -82,10 +84,10 @@ cargo run --example check_no_smoke_leak
 
 `check_no_smoke_leak` guards the restart path by failing if any persisted `Smoke` session still has panes that would be respawned into PTYs/OpenConsole hosts.
 
-To force a specific generic CLI command path, set `AWT_SMOKE_CLI` before running the smoke example. Optional whitespace-separated args can be supplied through `AWT_SMOKE_CLI_ARGS`.
+To force a specific generic CLI command path, set `VIBELINK_SMOKE_CLI` before running the smoke example. Optional whitespace-separated args can be supplied through `VIBELINK_SMOKE_CLI_ARGS`.
 
 ```powershell
-$env:AWT_SMOKE_CLI = "codex"
-$env:AWT_SMOKE_CLI_ARGS = "--version"
+$env:VIBELINK_SMOKE_CLI = "codex"
+$env:VIBELINK_SMOKE_CLI_ARGS = "--version"
 cargo run --example smoke_terminal
 ```

@@ -53,7 +53,7 @@ impl DaemonConnection {
         let (tx, frames) = mpsc::channel();
 
         thread::Builder::new()
-            .name("awt-smoke-reader".to_string())
+            .name("vibelink-smoke-reader".to_string())
             .spawn(move || loop {
                 match read_frame::<_, DaemonToClient>(&mut reader) {
                     Ok(frame) => {
@@ -166,11 +166,11 @@ fn planned_cases() -> Result<Vec<PlannedCase>> {
                     "/D".to_string(),
                     "/Q".to_string(),
                     "/C".to_string(),
-                    "echo AWT_PROFILE_CMD:%AWT_SMOKE_PROFILE%".to_string(),
+                    "echo VIBELINK_PROFILE_CMD:%VIBELINK_SMOKE_PROFILE%".to_string(),
                 ],
-                env: vec![("AWT_SMOKE_PROFILE".to_string(), "cmd".to_string())],
+                env: vec![("VIBELINK_SMOKE_PROFILE".to_string(), "cmd".to_string())],
                 cwd: cwd.clone(),
-                expected: ExpectedOutput::Contains(b"AWT_PROFILE_CMD:cmd"),
+                expected: ExpectedOutput::Contains(b"VIBELINK_PROFILE_CMD:cmd"),
             }));
         } else {
             cases.push(PlannedCase::Skip {
@@ -188,11 +188,12 @@ fn planned_cases() -> Result<Vec<PlannedCase>> {
                     "-NoProfile".to_string(),
                     "-NonInteractive".to_string(),
                     "-Command".to_string(),
-                    "Write-Output \"AWT_PROFILE_PWSH:$env:AWT_SMOKE_PROFILE\"".to_string(),
+                    "Write-Output \"VIBELINK_PROFILE_PWSH:$env:VIBELINK_SMOKE_PROFILE\""
+                        .to_string(),
                 ],
-                env: vec![("AWT_SMOKE_PROFILE".to_string(), "pwsh".to_string())],
+                env: vec![("VIBELINK_SMOKE_PROFILE".to_string(), "pwsh".to_string())],
                 cwd: cwd.clone(),
-                expected: ExpectedOutput::Contains(b"AWT_PROFILE_PWSH:pwsh"),
+                expected: ExpectedOutput::Contains(b"VIBELINK_PROFILE_PWSH:pwsh"),
             }));
         } else {
             cases.push(PlannedCase::Skip {
@@ -210,11 +211,11 @@ fn planned_cases() -> Result<Vec<PlannedCase>> {
                 program: "/bin/sh".to_string(),
                 args: vec![
                     "-lc".to_string(),
-                    "printf 'AWT_PROFILE_SH:%s\\n' \"$AWT_SMOKE_PROFILE\"".to_string(),
+                    "printf 'VIBELINK_PROFILE_SH:%s\\n' \"$VIBELINK_SMOKE_PROFILE\"".to_string(),
                 ],
-                env: vec![("AWT_SMOKE_PROFILE".to_string(), "sh".to_string())],
+                env: vec![("VIBELINK_SMOKE_PROFILE".to_string(), "sh".to_string())],
                 cwd: cwd.clone(),
-                expected: ExpectedOutput::Contains(b"AWT_PROFILE_SH:sh"),
+                expected: ExpectedOutput::Contains(b"VIBELINK_PROFILE_SH:sh"),
             }));
         } else {
             cases.push(PlannedCase::Skip {
@@ -229,13 +230,13 @@ fn planned_cases() -> Result<Vec<PlannedCase>> {
 }
 
 fn generic_cli_case(cwd: Option<String>) -> PlannedCase {
-    if let Ok(program) = env::var("AWT_SMOKE_CLI") {
-        let args = env::var("AWT_SMOKE_CLI_ARGS")
+    if let Ok(program) = env::var("VIBELINK_SMOKE_CLI") {
+        let args = env::var("VIBELINK_SMOKE_CLI_ARGS")
             .map(|value| value.split_whitespace().map(str::to_string).collect())
             .unwrap_or_else(|_| vec!["--version".to_string()]);
         return match resolve_program(&program) {
             Some(path) => PlannedCase::Run(SmokeCase {
-                name: "generic CLI from AWT_SMOKE_CLI".to_string(),
+                name: "generic CLI from VIBELINK_SMOKE_CLI".to_string(),
                 program: path.to_string_lossy().into_owned(),
                 args,
                 env: Vec::new(),
@@ -243,7 +244,7 @@ fn generic_cli_case(cwd: Option<String>) -> PlannedCase {
                 expected: ExpectedOutput::AnyVisible,
             }),
             None => PlannedCase::Skip {
-                name: "generic CLI from AWT_SMOKE_CLI",
+                name: "generic CLI from VIBELINK_SMOKE_CLI",
                 reason: format!("{program} was not found"),
             },
         };
@@ -264,7 +265,7 @@ fn generic_cli_case(cwd: Option<String>) -> PlannedCase {
 
     PlannedCase::Skip {
         name: "generic CLI command path",
-        reason: "none of claude, codex, or omp were found; set AWT_SMOKE_CLI to a command path to exercise this case".to_string(),
+        reason: "none of claude, codex, or omp were found; set VIBELINK_SMOKE_CLI to a command path to exercise this case".to_string(),
     }
 }
 

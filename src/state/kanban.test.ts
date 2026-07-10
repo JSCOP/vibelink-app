@@ -331,7 +331,7 @@ describe('kanban store', () => {
   })
 
   test('old persisted kanban layouts are discarded after layout schema bump', () => {
-    storage.set('awt:kanban', JSON.stringify({
+    storage.set('vibelink:kanban', JSON.stringify({
       version: 1,
       data: { tasks: {}, taskOrder: {} },
       viewModes: { [session.id]: 'kanban' },

@@ -99,7 +99,7 @@ export const terminalThemes = [
   defineTheme({
     id: 'abyss',
     name: 'Abyss',
-    category: 'AWT',
+    category: 'VibeLink',
     colorScheme: 'dark',
     description: 'Low-glare dark terminal for long agent sessions.',
     terminal: {
@@ -120,7 +120,7 @@ export const terminalThemes = [
   defineTheme({
     id: 'aurora',
     name: 'Aurora',
-    category: 'AWT',
+    category: 'VibeLink',
     colorScheme: 'dark',
     description: 'Dark blue-green theme with higher contrast prompts.',
     terminal: {
@@ -132,7 +132,7 @@ export const terminalThemes = [
   defineTheme({
     id: 'paper',
     name: 'Paper Dark',
-    category: 'AWT',
+    category: 'VibeLink',
     colorScheme: 'dark',
     description: 'Warm dark neutral with muted ANSI colors.',
     terminal: {
@@ -144,7 +144,7 @@ export const terminalThemes = [
   defineTheme({
     id: 'nightOwl',
     name: 'Night Owl',
-    category: 'AWT',
+    category: 'VibeLink',
     colorScheme: 'dark',
     description: 'Deep blue palette tuned for late-night readability.',
     terminal: {
@@ -156,7 +156,7 @@ export const terminalThemes = [
   defineTheme({
     id: 'pureBlack',
     name: 'Pure Black',
-    category: 'AWT',
+    category: 'VibeLink',
     colorScheme: 'dark',
     description: 'True-black background with high-contrast standard ANSI colors.',
     terminal: {
@@ -185,7 +185,7 @@ export const terminalThemes = [
   defineTheme({
     id: 'carbon',
     name: 'Carbon',
-    category: 'AWT',
+    category: 'VibeLink',
     colorScheme: 'dark',
     description: 'Neutral charcoal without any blue tint, ordinary contrast.',
     terminal: {
@@ -473,51 +473,51 @@ export function appThemeById(id: string): AppThemeTokens {
   return terminalThemeDefinitionById(id).ui
 }
 
-export function themeCssVariables(id: string): Record<`--awt-${string}`, string> {
+export function themeCssVariables(id: string): Record<`--vibelink-${string}`, string> {
   const theme = appThemeById(id)
   const terminal = terminalThemeDefinitionById(id).terminal
   return {
     // Terminal host + xterm viewport backgrounds are painted from these vars
     // (with !important in App.css), so they MUST track the selected theme —
     // as static :root defaults they pinned every theme's terminal to Abyss.
-    '--awt-terminal-bg': terminal.background,
-    '--awt-terminal-fg': terminal.foreground,
-    '--awt-bg': theme.background,
-    '--awt-sidebar': theme.sidebar,
-    '--awt-panel': theme.panel,
-    '--awt-panel-2': theme.panel2,
-    '--awt-panel-3': theme.panel3,
-    '--awt-input': theme.input,
-    '--awt-input-strong': theme.inputStrong,
-    '--awt-border': theme.border,
-    '--awt-border-soft': theme.borderSoft,
-    '--awt-text': theme.text,
-    '--awt-muted': theme.muted,
-    '--awt-accent': theme.accent,
-    '--awt-accent-soft': theme.accentSoft,
-    '--awt-accent-muted': theme.accentMuted,
-    '--awt-accent-border': theme.accentBorder,
-    '--awt-danger': theme.danger,
-    '--awt-danger-soft': theme.dangerSoft,
-    '--awt-danger-border': theme.dangerBorder,
-    '--awt-danger-text': theme.dangerText,
-    '--awt-hover': theme.hover,
-    '--awt-active': theme.active,
-    '--awt-selection': theme.selection,
-    '--awt-overlay': theme.overlay,
-    '--awt-dialog': theme.dialog,
-    '--awt-shadow': theme.shadow,
-    '--awt-shadow-soft': theme.shadowSoft,
-    '--awt-inset': theme.inset,
-    '--awt-scrollbar-track': theme.scrollbarTrack,
-    '--awt-scrollbar-thumb': theme.scrollbarThumb,
-    '--awt-blue': theme.blue,
-    '--awt-blue-soft': theme.blueSoft,
-    '--awt-cyan': theme.cyan,
-    '--awt-cyan-soft': theme.cyanSoft,
-    '--awt-warning': theme.warning,
-    '--awt-warning-soft': theme.warningSoft,
-    '--awt-focus': theme.focus,
+    '--vibelink-terminal-bg': terminal.background,
+    '--vibelink-terminal-fg': terminal.foreground,
+    '--vibelink-bg': theme.background,
+    '--vibelink-sidebar': theme.sidebar,
+    '--vibelink-panel': theme.panel,
+    '--vibelink-panel-2': theme.panel2,
+    '--vibelink-panel-3': theme.panel3,
+    '--vibelink-input': theme.input,
+    '--vibelink-input-strong': theme.inputStrong,
+    '--vibelink-border': theme.border,
+    '--vibelink-border-soft': theme.borderSoft,
+    '--vibelink-text': theme.text,
+    '--vibelink-muted': theme.muted,
+    '--vibelink-accent': theme.accent,
+    '--vibelink-accent-soft': theme.accentSoft,
+    '--vibelink-accent-muted': theme.accentMuted,
+    '--vibelink-accent-border': theme.accentBorder,
+    '--vibelink-danger': theme.danger,
+    '--vibelink-danger-soft': theme.dangerSoft,
+    '--vibelink-danger-border': theme.dangerBorder,
+    '--vibelink-danger-text': theme.dangerText,
+    '--vibelink-hover': theme.hover,
+    '--vibelink-active': theme.active,
+    '--vibelink-selection': theme.selection,
+    '--vibelink-overlay': theme.overlay,
+    '--vibelink-dialog': theme.dialog,
+    '--vibelink-shadow': theme.shadow,
+    '--vibelink-shadow-soft': theme.shadowSoft,
+    '--vibelink-inset': theme.inset,
+    '--vibelink-scrollbar-track': theme.scrollbarTrack,
+    '--vibelink-scrollbar-thumb': theme.scrollbarThumb,
+    '--vibelink-blue': theme.blue,
+    '--vibelink-blue-soft': theme.blueSoft,
+    '--vibelink-cyan': theme.cyan,
+    '--vibelink-cyan-soft': theme.cyanSoft,
+    '--vibelink-warning': theme.warning,
+    '--vibelink-warning-soft': theme.warningSoft,
+    '--vibelink-focus': theme.focus,
   }
 }
 

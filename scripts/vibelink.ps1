@@ -236,11 +236,11 @@ function Invoke-AllInstallers {
 
 function Show-HelpText {
   Write-Host @'
-AWT interactive build/run helper
+VibeLink interactive build/run helper
 
 Usage:
-  powershell -ExecutionPolicy Bypass -File scripts\awt.ps1
-  powershell -ExecutionPolicy Bypass -File scripts\awt.ps1 -Action dev-run
+  powershell -ExecutionPolicy Bypass -File scripts\vibelink.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\vibelink.ps1 -Action dev-run
 
 Actions:
   build              Debug/dev flavor executable only. Fast local compile; no installer.
@@ -285,7 +285,7 @@ function Invoke-Action([string]$Name) {
 
 function Show-Menu {
   while ($true) {
-    Write-Section 'Agentic Workspace Terminal build menu'
+    Write-Section 'VibeLink build menu'
     Write-Host '1. Build debug/dev executable (no installer)'
     Write-Host '2. Build release executable (no installer)'
     Write-Host '3. Run dev app (hot reload)'

@@ -5,7 +5,7 @@ import { OrchestratorChat } from '../components/OrchestratorChat'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { useWorkspaceStore } from '../state/store'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
-import { awtDockviewTheme } from './dockviewTheme'
+import { vibelinkDockviewTheme } from './dockviewTheme'
 import '../styles/kanban.css'
 
 const components = {
@@ -152,8 +152,8 @@ export function KanbanView({ sessionId }: KanbanViewProps) {
         {missing.map((id) => <button key={id} type="button" onClick={() => restorePanel(id)}>+ {PANEL_TITLES[id]}</button>)}
         <button type="button" onClick={resetLayout}>Reset layout</button>
       </div>
-      <div ref={dockRef} className="dockview-theme-awt kanban-dock">
-        <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" theme={awtDockviewTheme} />
+      <div ref={dockRef} className="dockview-theme-vibelink kanban-dock">
+        <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" theme={vibelinkDockviewTheme} />
       </div>
     </section>
   )

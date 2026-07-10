@@ -170,10 +170,10 @@ type ResourceRowProps = {
 
 function ResourceRow({ label, detail, memBytes, processCount }: ResourceRowProps) {
   return (
-    <div style={{ alignItems: 'center', border: '1px solid var(--awt-border-soft)', borderRadius: 8, display: 'grid', gap: 8, gridTemplateColumns: 'minmax(0, 1fr) auto auto', padding: '8px 10px' }}>
-      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><strong>{label}</strong><small style={{ color: 'var(--awt-muted)', marginLeft: 8 }}>{detail}</small></span>
+    <div style={{ alignItems: 'center', border: '1px solid var(--vibelink-border-soft)', borderRadius: 8, display: 'grid', gap: 8, gridTemplateColumns: 'minmax(0, 1fr) auto auto', padding: '8px 10px' }}>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><strong>{label}</strong><small style={{ color: 'var(--vibelink-muted)', marginLeft: 8 }}>{detail}</small></span>
       <span>{formatBytes(memBytes)}</span>
-      <small style={{ color: 'var(--awt-muted)' }}>{processCount} procs</small>
+      <small style={{ color: 'var(--vibelink-muted)' }}>{processCount} procs</small>
     </div>
   )
 }

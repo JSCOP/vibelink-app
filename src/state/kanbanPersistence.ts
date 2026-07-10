@@ -16,7 +16,7 @@ export type PersistedKanbanState = {
 
 type KanbanBlob = PersistedKanbanState & { version: 1; layoutVersion?: number }
 
-const storageKey = 'awt:kanban'
+const storageKey = 'vibelink:kanban'
 const layoutVersion = 2
 
 

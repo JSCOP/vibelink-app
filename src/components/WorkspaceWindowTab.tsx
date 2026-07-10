@@ -34,7 +34,7 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId
     ? Boolean(state.paneCompletionHighlights[paneId])
     : kind === 'terminal' && Object.keys(state.paneCompletionHighlights).length > 0)
-  const [title, setTitle] = useState(api.title ?? params?.title ?? (kind === 'agent' ? 'AWT Agent' : 'Window'))
+  const [title, setTitle] = useState(api.title ?? params?.title ?? (kind === 'agent' ? 'VibeLink Agent' : 'Window'))
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
   const dragStartBlockedRef = useRef(false)

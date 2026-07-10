@@ -357,7 +357,7 @@ impl HermesManager {
             let handshake_instance = Arc::clone(&instance);
             let handshake_manager = Arc::clone(self);
             thread::Builder::new()
-                .name(format!("awt-hermes-handshake-{session_id}"))
+                .name(format!("vibelink-hermes-handshake-{session_id}"))
                 .spawn(move || {
                     let result = handshake(
                         &handshake_session_id,
@@ -451,7 +451,7 @@ impl HermesManager {
         let manager = Arc::clone(self);
         manager.set_prompt_active(&session_id, true);
         thread::Builder::new()
-            .name(format!("awt-hermes-prompt-{session_id}"))
+            .name(format!("vibelink-hermes-prompt-{session_id}"))
             .spawn(move || {
                 let result = instance.request(
                     "session/prompt",
@@ -1067,7 +1067,7 @@ fn spawn_stdout_reader(
     manager: Arc<HermesManager>,
 ) {
     thread::Builder::new()
-        .name(format!("awt-hermes-stdout-{session_id}"))
+        .name(format!("vibelink-hermes-stdout-{session_id}"))
         .spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 match line {
@@ -1100,7 +1100,7 @@ fn spawn_stdout_reader(
 
 fn spawn_stderr_drain(session_id: String, stderr: impl std::io::Read + Send + 'static) {
     thread::Builder::new()
-        .name(format!("awt-hermes-stderr-{session_id}"))
+        .name(format!("vibelink-hermes-stderr-{session_id}"))
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 debug!(session_id, line, "Hermes stderr");
@@ -1110,7 +1110,7 @@ fn spawn_stderr_drain(session_id: String, stderr: impl std::io::Read + Send + 's
 }
 
 fn handshake(
-    awt_session_id: &str,
+    vibelink_session_id: &str,
     cwd: &str,
     home: &Path,
     configured_model: Option<&HermesConfiguredModel>,
@@ -1122,12 +1122,12 @@ fn handshake(
         json!({
             "protocolVersion": 1,
             "clientCapabilities": {},
-            "clientInfo": { "name": "AgenticWorkspaceTerminal", "version": env!("CARGO_PKG_VERSION") },
+            "clientInfo": { "name": "VibeLink", "version": env!("CARGO_PKG_VERSION") },
         }),
         Some(REQUEST_TIMEOUT),
     )?;
 
-    let session_file = home.join("awt-acp-session");
+    let session_file = home.join("vibelink-acp-session");
     let saved_session = std::fs::read_to_string(&session_file)
         .ok()
         .and_then(non_empty)
@@ -1135,7 +1135,7 @@ fn handshake(
 
     let (response, resumed_session) = if let Some(session_id) = saved_session.as_deref() {
         let resume_result = {
-            let _resume_replay = manager.begin_resume_replay(awt_session_id);
+            let _resume_replay = manager.begin_resume_replay(vibelink_session_id);
             instance.request(
                 "session/resume",
                 json!({ "cwd": cwd, "sessionId": session_id }),
@@ -1154,7 +1154,7 @@ fn handshake(
     };
 
     finalize_acp_session(
-        awt_session_id,
+        vibelink_session_id,
         home,
         configured_model,
         instance,
@@ -1165,7 +1165,7 @@ fn handshake(
 }
 
 fn finalize_acp_session(
-    awt_session_id: &str,
+    vibelink_session_id: &str,
     home: &Path,
     configured_model: Option<&HermesConfiguredModel>,
     instance: &HermesInstance,
@@ -1174,7 +1174,7 @@ fn finalize_acp_session(
     resumed_session: Option<&str>,
 ) -> Result<()> {
     let acp_session_id = acp_session_id_from_response(response, resumed_session)?;
-    std::fs::write(home.join("awt-acp-session"), &acp_session_id)?;
+    std::fs::write(home.join("vibelink-acp-session"), &acp_session_id)?;
     *instance
         .acp_session_id
         .lock()
@@ -1192,13 +1192,13 @@ fn finalize_acp_session(
     }
 
     manager.send_event(HermesEvent::Started {
-        session_id: awt_session_id.to_string(),
+        session_id: vibelink_session_id.to_string(),
         acp_session_id: acp_session_id.clone(),
     })?;
     let models = models_from_response(response);
     if !models.0.is_empty() || !models.1.is_empty() {
         manager.send_event(HermesEvent::Models {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             available: models.0,
             current: models.1,
         })?;
@@ -1254,7 +1254,7 @@ fn require_qualified_model(model_id: &str) -> Result<()> {
 }
 
 fn route_acp_message(
-    awt_session_id: &str,
+    vibelink_session_id: &str,
     value: &Value,
     instance: &HermesInstance,
     manager: &HermesManager,
@@ -1275,8 +1275,8 @@ fn route_acp_message(
     }
 
     if value.get("method").and_then(Value::as_str) == Some("session/update") {
-        if let Some(event) = translate_update(awt_session_id, value) {
-            if should_suppress_replayable_event(&event, manager, awt_session_id) {
+        if let Some(event) = translate_update(vibelink_session_id, value) {
+            if should_suppress_replayable_event(&event, manager, vibelink_session_id) {
                 return;
             }
             let _ = manager.send_event(event);
@@ -1285,7 +1285,7 @@ fn route_acp_message(
     }
 
     if value.get("method").and_then(Value::as_str) == Some("session/request_permission") {
-        if let Some(event) = translate_permission(awt_session_id, value) {
+        if let Some(event) = translate_permission(vibelink_session_id, value) {
             let _ = manager.send_event(event);
         }
         return;
@@ -1320,37 +1320,37 @@ fn should_suppress_replayable_event(
         && !manager.is_prompt_active(session_id)
 }
 
-pub fn translate_update(awt_session_id: &str, value: &Value) -> Option<HermesEvent> {
+pub fn translate_update(vibelink_session_id: &str, value: &Value) -> Option<HermesEvent> {
     let update = value.get("params")?.get("update")?;
     let kind = update.get("sessionUpdate")?.as_str()?;
     match kind {
         "agent_message_chunk" => Some(HermesEvent::Message {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             text: update_text(update),
         }),
         "agent_thought_chunk" => Some(HermesEvent::Thought {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             text: update_text(update),
         }),
         "tool_call" => Some(HermesEvent::ToolCall {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             tool_call_id: read_string(update, &["toolCallId", "id"]),
             title: read_string(update, &["title", "name"]),
             tool_kind: read_string(update, &["kind", "toolKind"]),
             status: read_string(update, &["status"]),
         }),
         "tool_call_update" => Some(HermesEvent::ToolUpdate {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             tool_call_id: read_string(update, &["toolCallId", "id"]),
             status: read_string(update, &["status"]),
             content: update_text(update),
         }),
         "plan" => Some(HermesEvent::Plan {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             entries: plan_entries(update),
         }),
         "usage_update" => Some(HermesEvent::Usage {
-            session_id: awt_session_id.to_string(),
+            session_id: vibelink_session_id.to_string(),
             size: read_u64(update, &["size", "contextWindow"]),
             used: read_u64(update, &["used", "tokens"]),
         }),
@@ -1358,11 +1358,11 @@ pub fn translate_update(awt_session_id: &str, value: &Value) -> Option<HermesEve
     }
 }
 
-fn translate_permission(awt_session_id: &str, value: &Value) -> Option<HermesEvent> {
+fn translate_permission(vibelink_session_id: &str, value: &Value) -> Option<HermesEvent> {
     let params = value.get("params")?;
     let tool_call = params.get("toolCall")?;
     Some(HermesEvent::Permission {
-        session_id: awt_session_id.to_string(),
+        session_id: vibelink_session_id.to_string(),
         request_id: value.get("id")?.as_u64()?,
         title: read_string(tool_call, &["title", "name"]),
         tool_kind: read_string(tool_call, &["kind", "toolKind"]),
@@ -1639,7 +1639,7 @@ fn ensure_workspace_native(
     let command = std::env::current_exe()?.to_string_lossy().to_string();
     let cwd_text = cwd.to_string_lossy().to_string();
 
-    merge_awt_into_doc(
+    merge_vibelink_into_doc(
         &mut doc,
         &command,
         session_id,
@@ -1690,7 +1690,7 @@ fn read_workspace_config_doc(config_path: &Path) -> Result<serde_yaml::Mapping> 
         .ok_or_else(|| anyhow!("config.yaml top-level is not a mapping"))
 }
 
-fn merge_awt_into_doc(
+fn merge_vibelink_into_doc(
     doc: &mut serde_yaml::Mapping,
     command: &str,
     session_id: &str,
@@ -1698,15 +1698,15 @@ fn merge_awt_into_doc(
     cwd: &str,
 ) -> Result<()> {
     let mut env = BTreeMap::new();
-    env.insert("AWT_SESSION_ID".to_string(), session_id.to_string());
-    env.insert("AWT_APP_FLAVOR".to_string(), flavor.to_string());
-    let awt = serde_yaml::to_value(McpServerConfig {
+    env.insert("VIBELINK_SESSION_ID".to_string(), session_id.to_string());
+    env.insert("VIBELINK_APP_FLAVOR".to_string(), flavor.to_string());
+    let vibelink = serde_yaml::to_value(McpServerConfig {
         command: command.to_string(),
         args: vec!["mcp".to_string(), "serve".to_string()],
         env,
         enabled: true,
     })?;
-    upsert_mapping(doc, "mcp_servers", "awt", awt);
+    upsert_mapping(doc, "mcp_servers", "vibelink", vibelink);
 
     let terminal = doc
         .entry(serde_yaml::Value::from("terminal"))
@@ -2043,10 +2043,10 @@ mod tests {
             }
         });
 
-        let event = translate_update("awt-session", &value).expect("event");
+        let event = translate_update("vibelink-session", &value).expect("event");
         match event {
             HermesEvent::Message { session_id, text } => {
-                assert_eq!(session_id, "awt-session");
+                assert_eq!(session_id, "vibelink-session");
                 assert_eq!(text, "hello");
             }
             other => panic!("unexpected event: {other:?}"),
@@ -2070,7 +2070,7 @@ mod tests {
             }
         });
 
-        let event = translate_update("awt-session", &value).expect("event");
+        let event = translate_update("vibelink-session", &value).expect("event");
         match event {
             HermesEvent::ToolCall {
                 session_id,
@@ -2079,7 +2079,7 @@ mod tests {
                 tool_kind,
                 status,
             } => {
-                assert_eq!(session_id, "awt-session");
+                assert_eq!(session_id, "vibelink-session");
                 assert_eq!(tool_call_id, "tool-1");
                 assert_eq!(title, "List panes");
                 assert_eq!(tool_kind, "mcp");
@@ -2092,13 +2092,13 @@ mod tests {
     #[test]
     fn hermes_events_serialize_frontend_field_names() {
         let value = serde_json::to_value(HermesEvent::Started {
-            session_id: "awt-session".to_string(),
+            session_id: "vibelink-session".to_string(),
             acp_session_id: "acp-session".to_string(),
         })
         .expect("serialize event");
 
         assert_eq!(value["kind"], "started");
-        assert_eq!(value["sessionId"], "awt-session");
+        assert_eq!(value["sessionId"], "vibelink-session");
         assert_eq!(value["acpSessionId"], "acp-session");
         assert!(value.get("session_id").is_none());
     }
@@ -2280,7 +2280,7 @@ model:
     }
 
     #[test]
-    fn merge_awt_into_doc_preserves_model_and_wires_workspace() {
+    fn merge_vibelink_into_doc_preserves_model_and_wires_workspace() {
         let mut doc = yaml_mapping(
             r#"
 model:
@@ -2296,9 +2296,9 @@ terminal:
             .cloned()
             .expect("model block");
 
-        merge_awt_into_doc(
+        merge_vibelink_into_doc(
             &mut doc,
-            r"E:\AgenticWorkspaceTerminal\app.exe",
+            r"E:\VibeLink\app.exe",
             "session-1",
             "dev",
             r"E:\CityAI\IncheonProject\t2in-dev",
@@ -2317,23 +2317,29 @@ terminal:
         );
         assert_eq!(yaml["terminal"]["backend"].as_str(), Some("remote"));
         assert_eq!(
-            yaml["mcp_servers"]["awt"]["command"].as_str(),
-            Some(r"E:\AgenticWorkspaceTerminal\app.exe")
+            yaml["mcp_servers"]["vibelink"]["command"].as_str(),
+            Some(r"E:\VibeLink\app.exe")
         );
-        assert_eq!(yaml["mcp_servers"]["awt"]["args"][0].as_str(), Some("mcp"));
         assert_eq!(
-            yaml["mcp_servers"]["awt"]["args"][1].as_str(),
+            yaml["mcp_servers"]["vibelink"]["args"][0].as_str(),
+            Some("mcp")
+        );
+        assert_eq!(
+            yaml["mcp_servers"]["vibelink"]["args"][1].as_str(),
             Some("serve")
         );
         assert_eq!(
-            yaml["mcp_servers"]["awt"]["env"]["AWT_SESSION_ID"].as_str(),
+            yaml["mcp_servers"]["vibelink"]["env"]["VIBELINK_SESSION_ID"].as_str(),
             Some("session-1")
         );
         assert_eq!(
-            yaml["mcp_servers"]["awt"]["env"]["AWT_APP_FLAVOR"].as_str(),
+            yaml["mcp_servers"]["vibelink"]["env"]["VIBELINK_APP_FLAVOR"].as_str(),
             Some("dev")
         );
-        assert_eq!(yaml["mcp_servers"]["awt"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            yaml["mcp_servers"]["vibelink"]["enabled"].as_bool(),
+            Some(true)
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ import { shouldRestoreDockviewLayout } from './layoutRestore'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
 import { activeWorkspaceLayoutPage, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
-import { awtDockviewTheme } from './dockviewTheme'
+import { vibelinkDockviewTheme } from './dockviewTheme'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { OrchestratorChat } from '../components/OrchestratorChat'
@@ -113,7 +113,7 @@ function TerminalPaneBoundary(props: IDockviewPanelProps) {
 function AgentWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-agent">
-      <ErrorBoundary label="AWT Agent panel">
+      <ErrorBoundary label="VibeLink Agent panel">
         <OrchestratorChat />
       </ErrorBoundary>
     </WindowPanelShell>
@@ -125,8 +125,8 @@ function TerminalWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-terminal">
       <ErrorBoundary label="Terminal window">
-        <div ref={bridge?.setDockElement} className="terminal-window-dock dockview-theme-awt" data-terminal-window-dock="true" data-resize-mode="connected">
-          <DockviewReact components={terminalComponents} onReady={bridge?.onReady ?? noopTerminalReady} defaultRenderer="always" defaultTabComponent={TerminalTab} disableDnd theme={awtDockviewTheme} />
+        <div ref={bridge?.setDockElement} className="terminal-window-dock dockview-theme-vibelink" data-terminal-window-dock="true" data-resize-mode="connected">
+          <DockviewReact components={terminalComponents} onReady={bridge?.onReady ?? noopTerminalReady} defaultRenderer="always" defaultTabComponent={TerminalTab} disableDnd theme={vibelinkDockviewTheme} />
           {bridge ? (
             <ConnectedResizeLayer
               handles={bridge.resizeHandles}
@@ -229,9 +229,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const layout = windowApi.toJSON() as unknown as Record<string, unknown>
     const terminalApi = terminalApiRef.current
     if (terminalApi && terminalApi.totalPanels > 0 && isDockElementMeasurable(terminalDockRef.current)) {
-      layout.awtTerminalLayout = terminalApi.toJSON()
+      layout.vibelinkTerminalLayout = terminalApi.toJSON()
     } else if (pendingTerminalLayoutRef.current) {
-      layout.awtTerminalLayout = pendingTerminalLayoutRef.current
+      layout.vibelinkTerminalLayout = pendingTerminalLayoutRef.current
     }
     return JSON.stringify(layout)
   }, [])
@@ -1691,14 +1691,14 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       <WorkspaceWindowActionsContext.Provider value={windowActions}>
         <TerminalWindowContext.Provider value={terminalWindowBridge}>
           <section className="workspace-view">
-            <div ref={dockRef} className="dockview-theme-awt workspace-dock" data-resize-mode="connected" data-single-window={isSingleWindow ? 'true' : undefined} onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
+            <div ref={dockRef} className="dockview-theme-vibelink workspace-dock" data-resize-mode="connected" data-single-window={isSingleWindow ? 'true' : undefined} onPointerDownCapture={activatePaneFromTarget} onMouseDownCapture={activatePaneFromTarget}>
               <DockviewReact
                 components={components}
                 onReady={handleReady}
                 defaultRenderer="always"
                 defaultTabComponent={WorkspaceWindowTab}
                 disableDnd
-                theme={awtDockviewTheme}
+                theme={vibelinkDockviewTheme}
               />
               <ConnectedResizeLayer
                 handles={resizeHandles}
@@ -2050,7 +2050,7 @@ function splitStoredWorkspaceLayout(layoutJson: string): { topLayout: unknown; t
     return null
   }
   if (!isRecord(layout)) return null
-  const terminalLayout = isRecord(layout.awtTerminalLayout) ? layout.awtTerminalLayout : extractTopLevelTerminalLayout(layout)
+  const terminalLayout = isRecord(layout.vibelinkTerminalLayout) ? layout.vibelinkTerminalLayout : extractTopLevelTerminalLayout(layout)
   const topLayout = terminalLayout === layout ? makeDefaultWindowLayout(true) : stripTopLevelTerminalPanels(layout)
   return { topLayout, terminalLayout }
 }
@@ -2067,7 +2067,7 @@ function extractTopLevelTerminalLayout(layout: Record<string, unknown>): unknown
 function stripTopLevelTerminalPanels(layout: Record<string, unknown>): unknown {
   if (!isRecord(layout.panels)) return layout
   const cloned = structuredClone(layout) as Record<string, unknown>
-  delete cloned.awtTerminalLayout
+  delete cloned.vibelinkTerminalLayout
   if (!isRecord(cloned.panels)) return cloned
   const terminalPanelIds = new Set<string>()
   for (const [panelId, value] of Object.entries(cloned.panels)) {

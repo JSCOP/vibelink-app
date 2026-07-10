@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Stop'
-$exe = [System.IO.Path]::GetFullPath($env:AWT_DAEMON_EXE)
+$exe = [System.IO.Path]::GetFullPath($env:VIBELINK_DAEMON_EXE)
 $daemonDir = $null
-if ($env:AWT_DAEMON_DIR) {
-  $daemonDir = [System.IO.Path]::GetFullPath($env:AWT_DAEMON_DIR).TrimEnd('\') + '\'
+if ($env:VIBELINK_DAEMON_DIR) {
+  $daemonDir = [System.IO.Path]::GetFullPath($env:VIBELINK_DAEMON_DIR).TrimEnd('\') + '\'
 }
-$copyPrefix = "app-daemon-$($env:AWT_APP_FLAVOR)-"
+$copyPrefix = "app-daemon-$($env:VIBELINK_APP_FLAVOR)-"
 
 Get-CimInstance Win32_Process |
   Where-Object {

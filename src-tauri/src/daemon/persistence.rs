@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn save_and_load_sessions_preserves_panes() {
-        let path = std::env::temp_dir().join(format!("awt-sessions-{}.json", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("vibelink-sessions-{}.json", Uuid::new_v4()));
         let session = PersistedSession {
             id: Uuid::new_v4(),
             name: "Workspace".to_string(),
@@ -85,7 +85,8 @@ mod tests {
 
     #[test]
     fn save_and_load_sessions_preserves_workspace_folder() {
-        let path = std::env::temp_dir().join(format!("awt-session-cwd-{}.json", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("vibelink-session-cwd-{}.json", Uuid::new_v4()));
         let session = PersistedSession {
             id: Uuid::new_v4(),
             name: "Repo".to_string(),
@@ -105,7 +106,7 @@ mod tests {
     #[test]
     fn save_sessions_replaces_existing_file() {
         let path =
-            std::env::temp_dir().join(format!("replace-awt-sessions-{}.json", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("replace-vibelink-sessions-{}.json", Uuid::new_v4()));
         std::fs::write(&path, "[]").expect("seed sessions file");
         let session = PersistedSession {
             id: Uuid::new_v4(),
@@ -126,7 +127,7 @@ mod tests {
     #[test]
     fn save_sessions_is_atomic() {
         let path =
-            std::env::temp_dir().join(format!("atomic-awt-sessions-{}.json", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atomic-vibelink-sessions-{}.json", Uuid::new_v4()));
         let tmp = path.with_extension("tmp");
         let session = PersistedSession {
             id: Uuid::new_v4(),
@@ -150,7 +151,7 @@ mod tests {
     #[test]
     fn missing_sessions_file_loads_empty() {
         let path =
-            std::env::temp_dir().join(format!("missing-awt-sessions-{}.json", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("missing-vibelink-sessions-{}.json", Uuid::new_v4()));
 
         assert_eq!(load_sessions(&path).expect("load missing"), Vec::new());
     }
@@ -158,7 +159,7 @@ mod tests {
     #[test]
     fn load_sessions_preserves_persisted_panes() {
         let path =
-            std::env::temp_dir().join(format!("legacy-awt-sessions-{}.json", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("legacy-vibelink-sessions-{}.json", Uuid::new_v4()));
         let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
         let json = format!(

@@ -101,7 +101,7 @@ describe('applyCaptureOverlayTransparency', () => {
       expect(target.style.background).toBe('transparent')
       expect(target.style.backgroundColor).toBe('transparent')
       expect(target.style.minWidth).toBe('0')
-      expect(target.properties['--awt-bg']).toBe('transparent')
+      expect(target.properties['--vibelink-bg']).toBe('transparent')
     }
   })
 })

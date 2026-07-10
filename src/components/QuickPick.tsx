@@ -51,7 +51,7 @@ export function QuickPick<Id extends string>({ value, ariaLabel, placeholder, ic
 
   return (
     <div
-      className="awt-quick-pick-backdrop"
+      className="vibelink-quick-pick-backdrop"
       role="presentation"
       onMouseDown={(event) => {
         // The picker lives inside the (visually hidden) settings backdrop;
@@ -60,8 +60,8 @@ export function QuickPick<Id extends string>({ value, ariaLabel, placeholder, ic
         onCancel()
       }}
     >
-      <div className="awt-quick-pick" role="dialog" aria-label={ariaLabel} onMouseDown={(event) => event.stopPropagation()} onKeyDown={onKeyDown}>
-        <header className="awt-quick-pick-header">
+      <div className="vibelink-quick-pick" role="dialog" aria-label={ariaLabel} onMouseDown={(event) => event.stopPropagation()} onKeyDown={onKeyDown}>
+        <header className="vibelink-quick-pick-header">
           {icon}
           <input
             autoFocus
@@ -77,10 +77,10 @@ export function QuickPick<Id extends string>({ value, ariaLabel, placeholder, ic
             }}
           />
         </header>
-        <div className="awt-quick-pick-list" ref={listRef}>
+        <div className="vibelink-quick-pick-list" ref={listRef}>
           {entries.map((entry) => {
             if (entry.kind === 'header') {
-              return <div key={`header:${entry.label}`} className="awt-quick-pick-category">{entry.label}</div>
+              return <div key={`header:${entry.label}`} className="vibelink-quick-pick-category">{entry.label}</div>
             }
             return (
               <button
@@ -95,7 +95,7 @@ export function QuickPick<Id extends string>({ value, ariaLabel, placeholder, ic
               </button>
             )
           })}
-          {entries.length === 0 ? <div className="awt-quick-pick-empty">No {noMatchLabel} match “{filter}”.</div> : null}
+          {entries.length === 0 ? <div className="vibelink-quick-pick-empty">No {noMatchLabel} match “{filter}”.</div> : null}
         </div>
       </div>
     </div>

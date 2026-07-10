@@ -25,13 +25,13 @@ export function ThemePicker({ value, onPreview, onSelect, onCancel }: ThemePicke
         const swatch = terminalThemeDefinitionById(item.id).terminal
         return (
           <>
-            <span className="awt-theme-picker-swatch" style={{ background: swatch.background, color: swatch.foreground }} aria-hidden>
+            <span className="vibelink-theme-picker-swatch" style={{ background: swatch.background, color: swatch.foreground }} aria-hidden>
               <span style={{ background: swatch.blue }} />
               <span style={{ background: swatch.green }} />
               <span style={{ background: swatch.red }} />
             </span>
-            <span className="awt-quick-pick-name">{item.name}</span>
-            <span className="awt-quick-pick-description">{item.description}</span>
+            <span className="vibelink-quick-pick-name">{item.name}</span>
+            <span className="vibelink-quick-pick-description">{item.description}</span>
           </>
         )
       }}

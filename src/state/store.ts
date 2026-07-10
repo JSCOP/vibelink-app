@@ -204,7 +204,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       terminalPaneIds: attached.panes.map((pane) => pane.id),
       legacyKanbanLayoutJson: get().kanbanLayouts[sessionId],
     })
-    window.localStorage.setItem('awt:lastActiveSessionId', sessionId)
+    window.localStorage.setItem('vibelink:lastActiveSessionId', sessionId)
     set((state) => ({
       activeSessionId: sessionId,
       activePaneId: undefined,
@@ -941,19 +941,19 @@ const terminalCapabilityEnv: [string, string][] = [
   ['COLORTERM', 'truecolor'],
   ['FORCE_COLOR', '1'],
   ['CLICOLOR_FORCE', '1'],
-  ['TERM_PROGRAM', 'AgenticWorkspaceTerminal'],
+  ['TERM_PROGRAM', 'VibeLink'],
 ]
 
 type TauriWindow = Window & { __TAURI_INTERNALS__?: { metadata?: { currentExe?: string } } }
 
 function terminalAgentEnv(env: [string, string][], sessionId: string, paneId: string): [string, string][] {
-  const filtered = env.filter(([key]) => !['AWT_SESSION_ID', 'AWT_PANE_ID', 'AWT_APP_EXE'].some((reserved) => key.toLowerCase() === reserved.toLowerCase()))
+  const filtered = env.filter(([key]) => !['VIBELINK_SESSION_ID', 'VIBELINK_PANE_ID', 'VIBELINK_APP_EXE'].some((reserved) => key.toLowerCase() === reserved.toLowerCase()))
   return keepLastEnvValue([
     ...terminalCapabilityEnv,
     ...filtered,
-    ['AWT_SESSION_ID', sessionId],
-    ['AWT_PANE_ID', paneId],
-    ['AWT_APP_EXE', (window as TauriWindow).__TAURI_INTERNALS__?.metadata?.currentExe ?? 'app.exe'],
+    ['VIBELINK_SESSION_ID', sessionId],
+    ['VIBELINK_PANE_ID', paneId],
+    ['VIBELINK_APP_EXE', (window as TauriWindow).__TAURI_INTERNALS__?.metadata?.currentExe ?? 'app.exe'],
   ])
 }
 
@@ -977,7 +977,7 @@ function normalizeWorkspaceFolder(folder: string | null | undefined): string | n
 
 function loadSettings(): Settings {
   try {
-    const raw = window.localStorage.getItem('awt:settings')
+    const raw = window.localStorage.getItem('vibelink:settings')
     if (!raw) return defaultSettings
     return normalizeSettings(JSON.parse(raw))
   } catch {
@@ -987,7 +987,7 @@ function loadSettings(): Settings {
 
 function persistSettings(settings: Settings): void {
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem('awt:settings', JSON.stringify(settings))
+    window.localStorage.setItem('vibelink:settings', JSON.stringify(settings))
   }
 }
 

@@ -94,7 +94,7 @@ function App() {
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const activeWorkspaceLayout = activeSessionId ? workspaceLayouts[activeSessionId] : undefined
   const activeLayoutPage = activeWorkspaceLayout?.pages.find((page) => page.id === activeWorkspaceLayout.activePageId) ?? activeWorkspaceLayout?.pages[0]
-  const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('awt:lastActiveSessionId'))
+  const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
 
   useEffect(() => {
     applyThemeToDocument(settings.terminalThemeId)
@@ -419,7 +419,7 @@ function App() {
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
 
   return (
-    <main className="app-shell" data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--awt-ui-scale': settings.uiScale, '--awt-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
+    <main className="app-shell" data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
       <div
         className="sidebar-hover-edge"
         onPointerEnter={(event) => {
@@ -619,7 +619,7 @@ function App() {
               </header>
               <div className="settings-dialog-body" style={{ display: 'block', maxHeight: 'none' }}>
                 <section className="settings-card">
-                  <p>AWT tried to download ffmpeg automatically but could not finish. Install ffmpeg, or set the ffmpeg.exe path in Settings → Capture.</p>
+                  <p>VibeLink tried to download ffmpeg automatically but could not finish. Install ffmpeg, or set the ffmpeg.exe path in Settings → Capture.</p>
                   <p className="ffmpeg-notice-error">{ffmpegNotice}</p>
                   <p><a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noreferrer">Download Windows ffmpeg builds</a></p>
                 </section>

@@ -35,21 +35,21 @@ const terminalColorKeys: (keyof RequiredTerminalTheme)[] = [
 ]
 
 const requiredCssVariables = [
-  '--awt-bg',
-  '--awt-sidebar',
-  '--awt-panel',
-  '--awt-panel-2',
-  '--awt-panel-3',
-  '--awt-input',
-  '--awt-border',
-  '--awt-border-soft',
-  '--awt-text',
-  '--awt-muted',
-  '--awt-accent',
-  '--awt-danger',
-  '--awt-overlay',
-  '--awt-dialog',
-  '--awt-focus',
+  '--vibelink-bg',
+  '--vibelink-sidebar',
+  '--vibelink-panel',
+  '--vibelink-panel-2',
+  '--vibelink-panel-3',
+  '--vibelink-input',
+  '--vibelink-border',
+  '--vibelink-border-soft',
+  '--vibelink-text',
+  '--vibelink-muted',
+  '--vibelink-accent',
+  '--vibelink-danger',
+  '--vibelink-overlay',
+  '--vibelink-dialog',
+  '--vibelink-focus',
 ] as const
 
 function contrastRatio(first: string, second: string): number {
@@ -105,13 +105,13 @@ describe('terminalThemes', () => {
       for (const variable of requiredCssVariables) {
         expect(variables[variable], `${theme.id}.${variable}`).toBeTruthy()
       }
-      expect(variables['--awt-bg']).toBe(theme.ui.background)
-      expect(variables['--awt-accent']).toBe(theme.ui.accent)
+      expect(variables['--vibelink-bg']).toBe(theme.ui.background)
+      expect(variables['--vibelink-accent']).toBe(theme.ui.accent)
       // App.css paints terminal hosts/viewports from these (with !important);
       // if they fall back to the static :root defaults every theme's terminal
       // stays pinned to the Abyss background.
-      expect(variables['--awt-terminal-bg']).toBe(theme.terminal.background)
-      expect(variables['--awt-terminal-fg']).toBe(theme.terminal.foreground)
+      expect(variables['--vibelink-terminal-bg']).toBe(theme.terminal.background)
+      expect(variables['--vibelink-terminal-fg']).toBe(theme.terminal.foreground)
     }
   })
 

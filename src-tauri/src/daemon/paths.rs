@@ -2,8 +2,8 @@ use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use std::{env, fs, path::PathBuf};
 
-const PROD_APP_NAME: &str = "AgenticWorkspaceTerminal";
-const DEV_APP_NAME: &str = "AgenticWorkspaceTerminalDev";
+const PROD_APP_NAME: &str = "VibeLink";
+const DEV_APP_NAME: &str = "VibeLink Dev";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonPaths {
@@ -15,7 +15,7 @@ pub struct DaemonPaths {
 }
 
 pub fn daemon_paths() -> Result<DaemonPaths> {
-    let project_dirs = ProjectDirs::from("dev", "awt", project_app_name())
+    let project_dirs = ProjectDirs::from("com", "vibelink", project_app_name())
         .ok_or_else(|| anyhow!("could not resolve project data directory"))?;
     let data_dir = project_dirs.data_dir().to_path_buf();
     fs::create_dir_all(&data_dir)?;
@@ -54,7 +54,10 @@ fn project_app_name() -> &'static str {
 }
 
 fn socket_name_for_user_and_flavor(username: &str, flavor: &str) -> String {
-    format!("awt-{flavor}-daemon-{:016x}", fnv1a64(username.as_bytes()))
+    format!(
+        "vibelink-{flavor}-daemon-{:016x}",
+        fnv1a64(username.as_bytes())
+    )
 }
 
 fn current_username() -> String {
@@ -85,7 +88,7 @@ mod tests {
         let alice_again = socket_name_for_user("alice");
         let bob = socket_name_for_user("bob");
 
-        assert!(alice.starts_with(&format!("awt-{}-daemon-", app_flavor())));
+        assert!(alice.starts_with(&format!("vibelink-{}-daemon-", app_flavor())));
         assert_eq!(alice, alice_again);
         assert_ne!(alice, bob);
     }
@@ -96,8 +99,8 @@ mod tests {
         let prod = socket_name_for_user_and_flavor("alice", "prod");
 
         assert_ne!(dev, prod);
-        assert!(dev.starts_with("awt-dev-daemon-"));
-        assert!(prod.starts_with("awt-prod-daemon-"));
+        assert!(dev.starts_with("vibelink-dev-daemon-"));
+        assert!(prod.starts_with("vibelink-prod-daemon-"));
     }
 
     #[test]

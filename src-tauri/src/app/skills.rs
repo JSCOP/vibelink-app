@@ -84,9 +84,9 @@ struct BuiltinSkill {
 
 const BUILTIN_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill {
-        id: "awt-terminal",
+        id: "vibelink-terminal",
         category: "Workspace",
-        description: "List, read, write, launch panes, and configure agent pane titles/roles through the AWT MCP bridge.",
+        description: "List, read, write, launch panes, and configure agent pane titles/roles through the VibeLink MCP bridge.",
     },
     BuiltinSkill {
         id: "kanban-board",
@@ -106,7 +106,7 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
 ];
 
 #[tauri::command]
-pub async fn awt_skill_list(session_id: Option<String>) -> Result<Vec<SkillEntry>, String> {
+pub async fn vibelink_skill_list(session_id: Option<String>) -> Result<Vec<SkillEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || list_skills(session_id.as_deref()))
         .await
         .map_err(to_string)?
@@ -114,7 +114,7 @@ pub async fn awt_skill_list(session_id: Option<String>) -> Result<Vec<SkillEntry
 }
 
 #[tauri::command]
-pub async fn awt_skill_get(
+pub async fn vibelink_skill_get(
     id: String,
     session_id: Option<String>,
     scope: Option<SkillScope>,
@@ -126,7 +126,7 @@ pub async fn awt_skill_get(
 }
 
 #[tauri::command]
-pub async fn awt_skill_apply(input: SkillApplyInput) -> Result<SkillEntry, String> {
+pub async fn vibelink_skill_apply(input: SkillApplyInput) -> Result<SkillEntry, String> {
     tauri::async_runtime::spawn_blocking(move || apply_skill(input))
         .await
         .map_err(to_string)?
@@ -134,7 +134,7 @@ pub async fn awt_skill_apply(input: SkillApplyInput) -> Result<SkillEntry, Strin
 }
 
 #[tauri::command]
-pub async fn awt_skill_delete(
+pub async fn vibelink_skill_delete(
     id: String,
     session_id: Option<String>,
     scope: Option<SkillScope>,
@@ -211,10 +211,10 @@ fn enabled_skill_context_at(data_dir: &Path, session_id: Option<&str>) -> Result
         (scope_rank(left.scope), &left.id).cmp(&(scope_rank(right.scope), &right.id))
     });
 
-    let mut context = String::from("AWT active skills are user-installed instructions. Follow them when relevant; workspace skills override global skills with the same id.\n");
+    let mut context = String::from("VibeLink active skills are user-installed instructions. Follow them when relevant; workspace skills override global skills with the same id.\n");
     for entry in entries {
         let content = entry.content.unwrap_or_default();
-        context.push_str("\n## AWT skill: ");
+        context.push_str("\n## VibeLink skill: ");
         context.push_str(&entry.id);
         context.push_str("\nName: ");
         context.push_str(&entry.name.replace('\n', " "));
@@ -714,7 +714,7 @@ mod tests {
         let skills = list_skills_at(&root, None).expect("list skills");
         assert_eq!(skills.len(), 4);
         assert!(skills.iter().all(|skill| skill.read_only));
-        assert!(skills.iter().any(|skill| skill.id == "awt-terminal"));
+        assert!(skills.iter().any(|skill| skill.id == "vibelink-terminal"));
         cleanup_root(root);
     }
 
@@ -798,7 +798,7 @@ mod tests {
         let err = apply_skill_at(
             &root,
             SkillApplyInput {
-                id: "awt-terminal".to_string(),
+                id: "vibelink-terminal".to_string(),
                 name: None,
                 category: None,
                 description: None,
@@ -810,7 +810,7 @@ mod tests {
         )
         .expect_err("built-in apply should fail");
         assert!(err.to_string().contains("read-only"));
-        assert!(delete_skill_at(&root, "awt-terminal", None, None).is_err());
+        assert!(delete_skill_at(&root, "vibelink-terminal", None, None).is_err());
         cleanup_root(root);
     }
 
@@ -934,7 +934,7 @@ mod tests {
         let context = enabled_skill_context_at(&root, Some("Session::{CTX}"))
             .expect("build context")
             .expect("context exists");
-        assert!(context.contains("## AWT skill: context-skill"));
+        assert!(context.contains("## VibeLink skill: context-skill"));
         assert!(context.contains("Always mention context."));
         assert!(!context.contains("disabled-skill"));
         cleanup_root(root);
@@ -967,7 +967,7 @@ mod tests {
     }
 
     fn temp_root(prefix: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("awt-{prefix}-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("vibelink-{prefix}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("create temp root");
         root
     }

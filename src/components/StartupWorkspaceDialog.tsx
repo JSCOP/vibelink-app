@@ -23,7 +23,7 @@ export function StartupWorkspaceDialog({ sessions, lastActiveSessionId, onOpen, 
             <TerminalSquare size={18} />
           </div>
           <div>
-            <p className="settings-eyebrow">Agentic Workspace Terminal</p>
+            <p className="settings-eyebrow">VibeLink</p>
             <h2 id="startup-workspace-title">Open workspace</h2>
           </div>
         </header>

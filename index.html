@@ -34,7 +34,7 @@
           everforestDark: ['#2d353b', 'dark'],
         }
         try {
-          const raw = window.localStorage.getItem('awt:settings')
+          const raw = window.localStorage.getItem('vibelink:settings')
           const id = raw ? JSON.parse(raw)?.terminalThemeId : ''
           const [background, colorScheme] = themes[id] || fallback
           const root = document.documentElement
@@ -68,7 +68,7 @@
         color-scheme: inherit;
       }
     </style>
-    <title>Agentic Workspace Terminal</title>
+    <title>VibeLink</title>
   </head>
   <body>
     <div id="root"></div>

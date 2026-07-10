@@ -1,11 +1,11 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "AgenticWorkspaceTerminal Dev",
-  "identifier": "dev.awt.agenticworkspaceterminal.dev",
+  "productName": "VibeLink Dev",
+  "identifier": "com.vibelink.desktop.dev",
   "app": {
     "windows": [
       {
-        "title": "Agentic Workspace Terminal Dev",
+        "title": "VibeLink Dev",
         "width": 800,
         "height": 600,
         "resizable": true,

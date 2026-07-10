@@ -29,7 +29,7 @@ describe('normalizeWorkspaceLayoutState', () => {
     const agentId = workspaceWindowDescriptors.agent.panelId
     const terminalWindowId = workspaceWindowDescriptors.terminal.panelId
 
-    expect(pageLayout.awtTerminalLayout.panels['pane-1']).toMatchObject({
+    expect(pageLayout.vibelinkTerminalLayout.panels['pane-1']).toMatchObject({
       id: 'pane-1',
       contentComponent: 'terminal',
       params: { paneId: 'pane-1', title: 'Shell' },
@@ -42,7 +42,7 @@ describe('normalizeWorkspaceLayoutState', () => {
     expect(pageLayout.panels[agentId]).toMatchObject({
       id: agentId,
       contentComponent: 'agent',
-      params: { kind: 'agent', title: 'AWT Agent' },
+      params: { kind: 'agent', title: 'VibeLink Agent' },
     })
     expect(pageLayout.panels['pane-1']).toBeUndefined()
     expect(JSON.stringify(pageLayout.grid.root)).toContain(terminalWindowId)

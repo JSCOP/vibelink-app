@@ -1,7 +1,7 @@
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { TaskStatus } from '../ipc/types'
 
-export const taskDragMime = 'application/x-awt-task'
+export const taskDragMime = 'application/x-vibelink-task'
 
 export type TaskDragPayload = {
   taskId: string

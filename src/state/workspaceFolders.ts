@@ -39,14 +39,14 @@ export function toggleFavoriteWorkspaceFolder(history: WorkspaceFolderHistory, f
 export function loadWorkspaceFolderHistory(storage: Storage | undefined = globalThis.localStorage): WorkspaceFolderHistory {
   if (!storage) return { recent: [], favorites: [] }
   try {
-    return normalizeWorkspaceFolderHistory(JSON.parse(storage.getItem('awt:workspaceFolders') ?? 'null'))
+    return normalizeWorkspaceFolderHistory(JSON.parse(storage.getItem('vibelink:workspaceFolders') ?? 'null'))
   } catch {
     return { recent: [], favorites: [] }
   }
 }
 
 export function saveWorkspaceFolderHistory(history: WorkspaceFolderHistory, storage: Storage | undefined = globalThis.localStorage): void {
-  storage?.setItem('awt:workspaceFolders', JSON.stringify(normalizeWorkspaceFolderHistory(history)))
+  storage?.setItem('vibelink:workspaceFolders', JSON.stringify(normalizeWorkspaceFolderHistory(history)))
 }
 
 function readFolderList(value: unknown, limit = Number.POSITIVE_INFINITY): string[] {

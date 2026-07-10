@@ -1,4 +1,4 @@
-export const paneDragMime = 'application/x-awt-pane-id'
+export const paneDragMime = 'application/x-vibelink-pane-id'
 
 export type PaneDropPosition = 'left' | 'right' | 'top' | 'bottom' | 'center'
 

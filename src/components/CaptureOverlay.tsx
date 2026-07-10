@@ -16,7 +16,7 @@ type CaptureConfig = {
 
 declare global {
   interface Window {
-    __AWT_CAPTURE__?: Partial<CaptureConfig>
+    __VIBELINK_CAPTURE__?: Partial<CaptureConfig>
   }
 }
 
@@ -150,7 +150,7 @@ function formatElapsed(seconds: number): string {
 }
 
 export default function CaptureOverlay() {
-  const cfg = window.__AWT_CAPTURE__ ?? { mode: 'image', dir: '', ffmpeg: '' }
+  const cfg = window.__VIBELINK_CAPTURE__ ?? { mode: 'image', dir: '', ffmpeg: '' }
   const mode: CaptureMode = cfg.mode === 'video' || cfg.mode === 'quick' ? cfg.mode : 'image'
   const [phase, setPhase] = useState<'select' | 'recording'>('select')
   const [rect, setRect] = useState<CaptureRect | null>(null)

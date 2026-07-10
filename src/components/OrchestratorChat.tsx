@@ -46,7 +46,7 @@ export function OrchestratorChat() {
   const [sessionSearch, setSessionSearch] = useState('')
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false
-    return window.localStorage.getItem('awt:agentSidebarCollapsed') === '1'
+    return window.localStorage.getItem('vibelink:agentSidebarCollapsed') === '1'
   })
 
   const session = useMemo(() => sessions.find((item) => item.id === sessionId), [sessions, sessionId])
@@ -139,7 +139,7 @@ export function OrchestratorChat() {
         await startHermesOutputStream({ force: true })
         await invoke('hermes_send', { sessionId, text: next })
       } catch (error) {
-        const message = `AWT Agent error: ${String(error)}`
+        const message = `VibeLink Agent error: ${String(error)}`
         setHermesStatus(sessionId, 'error')
         useWorkspaceStore.getState().appendHermesText(sessionId, 'message', message)
         useWorkspaceStore.getState().setError(message)
@@ -154,14 +154,14 @@ export function OrchestratorChat() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    window.localStorage.setItem('awt:agentSidebarCollapsed', isSidebarCollapsed ? '1' : '0')
+    window.localStorage.setItem('vibelink:agentSidebarCollapsed', isSidebarCollapsed ? '1' : '0')
   }, [isSidebarCollapsed])
 
   if (!sessionId) return <div className="orchestrator-chat hermes-chat">Open a workspace.</div>
 
   const installRuntime = async () => {
     setRuntimeBusy(true)
-    setRuntimeMessage('Installing AWT Agent runtime…')
+    setRuntimeMessage('Installing VibeLink Agent runtime…')
     try {
       const command = await invoke<string>('hermes_install_runtime')
       const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: settings.hermesCommand || null })
@@ -305,9 +305,9 @@ export function OrchestratorChat() {
   if (!runtime?.installed && !settings.hermesCommand) {
     return (
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
-        <h3>AWT Agent runtime is not installed</h3>
+        <h3>VibeLink Agent runtime is not installed</h3>
         <p>Install the managed uv-bundled agent runtime, or set a hermes-acp override in Settings.</p>
-        <button type="button" onClick={() => void installRuntime()} disabled={runtimeBusy}>{runtimeBusy ? 'Installing…' : 'Install AWT Agent runtime'}</button>
+        <button type="button" onClick={() => void installRuntime()} disabled={runtimeBusy}>{runtimeBusy ? 'Installing…' : 'Install VibeLink Agent runtime'}</button>
         {runtimeMessage ? <p>{runtimeMessage}</p> : null}
       </div>
     )
@@ -316,7 +316,7 @@ export function OrchestratorChat() {
   if (!workspace?.model) {
     return (
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
-        <h3>Configure this workspace&apos;s AWT Agent</h3>
+        <h3>Configure this workspace&apos;s VibeLink Agent</h3>
         <p>Provider, login, and model selection come from the native Hermes CLI. Run <code>hermes model</code>, complete login if prompted, then Refresh.</p>
         {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed to start — this workspace has no provider/model configured yet. Use Model below to run <code>hermes model</code>, complete login if prompted, then Refresh.</p> : null}
         <div className="hermes-runtime-note">
@@ -333,18 +333,18 @@ export function OrchestratorChat() {
   }
 
   return (
-    <div className={`orchestrator-chat hermes-chat awt-agent-shell${isSidebarCollapsed ? ' awt-agent-sidebar-collapsed' : ''}`}>
+    <div className={`orchestrator-chat hermes-chat vibelink-agent-shell${isSidebarCollapsed ? ' vibelink-agent-sidebar-collapsed' : ''}`}>
       {!isSidebarCollapsed ? (
-        <aside className="awt-agent-sidebar" aria-label="AWT Agent sidebar">
-          <div className="awt-agent-sidebar-toolbar">
+        <aside className="vibelink-agent-sidebar" aria-label="VibeLink Agent sidebar">
+          <div className="vibelink-agent-sidebar-toolbar">
             <span>Agent menu</span>
           </div>
-          <nav className="awt-agent-nav" aria-label="AWT Agent sections">
+          <nav className="vibelink-agent-nav" aria-label="VibeLink Agent sections">
             <button
               type="button"
               className={agentSection === 'chat' ? 'active' : undefined}
               disabled={status === 'busy' || status === 'starting'}
-              title="Start a new AWT Agent session"
+              title="Start a new VibeLink Agent session"
               onClick={() => {
                 setAgentSection('chat')
                 void createHermesSession()
@@ -362,12 +362,12 @@ export function OrchestratorChat() {
               <FileText size={14} /> Artifacts
             </button>
           </nav>
-          <div className="awt-agent-session-search">
+          <div className="vibelink-agent-session-search">
             <Search size={13} />
             <input value={sessionSearch} placeholder="Search sessions..." onChange={(event) => setSessionSearch(event.target.value)} />
           </div>
-          <div className="awt-agent-session-list">
-            <div className="awt-agent-session-heading">Sessions {filteredSessionOptions.length}/{sessionOptions.length}</div>
+          <div className="vibelink-agent-session-list">
+            <div className="vibelink-agent-session-heading">Sessions {filteredSessionOptions.length}/{sessionOptions.length}</div>
             {filteredSessionOptions.map((item) => (
               <button
                 key={item.id}
@@ -384,20 +384,20 @@ export function OrchestratorChat() {
         </aside>
       ) : null}
 
-      <section className="awt-agent-main">
-        <header className="hermes-chat-header awt-agent-header">
-          <div className="awt-agent-title">
+      <section className="vibelink-agent-main">
+        <header className="hermes-chat-header vibelink-agent-header">
+          <div className="vibelink-agent-title">
             <button
               type="button"
-              className="awt-agent-header-menu-toggle"
-              aria-label={isSidebarCollapsed ? 'Open AWT Agent menu' : 'Collapse AWT Agent menu'}
+              className="vibelink-agent-header-menu-toggle"
+              aria-label={isSidebarCollapsed ? 'Open VibeLink Agent menu' : 'Collapse VibeLink Agent menu'}
               aria-expanded={!isSidebarCollapsed}
               title={isSidebarCollapsed ? 'Open agent menu' : 'Collapse agent menu'}
               onClick={() => setSidebarCollapsed((value) => !value)}
             >
               {isSidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
             </button>
-            <h3>AWT Agent</h3>
+            <h3>VibeLink Agent</h3>
             <p>{workspace.model.provider} / {workspace.model.model} · {statusLabel}</p>
           </div>
           {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed. Check the transcript/top banner, then re-auth or restart.</p> : null}
@@ -405,14 +405,14 @@ export function OrchestratorChat() {
             <HeaderButton icon={KeyRound} label="Auth" title="Open Hermes auth CLI" onClick={() => void openHermesTerminal('auth')} />
             <HeaderButton icon={Settings2} label="Model" title="Configure model and login" onClick={() => void openHermesTerminal('model')} />
             <HeaderButton icon={RefreshCw} label="Refresh" title="Refresh agent workspace state" onClick={() => void refreshWorkspace()} />
-            {currentSession ? <HeaderButton icon={Trash2} label="Remove" title="Remove selected AWT Agent thread" disabled={status === 'busy'} onClick={() => void archiveHermesSession()} /> : null}
-            <HeaderButton icon={Plus} label="New" title="Start a new AWT Agent session" disabled={status === 'busy' || status === 'starting'} onClick={() => void createHermesSession()} />
+            {currentSession ? <HeaderButton icon={Trash2} label="Remove" title="Remove selected VibeLink Agent thread" disabled={status === 'busy'} onClick={() => void archiveHermesSession()} /> : null}
+            <HeaderButton icon={Plus} label="New" title="Start a new VibeLink Agent session" disabled={status === 'busy' || status === 'starting'} onClick={() => void createHermesSession()} />
             {models?.available.length ? (
               <select value={models.current} onChange={(event) => void setModel(event.target.value)} title="Agent models">
                 {models.available.map((model) => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
               </select>
             ) : <span className="hermes-model-pill" title="Hermes did not return a selectable model list; using the configured workspace model.">{workspace.model.model}</span>}
-            {status === 'busy' ? <HeaderButton icon={Square} label="Cancel" title="Cancel active agent response" onClick={() => void cancel()} /> : status === 'running' ? <HeaderButton icon={RotateCcw} label="Restart" title="Restart AWT Agent after model/auth changes" onClick={() => void restart()} /> : <HeaderButton icon={Play} label={status === 'starting' ? 'Starting' : 'Start'} title="Start AWT Agent" disabled={status === 'starting'} onClick={() => void start()} />}
+            {status === 'busy' ? <HeaderButton icon={Square} label="Cancel" title="Cancel active agent response" onClick={() => void cancel()} /> : status === 'running' ? <HeaderButton icon={RotateCcw} label="Restart" title="Restart VibeLink Agent after model/auth changes" onClick={() => void restart()} /> : <HeaderButton icon={Play} label={status === 'starting' ? 'Starting' : 'Start'} title="Start VibeLink Agent" disabled={status === 'starting'} onClick={() => void start()} />}
           </div>
         </header>
 
@@ -435,10 +435,10 @@ export function OrchestratorChat() {
 
             <div className="hermes-transcript">
               {transcript.length === 0 ? (
-                <div className="awt-agent-empty">
+                <div className="vibelink-agent-empty">
                   <Sparkles size={24} />
-                  <h2>AWT AGENT</h2>
-                  <p>Paste a task, bug, or file path and AWT Agent will work through the current workspace.</p>
+                  <h2>VibeLink Agent</h2>
+                  <p>Paste a task, bug, or file path and VibeLink Agent will work through the current workspace.</p>
                 </div>
               ) : null}
               {transcript.map((turn, index) => (
@@ -458,7 +458,7 @@ export function OrchestratorChat() {
               <textarea
                 value={message}
                 rows={2}
-                placeholder="Message AWT Agent..."
+                placeholder="Message VibeLink Agent..."
                 onChange={(event) => setMessage(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
@@ -488,7 +488,7 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     let cancelled = false
-    void invoke<SkillEntry[]>('awt_skill_list', { sessionId })
+    void invoke<SkillEntry[]>('vibelink_skill_list', { sessionId })
       .then((nextSkills) => {
         if (cancelled) return
         setSkills(nextSkills)
@@ -506,7 +506,7 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
   const refreshSkills = async () => {
     setSkillsLoading(true)
     try {
-      setSkills(await invoke<SkillEntry[]>('awt_skill_list', { sessionId }))
+      setSkills(await invoke<SkillEntry[]>('vibelink_skill_list', { sessionId }))
       setSkillsMessage('')
     } catch (error) {
       setSkillsMessage(`Unable to load skills: ${String(error)}`)
@@ -522,9 +522,9 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
     setSkillsMessage('')
     try {
       const input = buildWorkspaceSkillInput(content, sessionId)
-      const applied = await invoke<SkillEntry | null>('awt_skill_apply', { input })
+      const applied = await invoke<SkillEntry | null>('vibelink_skill_apply', { input })
       setSkillDraft('')
-      setSkills(await invoke<SkillEntry[]>('awt_skill_list', { sessionId }))
+      setSkills(await invoke<SkillEntry[]>('vibelink_skill_list', { sessionId }))
       setSkillsMessage(`Applied ${applied?.name || input.name || input.id}.`)
     } catch (error) {
       setSkillsMessage(`Unable to apply skill: ${String(error)}`)
@@ -534,31 +534,31 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <div className="awt-agent-section">
-      <div className="awt-agent-section-title">
+    <div className="vibelink-agent-section">
+      <div className="vibelink-agent-section-title">
         <Wrench size={16} />
         <div>
           <h4>Skills & Tools</h4>
-          <p>Built-in and workspace skills available to AWT Agent for this session.</p>
+          <p>Built-in and workspace skills available to VibeLink Agent for this session.</p>
         </div>
       </div>
-      <form className="awt-agent-skill-apply" onSubmit={(event) => { event.preventDefault(); void applySkill() }}>
+      <form className="vibelink-agent-skill-apply" onSubmit={(event) => { event.preventDefault(); void applySkill() }}>
         <label>
           <span>Apply workspace skill Markdown</span>
           <textarea
             value={skillDraft}
             rows={4}
-            placeholder={'# Skill name\n\nInstructions AWT Agent should follow for this workspace...'}
+            placeholder={'# Skill name\n\nInstructions VibeLink Agent should follow for this workspace...'}
             onChange={(event) => setSkillDraft(event.target.value)}
           />
         </label>
-        <div className="awt-agent-skill-apply-actions">
+        <div className="vibelink-agent-skill-apply-actions">
           <button type="submit" disabled={!skillDraft.trim() || skillsApplying}>{skillsApplying ? 'Applying…' : 'Apply to workspace'}</button>
           <button type="button" disabled={skillsLoading || skillsApplying} onClick={() => void refreshSkills()}>Refresh</button>
         </div>
       </form>
       {skillsMessage ? <p className="hermes-form-message">{skillsMessage}</p> : null}
-      <div className="awt-agent-skill-list" aria-busy={skillsLoading}>
+      <div className="vibelink-agent-skill-list" aria-busy={skillsLoading}>
         {skillsLoading && skills.length === 0 ? <p className="hermes-empty-state">Loading skills…</p> : null}
         {!skillsLoading && skills.length === 0 && !skillsMessage ? <p className="hermes-empty-state">No skills registered for this workspace yet.</p> : null}
         {skills.map((skill) => {
@@ -571,18 +571,18 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
           const scopeLabel = skill.scope === 'workspace' ? 'Workspace' : 'Global'
           const sourceLabel = skill.readOnly ? 'Built-in' : 'Persisted'
           return (
-            <div key={`${skill.scope}:${id}`} className={`awt-agent-skill-row${enabled ? '' : ' awt-agent-skill-row-disabled'}`}>
+            <div key={`${skill.scope}:${id}`} className={`vibelink-agent-skill-row${enabled ? '' : ' vibelink-agent-skill-row-disabled'}`}>
               <div>
                 <strong>{label}</strong>
                 {description ? <span>{description}</span> : null}
-                <div className="awt-agent-skill-meta">
+                <div className="vibelink-agent-skill-meta">
                   <small>{scopeLabel}</small>
                   <small>{sourceLabel}</small>
                   <small>{category}</small>
                   <small>{enabled ? 'Enabled' : 'Disabled'}</small>
                   {updatedAt ? <small>Updated {updatedAt}</small> : null}
                 </div>
-                {skill.path ? <code className="awt-agent-skill-path" title={skill.path}>{skill.path}</code> : null}
+                {skill.path ? <code className="vibelink-agent-skill-path" title={skill.path}>{skill.path}</code> : null}
               </div>
               <small>{id}</small>
             </div>
@@ -595,12 +595,12 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
 
 function AgentMessagingPanel({ sessionId }: { sessionId: string }) {
   return (
-    <div className="awt-agent-section">
-      <div className="awt-agent-section-title">
+    <div className="vibelink-agent-section">
+      <div className="vibelink-agent-section-title">
         <MessageSquare size={16} />
         <div>
           <h4>Messaging</h4>
-          <p>Connect messaging gateways that can deliver prompts to AWT Agent.</p>
+          <p>Connect messaging gateways that can deliver prompts to VibeLink Agent.</p>
         </div>
       </div>
       <HermesGatewayForm sessionId={sessionId} />
@@ -611,23 +611,23 @@ function AgentMessagingPanel({ sessionId }: { sessionId: string }) {
 function AgentArtifactsPanel({ transcript, permissions }: { transcript: HermesTurn[]; permissions: number }) {
   const toolCalls = transcript.flatMap((turn) => turn.toolCalls)
   return (
-    <div className="awt-agent-section">
-      <div className="awt-agent-section-title">
+    <div className="vibelink-agent-section">
+      <div className="vibelink-agent-section-title">
         <Archive size={16} />
         <div>
           <h4>Artifacts</h4>
           <p>Generated outputs, tool results, and permission diffs from the current agent session.</p>
         </div>
       </div>
-      <div className="awt-agent-artifact-grid">
+      <div className="vibelink-agent-artifact-grid">
         <div><strong>{transcript.length}</strong><span>Messages</span></div>
         <div><strong>{toolCalls.length}</strong><span>Tool calls</span></div>
         <div><strong>{permissions}</strong><span>Pending permissions</span></div>
       </div>
-      <div className="awt-agent-skill-list">
+      <div className="vibelink-agent-skill-list">
         {toolCalls.length === 0 ? <p className="hermes-empty-state">No tool artifacts in this session yet.</p> : null}
         {toolCalls.map((call) => (
-          <div key={call.id} className="awt-agent-skill-row">
+          <div key={call.id} className="vibelink-agent-skill-row">
             <div>
               <strong>{call.title || call.toolKind}</strong>
               <span>{call.content || call.status}</span>

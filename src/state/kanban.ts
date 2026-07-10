@@ -63,10 +63,10 @@ export function composeTaskPrompt(
     roleLine,
     worktreeLine,
     description || undefined,
-    'When you make progress, report a note from this AWT pane with:',
-    `& $env:AWT_APP_EXE cli task note --task ${task.id} --message "<short progress note>"`,
-    'When finished, report completion from this AWT pane with:',
-    `& $env:AWT_APP_EXE cli task done --task ${task.id} --result-summary "<short result summary>"`,
+    'When you make progress, report a note from this VibeLink pane with:',
+    `& $env:VIBELINK_APP_EXE cli task note --task ${task.id} --message "<short progress note>"`,
+    'When finished, report completion from this VibeLink pane with:',
+    `& $env:VIBELINK_APP_EXE cli task done --task ${task.id} --result-summary "<short result summary>"`,
   ]
     .filter((line): line is string => line !== undefined)
     .join(' | ')

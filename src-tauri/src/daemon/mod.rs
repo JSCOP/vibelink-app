@@ -96,7 +96,7 @@ fn run_inner() -> Result<()> {
                 let sessions_path = Arc::clone(&sessions_path);
                 let shutdown = Arc::clone(&shutdown);
                 thread::Builder::new()
-                    .name("awt-daemon-client".to_string())
+                    .name("vibelink-daemon-client".to_string())
                     .spawn(move || handle_connection(stream, state, sessions_path, shutdown))?;
             }
             Err(err) => warn!(?err, "failed to accept daemon client"),
@@ -184,7 +184,7 @@ fn handle_connection(
     lock_state(&state).add_client(client_id, tx.clone());
 
     let writer_thread = thread::Builder::new()
-        .name("awt-daemon-client-writer".to_string())
+        .name("vibelink-daemon-client-writer".to_string())
         .spawn(move || {
             while let Ok(msg) = rx.recv() {
                 if let Err(err) = write_frame(&mut writer, &msg) {
@@ -287,7 +287,7 @@ fn dispatch_message(
             for mut pane in panes {
                 let pane_id = pane.id;
                 thread::Builder::new()
-                    .name(format!("awt-close-pty-{pane_id}"))
+                    .name(format!("vibelink-close-pty-{pane_id}"))
                     .spawn(move || {
                         if let Err(err) = pane.kill() {
                             warn!(?err, %pane_id, "failed to kill deleted pane");
@@ -398,7 +398,7 @@ fn dispatch_message(
             send_ok(tx, req)?;
             if let Some(mut pane) = pane {
                 thread::Builder::new()
-                    .name(format!("awt-close-pty-{pane_id}"))
+                    .name(format!("vibelink-close-pty-{pane_id}"))
                     .spawn(move || {
                         if let Err(err) = pane.kill() {
                             warn!(?err, pane_id = %pane_id, "failed to kill closed pane");
@@ -414,7 +414,7 @@ fn dispatch_message(
             for mut pane in panes {
                 let pane_id = pane.id;
                 thread::Builder::new()
-                    .name(format!("awt-close-pty-{pane_id}"))
+                    .name(format!("vibelink-close-pty-{pane_id}"))
                     .spawn(move || {
                         if let Err(err) = pane.kill() {
                             warn!(?err, pane_id = %pane_id, "failed to kill cleared pane");
@@ -550,7 +550,7 @@ fn debounce_persist_state(state: &SharedState, sessions_path: &Path) -> Result<(
     let thread_state = Arc::clone(state);
     let thread_sessions_path = sessions_path.to_path_buf();
     thread::Builder::new()
-        .name("awt-daemon-persister".to_string())
+        .name("vibelink-daemon-persister".to_string())
         .spawn(move || loop {
             thread::sleep(PERSIST_DEBOUNCE_INTERVAL);
             if thread_dirty.swap(false, Ordering::AcqRel) {
@@ -599,7 +599,7 @@ fn spawn_pane_for_session(
     };
 
     thread::Builder::new()
-        .name(format!("awt-pty-{pane_id}"))
+        .name(format!("vibelink-pty-{pane_id}"))
         .spawn(move || read_pane_loop(state, pane_id, reader, child, Arc::new(sessions_path)))?;
 
     Ok(meta)
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn pid_file_guard_writes_and_removes_current_pid() {
         let path = std::env::temp_dir().join(format!(
-            "awt-daemon-test-{}-{}.pid",
+            "vibelink-daemon-test-{}-{}.pid",
             std::process::id(),
             Uuid::new_v4()
         ));

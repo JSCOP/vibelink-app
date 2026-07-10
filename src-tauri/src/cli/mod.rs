@@ -323,7 +323,7 @@ fn parse_read(tokens: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::Read {
         session_id: session_id
             .or_else(session_id_from_env)
-            .ok_or_else(|| usage_error("read requires --session <uuid> or AWT_SESSION_ID"))?,
+            .ok_or_else(|| usage_error("read requires --session <uuid> or VIBELINK_SESSION_ID"))?,
         pane_id: pane_id.ok_or_else(|| usage_error("read requires --pane <uuid>"))?,
     })
 }
@@ -362,7 +362,7 @@ fn parse_write(tokens: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::Write {
         session_id: session_id
             .or_else(session_id_from_env)
-            .ok_or_else(|| usage_error("write requires --session <uuid> or AWT_SESSION_ID"))?,
+            .ok_or_else(|| usage_error("write requires --session <uuid> or VIBELINK_SESSION_ID"))?,
         pane_id: pane_id.ok_or_else(|| usage_error("write requires --pane <uuid>"))?,
         text: text.ok_or_else(|| usage_error("write requires --text <text>"))?,
         enter,
@@ -418,9 +418,9 @@ fn parse_task_done(tokens: &[String]) -> Result<CliCommand> {
     }
 
     Ok(CliCommand::TaskDone {
-        session_id: session_id
-            .or_else(session_id_from_env)
-            .ok_or_else(|| usage_error("task done requires --session <uuid> or AWT_SESSION_ID"))?,
+        session_id: session_id.or_else(session_id_from_env).ok_or_else(|| {
+            usage_error("task done requires --session <uuid> or VIBELINK_SESSION_ID")
+        })?,
         pane_id: pane_id.or_else(pane_id_from_env),
         task_id: task_id.ok_or_else(|| usage_error("task done requires --task <id>"))?,
         commit_msg,
@@ -460,9 +460,9 @@ fn parse_task_note(tokens: &[String]) -> Result<CliCommand> {
     }
 
     Ok(CliCommand::TaskNote {
-        session_id: session_id
-            .or_else(session_id_from_env)
-            .ok_or_else(|| usage_error("task note requires --session <uuid> or AWT_SESSION_ID"))?,
+        session_id: session_id.or_else(session_id_from_env).ok_or_else(|| {
+            usage_error("task note requires --session <uuid> or VIBELINK_SESSION_ID")
+        })?,
         pane_id: pane_id.or_else(pane_id_from_env),
         task_id: task_id.ok_or_else(|| usage_error("task note requires --task <id>"))?,
         message: message.ok_or_else(|| usage_error("task note requires --message <text>"))?,
@@ -674,7 +674,7 @@ fn skill_lookup_session_id(
     }
     if scope == Some("workspace") && session_id.is_none() {
         bail!(
-            "usage: workspace skills require --session <uuid> or AWT_SESSION_ID\n{}",
+            "usage: workspace skills require --session <uuid> or VIBELINK_SESSION_ID\n{}",
             usage()
         );
     }
@@ -701,7 +701,7 @@ fn skill_apply_input(
     let scope = parse_skill_scope(Some(&scope))?.expect("skill scope is set");
     let session_id = if scope == SkillScope::Workspace {
         session_id.ok_or_else(|| {
-            usage_error("workspace skills require --session <uuid> or AWT_SESSION_ID")
+            usage_error("workspace skills require --session <uuid> or VIBELINK_SESSION_ID")
         })?
     } else {
         String::new()
@@ -744,7 +744,7 @@ fn parse_optional_session_flag_or_env(tokens: &[String], command: &str) -> Resul
     if tokens.is_empty() {
         return session_id_from_env().ok_or_else(|| {
             usage_error(&format!(
-                "{command} requires --session <uuid> or AWT_SESSION_ID"
+                "{command} requires --session <uuid> or VIBELINK_SESSION_ID"
             ))
         });
     }
@@ -784,13 +784,13 @@ fn usage() -> &'static str {
 }
 
 fn session_id_from_env() -> Option<Uuid> {
-    std::env::var("AWT_SESSION_ID")
+    std::env::var("VIBELINK_SESSION_ID")
         .ok()
         .and_then(|value| parse_uuid(&value).ok())
 }
 
 fn pane_id_from_env() -> Option<Uuid> {
-    std::env::var("AWT_PANE_ID")
+    std::env::var("VIBELINK_PANE_ID")
         .ok()
         .and_then(|value| parse_uuid(&value).ok())
 }
