@@ -22,7 +22,7 @@ import { createResizePreviewStore, useResizePreview, type ResizePreviewState as 
 import { createDockviewGridLayout, type GridPaneDescriptor } from './gridLayout'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
-import { activeWorkspaceLayoutPage, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
+import { activeWorkspaceLayoutPage, createDefaultWorkspaceDockviewLayout, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { KanbanBoard } from '../components/KanbanBoard'
@@ -31,27 +31,15 @@ import { OrchestratorChat } from '../components/OrchestratorChat'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 
-type PendingTemplateRequest = {
-  sessionId: string
-  templateId?: string
-  cols: number
-  rows: number
-  occupiedGrid?: GridSize | null
-  profileId?: string | null
-  requestId: number
-}
 
 type WorkspaceViewProps = {
   onApiReady?: (api: DockviewApi) => void
   onActionsReady?: (actions: WorkspaceWindowActions) => void
   onChromeStateChange?: (state: WorkspaceChromeState) => void
-  pendingTemplate?: PendingTemplateRequest | null
   arrangeRequestId?: number
-  arrangeGrid?: GridSize | null
   resizeSnapTolerance?: number
   windowRequest?: { kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null
   saveLayoutRequestId?: number
-  onTemplateApplied?: (requestId: number) => void
 }
 
 type TerminalLaunchRequest = {
@@ -172,7 +160,7 @@ function DiffWindowPanel(props: IDockviewPanelProps) {
   )
 }
 
-export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange, pendingTemplate, arrangeRequestId = 0, arrangeGrid = null, resizeSnapTolerance = 32, windowRequest = null, saveLayoutRequestId = 0, onTemplateApplied }: WorkspaceViewProps) {
+export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange, arrangeRequestId = 0, resizeSnapTolerance = 32, windowRequest = null, saveLayoutRequestId = 0 }: WorkspaceViewProps) {
   const apiRef = useRef<DockviewApi | null>(null)
   const terminalApiRef = useRef<DockviewApi | null>(null)
   const loadedSessionRef = useRef<string | null>(null)
@@ -184,7 +172,6 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const dockRef = useRef<HTMLDivElement | null>(null)
   const terminalDockRef = useRef<HTMLElement | null>(null)
   const pendingTerminalLayoutRef = useRef<unknown | null>(null)
-  const applyingTemplateRequestRef = useRef<number | null>(null)
   const applyingArrangeRequestRef = useRef<number | null>(null)
   const applyingWindowRequestRef = useRef<number | null>(null)
   const applyingSaveRequestRef = useRef<number | null>(null)
@@ -396,16 +383,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
   }, [])
 
-  const buildFallbackLayout = useCallback((api: DockviewApi, panels: PaneMeta[]) => {
-    if (panels.length === 0) {
-      addWorkspaceWindowPanel(api, 'agent')
-      return
-    }
-    addWorkspaceWindowPanel(api, 'terminal')
-    if (!api.getPanel(workspaceWindowDescriptors.agent.panelId)) {
-      addWorkspaceWindowPanel(api, 'agent', { referencePanel: workspaceWindowDescriptors.terminal.panelId, direction: 'right', inactive: true })
-    }
-  }, [addWorkspaceWindowPanel])
+  const buildFallbackLayout = useCallback((api: DockviewApi, pageId: string) => {
+    api.fromJSON(createDefaultWorkspaceDockviewLayout(pageId) as unknown as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
+  }, [])
 
   const ensureTerminalWindowPanel = useCallback((options?: { inactive?: boolean }) => {
     const api = apiRef.current
@@ -501,21 +481,21 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       api.clear()
       const currentPanes = Object.values(useWorkspaceStore.getState().panes)
       const paneIds = currentPanes.map((pane) => pane.id)
-      const storedLayout = layoutJson ? splitStoredWorkspaceLayout(layoutJson) : null
+      const storedLayout = layoutJson ? splitStoredWorkspaceLayout(layoutJson, pageId) : null
       pendingTerminalLayoutRef.current = storedLayout?.terminalLayout ?? null
       if (storedLayout?.topLayout && shouldRestoreWorkspaceDockviewLayout(JSON.stringify(storedLayout.topLayout), paneIds)) {
         try {
           api.fromJSON(storedLayout.topLayout as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
-          if (api.totalPanels === 0 && paneIds.length > 0) {
+          if (api.totalPanels === 0) {
             api.clear()
-            buildFallbackLayout(api, Object.values(useWorkspaceStore.getState().panes))
+            buildFallbackLayout(api, pageId)
           }
         } catch {
           api.clear()
-          buildFallbackLayout(api, Object.values(useWorkspaceStore.getState().panes))
+          buildFallbackLayout(api, pageId)
         }
       } else {
-        buildFallbackLayout(api, currentPanes)
+        buildFallbackLayout(api, pageId)
       }
       if (layoutDockview(api)) {
         loadedSessionRef.current = activeSessionId
@@ -1069,7 +1049,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (currentPanes.length === 0) return
     const rect = terminalDockRef.current?.getBoundingClientRect()
     const aspectRatio = rect && rect.width > 0 && rect.height > 0 ? rect.width / rect.height : 1
-    const requestedGrid = requestedGridOverride ?? terminalGridPreference ?? arrangeGrid
+    const requestedGrid = requestedGridOverride ?? terminalGridPreference
     const preferredGrid = requestedGrid ? expandGridRowsForPaneCount(requestedGrid, currentPanes.length) : null
     if (requestedGridOverride) setTerminalGridPreference({ cols: requestedGridOverride.cols, rows: requestedGridOverride.rows })
     const grid = preferredGrid ?? exactTemplateGridForPaneCount(currentPanes.length, aspectRatio) ?? balancedGridForPaneCount(currentPanes.length, aspectRatio)
@@ -1086,7 +1066,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         await saveWorkspaceLayoutPage(sessionId, pageId, layoutJson)
       }
     })
-  }, [applyGridLayout, arrangeGrid, ensureTerminalWindowPanel, layoutTerminalDockview, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout, terminalGridPreference])
+  }, [applyGridLayout, ensureTerminalWindowPanel, layoutTerminalDockview, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout, terminalGridPreference])
 
   const runKeybindingAction = useCallback((action: KeybindingActionId, activePanelId: string) => {
     const api = panelApiForId(activePanelId)
@@ -1669,22 +1649,6 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
   }, [panes])
 
-  useEffect(() => {
-    if (!pendingTemplate || pendingTemplate.sessionId !== activeSessionId) return
-    if (applyingTemplateRequestRef.current === pendingTemplate.requestId) return
-    const template = pendingTemplate.templateId
-      ? TEMPLATES.find((item) => item.id === pendingTemplate.templateId)
-      : { id: `${pendingTemplate.cols}x${pendingTemplate.rows}`, label: `${pendingTemplate.cols}x${pendingTemplate.rows}`, cols: pendingTemplate.cols, rows: pendingTemplate.rows }
-    if (!template || pendingTemplate.cols <= 0 || pendingTemplate.rows <= 0) {
-      onTemplateApplied?.(pendingTemplate.requestId)
-      return
-    }
-    applyingTemplateRequestRef.current = pendingTemplate.requestId
-    void applyTemplate(template, pendingTemplate.profileId, pendingTemplate.occupiedGrid).finally(() => {
-      applyingTemplateRequestRef.current = null
-      onTemplateApplied?.(pendingTemplate.requestId)
-    })
-  }, [activeSessionId, applyTemplate, onTemplateApplied, pendingTemplate])
 
   return (
     <WorkspaceActionsContext.Provider value={paneActions}>
@@ -2042,7 +2006,7 @@ function shouldRestoreWorkspaceDockviewLayout(layoutJson: string, livePaneIds: s
   return true
 }
 
-function splitStoredWorkspaceLayout(layoutJson: string): { topLayout: unknown; terminalLayout: unknown | null } | null {
+function splitStoredWorkspaceLayout(layoutJson: string, pageId: string): { topLayout: unknown; terminalLayout: unknown | null } | null {
   let layout: unknown
   try {
     layout = JSON.parse(layoutJson)
@@ -2051,7 +2015,7 @@ function splitStoredWorkspaceLayout(layoutJson: string): { topLayout: unknown; t
   }
   if (!isRecord(layout)) return null
   const terminalLayout = isRecord(layout.vibelinkTerminalLayout) ? layout.vibelinkTerminalLayout : extractTopLevelTerminalLayout(layout)
-  const topLayout = terminalLayout === layout ? makeDefaultWindowLayout(true) : stripTopLevelTerminalPanels(layout)
+  const topLayout = terminalLayout === layout ? createDefaultWorkspaceDockviewLayout(pageId) : stripTopLevelTerminalPanels(layout)
   return { topLayout, terminalLayout }
 }
 
@@ -2096,47 +2060,6 @@ function removePanelIdsFromDockNode(value: unknown, panelIds: Set<string>): bool
   return true
 }
 
-function makeDefaultWindowLayout(includeTerminal: boolean): unknown {
-  const panels: Record<string, unknown> = {}
-  const leaves: unknown[] = []
-  if (includeTerminal) {
-    const terminal = workspaceWindowDescriptors.terminal
-    panels[terminal.panelId] = makeWindowPanel(terminal)
-    leaves.push(makeWindowNode(terminal.panelId, 700))
-  }
-  const agent = workspaceWindowDescriptors.agent
-  panels[agent.panelId] = makeWindowPanel(agent)
-  leaves.push(makeWindowNode(agent.panelId, includeTerminal ? 300 : 1000))
-  return {
-    grid: {
-      root: { type: 'branch', data: leaves, size: 1000 },
-      width: 1000,
-      height: 600,
-      orientation: 'HORIZONTAL',
-    },
-    panels,
-    activeGroup: includeTerminal ? `window-${workspaceWindowDescriptors.terminal.panelId}` : `window-${agent.panelId}`,
-  }
-}
-
-function makeWindowPanel(descriptor: typeof workspaceWindowDescriptors[keyof typeof workspaceWindowDescriptors]): unknown {
-  return {
-    id: descriptor.panelId,
-    contentComponent: descriptor.component,
-    tabComponent: 'props.defaultTabComponent',
-    params: { kind: descriptor.kind, title: descriptor.title, icon: descriptor.icon },
-    title: descriptor.title,
-    renderer: 'always',
-  }
-}
-
-function makeWindowNode(panelId: string, size: number): unknown {
-  return {
-    type: 'leaf',
-    data: { views: [panelId], activeView: panelId, id: `window-${panelId}` },
-    size,
-  }
-}
 
 function collectRestorableViewIds(node: unknown, viewIds: Set<string>): boolean {
   if (!isRecord(node) || !isPositiveNumber(node.size)) return false

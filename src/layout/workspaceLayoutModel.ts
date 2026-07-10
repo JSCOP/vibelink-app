@@ -36,6 +36,14 @@ type NormalizeOptions = {
   terminalPaneIds?: string[]
   legacyKanbanLayoutJson?: string | null
 }
+export const terminalWorkspaceLayoutPageId = 'terminal'
+export const planningWorkspaceLayoutPageId = 'planning'
+
+const fixedWorkspaceLayoutPages = [
+  { id: terminalWorkspaceLayoutPageId, name: 'Terminal' },
+  { id: planningWorkspaceLayoutPageId, name: 'Kanban + Agent' },
+] as const
+
 
 export const workspaceWindowDescriptors: Record<WorkspaceWindowKind, WorkspaceWindowDescriptor> = {
   terminal: {
@@ -84,39 +92,55 @@ export const workspaceWindowKindByPanelId: Record<string, WorkspaceWindowKind> =
   Object.values(workspaceWindowDescriptors).map((descriptor) => [descriptor.panelId, descriptor.kind]),
 )
 
-const fallbackPageId = 'workspace'
-
 export function normalizeWorkspaceLayoutState(raw: string | null | undefined, options: NormalizeOptions = {}): WorkspaceLayoutState {
   const now = options.now ?? Date.now()
+  const terminalPaneIds = options.terminalPaneIds ?? []
   const parsed = parseJson(raw)
   if (isWorkspaceLayoutBlob(parsed)) {
-    const pages = normalizePages(parsed.pages, now, options.terminalPaneIds ?? [])
-    if (pages.length > 0) {
-      const requested = typeof parsed.activePageId === 'string' ? parsed.activePageId : ''
-      const activePageId = pages.some((page) => page.id === requested) ? requested : pages[0].id
-      return { version: 2, activePageId, pages }
-    }
+    const pages = normalizeFixedPages(parsed.pages, now, terminalPaneIds)
+    const requested = typeof parsed.activePageId === 'string' ? parsed.activePageId : ''
+    const activePageId = requested === terminalWorkspaceLayoutPageId || requested === planningWorkspaceLayoutPageId
+      ? requested
+      : terminalWorkspaceLayoutPageId
+    return { version: 2, activePageId, pages }
   }
 
-  const legacyPages: WorkspaceLayoutPage[] = []
-  if (raw && isLegacyDockviewLayout(parsed, options.terminalPaneIds ?? [])) {
-    legacyPages.push(createPage('terminal', 'Terminal', wrapTerminalLayout(raw) ?? raw, now))
-  }
-
+  const terminalLayout = raw && isLegacyDockviewLayout(parsed, terminalPaneIds)
+    ? wrapTerminalLayout(raw) ?? normalizeWorkspaceDockLayoutJson(raw, terminalPaneIds)
+    : null
   const planningLayout = migrateKanbanDockLayout(options.legacyKanbanLayoutJson)
-  if (planningLayout) {
-    legacyPages.push(createPage('planning', 'Planning', planningLayout, now))
-  }
-
-  if (legacyPages.length > 0) {
-    return { version: 2, activePageId: legacyPages[0].id, pages: legacyPages }
-  }
 
   return {
     version: 2,
-    activePageId: fallbackPageId,
-    pages: [createPage(fallbackPageId, 'Workspace', null, now)],
+    activePageId: terminalWorkspaceLayoutPageId,
+    pages: [
+      createPage(terminalWorkspaceLayoutPageId, 'Terminal', terminalLayout, now),
+      createPage(planningWorkspaceLayoutPageId, 'Kanban + Agent', planningLayout, now),
+    ],
   }
+}
+
+export function createDefaultWorkspaceDockviewLayout(pageId: string): Record<string, unknown> {
+  const planning = pageId === planningWorkspaceLayoutPageId
+  const descriptors = planning
+    ? [workspaceWindowDescriptors.kanban, workspaceWindowDescriptors.agent]
+    : [workspaceWindowDescriptors.terminal]
+  const panels: Record<string, unknown> = {}
+  const layout: Record<string, unknown> = { panels }
+  for (const descriptor of descriptors) rewritePanel(layout, descriptor)
+  const sizes = planning ? [700, 300] : [1000]
+  layout.grid = {
+    root: {
+      type: 'branch',
+      data: descriptors.map((descriptor, index) => makeWindowLeaf(descriptor.panelId, sizes[index])),
+      size: 1000,
+    },
+    width: 1000,
+    height: 600,
+    orientation: 'HORIZONTAL',
+  }
+  layout.activeGroup = `window-${descriptors[0].panelId}`
+  return layout
 }
 
 export function serializeWorkspaceLayoutState(state: WorkspaceLayoutState): string {
@@ -127,25 +151,6 @@ export function activeWorkspaceLayoutPage(state: WorkspaceLayoutState): Workspac
   return state.pages.find((page) => page.id === state.activePageId) ?? state.pages[0]
 }
 
-export function createWorkspaceLayoutPage(existing: WorkspaceLayoutState, name?: string, layoutJson: string | null = null): WorkspaceLayoutState {
-  const now = Date.now()
-  const page = createPage(nextPageId(existing.pages, 'layout'), nextPageName(existing.pages, name), layoutJson, now)
-  return {
-    version: 2,
-    activePageId: page.id,
-    pages: [...existing.pages, page],
-  }
-}
-
-export function renameWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string, name: string): WorkspaceLayoutState {
-  const trimmed = name.trim()
-  if (!trimmed) return existing
-  const now = Date.now()
-  return {
-    ...existing,
-    pages: existing.pages.map((page) => page.id === pageId ? { ...page, name: trimmed, updatedAt: now } : page),
-  }
-}
 
 export function replaceWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string, layoutJson: string | null): WorkspaceLayoutState {
   const now = Date.now()
@@ -155,27 +160,6 @@ export function replaceWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageI
   }
 }
 
-export function duplicateWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string): WorkspaceLayoutState {
-  const source = existing.pages.find((page) => page.id === pageId) ?? activeWorkspaceLayoutPage(existing)
-  const now = Date.now()
-  const page = createPage(nextPageId(existing.pages, source.id), nextPageName(existing.pages, `${source.name} Copy`), source.layoutJson, now)
-  return {
-    version: 2,
-    activePageId: page.id,
-    pages: [...existing.pages, page],
-  }
-}
-
-export function deleteWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string): WorkspaceLayoutState {
-  if (existing.pages.length <= 1) return existing
-  const index = existing.pages.findIndex((page) => page.id === pageId)
-  if (index < 0) return existing
-  const pages = existing.pages.filter((page) => page.id !== pageId)
-  const activePageId = existing.activePageId === pageId
-    ? pages[Math.max(0, index - 1)]?.id ?? pages[0].id
-    : existing.activePageId
-  return { version: 2, activePageId, pages }
-}
 
 export function setActiveWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string): WorkspaceLayoutState {
   if (!existing.pages.some((page) => page.id === pageId)) return existing
@@ -186,31 +170,25 @@ export function resetWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId:
   return replaceWorkspaceLayoutPage(existing, pageId, null)
 }
 
-function normalizePages(value: unknown, now: number, terminalPaneIds: string[]): WorkspaceLayoutPage[] {
-  if (!Array.isArray(value)) return []
-  const seen = new Set<string>()
-  const pages: WorkspaceLayoutPage[] = []
-  for (const item of value) {
-    if (!isRecord(item)) continue
-    const id = readNonEmptyString(item.id)
-    const name = readNonEmptyString(item.name)
-    if (!id || !name || seen.has(id)) continue
-    seen.add(id)
+function normalizeFixedPages(value: unknown, now: number, terminalPaneIds: string[]): WorkspaceLayoutPage[] {
+  const source = Array.isArray(value) ? value : []
+  return fixedWorkspaceLayoutPages.map(({ id, name }) => {
+    const item = source.find((candidate) => isRecord(candidate) && candidate.id === id)
+    if (!isRecord(item)) return createPage(id, name, null, now)
     const rawLayoutJson = typeof item.layoutJson === 'string' && item.layoutJson.trim() ? item.layoutJson : null
-    pages.push({
+    return {
       id,
       name,
       layoutJson: normalizeWorkspaceDockLayoutJson(rawLayoutJson, terminalPaneIds),
       createdAt: readTimestamp(item.createdAt, now),
       updatedAt: readTimestamp(item.updatedAt, now),
-    })
-  }
-  return pages
+    }
+  })
 }
 
 function migrateKanbanDockLayout(raw: string | null | undefined): string | null {
   const layout = parseJson(raw)
-  if (!isRecord(layout)) return null
+  if (!isRecord(layout) || !isRecord(layout.grid) || !isRecord(layout.panels)) return null
   const migrated = structuredClone(layout)
   replacePanelId(migrated, 'orchestrator', workspaceWindowDescriptors.agent.panelId)
   replacePanelId(migrated, 'board', workspaceWindowDescriptors.kanban.panelId)
@@ -223,8 +201,8 @@ function migrateKanbanDockLayout(raw: string | null | undefined): string | null 
 function normalizeWorkspaceDockLayoutJson(raw: string | null, terminalPaneIds: string[]): string | null {
   if (!raw) return null
   const layout = parseJson(raw)
-  if (!isRecord(layout) || !isRecord(layout.panels)) return raw
-  if (layoutHasTopLevelTerminalPanes(layout, terminalPaneIds)) return wrapTerminalLayout(raw) ?? raw
+  if (!isRecord(layout) || !isRecord(layout.grid) || !isRecord(layout.panels)) return null
+  if (layoutHasTopLevelTerminalPanes(layout, terminalPaneIds)) return wrapTerminalLayout(raw) ?? null
   if (isRecord(layout.vibelinkTerminalLayout) && !isRecord(layout.panels[workspaceWindowDescriptors.terminal.panelId])) {
     const migrated = structuredClone(layout)
     rewritePanel(migrated, workspaceWindowDescriptors.terminal)
@@ -253,18 +231,13 @@ function wrapTerminalLayout(raw: string): string | null {
     panels: {},
   }
   rewritePanel(wrapped, workspaceWindowDescriptors.terminal)
-  rewritePanel(wrapped, workspaceWindowDescriptors.agent)
-  const total = 1000
   wrapped.grid = {
     root: {
       type: 'branch',
-      data: [
-        makeWindowLeaf(workspaceWindowDescriptors.terminal.panelId, 700),
-        makeWindowLeaf(workspaceWindowDescriptors.agent.panelId, 300),
-      ],
-      size: total,
+      data: [makeWindowLeaf(workspaceWindowDescriptors.terminal.panelId, 1000)],
+      size: 1000,
     },
-    width: total,
+    width: 1000,
     height: 600,
     orientation: 'HORIZONTAL',
   }
@@ -340,7 +313,7 @@ function rewritePanel(layout: unknown, descriptor: WorkspaceWindowDescriptor): v
 
 function isLegacyDockviewLayout(value: unknown, terminalPaneIds: string[]): boolean {
   if (!isRecord(value) || !isRecord(value.panels)) return false
-  if (terminalPaneIds.length === 0) return true
+  if (terminalPaneIds.length === 0) return layoutHasTopLevelTerminalPanes(value, [])
   return shouldRestoreDockviewLayout(JSON.stringify(value), terminalPaneIds)
 }
 
@@ -348,27 +321,6 @@ function createPage(id: string, name: string, layoutJson: string | null, now: nu
   return { id, name, layoutJson, createdAt: now, updatedAt: now }
 }
 
-function nextPageId(pages: WorkspaceLayoutPage[], seed: string): string {
-  const base = slugify(seed) || 'layout'
-  const used = new Set(pages.map((page) => page.id))
-  if (!used.has(base)) return base
-  let suffix = 2
-  while (used.has(`${base}-${suffix}`)) suffix += 1
-  return `${base}-${suffix}`
-}
-
-function nextPageName(pages: WorkspaceLayoutPage[], requested?: string): string {
-  const base = requested?.trim() || `Layout ${pages.length + 1}`
-  const used = new Set(pages.map((page) => page.name.toLowerCase()))
-  if (!used.has(base.toLowerCase())) return base
-  let suffix = 2
-  while (used.has(`${base} ${suffix}`.toLowerCase())) suffix += 1
-  return `${base} ${suffix}`
-}
-
-function slugify(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-}
 
 function parseJson(raw: string | null | undefined): unknown {
   if (!raw) return null
@@ -383,9 +335,6 @@ function isWorkspaceLayoutBlob(value: unknown): value is WorkspaceLayoutBlob {
   return isRecord(value) && value.version === 2 && Array.isArray(value.pages)
 }
 
-function readNonEmptyString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
-}
 
 function readTimestamp(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback

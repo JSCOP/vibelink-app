@@ -997,6 +997,16 @@ button {
   padding: 5px;
 }
 
+.terminal-panel-shell[data-active='true']::before {
+  content: '';
+  inset: 0;
+  outline: 2px solid var(--vibelink-accent);
+  outline-offset: -2px;
+  pointer-events: none;
+  position: absolute;
+  z-index: 5;
+}
+
 .workspace-window-terminal {
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;

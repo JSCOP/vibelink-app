@@ -1,20 +1,18 @@
 import { open } from '@tauri-apps/plugin-dialog'
 import { useMemo, useState } from 'react'
 import { X } from 'lucide-react'
-import { TEMPLATES } from '../layout/templates'
 import type { Profile } from '../state/profiles'
 import { loadWorkspaceFolderHistory, rememberWorkspaceFolder, saveWorkspaceFolderHistory, toggleFavoriteWorkspaceFolder } from '../state/workspaceFolders'
 
 type WorkspaceCreateDialogProps = {
   profiles: Profile[]
   defaultProfileId: string
-  onCreate: (name: string, templateId: string, workspaceFolder: string | null, profileId: string) => void
+  onCreate: (name: string, workspaceFolder: string | null, profileId: string) => void
   onClose: () => void
 }
 
 export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, onClose }: WorkspaceCreateDialogProps) {
   const [name, setName] = useState('')
-  const [templateId, setTemplateId] = useState('2x2')
   const [workspaceFolder, setWorkspaceFolder] = useState('')
   const [profileId, setProfileId] = useState(defaultProfileId)
   const [isPickingFolder, setIsPickingFolder] = useState(false)
@@ -31,7 +29,7 @@ export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, on
       setFolderHistory(nextHistory)
       saveWorkspaceFolderHistory(nextHistory)
     }
-    onCreate(name.trim(), templateId, normalizedFolder.length > 0 ? normalizedFolder : null, profileId)
+    onCreate(name.trim(), normalizedFolder.length > 0 ? normalizedFolder : null, profileId)
   }
 
   const browseFolder = async () => {
@@ -56,7 +54,7 @@ export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, on
         <header className="workspace-create-header">
           <div>
             <p className="settings-eyebrow">New workspace</p>
-            <h2 id="workspace-create-title">Choose a starting grid</h2>
+            <h2 id="workspace-create-title">Create a workspace</h2>
           </div>
           <button type="button" className="settings-close" title="Close" onClick={onClose}>
             <X size={16} />
@@ -100,19 +98,6 @@ export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, on
           </div>
         ) : null}
 
-        <div className="workspace-template-grid">
-          {TEMPLATES.map((template) => (
-            <button
-              key={template.id}
-              type="button"
-              className={template.id === templateId ? 'selected' : ''}
-              onClick={() => setTemplateId(template.id)}
-            >
-              <span>{template.label}</span>
-              <small>{template.cols * template.rows} panes</small>
-            </button>
-          ))}
-        </div>
 
         <footer className="workspace-create-footer">
           <button type="button" onClick={onClose}>Cancel</button>

@@ -11,11 +11,7 @@ import { loadKanban, persistKanban, type ViewMode } from './kanbanPersistence'
 import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from './workspaceTodos'
 import { defaultHermesGateway, type HermesModelsState, type HermesPlanEntry, type HermesSessionInfo, type HermesStatus, type HermesTextPartKind, type HermesToolCallView, type HermesTranscriptPart, type HermesTurn, type PendingPermission } from './hermes'
 import {
-  createWorkspaceLayoutPage,
-  deleteWorkspaceLayoutPage,
-  duplicateWorkspaceLayoutPage,
   normalizeWorkspaceLayoutState,
-  renameWorkspaceLayoutPage,
   replaceWorkspaceLayoutPage,
   resetWorkspaceLayoutPage,
   serializeWorkspaceLayoutState,
@@ -82,10 +78,6 @@ type WorkspaceState = {
   saveLayout: (sessionId: string, layoutJson: string) => Promise<void>
   saveWorkspaceLayoutPage: (sessionId: string, pageId: string, layoutJson: string | null) => Promise<void>
   setActiveLayoutPage: (sessionId: string, pageId: string) => void
-  createLayoutPage: (sessionId: string, name?: string) => void
-  renameLayoutPage: (sessionId: string, pageId: string, name: string) => void
-  deleteLayoutPage: (sessionId: string, pageId: string) => void
-  duplicateLayoutPage: (sessionId: string, pageId: string) => void
   resetLayoutPage: (sessionId: string, pageId: string) => void
   clearSession: (sessionId: string) => Promise<void>
   renamePaneTitle: (paneId: string, title: string, source: 'manual' | 'auto') => Promise<void>
@@ -210,7 +202,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activePaneId: undefined,
       panes,
       paneCompletionHighlights: prunePaneCompletionHighlights(state.paneCompletionHighlights, panes),
-      layoutJson: attached.layoutJson ?? null,
+      layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
       workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: workspaceLayout },
     }))
     return attached
@@ -401,38 +393,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   setActiveLayoutPage: (sessionId: string, pageId: string) => {
     const next = setActiveWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), pageId)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
-  },
-  createLayoutPage: (sessionId: string, name?: string) => {
-    const next = createWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), name)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
-  },
-  renameLayoutPage: (sessionId: string, pageId: string, name: string) => {
-    const next = renameWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), pageId, name)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
-  },
-  deleteLayoutPage: (sessionId: string, pageId: string) => {
-    const next = deleteWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), pageId)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
-  },
-  duplicateLayoutPage: (sessionId: string, pageId: string) => {
-    const next = duplicateWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), pageId)
     set((state) => ({
       workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
       layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,

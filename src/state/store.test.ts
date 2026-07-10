@@ -86,6 +86,7 @@ describe('workspace store profiles', () => {
       panes: {},
       manualPaneTitles: {},
       layoutJson: null,
+      workspaceLayouts: {},
       status: 'ready',
       error: undefined,
       hermesPendingPrompts: {},
@@ -183,7 +184,7 @@ describe('workspace store profiles', () => {
     })
   })
 
-  test('createSession persists a workspace folder and launches the initial pane there', async () => {
+  test('createSession persists a workspace folder and launches exactly one initial pane there', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'create_session') return createdSession
       if (command === 'list_sessions') return [createdSession]
@@ -202,6 +203,41 @@ describe('workspace store profiles', () => {
       sessionId: 'session-workspace',
       cfg: expect.objectContaining({ cwd: 'E:/repo' }),
     })
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'spawn_pane')).toHaveLength(1)
+    expect(useWorkspaceStore.getState().workspaceLayouts[createdSession.id]).toMatchObject({
+      activePageId: 'terminal',
+      pages: [
+        { id: 'terminal', name: 'Terminal', layoutJson: null },
+        { id: 'planning', name: 'Kanban + Agent', layoutJson: null },
+      ],
+    })
+  })
+
+  test('attachSession normalizes persisted layouts to the two fixed pages', async () => {
+    const persistedLayout = JSON.stringify({
+      version: 2,
+      activePageId: 'scratch',
+      pages: [
+        { id: 'scratch', name: 'Scratch', layoutJson: null, createdAt: 1, updatedAt: 1 },
+        { id: 'planning', name: 'Old Planning', layoutJson: null, createdAt: 2, updatedAt: 3 },
+      ],
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: persistedLayout, panes: [nonAgentPane] }
+      return null
+    })
+    useWorkspaceStore.setState({ sessions: [createdSession] })
+
+    await useWorkspaceStore.getState().attachSession(createdSession.id)
+
+    expect(useWorkspaceStore.getState().workspaceLayouts[createdSession.id]).toMatchObject({
+      activePageId: 'terminal',
+      pages: [
+        { id: 'terminal', name: 'Terminal', layoutJson: null },
+        { id: 'planning', name: 'Kanban + Agent', layoutJson: null, createdAt: 2, updatedAt: 3 },
+      ],
+    })
+    expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}').pages.map((page: { id: string }) => page.id)).toEqual(['terminal', 'planning'])
   })
 
   test('bootstrap loads sessions without auto-opening a workspace', async () => {

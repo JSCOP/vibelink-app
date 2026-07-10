@@ -25,6 +25,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const paneId = props.params?.paneId
   const panelApi = props.api
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const activePaneId = useWorkspaceStore((state) => state.activePaneId)
   // Panels can be created before their pane process exists (panel-first spawn
   // measures the host to size the PTY). Until the pane is in the store there
   // is nothing to attach to on the daemon side.
@@ -157,7 +158,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   return (
-    <div className="terminal-panel-shell" data-pane-id={paneId} data-drop-position={dropPosition ?? undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onDragOver={onPaneDragOver} onDragLeave={onPaneDragLeave} onDrop={onPaneDrop} onContextMenu={onContextMenu}>
+    <div className="terminal-panel-shell" data-pane-id={paneId} data-active={activePaneId === paneId ? 'true' : undefined} data-drop-position={dropPosition ?? undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onDragOver={onPaneDragOver} onDragLeave={onPaneDragLeave} onDrop={onPaneDrop} onContextMenu={onContextMenu}>
       <div ref={hostRef} className="dock-terminal-host" />
       {contextMenu ? (
         <>

@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Camera, Copy, Edit2, Ellipsis, GitCompare, LayoutGrid, ListTodo, Minus, Plus, Save, Settings2, Square, TerminalSquare, Trash2, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Camera, Ellipsis, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
@@ -27,7 +27,6 @@ import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
 
-type TerminalGridPreference = { cols: number; rows: number }
 
 type CaptureShortcutAction = 'captureImage' | 'captureQuickImage' | 'captureVideo'
 type CaptureShortcutRegistration = { action: CaptureShortcutAction; label: string; accelerator: string }
@@ -52,8 +51,6 @@ function App() {
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
   const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null>(null)
-  const [terminalGridPreference, setTerminalGridPreference] = useState<TerminalGridPreference | null>(null)
-  const [pendingTemplate, setPendingTemplate] = useState<{ sessionId: string; templateId?: string; cols: number; rows: number; occupiedGrid?: TerminalGridPreference | null; profileId?: string | null; requestId: number } | null>(null)
   const [ffmpegNotice, setFfmpegNotice] = useState<string | null>(null)
   const [ffmpegDownload, setFfmpegDownload] = useState<FfmpegDownloadProgress | null>(null)
   const [recordingStartedAtMs, setRecordingStartedAtMs] = useState<number | null>(null)
@@ -81,10 +78,6 @@ function App() {
   const clearSession = useWorkspaceStore((state) => state.clearSession)
   const workspaceLayouts = useWorkspaceStore((state) => state.workspaceLayouts)
   const setActiveLayoutPage = useWorkspaceStore((state) => state.setActiveLayoutPage)
-  const createLayoutPage = useWorkspaceStore((state) => state.createLayoutPage)
-  const renameLayoutPage = useWorkspaceStore((state) => state.renameLayoutPage)
-  const deleteLayoutPage = useWorkspaceStore((state) => state.deleteLayoutPage)
-  const duplicateLayoutPage = useWorkspaceStore((state) => state.duplicateLayoutPage)
   const resetLayoutPage = useWorkspaceStore((state) => state.resetLayoutPage)
   const settings = useWorkspaceStore((state) => state.settings)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
@@ -230,11 +223,8 @@ function App() {
     void openSession(sessionId)
   }
 
-  const createWorkspace = async (name: string, templateId: string, workspaceFolder: string | null, profileId: string) => {
-    const created = await createSession(name || undefined, workspaceFolder, profileId)
-    const template = templateFromId(templateId)
-    setTerminalGridPreference({ cols: template.cols, rows: template.rows })
-    setPendingTemplate({ sessionId: created.id, templateId, cols: template.cols, rows: template.rows, profileId, requestId: Date.now() })
+  const createWorkspace = async (name: string, workspaceFolder: string | null, profileId: string) => {
+    await createSession(name || undefined, workspaceFolder, profileId)
     setIsCreateOpen(false)
   }
 
@@ -242,7 +232,6 @@ function App() {
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!sessionId) return
     await clearSession(sessionId)
-    setTerminalGridPreference(null)
   }
 
   const reloadAfterRestart = async () => {
@@ -315,32 +304,6 @@ function App() {
     setIsWindowMenuOpen(false)
   }
 
-  const addLayoutPage = () => {
-    if (!activeSessionId) return
-    persistActiveWorkspaceLayout()
-    const name = window.prompt('Layout page name', `Layout ${(activeWorkspaceLayout?.pages.length ?? 0) + 1}`)?.trim()
-    if (!name) return
-    createLayoutPage(activeSessionId, name)
-  }
-
-  const renameCurrentLayoutPage = () => {
-    if (!activeSessionId || !activeLayoutPage) return
-    const name = window.prompt('Rename layout page', activeLayoutPage.name)?.trim()
-    if (!name) return
-    renameLayoutPage(activeSessionId, activeLayoutPage.id, name)
-  }
-
-  const duplicateCurrentLayoutPage = () => {
-    if (!activeSessionId || !activeLayoutPage) return
-    persistActiveWorkspaceLayout()
-    duplicateLayoutPage(activeSessionId, activeLayoutPage.id)
-  }
-
-  const deleteCurrentLayoutPage = () => {
-    if (!activeSessionId || !activeLayoutPage || (activeWorkspaceLayout?.pages.length ?? 0) <= 1) return
-    if (!window.confirm(`Delete layout page "${activeLayoutPage.name}"?`)) return
-    deleteLayoutPage(activeSessionId, activeLayoutPage.id)
-  }
 
   const resetCurrentLayoutPage = () => {
     if (!activeSessionId || !activeLayoutPage) return
@@ -489,14 +452,10 @@ function App() {
                 aria-selected={page.id === activeWorkspaceLayout?.activePageId}
                 className={page.id === activeWorkspaceLayout?.activePageId ? 'active' : undefined}
                 onClick={() => switchLayoutPage(page.id)}
-                onDoubleClick={renameCurrentLayoutPage}
               >
                 {page.name}
               </button>
             ))}
-            <button type="button" title="New layout page" disabled={!activeSessionId} onClick={addLayoutPage}>
-              <Plus size={13} />
-            </button>
           </div>
           <div className="window-menu" ref={pageMenuRef}>
             <button type="button" className="topbar-icon-button" disabled={!activeSessionId} title="Layout page actions" aria-haspopup="menu" aria-expanded={isPageMenuOpen} onClick={() => setIsPageMenuOpen((open) => !open)}>
@@ -507,17 +466,8 @@ function App() {
                 <button type="button" role="menuitem" onClick={() => { setSaveLayoutRequestId((id) => id + 1); setIsPageMenuOpen(false) }}>
                   <Save size={14} /> Save layout
                 </button>
-                <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); renameCurrentLayoutPage() }}>
-                  <Edit2 size={14} /> Rename page
-                </button>
-                <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); duplicateCurrentLayoutPage() }}>
-                  <Copy size={14} /> Duplicate page
-                </button>
                 <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); resetCurrentLayoutPage() }}>
                   <Eraser size={14} /> Reset page
-                </button>
-                <button type="button" role="menuitem" disabled={(activeWorkspaceLayout?.pages.length ?? 0) <= 1} onClick={() => { setIsPageMenuOpen(false); deleteCurrentLayoutPage() }}>
-                  <Trash2 size={14} /> Delete page
                 </button>
               </div>
             ) : null}
@@ -563,14 +513,9 @@ function App() {
               onApiReady={(api) => { apiRef.current = api }}
               onActionsReady={setWindowActions}
               onChromeStateChange={setChromeState}
-              pendingTemplate={pendingTemplate}
-              arrangeGrid={terminalGridPreference}
               resizeSnapTolerance={settings.resizeSnapTolerance}
               windowRequest={workspaceWindowRequest}
               saveLayoutRequestId={saveLayoutRequestId}
-              onTemplateApplied={(requestId) => {
-                setPendingTemplate((current) => current?.requestId === requestId ? null : current)
-              }}
             />
           </div>
         )}
@@ -584,7 +529,7 @@ function App() {
         ) : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
-        {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, templateId, workspaceFolder, profileId) => void createWorkspace(name, templateId, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
         {ffmpegDownload ? (
           <div className="ffmpeg-download-toast" role="status" aria-live="polite">
@@ -741,12 +686,5 @@ function globalShortcutKeyName(token: string): string | null {
   return token.charAt(0).toUpperCase() + token.slice(1)
 }
 
-function templateFromId(templateId: string): { cols: number; rows: number } {
-  const [cols, rows] = templateId.split('x').map(Number)
-  return {
-    cols: Number.isFinite(cols) && cols > 0 ? cols : 1,
-    rows: Number.isFinite(rows) && rows > 0 ? rows : 1,
-  }
-}
 
 export default App
