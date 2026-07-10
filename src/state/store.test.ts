@@ -274,7 +274,7 @@ describe('workspace store profiles', () => {
       sessionId: 'session-workspace',
       cfg: expect.objectContaining({
         shell: 'ssh',
-        args: ['-t', 'me@dev.example.com', "cd -- '/srv/app' && exec \"${SHELL:-sh}\" -l"],
+        args: ['-t', 'me@dev.example.com', "cd -- 'E:/repo' && exec \"${SHELL:-sh}\" -l"],
         cwd: 'E:/local-ssh-launch-dir',
         title: 'SSH Dev',
       }),
