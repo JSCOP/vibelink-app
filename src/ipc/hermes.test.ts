@@ -106,6 +106,31 @@ describe('Hermes ACP startup', () => {
     expect(startCalls).toHaveLength(1)
   })
 
+  test('setup-required errors stay in the agent panel instead of the global banner', async () => {
+    const { startHermesOutputStream } = await import('./hermes')
+    await startHermesOutputStream({ force: true })
+
+    emitHermesEvent?.({
+      kind: 'error',
+      sessionId: 'session-a',
+      message: 'Hermes request session/new failed: {"code":-32603,"data":{"details":"No LLM provider configured. Run `hermes model` to select a provider, or run `hermes setup` for first-time configuration."},"message":"Internal error"}',
+    })
+
+    expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('error')
+    expect(useWorkspaceStore.getState().hermesTranscript['session-a']?.at(-1)?.text).toContain('No LLM provider configured')
+    expect(useWorkspaceStore.getState().error).toBeUndefined()
+  })
+
+  test('unexpected errors still raise the global banner', async () => {
+    const { startHermesOutputStream } = await import('./hermes')
+    await startHermesOutputStream({ force: true })
+
+    emitHermesEvent?.({ kind: 'error', sessionId: 'session-a', message: 'Hermes stdout stopped: broken pipe' })
+
+    expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('error')
+    expect(useWorkspaceStore.getState().error).toBe('Hermes: Hermes stdout stopped: broken pipe')
+  })
+
   test('stops and retries a stuck ACP startup once', async () => {
     let startAttempts = 0
     vi.mocked(invoke).mockImplementation(async (command: string) => {

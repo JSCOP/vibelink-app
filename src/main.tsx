@@ -13,6 +13,15 @@ if (isOverlay) {
   applyCaptureOverlayTransparency()
 }
 
+if (import.meta.env.DEV) {
+  // Live-debug handle for the WebView2 devtools (Ctrl+Shift+I in dev builds):
+  // lets a stuck pane be inspected in place, e.g.
+  //   __awtDebug.TerminalManager.getOrCreate('<pane-id>').term.buffer.active.type
+  void import('./terminal/TerminalManager').then(({ TerminalManager }) => {
+    ;(window as unknown as { __awtDebug?: unknown }).__awtDebug = { TerminalManager }
+  })
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {isOverlay ? <CaptureOverlay /> : <App />}

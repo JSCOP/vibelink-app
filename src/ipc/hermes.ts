@@ -19,6 +19,12 @@ export type HermesEvent =
 
 type HermesHistoryTurn = { role: 'user' | 'assistant'; text: string; thoughts: string }
 
+/** Setup-required failures (no provider/model configured yet) are guided inline
+ *  by the agent panel's empty state, so they must not raise the global banner. */
+export function isHermesSetupRequired(message: string): boolean {
+  return /no llm provider configured|hermes setup|hermes model/i.test(message)
+}
+
 let registration: Promise<void> | undefined
 const startPromises = new Map<string, Promise<void>>()
 const DEFAULT_START_TIMEOUT_MS = 60_000
@@ -84,7 +90,7 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
     } else if (event.kind === 'error') {
       store.appendHermesText(event.sessionId, 'message', `Hermes error: ${event.message}`)
       store.setHermesStatus(event.sessionId, 'error')
-      store.setError(`Hermes: ${event.message}`)
+      if (!isHermesSetupRequired(event.message)) store.setError(`Hermes: ${event.message}`)
     } else if (event.kind === 'exited') {
       store.setHermesStatus(event.sessionId, 'idle')
     }

@@ -318,7 +318,7 @@ export function OrchestratorChat() {
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
         <h3>Configure this workspace&apos;s AWT Agent</h3>
         <p>Provider, login, and model selection come from the native Hermes CLI. Run <code>hermes model</code>, complete login if prompted, then Refresh.</p>
-        {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed to start. See the top banner for the exact error. If it mentions the workspace folder, open or recreate that folder; if it mentions auth, run Configure model &amp; login.</p> : null}
+        {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed to start — this workspace has no provider/model configured yet. Use Model below to run <code>hermes model</code>, complete login if prompted, then Refresh.</p> : null}
         <div className="hermes-runtime-note">
           <small>Hermes CLI: {hermesCli || 'resolving…'}</small>
           <small>Workspace folder: {workspaceFolderLabel}</small>
