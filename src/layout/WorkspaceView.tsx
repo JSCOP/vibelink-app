@@ -4,7 +4,7 @@ import { WorkspaceWindowTab } from '../components/WorkspaceWindowTab'
 import { TerminalTab } from '../components/TerminalTab'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
-import { profileById } from '../state/profiles'
+import { profileById, selectedProfileForWorkspace } from '../state/profiles'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
 import type { PaneMeta } from '../ipc/types'
 import { PlaceholderPanel, TerminalPanePanel } from './TerminalPanePanel'
@@ -24,6 +24,7 @@ import { shouldRestoreDockviewLayout } from './layoutRestore'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
 import { activeWorkspaceLayoutPage, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
+import { awtDockviewTheme } from './dockviewTheme'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { OrchestratorChat } from '../components/OrchestratorChat'
@@ -125,7 +126,7 @@ function TerminalWindowPanel(props: IDockviewPanelProps) {
     <WindowPanelShell panelId={props.api.id} className="workspace-window-terminal">
       <ErrorBoundary label="Terminal window">
         <div ref={bridge?.setDockElement} className="terminal-window-dock dockview-theme-awt" data-terminal-window-dock="true" data-resize-mode="connected">
-          <DockviewReact components={terminalComponents} onReady={bridge?.onReady ?? noopTerminalReady} defaultRenderer="always" defaultTabComponent={TerminalTab} disableDnd />
+          <DockviewReact components={terminalComponents} onReady={bridge?.onReady ?? noopTerminalReady} defaultRenderer="always" defaultTabComponent={TerminalTab} disableDnd theme={awtDockviewTheme} />
           {bridge ? (
             <ConnectedResizeLayer
               handles={bridge.resizeHandles}
@@ -552,9 +553,22 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (!api || !sessionId) return
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       activatePane(paneId)
-      const pane = await spawnPane(sessionId)
-      addTerminalPanel(api, pane, { referencePanel: paneId, direction })
+      // Panel first, process second: the split resizes the sibling and sizes
+      // the new host before the shell exists, so the program never draws its
+      // startup frames across a resize.
+      const profile = selectedProfileForWorkspace(useWorkspaceStore.getState().settings, sessionId)
+      const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
+      addTerminalPanel(api, pending, { referencePanel: paneId, direction })
       layoutTerminalDockview(api)
+      const size = await measuredSpawnSize(pending.id)
+      try {
+        await spawnPane(sessionId, { paneId: pending.id, cols: size?.cols, rows: size?.rows })
+      } catch (error) {
+        api.getPanel(pending.id)?.api.close()
+        TerminalManager.dispose(pending.id)
+        useWorkspaceStore.getState().setError(String(error))
+        return
+      }
       // Splitting halves the sibling pane; recover it alongside the new one.
       reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       persistLayoutSoon()
@@ -973,9 +987,20 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         if (!terminalApi) return
         const livePaneCount = Object.keys(useWorkspaceStore.getState().panes).length
         if (livePaneCount === 0) {
-          const pane = await spawnPane(sessionId, { profileId })
-          addTerminalPanel(terminalApi, pane)
-          TerminalManager.focus(pane.id)
+          const profile = profileById(useWorkspaceStore.getState().settings, profileId)
+          const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
+          addTerminalPanel(terminalApi, pending)
+          layoutTerminalDockview(terminalApi)
+          const size = await measuredSpawnSize(pending.id)
+          try {
+            await spawnPane(sessionId, { paneId: pending.id, profileId, cols: size?.cols, rows: size?.rows })
+          } catch (error) {
+            terminalApi.getPanel(pending.id)?.api.close()
+            TerminalManager.dispose(pending.id)
+            useWorkspaceStore.getState().setError(String(error))
+            return
+          }
+          TerminalManager.focus(pending.id)
         } else if (terminalApi.totalPanels === 0) {
           loadedTerminalPageRef.current = null
           loadTerminalPaneLayout()
@@ -1132,24 +1157,45 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const existingPanes = Object.values(useWorkspaceStore.getState().panes)
       const existingPaneIds = existingPanes.map((pane) => pane.id)
       const missingPaneCount = Math.max(0, targetPaneCount - existingPanes.length)
-      const newPanes: PaneMeta[] = []
+      // Panels first, processes second: lay out placeholder panels for the new
+      // panes, let dockview settle, then spawn each PTY at the exact cell grid
+      // its terminal already has. Spawning first made every TUI draw its first
+      // frames across a burst of resizes, which duplicated banners/menus.
+      const pendingPanes: PaneMeta[] = Array.from({ length: missingPaneCount }, (_, index) =>
+        pendingPaneMeta(crypto.randomUUID(), `${profile.name} ${existingPanes.length + index + 1}`, profile.icon))
 
-      for (let index = 0; index < missingPaneCount; index += 1) {
-        const pane = await spawnPane(sessionId, { profileId, title: `${profile.name} ${existingPanes.length + newPanes.length + 1}` })
-        newPanes.push(pane)
-      }
-
-      const paneById = new Map([...existingPanes, ...newPanes].map((pane) => [pane.id, pane]))
+      const paneById = new Map([...existingPanes, ...pendingPanes].map((pane) => [pane.id, pane]))
       const gridPaneIds = missingPaneCount > 0
-        ? expandPaneIdsIntoGrid(existingPaneIds, newPanes.map((pane) => pane.id), occupiedGrid ?? occupiedGridForPaneCount(existingPanes.length), template)
+        ? expandPaneIdsIntoGrid(existingPaneIds, pendingPanes.map((pane) => pane.id), occupiedGrid ?? occupiedGridForPaneCount(existingPanes.length), template)
         : existingPaneIds.slice(0, targetPaneCount)
       const gridPaneIdSet = new Set(gridPaneIds)
       const overflowPaneIds = existingPaneIds.filter((paneId) => !gridPaneIdSet.has(paneId))
       const gridPanes = gridPaneIds.map((paneId) => paneById.get(paneId)).filter((pane): pane is PaneMeta => pane !== undefined)
       const overflowPanes = overflowPaneIds.map((paneId) => paneById.get(paneId)).filter((pane): pane is PaneMeta => pane !== undefined)
       applyGridLayout(api, template, gridPanes, overflowPanes)
-
       layoutTerminalDockview(api)
+
+      try {
+        for (const pending of pendingPanes) {
+          const size = await measuredSpawnSize(pending.id)
+          await spawnPane(sessionId, {
+            paneId: pending.id,
+            profileId,
+            title: pending.config.title ?? undefined,
+            cols: size?.cols,
+            rows: size?.rows,
+          })
+        }
+      } catch (error) {
+        for (const pending of pendingPanes) {
+          if (!useWorkspaceStore.getState().panes[pending.id]) {
+            api.getPanel(pending.id)?.api.close()
+            TerminalManager.dispose(pending.id)
+          }
+        }
+        useWorkspaceStore.getState().setError(String(error))
+      }
+
       reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       loadedSessionRef.current = sessionId
       loadedPageRef.current = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId ?? loadedPageRef.current
@@ -1652,6 +1698,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
                 defaultRenderer="always"
                 defaultTabComponent={WorkspaceWindowTab}
                 disableDnd
+                theme={awtDockviewTheme}
               />
               <ConnectedResizeLayer
                 handles={resizeHandles}
@@ -1674,6 +1721,29 @@ async function waitForDockviewApi(ref: { current: DockviewApi | null }, attempts
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   }
   return ref.current
+}
+
+/** Placeholder metadata for a pane whose panel is created before its process.
+ *  Only the id, title, and icon reach the dockview panel params; the real
+ *  PaneMeta replaces it in the store once spawn_pane returns. */
+function pendingPaneMeta(paneId: string, title: string | null, icon?: string | null): PaneMeta {
+  return {
+    id: paneId,
+    alive: true,
+    config: { paneId, shell: null, args: [], cwd: null, env: [], title, icon: icon ?? null, profileId: null, cols: 120, rows: 32 },
+  }
+}
+
+/** Wait until the pending panel's terminal host is laid out and fitted, then
+ *  report its cell grid so the PTY can spawn at that exact size. Falls back to
+ *  undefined (spawn default) if the host never becomes measurable. */
+async function measuredSpawnSize(paneId: string, attempts = 30): Promise<{ cols: number; rows: number } | undefined> {
+  for (let index = 0; index < attempts; index += 1) {
+    const size = TerminalManager.measureForSpawn(paneId)
+    if (size) return size
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  }
+  return undefined
 }
 
 function ConnectedResizeLayer({

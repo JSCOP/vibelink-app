@@ -17,10 +17,11 @@ import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
 import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
+import type { HermesWorkspaceState } from './ipc/types'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
-import { terminalThemeDefinitionById, themeCssVariables } from './state/terminalThemes'
+import { applyThemeToDocument } from './state/themePreview'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import './styles/theme.css'
 import './styles/kanban.css'
@@ -47,6 +48,7 @@ function App() {
   const [windowActions, setWindowActions] = useState<WorkspaceWindowActions | null>(null)
   const [chromeState, setChromeState] = useState<WorkspaceChromeState | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const sidebarEdgeHoverTimerRef = useRef<number | null>(null)
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
   const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null>(null)
@@ -95,13 +97,7 @@ function App() {
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('awt:lastActiveSessionId'))
 
   useEffect(() => {
-    const root = document.documentElement
-    const theme = terminalThemeDefinitionById(settings.terminalThemeId)
-    root.dataset.awtTheme = theme.id
-    root.style.colorScheme = theme.colorScheme
-    for (const [name, value] of Object.entries(themeCssVariables(theme.id))) {
-      root.style.setProperty(name, value)
-    }
+    applyThemeToDocument(settings.terminalThemeId)
   }, [settings.terminalThemeId])
 
   useEffect(() => {
@@ -196,7 +192,11 @@ function App() {
     const commandOverride = settings.hermesCommand || null
     // Workspace switch work is intentionally backgrounded: the derived profile
     // changes with activeSessionId immediately, while ACP warmup runs in parallel.
-    void startHermesAgent({ sessionId, commandOverride, workspaceFolder }).catch(() => {})
+    // Warmup only helps once `hermes model` has configured the workspace; without
+    // a provider the handshake can only fail, so skip it instead of surfacing errors.
+    void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId })
+      .then((state) => state.model ? startHermesAgent({ sessionId, commandOverride, workspaceFolder }) : undefined)
+      .catch(() => {})
   }, [activeSessionId, activeSession?.workspaceFolder, settings.hermesCommand])
 
   useEffect(() => {
@@ -206,6 +206,20 @@ function App() {
       TerminalManager.syncAllPtySizes()
     })
   }, [activeLayoutPage?.id])
+
+  useEffect(() => {
+    // Suppress the stock WebView2 context menu (Back/Reload/Print/...) —
+    // terminal panes provide their own menu, and the browser one is never
+    // useful in the app. Editable fields keep the native menu for spellcheck
+    // and clipboard access.
+    const onContextMenu = (event: Event) => {
+      const target = event.target
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]')) return
+      event.preventDefault()
+    }
+    document.addEventListener('contextmenu', onContextMenu)
+    return () => document.removeEventListener('contextmenu', onContextMenu)
+  }, [])
   const persistActiveWorkspaceLayout = () => {
     setSaveLayoutRequestId((id) => id + 1)
   }
@@ -406,7 +420,25 @@ function App() {
 
   return (
     <main className="app-shell" data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--awt-ui-scale': settings.uiScale, '--awt-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
-      <div className="sidebar-hover-edge" onPointerEnter={() => setIsSidebarOpen(true)} />
+      <div
+        className="sidebar-hover-edge"
+        onPointerEnter={(event) => {
+          // A pressed button means the user is mid-drag (terminal text
+          // selection reaching the screen edge) — never fly the sidebar out
+          // over their selection. Intentional opens are a bare hover that
+          // dwells at the edge for a beat.
+          if (event.buttons !== 0 || sidebarEdgeHoverTimerRef.current !== null) return
+          sidebarEdgeHoverTimerRef.current = window.setTimeout(() => {
+            sidebarEdgeHoverTimerRef.current = null
+            setIsSidebarOpen(true)
+          }, 180)
+        }}
+        onPointerLeave={() => {
+          if (sidebarEdgeHoverTimerRef.current === null) return
+          window.clearTimeout(sidebarEdgeHoverTimerRef.current)
+          sidebarEdgeHoverTimerRef.current = null
+        }}
+      />
       <Sidebar
         isOpen={isSidebarOpen}
         sessions={orderedSessions}

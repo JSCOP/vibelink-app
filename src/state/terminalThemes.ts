@@ -154,6 +154,60 @@ export const terminalThemes = [
     },
   }),
   defineTheme({
+    id: 'pureBlack',
+    name: 'Pure Black',
+    category: 'AWT',
+    colorScheme: 'dark',
+    description: 'True-black background with high-contrast standard ANSI colors.',
+    terminal: {
+      background: '#000000', foreground: '#e6e6e6', cursor: '#ffffff', cursorAccent: '#000000', selectionBackground: '#3a3a3a',
+      black: '#000000', red: '#cd3131', green: '#0dbc79', yellow: '#e5e510', blue: '#2472c8', magenta: '#bc3fbc', cyan: '#11a8cd', white: '#e5e5e5',
+      brightBlack: '#666666', brightRed: '#f14c4c', brightGreen: '#23d18b', brightYellow: '#f5f543', brightBlue: '#3b8eea', brightMagenta: '#d670d6', brightCyan: '#29b8db', brightWhite: '#ffffff',
+    },
+    ui: {
+      // Neutral chrome: no blue-tinted borders/hover — separation comes from
+      // plain white alpha so the whole app stays pitch black and high contrast.
+      background: '#000000',
+      sidebar: '#000000',
+      panel: '#0a0a0a',
+      panel2: '#111111',
+      panel3: '#161616',
+      input: '#0d0d0d',
+      inputStrong: '#050505',
+      border: 'rgba(255, 255, 255, 0.24)',
+      borderSoft: 'rgba(255, 255, 255, 0.13)',
+      hover: 'rgba(255, 255, 255, 0.09)',
+      dialog: '#0a0a0a',
+      scrollbarTrack: '#000000',
+      scrollbarThumb: 'rgba(255, 255, 255, 0.4)',
+    },
+  }),
+  defineTheme({
+    id: 'carbon',
+    name: 'Carbon',
+    category: 'AWT',
+    colorScheme: 'dark',
+    description: 'Neutral charcoal without any blue tint, ordinary contrast.',
+    terminal: {
+      background: '#121212', foreground: '#dcdcdc', cursor: '#dcdcdc', cursorAccent: '#121212', selectionBackground: '#3f3f3f',
+      black: '#121212', red: '#e06c75', green: '#98c379', yellow: '#e5c07b', blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#dcdcdc',
+      brightBlack: '#7a7a7a', brightRed: '#ef8a93', brightGreen: '#b2d69a', brightYellow: '#efd394', brightBlue: '#8cc6f4', brightMagenta: '#d99ae8', brightCyan: '#7fcdd6', brightWhite: '#ffffff',
+    },
+    ui: {
+      background: '#121212',
+      sidebar: '#0e0e0e',
+      panel: '#1a1a1a',
+      panel2: '#202020',
+      panel3: '#262626',
+      input: '#1c1c1c',
+      inputStrong: '#0c0c0c',
+      border: 'rgba(255, 255, 255, 0.2)',
+      borderSoft: 'rgba(255, 255, 255, 0.11)',
+      hover: 'rgba(255, 255, 255, 0.07)',
+      dialog: '#1a1a1a',
+    },
+  }),
+  defineTheme({
     id: 'campbell',
     name: 'Campbell',
     category: 'Windows Terminal',
@@ -421,7 +475,13 @@ export function appThemeById(id: string): AppThemeTokens {
 
 export function themeCssVariables(id: string): Record<`--awt-${string}`, string> {
   const theme = appThemeById(id)
+  const terminal = terminalThemeDefinitionById(id).terminal
   return {
+    // Terminal host + xterm viewport backgrounds are painted from these vars
+    // (with !important in App.css), so they MUST track the selected theme —
+    // as static :root defaults they pinned every theme's terminal to Abyss.
+    '--awt-terminal-bg': terminal.background,
+    '--awt-terminal-fg': terminal.foreground,
     '--awt-bg': theme.background,
     '--awt-sidebar': theme.sidebar,
     '--awt-panel': theme.panel,

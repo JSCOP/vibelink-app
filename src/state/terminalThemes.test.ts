@@ -85,7 +85,7 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 
 describe('terminalThemes', () => {
   test('provides the expected curated theme count with unique ids', () => {
-    expect(terminalThemes).toHaveLength(24)
+    expect(terminalThemes).toHaveLength(26)
     expect(new Set(terminalThemes.map((theme) => theme.id)).size).toBe(terminalThemes.length)
     expect(terminalThemes.some((theme) => theme.id === defaultTerminalThemeId)).toBe(true)
   })
@@ -107,6 +107,11 @@ describe('terminalThemes', () => {
       }
       expect(variables['--awt-bg']).toBe(theme.ui.background)
       expect(variables['--awt-accent']).toBe(theme.ui.accent)
+      // App.css paints terminal hosts/viewports from these (with !important);
+      // if they fall back to the static :root defaults every theme's terminal
+      // stays pinned to the Abyss background.
+      expect(variables['--awt-terminal-bg']).toBe(theme.terminal.background)
+      expect(variables['--awt-terminal-fg']).toBe(theme.terminal.foreground)
     }
   })
 

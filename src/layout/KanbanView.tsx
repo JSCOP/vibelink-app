@@ -5,6 +5,7 @@ import { OrchestratorChat } from '../components/OrchestratorChat'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { useWorkspaceStore } from '../state/store'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
+import { awtDockviewTheme } from './dockviewTheme'
 import '../styles/kanban.css'
 
 const components = {
@@ -152,7 +153,7 @@ export function KanbanView({ sessionId }: KanbanViewProps) {
         <button type="button" onClick={resetLayout}>Reset layout</button>
       </div>
       <div ref={dockRef} className="dockview-theme-awt kanban-dock">
-        <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" />
+        <DockviewReact components={components} onReady={handleReady} defaultRenderer="always" theme={awtDockviewTheme} />
       </div>
     </section>
   )

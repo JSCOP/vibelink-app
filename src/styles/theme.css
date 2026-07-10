@@ -49,7 +49,9 @@
   --dv-background-color: var(--awt-panel);
   --dv-paneview-active-outline-color: transparent;
   --dv-tabs-and-actions-container-font-size: 13px;
-  --dv-tabs-and-actions-container-height: 35px;
+  /* The dockview shell also carries this class (theme prop), so this var must
+     track the pane header height or it would shadow the dock wrappers' value. */
+  --dv-tabs-and-actions-container-height: var(--awt-pane-header-height, 28px);
   --dv-drag-over-background-color: var(--awt-accent-soft);
   --dv-drag-over-border-color: var(--awt-accent);
   --dv-tabs-container-scrollbar-color: var(--awt-scrollbar-thumb);
