@@ -9,6 +9,10 @@ import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
 import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type Profile, type ProfileKind, type Settings } from '../state/profiles'
 import { profileIconNames } from '../state/profileIcons'
 import { terminalThemeDefinitionById, terminalThemeGroups, type TerminalThemeId } from '../state/terminalThemes'
+import { applyThemeToDocument } from '../state/themePreview'
+import { TerminalManager } from '../terminal/TerminalManager'
+import { ThemePicker } from './ThemePicker'
+import { FontPicker } from './FontPicker'
 import { useWorkspaceStore } from '../state/store'
 import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
 
@@ -94,6 +98,8 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   const [runtimeMessage, setRuntimeMessage] = useState('')
   const [terminalMessage, setTerminalMessage] = useState('')
   const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null)
+  const [isThemePickerOpen, setThemePickerOpen] = useState(false)
+  const [isFontPickerOpen, setFontPickerOpen] = useState(false)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -276,8 +282,32 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
     onClose()
   }
 
+  // Theme changes preview live on the whole app (chrome + terminals) but only
+  // commit on Apply/OK; closing without committing reverts to the saved theme.
+  const previewTheme = (themeId: TerminalThemeId) => {
+    applyThemeToDocument(themeId)
+    TerminalManager.previewTheme(themeId)
+  }
+  const revertThemePreview = () => {
+    applyThemeToDocument(settings.terminalThemeId)
+    TerminalManager.previewTheme(null)
+  }
+  const closeSettings = () => {
+    revertThemePreview()
+    TerminalManager.previewFont(null)
+    onClose()
+  }
+  const openThemePicker = () => {
+    previewTheme(draft.terminalThemeId)
+    setThemePickerOpen(true)
+  }
+  const openFontPicker = () => {
+    TerminalManager.previewFont(draft.fontFamily)
+    setFontPickerOpen(true)
+  }
+
   return (
-    <div className="settings-backdrop awt-settings-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className={`settings-backdrop awt-settings-backdrop${isThemePickerOpen || isFontPickerOpen ? ' awt-settings-backdrop-hidden' : ''}`} role="presentation" onMouseDown={closeSettings}>
       <section className="settings-dialog awt-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <aside className="awt-settings-nav">
           <div className="awt-settings-search">
@@ -300,7 +330,7 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
         <main className="awt-settings-content">
           <header className="awt-settings-header">
             <h2 id="settings-title">{sections.find((section) => section.id === activeSection)?.label ?? 'Settings'}</h2>
-            <button type="button" className="settings-close" title="Close settings" onClick={onClose}>
+            <button type="button" className="settings-close" title="Close settings" onClick={closeSettings}>
               <X size={15} />
             </button>
           </header>
@@ -363,13 +393,22 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
 
             {activeSection === 'appearance' ? (
               <>
-                <SettingsGroup title="Font" description="Applies to terminal panes and AWT chrome after Apply or OK.">
+                <SettingsGroup title="Font" description="Font family previews live on terminal panes and commits on Apply or OK. Size, weight, and scale apply after Apply or OK.">
                   <label>
                     Font family
-                    <select value={draft.fontFamily} onChange={(event) => patchDraft({ fontFamily: event.target.value })}>
+                    <select
+                      value={draft.fontFamily}
+                      onChange={(event) => {
+                        patchDraft({ fontFamily: event.target.value })
+                        TerminalManager.previewFont(event.target.value)
+                      }}
+                    >
                       {fontChoices.map((font) => <option key={font} value={font}>{font}</option>)}
                     </select>
                   </label>
+                  <div className="awt-settings-actions">
+                    <button type="button" onClick={openFontPicker}>Browse fonts (live preview)</button>
+                  </div>
                   <div className="awt-settings-grid">
                     <label>Font size<input type="number" min="8" max="32" value={draft.fontSize} onChange={(event) => patchDraft({ fontSize: Number(event.target.value) })} /></label>
                     <label>Font weight<select value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })}>{fontWeightOptions.map((weight) => <option key={weight} value={weight}>{weight}</option>)}</select></label>
@@ -378,10 +417,17 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                   </div>
                   <div className="awt-settings-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>PS E:\repo&gt; AWT Agent ready</div>
                 </SettingsGroup>
-                <SettingsGroup title="Theme" description="One palette drives app chrome, settings, tabs, and terminal colors.">
+                <SettingsGroup title="Theme" description="One palette drives app chrome, settings, tabs, and terminal colors. Changes preview live and commit on Apply or OK.">
                   <label>
                     Theme
-                    <select value={draft.terminalThemeId} onChange={(event) => patchDraft({ terminalThemeId: event.target.value as TerminalThemeId })}>
+                    <select
+                      value={draft.terminalThemeId}
+                      onChange={(event) => {
+                        const themeId = event.target.value as TerminalThemeId
+                        patchDraft({ terminalThemeId: themeId })
+                        previewTheme(themeId)
+                      }}
+                    >
                       {terminalThemeGroups.map((group) => (
                         <optgroup key={group.category} label={group.category}>
                           {group.themes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}
@@ -389,6 +435,9 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                       ))}
                     </select>
                   </label>
+                  <div className="awt-settings-actions">
+                    <button type="button" onClick={openThemePicker}>Browse themes (live preview)</button>
+                  </div>
                   <div className="awt-theme-preview" style={{ background: selectedTheme.terminal.background, color: selectedTheme.terminal.foreground }}>
                     <span>{selectedTheme.name}</span>
                     <small>{selectedTheme.description}</small>
@@ -572,13 +621,44 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
           <footer className="awt-settings-footer">
             <span>Changes are staged until Apply or OK.</span>
             <div>
-              <button type="button" className="secondary-action" onClick={onClose}>Cancel</button>
+              <button type="button" className="secondary-action" onClick={closeSettings}>Cancel</button>
               <button type="button" className="secondary-action" onClick={apply}>Apply</button>
               <button type="button" className="primary-action" onClick={ok}>OK</button>
             </div>
           </footer>
         </main>
       </section>
+      {isThemePickerOpen ? (
+        <ThemePicker
+          value={draft.terminalThemeId}
+          onPreview={previewTheme}
+          onSelect={(themeId) => {
+            patchDraft({ terminalThemeId: themeId })
+            previewTheme(themeId)
+            setThemePickerOpen(false)
+          }}
+          onCancel={() => {
+            previewTheme(draft.terminalThemeId)
+            setThemePickerOpen(false)
+          }}
+        />
+      ) : null}
+      {isFontPickerOpen ? (
+        <FontPicker
+          value={draft.fontFamily}
+          installedFonts={installedFonts}
+          onPreview={(fontFamily) => TerminalManager.previewFont(fontFamily)}
+          onSelect={(fontFamily) => {
+            patchDraft({ fontFamily })
+            TerminalManager.previewFont(fontFamily)
+            setFontPickerOpen(false)
+          }}
+          onCancel={() => {
+            TerminalManager.previewFont(draft.fontFamily)
+            setFontPickerOpen(false)
+          }}
+        />
+      ) : null}
     </div>
   )
 }

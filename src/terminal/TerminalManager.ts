@@ -6,11 +6,12 @@ import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { terminalThemeById } from '../state/terminalThemes'
+import { terminalFontStack } from '../state/fonts'
 import { createTerminalOptions, defaultTerminalSettings, terminalLetterSpacing, terminalLineHeight, type TerminalVisualSettings } from './options'
 import { terminalHostBecameMeasurable, terminalHostMeasureState, type TerminalHostMeasureState } from './geometry'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
-import { terminalOutputAfterLastHardClear } from './clearSequences'
+import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
 import { agentActivityTracker, type AgentActivityActions } from './agentActivity'
 
 const MAX_FIT_ATTEMPTS = 120
@@ -207,6 +208,9 @@ class TerminalManagerImpl {
     }
 
     if (options.sessionId && (!entry.daemonAttached || previousSessionId !== options.sessionId)) {
+      // Fit synchronously before the daemon attach so a scrollback replay
+      // parses at the pane's real geometry instead of the constructor default.
+      this.safeFit(entry)
       entry.daemonAttached = true
       void invoke('attach_pane', { sessionId: options.sessionId, paneId })
     }
@@ -214,6 +218,12 @@ class TerminalManagerImpl {
     entry.observer?.disconnect()
     entry.observer = new ResizeObserver(() => this.fit(entry, 0))
     entry.observer.observe(container)
+    // Output held while the terminal was unopened parses now, after the
+    // synchronous fit above sized the grid to the real host.
+    if (entry.pendingOutput?.length) {
+      this.safeFit(entry)
+      this.flushAllOutput(entry)
+    }
     this.reflowEntry(entry, true)
     this.fitAfterFontsLoad(entry)
   }
@@ -233,6 +243,17 @@ class TerminalManagerImpl {
     if (bytes.byteLength === 0) return
     agentActivityTracker.noteOutput(paneId, bytes)
     const entry = this.getOrCreate(paneId)
+    // Output can start streaming before the pane's panel mounts (panes are
+    // attached daemon-side at spawn). Parsing it into an unopened terminal
+    // would use the constructor's default grid, not the pane's real one —
+    // hold the bytes until attach() has opened and fitted the terminal.
+    if (!entry.opened) {
+      entry.pendingOutput ??= []
+      entry.pendingOutput.push(bytes)
+      entry.pendingOutputBytes = (entry.pendingOutputBytes ?? 0) + bytes.byteLength
+      if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.trimPendingOutput(entry)
+      return
+    }
     if (bytes.byteLength < INSTANT_OUTPUT_BYTES
       && entry.outputFrame === undefined
       && entry.outputTimer === undefined
@@ -259,6 +280,56 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     void copyTerminalSelection(entry.term)
+  }
+
+  /** Live-preview a theme on every terminal without touching the committed
+   *  settings; pass null to revert to the committed theme. */
+  previewTheme(themeId: string | null): void {
+    const theme = terminalThemeById(themeId ?? this.settings.terminalThemeId)
+    for (const entry of this.entries.values()) {
+      entry.term.options.theme = theme
+    }
+  }
+
+  /** Live-preview a font family on every terminal without touching the
+   *  committed settings; pass null to revert to the committed font. */
+  previewFont(fontFamily: string | null): void {
+    const stack = terminalFontStack(fontFamily ?? this.settings.fontFamily)
+    for (const entry of this.entries.values()) {
+      if (entry.term.options.fontFamily === stack) continue
+      entry.term.options.fontFamily = stack
+      this.fitAfterFontsLoad(entry)
+      this.redrawAfterNextFrame(entry)
+      this.fit(entry, 0, true)
+    }
+  }
+
+  hasSelection(paneId: string): boolean {
+    return this.entries.get(paneId)?.term.hasSelection() ?? false
+  }
+
+  selectAll(paneId: string): void {
+    this.entries.get(paneId)?.term.selectAll()
+  }
+
+  paste(paneId: string, text: string): void {
+    if (text.length === 0) return
+    this.entries.get(paneId)?.term.paste(text)
+  }
+
+  /** Synchronously fit an opened pane and report its cell grid, so a PTY can
+   *  be spawned at the exact size the terminal already has — the program then
+   *  never draws its first frames across a resize. Returns null while the
+   *  host container is not yet measurable. */
+  measureForSpawn(paneId: string): { cols: number; rows: number } | null {
+    const entry = this.entries.get(paneId)
+    if (!entry?.opened) return null
+    try {
+      if (!this.safeFit(entry)) return null
+    } catch {
+      return null
+    }
+    return { cols: entry.term.cols, rows: entry.term.rows }
   }
 
   focus(paneId: string): void {
@@ -628,11 +699,21 @@ class TerminalManagerImpl {
     if (pendingBytes <= MAX_PENDING_OUTPUT_BYTES) return
 
     let trimmed = false
+    const preservedState: Uint8Array[] = []
     while (pending.length > 0 && pendingBytes > MAX_PENDING_OUTPUT_BYTES) {
       const dropped = pending.shift()
       if (!dropped) break
       pendingBytes -= dropped.byteLength
+      // Dropped backlog may contain terminal-STATE changes (alt-screen enter/
+      // leave, mouse modes, ...); losing those corrupts the emulator forever,
+      // so replay them ahead of the retained output.
+      preservedState.push(...terminalStateSequences(dropped))
       trimmed = true
+    }
+    if (preservedState.length > 0) {
+      const merged = concatUint8Arrays(preservedState, preservedState.reduce((total, part) => total + part.byteLength, 0))
+      pending.unshift(merged)
+      pendingBytes += merged.byteLength
     }
     entry.pendingOutputBytes = Math.max(0, pendingBytes)
     if (pending.length === 0) entry.pendingOutput = undefined

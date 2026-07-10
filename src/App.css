@@ -9,7 +9,9 @@
   position: fixed;
   inset: 0 auto 0 0;
   z-index: 32;
-  width: 10px;
+  /* Only the outermost sliver of the window: the leftmost terminal pane's
+     text must stay draggable without the sidebar flying out. */
+  width: 3px;
 }
 
 
@@ -357,6 +359,170 @@ button {
 
 .window-menu-popover button:hover {
   background: var(--awt-hover);
+}
+
+.terminal-context-backdrop {
+  inset: 0;
+  position: fixed;
+  z-index: calc(var(--z-popover) + 1);
+}
+
+.terminal-context-menu {
+  background: var(--awt-dialog);
+  border: 1px solid var(--awt-border);
+  border-radius: 4px;
+  box-shadow: var(--awt-shadow);
+  display: grid;
+  gap: 2px;
+  min-width: 176px;
+  padding: 5px;
+  position: fixed;
+  z-index: calc(var(--z-popover) + 2);
+}
+
+.terminal-context-menu button {
+  align-items: center;
+  color: var(--awt-text);
+  display: flex;
+  font: 12px/1 var(--awt-sans);
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 28px;
+  padding: 0 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.terminal-context-menu button:hover:not(:disabled) {
+  background: var(--awt-hover);
+}
+
+.terminal-context-menu button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+/* While a quick pick (theme/font) is open, the settings dialog steps aside so
+   the live workspace shows the previewed value undimmed; only the floating
+   picker stays. Doubled class specificity so the later `.settings-backdrop`
+   background/overlay rules cannot re-darken it. */
+.settings-backdrop.awt-settings-backdrop-hidden {
+  backdrop-filter: none;
+  background: transparent;
+}
+
+.settings-backdrop.awt-settings-backdrop-hidden > .settings-dialog {
+  display: none;
+}
+
+.awt-quick-pick-backdrop {
+  inset: 0;
+  position: fixed;
+  z-index: var(--z-modal);
+}
+
+.awt-quick-pick {
+  background: var(--awt-dialog);
+  border: 1px solid var(--awt-border);
+  border-radius: 6px;
+  box-shadow: var(--awt-shadow);
+  display: flex;
+  flex-direction: column;
+  left: 50%;
+  max-height: min(520px, calc(100vh - 96px));
+  position: fixed;
+  top: 44px;
+  transform: translateX(-50%);
+  width: min(600px, calc(100vw - 48px));
+}
+
+.awt-quick-pick-header {
+  align-items: center;
+  border-bottom: 1px solid var(--awt-border-soft);
+  color: var(--awt-text);
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.awt-quick-pick-header input {
+  background: var(--awt-input);
+  border: 1px solid var(--awt-border-soft);
+  border-radius: 3px;
+  color: var(--awt-text);
+  flex: 1;
+  font: 12px var(--awt-sans);
+  padding: 6px 8px;
+}
+
+.awt-quick-pick-list {
+  display: grid;
+  gap: 2px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.awt-quick-pick-category {
+  color: var(--awt-text);
+  font: 600 10px var(--awt-sans);
+  letter-spacing: 0.5px;
+  opacity: 0.55;
+  padding: 8px 8px 2px;
+  text-transform: uppercase;
+}
+
+.awt-quick-pick-list button {
+  align-items: center;
+  border-radius: 4px;
+  color: var(--awt-text);
+  display: flex;
+  gap: 10px;
+  font: 12px/1.3 var(--awt-sans);
+  padding: 6px 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.awt-quick-pick-list button[data-active='true'] {
+  background: var(--awt-accent-soft);
+  outline: 1px solid var(--awt-accent-border);
+}
+
+.awt-theme-picker-swatch {
+  align-items: center;
+  border: 1px solid var(--awt-border-soft);
+  border-radius: 3px;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  height: 20px;
+  justify-content: center;
+  width: 34px;
+}
+
+.awt-theme-picker-swatch span {
+  border-radius: 1px;
+  height: 10px;
+  width: 6px;
+}
+
+.awt-quick-pick-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.awt-quick-pick-description {
+  flex: 1;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.awt-quick-pick-empty {
+  font: 12px var(--awt-sans);
+  opacity: 0.6;
+  padding: 16px;
 }
 
 .layout-page-strip {

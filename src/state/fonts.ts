@@ -36,7 +36,7 @@ export function uiFontStack(fontFamily: string): string {
   return buildFontStack([fontFamily, ...defaultFontChoices.filter((font) => font !== 'monospace'), ...koreanFallbackFonts, 'monospace'])
 }
 
-function cssFontFamilyName(font: string): string {
+export function cssFontFamilyName(font: string): string {
   return /^[a-z-]+$/i.test(font) ? font : `'${font.replace(/'/g, "\\'")}'`
 }
 
