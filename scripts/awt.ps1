@@ -75,7 +75,7 @@ function Read-Text([string]$Path) {
 
 function Write-Text([string]$Path, [string]$Content, [switch]$DryRun) {
   if ($DryRun) { return }
-  Set-Content -LiteralPath $Path -Value $Content -NoNewline -Encoding UTF8
+  [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Get-JsonVersion([string]$Path) {
