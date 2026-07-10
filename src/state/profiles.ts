@@ -34,6 +34,7 @@ const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
 const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
 const agentNamePhrasePattern = /\b(?:claude code|oh my pi|oh-my-pi|ohmypi)\b/
 const agentProfileIcons = new Set(['bot', 'sparkles', 'zap'])
+const sixDigitHexColorPattern = /^#[0-9a-f]{6}$/i
 
 export type Settings = {
   fontFamily: string
@@ -42,6 +43,8 @@ export type Settings = {
   terminalFontWeight: number
   uiScale: number
   terminalThemeId: TerminalThemeId
+  selectedPaneHighlightColor: string
+  alarmHighlightColor: string
   terminalScrollbarVisible: boolean
   terminalTabsVisible: boolean
   cursorStyle: TerminalCursorStyle
@@ -204,6 +207,8 @@ export const defaultSettings: Settings = {
   terminalFontWeight: 400,
   uiScale: 1,
   terminalThemeId: defaultTerminalThemeId,
+  selectedPaneHighlightColor: '#ff9f1a',
+  alarmHighlightColor: '#7ee787',
   terminalScrollbarVisible: false,
   terminalTabsVisible: true,
   cursorStyle: 'bar',
@@ -244,6 +249,8 @@ export function normalizeSettings(value: unknown): Settings {
     terminalFontWeight: readNumberInRange(record?.terminalFontWeight, defaultSettings.terminalFontWeight, 100, 900),
     uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
+    selectedPaneHighlightColor: readHexColor(record?.selectedPaneHighlightColor, defaultSettings.selectedPaneHighlightColor),
+    alarmHighlightColor: readHexColor(record?.alarmHighlightColor, defaultSettings.alarmHighlightColor),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     terminalTabsVisible: readBoolean(record?.terminalTabsVisible, defaultSettings.terminalTabsVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
@@ -648,6 +655,12 @@ function readNonEmptyString(value: unknown, fallback: string): string {
   if (typeof value !== 'string') return fallback
   const normalized = value.trim()
   return normalized.length > 0 ? normalized : fallback
+}
+
+function readHexColor(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback
+  const normalized = value.trim()
+  return sixDigitHexColorPattern.test(normalized) ? normalized : fallback
 }
 
 function readProfileKind(value: unknown): ProfileKind {

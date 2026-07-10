@@ -133,6 +133,12 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   }, [activeSection, activeSessionId, draft.hermesCommand])
 
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
+  const previewHighlightColors = (patch: Partial<Pick<Settings, 'selectedPaneHighlightColor' | 'alarmHighlightColor'>>) => {
+    const selectedPaneHighlightColor = patch.selectedPaneHighlightColor ?? draft.selectedPaneHighlightColor
+    const alarmHighlightColor = patch.alarmHighlightColor ?? draft.alarmHighlightColor
+    patchDraft(patch)
+    applyThemeToDocument(draft.terminalThemeId, selectedPaneHighlightColor, alarmHighlightColor)
+  }
   const updateKeybinding = (id: KeybindingActionId, chord: string) => patchDraft({ keybindings: { ...draft.keybindings, [id]: chord } })
   const updateProfile = (profileId: string, patch: Partial<Profile>) => {
     setDraft((current) => ({
@@ -282,14 +288,14 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
     onClose()
   }
 
-  // Theme changes preview live on the whole app (chrome + terminals) but only
-  // commit on Apply/OK; closing without committing reverts to the saved theme.
+  // Theme and highlight changes preview live on the whole app but only commit
+  // on Apply/OK; closing without committing restores the saved palette.
   const previewTheme = (themeId: TerminalThemeId) => {
-    applyThemeToDocument(themeId)
+    applyThemeToDocument(themeId, draft.selectedPaneHighlightColor, draft.alarmHighlightColor)
     TerminalManager.previewTheme(themeId)
   }
   const revertThemePreview = () => {
-    applyThemeToDocument(settings.terminalThemeId)
+    applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor)
     TerminalManager.previewTheme(null)
   }
   const closeSettings = () => {
@@ -441,6 +447,24 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                   <div className="vibelink-theme-preview" style={{ background: selectedTheme.terminal.background, color: selectedTheme.terminal.foreground }}>
                     <span>{selectedTheme.name}</span>
                     <small>{selectedTheme.description}</small>
+                  </div>
+                  <div className="vibelink-settings-grid">
+                    <label>
+                      Selected pane highlight
+                      <input
+                        type="color"
+                        value={draft.selectedPaneHighlightColor}
+                        onChange={(event) => previewHighlightColors({ selectedPaneHighlightColor: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Alarm highlight
+                      <input
+                        type="color"
+                        value={draft.alarmHighlightColor}
+                        onChange={(event) => previewHighlightColors({ alarmHighlightColor: event.target.value })}
+                      />
+                    </label>
                   </div>
                 </SettingsGroup>
               </>

@@ -178,6 +178,29 @@ describe('terminal profiles', () => {
     expect(fallback.terminalThemeId).toBe(defaultSettings.terminalThemeId)
   })
 
+  test('normalizes configurable pane highlight colors', () => {
+    expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
+    expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')
+    expect(normalizeSettings({})).toMatchObject({
+      selectedPaneHighlightColor: '#ff9f1a',
+      alarmHighlightColor: '#7ee787',
+    })
+    expect(normalizeSettings({
+      selectedPaneHighlightColor: '  #123ABC  ',
+      alarmHighlightColor: '#abcdef',
+    })).toMatchObject({
+      selectedPaneHighlightColor: '#123ABC',
+      alarmHighlightColor: '#abcdef',
+    })
+    expect(normalizeSettings({
+      selectedPaneHighlightColor: '#abc',
+      alarmHighlightColor: '#12345678',
+    })).toMatchObject({
+      selectedPaneHighlightColor: defaultSettings.selectedPaneHighlightColor,
+      alarmHighlightColor: defaultSettings.alarmHighlightColor,
+    })
+  })
+
   test('normalizes workspace specific profile defaults', () => {
     const settings = normalizeSettings({
       defaultProfileId: 'powershell',

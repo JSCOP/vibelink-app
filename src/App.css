@@ -1000,8 +1000,8 @@ button {
 .terminal-panel-shell[data-active='true']::before {
   content: '';
   inset: 0;
-  outline: 2px solid var(--vibelink-accent);
-  outline-offset: -2px;
+  outline: 2px solid var(--vibelink-selected-pane-highlight);
+  outline-offset: -4px;
   pointer-events: none;
   position: absolute;
   z-index: 5;
@@ -1106,9 +1106,9 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 
 .terminal-panel-shell[data-pane-response-complete='true']::after {
   animation: terminal-response-complete-pulse 1.6s ease-in-out infinite;
-  background: color-mix(in srgb, var(--vibelink-warning, #ff9f1a) 14%, transparent);
-  border-color: var(--vibelink-warning, #ff9f1a);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vibelink-warning, #ff9f1a) 58%, transparent), 0 0 24px color-mix(in srgb, var(--vibelink-warning, #ff9f1a) 28%, transparent);
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 14%, transparent);
+  border-color: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 58%, transparent), 0 0 24px color-mix(in srgb, var(--vibelink-alarm-highlight) 28%, transparent);
 }
 
 @keyframes terminal-response-complete-pulse {
@@ -1121,14 +1121,14 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 }
 
 .terminal-tab-response-complete {
-  background: color-mix(in srgb, var(--vibelink-warning, #ff9f1a) 12%, transparent);
-  box-shadow: inset 0 -2px 0 var(--vibelink-warning, #ff9f1a), 0 0 16px color-mix(in srgb, var(--vibelink-warning, #ff9f1a) 24%, transparent);
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 12%, transparent);
+  box-shadow: inset 0 -2px 0 var(--vibelink-alarm-highlight), 0 0 16px color-mix(in srgb, var(--vibelink-alarm-highlight) 24%, transparent);
   color: var(--vibelink-text);
 }
 
 .terminal-tab-response-complete .terminal-tab-icon,
 .terminal-tab-response-complete .terminal-tab-role {
-  color: var(--vibelink-warning, #ffb347);
+  color: var(--vibelink-alarm-highlight);
 }
 
 .terminal-tab,
@@ -2608,6 +2608,12 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
   min-height: 28px;
   min-width: 0;
   padding: 0 8px;
+}
+
+.vibelink-settings-group-body input[type='color'] {
+  cursor: pointer;
+  padding: 3px;
+  width: 100%;
 }
 
 .vibelink-settings-grid {
