@@ -290,6 +290,7 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
             req: 2,
             session_id,
             cfg,
+            attach: false,
         },
     )? {
         ReplyResult::PaneSpawned(meta) if meta.id == pane_id => {

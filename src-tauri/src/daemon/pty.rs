@@ -114,13 +114,24 @@ impl Pane {
         }
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        // ConPTY repaints its whole screen on resize; a same-size resize (the
+        // client re-asserting geometry after attach/fit) must not trigger that
+        // — it duplicates in-place TUI redraws (banners, completion menus).
+        if self.config.cols == cols && self.config.rows == rows {
+            return Ok(());
+        }
         self.master.resize(PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
-        })
+        })?;
+        self.config.cols = cols;
+        self.config.rows = rows;
+        Ok(())
     }
 
     pub fn kill(&mut self) -> Result<()> {

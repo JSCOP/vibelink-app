@@ -228,13 +228,13 @@ impl DaemonState {
     }
 
     pub fn resize_pane(
-        &self,
+        &mut self,
         session_id: Uuid,
         pane_id: Uuid,
         cols: u16,
         rows: u16,
     ) -> anyhow::Result<()> {
-        let pane = self.pane_in_session(session_id, pane_id)?;
+        let pane = self.pane_in_session_mut(session_id, pane_id)?;
         pane.resize(cols, rows)
     }
 
@@ -286,12 +286,23 @@ impl DaemonState {
             let pane = self.pane_in_session(session_id, pane_id)?;
             (pane.scrollback_snapshot(), pane.alive)
         };
+        // A client that is already attached (e.g. it spawned the pane and was
+        // attached at spawn time) has received every byte live; replaying the
+        // snapshot would duplicate screen content.
+        let already_attached = self
+            .pane_clients
+            .get(&pane_id)
+            .is_some_and(|clients| clients.contains(&client_id));
         if let Some(tx) = self.clients.get(&client_id) {
-            if !snapshot.is_empty() {
-                let _ = tx.try_send(DaemonToClient::Output {
-                    pane_id,
-                    data: snapshot,
-                });
+            if !snapshot.is_empty() && !already_attached {
+                // Strip terminal queries (DA1/DSR/DECRQM/...) so the client's
+                // emulator does not answer them a second time — the TUI's
+                // capability detection ended long ago and late replies leak
+                // into its prompt as stray keystrokes.
+                let data = crate::daemon::query_filter::strip_terminal_queries(&snapshot);
+                if !data.is_empty() {
+                    let _ = tx.try_send(DaemonToClient::Output { pane_id, data });
+                }
             }
             if !alive {
                 let _ = tx.send(DaemonToClient::PaneExited {
@@ -756,6 +767,65 @@ mod tests {
             DaemonToClient::Output {
                 pane_id,
                 data: b"hello".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn attach_pane_skips_replay_for_already_attached_clients() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = unbounded();
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        state.record_output_and_push(pane_id, b"banner");
+
+        state
+            .attach_pane(client_id, workspace.id, pane_id)
+            .expect("first attach");
+        assert_eq!(
+            rx.try_recv().expect("snapshot replay"),
+            DaemonToClient::Output {
+                pane_id,
+                data: b"banner".to_vec(),
+            }
+        );
+
+        state
+            .attach_pane(client_id, workspace.id, pane_id)
+            .expect("second attach");
+        assert!(
+            rx.try_recv().is_err(),
+            "already-attached client must not receive a second replay"
+        );
+    }
+
+    #[test]
+    fn attach_pane_strips_terminal_queries_from_replay() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = unbounded();
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        state.record_output_and_push(pane_id, b"omp \x1b[c\x1b[?2026$p\x1b]11;?\x07ready");
+
+        state
+            .attach_pane(client_id, workspace.id, pane_id)
+            .expect("attach");
+
+        assert_eq!(
+            rx.try_recv().expect("snapshot replay"),
+            DaemonToClient::Output {
+                pane_id,
+                data: b"omp ready".to_vec(),
             }
         );
     }

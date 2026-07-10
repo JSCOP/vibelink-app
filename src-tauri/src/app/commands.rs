@@ -228,6 +228,7 @@ pub async fn spawn_pane(
             req,
             session_id,
             cfg,
+            attach: true,
         })
         .map_err(to_string)?
     {

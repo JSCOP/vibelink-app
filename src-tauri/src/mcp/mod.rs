@@ -569,6 +569,7 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
             req,
             session_id,
             cfg,
+            attach: false,
         })? {
             ReplyResult::PaneSpawned(meta) => meta,
             other => bail!("unexpected daemon response: {other:?}"),

@@ -2,6 +2,7 @@ pub mod paths;
 pub mod persistence;
 pub mod proc;
 pub mod pty;
+pub mod query_filter;
 pub mod scrollback;
 pub mod session;
 
@@ -325,12 +326,14 @@ fn dispatch_message(
             req,
             session_id,
             cfg,
+            attach,
         } => {
             let meta = spawn_pane_for_session(
                 Arc::clone(&state),
                 sessions_path.to_path_buf(),
                 session_id,
                 cfg,
+                attach.then_some(client_id),
             )?;
             persist_state(&state, sessions_path)?;
             send(
@@ -565,6 +568,7 @@ fn spawn_pane_for_session(
     sessions_path: PathBuf,
     session_id: Uuid,
     mut cfg: crate::protocol::PaneConfig,
+    attach_client: Option<Uuid>,
 ) -> Result<crate::protocol::PaneMeta> {
     lock_state(&state).pane_metas(session_id)?;
 
@@ -573,14 +577,25 @@ fn spawn_pane_for_session(
     let spawned = Pane::spawn(cfg)?;
     let child = spawned.pane.child();
     let reader = spawned.reader;
-    let meta = match lock_state(&state).insert_pane_or_recover(session_id, spawned.pane) {
-        Ok(meta) => meta,
-        Err((err, mut pane)) => {
-            if let Err(kill_err) = pane.kill() {
-                warn!(?kill_err, %pane_id, "failed to kill pane after insert error");
+    let meta = {
+        let mut guard = lock_state(&state);
+        let meta = match guard.insert_pane_or_recover(session_id, spawned.pane) {
+            Ok(meta) => meta,
+            Err((err, mut pane)) => {
+                drop(guard);
+                if let Err(kill_err) = pane.kill() {
+                    warn!(?kill_err, %pane_id, "failed to kill pane after insert error");
+                }
+                return Err(err);
             }
-            return Err(err);
+        };
+        // Attach before the reader thread exists so the client receives the
+        // pane's output live from the very first byte — a later AttachPane is
+        // then a no-op and never has to replay a snapshot into the emulator.
+        if let Some(client_id) = attach_client {
+            guard.attach_client_to_pane(client_id, pane_id);
         }
+        meta
     };
 
     thread::Builder::new()
@@ -804,6 +819,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
             },
+            attach: false,
         };
 
         assert_eq!(request_id(&msg), Some(42));

@@ -60,6 +60,11 @@ pub enum ClientToDaemon {
         req: Req,
         session_id: Uuid,
         cfg: PaneConfig,
+        /// Attach the requesting client to the pane atomically at spawn, so
+        /// output streams to it live from the first byte and a later
+        /// `AttachPane` does not need a snapshot replay.
+        #[serde(default)]
+        attach: bool,
     },
     AttachPane {
         session_id: Uuid,
@@ -306,6 +311,7 @@ mod tests {
                 cols: 120,
                 rows: 32,
             },
+            attach: true,
         };
 
         let mut bytes = Vec::new();
