@@ -39,6 +39,12 @@ function Assert-Tool([string]$Name) {
   }
 }
 
+function Assert-LocalTauriCli {
+  $tauriCommand = Join-Path $RepoRoot 'node_modules\.bin\tauri.cmd'
+  if (-not (Test-Path -LiteralPath $tauriCommand -PathType Leaf)) {
+    throw 'Local Tauri CLI is missing. Run "pnpm install --frozen-lockfile" from the repository root, then retry.'
+  }
+}
 
 function Assert-ReleaseLicenseApiUrl {
   if ([string]::IsNullOrWhiteSpace($env:VIBELINK_LICENSE_API_URL)) {
@@ -207,6 +213,7 @@ function Invoke-DevBuild {
   Write-Section 'Build: debug/dev flavor executable, no installer'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
   }
@@ -218,6 +225,7 @@ function Invoke-ReleaseBuild {
   Write-Section 'Build: release executable, no installer'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   Assert-ReleaseLicenseApiUrl
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--no-bundle')
   Write-Host 'Release build complete: src-tauri\target\release\app.exe' -ForegroundColor Green
@@ -227,6 +235,7 @@ function Invoke-DevRun {
   Write-Section 'Run: dev flavor with Vite hot reload'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   Show-PortOwner 1420
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
@@ -249,6 +258,7 @@ function Invoke-DevInstaller([switch]$SkipVersionBump) {
   Write-Section 'Installer: dev flavor, debug build, side-by-side data'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
@@ -261,6 +271,7 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Write-Section 'Installer: release flavor'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   Assert-ReleaseLicenseApiUrl
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
@@ -271,6 +282,7 @@ function Invoke-CiInstaller {
   Write-Section 'Installer: CI release flavor without version mutation'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   Assert-ReleaseLicenseApiUrl
   $packageVersion = Get-JsonVersion $PackageJson
   $cargoVersion = Get-CargoPackageVersion $CargoToml
@@ -291,6 +303,7 @@ function Invoke-CiInstaller {
 function Invoke-AllInstallers {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-LocalTauriCli
   Assert-ReleaseLicenseApiUrl
   Invoke-InstallerVersionBump
   Invoke-DevInstaller -SkipVersionBump
