@@ -7,6 +7,7 @@ import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
 import { Activity, AlertTriangle, Bot, Camera, Ellipsis, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
+import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
@@ -47,7 +48,7 @@ function App() {
   const [windowActions, setWindowActions] = useState<WorkspaceWindowActions | null>(null)
   const [chromeState, setChromeState] = useState<WorkspaceChromeState | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const sidebarEdgeHoverTimerRef = useRef<number | null>(null)
+
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
   const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null>(null)
@@ -383,25 +384,7 @@ function App() {
 
   return (
     <main className="app-shell" data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
-      <div
-        className="sidebar-hover-edge"
-        onPointerEnter={(event) => {
-          // A pressed button means the user is mid-drag (terminal text
-          // selection reaching the screen edge) — never fly the sidebar out
-          // over their selection. Intentional opens are a bare hover that
-          // dwells at the edge for a beat.
-          if (event.buttons !== 0 || sidebarEdgeHoverTimerRef.current !== null) return
-          sidebarEdgeHoverTimerRef.current = window.setTimeout(() => {
-            sidebarEdgeHoverTimerRef.current = null
-            setIsSidebarOpen(true)
-          }, 180)
-        }}
-        onPointerLeave={() => {
-          if (sidebarEdgeHoverTimerRef.current === null) return
-          window.clearTimeout(sidebarEdgeHoverTimerRef.current)
-          sidebarEdgeHoverTimerRef.current = null
-        }}
-      />
+      <SidebarRevealEdge onReveal={() => setIsSidebarOpen(true)} />
       <Sidebar
         isOpen={isSidebarOpen}
         sessions={orderedSessions}
