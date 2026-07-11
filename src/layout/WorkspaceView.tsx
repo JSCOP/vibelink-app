@@ -25,6 +25,7 @@ import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneC
 import { activeWorkspaceLayoutPage, createDefaultWorkspaceDockviewLayout, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
+import { waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { OrchestratorChat } from '../components/OrchestratorChat'
@@ -539,6 +540,14 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const profile = selectedProfileForWorkspace(useWorkspaceStore.getState().settings, sessionId)
       const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
       addTerminalPanel(api, pending, { referencePanel: paneId, direction })
+      layoutTerminalDockview(api)
+      // Dockview commits the new split's group bounds before its always-rendered
+      // overlay positions. The first layout pass can therefore leave the source
+      // pane's overlay at its pre-split width, painting across the new pane.
+      // Wait for both Dockview frames, then lay out/reposition again before the
+      // new PTY is measured or either terminal is resized.
+      await waitForDockviewOverlayLayout()
+      if (terminalApiRef.current !== api) return
       layoutTerminalDockview(api)
       const size = await measuredSpawnSize(pending.id)
       try {
@@ -1678,6 +1687,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     </WorkspaceActionsContext.Provider>
   )
 }
+
 
 async function waitForDockviewApi(ref: { current: DockviewApi | null }, attempts = 8): Promise<DockviewApi | null> {
   for (let index = 0; index < attempts; index += 1) {
