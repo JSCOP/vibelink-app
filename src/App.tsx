@@ -12,6 +12,7 @@ import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinSta
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
+import { VoiceSetupDialog } from './components/VoiceSetupDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { TerminalTopbarActions } from './components/TerminalTopbarActions'
@@ -20,12 +21,15 @@ import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/wind
 import { startTerminalOutputStream } from './ipc/output'
 import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import type { HermesWorkspaceState } from './ipc/types'
+import { disableVoiceHotkey, enableVoiceHotkey, startVoiceSidecar, stopVoiceSidecar } from './ipc/voice'
+import { voiceClient, type VoiceServerMessage } from './services/voiceClient'
 import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import './styles/theme.css'
+import './styles/voice-setup.css'
 import './styles/kanban.css'
 import './App.css'
 
@@ -85,6 +89,11 @@ function App() {
   const settings = useWorkspaceStore((state) => state.settings)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
+  const voiceStatus = useWorkspaceStore((state) => state.voiceStatus)
+  const voiceModelDownload = useWorkspaceStore((state) => state.voiceModelDownload)
+  const voiceLastError = useWorkspaceStore((state) => state.voiceLastError)
+  const voiceLastTranscription = useWorkspaceStore((state) => state.voiceLastTranscription)
+  const voiceShouldRun = settings.voiceEnabled && settings.voiceModelId !== ''
   const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
@@ -159,6 +168,88 @@ function App() {
       })
     }
   }, [])
+
+  useEffect(() => voiceClient.subscribe((message: VoiceServerMessage) => {
+    const state = useWorkspaceStore.getState()
+    if (message.type === 'status') {
+      const mapped = message.status === 'recording'
+        ? 'recording'
+        : message.status === 'processing'
+          ? 'transcribing'
+          : message.status === 'error'
+            ? 'error'
+            : message.status === 'loading'
+              ? 'starting'
+              : 'idle'
+      state.setVoiceStatus(mapped)
+    } else if (message.type === 'transcription') {
+      state.setVoiceLastTranscription(message.text)
+      state.setVoiceLastError(undefined)
+      state.setVoiceStatus('idle')
+    } else if (message.type === 'model_download_progress') {
+      state.setVoiceModelDownload({ downloaded: message.downloaded_bytes ?? 0, total: message.total_bytes })
+      if (message.stage === 'ready') state.setVoiceModelDownload(undefined)
+    } else if (message.type === 'model_runtime_info') {
+      state.setVoiceModelDownload(undefined)
+      state.setVoiceStatus('idle')
+    } else if (message.type === 'error') {
+      state.setVoiceLastError(message.message)
+      state.setVoiceStatus('error')
+    }
+  }), [])
+
+  useEffect(() => {
+    const unlisteners = [
+      listen('vibelink://voice-ptt-pressed', () => voiceClient.startRecording()),
+      listen('vibelink://voice-ptt-released', () => voiceClient.stopRecording()),
+    ]
+    return () => { void Promise.all(unlisteners).then((disposes) => disposes.forEach((dispose) => dispose())) }
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    if (!voiceShouldRun) {
+      voiceClient.disconnect()
+      useWorkspaceStore.getState().setVoiceStatus('off')
+      void disableVoiceHotkey().catch(() => {})
+      void stopVoiceSidecar().catch(() => {})
+      return undefined
+    }
+
+    useWorkspaceStore.getState().setVoiceStatus('starting')
+    void startVoiceSidecar()
+      .then(async ({ port, token }) => {
+        await voiceClient.connect(port, token)
+        if (disposed) return
+        await enableVoiceHotkey()
+      })
+      .catch((caught) => {
+        if (disposed) return
+        useWorkspaceStore.getState().setVoiceLastError(String(caught))
+        useWorkspaceStore.getState().setError(`Voice input could not start. ${String(caught)}`)
+      })
+
+    return () => {
+      disposed = true
+      voiceClient.disconnect()
+      void disableVoiceHotkey().catch(() => {})
+      void stopVoiceSidecar().catch(() => {})
+    }
+  }, [voiceShouldRun])
+
+  useEffect(() => {
+    if (!voiceShouldRun) return
+    voiceClient.setConfig({
+      model_id: settings.voiceModelId,
+      device: settings.voiceDevice,
+      language: settings.voiceLanguage === 'auto' ? null : settings.voiceLanguage,
+      beam_size: 1,
+      mute_speakers: settings.voiceMuteSpeakers,
+      add_trailing_space: settings.voiceTrailingSpace,
+      add_trailing_newline: settings.voiceAutoEnter,
+      initial_prompt: '한국어와 English가 섞인 대화. Technical terms like API, GPU, CLI, git, terminal을 자주 사용합니다.',
+    })
+  }, [settings.voiceAutoEnter, settings.voiceDevice, settings.voiceLanguage, settings.voiceModelId, settings.voiceMuteSpeakers, settings.voiceTrailingSpace, voiceShouldRun])
 
   useEffect(() => {
     if (recordingStartedAtMs === null) return undefined
@@ -392,6 +483,9 @@ function App() {
 
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
+  const voiceDownloadPercent = voiceModelDownload?.total
+    ? Math.min(100, Math.max(0, Math.round((voiceModelDownload.downloaded / voiceModelDownload.total) * 100)))
+    : null
 
   return (
     <main className="app-shell" data-sidebar-pinned={isSidebarPinned ? 'true' : undefined} data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
@@ -515,7 +609,7 @@ function App() {
             />
           </div>
         )}
-        {status === 'ready' && !activeSessionId && !isCreateOpen ? (
+        {status === 'ready' && settings.voiceSetupCompleted && !activeSessionId && !isCreateOpen ? (
           <StartupWorkspaceDialog
             sessions={orderedSessions}
             lastActiveSessionId={startupLastActiveSessionId}
@@ -524,6 +618,12 @@ function App() {
           />
         ) : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
+        {status === 'ready' && !settings.voiceSetupCompleted ? (
+          <VoiceSetupDialog
+            onUse={(voiceModelId, voiceDevice) => updateSettings({ voiceModelId, voiceDevice, voiceSetupCompleted: true })}
+            onSkip={() => updateSettings({ voiceEnabled: false, voiceSetupCompleted: true })}
+          />
+        ) : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
@@ -535,6 +635,21 @@ function App() {
                 <span style={{ width: `${ffmpegDownloadPercent}%` }} />
               </span>
             ) : null}
+          </div>
+        ) : null}
+        {voiceModelDownload ? (
+          <div className="voice-download-toast" role="status" aria-live="polite">
+            <span className="ffmpeg-download-title">Downloading voice model… {voiceDownloadPercent !== null ? `${voiceDownloadPercent}%` : formatBytes(voiceModelDownload.downloaded)}</span>
+            {voiceDownloadPercent !== null ? (
+              <span className="ffmpeg-download-progress" aria-hidden="true"><span style={{ width: `${voiceDownloadPercent}%` }} /></span>
+            ) : null}
+          </div>
+        ) : null}
+        {voiceStatus === 'recording' || voiceStatus === 'transcribing' || voiceLastError ? (
+          <div className="voice-status-pill" role="status" aria-live="polite" data-state={voiceStatus}>
+            <span className="capture-recording-dot" aria-hidden="true" />
+            <span>{voiceLastError ?? (voiceStatus === 'recording' ? 'Listening…' : 'Transcribing…')}</span>
+            {voiceLastTranscription && voiceStatus !== 'recording' ? <span className="voice-last-text">{voiceLastTranscription}</span> : null}
           </div>
         ) : null}
         {recordingStartedAtMs !== null ? (

@@ -15,6 +15,9 @@ $PackageJson = Join-Path $RepoRoot 'package.json'
 $CargoToml = Join-Path $RepoRoot 'src-tauri\Cargo.toml'
 $CargoLock = Join-Path $RepoRoot 'src-tauri\Cargo.lock'
 $TauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
+$BuildVoiceSidecar = Join-Path $RepoRoot 'scripts\build-voice-sidecar.ps1'
+$VoiceSidecarDistExe = Join-Path $RepoRoot 'voice-sidecar\dist\vibelink-voice-sidecar.exe'
+
 
 function Write-Section([string]$Title) {
   Write-Host ''
@@ -206,10 +209,32 @@ function Invoke-ReleaseRun {
   Write-Host "Started release app PID $($process.Id): $ReleaseExe" -ForegroundColor Green
 }
 
+function Ensure-VoiceSidecar {
+  if (-not (Test-Path -LiteralPath $BuildVoiceSidecar)) {
+    throw "Voice sidecar build script is missing: $BuildVoiceSidecar"
+  }
+
+  $sourceFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'voice-sidecar\src') -File
+    Get-Item -LiteralPath (Join-Path $RepoRoot 'voice-sidecar\Cargo.toml')
+    Get-Item -LiteralPath $BuildVoiceSidecar
+  )
+  $distItem = Get-Item -LiteralPath $VoiceSidecarDistExe -ErrorAction SilentlyContinue
+  $isStale = -not $distItem -or ($sourceFiles | Where-Object { $_.LastWriteTimeUtc -gt $distItem.LastWriteTimeUtc })
+  if ($isStale) {
+    Write-Section 'Build: CUDA voice sidecar'
+    & $BuildVoiceSidecar
+    if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) {
+      throw "Voice sidecar build failed with exit code $LASTEXITCODE"
+    }
+  }
+}
+
 function Invoke-DevInstaller([switch]$SkipVersionBump) {
   Write-Section 'Installer: dev flavor, debug build, side-by-side data'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Ensure-VoiceSidecar
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
@@ -222,6 +247,7 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Write-Section 'Installer: release flavor'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Ensure-VoiceSidecar
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
   Show-Bundles 'release'

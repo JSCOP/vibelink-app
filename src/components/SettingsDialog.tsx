@@ -6,7 +6,7 @@ import { HermesGatewayForm } from './HermesGatewayForm'
 import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
-import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type Profile, type ProfileKind, type Settings } from '../state/profiles'
+import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type Profile, type ProfileKind, type Settings, type VoiceDevice } from '../state/profiles'
 import { profileIconNames } from '../state/profileIcons'
 import { terminalThemeDefinitionById, terminalThemeGroups, type TerminalThemeId } from '../state/terminalThemes'
 import { applyThemeToDocument } from '../state/themePreview'
@@ -15,6 +15,8 @@ import { ThemePicker } from './ThemePicker'
 import { FontPicker } from './FontPicker'
 import { useWorkspaceStore } from '../state/store'
 import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
+import { getVoiceGpuInfo, getVoiceModelsDir, type VoiceGpuInfo } from '../ipc/voice'
+import { formatVoiceModelSize, recommendVoiceModel, voiceModels } from '../voice/models'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -70,6 +72,21 @@ const cursorStyleOptions: { value: Settings['cursorStyle']; label: string }[] = 
   { value: 'block', label: 'Block' },
   { value: 'underline', label: 'Underline' },
 ]
+const voiceDeviceOptions = [
+  { value: 'auto', label: 'Auto (GPU with CPU fallback)' },
+  { value: 'gpu', label: 'GPU preferred' },
+  { value: 'cpu', label: 'CPU only' },
+]
+const voiceLanguageOptions = [
+  { value: 'auto', label: 'Auto detect' },
+  { value: 'ko', label: 'Korean' },
+  { value: 'en', label: 'English' },
+  { value: 'ja', label: 'Japanese' },
+  { value: 'zh', label: 'Chinese' },
+  { value: 'es', label: 'Spanish' },
+  { value: 'fr', label: 'French' },
+  { value: 'de', label: 'German' },
+]
 
 const profileKindLabels: Record<ProfileKind, string> = {
   local: 'Local',
@@ -100,6 +117,9 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null)
   const [isThemePickerOpen, setThemePickerOpen] = useState(false)
   const [isFontPickerOpen, setFontPickerOpen] = useState(false)
+  const [voiceGpu, setVoiceGpu] = useState<VoiceGpuInfo | null>(null)
+  const [voiceHardwareStatus, setVoiceHardwareStatus] = useState('Not checked')
+  const [voiceModelsDir, setVoiceModelsDir] = useState('')
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -107,6 +127,14 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [draft.fontFamily, installedFonts])
   const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
   const filteredSections = sections.filter((section) => section.label.toLowerCase().includes(search.trim().toLowerCase()))
+  const voiceRecommendation = recommendVoiceModel(voiceGpu)
+  const voiceModelOptions = [
+    ...(draft.voiceModelId === '' ? [{ value: '', label: 'Choose a model' }] : []),
+    ...voiceModels.map((model) => ({
+      value: model.id,
+      label: `${model.name} · ${formatVoiceModelSize(model.bytes)} · ${model.hardware}${model.id === voiceRecommendation.modelId ? ' · Recommended' : ''}`,
+    })),
+  ]
 
   useEffect(() => {
     let cancelled = false
@@ -116,6 +144,20 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
     void invoke<string>('default_capture_dir')
       .then((dir) => { if (!cancelled) setDefaultCaptureDir(dir) })
       .catch(() => { if (!cancelled) setDefaultCaptureDir('') })
+    void getVoiceModelsDir()
+      .then((dir) => { if (!cancelled) setVoiceModelsDir(dir) })
+      .catch(() => { if (!cancelled) setVoiceModelsDir('Unavailable') })
+    void getVoiceGpuInfo()
+      .then((gpu) => {
+        if (cancelled) return
+        setVoiceGpu(gpu)
+        setVoiceHardwareStatus(gpu.name ? `${gpu.name} · ${(gpu.dedicatedVideoMemoryMb / 1024).toFixed(1)} GB VRAM` : 'No dedicated GPU detected · CPU recommended')
+      })
+      .catch(() => {
+        if (cancelled) return
+        setVoiceGpu(null)
+        setVoiceHardwareStatus('GPU 감지 실패 · CPU recommended')
+      })
     return () => { cancelled = true }
   }, [])
 
@@ -282,6 +324,18 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
       setFfmpegStatus(String(error))
     }
   }
+  const refreshVoiceHardware = async () => {
+    setVoiceHardwareStatus('Detecting...')
+    try {
+      const gpu = await getVoiceGpuInfo()
+      setVoiceGpu(gpu)
+      setVoiceHardwareStatus(gpu.name ? `${gpu.name} · ${(gpu.dedicatedVideoMemoryMb / 1024).toFixed(1)} GB VRAM` : 'No dedicated GPU detected · CPU recommended')
+    } catch {
+      setVoiceGpu(null)
+      setVoiceHardwareStatus('GPU 감지 실패 · CPU recommended')
+    }
+  }
+
   const apply = () => onChange(draft)
   const ok = () => {
     onChange(draft)
@@ -570,9 +624,19 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
             ) : null}
 
             {activeSection === 'voice' ? (
-              <SettingsGroup title="Voice" description="Voice controls are reserved for a future VibeLink Agent provider.">
-                <SettingsToggle label="Voice input" checked={false} disabled />
-                <SettingsToggle label="Voice output" checked={false} disabled />
+              <SettingsGroup title="Voice input" description="Local Whisper speech-to-text. Hold Ctrl + Win, speak, then release to transcribe into the focused window.">
+                <SettingsToggle label="Voice input (Ctrl+Win hold)" checked={draft.voiceEnabled} onChange={(voiceEnabled) => patchDraft({ voiceEnabled })} />
+                <SettingsSelect label="Model" value={draft.voiceModelId} options={voiceModelOptions} onChange={(voiceModelId) => patchDraft({ voiceModelId })} />
+                <SettingsSelect label="Device" value={draft.voiceDevice} options={voiceDeviceOptions} onChange={(voiceDevice) => patchDraft({ voiceDevice: voiceDevice as VoiceDevice })} />
+                <SettingsSelect label="Language" value={draft.voiceLanguage} options={voiceLanguageOptions} onChange={(voiceLanguage) => patchDraft({ voiceLanguage })} />
+                <SettingsToggle label="Press Enter after injection" checked={draft.voiceAutoEnter} onChange={(voiceAutoEnter) => patchDraft({ voiceAutoEnter })} />
+                <SettingsToggle label="Add trailing space" checked={draft.voiceTrailingSpace} onChange={(voiceTrailingSpace) => patchDraft({ voiceTrailingSpace })} />
+                <SettingsToggle label="Mute speakers while recording" checked={draft.voiceMuteSpeakers} onChange={(voiceMuteSpeakers) => patchDraft({ voiceMuteSpeakers })} />
+                <ReadonlyRow label="Hotkey" value="Ctrl + Win (hold to talk)" />
+                <ReadonlyRow label="Model storage" value={voiceModelsDir || 'Resolving...'} mono />
+                <ReadonlyRow label="Hardware" value={voiceHardwareStatus} />
+                <ReadonlyRow label="Recommended model" value={voiceModels.find((model) => model.id === voiceRecommendation.modelId)?.name ?? voiceRecommendation.modelId} />
+                <button type="button" onClick={() => void refreshVoiceHardware()}><RefreshCw size={14} /> Re-run hardware detection</button>
               </SettingsGroup>
             ) : null}
 

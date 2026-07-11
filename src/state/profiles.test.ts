@@ -267,6 +267,39 @@ describe('terminal profiles', () => {
     })
   })
 
+  test('normalizes local voice settings', () => {
+    expect(normalizeSettings({})).toMatchObject({
+      voiceEnabled: true,
+      voiceModelId: '',
+      voiceDevice: 'auto',
+      voiceLanguage: 'auto',
+      voiceAutoEnter: false,
+      voiceTrailingSpace: true,
+      voiceMuteSpeakers: true,
+      voiceSetupCompleted: false,
+    })
+    expect(normalizeSettings({
+      voiceEnabled: false,
+      voiceModelId: 'small-q8_0',
+      voiceDevice: 'cpu',
+      voiceLanguage: 'ko',
+      voiceAutoEnter: true,
+      voiceTrailingSpace: false,
+      voiceMuteSpeakers: false,
+      voiceSetupCompleted: true,
+    })).toMatchObject({
+      voiceEnabled: false,
+      voiceModelId: 'small-q8_0',
+      voiceDevice: 'cpu',
+      voiceLanguage: 'ko',
+      voiceAutoEnter: true,
+      voiceTrailingSpace: false,
+      voiceMuteSpeakers: false,
+      voiceSetupCompleted: true,
+    })
+    expect(normalizeSettings({ voiceDevice: 'directml' }).voiceDevice).toBe('auto')
+  })
+
   test('normalizes pane resize snap tolerance', () => {
     expect(normalizeSettings({ resizeSnapTolerance: 48 }).resizeSnapTolerance).toBe(48)
     expect(normalizeSettings({ resizeSnapTolerance: -1 }).resizeSnapTolerance).toBe(defaultSettings.resizeSnapTolerance)

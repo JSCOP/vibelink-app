@@ -20,6 +20,8 @@ coverage/
 # Rust/Tauri build output
 target/
 src-tauri/target/
+voice-sidecar/smoke-models/
+src-tauri/resources/voice/
 
 # Local environment overrides
 .env

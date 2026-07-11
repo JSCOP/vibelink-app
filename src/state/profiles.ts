@@ -7,6 +7,7 @@ export type ProfileKind = 'local' | 'ssh' | 'command'
 export type ChatPersonality = 'direct' | 'balanced' | 'concise' | 'exploratory'
 export type ChatImageAttachmentMode = 'auto' | 'always' | 'never'
 export type TerminalCursorStyle = 'bar' | 'block' | 'underline'
+export type VoiceDevice = 'auto' | 'gpu' | 'cpu'
 
 
 export type Profile = {
@@ -66,6 +67,14 @@ export type Settings = {
   chatImageAttachments: ChatImageAttachmentMode
   captureDir: string
   captureFfmpegPath: string
+  voiceEnabled: boolean
+  voiceModelId: string
+  voiceDevice: VoiceDevice
+  voiceLanguage: string
+  voiceAutoEnter: boolean
+  voiceTrailingSpace: boolean
+  voiceMuteSpeakers: boolean
+  voiceSetupCompleted: boolean
 }
 
 const legacyTerminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
@@ -229,6 +238,14 @@ export const defaultSettings: Settings = {
   chatImageAttachments: 'auto',
   captureDir: '',
   captureFfmpegPath: '',
+  voiceEnabled: true,
+  voiceModelId: '',
+  voiceDevice: 'auto',
+  voiceLanguage: 'auto',
+  voiceAutoEnter: false,
+  voiceTrailingSpace: true,
+  voiceMuteSpeakers: true,
+  voiceSetupCompleted: false,
   keybindings: { ...defaultKeybindings },
 }
 
@@ -272,6 +289,14 @@ export function normalizeSettings(value: unknown): Settings {
     chatImageAttachments: readChatImageAttachmentMode(record?.chatImageAttachments),
     captureDir: readString(record?.captureDir, defaultSettings.captureDir),
     captureFfmpegPath: readString(record?.captureFfmpegPath, defaultSettings.captureFfmpegPath),
+    voiceEnabled: readBoolean(record?.voiceEnabled, defaultSettings.voiceEnabled),
+    voiceModelId: readString(record?.voiceModelId, defaultSettings.voiceModelId),
+    voiceDevice: readVoiceDevice(record?.voiceDevice),
+    voiceLanguage: readString(record?.voiceLanguage, defaultSettings.voiceLanguage),
+    voiceAutoEnter: readBoolean(record?.voiceAutoEnter, defaultSettings.voiceAutoEnter),
+    voiceTrailingSpace: readBoolean(record?.voiceTrailingSpace, defaultSettings.voiceTrailingSpace),
+    voiceMuteSpeakers: readBoolean(record?.voiceMuteSpeakers, defaultSettings.voiceMuteSpeakers),
+    voiceSetupCompleted: readBoolean(record?.voiceSetupCompleted, defaultSettings.voiceSetupCompleted),
   }
 }
 
@@ -673,6 +698,10 @@ function readTerminalThemeId(value: unknown): TerminalThemeId {
 
 function readTerminalCursorStyle(value: unknown): TerminalCursorStyle {
   return value === 'bar' || value === 'block' || value === 'underline' ? value : defaultSettings.cursorStyle
+}
+
+function readVoiceDevice(value: unknown): VoiceDevice {
+  return value === 'auto' || value === 'gpu' || value === 'cpu' ? value : defaultSettings.voiceDevice
 }
 
 function readChatPersonality(value: unknown): ChatPersonality {

@@ -6,6 +6,8 @@ pub mod git;
 pub mod hermes;
 pub mod skills;
 pub mod spawn_daemon;
+pub mod voice;
+pub mod voice_hook;
 
 use daemon_client::DaemonClient;
 use std::sync::Arc;
@@ -33,6 +35,7 @@ pub fn run() {
             app.manage(Arc::new(hermes::HermesManager::new()));
             app.manage(capture::CaptureState::default());
             app.manage(KeepAlivePrefs::default());
+            app.manage(voice::VoiceState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -104,6 +107,12 @@ pub fn run() {
             capture::start_video_capture,
             capture::stop_video_capture,
             capture::capture_recording_state,
+            voice::voice_start_sidecar,
+            voice::voice_stop_sidecar,
+            voice::voice_gpu_info,
+            voice::voice_models_dir,
+            voice::voice_enable_hotkey,
+            voice::voice_disable_hotkey,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -115,6 +124,9 @@ pub fn run() {
             }
             if let Some(manager) = app.try_state::<Arc<hermes::HermesManager>>() {
                 manager.shutdown_all();
+            }
+            if let Some(state) = app.try_state::<voice::VoiceState>() {
+                voice::shutdown(&state);
             }
             let keep_alive = app
                 .try_state::<KeepAlivePrefs>()
