@@ -81,10 +81,12 @@ version = "0.1.7"
 dependencies = [
  "anyhow",
  "arboard",
+ "chrono",
  "crossbeam-channel",
  "directories",
  "indexmap 2.14.0",
  "interprocess",
+ "keyring",
  "portable-pty",
  "rmp-serde",
  "rusqlite",
@@ -102,6 +104,7 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "ureq",
+ "url",
  "uuid",
  "xcap",
  "zip",
@@ -619,8 +622,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -2301,6 +2306,18 @@ dependencies = [
  "bitflags 2.13.0",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "byteorder",
+ "log",
+ "windows-sys 0.60.2",
+ "zeroize",
 ]
 
 [[package]]

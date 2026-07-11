@@ -30,7 +30,7 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
   const paneId = params?.paneId
   const kind = params?.kind ?? (paneId ? 'terminal' : undefined)
   const isTerminalPane = kind === 'terminal' && Boolean(paneId)
-  const role = useWorkspaceStore((state) => paneId ? state.settings.paneRoles[paneId] : undefined)
+  const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId
     ? Boolean(state.paneCompletionHighlights[paneId])
     : kind === 'terminal' && Object.keys(state.paneCompletionHighlights).length > 0)

@@ -1,7 +1,8 @@
 param(
-  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installers', 'version-preview')]
+  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'installers', 'version-preview')]
   [string]$Action = 'menu',
-  [string]$Version = ''
+  [string]$Version = '',
+  [string]$ConfigOverlay = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -227,6 +228,26 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Show-Bundles 'release'
 }
 
+function Invoke-CiInstaller {
+  Write-Section 'Installer: CI release flavor without version mutation'
+  Enter-RepoRoot
+  Assert-Tool 'pnpm'
+  $packageVersion = Get-JsonVersion $PackageJson
+  $cargoVersion = Get-CargoPackageVersion $CargoToml
+  $tauriVersion = Get-JsonVersion $TauriConfig
+  if ($packageVersion -ne $cargoVersion -or $packageVersion -ne $tauriVersion) {
+    throw "Version mismatch: package.json=$packageVersion, Cargo.toml=$cargoVersion, tauri.conf.json=$tauriVersion"
+  }
+  $arguments = @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
+  if ($ConfigOverlay.Trim().Length -gt 0) {
+    $overlay = [System.IO.Path]::GetFullPath($ConfigOverlay)
+    if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) { throw "Config overlay not found: $overlay" }
+    $arguments += @('--config', $overlay)
+  }
+  Invoke-Checked 'pnpm' $arguments
+  Show-Bundles 'release'
+}
+
 function Invoke-AllInstallers {
   Enter-RepoRoot
   Invoke-InstallerVersionBump
@@ -250,6 +271,7 @@ Actions:
   installer-dev      Dev-flavor installer; auto-bumps patch version first.
   installer-release  Production installer; auto-bumps patch version first.
   installers         Builds both installers after one shared patch bump.
+  installer-ci      CI installer without version bump; accepts -ConfigOverlay path.
   version-preview    Shows the next installer version without changing files.
 
 Debug vs release:
@@ -277,6 +299,7 @@ function Invoke-Action([string]$Name) {
     'release-run' { Invoke-ReleaseRun }
     'installer-dev' { Invoke-DevInstaller }
     'installer-release' { Invoke-ReleaseInstaller }
+    'installer-ci' { Invoke-CiInstaller }
     'installers' { Invoke-AllInstallers }
     'version-preview' { Invoke-InstallerVersionBump -DryRun }
     default { throw "Unknown action: $Name" }

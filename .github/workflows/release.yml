@@ -1,0 +1,105 @@
+name: Signed Windows release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      VIBELINK_LICENSE_API_URL: ${{ secrets.VIBELINK_LICENSE_API_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build, sign, and verify release assets
+        shell: powershell
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Release tag must be vX.Y.Z: $tag" }
+          $version = $Matches[1]
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoText = Get-Content src-tauri/Cargo.toml -Raw
+          $cargoPackage = [regex]::Match($cargoText, '(?ms)^\[package\]\s*(.*?)(?=^\[|\z)')
+          $cargoVersion = [regex]::Match($cargoPackage.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ($packageVersion -ne $version -or $tauriVersion -ne $version -or $cargoVersion -ne $version) {
+            throw "Tag/package version mismatch: tag=$version package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
+          }
+          if (-not $env:VIBELINK_LICENSE_API_URL) { throw 'VIBELINK_LICENSE_API_URL secret is required.' }
+          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows signing certificate secrets are required.' }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'vibelink-signing.pfx'
+          $overlayPath = Join-Path $env:RUNNER_TEMP 'vibelink-signing.json'
+          $releaseDir = Join-Path $env:RUNNER_TEMP 'vibelink-release'
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          $imported = @()
+          try {
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false)
+            $codeSigning = @($imported | Where-Object { $_.HasPrivateKey -and ($_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3') })
+            if ($codeSigning.Count -ne 1) { throw "Expected exactly one imported code-signing certificate, found $($codeSigning.Count)." }
+            $certificate = $codeSigning[0]
+            @{
+              bundle = @{
+                windows = @{
+                  certificateThumbprint = $certificate.Thumbprint
+                  digestAlgorithm = 'sha256'
+                  timestampUrl = 'http://timestamp.digicert.com'
+                }
+              }
+            } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $overlayPath -Encoding utf8
+
+            pnpm tauri:build:ci -- -ConfigOverlay $overlayPath
+            if ($LASTEXITCODE -ne 0) { throw "Tauri installer build failed: $LASTEXITCODE" }
+
+            $expectedExe = "VibeLink_${version}_x64-setup.exe"
+            $expectedMsi = "VibeLink_${version}_x64_en-US.msi"
+            $exeMatches = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter $expectedExe -Recurse)
+            $msiMatches = @(Get-ChildItem src-tauri/target/release/bundle/msi -File -Filter $expectedMsi -Recurse)
+            if ($exeMatches.Count -ne 1 -or $msiMatches.Count -ne 1) { throw 'Installer basename/version contract failed.' }
+            $appExe = Resolve-Path src-tauri/target/release/app.exe
+            $signatures = @($appExe.Path, $exeMatches[0].FullName, $msiMatches[0].FullName) | ForEach-Object { Get-AuthenticodeSignature -FilePath $_ }
+            $invalid = @($signatures | Where-Object { $_.Status -ne 'Valid' })
+            if ($invalid.Count -ne 0) { throw "Authenticode verification failed for $($invalid.Count) artifact(s)." }
+
+            Copy-Item $exeMatches[0].FullName (Join-Path $releaseDir $expectedExe)
+            Copy-Item $msiMatches[0].FullName (Join-Path $releaseDir $expectedMsi)
+            $checksumLines = @($expectedExe, $expectedMsi) | ForEach-Object {
+              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $releaseDir $_)).Hash.ToLowerInvariant()
+              "$hash  $_"
+            }
+            [IO.File]::WriteAllLines((Join-Path $releaseDir 'SHA256SUMS.txt'), $checksumLines, (New-Object Text.UTF8Encoding($false)))
+          } finally {
+            foreach ($certificate in $imported) {
+              $certificatePath = "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
+              if (Test-Path $certificatePath) { Remove-Item $certificatePath -Force }
+            }
+            Remove-Item $pfxPath, $overlayPath -Force -ErrorAction SilentlyContinue
+          }
+      - name: Publish verified release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ runner.temp }}/vibelink-release/VibeLink_*.exe
+            ${{ runner.temp }}/vibelink-release/VibeLink_*.msi
+            ${{ runner.temp }}/vibelink-release/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true

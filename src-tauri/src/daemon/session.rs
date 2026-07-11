@@ -249,6 +249,17 @@ impl DaemonState {
         Ok(())
     }
 
+    pub fn set_pane_role(
+        &mut self,
+        session_id: Uuid,
+        pane_id: Uuid,
+        role: Option<String>,
+    ) -> anyhow::Result<()> {
+        let pane = self.pane_in_session_mut(session_id, pane_id)?;
+        pane.config.role = role;
+        Ok(())
+    }
+
     pub fn get_scrollback(&self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<Vec<u8>> {
         let session = self.session(session_id)?;
         let pane = session.panes.get(&pane_id).ok_or_else(|| {
@@ -892,6 +903,7 @@ mod tests {
             title: Some("test".to_string()),
             icon: None,
             profile_id: None,
+            role: None,
             cols: 80,
             rows: 24,
         }

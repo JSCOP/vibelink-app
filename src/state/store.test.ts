@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { PaneMeta, SessionMeta } from '../ipc/types'
+import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import { useWorkspaceStore } from './store'
 
@@ -50,6 +50,22 @@ const secondSession: SessionMeta = {
   workspaceFolder: 'E:/other',
 }
 
+const unlicensedStatus: LicenseStatus = {
+  state: 'unlicensed',
+  entitled: false,
+  provider: null,
+  maskedKey: null,
+  activationId: null,
+  deviceId: 'device-test',
+  deviceName: 'Test device',
+  maxDevices: 0,
+  devices: [],
+  validatedAt: null,
+  offlineGraceUntil: null,
+  purchaseUrl: 'https://example.com',
+  message: 'License required',
+}
+
 const localStorageStub = {
   getItem: vi.fn(() => null),
   setItem: vi.fn(),
@@ -59,6 +75,7 @@ const localStorageStub = {
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (command: string) => {
+    if (command === 'license_status') return unlicensedStatus
     if (command === 'spawn_pane') return spawnedPane
     if (command === 'list_sessions') return []
     return null
@@ -75,11 +92,13 @@ describe('workspace store profiles', () => {
     localStorageStub.clear.mockClear()
     vi.mocked(invoke).mockClear()
     vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'license_status') return unlicensedStatus
       if (command === 'spawn_pane') return spawnedPane
       if (command === 'list_sessions') return []
       return null
     })
     useWorkspaceStore.setState({
+      license: { ready: false, status: null },
       sessions: [],
       activeSessionId: undefined,
       activePaneId: undefined,
@@ -240,8 +259,21 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}').pages.map((page: { id: string }) => page.id)).toEqual(['terminal', 'planning'])
   })
 
+  test('attachSession detaches the previously active workspace', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: null, panes: [nonAgentPane] }
+      return null
+    })
+    useWorkspaceStore.setState({ activeSessionId: createdSession.id })
+
+    await useWorkspaceStore.getState().attachSession(secondSession.id)
+
+    expect(invoke).toHaveBeenCalledWith('detach_session', { sessionId: createdSession.id })
+  })
+
   test('bootstrap loads sessions without auto-opening a workspace', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'license_status') return unlicensedStatus
       if (command === 'list_sessions') return [createdSession]
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'spawn_pane') return spawnedPane
@@ -258,18 +290,6 @@ describe('workspace store profiles', () => {
   })
 
   test('openSession launches an empty workspace pane in the workspace folder', async () => {
-  test('attachSession detaches the previously active workspace', async () => {
-    vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'attach_session') return { layoutJson: null, panes: [nonAgentPane] }
-      return null
-    })
-    useWorkspaceStore.setState({ activeSessionId: createdSession.id })
-
-    await useWorkspaceStore.getState().attachSession(secondSession.id)
-
-    expect(invoke).toHaveBeenCalledWith('detach_session', { sessionId: createdSession.id })
-  })
-
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'list_sessions') return [createdSession]

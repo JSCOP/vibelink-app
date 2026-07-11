@@ -1,4 +1,5 @@
 use crate::app::board::{board_read_native, board_write_native};
+use crate::app::license::HeadlessLicenseCache;
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
@@ -32,6 +33,8 @@ fn serve() -> Result<()> {
     let session_id = parse_uuid(&session_id)?;
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
     let client = DaemonClient::new(stream);
+    let license = HeadlessLicenseCache::load()?;
+    license.require_pro()?;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -39,7 +42,7 @@ fn serve() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(&client, session_id, &line) {
+        if let Some(response) = handle_line_with_license(&client, session_id, &line, Some(&license)) {
             serde_json::to_writer(&mut stdout, &response)?;
             stdout.write_all(b"\n")?;
             stdout.flush()?;
@@ -49,72 +52,48 @@ fn serve() -> Result<()> {
 }
 
 /// Returns Some(response_value) to write to stdout, or None when no reply is due.
-fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
+fn handle_line_with_license(client: &DaemonClient, session_id: Uuid, line: &str, license: Option<&HeadlessLicenseCache>) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
-        Err(err) => {
-            return Some(error_response(
-                Value::Null,
-                -32700,
-                format!("Parse error: {err}"),
-            ));
-        }
+        Err(err) => return Some(error_response(Value::Null, -32700, format!("Parse error: {err}"))),
     };
     if is_notification(&request) {
         let _ = handle_notification(client, session_id, &request);
         return None;
     }
-    Some(
-        handle_message(client, session_id, &request).unwrap_or_else(|err| {
-            error_response(
-                request.get("id").cloned().unwrap_or(Value::Null),
-                -32000,
-                err.to_string(),
-            )
-        }),
-    )
+    Some(handle_message_with_license(client, session_id, &request, license).unwrap_or_else(|err| {
+        error_response(request.get("id").cloned().unwrap_or(Value::Null), -32000, err.to_string())
+    }))
 }
 
-fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
+fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
+    handle_line_with_license(client, session_id, line, None)
+}
+
+fn handle_message_with_license(client: &DaemonClient, session_id: Uuid, request: &Value, license: Option<&HeadlessLicenseCache>) -> Result<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     match request.get("method").and_then(Value::as_str) {
         Some("initialize") => Ok(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2025-06-18",
-                "serverInfo": { "name": "vibelink", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "tools": {} }
-            }
+            "jsonrpc": "2.0", "id": id,
+            "result": { "protocolVersion": "2025-06-18", "serverInfo": { "name": "vibelink", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "tools": {} } }
         })),
-        Some("tools/list") => {
-            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tool_schemas() } }))
-        }
+        Some("tools/list") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tool_schemas() } })),
         Some("tools/call") => {
-            let params = request
-                .get("params")
-                .ok_or_else(|| anyhow!("tools/call missing params"))?;
-            let name = params
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("tools/call missing name"))?;
-            let args = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let params = request.get("params").ok_or_else(|| anyhow!("tools/call missing params"))?;
+            let name = params.get("name").and_then(Value::as_str).ok_or_else(|| anyhow!("tools/call missing name"))?;
+            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            if let Some(license) = license { license.require_pro()?; }
             let text = call_tool(client, session_id, name, &args)?;
-            Ok(
-                json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }),
-            )
+            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }))
         }
         Some("ping") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
-        Some(other) => Ok(error_response(
-            id,
-            -32601,
-            format!("method not found: {other}"),
-        )),
+        Some(other) => Ok(error_response(id, -32601, format!("method not found: {other}"))),
         None => Ok(error_response(id, -32600, "missing method")),
     }
+}
+
+fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
+    handle_message_with_license(client, session_id, request, None)
 }
 
 fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) -> Result<String> {
@@ -563,6 +542,7 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
             title: Some(format!("{title_prefix} {ordinal}")),
             icon: icon.clone(),
             profile_id: profile_id.clone(),
+            role: None,
             cols: 120,
             rows: 32,
         };
@@ -1480,6 +1460,7 @@ mod tests {
                         title: Some(format!("Pane {}", index + 1)),
                         icon: Some("terminal".to_string()),
                         profile_id: None,
+                        role: None,
                         cols: 120,
                         rows: 32,
                     },

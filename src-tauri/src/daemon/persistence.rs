@@ -67,6 +67,7 @@ mod tests {
                 title: Some("shell".to_string()),
                 icon: None,
                 profile_id: None,
+                role: None,
                 cols: 100,
                 rows: 40,
             }],

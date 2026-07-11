@@ -124,6 +124,8 @@ async function reloadSession(sessionId: string): Promise<void> {
 }
 
 async function reloadBoard(sessionId: string): Promise<void> {
+  const license = useWorkspaceStore.getState().license
+  if (!license.ready || !license.status?.entitled) return
   const json = await invoke<string>('board_read', { sessionId })
   useWorkspaceStore.getState().applyBoardSnapshot(sessionId, json)
 }

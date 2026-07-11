@@ -1,6 +1,8 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
+use super::license::LicenseService;
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
 use tauri::{ipc::Channel, State};
+use std::sync::Arc;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -306,6 +308,20 @@ pub async fn set_pane_title(
         pane_id,
         title,
     }))
+}
+
+#[tauri::command]
+pub async fn set_pane_role(
+    client: State<'_, DaemonClient>,
+    license: State<'_, Arc<LicenseService>>,
+    session_id: String,
+    pane_id: String,
+    role: Option<String>,
+) -> Result<(), String> {
+    license.require_pro_cached().map_err(to_string)?;
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneRole { req, session_id, pane_id, role }))
 }
 
 #[tauri::command]

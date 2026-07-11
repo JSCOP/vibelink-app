@@ -280,6 +280,7 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         title: Some(case.name.clone()),
         icon: None,
         profile_id: None,
+        role: None,
         cols: 80,
         rows: 24,
     };

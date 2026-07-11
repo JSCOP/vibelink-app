@@ -21,6 +21,7 @@ export function TaskCreateDialog({ sessionId, onClose }: TaskCreateDialogProps) 
     const trimmed = title.trim()
     if (!trimmed) return
     const task = createTask(sessionId, { title: trimmed, description })
+    if (!task) return
     if (targetPaneId) await assignTask(task.id, targetPaneId)
     onClose()
   }

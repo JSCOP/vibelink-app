@@ -90,6 +90,12 @@ pub enum ClientToDaemon {
         pane_id: Uuid,
         title: String,
     },
+    SetPaneRole {
+        req: Req,
+        session_id: Uuid,
+        pane_id: Uuid,
+        role: Option<String>,
+    },
     ClosePane {
         req: Req,
         session_id: Uuid,
@@ -203,6 +209,8 @@ pub struct PaneConfig {
     pub icon: Option<String>,
     #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -308,6 +316,7 @@ mod tests {
                 title: Some("main".to_string()),
                 icon: Some("sparkles".to_string()),
                 profile_id: Some("codex".to_string()),
+                role: Some("Reviewer".to_string()),
                 cols: 120,
                 rows: 32,
             },

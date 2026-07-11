@@ -15,6 +15,7 @@ export type PaneConfig = {
   title?: string | null
   icon?: string | null
   profileId?: string | null
+  role?: string | null
   cols: number
   rows: number
 }
@@ -113,4 +114,33 @@ export type SkillApplyInput = {
   scope: SkillScope
   sessionId?: string | null
   enabled?: boolean
+}
+
+export type LicenseState = 'unlicensed' | 'validOnline' | 'validOffline' | 'activationLimit' | 'reviewRequired' | 'invalid' | 'revoked' | 'configurationError'
+
+export type LicenseDevice = {
+  activationId: string
+  deviceId: string
+  deviceName: string
+  appVersion: string
+  status: 'pending' | 'active' | 'review_required' | 'deactivated'
+  activatedAt: string | null
+  lastValidatedAt: string | null
+  current: boolean
+}
+
+export type LicenseStatus = {
+  state: LicenseState
+  entitled: boolean
+  provider: 'vibelink' | 'lemonsqueezy' | null
+  maskedKey: string | null
+  activationId: string | null
+  deviceId: string
+  deviceName: string
+  maxDevices: number
+  devices: LicenseDevice[]
+  validatedAt: string | null
+  offlineGraceUntil: string | null
+  purchaseUrl: string
+  message: string
 }

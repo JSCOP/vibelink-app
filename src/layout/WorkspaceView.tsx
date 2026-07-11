@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanel, type IDockviewPanelProps } from 'dockview-react'
 import { WorkspaceWindowTab } from '../components/WorkspaceWindowTab'
 import { TerminalTab } from '../components/TerminalTab'
@@ -31,6 +31,8 @@ import { TaskDiffView } from '../components/TaskDiffView'
 import { OrchestratorChat } from '../components/OrchestratorChat'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { ProLockedPanel } from '../components/ProLockedPanel'
+import { requiresProWindow } from '../state/licenseGate'
 
 
 type WorkspaceViewProps = {
@@ -61,10 +63,10 @@ type ResizeHandleSets = {
   single: ConnectedResizeHandle[]
 }
 
-const components = {
-  terminalWindow: TerminalWindowPanel,
 let interactiveResizeActive = false
 
+const components = {
+  terminalWindow: TerminalWindowPanel,
   agent: AgentWindowPanel,
   kanban: KanbanWindowPanel,
   diff: DiffWindowPanel,
@@ -101,12 +103,17 @@ function TerminalPaneBoundary(props: IDockviewPanelProps) {
   )
 }
 
+function ProPanelBoundary({ feature, children }: { feature: string; children: ReactNode }) {
+  const entitled = useWorkspaceStore((state) => Boolean(state.license.ready && state.license.status?.entitled))
+  return entitled ? children : <ProLockedPanel feature={feature} />
+}
+
 function AgentWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-agent">
-      <ErrorBoundary label="VibeLink Agent panel">
-        <OrchestratorChat />
-      </ErrorBoundary>
+      <ProPanelBoundary feature="VibeLink Agent">
+        <ErrorBoundary label="VibeLink Agent panel"><OrchestratorChat /></ErrorBoundary>
+      </ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -136,9 +143,7 @@ function TerminalWindowPanel(props: IDockviewPanelProps) {
 function KanbanWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban">
-      <ErrorBoundary label="Kanban panel">
-        <KanbanBoard />
-      </ErrorBoundary>
+      <ProPanelBoundary feature="Kanban"><ErrorBoundary label="Kanban panel"><KanbanBoard /></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -146,9 +151,7 @@ function KanbanWindowPanel(props: IDockviewPanelProps) {
 function TodoWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-todo">
-      <ErrorBoundary label="Todo panel">
-        <WorkspaceTodoPanel />
-      </ErrorBoundary>
+      <ProPanelBoundary feature="Todo orchestration"><ErrorBoundary label="Todo panel"><WorkspaceTodoPanel /></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -156,9 +159,7 @@ function TodoWindowPanel(props: IDockviewPanelProps) {
 function DiffWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-diff">
-      <ErrorBoundary label="Diff panel">
-        <TaskDiffView />
-      </ErrorBoundary>
+      <ProPanelBoundary feature="Task diff"><ErrorBoundary label="Diff panel"><TaskDiffView /></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -184,16 +185,13 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const resizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
   const terminalResizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
   const terminalResizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
+  const terminalDockLayoutFrameRef = useRef<number | undefined>()
   const [resizeHandles, setResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   // Preview state lives outside React state: a drag writes it per frame and
   // routing that through useState would reconcile both dockview trees per
   // frame. Only ConnectedResizeLayer subscribes.
-  const workspacePreviewStoreRef = useRef<ResizePreviewStore | null>(null)
-  workspacePreviewStoreRef.current ??= createResizePreviewStore()
-  const workspacePreviewStore = workspacePreviewStoreRef.current
-  const terminalPreviewStoreRef = useRef<ResizePreviewStore | null>(null)
-  terminalPreviewStoreRef.current ??= createResizePreviewStore()
-  const terminalPreviewStore = terminalPreviewStoreRef.current
+  const [workspacePreviewStore] = useState(createResizePreviewStore)
+  const [terminalPreviewStore] = useState(createResizePreviewStore)
   const [terminalResizeHandles, setTerminalResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   const [terminalGridPreference, setTerminalGridPreference] = useState<GridSize | null>(null)
   const [chromeWindowCount, setChromeWindowCount] = useState(0)
@@ -260,8 +258,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     resizeDragRef.current = null
     resizeHoverRef.current = null
     workspacePreviewStore.set(null)
-    if (options?.clearHandles) setResizeHandles({ connected: [], single: [] })
     interactiveResizeActive = false
+    if (options?.clearHandles) setResizeHandles({ connected: [], single: [] })
   }, [workspacePreviewStore])
 
   const clearTerminalResizeInteraction = useCallback((options?: { clearHandles?: boolean }) => {
@@ -269,8 +267,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     terminalResizeDragRef.current = null
     terminalResizeHoverRef.current = null
     terminalPreviewStore.set(null)
-    if (options?.clearHandles) setTerminalResizeHandles({ connected: [], single: [] })
     interactiveResizeActive = false
+    if (options?.clearHandles) setTerminalResizeHandles({ connected: [], single: [] })
   }, [terminalPreviewStore])
 
   const scheduleLayoutReflow = useCallback(() => {
@@ -287,8 +285,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   }, [clearResizeInteraction, clearTerminalResizeInteraction])
 
   const persistLayoutSoon = useCallback(() => {
-    const api = apiRef.current
     if (interactiveResizeActive) return
+    const api = apiRef.current
     if (!api || !activeSessionId || suppressPanelRemovalRef.current || !isDockElementMeasurable(dockRef.current)) return
     window.clearTimeout(saveTimerRef.current)
     saveTimerRef.current = window.setTimeout(() => {
@@ -330,7 +328,6 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     return true
   }, [refreshTerminalResizeHandles])
 
-  const terminalDockLayoutFrameRef = useRef<number | undefined>()
   // The outer dockview repositions the terminal window's render overlay in a
   // rAF-deferred pass that only runs on per-panel dimension events — after a
   // sibling window closes, the terminal window's own dimensions "didn't
@@ -605,10 +602,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       requestAnimationFrame(() => requestAnimationFrame(syncActivePane))
     } else {
       panel.api.maximize()
-      // Maximizing hides the siblings; recover them on the way back is handled
-      // above, but the maximized pane itself was just re-parented and needs a
-      // repaint against its new full-size geometry.
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+      // Only the maximized pane changes size here; hidden siblings are handled
+      // by their visibility/context-loss state when the layout is restored.
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true, paneIds: [paneId] })
       requestAnimationFrame(syncActivePane)
     }
   }, [activatePane, panelApiForId])
@@ -773,25 +769,25 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const segmentPoint = previewHandle.axis === 'x'
       ? event.clientY - (dockRect?.top ?? 0)
       : event.clientX - (dockRect?.left ?? 0)
-    // One-time analysis per drag: the per-frame path (deltaFor) is pure
-    // arithmetic over precomputed boundaries; the clone-and-apply
-    // (layoutFor) runs once, on pointerup.
     const session = singleSegment
-    interactiveResizeActive = true
       ? createSingleResizeDragSession(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, undefined, resizeSnapTolerance, true)
       : createConnectedResizeDragSession(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, undefined, resizeSnapTolerance)
-    let lastDragFitAt = 0
     if (!session) return
+    interactiveResizeActive = true
     let latestPoint: number | null = null
     let moveFrame: number | undefined
+    let lastDragFitAt = 0
 
     workspacePreviewStore.set({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
-    // pointermove can outpace the compositor (high-Hz mice / 240Hz panels);
-    // coalesce preview updates to one per frame.
     const onPointerMove = (moveEvent: PointerEvent) => {
       latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
       if (moveFrame !== undefined) return
+      moveFrame = requestAnimationFrame(() => {
+        moveFrame = undefined
+        if (latestPoint === null) return
+        const rawDelta = latestPoint - startPoint
+        const delta = session.deltaFor(rawDelta)
         for (const target of session.liveTargets) {
           const panel = api.getPanel(target.paneId)
           panel?.api.setSize(target.axis === 'x' ? { width: target.baseSize + delta } : { height: target.baseSize + delta })
@@ -801,11 +797,6 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
           TerminalManager.scheduleLayoutPass({ paneIds: session.affectedPaneIds, syncPty: true })
           lastDragFitAt = now
         }
-      moveFrame = requestAnimationFrame(() => {
-        moveFrame = undefined
-        if (latestPoint === null) return
-        const rawDelta = latestPoint - startPoint
-        const delta = session.deltaFor(rawDelta)
         const snapped = Math.abs(delta - rawDelta) > 2
         workspacePreviewStore.set({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
       })
@@ -834,10 +825,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
 
     const removeListeners = () => {
-      if (moveFrame !== undefined) {
-        cancelAnimationFrame(moveFrame)
-        moveFrame = undefined
-      }
+      if (moveFrame !== undefined) cancelAnimationFrame(moveFrame)
+      moveFrame = undefined
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('pointercancel', onPointerCancel)
@@ -893,21 +882,28 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (!previewHandle) return
     const singleSegment = event.ctrlKey || isSingleResizeHandle(previewHandle)
     const startPoint = previewHandle.axis === 'x' ? event.clientX : event.clientY
-    interactiveResizeActive = true
     const segmentPoint = previewHandle.axis === 'x'
       ? event.clientY - (dockRect?.top ?? 0)
-    let lastDragFitAt = 0
       : event.clientX - (dockRect?.left ?? 0)
-    // See startConnectedResize: one-time analysis, per-frame arithmetic.
     const session = singleSegment
       ? createSingleResizeDragSession(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, undefined, resizeSnapTolerance, true)
       : createConnectedResizeDragSession(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, undefined, resizeSnapTolerance)
     if (!session) return
+    interactiveResizeActive = true
     let latestPoint: number | null = null
     let moveFrame: number | undefined
+    let lastDragFitAt = 0
 
     terminalPreviewStore.set({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
+      if (moveFrame !== undefined) return
+      moveFrame = requestAnimationFrame(() => {
+        moveFrame = undefined
+        if (latestPoint === null) return
+        const rawDelta = latestPoint - startPoint
+        const delta = session.deltaFor(rawDelta)
         for (const target of session.liveTargets) {
           const panel = api.getPanel(target.paneId)
           panel?.api.setSize(target.axis === 'x' ? { width: target.baseSize + delta } : { height: target.baseSize + delta })
@@ -917,14 +913,6 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
           TerminalManager.scheduleLayoutPass({ paneIds: session.affectedPaneIds, syncPty: true })
           lastDragFitAt = now
         }
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
-      if (moveFrame !== undefined) return
-      moveFrame = requestAnimationFrame(() => {
-        moveFrame = undefined
-        if (latestPoint === null) return
-        const rawDelta = latestPoint - startPoint
-        const delta = session.deltaFor(rawDelta)
         const snapped = Math.abs(delta - rawDelta) > 2
         terminalPreviewStore.set({ ...previewHandle, delta, rawDelta, mode: singleSegment ? 'single' : 'connected', snapped })
       })
@@ -953,10 +941,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
 
     const removeListeners = () => {
-      if (moveFrame !== undefined) {
-        cancelAnimationFrame(moveFrame)
-        moveFrame = undefined
-      }
+      if (moveFrame !== undefined) cancelAnimationFrame(moveFrame)
+      moveFrame = undefined
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('pointercancel', onPointerCancel)
@@ -999,6 +985,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const windowApi = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!windowApi || !sessionId) return
+    const license = useWorkspaceStore.getState().license
+    if (requiresProWindow(kind) && (!license.ready || !license.status?.entitled)) return
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       if (kind === 'terminal') {
         ensureTerminalWindowPanel()
@@ -1345,17 +1333,16 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       clearTerminalResizeInteraction({ clearHandles: hasMaximizedGroup })
       if (!hasMaximizedGroup && isDockElementMeasurable(terminalDockRef.current)) refreshTerminalResizeHandles(event.api)
       // Dockview's maximize transition leaves geometry stale until the next
-      if (interactiveResizeActive) return
-      scheduleLayoutReflow()
       // layout pass; lay out first, then let the dirty scheduler refit panes.
       scheduleTerminalDockLayout()
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+      reflowTerminalsAfterLayout({ syncPty: true })
       persistLayoutSoon()
     })
     event.api.onDidLayoutChange(() => {
       if (!isDockElementMeasurable(terminalDockRef.current)) return
-      scheduleLayoutReflow()
       refreshTerminalResizeHandles(event.api)
+      if (interactiveResizeActive) return
+      scheduleLayoutReflow()
       persistLayoutSoon()
       if (!hasActivePanelChange) updateActivePaneId()
     })
@@ -1419,18 +1406,16 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const hasMaximizedGroup = event.api.hasMaximizedGroup()
       clearResizeInteraction({ clearHandles: hasMaximizedGroup })
       if (!hasMaximizedGroup && isDockElementMeasurable(dockRef.current)) refreshResizeHandles(event.api)
-      // See handleTerminalReady: force a layout pass before pane recovery.
+      // Force outer/inner layout before the terminal dirty pass.
       requestAnimationFrame(() => layoutDockview(event.api))
       scheduleTerminalDockLayout()
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+      reflowTerminalsAfterLayout({ syncPty: true })
     }
 
     if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(updateActivePaneId)
     event.api.onDidMaximizedGroupChange(syncMaximizedResizeState)
     updateActivePaneId()
     event.api.onDidAddPanel(syncChromeState)
-      if (interactiveResizeActive) return
-      scheduleLayoutReflow()
     event.api.onDidRemovePanel(syncChromeState)
     if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(syncChromeState)
     event.api.onDidLayoutFromJSON(syncChromeState)
@@ -1439,8 +1424,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     event.api.onDidLayoutChange(() => {
       syncChromeState()
       if (!isDockElementMeasurable(dockRef.current)) return
-      scheduleLayoutReflow()
       refreshResizeHandles(event.api)
+      if (interactiveResizeActive) return
+      scheduleLayoutReflow()
       scheduleTerminalDockLayout()
       persistLayoutSoon()
       if (!hasActivePanelChange) updateActivePaneId()

@@ -707,6 +707,7 @@ mod tests {
             title: None,
             icon: None,
             profile_id: None,
+            role: None,
             cols: 80,
             rows: 24,
         }

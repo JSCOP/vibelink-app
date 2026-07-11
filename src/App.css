@@ -3532,3 +3532,21 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
     transition-duration: 0.01ms !important;
   }
 }
+
+.license-settings { display: grid; gap: 16px; }
+.settings-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.settings-section-heading h2 { margin: 0; }
+.settings-section-heading p { margin: 6px 0 0; color: var(--vibelink-muted); }
+.license-state { border: 1px solid var(--vibelink-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; }
+.license-state-validOnline, .license-state-validOffline { color: var(--vibelink-alarm-highlight); }
+.license-summary, .license-device-list { display: grid; gap: 8px; }
+.license-summary span, .license-device-row span { display: block; color: var(--vibelink-muted); font-size: 12px; }
+.license-activate-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+.license-activate-row input { min-width: 0; }
+.license-device-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--vibelink-border); border-radius: 8px; padding: 10px 12px; }
+.license-actions { display: flex; gap: 8px; }
+.settings-error { color: #ff6b6b; }
+.pro-locked-panel { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 12px; padding: 32px; text-align: center; color: var(--vibelink-muted); background: var(--vibelink-panel); }
+.pro-locked-panel h2 { margin: 0; color: var(--vibelink-text); }
+.pro-locked-panel p { max-width: 420px; margin: 0; }
+.pro-upsell-dialog { max-width: 480px; }

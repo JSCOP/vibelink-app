@@ -15,6 +15,7 @@ import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { TerminalTopbarActions } from './components/TerminalTopbarActions'
+import { ProUpsellDialog } from './components/ProUpsellDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
@@ -26,6 +27,7 @@ import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
+import { requiresProWindow } from './state/licenseGate'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -55,6 +57,7 @@ function App() {
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
   const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null>(null)
+  const [proUpsellFeature, setProUpsellFeature] = useState<string | null>(null)
   const [ffmpegNotice, setFfmpegNotice] = useState<string | null>(null)
   const [ffmpegDownload, setFfmpegDownload] = useState<FfmpegDownloadProgress | null>(null)
   const [recordingStartedAtMs, setRecordingStartedAtMs] = useState<number | null>(null)
@@ -74,6 +77,8 @@ function App() {
   const error = useWorkspaceStore((state) => state.error)
   const dismissError = useWorkspaceStore((state) => state.dismissError)
   const bootstrap = useWorkspaceStore((state) => state.bootstrap)
+  const license = useWorkspaceStore((state) => state.license)
+  const revalidateLicense = useWorkspaceStore((state) => state.revalidateLicense)
   const createSession = useWorkspaceStore((state) => state.createSession)
   const renameSession = useWorkspaceStore((state) => state.renameSession)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
@@ -106,6 +111,12 @@ function App() {
       useWorkspaceStore.getState().setError(String(caught))
     })
   }, [bootstrap])
+
+  useEffect(() => {
+    if (!license.ready || !license.status?.activationId) return
+    const timer = window.setInterval(() => { void revalidateLicense() }, 12 * 60 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [license.ready, license.status?.activationId, revalidateLicense])
 
   useEffect(() => {
     TerminalManager.setLinkActions({
@@ -183,7 +194,7 @@ function App() {
   }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible, settings.cursorStyle, settings.cursorWidth])
 
   useEffect(() => {
-    if (!activeSessionId) return
+    if (!activeSessionId || !license.ready || !license.status?.entitled) return
     const sessionId = activeSessionId
     const workspaceFolder = activeSession?.workspaceFolder ?? null
     const commandOverride = settings.hermesCommand || null
@@ -194,7 +205,7 @@ function App() {
     void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId })
       .then((state) => state.model ? startHermesAgent({ sessionId, commandOverride, workspaceFolder }) : undefined)
       .catch(() => {})
-  }, [activeSessionId, activeSession?.workspaceFolder, settings.hermesCommand])
+  }, [activeSessionId, activeSession?.workspaceFolder, license.ready, license.status?.entitled, settings.hermesCommand])
 
   useEffect(() => {
     TerminalManager.scheduleLayoutPass({ force: true, syncPty: true })
@@ -312,6 +323,11 @@ function App() {
 
   const openWorkspaceWindow = (kind: WorkspaceWindowKind) => {
     if (!activeSessionId) return
+    if (requiresProWindow(kind) && !license.status?.entitled) {
+      setProUpsellFeature(workspaceWindowDescriptors[kind].title)
+      setIsWindowMenuOpen(false)
+      return
+    }
     setWorkspaceWindowRequest({ kind, profileId: kind === 'terminal' ? activeProfile.id : null, requestId: Date.now() })
     setIsWindowMenuOpen(false)
   }
@@ -535,6 +551,7 @@ function App() {
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {proUpsellFeature ? <ProUpsellDialog feature={proUpsellFeature} onClose={() => setProUpsellFeature(null)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
         {ffmpegDownload ? (
           <div className="ffmpeg-download-toast" role="status" aria-live="polite">

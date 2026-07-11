@@ -18,7 +18,20 @@ pnpm build
 pnpm tauri:build
 ```
 
-`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release`. Versioned Windows bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.7_x64_en-US.msi` and `VibeLink_0.1.7_x64-setup.exe`.
+`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release` and performs the local release-preparation version bump. Versioned bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.9_x64_en-US.msi` and `VibeLink_0.1.9_x64-setup.exe`. CI uses `pnpm tauri:build:ci -- -ConfigOverlay <json>` to merge signing configuration without changing versions.
+
+## VibeLink Pro licensing
+
+- Core remains usable without a key for terminal sessions, panes, grids, themes, profiles, and capture/recording.
+- Pro gates Agent, Kanban, Todo, Diff, task orchestration, pane roles, Hermes/MCP, git snapshots/worktrees, board writes, and related CLI/native commands.
+- Settings → License activates either a VibeLink-issued `VBL-…` key or a Lemon Squeezy key and shows the masked key plus active/review devices. One license supports three devices; current or remote devices can be removed.
+- Successful online validation stores only encrypted Windows Credential Manager state. License keys are never persisted in localStorage, Zustand settings, session JSON, or logs.
+- The last successful server timestamps grant up to seven days of offline Pro. Explicit refund/revocation/deactivation locks immediately on the next online validation; clock rollback or expired grace returns to Core.
+- `VIBELINK_LICENSE_API_URL` is compiled into the application. Debug defaults to `http://localhost:3000`; release builds require an HTTPS origin with no credentials, path, query, or fragment.
+
+## Signed release
+
+Tag releases require `vX.Y.Z` to match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. `.github/workflows/release.yml` imports one CurrentUser code-signing PFX, builds through the non-bumping CI wrapper, verifies Authenticode for `app.exe`, NSIS, and MSI, creates `SHA256SUMS.txt`, removes the temporary certificate/config, and only then publishes the exact installer names. Unsigned or invalid artifacts are not release/download candidates.
 
 ## Architecture
 
@@ -60,6 +73,8 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 
 `sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage VibeLink-owned Markdown skills under app data; enabled persisted skills are injected into VibeLink Agent prompts for the matching workspace. The built-in terminal integration skill is `vibelink-terminal`.
 VibeLink-launched panes receive `VIBELINK_SESSION_ID`, `VIBELINK_PANE_ID`, `VIBELINK_APP_EXE`, and `VIBELINK_APP_FLAVOR`; `panes`, `read`, `write`, `task`, and workspace-scoped `skill` commands use `VIBELINK_SESSION_ID` when `--session` is omitted, so agents should run `$env:VIBELINK_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace. Spawned PTYs advertise `TERM_PROGRAM=VibeLink`.
+
+Core CLI can list sessions and use role-free terminal panes. Task commands, pane-role access, and `mcp serve` require an entitled Pro cache; unlicensed callers receive `VibeLink Pro license required.` rather than an unguarded native operation.
 
 `mcp serve` is the stdio MCP server configured as `mcp_servers.vibelink` in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The server requires `VIBELINK_SESSION_ID`, receives `VIBELINK_APP_FLAVOR`, and exposes `vibelink_pane_*`, `vibelink_terminal_grid_launch`, `vibelink_skill_*`, and `vibelink_task_*` tools. The Orchestrator provisions `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, stores secrets only in `<HERMES_HOME>\.env`, and mirrors Kanban board state to `<appData>\kanban\<session-id>.json`.
 

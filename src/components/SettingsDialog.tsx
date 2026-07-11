@@ -3,6 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Terminal, X } from 'lucide-react'
 import { HermesGatewayForm } from './HermesGatewayForm'
+import { LicenseSettings } from './LicenseSettings'
 import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
@@ -23,6 +24,7 @@ type SettingsDialogProps = {
 }
 
 type SettingsSection =
+  | 'license'
   | 'model'
   | 'chat'
   | 'appearance'
@@ -38,6 +40,7 @@ type SettingsSection =
   | 'about'
 
 const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[] = [
+  { id: 'license', label: 'License', icon: KeyRound },
   { id: 'model', label: 'Model', icon: Bot },
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -85,7 +88,7 @@ const profileKindOptions: { value: ProfileKind; label: string }[] = [
 
 export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
-  const [activeSection, setActiveSection] = useState<SettingsSection>('model')
+  const [activeSection, setActiveSection] = useState<SettingsSection>('license')
   const [search, setSearch] = useState('')
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
   const [defaultCaptureDir, setDefaultCaptureDir] = useState('')
@@ -342,6 +345,8 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
           </header>
 
           <div className="vibelink-settings-scroll">
+            {activeSection === 'license' ? <LicenseSettings /> : null}
+
             {activeSection === 'model' ? (
               <SettingsGroup title="Main model" description="Native Hermes owns provider, login, and model configuration. VibeLink displays the active workspace state.">
                 <ReadonlyRow label="Workspace" value={activeSession?.name ?? 'No workspace'} />

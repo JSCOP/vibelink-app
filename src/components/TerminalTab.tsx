@@ -32,7 +32,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
   const actions = useWorkspaceActions()
   const [title, setTitle] = useState(api.title ?? params?.title ?? 'Shell')
   const paneId = params?.paneId
-  const role = useWorkspaceStore((state) => paneId ? state.settings.paneRoles[paneId] : undefined)
+  const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)

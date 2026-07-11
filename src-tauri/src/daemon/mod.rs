@@ -388,6 +388,16 @@ fn dispatch_message(
             debounce_persist_state(&state, sessions_path)?;
             send_ok(tx, req)
         }
+        ClientToDaemon::SetPaneRole {
+            req,
+            session_id,
+            pane_id,
+            role,
+        } => {
+            lock_state(&state).set_pane_role(session_id, pane_id, role)?;
+            debounce_persist_state(&state, sessions_path)?;
+            send_ok(tx, req)
+        }
         ClientToDaemon::ClosePane {
             req,
             session_id,
@@ -443,6 +453,10 @@ fn dispatch_message(
             event,
         } => {
             info!(%session_id, ?event, "relaying task event");
+            if let crate::protocol::TaskSignal::PaneConfigured { pane_id, role, .. } = &event {
+                lock_state(&state).set_pane_role(session_id, *pane_id, role.clone())?;
+                debounce_persist_state(&state, sessions_path)?;
+            }
             let senders = lock_state(&state).senders_for_session(session_id);
             for sender in senders {
                 let _ = sender.send(DaemonToClient::TaskEvent {
@@ -516,6 +530,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
+        | ClientToDaemon::SetPaneRole { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
         | ClientToDaemon::ClearSession { req, .. }
         | ClientToDaemon::GetScrollback { req, .. }
@@ -780,6 +795,7 @@ mod tests {
                             title: Some("test".to_string()),
                             icon: None,
                             profile_id: None,
+                            role: None,
                             cols: 80,
                             rows: 24,
                         },
@@ -816,6 +832,7 @@ mod tests {
                 title: None,
                 icon: None,
                 profile_id: None,
+                role: None,
                 cols: 80,
                 rows: 24,
             },

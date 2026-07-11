@@ -1,8 +1,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::State;
+use super::license::LicenseService;
 
 #[tauri::command]
-pub async fn board_read(session_id: String) -> Result<String, String> {
+pub async fn board_read(license: State<'_, Arc<LicenseService>>, session_id: String) -> Result<String, String> {
+    license.require_pro_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || board_read_native(&session_id))
         .await
         .map_err(to_string)?
@@ -10,7 +14,8 @@ pub async fn board_read(session_id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn board_write(session_id: String, json: String) -> Result<(), String> {
+pub async fn board_write(license: State<'_, Arc<LicenseService>>, session_id: String, json: String) -> Result<(), String> {
+    license.require_pro_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || board_write_native(&session_id, &json))
         .await
         .map_err(to_string)?

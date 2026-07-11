@@ -1,4 +1,5 @@
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
+use crate::app::license::HeadlessLicenseCache;
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
 };
@@ -75,13 +76,17 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     if is_skill_command(&command) {
         return execute_skill(command);
     }
+    if matches!(command, CliCommand::TaskDone { .. } | CliCommand::TaskNote { .. }) {
+        HeadlessLicenseCache::load()?.require_pro()?;
+    }
 
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
     let client = DaemonClient::new(stream);
-    execute(&client, command)
+    let license = HeadlessLicenseCache::load().ok();
+    execute(&client, command, license.as_ref())
 }
 
-fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
+fn execute(client: &DaemonClient, command: CliCommand, license: Option<&HeadlessLicenseCache>) -> Result<()> {
     match command {
         CliCommand::Sessions => {
             match client.request_reply(|req| ClientToDaemon::ListSessions { req })? {
@@ -95,7 +100,10 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
         }
         CliCommand::Panes { session_id } => {
             match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
-                ReplyResult::Attached { panes, .. } => {
+                ReplyResult::Attached { mut panes, .. } => {
+                    if !license.is_some_and(HeadlessLicenseCache::is_entitled) {
+                        for pane in &mut panes { pane.config.role = None; }
+                    }
                     serde_json::to_writer_pretty(io::stdout(), &panes)?;
                     println!();
                     Ok(())
@@ -107,6 +115,7 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             session_id,
             pane_id,
         } => {
+            require_pane_access(client, session_id, pane_id, license)?;
             match client.request_reply(|req| ClientToDaemon::GetScrollback {
                 req,
                 session_id,
@@ -127,6 +136,7 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             text,
             enter,
         } => {
+            require_pane_access(client, session_id, pane_id, license)?;
             let data = write_payload(text, enter);
             client.send(ClientToDaemon::WritePane {
                 session_id,
@@ -188,6 +198,18 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
         | CliCommand::SkillDelete { .. } => unreachable!("handled before daemon connection"),
         CliCommand::Help => unreachable!("handled before daemon connection"),
     }
+}
+
+fn require_pane_access(client: &DaemonClient, session_id: Uuid, pane_id: Uuid, license: Option<&HeadlessLicenseCache>) -> Result<()> {
+    let panes = match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
+        ReplyResult::Attached { panes, .. } => panes,
+        other => bail!("unexpected daemon response: {other:?}"),
+    };
+    let pane = panes.iter().find(|pane| pane.id == pane_id).ok_or_else(|| anyhow!("pane not found: {pane_id}"))?;
+    if pane.config.role.is_some() && !license.is_some_and(HeadlessLicenseCache::is_entitled) {
+        bail!("VibeLink Pro license required.");
+    }
+    Ok(())
 }
 
 fn is_skill_command(command: &CliCommand) -> bool {
@@ -871,8 +893,13 @@ mod tests {
     #[test]
     fn parse_read_rejects_unscoped_pane_reads() {
         let pane_id = Uuid::new_v4();
+        let previous_session = std::env::var_os("VIBELINK_SESSION_ID");
+        std::env::remove_var("VIBELINK_SESSION_ID");
         let err = parse_args(["cli", "read", "--pane", &pane_id.to_string()])
             .expect_err("missing session should fail");
+        if let Some(previous_session) = previous_session {
+            std::env::set_var("VIBELINK_SESSION_ID", previous_session);
+        }
 
         assert!(err.to_string().contains("--session"));
     }

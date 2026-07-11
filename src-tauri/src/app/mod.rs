@@ -4,6 +4,7 @@ pub mod commands;
 pub mod daemon_client;
 pub mod git;
 pub mod hermes;
+pub mod license;
 pub mod skills;
 pub mod spawn_daemon;
 
@@ -31,6 +32,10 @@ pub fn run() {
             })?;
             app.manage(DaemonClient::new(stream));
             app.manage(Arc::new(hermes::HermesManager::new()));
+            app.manage(Arc::new(license::LicenseService::new().map_err(|error| {
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            })?));
             app.manage(capture::CaptureState::default());
             app.manage(KeepAlivePrefs::default());
             Ok(())
@@ -71,6 +76,11 @@ pub fn run() {
             hermes::hermes_ensure_workspace,
             hermes::hermes_workspace_state,
             hermes::hermes_runtime_status,
+            license::license_status,
+            license::license_activate,
+            license::license_revalidate,
+            license::license_deactivate_device,
+            license::license_forget_local,
             git::git_changed_files,
             git::git_file_contents,
             git::git_is_available,
@@ -82,6 +92,7 @@ pub fn run() {
             commands::ping,
             commands::rename_session,
             commands::resource_snapshot,
+            commands::set_pane_role,
             commands::restart_daemon,
             commands::set_keep_terminals_alive_on_close,
             commands::resize_pane,
