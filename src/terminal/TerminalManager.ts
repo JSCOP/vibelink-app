@@ -314,6 +314,10 @@ class TerminalManagerImpl {
     return this.entries.get(paneId)?.term.hasSelection() ?? false
   }
 
+  getSelection(paneId: string): string {
+    return this.entries.get(paneId)?.term.getSelection() ?? ''
+  }
+
   selectAll(paneId: string): void {
     this.entries.get(paneId)?.term.selectAll()
   }

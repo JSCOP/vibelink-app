@@ -1,8 +1,10 @@
+import { invoke } from '@tauri-apps/api/core'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { ClipboardCopy, ClipboardPaste, Copy, TextSelect } from 'lucide-react'
+import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, Play, TextSelect } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
+import { pathFromTerminalSelection } from '../terminal/selectionPath'
 import { useWorkspaceActions } from './actions'
 import { hasPaneDragPayload, paneDragMime, paneDropPositionFromPoint, type PaneDropPosition } from './paneDrag'
 
@@ -15,10 +17,11 @@ type ContextMenuState = {
   x: number
   y: number
   hasSelection: boolean
+  selectedPath: string | null
 }
 
-const CONTEXT_MENU_WIDTH = 200
-const CONTEXT_MENU_HEIGHT = 138
+const CONTEXT_MENU_WIDTH = 232
+const CONTEXT_MENU_HEIGHT = 206
 
 export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -32,6 +35,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const paneExists = useWorkspaceStore((state) => Boolean(paneId && state.panes[paneId]))
   const applyTerminalTitle = useWorkspaceStore((state) => state.applyTerminalTitle)
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
+  const setError = useWorkspaceStore((state) => state.setError)
   const actions = useWorkspaceActions()
   const [dropPosition, setDropPosition] = useState<PaneDropPosition | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
@@ -70,10 +74,12 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     if (!paneId) return
     event.preventDefault()
     event.stopPropagation()
+    const selection = TerminalManager.getSelection(paneId)
     setContextMenu({
       x: Math.min(event.clientX, window.innerWidth - CONTEXT_MENU_WIDTH),
       y: Math.min(event.clientY, window.innerHeight - CONTEXT_MENU_HEIGHT),
-      hasSelection: TerminalManager.hasSelection(paneId),
+      hasSelection: selection.length > 0,
+      selectedPath: pathFromTerminalSelection(selection),
     })
   }
 
@@ -103,6 +109,13 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const copyAll = () => {
     if (paneId) TerminalManager.copyContentsToClipboard(paneId)
     closeContextMenu()
+  }
+
+  const runSelectedPathAction = (command: 'open_path' | 'reveal_path', errorMessage: string) => {
+    const path = contextMenu?.selectedPath
+    closeContextMenu()
+    if (!path) return
+    void invoke(command, { path }).catch((error) => setError(`${errorMessage}: ${String(error)}`))
   }
 
   useEffect(() => {
@@ -167,6 +180,16 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             <button type="button" role="menuitem" disabled={!contextMenu.hasSelection} onClick={copySelection}>
               <Copy size={13} /> Copy
             </button>
+            {contextMenu.selectedPath ? (
+              <>
+                <button type="button" role="menuitem" onClick={() => runSelectedPathAction('reveal_path', 'Could not show the selected path')}>
+                  <FolderOpen size={13} /> Show in File Explorer
+                </button>
+                <button type="button" role="menuitem" onClick={() => runSelectedPathAction('open_path', 'Could not open the selected path')}>
+                  <Play size={13} /> Open / run selected path
+                </button>
+              </>
+            ) : null}
             <button type="button" role="menuitem" onClick={pasteClipboard}>
               <ClipboardPaste size={13} /> Paste
             </button>

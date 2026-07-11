@@ -108,6 +108,7 @@ pub fn run() {
             capture::check_ffmpeg,
             capture::ensure_ffmpeg,
             capture::open_path,
+            capture::reveal_path,
             capture::open_capture_overlay,
             capture::capture_region_image,
             capture::clipboard_write_image,

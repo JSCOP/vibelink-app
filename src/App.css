@@ -408,7 +408,7 @@ button {
   box-shadow: var(--vibelink-shadow);
   display: grid;
   gap: 2px;
-  min-width: 176px;
+  width: 232px;
   padding: 5px;
   position: fixed;
   z-index: calc(var(--z-popover) + 2);

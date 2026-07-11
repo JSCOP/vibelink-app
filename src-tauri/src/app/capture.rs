@@ -439,18 +439,70 @@ pub async fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    let target = normalize_local_target(&path)?;
+
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        if target.is_file() {
+            command.arg("/select,").arg(&target);
+        } else {
+            command.arg(&target);
+        }
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        if target.is_file() {
+            command.arg("-R").arg(&target);
+        } else {
+            command.arg(&target);
+        }
+        command
+    };
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(if target.is_file() {
+            target.parent().unwrap_or(&target)
+        } else {
+            &target
+        });
+        command
+    };
+
+    hide_console(&mut command).spawn().map_err(to_string)?;
+    Ok(())
+}
+
 fn normalize_open_target(path: &str) -> Result<String, String> {
-    let target = path.trim().trim_matches('"');
+    let target = trim_open_target(path);
     if is_supported_uri(target) {
         return Ok(target.to_string());
     }
 
+    Ok(normalize_local_target(target)?.to_string_lossy().into_owned())
+}
+
+fn normalize_local_target(path: &str) -> Result<PathBuf, String> {
+    let target = trim_open_target(path);
+    if is_supported_uri(target) {
+        return Err("local path required".to_string());
+    }
     let expanded = expand_home_path(target);
     if !expanded.exists() {
         return Err("not found".to_string());
     }
+    Ok(expanded)
+}
 
-    Ok(expanded.to_string_lossy().into_owned())
+fn trim_open_target(path: &str) -> &str {
+    path.trim().trim_matches(|character| matches!(character, '"' | '\'' | '`'))
 }
 
 fn is_supported_uri(target: &str) -> bool {
@@ -749,6 +801,20 @@ mod tests {
     #[test]
     fn supported_uri_does_not_treat_windows_drive_as_scheme() {
         assert!(!is_supported_uri(r"E:\captures\a.png"));
+    }
+
+    #[test]
+    fn local_target_preserves_spaces_and_strips_quotes() {
+        let root = std::env::temp_dir().join(format!("vibelink-open-path-{}", uuid::Uuid::new_v4()));
+        let file = root.join("VibeLink Voice setup.exe");
+        std::fs::create_dir_all(&root).expect("create temp directory");
+        std::fs::write(&file, b"installer").expect("write temp file");
+
+        let quoted = format!("\"{}\"", file.to_string_lossy());
+        assert_eq!(normalize_local_target(&quoted).expect("local path"), file);
+        assert!(normalize_local_target("https://example.com/setup.exe").is_err());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
