@@ -18,7 +18,7 @@ pnpm build
 pnpm tauri:build
 ```
 
-`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release` and performs the local release-preparation version bump. Versioned bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.9_x64_en-US.msi` and `VibeLink_0.1.9_x64-setup.exe`. CI uses `pnpm tauri:build:ci -- -ConfigOverlay <json>` to merge signing configuration without changing versions.
+`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release` and performs the local release-preparation version bump. Versioned bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.13_x64_en-US.msi` and `VibeLink_0.1.13_x64-setup.exe`.
 
 ## VibeLink Pro licensing
 
@@ -27,11 +27,11 @@ pnpm tauri:build
 - Settings → License activates either a VibeLink-issued `VBL-…` key or a Lemon Squeezy key and shows the masked key plus active/review devices. One license supports three devices; current or remote devices can be removed.
 - Successful online validation stores only encrypted Windows Credential Manager state. License keys are never persisted in localStorage, Zustand settings, session JSON, or logs.
 - The last successful server timestamps grant up to seven days of offline Pro. Explicit refund/revocation/deactivation locks immediately on the next online validation; clock rollback or expired grace returns to Core.
-- `VIBELINK_LICENSE_API_URL` is compiled into the application. Debug defaults to `http://localhost:3000`; release builds require an HTTPS origin with no credentials, path, query, or fragment.
+- `VIBELINK_LICENSE_API_URL` is compiled into the application. Debug defaults to `http://localhost:3000`; release builds accept only `https://vibelink.moobang.net`.
 
 ## Signed release
 
-Tag releases require `vX.Y.Z` to match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. `.github/workflows/release.yml` imports one CurrentUser code-signing PFX, builds through the non-bumping CI wrapper, verifies Authenticode for `app.exe`, NSIS, and MSI, creates `SHA256SUMS.txt`, removes the temporary certificate/config, and only then publishes the exact installer names. Unsigned or invalid artifacts are not release/download candidates.
+Tag releases require `vX.Y.Z` to match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. The protected `release` environment builds `app.exe` without bundles, signs it through SSL.com eSigner, bundles the signed executable, signs and verifies NSIS/MSI with Authenticode plus `signtool`, creates `SHA256SUMS.txt`, and publishes exactly three assets to the public binary-only `JSCOP/vibelink-releases` repository through a repository-scoped GitHub App. The private source repository is never a public download target.
 
 ## Architecture
 

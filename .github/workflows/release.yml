@@ -5,13 +5,15 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: windows-latest
+    environment: release
     env:
-      VIBELINK_LICENSE_API_URL: ${{ secrets.VIBELINK_LICENSE_API_URL }}
+      VIBELINK_LICENSE_API_URL: https://vibelink.moobang.net
+      RELEASE_REPOSITORY: JSCOP/vibelink-releases
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -24,11 +26,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build, sign, and verify release assets
+      - name: Validate release contract
+        id: release_meta
         shell: powershell
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           $tag = '${{ github.ref_name }}'
@@ -42,64 +42,165 @@ jobs:
           if ($packageVersion -ne $version -or $tauriVersion -ne $version -or $cargoVersion -ne $version) {
             throw "Tag/package version mismatch: tag=$version package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
           }
-          if (-not $env:VIBELINK_LICENSE_API_URL) { throw 'VIBELINK_LICENSE_API_URL secret is required.' }
-          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'Windows signing certificate secrets are required.' }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'vibelink-signing.pfx'
-          $overlayPath = Join-Path $env:RUNNER_TEMP 'vibelink-signing.json'
+          $expectedExe = "VibeLink_${version}_x64-setup.exe"
+          $expectedMsi = "VibeLink_${version}_x64_en-US.msi"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "expected_exe=$expectedExe" >> $env:GITHUB_OUTPUT
+          "expected_msi=$expectedMsi" >> $env:GITHUB_OUTPUT
+          "app_path=$env:GITHUB_WORKSPACE/src-tauri/target/release/app.exe" >> $env:GITHUB_OUTPUT
+          "nsis_path=$env:GITHUB_WORKSPACE/src-tauri/target/release/bundle/nsis/$expectedExe" >> $env:GITHUB_OUTPUT
+          "msi_path=$env:GITHUB_WORKSPACE/src-tauri/target/release/bundle/msi/$expectedMsi" >> $env:GITHUB_OUTPUT
+      - name: Build release executable without bundles
+        shell: powershell
+        run: |
+          pnpm exec tauri build --no-bundle
+          if ($LASTEXITCODE -ne 0) { throw "Tauri executable build failed: $LASTEXITCODE" }
+      - name: Sign release executable with SSL.com eSigner
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ steps.release_meta.outputs.app_path }}
+          malware_block: true
+          override: true
+          clean_logs: true
+      - name: Verify signed release executable
+        shell: powershell
+        env:
+          EXPECTED_SIGNER_SUBJECT: ${{ secrets.EXPECTED_SIGNER_SUBJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = '${{ steps.release_meta.outputs.app_path }}'
+          $signature = Get-AuthenticodeSignature -FilePath $path
+          if ($signature.Status -ne 'Valid') { throw "Authenticode status is $($signature.Status): $path" }
+          if (-not $env:EXPECTED_SIGNER_SUBJECT -or $signature.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER_SUBJECT) { throw 'Unexpected Authenticode signer subject.' }
+          if (-not $signature.TimeStamperCertificate) { throw 'Authenticode timestamp certificate is missing.' }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe was not found.' }
+          & $signtool.FullName verify /pa /all /v $path
+          if ($LASTEXITCODE -ne 0) { throw 'signtool verification failed for app.exe.' }
+      - name: Bundle signed executable
+        shell: powershell
+        run: |
+          pnpm exec tauri bundle --bundles nsis,msi --no-sign
+          if ($LASTEXITCODE -ne 0) { throw "Tauri bundle failed: $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath '${{ steps.release_meta.outputs.nsis_path }}')) { throw 'Expected NSIS artifact is missing.' }
+          if (-not (Test-Path -LiteralPath '${{ steps.release_meta.outputs.msi_path }}')) { throw 'Expected MSI artifact is missing.' }
+      - name: Sign NSIS installer with SSL.com eSigner
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ steps.release_meta.outputs.nsis_path }}
+          malware_block: true
+          override: true
+          clean_logs: true
+      - name: Sign MSI installer with SSL.com eSigner
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ steps.release_meta.outputs.msi_path }}
+          malware_block: true
+          override: true
+          clean_logs: true
+      - name: Verify and stage signed release assets
+        shell: powershell
+        env:
+          EXPECTED_SIGNER_SUBJECT: ${{ secrets.EXPECTED_SIGNER_SUBJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $paths = @(
+            '${{ steps.release_meta.outputs.app_path }}',
+            '${{ steps.release_meta.outputs.nsis_path }}',
+            '${{ steps.release_meta.outputs.msi_path }}'
+          )
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe was not found.' }
+          foreach ($path in $paths) {
+            $signature = Get-AuthenticodeSignature -FilePath $path
+            if ($signature.Status -ne 'Valid') { throw "Authenticode status is $($signature.Status): $path" }
+            if (-not $env:EXPECTED_SIGNER_SUBJECT -or $signature.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER_SUBJECT) { throw "Unexpected signer subject: $path" }
+            if (-not $signature.TimeStamperCertificate) { throw "Timestamp certificate is missing: $path" }
+            & $signtool.FullName verify /pa /all /v $path
+            if ($LASTEXITCODE -ne 0) { throw "signtool verification failed: $path" }
+          }
           $releaseDir = Join-Path $env:RUNNER_TEMP 'vibelink-release'
           New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-          $imported = @()
-          try {
-            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
-            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-            $imported = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false)
-            $codeSigning = @($imported | Where-Object { $_.HasPrivateKey -and ($_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3') })
-            if ($codeSigning.Count -ne 1) { throw "Expected exactly one imported code-signing certificate, found $($codeSigning.Count)." }
-            $certificate = $codeSigning[0]
-            @{
-              bundle = @{
-                windows = @{
-                  certificateThumbprint = $certificate.Thumbprint
-                  digestAlgorithm = 'sha256'
-                  timestampUrl = 'http://timestamp.digicert.com'
-                }
-              }
-            } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $overlayPath -Encoding utf8
-
-            pnpm tauri:build:ci -- -ConfigOverlay $overlayPath
-            if ($LASTEXITCODE -ne 0) { throw "Tauri installer build failed: $LASTEXITCODE" }
-
-            $expectedExe = "VibeLink_${version}_x64-setup.exe"
-            $expectedMsi = "VibeLink_${version}_x64_en-US.msi"
-            $exeMatches = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter $expectedExe -Recurse)
-            $msiMatches = @(Get-ChildItem src-tauri/target/release/bundle/msi -File -Filter $expectedMsi -Recurse)
-            if ($exeMatches.Count -ne 1 -or $msiMatches.Count -ne 1) { throw 'Installer basename/version contract failed.' }
-            $appExe = Resolve-Path src-tauri/target/release/app.exe
-            $signatures = @($appExe.Path, $exeMatches[0].FullName, $msiMatches[0].FullName) | ForEach-Object { Get-AuthenticodeSignature -FilePath $_ }
-            $invalid = @($signatures | Where-Object { $_.Status -ne 'Valid' })
-            if ($invalid.Count -ne 0) { throw "Authenticode verification failed for $($invalid.Count) artifact(s)." }
-
-            Copy-Item $exeMatches[0].FullName (Join-Path $releaseDir $expectedExe)
-            Copy-Item $msiMatches[0].FullName (Join-Path $releaseDir $expectedMsi)
-            $checksumLines = @($expectedExe, $expectedMsi) | ForEach-Object {
-              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $releaseDir $_)).Hash.ToLowerInvariant()
-              "$hash  $_"
-            }
-            [IO.File]::WriteAllLines((Join-Path $releaseDir 'SHA256SUMS.txt'), $checksumLines, (New-Object Text.UTF8Encoding($false)))
-          } finally {
-            foreach ($certificate in $imported) {
-              $certificatePath = "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
-              if (Test-Path $certificatePath) { Remove-Item $certificatePath -Force }
-            }
-            Remove-Item $pfxPath, $overlayPath -Force -ErrorAction SilentlyContinue
+          Copy-Item '${{ steps.release_meta.outputs.nsis_path }}' (Join-Path $releaseDir '${{ steps.release_meta.outputs.expected_exe }}')
+          Copy-Item '${{ steps.release_meta.outputs.msi_path }}' (Join-Path $releaseDir '${{ steps.release_meta.outputs.expected_msi }}')
+          $checksumLines = @('${{ steps.release_meta.outputs.expected_exe }}', '${{ steps.release_meta.outputs.expected_msi }}') | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $releaseDir $_)).Hash.ToLowerInvariant()
+            "$hash  $_"
           }
-      - name: Publish verified release
-        uses: softprops/action-gh-release@v2
+          [IO.File]::WriteAllLines((Join-Path $releaseDir 'SHA256SUMS.txt'), $checksumLines, (New-Object Text.UTF8Encoding($false)))
+          $notes = @"
+          VibeLink ${{ steps.release_meta.outputs.version }}
+
+          - Built from private commit `${{ github.sha }}`.
+          - Official site: https://vibelink.moobang.net
+          - Support: support@moobang.net
+          - Signer: $env:EXPECTED_SIGNER_SUBJECT
+          - Verify downloaded installer bytes against `SHA256SUMS.txt` before installation.
+          - Windows may still show SmartScreen reputation prompts for a newly issued certificate.
+          "@
+          [IO.File]::WriteAllText((Join-Path $releaseDir 'RELEASE_NOTES.md'), $notes, (New-Object Text.UTF8Encoding($false)))
+      - name: Mint public release publisher token
+        id: publisher
+        uses: actions/create-github-app-token@v2
         with:
-          files: |
-            ${{ runner.temp }}/vibelink-release/VibeLink_*.exe
-            ${{ runner.temp }}/vibelink-release/VibeLink_*.msi
-            ${{ runner.temp }}/vibelink-release/SHA256SUMS.txt
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+          app-id: ${{ secrets.RELEASE_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PUBLISHER_PRIVATE_KEY }}
+          owner: JSCOP
+          repositories: vibelink-releases
+      - name: Publish exact assets to public release repository
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ steps.publisher.outputs.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = Join-Path $env:RUNNER_TEMP 'vibelink-release'
+          gh release create '${{ github.ref_name }}' `
+            (Join-Path $releaseDir '${{ steps.release_meta.outputs.expected_exe }}') `
+            (Join-Path $releaseDir '${{ steps.release_meta.outputs.expected_msi }}') `
+            (Join-Path $releaseDir 'SHA256SUMS.txt') `
+            --repo $env:RELEASE_REPOSITORY `
+            --title 'VibeLink ${{ steps.release_meta.outputs.version }}' `
+            --notes-file (Join-Path $releaseDir 'RELEASE_NOTES.md')
+      - name: Refetch and verify public release bytes
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ steps.publisher.outputs.token }}
+          EXPECTED_SIGNER_SUBJECT: ${{ secrets.EXPECTED_SIGNER_SUBJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $downloadDir = Join-Path $env:RUNNER_TEMP 'vibelink-release-verification'
+          New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+          gh release download '${{ github.ref_name }}' --repo $env:RELEASE_REPOSITORY --dir $downloadDir
+          $release = gh release view '${{ github.ref_name }}' --repo $env:RELEASE_REPOSITORY --json assets | ConvertFrom-Json
+          $expectedNames = @('${{ steps.release_meta.outputs.expected_exe }}', '${{ steps.release_meta.outputs.expected_msi }}', 'SHA256SUMS.txt')
+          $actualNames = @($release.assets | ForEach-Object { $_.name } | Sort-Object)
+          if (Compare-Object ($expectedNames | Sort-Object) $actualNames) { throw 'Public release asset names do not match the exact contract.' }
+          $checksumPath = Join-Path $downloadDir 'SHA256SUMS.txt'
+          $expectedChecksums = @('${{ steps.release_meta.outputs.expected_exe }}', '${{ steps.release_meta.outputs.expected_msi }}') | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $downloadDir $_)).Hash.ToLowerInvariant()
+            "$hash  $_"
+          }
+          $actualChecksums = Get-Content -LiteralPath $checksumPath
+          if (Compare-Object $expectedChecksums $actualChecksums) { throw 'Downloaded release checksums do not match downloaded bytes.' }
+          foreach ($name in @('${{ steps.release_meta.outputs.expected_exe }}', '${{ steps.release_meta.outputs.expected_msi }}')) {
+            $path = Join-Path $downloadDir $name
+            $signature = Get-AuthenticodeSignature -FilePath $path
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER_SUBJECT -or -not $signature.TimeStamperCertificate) {
+              throw "Downloaded signature verification failed: $name"
+            }
+          }

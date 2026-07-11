@@ -39,6 +39,24 @@ function Assert-Tool([string]$Name) {
   }
 }
 
+
+function Assert-ReleaseLicenseApiUrl {
+  if ([string]::IsNullOrWhiteSpace($env:VIBELINK_LICENSE_API_URL)) {
+    throw 'VIBELINK_LICENSE_API_URL is required for release builds. Set it to: $env:VIBELINK_LICENSE_API_URL = "https://vibelink.moobang.net"'
+  }
+  try {
+    $uri = [System.Uri]$env:VIBELINK_LICENSE_API_URL
+  } catch {
+    throw 'VIBELINK_LICENSE_API_URL must be a valid absolute HTTPS origin.'
+  }
+  if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($uri.UserInfo) -or $uri.AbsolutePath -ne '/' -or -not [string]::IsNullOrEmpty($uri.Query) -or -not [string]::IsNullOrEmpty($uri.Fragment)) {
+    throw 'VIBELINK_LICENSE_API_URL must be an HTTPS origin without credentials, path, query, or fragment.'
+  }
+  if ($uri.AbsoluteUri -ne 'https://vibelink.moobang.net/') {
+    throw 'VIBELINK_LICENSE_API_URL must be exactly https://vibelink.moobang.net for release builds.'
+  }
+}
+
 function Enter-RepoRoot {
   Set-Location -LiteralPath $RepoRoot
 }
@@ -181,6 +199,7 @@ function Invoke-ReleaseBuild {
   Write-Section 'Build: release executable, no installer'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-ReleaseLicenseApiUrl
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--no-bundle')
   Write-Host 'Release build complete: src-tauri\target\release\app.exe' -ForegroundColor Green
 }
@@ -223,6 +242,7 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Write-Section 'Installer: release flavor'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-ReleaseLicenseApiUrl
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
   Show-Bundles 'release'
@@ -232,6 +252,7 @@ function Invoke-CiInstaller {
   Write-Section 'Installer: CI release flavor without version mutation'
   Enter-RepoRoot
   Assert-Tool 'pnpm'
+  Assert-ReleaseLicenseApiUrl
   $packageVersion = Get-JsonVersion $PackageJson
   $cargoVersion = Get-CargoPackageVersion $CargoToml
   $tauriVersion = Get-JsonVersion $TauriConfig
@@ -250,6 +271,8 @@ function Invoke-CiInstaller {
 
 function Invoke-AllInstallers {
   Enter-RepoRoot
+  Assert-Tool 'pnpm'
+  Assert-ReleaseLicenseApiUrl
   Invoke-InstallerVersionBump
   Invoke-DevInstaller -SkipVersionBump
   Invoke-ReleaseInstaller -SkipVersionBump
@@ -283,6 +306,10 @@ Versioning:
   Installer actions update package.json, src-tauri/Cargo.toml,
   src-tauri/Cargo.lock, and src-tauri/tauri.conf.json from x.y.z to x.y.(z+1).
   Pass -Version x.y.z with installer actions to force a specific newer version.
+
+Release licensing:
+  Release builds require VIBELINK_LICENSE_API_URL to be exactly
+  `$env:VIBELINK_LICENSE_API_URL = "https://vibelink.moobang.net"`.
 
 Safety:
   This script does not broad-kill processes. Dev run/build only delegates to

@@ -1,5 +1,7 @@
 use url::Url;
 
+const RELEASE_LICENSE_ORIGIN: &str = "https://vibelink.moobang.net";
+
 fn main() {
     let configured = std::env::var("VIBELINK_LICENSE_API_URL").ok();
     let raw = configured.as_deref().unwrap_or_else(|| {
@@ -20,6 +22,9 @@ fn main() {
     }
     if !cfg!(debug_assertions) && url.scheme() != "https" {
         panic!("VIBELINK_LICENSE_API_URL must use HTTPS for release builds");
+    }
+    if !cfg!(debug_assertions) && url.origin().ascii_serialization() != RELEASE_LICENSE_ORIGIN {
+        panic!("VIBELINK_LICENSE_API_URL must be https://vibelink.moobang.net for release builds");
     }
     if url.scheme() != "http" && url.scheme() != "https" {
         panic!("VIBELINK_LICENSE_API_URL must use HTTP(S)");
