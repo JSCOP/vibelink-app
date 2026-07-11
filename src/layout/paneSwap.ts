@@ -1,3 +1,60 @@
+export type PaneDirection = 'left' | 'right' | 'up' | 'down'
+
+export type PaneRect = {
+  left: number
+  right: number
+  top: number
+  bottom: number
+  width: number
+  height: number
+}
+
+export function nearestPaneIdInDirection(
+  activePaneId: string,
+  paneIds: string[],
+  direction: PaneDirection,
+  rectForPane: (paneId: string) => PaneRect | null,
+): string | null {
+  const activeRect = rectForPane(activePaneId)
+  if (!activeRect) return null
+
+  let best: { id: string; score: number } | null = null
+  for (const paneId of paneIds) {
+    if (paneId === activePaneId) continue
+    const rect = rectForPane(paneId)
+    if (!rect || !isInDirection(activeRect, rect, direction)) continue
+    const score = directionalDistance(activeRect, rect, direction)
+    if (!best || score < best.score) best = { id: paneId, score }
+  }
+  return best?.id ?? null
+}
+
+function isInDirection(active: PaneRect, candidate: PaneRect, direction: PaneDirection): boolean {
+  const tolerance = 2
+  if (direction === 'left') return candidate.right <= active.left + tolerance
+  if (direction === 'right') return candidate.left >= active.right - tolerance
+  if (direction === 'up') return candidate.bottom <= active.top + tolerance
+  return candidate.top >= active.bottom - tolerance
+}
+
+function directionalDistance(active: PaneRect, candidate: PaneRect, direction: PaneDirection): number {
+  const activeCenterX = active.left + active.width / 2
+  const activeCenterY = active.top + active.height / 2
+  const candidateCenterX = candidate.left + candidate.width / 2
+  const candidateCenterY = candidate.top + candidate.height / 2
+  const primary = direction === 'left'
+    ? active.left - candidate.right
+    : direction === 'right'
+      ? candidate.left - active.right
+      : direction === 'up'
+        ? active.top - candidate.bottom
+        : candidate.top - active.bottom
+  const secondary = direction === 'left' || direction === 'right'
+    ? Math.abs(activeCenterY - candidateCenterY)
+    : Math.abs(activeCenterX - candidateCenterX)
+  return primary * 10000 + secondary
+}
+
 type MutableRecord = Record<string, unknown>
 
 type GroupState = MutableRecord & {

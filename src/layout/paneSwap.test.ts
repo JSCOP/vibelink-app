@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { swapPanelIdsInDockviewLayout } from './paneSwap'
+import { nearestPaneIdInDirection, swapPanelIdsInDockviewLayout, type PaneRect } from './paneSwap'
 
 describe('swapPanelIdsInDockviewLayout', () => {
   it('swaps pane ids between grid groups without changing panel state', () => {
@@ -58,3 +58,32 @@ describe('swapPanelIdsInDockviewLayout', () => {
     expect(layout.grid.root.data.activeView).toBe('pane-a')
   })
 })
+
+describe('nearestPaneIdInDirection', () => {
+  const rects: Record<string, PaneRect> = {
+    center: rect(100, 100, 100, 100),
+    left: rect(0, 100, 100, 100),
+    right: rect(200, 100, 100, 100),
+    up: rect(100, 0, 100, 100),
+    down: rect(100, 200, 100, 100),
+    farRight: rect(300, 100, 100, 100),
+  }
+
+  it('selects the nearest pane in each requested direction', () => {
+    const paneIds = Object.keys(rects)
+    const lookup = (paneId: string) => rects[paneId] ?? null
+
+    expect(nearestPaneIdInDirection('center', paneIds, 'left', lookup)).toBe('left')
+    expect(nearestPaneIdInDirection('center', paneIds, 'right', lookup)).toBe('right')
+    expect(nearestPaneIdInDirection('center', paneIds, 'up', lookup)).toBe('up')
+    expect(nearestPaneIdInDirection('center', paneIds, 'down', lookup)).toBe('down')
+  })
+
+  it('returns null instead of wrapping when no pane exists in that direction', () => {
+    expect(nearestPaneIdInDirection('left', Object.keys(rects), 'left', (paneId) => rects[paneId] ?? null)).toBeNull()
+  })
+})
+
+function rect(left: number, top: number, width: number, height: number): PaneRect {
+  return { left, top, width, height, right: left + width, bottom: top + height }
+}

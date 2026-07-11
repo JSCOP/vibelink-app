@@ -14,7 +14,7 @@ import { TEMPLATES, type GridTemplate } from './templates'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { withSuppressedPanelRemoval } from './suppression'
 import { paneIdFromEventTarget } from './paneActivation'
-import { swapPanelIdsInDockviewLayout } from './paneSwap'
+import { nearestPaneIdInDirection, swapPanelIdsInDockviewLayout, type PaneDirection } from './paneSwap'
 import type { PaneDropPosition } from './paneDrag'
 import { connectedResizeHandles, createConnectedResizeDragSession, createSingleResizeDragSession, resizeConnectedBoundaryForPane, resizeLiveTargetSizes, singleResizeHandleAt, singleResizeHandles, type ConnectedResizeHandle, type ResizeDirection, type ResizeDragSession } from './connectedResize'
 import { shouldShowResizeGuide } from './resizePreviewPolicy'
@@ -1045,39 +1045,34 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
   }, [addTerminalPanel, addWorkspaceWindowPanel, ensureTerminalWindowPanel, layoutDockview, layoutTerminalDockview, loadTerminalPaneLayout, saveCurrentPageLayout, spawnPane])
 
-  const focusPane = useCallback((direction: 'left' | 'right' | 'up' | 'down') => {
+  const focusPane = useCallback((direction: PaneDirection) => {
     const topActivePanelId = apiRef.current?.activePanel?.id
     const api = topActivePanelId === workspaceWindowDescriptors.terminal.panelId ? terminalApiRef.current : apiRef.current
     const activePanel = api?.activePanel
     if (!api || !activePanel) return
 
-    const activeRect = getPaneRect(activePanel.id)
-    if (!activeRect) {
-      if (direction === 'left' || direction === 'up') api.moveToPrevious()
-      else api.moveToNext()
-      return
-    }
-
-    let best: { id: string; score: number } | null = null
-    for (const panel of api.panels) {
-      if (panel.id === activePanel.id) continue
-      const rect = getPaneRect(panel.id)
-      if (!rect || !isInDirection(activeRect, rect, direction)) continue
-      const score = directionalDistance(activeRect, rect, direction)
-      if (!best || score < best.score) best = { id: panel.id, score }
-    }
-
-    const target = best ? api.getPanel(best.id) : undefined
+    const targetId = nearestPaneIdInDirection(activePanel.id, api.panels.map((panel) => panel.id), direction, getPaneRect)
+    const target = targetId ? api.getPanel(targetId) : undefined
     if (target) {
       target.api.setActive()
       TerminalManager.focus(target.id)
-    } else {
-      if (direction === 'left' || direction === 'up') api.moveToPrevious()
-      else api.moveToNext()
-      const focusedPanelId = api.activePanel?.id
-      if (focusedPanelId) TerminalManager.focus(focusedPanelId)
+      return
     }
+
+    if (direction === 'left' || direction === 'up') api.moveToPrevious()
+    else api.moveToNext()
+    const focusedPanelId = api.activePanel?.id
+    if (focusedPanelId) TerminalManager.focus(focusedPanelId)
   }, [])
+
+  const movePaneInDirection = useCallback((paneId: string, direction: PaneDirection) => {
+    const api = panelApiForId(paneId)
+    if (!api || api !== terminalApiRef.current) return
+    const targetId = nearestPaneIdInDirection(paneId, api.panels.map((panel) => panel.id), direction, getPaneRect)
+    if (!targetId) return
+    const position: Exclude<PaneDropPosition, 'center'> = direction === 'up' ? 'top' : direction === 'down' ? 'bottom' : direction
+    void movePaneToPosition(paneId, targetId, position)
+  }, [movePaneToPosition, panelApiForId])
 
   const arrangePanes = useCallback(async (requestedGridOverride?: GridSize | null) => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -1153,6 +1148,18 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       case 'focusDown':
         focusPane('down')
         break
+      case 'moveLeft':
+        movePaneInDirection(activePanelId, 'left')
+        break
+      case 'moveRight':
+        movePaneInDirection(activePanelId, 'right')
+        break
+      case 'moveUp':
+        movePaneInDirection(activePanelId, 'up')
+        break
+      case 'moveDown':
+        movePaneInDirection(activePanelId, 'down')
+        break
       case 'copyTerminalContents':
         if (useWorkspaceStore.getState().panes[activePanelId]) TerminalManager.copyContentsToClipboard(activePanelId)
         break
@@ -1163,7 +1170,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         useWorkspaceStore.getState().toggleTerminalTabsVisible()
         break
     }
-  }, [arrangePanes, closePane, closeWorkspace, focusPane, panelApiForId, splitPane, toggleMaximize])
+  }, [arrangePanes, closePane, closeWorkspace, focusPane, movePaneInDirection, panelApiForId, splitPane, toggleMaximize])
 
   const applyTemplate = useCallback(async (template: GridTemplate, profileId?: string | null, occupiedGrid?: GridSize | null) => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -2172,34 +2179,4 @@ function getPaneRect(paneId: string): DOMRect | null {
     `.terminal-panel-shell[data-pane-id="${paneId}"], .workspace-window-panel[data-window-panel-id="${paneId}"]`,
   )
   return el?.getBoundingClientRect() ?? null
-}
-
-function isInDirection(active: DOMRect, candidate: DOMRect, direction: 'left' | 'right' | 'up' | 'down'): boolean {
-  // getBoundingClientRect returns fractional px; adjacent dockview panes share a
-  // seam where candidate.left can round a hair under active.right. A small
-  // tolerance keeps the true neighbor in the running without admitting panes in
-  // other columns/rows (which sit hundreds of px away).
-  const TOL = 2
-  if (direction === 'left') return candidate.right <= active.left + TOL
-  if (direction === 'right') return candidate.left >= active.right - TOL
-  if (direction === 'up') return candidate.bottom <= active.top + TOL
-  return candidate.top >= active.bottom - TOL
-}
-
-function directionalDistance(active: DOMRect, candidate: DOMRect, direction: 'left' | 'right' | 'up' | 'down'): number {
-  const activeCenterX = active.left + active.width / 2
-  const activeCenterY = active.top + active.height / 2
-  const candidateCenterX = candidate.left + candidate.width / 2
-  const candidateCenterY = candidate.top + candidate.height / 2
-  const primary = direction === 'left'
-    ? active.left - candidate.right
-    : direction === 'right'
-      ? candidate.left - active.right
-      : direction === 'up'
-        ? active.top - candidate.bottom
-        : candidate.top - active.bottom
-  const secondary = direction === 'left' || direction === 'right'
-    ? Math.abs(activeCenterY - candidateCenterY)
-    : Math.abs(activeCenterX - candidateCenterX)
-  return primary * 10000 + secondary
 }

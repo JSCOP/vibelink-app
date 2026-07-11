@@ -10,6 +10,10 @@ describe('keybindings', () => {
     expect(defaultKeybindings.focusRight).toBe('ctrl+right')
     expect(defaultKeybindings.focusUp).toBe('ctrl+up')
     expect(defaultKeybindings.focusDown).toBe('ctrl+down')
+    expect(defaultKeybindings.moveLeft).toBe('ctrl+shift+left')
+    expect(defaultKeybindings.moveRight).toBe('ctrl+shift+right')
+    expect(defaultKeybindings.moveUp).toBe('ctrl+shift+up')
+    expect(defaultKeybindings.moveDown).toBe('ctrl+shift+down')
     expect(defaultKeybindings.copyTerminalContents).toBe('ctrl+a')
     expect(defaultKeybindings.copyTerminalSelection).toBe('ctrl+shift+c')
     expect(defaultKeybindings.captureImage).toBe('alt+shift+s')
@@ -76,6 +80,13 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true }))).toBe('captureQuickImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'r', altKey: true, shiftKey: true }))).toBe('captureVideo')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 't', altKey: true, shiftKey: true }))).toBe('toggleTerminalTabs')
+  })
+
+  it('maps Ctrl+Shift+arrow to directional pane movement', () => {
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'ArrowLeft', ctrlKey: true, shiftKey: true }))).toBe('moveLeft')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'ArrowRight', ctrlKey: true, shiftKey: true }))).toBe('moveRight')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'ArrowUp', ctrlKey: true, shiftKey: true }))).toBe('moveUp')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'ArrowDown', ctrlKey: true, shiftKey: true }))).toBe('moveDown')
   })
 
   it('does not intercept Ctrl+C so terminal interrupt reaches the PTY', () => {
