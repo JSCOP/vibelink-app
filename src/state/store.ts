@@ -29,8 +29,6 @@ type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 type Status = 'booting' | 'ready' | 'error'
 export type PaneCompletionSource = 'agent-response' | 'task-done'
 export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource }
-export type VoiceStatus = 'off' | 'starting' | 'idle' | 'recording' | 'transcribing' | 'error'
-export type VoiceModelDownload = { downloaded: number; total?: number }
 
 
 type WorkspaceState = {
@@ -63,14 +61,6 @@ type WorkspaceState = {
   paneCompletionHighlights: Record<string, PaneCompletionHighlight>
   capturesByPane: Record<string, string[]>
   recentCaptures: string[]
-  voiceStatus: VoiceStatus
-  voiceModelDownload?: VoiceModelDownload
-  voiceLastError?: string
-  voiceLastTranscription?: string
-  setVoiceStatus: (status: VoiceStatus) => void
-  setVoiceModelDownload: (download?: VoiceModelDownload) => void
-  setVoiceLastError: (error?: string) => void
-  setVoiceLastTranscription: (text?: string) => void
   setActivePaneId: (paneId?: string) => void
   markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource) => void
   clearPaneCompletionHighlight: (paneId: string) => void
@@ -166,15 +156,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   paneCompletionHighlights: {},
   capturesByPane: {},
   recentCaptures: [],
-  voiceStatus: 'off',
-  voiceModelDownload: undefined,
-  voiceLastError: undefined,
-  voiceLastTranscription: undefined,
-  setVoiceStatus: (voiceStatus) => set({ voiceStatus }),
-  setVoiceModelDownload: (voiceModelDownload) => set({ voiceModelDownload }),
-  setVoiceLastError: (voiceLastError) => set({ voiceLastError }),
-  setVoiceLastTranscription: (voiceLastTranscription) => set({ voiceLastTranscription }),
-
 
   bootstrap: async () => {
     set({ status: 'booting', error: undefined })

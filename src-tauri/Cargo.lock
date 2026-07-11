@@ -103,7 +103,6 @@ dependencies = [
  "tungstenite",
  "ureq",
  "uuid",
- "windows 0.62.2",
  "xcap",
  "zip",
 ]

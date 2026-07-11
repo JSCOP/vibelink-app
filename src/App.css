@@ -798,24 +798,6 @@ button {
   z-index: calc(var(--z-overlay) + 10);
 }
 
-.voice-download-toast {
-  align-items: center;
-  background: color-mix(in srgb, var(--vibelink-dialog) 94%, transparent);
-  border: 1px solid var(--vibelink-border);
-  border-radius: 999px;
-  box-shadow: var(--vibelink-shadow);
-  color: var(--vibelink-text);
-  display: inline-flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: min(420px, calc(100vw - 32px));
-  padding: 10px 14px;
-  position: fixed;
-  right: 16px;
-  top: 104px;
-  z-index: calc(var(--z-overlay) + 10);
-}
-
 .ffmpeg-download-title {
   font: 700 12px/1.2 var(--vibelink-sans);
   white-space: nowrap;
@@ -836,37 +818,6 @@ button {
   display: block;
   height: 100%;
   transition: width 160ms ease;
-}
-
-.voice-status-pill {
-  align-items: center;
-  background: color-mix(in srgb, var(--vibelink-dialog) 96%, transparent);
-  border: 1px solid var(--vibelink-border-strong);
-  border-radius: 999px;
-  box-shadow: var(--vibelink-shadow);
-  color: var(--vibelink-text);
-  display: inline-flex;
-  gap: 10px;
-  left: 50%;
-  max-width: min(640px, calc(100vw - 32px));
-  padding: 8px 12px;
-  position: fixed;
-  top: 50px;
-  transform: translateX(-50%);
-  z-index: calc(var(--z-overlay) + 20);
-}
-
-.voice-status-pill[data-state='transcribing'] .capture-recording-dot {
-  background: var(--vibelink-accent);
-  box-shadow: 0 0 0 4px var(--vibelink-accent-soft);
-}
-
-.voice-last-text {
-  color: var(--vibelink-text-muted);
-  max-width: 360px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .capture-recording-pill {

@@ -38,8 +38,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/uv/*",
-      "resources/voice/*"
+      "resources/uv/*"
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
