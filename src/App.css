@@ -169,6 +169,17 @@ button {
   cursor: grabbing;
 }
 
+.session-order {
+  color: var(--vibelink-muted);
+  flex: 0 0 14px;
+  font: 600 11px/1 var(--vibelink-mono);
+  text-align: right;
+}
+
+.session-row.active .session-order {
+  color: var(--vibelink-text);
+}
+
 .session-icon {
   align-items: center;
   color: var(--vibelink-muted);

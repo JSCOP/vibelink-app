@@ -129,7 +129,7 @@ export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointer
         </div>
       </div>
       <div className="session-list" ref={listRef}>
-        {sessions.map((session) => {
+        {sessions.map((session, index) => {
           const isDropTarget = dropTarget?.id === session.id
           const rowClass = [
             'session-row',
@@ -148,6 +148,7 @@ export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointer
               onPointerCancel={onRowPointerCancel}
             >
               <div className="session-main">
+                <span className="session-order" title={index < 9 ? `Ctrl+${index + 1}` : undefined}>{index + 1}</span>
                 <span className="session-icon"><Folder size={14} strokeWidth={1.7} /></span>
                 <span className="session-name">{session.name}</span>
                 <span className="session-badge">{session.paneCount}</span>

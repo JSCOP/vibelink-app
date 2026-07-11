@@ -167,6 +167,19 @@ describe('keybindings', () => {
     expect(event.stopPropagation).not.toHaveBeenCalled()
   })
 
+  it('reserves Ctrl+1 through Ctrl+9 for workspace selection over custom pane bindings', () => {
+    const seen: string[] = []
+    const settings = { ...defaultKeybindings, focusLeft: 'ctrl+1' }
+    const event = keyEvent({ key: '1', ctrlKey: true })
+
+    const handled = handleCapturedKeybindingEvent(settings, event, (action) => seen.push(action))
+
+    expect(handled).toBe(false)
+    expect(seen).toEqual([])
+    expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(event.stopPropagation).not.toHaveBeenCalled()
+  })
+
   it('handles configured app shortcuts from captured terminal keydown events', () => {
     const seen: string[] = []
     const event = keyEvent({ key: 'w', ctrlKey: true })

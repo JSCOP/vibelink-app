@@ -27,6 +27,7 @@ import { useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
+import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import './styles/theme.css'
 import './styles/voice-setup.css'
@@ -307,15 +308,27 @@ function App() {
     document.addEventListener('contextmenu', onContextMenu)
     return () => document.removeEventListener('contextmenu', onContextMenu)
   }, [])
-  const persistActiveWorkspaceLayout = () => {
+  const persistActiveWorkspaceLayout = useCallback(() => {
     setSaveLayoutRequestId((id) => id + 1)
-  }
+  }, [])
 
-
-  const selectSession = (sessionId: string) => {
+  const selectSession = useCallback((sessionId: string) => {
     persistActiveWorkspaceLayout()
     void openSession(sessionId)
-  }
+  }, [openSession, persistActiveWorkspaceLayout])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
+      const session = workspaceForShortcut(event, orderedSessions)
+      if (!session) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (session.id !== activeSessionId) selectSession(session.id)
+    }
+    window.addEventListener('keydown', onKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
+  }, [activeSessionId, orderedSessions, selectSession])
 
   const createWorkspace = async (name: string, workspaceFolder: string | null, profileId: string) => {
     await createSession(name || undefined, workspaceFolder, profileId)

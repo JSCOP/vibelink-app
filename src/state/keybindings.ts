@@ -1,3 +1,5 @@
+import { workspaceShortcutIndex } from './workspaceShortcuts'
+
 export const keybindingActionIds = [
   'splitRight',
   'splitDown',
@@ -114,6 +116,9 @@ export function handleCapturedKeybindingEvent(
   shouldHandleAction?: (action: KeybindingActionId) => boolean,
 ): boolean {
   if (event.defaultPrevented) return false
+  // Ctrl+1..9 is a fixed workspace navigation contract. Keep configurable
+  // pane actions from consuming those chords before App selects the workspace.
+  if (workspaceShortcutIndex(event) !== null) return false
   const action = findKeybindingAction(settings, event)
   if (!action || globalShortcutOnlyActions[action] || shouldHandleAction?.(action) === false) return false
   event.preventDefault()
