@@ -258,6 +258,18 @@ describe('workspace store profiles', () => {
   })
 
   test('openSession launches an empty workspace pane in the workspace folder', async () => {
+  test('attachSession detaches the previously active workspace', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: null, panes: [nonAgentPane] }
+      return null
+    })
+    useWorkspaceStore.setState({ activeSessionId: createdSession.id })
+
+    await useWorkspaceStore.getState().attachSession(secondSession.id)
+
+    expect(invoke).toHaveBeenCalledWith('detach_session', { sessionId: createdSession.id })
+  })
+
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'list_sessions') return [createdSession]

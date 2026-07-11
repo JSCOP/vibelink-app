@@ -48,8 +48,6 @@ type Entry = {
   sessionId?: string
   observer?: ResizeObserver
   fitFrame?: number
-  visibleRecoveryFrame?: number
-  visibleRecoveryRefreshFrame?: number
   rendererReloadPending?: boolean
   rendererReloadTimer?: number
   outputFrame?: number
@@ -60,6 +58,9 @@ type Entry = {
   measureState?: TerminalHostMeasureState
   forceFitOnNextMeasure?: boolean
   rendererResetPending?: boolean
+  lastFitRect?: { width: number; height: number }
+  lastSentPtyCols?: number
+  lastSentPtyRows?: number
   container?: HTMLElement
   titleDisposable?: { dispose: () => void }
   linkDisposables?: { dispose(): void }[]
@@ -74,6 +75,8 @@ class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
   private settings: TerminalVisualSettings = defaultTerminalSettings
   private linkActions: CaptureLinkActions = { onOpenPath: () => {}, resolveMarker: () => undefined }
+  private pendingPass = new Map<string, { fit: boolean; syncPty: boolean; force: boolean }>()
+  private passFrame: number | undefined
 
   constructor() {
     if (typeof document !== 'undefined') {
@@ -194,7 +197,10 @@ class TerminalManagerImpl {
       })
       entry.term.onResize(({ cols, rows }) => {
         const sessionId = entry.sessionId
-        if (sessionId) void invoke('resize_pane', { sessionId, paneId, cols, rows })
+        if (!sessionId || (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows)) return
+        entry.lastSentPtyCols = cols
+        entry.lastSentPtyRows = rows
+        void invoke('resize_pane', { sessionId, paneId, cols, rows })
       })
       entry.dataWired = true
     }
@@ -216,7 +222,7 @@ class TerminalManagerImpl {
     }
 
     entry.observer?.disconnect()
-    entry.observer = new ResizeObserver(() => this.fit(entry, 0))
+    entry.observer = new ResizeObserver(() => this.scheduleLayoutPass({ paneIds: [paneId] }))
     entry.observer.observe(container)
     // Output held while the terminal was unopened parses now, after the
     // synchronous fit above sized the grid to the real host.
@@ -224,7 +230,7 @@ class TerminalManagerImpl {
       this.safeFit(entry)
       this.flushAllOutput(entry)
     }
-    this.reflowEntry(entry, true)
+    this.scheduleLayoutPass({ paneIds: [paneId], force: true })
     this.fitAfterFontsLoad(entry)
   }
 
@@ -336,54 +342,81 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.term.focus()
-    // Non-forced reflow: refresh the renderer and correct geometry only if it
-    // actually changed. A plain click must not force-fit (forced fits are for
-    // recovery paths: notifyPaneVisible / recoverAllVisiblePanes).
-    this.reflowEntry(entry)
+    this.scheduleLayoutPass({ paneIds: [paneId] })
   }
 
   reflow(paneId: string): void {
-    const entry = this.entries.get(paneId)
-    if (!entry) return
-    this.reflowEntry(entry)
+    this.scheduleLayoutPass({ paneIds: [paneId] })
   }
 
   notifyPaneVisible(paneId: string): void {
-    const entry = this.entries.get(paneId)
-    if (!entry) return
-    this.scheduleVisibleRecovery(entry, 0)
+    this.scheduleLayoutPass({ paneIds: [paneId], force: true, syncPty: true })
   }
 
-  /** Force-fit + WebGL atlas reset for every pane once its host is measurable.
-   *  Use after dockview maximize/restore, where plain reflowAll leaves stale
-   *  glyph textures until the pane is clicked. */
   recoverAllVisiblePanes(): void {
-    for (const entry of this.entries.values()) {
-      this.scheduleVisibleRecovery(entry, 0)
-    }
+    this.scheduleLayoutPass({ force: true, syncPty: true })
   }
 
   reflowAll(forceFit = false): void {
-    for (const entry of this.entries.values()) {
-      this.reflowEntry(entry, forceFit)
-    }
+    this.scheduleLayoutPass({ force: forceFit })
   }
 
   syncPtySize(paneId: string): void {
-    const entry = this.entries.get(paneId)
-    if (!entry) return
-    this.syncEntryPtySize(entry)
+    this.scheduleLayoutPass({ paneIds: [paneId], syncPty: true })
   }
 
   syncAllPtySizes(): void {
-    for (const entry of this.entries.values()) {
-      this.syncEntryPtySize(entry)
-    }
+    this.scheduleLayoutPass({ syncPty: true })
   }
 
   resumeRendering(): void {
-    this.reflowAll(true)
-    requestAnimationFrame(() => this.syncAllPtySizes())
+    this.scheduleLayoutPass({ force: true, syncPty: true })
+  }
+
+  scheduleLayoutPass(options: { paneIds?: string[]; syncPty?: boolean; force?: boolean } = {}): void {
+    const paneIds = options.paneIds ?? [...this.entries.keys()]
+    for (const paneId of paneIds) {
+      if (!this.entries.has(paneId)) continue
+      const pending = this.pendingPass.get(paneId)
+      this.pendingPass.set(paneId, {
+        fit: true,
+        syncPty: Boolean(pending?.syncPty || options.syncPty),
+        force: Boolean(pending?.force || options.force),
+      })
+    }
+    if (this.passFrame !== undefined || this.pendingPass.size === 0) return
+    this.passFrame = requestAnimationFrame(() => {
+      this.passFrame = undefined
+      const pending = this.pendingPass
+      this.pendingPass = new Map()
+      for (const [paneId, pass] of pending) {
+        const entry = this.entries.get(paneId)
+        if (!entry?.opened || !pass.fit) continue
+        const rect = entry.container?.getBoundingClientRect()
+        const measurement = this.observeMeasureState(entry, rect)
+        if (!rect || !measurement.measurable) continue
+        const lastRect = entry.lastFitRect
+        const rectUnchanged = lastRect !== undefined
+          && Math.abs(lastRect.width - rect.width) <= 1
+          && Math.abs(lastRect.height - rect.height) <= 1
+        if (!pass.force && !entry.rendererResetPending && rectUnchanged) continue
+
+        if (entry.rendererResetPending) {
+          if (!this.forceFitAndRepaint(entry)) continue
+        } else {
+          const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
+          if (!this.safeFit(entry, pass.force || measurement.forceFitForMeasure)) {
+            entry.forceFitOnNextMeasure = true
+            continue
+          }
+          if (wasAtBottom) entry.term.scrollToBottom()
+          entry.forceFitOnNextMeasure = false
+          this.redraw(entry)
+        }
+        entry.lastFitRect = { width: rect.width, height: rect.height }
+        if (pass.syncPty) this.syncEntryPtySize(entry)
+      }
+    })
   }
 
   containsEventTarget(paneId: string, target: EventTarget | null): boolean {
@@ -405,8 +438,7 @@ class TerminalManagerImpl {
     agentActivityTracker.clear(paneId)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
-    if (entry.visibleRecoveryFrame !== undefined) cancelAnimationFrame(entry.visibleRecoveryFrame)
-    if (entry.visibleRecoveryRefreshFrame !== undefined) cancelAnimationFrame(entry.visibleRecoveryRefreshFrame)
+    this.pendingPass.delete(paneId)
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadPending = false
     this.cancelScheduledOutputFlush(entry)
@@ -445,7 +477,7 @@ class TerminalManagerImpl {
         // renderer repaints once the pane is measurable again.
         entry.forceFitOnNextMeasure = true
         entry.rendererResetPending = true
-        this.scheduleVisibleRecovery(entry, 0)
+        this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, syncPty: true })
       })
       entry.term.loadAddon(addon)
       entry.webgl = addon
@@ -480,52 +512,6 @@ class TerminalManagerImpl {
     requestAnimationFrame(() => this.redraw(entry))
   }
 
-  private reflowEntry(entry: Entry, forceFit = false): void {
-    this.redraw(entry)
-    this.fit(entry, 0, forceFit)
-    requestAnimationFrame(() => this.redraw(entry))
-  }
-
-  private scheduleVisibleRecovery(entry: Entry, attempt: number): void {
-    if (entry.visibleRecoveryFrame !== undefined) return
-    entry.visibleRecoveryFrame = requestAnimationFrame(() => {
-      entry.visibleRecoveryFrame = undefined
-      if (this.entries.get(entry.paneId) !== entry) return
-      const measurement = this.observeMeasureState(entry, entry.container?.getBoundingClientRect())
-      if (!measurement.measurable) {
-        if (attempt < MAX_FIT_ATTEMPTS) this.scheduleVisibleRecovery(entry, attempt + 1)
-        else {
-          entry.forceFitOnNextMeasure = true
-          entry.rendererResetPending = true
-        }
-        return
-      }
-      try {
-        this.recoverVisiblePane(entry)
-      } catch {
-        if (attempt < MAX_FIT_ATTEMPTS) this.scheduleVisibleRecovery(entry, attempt + 1)
-      }
-    })
-  }
-
-  private recoverVisiblePane(entry: Entry): void {
-    if (!entry.opened) return
-    this.forceFitAndRepaint(entry)
-    // dockview's always-renderer overlay repositions its container on its own
-    // rAF; if ours ran first the fit above used stale geometry. Verify one
-    // frame later and refit when the container size changed.
-    if (entry.visibleRecoveryRefreshFrame !== undefined) cancelAnimationFrame(entry.visibleRecoveryRefreshFrame)
-    entry.visibleRecoveryRefreshFrame = requestAnimationFrame(() => {
-      entry.visibleRecoveryRefreshFrame = undefined
-      if (this.entries.get(entry.paneId) !== entry) return
-      const proposed = entry.fit.proposeDimensions()
-      if (proposed && (proposed.cols !== entry.term.cols || proposed.rows !== entry.term.rows)) {
-        this.forceFitAndRepaint(entry)
-      } else {
-        this.redraw(entry)
-      }
-    })
-  }
 
   // Fit only when FitAddon proposes sane dimensions. During dockview's maximize/
   // restore the container can be transiently ~1px (measurable by width/height > 0,
@@ -540,7 +526,7 @@ class TerminalManagerImpl {
     return true
   }
 
-  private forceFitAndRepaint(entry: Entry, attempt = 0): void {
+  private forceFitAndRepaint(entry: Entry, attempt = 0): boolean {
     const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
     // safeFit skips a degenerate proposal (container mid-layout). If it could not
     // fit, retry on a bounded delay once the real geometry settles rather than
@@ -552,15 +538,16 @@ class TerminalManagerImpl {
           if (this.entries.get(entry.paneId) === entry && entry.opened) this.forceFitAndRepaint(entry, attempt + 1)
         }, DEGENERATE_FIT_RETRY_MS)
       }
-      return
+      return false
     }
     if (wasAtBottom) entry.term.scrollToBottom()
     this.redraw(entry, { clearWebglTextureAtlas: entry.webgl !== undefined })
-    this.forceGlyphRepaint(entry)
+    if (entry.rendererResetPending) this.forceGlyphRepaint(entry)
+    else if (entry.webgl) this.clearWebglTextureAtlas(entry)
     entry.forceFitOnNextMeasure = false
     entry.rendererResetPending = false
-    const sessionId = entry.sessionId
-    if (sessionId) void invoke('resize_pane', { sessionId, paneId: entry.paneId, cols: entry.term.cols, rows: entry.term.rows })
+    this.syncEntryPtySize(entry)
+    return true
   }
 
   // After dockview re-parents a pane's container (maximize/restore, pane swap),
@@ -774,23 +761,12 @@ class TerminalManagerImpl {
     const sessionId = entry.sessionId
     if (!sessionId || !entry.opened) return
     this.flushOutput(entry)
-    const measurement = this.observeMeasureState(entry, entry.container?.getBoundingClientRect())
-    let fitSucceeded = false
-    if (measurement.measurable) {
-      try {
-        fitSucceeded = this.safeFit(entry)
-      } catch {
-        // The scheduled fit retry path handles transient layout races.
-      }
-    }
-    const resetRenderer = fitSucceeded && Boolean(entry.rendererResetPending)
-    this.redraw(entry, { clearWebglTextureAtlas: resetRenderer })
-    if (fitSucceeded) {
-      entry.forceFitOnNextMeasure = false
-      if (resetRenderer) entry.rendererResetPending = false
-    }
-    void invoke('resize_pane', { sessionId, paneId: entry.paneId, cols: entry.term.cols, rows: entry.term.rows })
-    requestAnimationFrame(() => this.redraw(entry))
+    const cols = entry.term.cols
+    const rows = entry.term.rows
+    if (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows) return
+    entry.lastSentPtyCols = cols
+    entry.lastSentPtyRows = rows
+    void invoke('resize_pane', { sessionId, paneId: entry.paneId, cols, rows })
   }
 
   private observeMeasureState(entry: Entry, rect: { width: number; height: number } | null | undefined): { measurable: boolean; forceFitForMeasure: boolean } {
@@ -800,7 +776,6 @@ class TerminalManagerImpl {
     if (nextMeasureState !== 'measurable') return { measurable: false, forceFitForMeasure: false }
     if (becameMeasurable) entry.forceFitOnNextMeasure = true
     const forceFitForMeasure = entry.forceFitOnNextMeasure === true
-    if (forceFitForMeasure) entry.rendererResetPending = true
     return { measurable: true, forceFitForMeasure }
   }
 
@@ -831,10 +806,8 @@ class TerminalManagerImpl {
         // fit re-measures geometry; it must never yank the viewport away from a
         // user who scrolled up (click-to-select, split, tab toggle, resize).
         if (wasAtBottom) entry.term.scrollToBottom()
-        const resetRenderer = Boolean(entry.rendererResetPending)
-        this.redrawAfterNextFrame(entry, { clearWebglTextureAtlas: resetRenderer })
+        this.redrawAfterNextFrame(entry, { clearWebglTextureAtlas: entry.webgl !== undefined })
         entry.forceFitOnNextMeasure = false
-        if (resetRenderer) entry.rendererResetPending = false
       } catch {
         if (attempt < MAX_FIT_ATTEMPTS) this.fit(entry, attempt + 1, forceFit)
       }

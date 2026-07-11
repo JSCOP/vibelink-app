@@ -196,6 +196,14 @@ describe('connected dockview resizing', () => {
     }
   })
 
+  it('precomputes live resize targets and affected panes', () => {
+    const session = createConnectedResizeDragSession(makeGrid2x2(), 'x', 120, 0, 200)
+
+    expect(session).not.toBeNull()
+    expect(session?.liveTargets).toEqual([{ paneId: 'pane-2', axis: 'x', baseSize: 120 }])
+    expect(session?.affectedPaneIds).toEqual(['pane-0', 'pane-2', 'pane-1', 'pane-3'])
+  })
+
   it('keeps single drag sessions in parity with single resize math', () => {
     const cases = [
       { name: 'split-column segment', layout: makeThreeColumnWithSplitColumn(), axis: 'y' as const, coordinate: 100, point: 50 },

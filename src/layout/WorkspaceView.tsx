@@ -63,6 +63,8 @@ type ResizeHandleSets = {
 
 const components = {
   terminalWindow: TerminalWindowPanel,
+let interactiveResizeActive = false
+
   agent: AgentWindowPanel,
   kanban: KanbanWindowPanel,
   diff: DiffWindowPanel,
@@ -182,7 +184,6 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const resizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
   const terminalResizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
   const terminalResizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
-  const layoutReflowFrameRef = useRef<number | undefined>()
   const [resizeHandles, setResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   // Preview state lives outside React state: a drag writes it per frame and
   // routing that through useState would reconcile both dockview trees per
@@ -260,6 +261,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     resizeHoverRef.current = null
     workspacePreviewStore.set(null)
     if (options?.clearHandles) setResizeHandles({ connected: [], single: [] })
+    interactiveResizeActive = false
   }, [workspacePreviewStore])
 
   const clearTerminalResizeInteraction = useCallback((options?: { clearHandles?: boolean }) => {
@@ -268,23 +270,16 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     terminalResizeHoverRef.current = null
     terminalPreviewStore.set(null)
     if (options?.clearHandles) setTerminalResizeHandles({ connected: [], single: [] })
+    interactiveResizeActive = false
   }, [terminalPreviewStore])
 
   const scheduleLayoutReflow = useCallback(() => {
-    if (layoutReflowFrameRef.current !== undefined) cancelAnimationFrame(layoutReflowFrameRef.current)
-    layoutReflowFrameRef.current = requestAnimationFrame(() => {
-      layoutReflowFrameRef.current = undefined
-      TerminalManager.reflowAll()
-    })
+    TerminalManager.scheduleLayoutPass({})
   }, [])
 
   useEffect(() => () => {
     clearResizeInteraction()
     clearTerminalResizeInteraction()
-    if (layoutReflowFrameRef.current !== undefined) {
-      cancelAnimationFrame(layoutReflowFrameRef.current)
-      layoutReflowFrameRef.current = undefined
-    }
     if (terminalDockLayoutFrameRef.current !== undefined) {
       cancelAnimationFrame(terminalDockLayoutFrameRef.current)
       terminalDockLayoutFrameRef.current = undefined
@@ -293,6 +288,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
 
   const persistLayoutSoon = useCallback(() => {
     const api = apiRef.current
+    if (interactiveResizeActive) return
     if (!api || !activeSessionId || suppressPanelRemovalRef.current || !isDockElementMeasurable(dockRef.current)) return
     window.clearTimeout(saveTimerRef.current)
     saveTimerRef.current = window.setTimeout(() => {
@@ -559,7 +555,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         return
       }
       // Splitting halves the sibling pane; recover it alongside the new one.
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true, paneIds: [paneId, pending.id] })
       persistLayoutSoon()
     })
   }, [activatePane, addTerminalPanel, ensureTerminalWindowPanel, layoutTerminalDockview, persistLayoutSoon, spawnPane])
@@ -599,18 +595,13 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     activatePane(paneId)
     if (!panel) return
     const syncActivePane = () => {
-      if (useWorkspaceStore.getState().panes[paneId]) {
-        TerminalManager.focus(paneId)
-        TerminalManager.syncPtySize(paneId)
-      }
+      if (useWorkspaceStore.getState().panes[paneId]) TerminalManager.focus(paneId)
     }
     if (panel.api.isMaximized()) {
       panel.api.exitMaximized()
-      // Restoring un-hides every sibling that was collapsed to 0x0 while this
-      // pane was maximized; they lost their WebGL context and need a forced
-      // repaint (recover), not just a refit. onDidMaximizedGroupChange also runs
-      // recover, but the dockview event can coalesce/skip, so drive it here too.
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+      // Restoring changes every sibling's host geometry. The dirty scheduler
+      // skips unchanged panes and repairs only entries flagged by real context loss.
+      reflowTerminalsAfterLayout({ syncPty: true })
       requestAnimationFrame(() => requestAnimationFrame(syncActivePane))
     } else {
       panel.api.maximize()
@@ -688,7 +679,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
   }, [layoutDockview, layoutTerminalDockview, panelApiForId, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout])
 
-  const applyResizedLayout = useCallback(async (api: DockviewApi, nextLayout: unknown, isTerminalLayout: boolean) => {
+  const applyResizedLayout = useCallback(async (api: DockviewApi, nextLayout: unknown, isTerminalLayout: boolean, affectedPaneIds?: string[]) => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!api || !sessionId) return
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
@@ -700,9 +691,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         // the inner dock once its DOM settles.
         scheduleTerminalDockLayout()
       }
-      // Divider commits rebuild the grid from JSON; recover so pane content
-      // (WebGL glyphs + scroll geometry) matches the new sizes without a click.
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+      reflowTerminalsAfterLayout({ syncPty: true, paneIds: affectedPaneIds })
       loadedSessionRef.current = sessionId
       loadedPageRef.current = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId ?? loadedPageRef.current
       const pageId = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId
@@ -788,8 +777,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     // arithmetic over precomputed boundaries; the clone-and-apply
     // (layoutFor) runs once, on pointerup.
     const session = singleSegment
+    interactiveResizeActive = true
       ? createSingleResizeDragSession(startLayout, previewHandle.axis, previewHandle.coordinate, segmentPoint, undefined, resizeSnapTolerance, true)
       : createConnectedResizeDragSession(startLayout, previewHandle.axis, previewHandle.coordinate, previewHandle.start, previewHandle.end, undefined, resizeSnapTolerance)
+    let lastDragFitAt = 0
     if (!session) return
     let latestPoint: number | null = null
     let moveFrame: number | undefined
@@ -801,6 +792,15 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const onPointerMove = (moveEvent: PointerEvent) => {
       latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
       if (moveFrame !== undefined) return
+        for (const target of session.liveTargets) {
+          const panel = api.getPanel(target.paneId)
+          panel?.api.setSize(target.axis === 'x' ? { width: target.baseSize + delta } : { height: target.baseSize + delta })
+        }
+        const now = performance.now()
+        if (now - lastDragFitAt >= 100) {
+          TerminalManager.scheduleLayoutPass({ paneIds: session.affectedPaneIds, syncPty: true })
+          lastDragFitAt = now
+        }
       moveFrame = requestAnimationFrame(() => {
         moveFrame = undefined
         if (latestPoint === null) return
@@ -811,18 +811,26 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       })
     }
 
-    const onPointerUp = (upEvent: PointerEvent) => {
-      // Commit from the release position so a fast drag-release never lands a
-      // frame-stale size. pointercancel carries no meaningful coordinates —
-      // keep the last move point there.
-      if (upEvent.type === 'pointerup') latestPoint = previewHandle.axis === 'x' ? upEvent.clientX : upEvent.clientY
-      const nextLayout = latestPoint === null ? null : session.layoutFor(session.deltaFor(latestPoint - startPoint))
+    const finishInteraction = (releaseGate = true) => {
       resizeDragRef.current?.removeListeners()
       resizeDragRef.current = null
       resizeHoverRef.current = null
       workspacePreviewStore.set(null)
-      if (!nextLayout) return
-      void applyResizedLayout(api, nextLayout, false)
+      if (releaseGate) interactiveResizeActive = false
+    }
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      latestPoint = previewHandle.axis === 'x' ? upEvent.clientX : upEvent.clientY
+      const nextLayout = session.layoutFor(session.deltaFor(latestPoint - startPoint))
+      finishInteraction()
+      if (nextLayout) void applyResizedLayout(api, nextLayout, false, session.affectedPaneIds)
+    }
+
+    const onPointerCancel = () => {
+      finishInteraction(false)
+      api.fromJSON(startLayout, { reuseExistingPanels: true })
+      interactiveResizeActive = false
+      TerminalManager.scheduleLayoutPass({ paneIds: session.affectedPaneIds, syncPty: true })
     }
 
     const removeListeners = () => {
@@ -832,12 +840,12 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       }
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
-      window.removeEventListener('pointercancel', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerCancel)
     }
     resizeDragRef.current = { removeListeners }
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
-    window.addEventListener('pointercancel', onPointerUp)
+    window.addEventListener('pointercancel', onPointerCancel)
   }, [applyResizedLayout, resizeHandleForPointer, resizeSnapTolerance, workspacePreviewStore])
 
   const showTerminalResizePreview = useCallback((pointer: ResizePointer, handle: ConnectedResizeHandle) => {
@@ -885,8 +893,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (!previewHandle) return
     const singleSegment = event.ctrlKey || isSingleResizeHandle(previewHandle)
     const startPoint = previewHandle.axis === 'x' ? event.clientX : event.clientY
+    interactiveResizeActive = true
     const segmentPoint = previewHandle.axis === 'x'
       ? event.clientY - (dockRect?.top ?? 0)
+    let lastDragFitAt = 0
       : event.clientX - (dockRect?.left ?? 0)
     // See startConnectedResize: one-time analysis, per-frame arithmetic.
     const session = singleSegment
@@ -898,6 +908,15 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
 
     terminalPreviewStore.set({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
+        for (const target of session.liveTargets) {
+          const panel = api.getPanel(target.paneId)
+          panel?.api.setSize(target.axis === 'x' ? { width: target.baseSize + delta } : { height: target.baseSize + delta })
+        }
+        const now = performance.now()
+        if (now - lastDragFitAt >= 100) {
+          TerminalManager.scheduleLayoutPass({ paneIds: session.affectedPaneIds, syncPty: true })
+          lastDragFitAt = now
+        }
     const onPointerMove = (moveEvent: PointerEvent) => {
       latestPoint = previewHandle.axis === 'x' ? moveEvent.clientX : moveEvent.clientY
       if (moveFrame !== undefined) return
@@ -911,15 +930,26 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       })
     }
 
-    const onPointerUp = (upEvent: PointerEvent) => {
-      if (upEvent.type === 'pointerup') latestPoint = previewHandle.axis === 'x' ? upEvent.clientX : upEvent.clientY
-      const nextLayout = latestPoint === null ? null : session.layoutFor(session.deltaFor(latestPoint - startPoint))
+    const finishInteraction = (releaseGate = true) => {
       terminalResizeDragRef.current?.removeListeners()
       terminalResizeDragRef.current = null
       terminalResizeHoverRef.current = null
       terminalPreviewStore.set(null)
-      if (!nextLayout) return
-      void applyResizedLayout(api, nextLayout, true)
+      if (releaseGate) interactiveResizeActive = false
+    }
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      latestPoint = previewHandle.axis === 'x' ? upEvent.clientX : upEvent.clientY
+      const nextLayout = session.layoutFor(session.deltaFor(latestPoint - startPoint))
+      finishInteraction()
+      if (nextLayout) void applyResizedLayout(api, nextLayout, true, session.affectedPaneIds)
+    }
+
+    const onPointerCancel = () => {
+      finishInteraction(false)
+      api.fromJSON(startLayout, { reuseExistingPanels: true })
+      interactiveResizeActive = false
+      TerminalManager.scheduleLayoutPass({ paneIds: session.affectedPaneIds, syncPty: true })
     }
 
     const removeListeners = () => {
@@ -929,12 +959,12 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       }
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
-      window.removeEventListener('pointercancel', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerCancel)
     }
     terminalResizeDragRef.current = { removeListeners }
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
-    window.addEventListener('pointercancel', onPointerUp)
+    window.addEventListener('pointercancel', onPointerCancel)
   }, [applyResizedLayout, resizeHandleForPointer, resizeSnapTolerance, terminalPreviewStore])
 
 
@@ -1314,9 +1344,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const hasMaximizedGroup = event.api.hasMaximizedGroup()
       clearTerminalResizeInteraction({ clearHandles: hasMaximizedGroup })
       if (!hasMaximizedGroup && isDockElementMeasurable(terminalDockRef.current)) refreshTerminalResizeHandles(event.api)
-      // Dockview's maximize transition leaves group geometry stale until the
-      // next layout pass; force one first, then reflow + recover panes so
-      // xterm refits against the real container size.
+      // Dockview's maximize transition leaves geometry stale until the next
+      if (interactiveResizeActive) return
+      scheduleLayoutReflow()
+      // layout pass; lay out first, then let the dirty scheduler refit panes.
       scheduleTerminalDockLayout()
       reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       persistLayoutSoon()
@@ -1398,6 +1429,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     event.api.onDidMaximizedGroupChange(syncMaximizedResizeState)
     updateActivePaneId()
     event.api.onDidAddPanel(syncChromeState)
+      if (interactiveResizeActive) return
+      scheduleLayoutReflow()
     event.api.onDidRemovePanel(syncChromeState)
     if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(syncChromeState)
     event.api.onDidLayoutFromJSON(syncChromeState)
@@ -1870,26 +1903,13 @@ function forceOverlayReposition(api: DockviewApi): void {
   container.updateAllPositions()
 }
 
-let terminalLayoutReflowFrame: number | undefined
-let terminalLayoutReflowSyncPty = false
-let terminalLayoutReflowRecover = false
-
-function reflowTerminalsAfterLayout(options: { syncPty?: boolean; recover?: boolean } = {}): void {
-  terminalLayoutReflowSyncPty = terminalLayoutReflowSyncPty || options.syncPty === true
-  terminalLayoutReflowRecover = terminalLayoutReflowRecover || options.recover === true
-  if (terminalLayoutReflowFrame !== undefined) cancelAnimationFrame(terminalLayoutReflowFrame)
-  terminalLayoutReflowFrame = requestAnimationFrame(() => {
-    terminalLayoutReflowFrame = requestAnimationFrame(() => {
-      terminalLayoutReflowFrame = undefined
-      const syncPty = terminalLayoutReflowSyncPty
-      const recover = terminalLayoutReflowRecover
-      terminalLayoutReflowSyncPty = false
-      terminalLayoutReflowRecover = false
-      TerminalManager.reflowAll(true)
-      if (syncPty) TerminalManager.syncAllPtySizes()
-      // reflowAll never clears the WebGL glyph atlas; after dockview
-      // maximize/restore that leaves stale textures until a pane is clicked.
-      if (recover) TerminalManager.recoverAllVisiblePanes()
+function reflowTerminalsAfterLayout(options: { syncPty?: boolean; recover?: boolean; paneIds?: string[] } = {}): void {
+  // Dockview registers its overlay reposition first; measure terminals one frame later.
+  requestAnimationFrame(() => {
+    TerminalManager.scheduleLayoutPass({
+      paneIds: options.paneIds,
+      syncPty: options.syncPty,
+      force: options.recover,
     })
   })
 }

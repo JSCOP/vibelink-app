@@ -197,11 +197,7 @@ function App() {
   }, [activeSessionId, activeSession?.workspaceFolder, settings.hermesCommand])
 
   useEffect(() => {
-    TerminalManager.reflowAll(true)
-    requestAnimationFrame(() => {
-      TerminalManager.reflowAll(true)
-      TerminalManager.syncAllPtySizes()
-    })
+    TerminalManager.scheduleLayoutPass({ force: true, syncPty: true })
   }, [activeLayoutPage?.id])
 
   useEffect(() => {

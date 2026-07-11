@@ -223,8 +223,12 @@ export function singleResizeDeltaAt(
   return snapSingleDelta(root, analysis.boundaries, selected, clampDelta(root, [selected], delta, minSize), minSize, snapTolerance)
 }
 
+export type ResizeLiveTarget = { paneId: string; axis: SplitAxis; baseSize: number }
+
 export type ResizeDragSession = {
   handle: ConnectedResizeHandle
+  liveTargets: ResizeLiveTarget[]
+  affectedPaneIds: string[]
   /** Snap+clamp a raw pointer delta. Cheap: no cloning, no re-analysis. */
   deltaFor(rawDelta: number): number
   /** Build the resized layout tree for a final delta. Clones — call once, on commit. */
@@ -234,6 +238,26 @@ export type ResizeDragSession = {
 /** Precompute everything a connected-boundary drag needs. The per-move path
  *  (deltaFor) only walks the selected boundaries; the expensive clone+apply
  *  (layoutFor) runs once on pointerup. */
+function resizeSessionTargets(boundaries: Boundary[]): { liveTargets: ResizeLiveTarget[]; affectedPaneIds: string[] } {
+  const liveTargets: ResizeLiveTarget[] = []
+  const affectedPaneIds = new Set<string>()
+  for (const boundary of boundaries) {
+    const leaf = boundary.beforeLeaves.at(-1)
+    const paneId = leaf?.node.data.views?.[0]
+    if (leaf && paneId) {
+      liveTargets.push({
+        paneId,
+        axis: boundary.axis,
+        baseSize: boundary.axis === 'x' ? leaf.rect.width : leaf.rect.height,
+      })
+    }
+    for (const adjacentLeaf of [...boundary.beforeLeaves, ...boundary.afterLeaves]) {
+      for (const adjacentPaneId of adjacentLeaf.paneIds) affectedPaneIds.add(adjacentPaneId)
+    }
+  }
+  return { liveTargets, affectedPaneIds: [...affectedPaneIds] }
+}
+
 export function createConnectedResizeDragSession(
   layout: unknown,
   axis: SplitAxis,
@@ -253,8 +277,10 @@ export function createConnectedResizeDragSession(
   const deltaFor = (rawDelta: number) =>
     snapConnectedDelta(root, analysis.boundaries, selected, clampDelta(root, selected, rawDelta, minSize), minSize, snapTolerance)
 
+  const targets = resizeSessionTargets(selected)
   return {
     handle: { id: `session:${axis}:${Math.round(coordinate)}`, axis, coordinate, start, end },
+    ...targets,
     deltaFor,
     layoutFor(delta: number): unknown | null {
       if (Math.abs(delta) < 1) return null
@@ -300,8 +326,10 @@ export function createSingleResizeDragSession(
   const deltaFor = (rawDelta: number) =>
     snapSingleDelta(root, analysis.boundaries, selected, clampDelta(root, [selected], rawDelta, minSize), minSize, snapTolerance)
 
+  const targets = resizeSessionTargets([selected])
   return {
     handle: selectedHandle,
+    ...targets,
     deltaFor,
     layoutFor(delta: number): unknown | null {
       if (Math.abs(delta) < 1) return null

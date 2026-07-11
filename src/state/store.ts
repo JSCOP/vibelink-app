@@ -231,6 +231,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   renameSession: async (sessionId: string, name: string) => {
+    const previousSessionId = get().activeSessionId
     await invoke('rename_session', { sessionId, name })
     await get().refreshSessions()
   },
@@ -246,6 +247,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const deletedPaneIds = state.activeSessionId === sessionId ? Object.keys(state.panes) : []
       const taskIds = new Set(state.kanban.taskOrder[sessionId] ?? [])
       const tasks = { ...state.kanban.tasks }
+    if (previousSessionId && previousSessionId !== sessionId) {
+      void invoke('detach_session', { sessionId: previousSessionId }).catch(() => {})
+    }
       for (const taskId of taskIds) delete tasks[taskId]
       const taskOrder = { ...state.kanban.taskOrder }
       delete taskOrder[sessionId]
