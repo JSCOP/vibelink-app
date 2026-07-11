@@ -127,6 +127,20 @@ button {
   border-left-color: var(--vibelink-accent);
 }
 
+.session-row.has-completions {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 24%, transparent), 0 0 14px color-mix(in srgb, var(--vibelink-alarm-highlight) 10%, transparent);
+}
+
+.session-row.has-completions:not(.active) {
+  border-left-color: var(--vibelink-alarm-highlight);
+}
+
+.session-row.has-completions .session-icon,
+.session-row.has-completions .session-name {
+  color: var(--vibelink-alarm-highlight);
+}
+
 .session-row {
   position: relative;
 }
@@ -199,6 +213,27 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-completion-badge {
+  align-items: center;
+  animation: session-completion-pulse 1.8s ease-in-out infinite;
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-alarm-highlight) 48%, transparent);
+  border-radius: 999px;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--vibelink-alarm-highlight) 20%, transparent);
+  color: var(--vibelink-alarm-highlight);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font: 700 10px/1 var(--vibelink-mono);
+  gap: 3px;
+  min-width: 24px;
+  padding: 3px 5px;
+}
+
+@keyframes session-completion-pulse {
+  0%, 100% { filter: brightness(0.92); }
+  50% { filter: brightness(1.18); }
 }
 
 .session-badge {

@@ -100,6 +100,11 @@ export class AgentActivityTracker {
   private recordUserInput(paneId: string, data: string): boolean {
     const state = this.inputStates.get(paneId) ?? { draft: '', inPaste: false }
     let submitted = false
+    const submitDraft = () => {
+      const draft = state.draft.trim()
+      if (draft && !draft.startsWith('/')) submitted = true
+      state.draft = ''
+    }
     for (let index = 0; index < data.length; index += 1) {
       if (data.startsWith('\x1b[200~', index)) {
         state.inPaste = true
@@ -112,19 +117,14 @@ export class AgentActivityTracker {
         continue
       }
       if (data.startsWith('\x1b[13u', index)) {
-        if (!state.inPaste && state.draft.trim()) submitted = true
-        state.draft = ''
+        if (!state.inPaste) submitDraft()
         index += 4
         continue
       }
       const code = data.charCodeAt(index)
       if (code === 0x0d || code === 0x0a) {
-        if (state.inPaste) {
-          state.draft += ' '
-        } else {
-          if (state.draft.trim()) submitted = true
-          state.draft = ''
-        }
+        if (state.inPaste) state.draft += ' '
+        else submitDraft()
       } else if (code === 0x08 || code === 0x7f) {
         state.draft = state.draft.slice(0, -1)
       } else if (code === 0x1b) {
@@ -151,6 +151,10 @@ export class AgentActivityTracker {
     if (pending.timer !== undefined) globalThis.clearTimeout(pending.timer)
     pending.timer = globalThis.setTimeout(() => this.complete(paneId, pending), this.actions.quietMs ?? defaultAgentResponseQuietMs)
   }
+}
+
+export function shouldTrackAgentInput(bufferType: string): boolean {
+  return bufferType === 'alternate'
 }
 
 export const agentActivityTracker = new AgentActivityTracker()

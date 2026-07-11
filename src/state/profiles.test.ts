@@ -94,6 +94,21 @@ describe('terminal profiles', () => {
         rows: 32,
       },
     }, settings)).toBe(false)
+    expect(isAgentPane({
+      id: 'pane-icon-only',
+      alive: true,
+      config: {
+        paneId: 'pane-icon-only',
+        shell: 'pwsh.exe',
+        args: ['-NoLogo'],
+        cwd: null,
+        env: [],
+        title: 'PowerShell',
+        icon: 'bot',
+        cols: 120,
+        rows: 32,
+      },
+    }, settings)).toBe(false)
   })
 
   test('runs local agent tools inside PowerShell and resets terminal modes on exit', () => {

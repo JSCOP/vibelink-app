@@ -29,7 +29,7 @@ type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 
 type Status = 'booting' | 'ready' | 'error'
 export type PaneCompletionSource = 'agent-response' | 'task-done'
-export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource }
+export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource; sessionId: string }
 
 
 type WorkspaceState = {
@@ -243,7 +243,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeSessionId: sessionId,
       activePaneId: undefined,
       panes,
-      paneCompletionHighlights: prunePaneCompletionHighlights(state.paneCompletionHighlights, panes),
+      paneCompletionHighlights: reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
       workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: workspaceLayout },
     }))
@@ -312,6 +312,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const hermesSessions = { ...state.hermesSessions }
       const manualPaneTitles = withoutPaneKeys(state.manualPaneTitles, deletedPaneIds)
       const capturesByPane = withoutPaneKeys(state.capturesByPane, deletedPaneIds)
+      const paneCompletionHighlights = withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId)
       const paneRoles = withoutPaneKeys(state.settings.paneRoles, deletedPaneIds)
       const settings = paneRoles === state.settings.paneRoles ? state.settings : { ...state.settings, paneRoles }
       delete viewModes[sessionId]
@@ -330,7 +331,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesPendingPrompts[sessionId]
       delete hermesCurrentSession[sessionId]
       delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, settings }
+      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, settings }
     })
     persistSettings(get().settings)
     persistCurrentKanban(get())
@@ -388,7 +389,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   clearSession: async (sessionId: string) => {
     await invoke('clear_session', { sessionId })
-    if (get().activeSessionId === sessionId) set({ panes: {}, activePaneId: undefined, paneCompletionHighlights: {} })
+    set((state) => ({
+      panes: state.activeSessionId === sessionId ? {} : state.panes,
+      activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
+      paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
+    }))
   },
 
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
@@ -456,17 +461,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setError: (error: string) => set({ error, status: 'error' }),
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
-  setActivePaneId: (paneId) => set((state) => {
-    if (!paneId || !state.paneCompletionHighlights[paneId]) return { activePaneId: paneId }
-    return { activePaneId: paneId, paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId) }
-  }),
+  setActivePaneId: (paneId) => set({ activePaneId: paneId }),
   markPaneResponseComplete: (paneId, source = 'agent-response') => set((state) => {
     const pane = state.panes[paneId]
-    if (!pane?.alive || !isAgentPane(pane, state.settings)) return {}
+    const sessionId = state.activeSessionId
+    if (!sessionId || !pane?.alive || !isAgentPane(pane, state.settings)) return {}
     return {
       paneCompletionHighlights: {
         ...state.paneCompletionHighlights,
-        [paneId]: { completedAt: Date.now(), source },
+        [paneId]: { completedAt: Date.now(), source, sessionId },
       },
     }
   }),
@@ -956,10 +959,29 @@ function withoutPaneKeys<T>(record: Record<string, T>, paneIds: readonly string[
   return next ?? record
 }
 
-function prunePaneCompletionHighlights(highlights: Record<string, PaneCompletionHighlight>, panes: Record<string, PaneMeta>): Record<string, PaneCompletionHighlight> {
-  const nextEntries = Object.entries(highlights).filter(([paneId]) => panes[paneId]?.alive)
+function reconcilePaneCompletionHighlights(
+  highlights: Record<string, PaneCompletionHighlight>,
+  sessionId: string,
+  panes: Record<string, PaneMeta>,
+): Record<string, PaneCompletionHighlight> {
+  const nextEntries = Object.entries(highlights).filter(([paneId, highlight]) => highlight.sessionId !== sessionId || panes[paneId]?.alive)
   if (nextEntries.length === Object.keys(highlights).length) return highlights
   return Object.fromEntries(nextEntries)
+}
+
+function withoutSessionCompletionHighlights(
+  highlights: Record<string, PaneCompletionHighlight>,
+  sessionId: string,
+): Record<string, PaneCompletionHighlight> {
+  const nextEntries = Object.entries(highlights).filter(([, highlight]) => highlight.sessionId !== sessionId)
+  if (nextEntries.length === Object.keys(highlights).length) return highlights
+  return Object.fromEntries(nextEntries)
+}
+
+export function paneCompletionCountsBySession(highlights: Record<string, PaneCompletionHighlight>): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const highlight of Object.values(highlights)) counts[highlight.sessionId] = (counts[highlight.sessionId] ?? 0) + 1
+  return counts
 }
 
 const terminalCapabilityEnv: [string, string][] = [

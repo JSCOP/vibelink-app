@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { AgentActivityTracker } from './agentActivity'
+import { AgentActivityTracker, shouldTrackAgentInput } from './agentActivity'
 
 const encoder = new TextEncoder()
 
@@ -155,6 +155,20 @@ describe('AgentActivityTracker', () => {
 
     vi.advanceTimersByTime(1)
     expect(completed).toEqual(['agent-pane'])
+  })
+
+  test('slash commands such as resume do not create completion alerts', () => {
+    tracker.noteUserInput('agent-pane', '/resume latest\r')
+    tracker.noteOutput('agent-pane', encoder.encode('Resumed session'))
+    vi.advanceTimersByTime(40)
+
+    expect(started).toEqual([])
+    expect(completed).toEqual([])
+  })
+
+  test('tracks typed prompts only while an interactive agent TUI owns the alternate buffer', () => {
+    expect(shouldTrackAgentInput('alternate')).toBe(true)
+    expect(shouldTrackAgentInput('normal')).toBe(false)
   })
 
   test('newlines inside a bracketed paste do not count as a submit', () => {

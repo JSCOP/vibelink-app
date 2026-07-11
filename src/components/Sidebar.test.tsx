@@ -5,6 +5,7 @@ import { Sidebar } from './Sidebar'
 const baseProps = {
   isOpen: true,
   sessions: [],
+  completionCounts: {},
   onSelect: vi.fn(),
   onCreate: vi.fn(),
   onRename: vi.fn(),
@@ -40,5 +41,15 @@ describe('Sidebar workspace navigation', () => {
 
     expect(markup).toContain('<span class="session-order" title="Ctrl+1">1</span><span class="session-icon">')
     expect(markup).toContain('<span class="session-order" title="Ctrl+2">2</span><span class="session-icon">')
+  })
+
+  test('shows an emphasized AI completion count separately from pane count', () => {
+    const markup = renderToStaticMarkup(<Sidebar {...baseProps} sessions={sessions} completionCounts={{ beta: 3 }} isPinned />)
+
+    expect(markup).toContain('class="session-row has-completions"')
+    expect(markup).toContain('data-completion-count="3"')
+    expect(markup).toContain('class="session-completion-badge"')
+    expect(markup).toContain('3 AI coding agent panes need attention')
+    expect(markup).toContain('title="1 terminal panes"')
   })
 })

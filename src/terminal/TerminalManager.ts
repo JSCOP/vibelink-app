@@ -12,7 +12,7 @@ import { terminalHostBecameMeasurable, terminalHostMeasureState, type TerminalHo
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
-import { agentActivityTracker, type AgentActivityActions } from './agentActivity'
+import { agentActivityTracker, shouldTrackAgentInput, type AgentActivityActions } from './agentActivity'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
@@ -191,7 +191,8 @@ class TerminalManagerImpl {
 
     if (!entry.dataWired) {
       entry.term.onData((data) => {
-        agentActivityTracker.noteUserInput(paneId, data)
+        if (shouldTrackAgentInput(entry.term.buffer.active.type)) agentActivityTracker.noteUserInput(paneId, data)
+        else agentActivityTracker.clear(paneId)
         const sessionId = entry.sessionId
         if (sessionId) void invoke('write_pane', { sessionId, paneId, data })
       })

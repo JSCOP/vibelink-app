@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { DockviewApi } from 'dockview-react'
 import { invoke } from '@tauri-apps/api/core'
@@ -21,7 +21,7 @@ import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/wind
 import { startTerminalOutputStream } from './ipc/output'
 import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import type { HermesWorkspaceState } from './ipc/types'
-import { useWorkspaceStore } from './state/store'
+import { paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
@@ -73,6 +73,7 @@ function App() {
   const globalShortcutOperationRef = useRef<Promise<void>>(Promise.resolve())
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const paneCompletionHighlights = useWorkspaceStore((state) => state.paneCompletionHighlights)
   const status = useWorkspaceStore((state) => state.status)
   const error = useWorkspaceStore((state) => state.error)
   const dismissError = useWorkspaceStore((state) => state.dismissError)
@@ -92,6 +93,7 @@ function App() {
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
   const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
+  const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const activeWorkspaceLayout = activeSessionId ? workspaceLayouts[activeSessionId] : undefined
@@ -129,8 +131,7 @@ function App() {
         const pane = state.panes[paneId]
         return Boolean(pane && isAgentPane(pane, state.settings))
       },
-      onResponseStart: (paneId) => useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId),
-      onUserActivity: (paneId) => useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId),
+      onResponseStart: () => {},
       onResponseComplete: (paneId) => useWorkspaceStore.getState().markPaneResponseComplete(paneId),
     })
     const unlisteners = [
@@ -426,6 +427,7 @@ function App() {
         isPinned={isSidebarPinned}
         sessions={orderedSessions}
         activeSessionId={activeSessionId}
+        completionCounts={completionCounts}
         onPointerEnter={() => setIsSidebarOpen(true)}
         onPointerLeave={() => { if (!isSidebarPinned) setIsSidebarOpen(false) }}
         onTogglePin={toggleSidebarPin}

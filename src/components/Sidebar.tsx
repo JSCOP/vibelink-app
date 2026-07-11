@@ -1,5 +1,5 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { Folder, Pencil, Pin, PinOff, Plus, Trash2 } from 'lucide-react'
+import { CheckCircle2, Folder, Pencil, Pin, PinOff, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta } from '../ipc/types'
 
 type SidebarProps = {
@@ -7,6 +7,7 @@ type SidebarProps = {
   isPinned: boolean
   sessions: SessionMeta[]
   activeSessionId?: string
+  completionCounts: Record<string, number>
   onSelect: (sessionId: string) => void
   onCreate: () => void
   onRename: (sessionId: string, name: string) => void
@@ -59,7 +60,7 @@ function dropTargetFromPoint(list: HTMLElement, clientY: number, draggingId: str
   return null
 }
 
-export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointerEnter, onPointerLeave, onTogglePin, onSelect, onCreate, onRename, onDelete, onReorder }: SidebarProps) {
+export function Sidebar({ sessions, activeSessionId, completionCounts, isOpen, isPinned, onPointerEnter, onPointerLeave, onTogglePin, onSelect, onCreate, onRename, onDelete, onReorder }: SidebarProps) {
   const listRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragState | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -131,9 +132,11 @@ export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointer
       <div className="session-list" ref={listRef}>
         {sessions.map((session, index) => {
           const isDropTarget = dropTarget?.id === session.id
+          const completionCount = completionCounts[session.id] ?? 0
           const rowClass = [
             'session-row',
             session.id === activeSessionId ? 'active' : '',
+            completionCount > 0 ? 'has-completions' : '',
             draggingId === session.id ? 'dragging' : '',
             isDropTarget ? `drop-${dropTarget.place}` : '',
           ].filter(Boolean).join(' ')
@@ -142,6 +145,7 @@ export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointer
               key={session.id}
               className={rowClass}
               data-session-id={session.id}
+              data-completion-count={completionCount || undefined}
               onPointerDown={(event) => onRowPointerDown(event, session.id)}
               onPointerMove={onRowPointerMove}
               onPointerUp={finishDrag}
@@ -151,7 +155,13 @@ export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointer
                 <span className="session-order" title={index < 9 ? `Ctrl+${index + 1}` : undefined}>{index + 1}</span>
                 <span className="session-icon"><Folder size={14} strokeWidth={1.7} /></span>
                 <span className="session-name">{session.name}</span>
-                <span className="session-badge">{session.paneCount}</span>
+                {completionCount > 0 ? (
+                  <span className="session-completion-badge" title={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`} aria-label={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`}>
+                    <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />
+                    {completionCount}
+                  </span>
+                ) : null}
+                <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
               </div>
               <button
                 type="button"

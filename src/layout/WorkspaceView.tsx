@@ -517,7 +517,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
 
   const activatePaneFromTarget = useCallback((event: { target: EventTarget | null }) => {
     const paneId = paneIdFromEventTarget(event.target) ?? windowPanelIdFromEventTarget(event.target)
-    if (paneId) activatePane(paneId)
+    if (!paneId) return
+    if (useWorkspaceStore.getState().panes[paneId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId)
+    activatePane(paneId)
   }, [activatePane])
 
   const splitPane = useCallback(async (paneId: string, direction: SplitDirection) => {
@@ -1055,6 +1057,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const target = targetId ? api.getPanel(targetId) : undefined
     if (target) {
       target.api.setActive()
+      if (useWorkspaceStore.getState().panes[target.id]) useWorkspaceStore.getState().clearPaneCompletionHighlight(target.id)
       TerminalManager.focus(target.id)
       return
     }
@@ -1062,7 +1065,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (direction === 'left' || direction === 'up') api.moveToPrevious()
     else api.moveToNext()
     const focusedPanelId = api.activePanel?.id
-    if (focusedPanelId) TerminalManager.focus(focusedPanelId)
+    if (focusedPanelId) {
+      if (useWorkspaceStore.getState().panes[focusedPanelId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(focusedPanelId)
+      TerminalManager.focus(focusedPanelId)
+    }
   }, [])
 
   const movePaneInDirection = useCallback((paneId: string, direction: PaneDirection) => {
@@ -1127,13 +1133,19 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       case 'nextTab': {
         api.moveToNext()
         const nextPanelId = api.activePanel?.id
-        if (nextPanelId) TerminalManager.focus(nextPanelId)
+        if (nextPanelId) {
+          if (useWorkspaceStore.getState().panes[nextPanelId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(nextPanelId)
+          TerminalManager.focus(nextPanelId)
+        }
         break
       }
       case 'previousTab': {
         api.moveToPrevious()
         const previousPanelId = api.activePanel?.id
-        if (previousPanelId) TerminalManager.focus(previousPanelId)
+        if (previousPanelId) {
+          if (useWorkspaceStore.getState().panes[previousPanelId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(previousPanelId)
+          TerminalManager.focus(previousPanelId)
+        }
         break
       }
       case 'focusLeft':

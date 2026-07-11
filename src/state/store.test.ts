@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
-import { useWorkspaceStore } from './store'
+import { paneCompletionCountsBySession, useWorkspaceStore } from './store'
 
 const spawnedPane: PaneMeta = {
   id: 'pane-test',
@@ -499,9 +499,10 @@ describe('workspace store profiles', () => {
     ])
   })
 
-  test('pane completion highlights the focused active agent pane until input clears it', () => {
+  test('pane completion survives active-state changes until explicitly acknowledged', () => {
     vi.stubGlobal('document', { hasFocus: () => true })
     useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
       activePaneId: 'pane-test',
       panes: { 'pane-test': spawnedPane },
       paneCompletionHighlights: {},
@@ -509,7 +510,10 @@ describe('workspace store profiles', () => {
 
     useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
 
-    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response', sessionId: createdSession.id })
+
+    useWorkspaceStore.getState().setActivePaneId('pane-test')
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeDefined()
 
     useWorkspaceStore.getState().clearPaneCompletionHighlight('pane-test')
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
@@ -517,6 +521,7 @@ describe('workspace store profiles', () => {
 
   test('pane completion highlights the active agent pane while the app is unfocused', () => {
     useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
       activePaneId: 'pane-test',
       panes: { 'pane-test': spawnedPane },
       paneCompletionHighlights: {},
@@ -527,24 +532,27 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
   })
 
-  test('pane completion highlights an inactive agent pane until it is activated', () => {
+  test('pane completion remains while an inactive workspace or pane becomes active', () => {
     vi.stubGlobal('document', { hasFocus: () => true })
     useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
       activePaneId: undefined,
       panes: { 'pane-test': spawnedPane },
       paneCompletionHighlights: {},
     })
 
     useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+    useWorkspaceStore.getState().setActivePaneId('pane-test')
 
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
 
-    useWorkspaceStore.getState().setActivePaneId('pane-test')
+    useWorkspaceStore.getState().clearPaneCompletionHighlight('pane-test')
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
   })
 
   test('pane completion does not highlight a non-agent pane', () => {
     useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
       activePaneId: 'pane-shell',
       panes: { 'pane-shell': nonAgentPane },
       paneCompletionHighlights: {},
@@ -553,6 +561,34 @@ describe('workspace store profiles', () => {
     useWorkspaceStore.getState().markPaneResponseComplete('pane-shell')
 
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-shell']).toBeUndefined()
+  })
+
+  test('completion counts stay associated with their workspace', () => {
+    expect(paneCompletionCountsBySession({
+      'pane-a': { completedAt: 1, source: 'agent-response', sessionId: createdSession.id },
+      'pane-b': { completedAt: 2, source: 'task-done', sessionId: createdSession.id },
+      'pane-c': { completedAt: 3, source: 'agent-response', sessionId: secondSession.id },
+    })).toEqual({ [createdSession.id]: 2, [secondSession.id]: 1 })
+  })
+
+  test('switching workspaces preserves completion highlights from inactive workspaces', async () => {
+    const otherPane = { ...spawnedPane, id: 'pane-other', config: { ...spawnedPane.config, paneId: 'pane-other' } }
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: null, panes: [otherPane] }
+      return null
+    })
+    useWorkspaceStore.setState({
+      sessions: [createdSession, secondSession],
+      activeSessionId: createdSession.id,
+      panes: { [spawnedPane.id]: spawnedPane },
+      paneCompletionHighlights: {
+        [spawnedPane.id]: { completedAt: 1, source: 'agent-response', sessionId: createdSession.id },
+      },
+    })
+
+    await useWorkspaceStore.getState().attachSession(secondSession.id)
+
+    expect(useWorkspaceStore.getState().paneCompletionHighlights[spawnedPane.id]).toMatchObject({ sessionId: createdSession.id })
   })
 
   test('deleteSession clears Hermes session browser state', async () => {

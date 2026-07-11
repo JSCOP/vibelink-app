@@ -33,7 +33,6 @@ export type Profile = {
 const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
 const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
 const agentNamePhrasePattern = /\b(?:claude code|oh my pi|oh-my-pi|ohmypi)\b/
-const agentProfileIcons = new Set(['bot', 'sparkles', 'zap'])
 const sixDigitHexColorPattern = /^#[0-9a-f]{6}$/i
 
 export type Settings = {
@@ -335,7 +334,7 @@ export function isAgentPane(pane: PaneMeta, settings: Settings): boolean {
     pane.config.shell ?? '',
     ...(pane.config.args ?? []),
   ].join(' ').toLowerCase()
-  return agentProfileIcons.has(pane.config.icon ?? '') || agentNamePhrasePattern.test(haystack) || agentCommandNames.some((command) => new RegExp(`(^|[\\s\\\\/"'])${command}([\\s\\\\/"']|$|\\.)`).test(haystack))
+  return agentNamePhrasePattern.test(haystack) || agentCommandNames.some((command) => new RegExp(`(^|[\\s\\\\/"'])${command}([\\s\\\\/"']|$|\\.)`).test(haystack))
 }
 
 function normalizeProfiles(value: unknown, legacyShell: string | null): Profile[] {
