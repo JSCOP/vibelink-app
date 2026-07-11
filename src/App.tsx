@@ -8,6 +8,7 @@ import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
 import { Activity, AlertTriangle, Bot, Camera, Ellipsis, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
+import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
@@ -48,6 +49,7 @@ function App() {
   const [windowActions, setWindowActions] = useState<WorkspaceWindowActions | null>(null)
   const [chromeState, setChromeState] = useState<WorkspaceChromeState | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [isSidebarPinned, setIsSidebarPinned] = useState(loadSidebarPinned)
 
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
@@ -379,18 +381,29 @@ function App() {
     }
   }, [isWindowMenuOpen, isPageMenuOpen])
 
+  const toggleSidebarPin = () => {
+    const pinned = !isSidebarPinned
+    setIsSidebarPinned(pinned)
+    saveSidebarPinned(pinned)
+    // Unpinning from inside the sidebar should not make the control disappear
+    // under the pointer; keep the overlay open until the pointer leaves.
+    setIsSidebarOpen(true)
+  }
+
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
 
   return (
-    <main className="app-shell" data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
-      <SidebarRevealEdge onReveal={() => setIsSidebarOpen(true)} />
+    <main className="app-shell" data-sidebar-pinned={isSidebarPinned ? 'true' : undefined} data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
+      {!isSidebarPinned ? <SidebarRevealEdge onReveal={() => setIsSidebarOpen(true)} /> : null}
       <Sidebar
-        isOpen={isSidebarOpen}
+        isOpen={isSidebarPinned || isSidebarOpen}
+        isPinned={isSidebarPinned}
         sessions={orderedSessions}
         activeSessionId={activeSessionId}
         onPointerEnter={() => setIsSidebarOpen(true)}
-        onPointerLeave={() => setIsSidebarOpen(false)}
+        onPointerLeave={() => { if (!isSidebarPinned) setIsSidebarOpen(false) }}
+        onTogglePin={toggleSidebarPin}
         onSelect={selectSession}
         onCreate={() => setIsCreateOpen(true)}
         onRename={(sessionId, name) => void renameSession(sessionId, name)}

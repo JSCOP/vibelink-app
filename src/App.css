@@ -5,6 +5,11 @@
   height: 100vh;
   overflow: hidden;
 }
+
+.app-shell[data-sidebar-pinned='true'] {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
 .sidebar-hover-edge {
   position: fixed;
   inset: 0 auto 0 0;
@@ -37,6 +42,19 @@
   transform: translateX(0);
 }
 
+.app-shell[data-sidebar-pinned='true'] .sidebar {
+  box-shadow: none;
+  grid-column: 1;
+  position: relative;
+  transform: none;
+  width: 260px;
+  z-index: 26;
+}
+
+.app-shell[data-sidebar-pinned='true'] .main-surface {
+  grid-column: 2;
+}
+
 .sidebar-heading {
   align-items: center;
   color: var(--vibelink-muted);
@@ -46,6 +64,11 @@
   letter-spacing: 0.16em;
   padding: 0 4px 12px;
   text-transform: uppercase;
+}
+
+.sidebar-heading-actions {
+  display: flex;
+  gap: 2px;
 }
 
 button {

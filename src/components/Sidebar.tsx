@@ -1,9 +1,10 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { Folder, Pencil, Plus, Trash2 } from 'lucide-react'
+import { Folder, Pencil, Pin, PinOff, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta } from '../ipc/types'
 
 type SidebarProps = {
   isOpen: boolean
+  isPinned: boolean
   sessions: SessionMeta[]
   activeSessionId?: string
   onSelect: (sessionId: string) => void
@@ -11,6 +12,7 @@ type SidebarProps = {
   onRename: (sessionId: string, name: string) => void
   onDelete: (sessionId: string) => void
   onReorder: (orderedIds: string[]) => void
+  onTogglePin: () => void
   onPointerEnter: () => void
   onPointerLeave: () => void
 }
@@ -57,7 +59,7 @@ function dropTargetFromPoint(list: HTMLElement, clientY: number, draggingId: str
   return null
 }
 
-export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onPointerLeave, onSelect, onCreate, onRename, onDelete, onReorder }: SidebarProps) {
+export function Sidebar({ sessions, activeSessionId, isOpen, isPinned, onPointerEnter, onPointerLeave, onTogglePin, onSelect, onCreate, onRename, onDelete, onReorder }: SidebarProps) {
   const listRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragState | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -117,9 +119,14 @@ export function Sidebar({ sessions, activeSessionId, isOpen, onPointerEnter, onP
     <aside className={`sidebar ${isOpen ? 'open' : ''}`} onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave}>
       <div className="sidebar-heading">
         <span>Workspaces</span>
-        <button type="button" title="New workspace" onClick={onCreate}>
-          <Plus size={14} />
-        </button>
+        <div className="sidebar-heading-actions">
+          <button type="button" title={isPinned ? 'Unpin workspace sidebar' : 'Pin workspace sidebar'} aria-pressed={isPinned} onClick={onTogglePin}>
+            {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+          </button>
+          <button type="button" title="New workspace" onClick={onCreate}>
+            <Plus size={14} />
+          </button>
+        </div>
       </div>
       <div className="session-list" ref={listRef}>
         {sessions.map((session) => {
