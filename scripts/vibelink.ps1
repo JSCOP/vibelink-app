@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'installers', 'version-preview')]
+  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'installers', 'open-installers', 'version-preview')]
   [string]$Action = 'menu',
   [string]$Version = '',
   [string]$ConfigOverlay = ''
@@ -86,6 +86,25 @@ function Show-Bundles([string]$Profile) {
     Sort-Object LastWriteTime -Descending |
     Select-Object FullName, Length, LastWriteTime |
     Format-Table -AutoSize
+}
+
+function Open-InstallerOutputs {
+  $installerDirectories = @(
+    @(
+      (Join-Path $RepoRoot 'src-tauri\target\debug\bundle\nsis'),
+      (Join-Path $RepoRoot 'src-tauri\target\release\bundle\nsis')
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+  )
+
+  if ($installerDirectories.Count -eq 0) {
+    Write-Host 'No NSIS installer output directories found. Build an installer first.' -ForegroundColor Yellow
+    return
+  }
+
+  foreach ($installerDirectory in $installerDirectories) {
+    Invoke-Item -LiteralPath $installerDirectory
+    Write-Host "Opened installer output: $installerDirectory" -ForegroundColor Green
+  }
 }
 
 function Read-Text([string]$Path) {
@@ -295,6 +314,7 @@ Actions:
   installer-release  Production installer; auto-bumps patch version first.
   installers         Builds both installers after one shared patch bump.
   installer-ci      CI installer without version bump; accepts -ConfigOverlay path.
+  open-installers    Open existing dev and release NSIS installer output folders.
   version-preview    Shows the next installer version without changing files.
 
 Debug vs release:
@@ -328,6 +348,7 @@ function Invoke-Action([string]$Name) {
     'installer-release' { Invoke-ReleaseInstaller }
     'installer-ci' { Invoke-CiInstaller }
     'installers' { Invoke-AllInstallers }
+    'open-installers' { Open-InstallerOutputs }
     'version-preview' { Invoke-InstallerVersionBump -DryRun }
     default { throw "Unknown action: $Name" }
   }
@@ -344,6 +365,7 @@ function Show-Menu {
     Write-Host '6. Create release installer'
     Write-Host '7. Create both installers'
     Write-Host 'v. Preview next installer version'
+    Write-Host '8. Open installer output folders'
     Write-Host 'h. Help / debug vs release explanation'
     Write-Host 'q. Quit'
     $choice = Read-Host 'Select'
@@ -357,6 +379,7 @@ function Show-Menu {
         '5' { Invoke-DevInstaller }
         '6' { Invoke-ReleaseInstaller }
         '7' { Invoke-AllInstallers }
+        '8' { Open-InstallerOutputs }
         'v' { Invoke-InstallerVersionBump -DryRun }
         'version' { Invoke-InstallerVersionBump -DryRun }
         'h' { Show-HelpText }
