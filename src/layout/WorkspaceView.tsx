@@ -16,7 +16,7 @@ import { withSuppressedPanelRemoval } from './suppression'
 import { paneIdFromEventTarget } from './paneActivation'
 import { swapPanelIdsInDockviewLayout } from './paneSwap'
 import type { PaneDropPosition } from './paneDrag'
-import { connectedResizeHandles, createConnectedResizeDragSession, createSingleResizeDragSession, resizeConnectedBoundaryForPane, singleResizeHandleAt, singleResizeHandles, type ConnectedResizeHandle, type ResizeDirection } from './connectedResize'
+import { connectedResizeHandles, createConnectedResizeDragSession, createSingleResizeDragSession, resizeConnectedBoundaryForPane, resizeLiveTargetSizes, singleResizeHandleAt, singleResizeHandles, type ConnectedResizeHandle, type ResizeDirection, type ResizeDragSession } from './connectedResize'
 import { shouldShowResizeGuide } from './resizePreviewPolicy'
 import { createResizePreviewStore, useResizePreview, type ResizePreviewState as ResizePreview, type ResizePreviewStore } from './resizePreviewStore'
 import { createDockviewGridLayout, type GridPaneDescriptor } from './gridLayout'
@@ -777,6 +777,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     let latestPoint: number | null = null
     let moveFrame: number | undefined
     let lastDragFitAt = 0
+    let liveLayoutApplied = !singleSegment
 
     workspacePreviewStore.set({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
@@ -788,9 +789,14 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         if (latestPoint === null) return
         const rawDelta = latestPoint - startPoint
         const delta = session.deltaFor(rawDelta)
-        for (const target of session.liveTargets) {
-          const panel = api.getPanel(target.paneId)
-          panel?.api.setSize(target.axis === 'x' ? { width: target.baseSize + delta } : { height: target.baseSize + delta })
+        if (!liveLayoutApplied) {
+          const liveLayout = session.liveLayout as Parameters<DockviewApi['fromJSON']>[0]
+          api.fromJSON(liveLayout, { reuseExistingPanels: true })
+          liveLayoutApplied = true
+        }
+        if (!applyLiveResizeSession(api, session, delta)) {
+          const fallbackLayout = session.layoutFor(delta) as Parameters<DockviewApi['fromJSON']>[0] | null
+          if (fallbackLayout) api.fromJSON(fallbackLayout, { reuseExistingPanels: true })
         }
         const now = performance.now()
         if (now - lastDragFitAt >= 100) {
@@ -893,6 +899,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     let latestPoint: number | null = null
     let moveFrame: number | undefined
     let lastDragFitAt = 0
+    let liveLayoutApplied = !singleSegment
 
     terminalPreviewStore.set({ ...previewHandle, delta: 0, mode: singleSegment ? 'single' : 'connected' })
 
@@ -904,9 +911,14 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         if (latestPoint === null) return
         const rawDelta = latestPoint - startPoint
         const delta = session.deltaFor(rawDelta)
-        for (const target of session.liveTargets) {
-          const panel = api.getPanel(target.paneId)
-          panel?.api.setSize(target.axis === 'x' ? { width: target.baseSize + delta } : { height: target.baseSize + delta })
+        if (!liveLayoutApplied) {
+          const liveLayout = session.liveLayout as Parameters<DockviewApi['fromJSON']>[0]
+          api.fromJSON(liveLayout, { reuseExistingPanels: true })
+          liveLayoutApplied = true
+        }
+        if (!applyLiveResizeSession(api, session, delta)) {
+          const fallbackLayout = session.layoutFor(delta) as Parameters<DockviewApi['fromJSON']>[0] | null
+          if (fallbackLayout) api.fromJSON(fallbackLayout, { reuseExistingPanels: true })
         }
         const now = performance.now()
         if (now - lastDragFitAt >= 100) {
@@ -1887,6 +1899,39 @@ function forceOverlayReposition(api: DockviewApi): void {
   if (!container || typeof container !== 'object' || !('updateAllPositions' in container)) return
   if (typeof container.updateAllPositions !== 'function') return
   container.updateAllPositions()
+}
+
+function applyLiveResizeSession(api: DockviewApi, session: ResizeDragSession, delta: number): boolean {
+  const holder: unknown = api
+  if (!holder || typeof holder !== 'object' || !('component' in holder)) return false
+  const component = holder.component
+  if (!component || typeof component !== 'object' || !('gridview' in component)) return false
+  const gridview = component.gridview
+  if (!gridview || typeof gridview !== 'object' || !('getNode' in gridview) || typeof gridview.getNode !== 'function') return false
+
+  for (const target of session.liveTargets) {
+    const nodeResult: unknown = gridview.getNode(target.path)
+    if (!Array.isArray(nodeResult) || nodeResult.length < 2) return false
+    const branch: unknown = nodeResult[1]
+    if (!branch || typeof branch !== 'object' || !('splitview' in branch)) return false
+    const splitview = branch.splitview
+    if (!splitview || typeof splitview !== 'object' || !('viewItems' in splitview) || !Array.isArray(splitview.viewItems)) return false
+    if (!('layoutViews' in splitview) || typeof splitview.layoutViews !== 'function') return false
+    if (!('saveProportions' in splitview) || typeof splitview.saveProportions !== 'function') return false
+    if (!('updateSashEnablement' in splitview) || typeof splitview.updateSashEnablement !== 'function') return false
+
+    const sizes = resizeLiveTargetSizes(target, delta)
+    if (sizes.length !== splitview.viewItems.length) return false
+    for (let index = 0; index < sizes.length; index += 1) {
+      const item = splitview.viewItems[index]
+      if (!item || typeof item !== 'object' || !('size' in item) || typeof item.size !== 'number') return false
+      item.size = sizes[index]
+    }
+    splitview.layoutViews()
+    splitview.saveProportions()
+    splitview.updateSashEnablement()
+  }
+  return true
 }
 
 function reflowTerminalsAfterLayout(options: { syncPty?: boolean; recover?: boolean; paneIds?: string[] } = {}): void {

@@ -82,7 +82,7 @@ describe('connected dockview resizing', () => {
     const left = resizeConnectedBoundaryForPane(makeGrid3x2(), 'pane-1', 'left', 20, 50) as TestLayout
     const up = resizeConnectedBoundaryForPane(makeGrid3x2(), 'pane-4', 'up', 20, 50) as TestLayout
 
-    expect(left.grid.root.data.map((column) => column.size)).toEqual([80, 120, 100])
+    expect(left.grid.root.data.map((column) => column.size)).toEqual([80, 110, 110])
     expect(up.grid.root.data.map((column) => column.data[0].size)).toEqual([80, 80, 80])
     expect(up.grid.root.data.map((column) => column.data[1].size)).toEqual([120, 120, 120])
   })
@@ -196,12 +196,29 @@ describe('connected dockview resizing', () => {
     }
   })
 
+  it('distributes a connected outer-column drag across every trailing column', () => {
+    const resized = resizeConnectedBoundaryAt(makeGrid4x2(), 'x', 100, 0, 200, 120, 50) as TestLayout
+
+    expect(resized.grid.root.data.map((column) => column.size)).toEqual([220, 60, 60, 60])
+  })
+
   it('precomputes live resize targets and affected panes', () => {
     const session = createConnectedResizeDragSession(makeGrid2x2(), 'x', 120, 0, 200)
 
     expect(session).not.toBeNull()
-    expect(session?.liveTargets).toEqual([{ paneId: 'pane-2', axis: 'x', baseSize: 120 }])
+    expect(session?.liveTargets).toEqual([{ path: [], index: 0, baseSizes: [120, 120], mode: 'connected', minSize: 96 }])
     expect(session?.affectedPaneIds).toEqual(['pane-0', 'pane-2', 'pane-1', 'pane-3'])
+  })
+
+  it('normalizes Ctrl single-pane drag geometry before live resizing', () => {
+    const session = createSingleResizeDragSession(makeGrid2x2(), 'x', 120, 50, undefined, 32, true)
+
+    expect(session).not.toBeNull()
+    expect(session?.liveLayout).toMatchObject({ grid: { orientation: 'VERTICAL' } })
+    expect(session?.liveTargets).toEqual([{ path: [0], index: 0, baseSizes: [120, 120], mode: 'single', minSize: 96 }])
+    const resized = session?.layoutFor(20) as TestLayout
+    expect(resized.grid.root.data[0].data.map((child) => child.size)).toEqual([140, 100])
+    expect(resized.grid.root.data[1].data.map((child) => child.size)).toEqual([120, 120])
   })
 
   it('keeps single drag sessions in parity with single resize math', () => {
@@ -360,6 +377,32 @@ function makeGrid2x2() {
         data: [column('pane-0', 'pane-2'), column('pane-1', 'pane-3')],
       },
       width: 240,
+      height: 200,
+      orientation: 'HORIZONTAL',
+    },
+  }
+}
+
+function makeGrid4x2() {
+  const leaf = (id: string) => ({
+    type: 'leaf' as const,
+    size: 100,
+    data: { views: [id] },
+  })
+  const column = (top: string, bottom: string) => ({
+    type: 'branch' as const,
+    size: 100,
+    data: [leaf(top), leaf(bottom)],
+  })
+
+  return {
+    grid: {
+      root: {
+        type: 'branch' as const,
+        size: 400,
+        data: [column('pane-0', 'pane-4'), column('pane-1', 'pane-5'), column('pane-2', 'pane-6'), column('pane-3', 'pane-7')],
+      },
+      width: 400,
       height: 200,
       orientation: 'HORIZONTAL',
     },

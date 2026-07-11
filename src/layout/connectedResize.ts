@@ -115,18 +115,14 @@ export function resizeConnectedBoundaryAt(
   const root = next.grid?.root
   if (!root) return null
 
-  const clampedDelta = clampDelta(root, selected, delta, minSize)
+  const clampedDelta = clampConnectedDelta(root, selected, delta, minSize)
   const snappedDelta = snapConnectedDelta(root, analysis.boundaries, selected, clampedDelta, minSize, snapTolerance)
   if (Math.abs(snappedDelta) < 1) return null
 
   for (const boundary of selected) {
     const branch = nodeAtPath(root, boundary.path)
     if (!branch || branch.type !== 'branch') continue
-    const before = branch.data[boundary.index]
-    const after = branch.data[boundary.index + 1]
-    if (!before || !after) continue
-    before.size = Math.max(minSize, Math.round(before.size + snappedDelta))
-    after.size = Math.max(minSize, Math.round(after.size - snappedDelta))
+    applySizes(branch.data, connectedBranchSizes(branch.data.map((child) => child.size), boundary.index, snappedDelta, minSize))
   }
 
   return next
@@ -151,7 +147,7 @@ export function connectedResizeDeltaAt(
   const root = (layout as DockviewLayoutLike).grid?.root
   if (!root) return null
 
-  return snapConnectedDelta(root, analysis.boundaries, selected, clampDelta(root, selected, delta, minSize), minSize, snapTolerance)
+  return snapConnectedDelta(root, analysis.boundaries, selected, clampConnectedDelta(root, selected, delta, minSize), minSize, snapTolerance)
 }
 
 export function resizeSingleBoundaryAt(
@@ -223,10 +219,17 @@ export function singleResizeDeltaAt(
   return snapSingleDelta(root, analysis.boundaries, selected, clampDelta(root, [selected], delta, minSize), minSize, snapTolerance)
 }
 
-export type ResizeLiveTarget = { paneId: string; axis: SplitAxis; baseSize: number }
+export type ResizeLiveTarget = {
+  path: number[]
+  index: number
+  baseSizes: number[]
+  mode: 'connected' | 'single'
+  minSize: number
+}
 
 export type ResizeDragSession = {
   handle: ConnectedResizeHandle
+  liveLayout: unknown
   liveTargets: ResizeLiveTarget[]
   affectedPaneIds: string[]
   /** Snap+clamp a raw pointer delta. Cheap: no cloning, no re-analysis. */
@@ -238,24 +241,27 @@ export type ResizeDragSession = {
 /** Precompute everything a connected-boundary drag needs. The per-move path
  *  (deltaFor) only walks the selected boundaries; the expensive clone+apply
  *  (layoutFor) runs once on pointerup. */
-function resizeSessionTargets(boundaries: Boundary[]): { liveTargets: ResizeLiveTarget[]; affectedPaneIds: string[] } {
+function resizeSessionTargets(root: SerializedNode, boundaries: Boundary[], mode: ResizeLiveTarget['mode'], minSize: number): { liveTargets: ResizeLiveTarget[]; affectedPaneIds: string[] } {
   const liveTargets: ResizeLiveTarget[] = []
   const affectedPaneIds = new Set<string>()
   for (const boundary of boundaries) {
-    const leaf = boundary.beforeLeaves.at(-1)
-    const paneId = leaf?.node.data.views?.[0]
-    if (leaf && paneId) {
-      liveTargets.push({
-        paneId,
-        axis: boundary.axis,
-        baseSize: boundary.axis === 'x' ? leaf.rect.width : leaf.rect.height,
-      })
+    const branch = nodeAtPath(root, boundary.path)
+    if (branch?.type === 'branch') {
+      liveTargets.push({ path: boundary.path, index: boundary.index, baseSizes: branch.data.map((child) => child.size), mode, minSize })
     }
     for (const adjacentLeaf of [...boundary.beforeLeaves, ...boundary.afterLeaves]) {
       for (const adjacentPaneId of adjacentLeaf.paneIds) affectedPaneIds.add(adjacentPaneId)
     }
   }
   return { liveTargets, affectedPaneIds: [...affectedPaneIds] }
+}
+
+export function resizeLiveTargetSizes(target: ResizeLiveTarget, delta: number): number[] {
+  if (target.mode === 'connected') return connectedBranchSizes(target.baseSizes, target.index, delta, target.minSize)
+  const sizes = [...target.baseSizes]
+  sizes[target.index] = Math.max(target.minSize, Math.round(sizes[target.index] + delta))
+  sizes[target.index + 1] = Math.max(target.minSize, Math.round(sizes[target.index + 1] - delta))
+  return sizes
 }
 
 export function createConnectedResizeDragSession(
@@ -275,11 +281,12 @@ export function createConnectedResizeDragSession(
   if (!root) return null
 
   const deltaFor = (rawDelta: number) =>
-    snapConnectedDelta(root, analysis.boundaries, selected, clampDelta(root, selected, rawDelta, minSize), minSize, snapTolerance)
+    snapConnectedDelta(root, analysis.boundaries, selected, clampConnectedDelta(root, selected, rawDelta, minSize), minSize, snapTolerance)
 
-  const targets = resizeSessionTargets(selected)
+  const targets = resizeSessionTargets(root, selected, 'connected', minSize)
   return {
     handle: { id: `session:${axis}:${Math.round(coordinate)}`, axis, coordinate, start, end },
+    liveLayout: layout,
     ...targets,
     deltaFor,
     layoutFor(delta: number): unknown | null {
@@ -290,11 +297,7 @@ export function createConnectedResizeDragSession(
       for (const boundary of selected) {
         const branch = nodeAtPath(nextRoot, boundary.path)
         if (!branch || branch.type !== 'branch') continue
-        const before = branch.data[boundary.index]
-        const after = branch.data[boundary.index + 1]
-        if (!before || !after) continue
-        before.size = Math.max(minSize, Math.round(before.size + delta))
-        after.size = Math.max(minSize, Math.round(after.size - delta))
+        applySizes(branch.data, connectedBranchSizes(branch.data.map((child) => child.size), boundary.index, delta, minSize))
       }
       return next
     },
@@ -326,9 +329,10 @@ export function createSingleResizeDragSession(
   const deltaFor = (rawDelta: number) =>
     snapSingleDelta(root, analysis.boundaries, selected, clampDelta(root, [selected], rawDelta, minSize), minSize, snapTolerance)
 
-  const targets = resizeSessionTargets([selected])
+  const targets = resizeSessionTargets(root, [selected], 'single', minSize)
   return {
     handle: selectedHandle,
+    liveLayout: workingLayout,
     ...targets,
     deltaFor,
     layoutFor(delta: number): unknown | null {
@@ -877,7 +881,7 @@ function snapConnectedDelta(root: SerializedNode, boundaries: Boundary[], select
   if (!snapTarget) return delta
 
   const snappedDelta = snapTarget.coordinate - selectedCoordinate
-  const clamped = clampDelta(root, selected, snappedDelta, minSize)
+  const clamped = clampConnectedDelta(root, selected, snappedDelta, minSize)
   if (Math.abs(clamped - snappedDelta) > COORDINATE_TOLERANCE) return delta
   return clamped
 }
@@ -937,6 +941,62 @@ function groupConnectedBoundaries(boundaries: Boundary[]): ConnectedResizeHandle
   }
 
   return handles
+}
+
+function connectedBranchSizes(baseSizes: number[], index: number, delta: number, minSize: number): number[] {
+  const sizes = [...baseSizes]
+  sizes[index] = Math.max(minSize, Math.round(baseSizes[index] + delta))
+  const trailing = baseSizes.slice(index + 1)
+  if (trailing.length === 0) return sizes
+
+  let remainingDelta = delta
+  const active = new Set(trailing.map((_, trailingIndex) => trailingIndex))
+  while (active.size > 0) {
+    const share = remainingDelta / active.size
+    const limited = [...active].filter((trailingIndex) => share > 0 && trailing[trailingIndex] - share < minSize)
+    if (limited.length === 0) {
+      for (const trailingIndex of active) sizes[index + 1 + trailingIndex] = trailing[trailingIndex] - share
+      break
+    }
+    for (const trailingIndex of limited) {
+      sizes[index + 1 + trailingIndex] = minSize
+      remainingDelta -= trailing[trailingIndex] - minSize
+      active.delete(trailingIndex)
+    }
+  }
+
+  const targetTotal = Math.round(baseSizes.reduce((sum, size) => sum + size, 0))
+  const rounded = sizes.map((size) => Math.round(size))
+  let difference = targetTotal - rounded.reduce((sum, size) => sum + size, 0)
+  for (let trailingIndex = rounded.length - 1; trailingIndex > index && difference !== 0; trailingIndex -= 1) {
+    const adjustment = difference > 0 ? difference : Math.max(difference, minSize - rounded[trailingIndex])
+    rounded[trailingIndex] += adjustment
+    difference -= adjustment
+  }
+  return rounded
+}
+
+function applySizes(nodes: SerializedNode[], sizes: number[]): void {
+  nodes.forEach((node, index) => { node.size = sizes[index] })
+}
+
+function clampConnectedDelta(root: SerializedNode, boundaries: Boundary[], delta: number, minSize: number): number {
+  let lower = Number.NEGATIVE_INFINITY
+  let upper = Number.POSITIVE_INFINITY
+  for (const boundary of boundaries) {
+    const branch = nodeAtPath(root, boundary.path)
+    if (!branch || branch.type !== 'branch') continue
+    const before = branch.data[boundary.index]
+    if (!before) continue
+    const trailingCapacity = branch.data.slice(boundary.index + 1).reduce((capacity, child) => capacity + Math.max(0, child.size - minSize), 0)
+    lower = Math.max(lower, minSize - before.size)
+    upper = Math.min(upper, trailingCapacity)
+  }
+  if (lower > upper) return 0
+  const clamped = Math.max(lower, Math.min(upper, delta))
+  if (delta < 0 && clamped > 0) return 0
+  if (delta > 0 && clamped < 0) return 0
+  return clamped
 }
 
 function clampDelta(root: SerializedNode, boundaries: Boundary[], delta: number, minSize: number): number {
