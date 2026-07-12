@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import QRCode from 'qrcode'
 import { useEffect, useMemo, useState } from 'react'
-import { RefreshCw, ShieldAlert, Smartphone, Trash2, Wifi } from 'lucide-react'
+import { RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Trash2, Wifi } from 'lucide-react'
 
 type RemoteDevice = { id: string; name: string; createdAt: number; lastSeenAt: number }
 type RemoteStatus = {
@@ -22,6 +22,7 @@ export function RemoteSettings() {
   const [now, setNow] = useState(() => Date.now())
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [firewallReady, setFirewallReady] = useState<boolean | null>(null)
 
   const refresh = async () => {
     const next = await invoke<RemoteStatus>('remote_get_status')
@@ -34,6 +35,7 @@ export function RemoteSettings() {
       setStatus(next)
       setPort(String(next.port))
     }).catch((error) => setMessage(String(error)))
+    void invoke<boolean>('remote_firewall_status').then(setFirewallReady).catch(() => setFirewallReady(null))
   }, [])
   useEffect(() => {
     if (!pairing) return
@@ -49,10 +51,22 @@ export function RemoteSettings() {
     try { await action() } catch (error) { setMessage(String(error)) } finally { setBusy(false) }
   }
 
+  const ensureFirewall = async (force = false) => {
+    const ready = await invoke<boolean>('remote_firewall_status').catch(() => null)
+    setFirewallReady(ready)
+    if (ready === true || (!force && ready === null)) return
+    const configured = await invoke<boolean>('remote_setup_firewall')
+    setFirewallReady(configured)
+  }
+
+  const setupFirewall = () => void run(() => ensureFirewall(true))
+
   const toggleEnabled = () => void run(async () => {
-    const next = await invoke<RemoteStatus>('remote_set_enabled', { enabled: !status?.enabled })
+    const enabling = !status?.enabled
+    const next = await invoke<RemoteStatus>('remote_set_enabled', { enabled: enabling })
     setStatus(next)
     setPort(String(next.port))
+    if (enabling) await ensureFirewall()
   })
 
   const savePort = () => void run(async () => {
@@ -63,6 +77,13 @@ export function RemoteSettings() {
   })
 
   const createPairing = () => void run(async () => {
+    let current = status
+    if (!current?.running) {
+      current = await invoke<RemoteStatus>('remote_set_enabled', { enabled: true })
+      setStatus(current)
+      setPort(String(current.port))
+      await ensureFirewall()
+    }
     const next = await invoke<PairingPayload>('remote_create_pairing')
     setPairing(next)
     setNow(Date.now())
@@ -110,7 +131,8 @@ export function RemoteSettings() {
       </div>
 
       <div className="remote-pairing-panel">
-        <button type="button" disabled={busy || !status?.running} onClick={createPairing}><Smartphone size={14} /> 페어링 QR 표시</button>
+        <button type="button" disabled={busy || !status} onClick={createPairing}><Smartphone size={14} /> 페어링 QR 표시</button>
+        {!status?.running ? <p className="vibelink-settings-note">서버가 꺼져 있으면 QR 생성 시 자동으로 켜집니다.</p> : null}
         {pairing ? (
           <div className="remote-pairing-content">
             {qrUrl ? <img src={qrUrl} width={240} height={240} alt="VibeLink Mobile pairing QR" /> : null}
@@ -130,8 +152,14 @@ export function RemoteSettings() {
       </div>
 
       <button type="button" className="remote-danger" disabled={busy} onClick={regenerate}><ShieldAlert size={14} /> 인증서 재생성</button>
+      <div className="remote-firewall-row">
+        {firewallReady ? <span className="remote-firewall-ok"><ShieldCheck size={14} /> Windows 방화벽 인바운드 규칙이 설정되어 있습니다.</span> : <>
+          <span className="remote-firewall-warn"><ShieldAlert size={14} /> Windows 방화벽에서 포트 {status?.port ?? port} 인바운드 허용이 필요합니다.</span>
+          <button type="button" disabled={busy} onClick={setupFirewall}>방화벽 자동 설정</button>
+        </>}
+      </div>
       <div className="remote-hints">
-        <span>Windows 방화벽에서 선택한 포트의 인바운드 연결을 허용해야 합니다.</span>
+        <span>방화벽 자동 설정은 관리자 승인(UAC) 창을 한 번 표시합니다.</span>
         <span>원격 접속은 VibeLink 실행 중에만 동작합니다.</span>
       </div>
       {message ? <p className="settings-error">{message}</p> : null}

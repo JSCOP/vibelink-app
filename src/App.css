@@ -3734,6 +3734,28 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
   gap: 4px;
 }
 
+.remote-firewall-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.remote-firewall-row span {
+  align-items: center;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.remote-firewall-ok {
+  color: var(--vibelink-success-text, #7dd191);
+}
+
+.remote-firewall-warn {
+  color: var(--vibelink-danger-text);
+}
+
 @media (max-width: 900px) {
   .remote-status-grid { grid-template-columns: 1fr; }
   .remote-actions { align-items: stretch; flex-direction: column; }

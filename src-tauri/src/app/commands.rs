@@ -115,6 +115,23 @@ pub async fn remote_regenerate_identity(
 }
 
 #[tauri::command]
+pub async fn remote_firewall_status(
+    remote: State<'_, Arc<RemoteServer>>,
+) -> Result<bool, String> {
+    let port = remote.status().port;
+    crate::remote::firewall::is_configured(port).map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn remote_setup_firewall(
+    remote: State<'_, Arc<RemoteServer>>,
+) -> Result<bool, String> {
+    let port = remote.status().port;
+    crate::remote::firewall::setup(port).map_err(to_string)?;
+    crate::remote::firewall::is_configured(port).map_err(to_string)
+}
+
+#[tauri::command]
 pub async fn set_remote_appearance(
     remote: State<'_, Arc<RemoteServer>>,
     appearance: Value,
