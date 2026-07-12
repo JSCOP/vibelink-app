@@ -223,7 +223,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
           {step === 'license' ? (
             <div className="setup-wizard-panel">
-              <LicenseActivationForm onActivated={() => undefined} showRevalidate={false} />
+              <LicenseActivationForm onActivated={next} showRevalidate={false} />
               <p>Core remains free for terminal workspaces. Agent, Kanban, Hermes, and MCP operations require Pro.</p>
               <div className="setup-wizard-actions">
                 <button type="button" className="primary-action" onClick={next}>{entitled ? 'Continue' : 'Continue with Core (free)'}</button>

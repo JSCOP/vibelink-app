@@ -140,7 +140,14 @@ impl LicenseService {
         match self.post("/api/license/activate", body) {
             Ok(api) => self.store_online(license_key, api),
             Err(HttpOutcome::Business(error)) => Ok(self.business_status(error)),
-            Err(HttpOutcome::Unavailable) => Ok(self.network_status()),
+            Err(HttpOutcome::Unavailable) => {
+                let mut status = self.network_status();
+                if !status.entitled {
+                    status.state = "configurationError".to_string();
+                    status.message = format!("License service is unreachable at {LICENSE_API_ORIGIN}.");
+                }
+                Ok(status)
+            }
             Err(HttpOutcome::Malformed(message)) => Err(anyhow!(message)),
         }
     }

@@ -46,7 +46,11 @@ export function LicenseActivationForm({ onActivated, showRevalidate = true }: Li
           disabled={busy}
         />
         <button disabled={busy || licenseKey.trim().length === 0} onClick={() => void run(async () => {
-          await activate(licenseKey)
+          const next = await activate(licenseKey)
+          if (!next.entitled) {
+            setMessage(next.message || '라이선스 활성화에 실패했습니다.')
+            return
+          }
           setLicenseKey('')
           onActivated?.()
         })}>Activate</button>
