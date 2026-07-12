@@ -35,6 +35,13 @@ const DEGENERATE_FIT_RETRY_MS = 32
 // the rebuild captures a stale cursor position and leaves a ghost. A slightly
 // delayed rebuild on a truly silent pane is harmless (it is a recovery path).
 const RENDERER_RESET_SETTLE_MS = 1000
+// Input emitted by the emulator or user before the pane has a session (panel
+// mounts before spawn_pane resolves) is held and flushed on the session-bound
+// attach. ConPTY handshakes make this load-bearing: the PTY host sends DSR
+// (ESC[6n) immediately after spawn and BLOCKS the child shell until the CPR
+// reply arrives — dropping xterm's auto-reply leaves that shell hung forever
+// with a black pane. Cap the buffer so an orphaned panel cannot grow it.
+const MAX_PENDING_INPUT_CHUNKS = 256
 
 
 
@@ -46,6 +53,7 @@ type Entry = {
   daemonAttached: boolean
   dataWired: boolean
   sessionId?: string
+  pendingInput?: string[]
   observer?: ResizeObserver
   fitFrame?: number
   rendererReloadPending?: boolean
@@ -194,7 +202,15 @@ class TerminalManagerImpl {
         if (shouldTrackAgentInput(entry.term.buffer.active.type)) agentActivityTracker.noteUserInput(paneId, data)
         else agentActivityTracker.clear(paneId)
         const sessionId = entry.sessionId
-        if (sessionId) void invoke('write_pane', { sessionId, paneId, data })
+        if (sessionId) {
+          void invoke('write_pane', { sessionId, paneId, data })
+          return
+        }
+        // No session yet (panel-first spawn): hold the input. Dropping it can
+        // hang the shell forever — ConPTY blocks the child on its startup DSR
+        // (ESC[6n) until xterm's CPR auto-reply is delivered.
+        entry.pendingInput ??= []
+        if (entry.pendingInput.length < MAX_PENDING_INPUT_CHUNKS) entry.pendingInput.push(data)
       })
       entry.term.onResize(({ cols, rows }) => {
         const sessionId = entry.sessionId
@@ -221,6 +237,7 @@ class TerminalManagerImpl {
       entry.daemonAttached = true
       void invoke('attach_pane', { sessionId: options.sessionId, paneId })
     }
+    if (options.sessionId) this.flushPendingInput(entry)
 
     entry.observer?.disconnect()
     entry.observer = new ResizeObserver(() => this.scheduleLayoutPass({ paneIds: [paneId] }))
@@ -243,6 +260,20 @@ class TerminalManagerImpl {
       entry.sessionId = sessionId
       entry.daemonAttached = true
       void invoke('attach_pane', { sessionId, paneId })
+      this.flushPendingInput(entry)
+    }
+  }
+
+  /** Deliver input held while the pane had no session (panel-first spawn).
+   *  Chunks stay in emission order; the CPR reply to ConPTY's startup DSR
+   *  must reach the PTY or the child shell never starts. */
+  private flushPendingInput(entry: Entry): void {
+    const sessionId = entry.sessionId
+    const pending = entry.pendingInput
+    if (!sessionId || !pending?.length) return
+    entry.pendingInput = undefined
+    for (const data of pending) {
+      void invoke('write_pane', { sessionId, paneId: entry.paneId, data })
     }
   }
 
