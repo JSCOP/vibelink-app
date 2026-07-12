@@ -35,6 +35,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const paneExists = useWorkspaceStore((state) => Boolean(paneId && state.panes[paneId]))
   const applyTerminalTitle = useWorkspaceStore((state) => state.applyTerminalTitle)
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
+  const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const setError = useWorkspaceStore((state) => state.setError)
   const actions = useWorkspaceActions()
   const [dropPosition, setDropPosition] = useState<PaneDropPosition | null>(null)
@@ -171,7 +172,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   return (
-    <div className="terminal-panel-shell" data-pane-id={paneId} data-active={activePaneId === paneId ? 'true' : undefined} data-drop-position={dropPosition ?? undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onDragOver={onPaneDragOver} onDragLeave={onPaneDragLeave} onDrop={onPaneDrop} onContextMenu={onContextMenu}>
+    <div className="terminal-panel-shell" data-pane-id={paneId} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-drop-position={dropPosition ?? undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onDragOver={onPaneDragOver} onDragLeave={onPaneDragLeave} onDrop={onPaneDrop} onContextMenu={onContextMenu}>
       <div ref={hostRef} className="dock-terminal-host" />
       {contextMenu ? (
         <>

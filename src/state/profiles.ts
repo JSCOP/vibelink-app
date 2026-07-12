@@ -44,6 +44,7 @@ export type Settings = {
   terminalThemeId: TerminalThemeId
   selectedPaneHighlightColor: string
   alarmHighlightColor: string
+  reviewedPaneHighlightColor: string
   terminalScrollbarVisible: boolean
   terminalTabsVisible: boolean
   cursorStyle: TerminalCursorStyle
@@ -208,6 +209,7 @@ export const defaultSettings: Settings = {
   terminalThemeId: defaultTerminalThemeId,
   selectedPaneHighlightColor: '#ff9f1a',
   alarmHighlightColor: '#7ee787',
+  reviewedPaneHighlightColor: '#58a6ff',
   terminalScrollbarVisible: false,
   terminalTabsVisible: true,
   cursorStyle: 'bar',
@@ -250,6 +252,7 @@ export function normalizeSettings(value: unknown): Settings {
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),
     selectedPaneHighlightColor: readHexColor(record?.selectedPaneHighlightColor, defaultSettings.selectedPaneHighlightColor),
     alarmHighlightColor: readHexColor(record?.alarmHighlightColor, defaultSettings.alarmHighlightColor),
+    reviewedPaneHighlightColor: readHexColor(record?.reviewedPaneHighlightColor, defaultSettings.reviewedPaneHighlightColor),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     terminalTabsVisible: readBoolean(record?.terminalTabsVisible, defaultSettings.terminalTabsVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type { DockviewApi, IDockviewPanelHeaderProps } from 'dockview-react'
-import { Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { CheckCircle2, Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { useWorkspaceActions } from '../layout/actions'
 import { hasPaneDragPayload, paneDragMime } from '../layout/paneDrag'
 import { useWorkspaceStore } from '../state/store'
@@ -34,6 +34,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
   const paneId = params?.paneId
   const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
+  const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
   const dragStartBlockedRef = useRef(false)
@@ -124,8 +125,8 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
 
   return (
     <div
-      className={`terminal-tab${completionHighlight ? ' terminal-tab-response-complete' : ''}`}
-      title={completionHighlight ? `${title} · response complete` : title}
+      className={`terminal-tab${completionHighlight ? ' terminal-tab-response-complete' : ''}${reviewed ? ' terminal-tab-reviewed' : ''}`}
+      title={reviewed ? `${title} · reviewed` : completionHighlight ? `${title} · response complete` : title}
       data-pane-id={paneId}
       draggable={Boolean(paneId && !isEditing)}
       onPointerDownCapture={rememberPaneDragStartTarget}
@@ -154,6 +155,9 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
       )}
       {paneId ? (
         <div className="terminal-tab-actions" data-pane-drag-disabled="true" onMouseDown={activatePaneAndStop} onPointerDown={activatePaneAndStop}>
+          <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? 'Mark as not reviewed (Alt+Shift+C)' : 'Mark as reviewed (Alt+Shift+C)'} onClick={(event) => { activatePaneAndStop(event); useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
+            <CheckCircle2 size={12} />
+          </button>
           <button type="button" title="Split right" onClick={(event) => { activatePaneAndStop(event); void actions.splitPane(paneId, 'right') }}>
             <SplitSquareVertical size={12} />
           </button>

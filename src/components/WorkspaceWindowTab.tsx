@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
-import { Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { CheckCircle2, Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useWorkspaceWindowActions } from '../layout/windowActions'
@@ -34,6 +34,7 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId
     ? Boolean(state.paneCompletionHighlights[paneId])
     : kind === 'terminal' && Object.keys(state.paneCompletionHighlights).length > 0)
+  const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const [title, setTitle] = useState(api.title ?? params?.title ?? (kind === 'agent' ? 'VibeLink Agent' : 'Window'))
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
@@ -99,8 +100,8 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
 
   return (
     <div
-      className={`workspace-window-tab workspace-window-tab-${kind ?? 'generic'}${hasCompletionHighlight ? ' terminal-tab-response-complete' : ''}`}
-      title={hasCompletionHighlight ? `${title} · response complete` : title}
+      className={`workspace-window-tab workspace-window-tab-${kind ?? 'generic'}${hasCompletionHighlight ? ' terminal-tab-response-complete' : ''}${reviewed ? ' terminal-tab-reviewed' : ''}`}
+      title={reviewed ? `${title} · reviewed` : hasCompletionHighlight ? `${title} · response complete` : title}
       data-window-panel-id={panelId}
       data-pane-id={paneId}
       draggable={!isEditing}
@@ -135,6 +136,9 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
       <div className="terminal-tab-actions" data-window-drag-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
         {isTerminalPane ? (
           <>
+            <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? 'Mark as not reviewed (Alt+Shift+C)' : 'Mark as reviewed (Alt+Shift+C)'} onClick={(event) => { activateAndStop(event); if (paneId) useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
+              <CheckCircle2 size={12} />
+            </button>
             <button type="button" title="Split terminal pane right" onClick={(event) => { activateAndStop(event); if (paneId) void actions.splitTerminal(paneId, 'right') }}>
               <SplitSquareVertical size={12} />
             </button>

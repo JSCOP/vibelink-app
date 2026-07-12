@@ -196,23 +196,29 @@ describe('terminal profiles', () => {
   test('normalizes configurable pane highlight colors', () => {
     expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')
+    expect(defaultSettings.reviewedPaneHighlightColor).toBe('#58a6ff')
     expect(normalizeSettings({})).toMatchObject({
       selectedPaneHighlightColor: '#ff9f1a',
       alarmHighlightColor: '#7ee787',
+      reviewedPaneHighlightColor: '#58a6ff',
     })
     expect(normalizeSettings({
       selectedPaneHighlightColor: '  #123ABC  ',
       alarmHighlightColor: '#abcdef',
+      reviewedPaneHighlightColor: '#FEDCBA',
     })).toMatchObject({
       selectedPaneHighlightColor: '#123ABC',
       alarmHighlightColor: '#abcdef',
+      reviewedPaneHighlightColor: '#FEDCBA',
     })
     expect(normalizeSettings({
       selectedPaneHighlightColor: '#abc',
       alarmHighlightColor: '#12345678',
+      reviewedPaneHighlightColor: 'blue',
     })).toMatchObject({
       selectedPaneHighlightColor: defaultSettings.selectedPaneHighlightColor,
       alarmHighlightColor: defaultSettings.alarmHighlightColor,
+      reviewedPaneHighlightColor: defaultSettings.reviewedPaneHighlightColor,
     })
   })
 

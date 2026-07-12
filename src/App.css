@@ -1066,14 +1066,22 @@ button {
   padding: 5px;
 }
 
-.terminal-panel-shell[data-active='true']::before {
+.terminal-panel-shell[data-active='true']::before,
+.terminal-panel-shell[data-pane-reviewed='true']::before {
   content: '';
   inset: 0;
-  outline: 2px solid var(--vibelink-selected-pane-highlight);
-  outline-offset: -4px;
   pointer-events: none;
   position: absolute;
   z-index: 5;
+}
+
+.terminal-panel-shell[data-active='true']::before {
+  outline: 2px solid var(--vibelink-selected-pane-highlight);
+  outline-offset: -4px;
+}
+
+.terminal-panel-shell[data-pane-reviewed='true']::before {
+  box-shadow: inset 0 0 0 2px var(--vibelink-reviewed-pane-highlight), inset 0 0 14px color-mix(in srgb, var(--vibelink-reviewed-pane-highlight) 14%, transparent);
 }
 
 .workspace-window-terminal {
@@ -1198,6 +1206,16 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 .terminal-tab-response-complete .terminal-tab-icon,
 .terminal-tab-response-complete .terminal-tab-role {
   color: var(--vibelink-alarm-highlight);
+}
+
+.terminal-tab-reviewed {
+  background: color-mix(in srgb, var(--vibelink-reviewed-pane-highlight) 10%, transparent);
+  box-shadow: inset 0 -2px 0 var(--vibelink-reviewed-pane-highlight);
+}
+
+.terminal-tab-reviewed .terminal-tab-icon,
+.terminal-tab-review-button-active {
+  color: var(--vibelink-reviewed-pane-highlight) !important;
 }
 
 .terminal-tab,

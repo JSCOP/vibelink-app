@@ -101,8 +101,8 @@ function App() {
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
 
   useEffect(() => {
-    applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor)
-  }, [settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor])
+    applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor)
+  }, [settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor])
 
   useEffect(() => {
     void invoke('set_keep_terminals_alive_on_close', { value: settings.keepTerminalsAliveOnClose }).catch(() => {})

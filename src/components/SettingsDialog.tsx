@@ -136,11 +136,12 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   }, [activeSection, activeSessionId, draft.hermesCommand])
 
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
-  const previewHighlightColors = (patch: Partial<Pick<Settings, 'selectedPaneHighlightColor' | 'alarmHighlightColor'>>) => {
+  const previewHighlightColors = (patch: Partial<Pick<Settings, 'selectedPaneHighlightColor' | 'alarmHighlightColor' | 'reviewedPaneHighlightColor'>>) => {
     const selectedPaneHighlightColor = patch.selectedPaneHighlightColor ?? draft.selectedPaneHighlightColor
     const alarmHighlightColor = patch.alarmHighlightColor ?? draft.alarmHighlightColor
+    const reviewedPaneHighlightColor = patch.reviewedPaneHighlightColor ?? draft.reviewedPaneHighlightColor
     patchDraft(patch)
-    applyThemeToDocument(draft.terminalThemeId, selectedPaneHighlightColor, alarmHighlightColor)
+    applyThemeToDocument(draft.terminalThemeId, selectedPaneHighlightColor, alarmHighlightColor, reviewedPaneHighlightColor)
   }
   const updateKeybinding = (id: KeybindingActionId, chord: string) => patchDraft({ keybindings: { ...draft.keybindings, [id]: chord } })
   const updateProfile = (profileId: string, patch: Partial<Profile>) => {
@@ -294,11 +295,11 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   // Theme and highlight changes preview live on the whole app but only commit
   // on Apply/OK; closing without committing restores the saved palette.
   const previewTheme = (themeId: TerminalThemeId) => {
-    applyThemeToDocument(themeId, draft.selectedPaneHighlightColor, draft.alarmHighlightColor)
+    applyThemeToDocument(themeId, draft.selectedPaneHighlightColor, draft.alarmHighlightColor, draft.reviewedPaneHighlightColor)
     TerminalManager.previewTheme(themeId)
   }
   const revertThemePreview = () => {
-    applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor)
+    applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor)
     TerminalManager.previewTheme(null)
   }
   const closeSettings = () => {
@@ -468,6 +469,14 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                         type="color"
                         value={draft.alarmHighlightColor}
                         onChange={(event) => previewHighlightColors({ alarmHighlightColor: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Reviewed pane highlight
+                      <input
+                        type="color"
+                        value={draft.reviewedPaneHighlightColor}
+                        onChange={(event) => previewHighlightColors({ reviewedPaneHighlightColor: event.target.value })}
                       />
                     </label>
                   </div>

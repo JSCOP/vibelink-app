@@ -6,6 +6,7 @@ import { TerminalPanePanel } from './TerminalPanePanel'
 
 const mockStore = vi.hoisted(() => ({
   activePaneId: undefined as string | undefined,
+  reviewedPaneId: undefined as string | undefined,
 }))
 
 vi.mock('../state/store', () => ({
@@ -15,12 +16,14 @@ vi.mock('../state/store', () => ({
     panes: Record<string, unknown>
     applyTerminalTitle: () => Promise<void>
     paneCompletionHighlights: Record<string, unknown>
+    paneReviewMarkers: Record<string, unknown>
   }) => unknown) => selector({
     activeSessionId: 'session-1',
     activePaneId: mockStore.activePaneId,
     panes: {},
     applyTerminalTitle: async () => undefined,
     paneCompletionHighlights: {},
+    paneReviewMarkers: mockStore.reviewedPaneId ? { [mockStore.reviewedPaneId]: {} } : {},
   }),
 }))
 
@@ -55,6 +58,7 @@ function renderTerminalPane(paneId: string) {
 describe('TerminalPanePanel', () => {
   beforeEach(() => {
     mockStore.activePaneId = undefined
+    mockStore.reviewedPaneId = undefined
   })
 
   test('marks only the selected terminal pane as active', () => {
@@ -66,5 +70,14 @@ describe('TerminalPanePanel', () => {
     expect(activePane).toContain('class="terminal-panel-shell" data-pane-id="pane-active" data-active="true"')
     expect(inactivePane).toContain('class="terminal-panel-shell" data-pane-id="pane-inactive"')
     expect(inactivePane).not.toContain('data-active=')
+  })
+
+  test('marks reviewed terminal panes independently from selection', () => {
+    mockStore.reviewedPaneId = 'pane-reviewed'
+
+    const reviewedPane = renderTerminalPane('pane-reviewed')
+
+    expect(reviewedPane).toContain('data-pane-reviewed="true"')
+    expect(reviewedPane).not.toContain('data-active=')
   })
 })

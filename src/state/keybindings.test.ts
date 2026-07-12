@@ -20,6 +20,7 @@ describe('keybindings', () => {
     expect(defaultKeybindings.captureQuickImage).toBe('alt+s')
     expect(defaultKeybindings.captureVideo).toBe('alt+shift+r')
     expect(defaultKeybindings.toggleTerminalTabs).toBe('alt+shift+t')
+    expect(defaultKeybindings.togglePaneReviewed).toBe('alt+shift+c')
   })
 
   it('normalizes partial stored keybindings without dropping new defaults', () => {
@@ -35,6 +36,7 @@ describe('keybindings', () => {
     expect(normalized.captureVideo).toBe(defaultKeybindings.captureVideo)
     expect(normalized.captureQuickImage).toBe(defaultKeybindings.captureQuickImage)
     expect(normalized.toggleTerminalTabs).toBe(defaultKeybindings.toggleTerminalTabs)
+    expect(normalized.togglePaneReviewed).toBe(defaultKeybindings.togglePaneReviewed)
   })
 
   it('migrates short-lived Alt+arrow focus bindings back to Ctrl+arrow defaults', () => {
@@ -80,6 +82,7 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true }))).toBe('captureQuickImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'r', altKey: true, shiftKey: true }))).toBe('captureVideo')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 't', altKey: true, shiftKey: true }))).toBe('toggleTerminalTabs')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', altKey: true, shiftKey: true }))).toBe('togglePaneReviewed')
   })
 
   it('maps Ctrl+Shift+arrow to directional pane movement', () => {

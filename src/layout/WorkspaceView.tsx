@@ -1127,6 +1127,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       case 'toggleMaximize':
         toggleMaximize(activePanelId)
         break
+      case 'togglePaneReviewed':
+        if (useWorkspaceStore.getState().panes[activePanelId]) useWorkspaceStore.getState().togglePaneReviewed(activePanelId)
+        break
       case 'arrangePanes':
         void arrangePanes()
         break

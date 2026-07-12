@@ -21,6 +21,7 @@ import {
 } from '../layout/workspaceLayoutModel'
 
 const initialKanban = loadKanban()
+const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 
 const boardMirrorDelayMs = 300
 const boardMirrorTimers = new Map<string, number>()
@@ -30,6 +31,7 @@ type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 type Status = 'booting' | 'ready' | 'error'
 export type PaneCompletionSource = 'agent-response' | 'task-done'
 export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource; sessionId: string }
+export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
 
 
 type WorkspaceState = {
@@ -61,11 +63,13 @@ type WorkspaceState = {
   selectedTaskId: Record<string, string | null>
   activePaneId?: string
   paneCompletionHighlights: Record<string, PaneCompletionHighlight>
+  paneReviewMarkers: Record<string, PaneReviewMarker>
   capturesByPane: Record<string, string[]>
   recentCaptures: string[]
   setActivePaneId: (paneId?: string) => void
   markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource) => void
   clearPaneCompletionHighlight: (paneId: string) => void
+  togglePaneReviewed: (paneId: string) => void
   recordCapture: (paneId: string | undefined, path: string) => void
   resolveCaptureMarker: (paneId: string, n: number) => string | undefined
   refreshLicense: () => Promise<LicenseStatus>
@@ -162,6 +166,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   selectedTaskId: {},
   activePaneId: undefined,
   paneCompletionHighlights: {},
+  paneReviewMarkers: loadPaneReviewMarkers(),
   capturesByPane: {},
   recentCaptures: [],
 
@@ -244,6 +249,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activePaneId: undefined,
       panes,
       paneCompletionHighlights: reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
+      paneReviewMarkers: reconcilePaneReviewMarkers(state.paneReviewMarkers, sessionId, panes),
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
       workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: workspaceLayout },
     }))
@@ -313,6 +319,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const manualPaneTitles = withoutPaneKeys(state.manualPaneTitles, deletedPaneIds)
       const capturesByPane = withoutPaneKeys(state.capturesByPane, deletedPaneIds)
       const paneCompletionHighlights = withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId)
+      const paneReviewMarkers = withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId)
       const paneRoles = withoutPaneKeys(state.settings.paneRoles, deletedPaneIds)
       const settings = paneRoles === state.settings.paneRoles ? state.settings : { ...state.settings, paneRoles }
       delete viewModes[sessionId]
@@ -331,7 +338,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesPendingPrompts[sessionId]
       delete hermesCurrentSession[sessionId]
       delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, settings }
+      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
     })
     persistSettings(get().settings)
     persistCurrentKanban(get())
@@ -382,6 +389,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         panes,
         activePaneId: state.activePaneId === paneId ? undefined : state.activePaneId,
         paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
+        paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
       }
     })
     await get().refreshSessions()
@@ -393,6 +401,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       panes: state.activeSessionId === sessionId ? {} : state.panes,
       activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
       paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
+      paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
     }))
   },
 
@@ -476,6 +485,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   clearPaneCompletionHighlight: (paneId) => set((state) => {
     if (!state.paneCompletionHighlights[paneId]) return {}
     return { paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId) }
+  }),
+  togglePaneReviewed: (paneId) => set((state) => {
+    if (state.paneReviewMarkers[paneId]) {
+      return { paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId) }
+    }
+    const pane = state.panes[paneId]
+    const sessionId = state.activeSessionId
+    if (!sessionId || !pane?.alive) return {}
+    return {
+      paneReviewMarkers: {
+        ...state.paneReviewMarkers,
+        [paneId]: { reviewedAt: Date.now(), sessionId },
+      },
+      paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
+    }
   }),
   recordCapture: (paneId, path) => set((state) => {
     const recentCaptures = [...state.recentCaptures, path].slice(-50)
@@ -942,6 +966,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 }))
 
+useWorkspaceStore.subscribe((state, previousState) => {
+  if (state.paneReviewMarkers !== previousState.paneReviewMarkers) persistPaneReviewMarkers(state.paneReviewMarkers)
+})
+
 function withoutPaneKey<T>(record: Record<string, T>, paneId: string): Record<string, T> {
   if (!(paneId in record)) return record
   const next = { ...record }
@@ -976,6 +1004,55 @@ function withoutSessionCompletionHighlights(
   const nextEntries = Object.entries(highlights).filter(([, highlight]) => highlight.sessionId !== sessionId)
   if (nextEntries.length === Object.keys(highlights).length) return highlights
   return Object.fromEntries(nextEntries)
+}
+
+function reconcilePaneReviewMarkers(
+  markers: Record<string, PaneReviewMarker>,
+  sessionId: string,
+  panes: Record<string, PaneMeta>,
+): Record<string, PaneReviewMarker> {
+  const nextEntries = Object.entries(markers).filter(([paneId, marker]) => marker.sessionId !== sessionId || panes[paneId]?.alive)
+  if (nextEntries.length === Object.keys(markers).length) return markers
+  return Object.fromEntries(nextEntries)
+}
+
+function withoutSessionReviewMarkers(
+  markers: Record<string, PaneReviewMarker>,
+  sessionId: string,
+): Record<string, PaneReviewMarker> {
+  const nextEntries = Object.entries(markers).filter(([, marker]) => marker.sessionId !== sessionId)
+  if (nextEntries.length === Object.keys(markers).length) return markers
+  return Object.fromEntries(nextEntries)
+}
+
+export function loadPaneReviewMarkers(storage?: Pick<Storage, 'getItem'> | null): Record<string, PaneReviewMarker> {
+  const target = storage === undefined ? (typeof window === 'undefined' ? null : window.localStorage) : storage
+  if (!target) return {}
+  try {
+    const parsed = JSON.parse(target.getItem(paneReviewMarkersStorageKey) ?? '{}') as unknown
+    if (!isRecord(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, PaneReviewMarker] => {
+      const [paneId, marker] = entry
+      return paneId.length > 0 && isRecord(marker) && typeof marker.reviewedAt === 'number' && Number.isFinite(marker.reviewedAt) && typeof marker.sessionId === 'string' && marker.sessionId.length > 0
+    }))
+  } catch {
+    return {}
+  }
+}
+
+export function persistPaneReviewMarkers(markers: Record<string, PaneReviewMarker>, storage?: Pick<Storage, 'setItem' | 'removeItem'> | null): void {
+  const target = storage === undefined ? (typeof window === 'undefined' ? null : window.localStorage) : storage
+  if (!target) return
+  try {
+    if (Object.keys(markers).length === 0) target.removeItem(paneReviewMarkersStorageKey)
+    else target.setItem(paneReviewMarkersStorageKey, JSON.stringify(markers))
+  } catch {
+    // Review markers are convenience state; storage failures must not block terminal interaction.
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export function paneCompletionCountsBySession(highlights: Record<string, PaneCompletionHighlight>): Record<string, number> {

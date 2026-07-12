@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
-import { paneCompletionCountsBySession, useWorkspaceStore } from './store'
+import { loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneReviewMarkers, useWorkspaceStore } from './store'
 
 const spawnedPane: PaneMeta = {
   id: 'pane-test',
@@ -112,6 +112,7 @@ describe('workspace store profiles', () => {
       hermesTranscript: {},
       hermesCurrentSession: {},
       paneCompletionHighlights: {},
+      paneReviewMarkers: {},
       capturesByPane: {},
       recentCaptures: [],
       hermesSessions: {},
@@ -517,6 +518,47 @@ describe('workspace store profiles', () => {
 
     useWorkspaceStore.getState().clearPaneCompletionHighlight('pane-test')
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
+  })
+
+  test('reviewed pane marker toggles explicitly and acknowledges completion', () => {
+    useWorkspaceStore.setState({
+      activeSessionId: createdSession.id,
+      activePaneId: 'pane-test',
+      panes: { 'pane-test': spawnedPane },
+      paneCompletionHighlights: {
+        'pane-test': { completedAt: 1, source: 'agent-response', sessionId: createdSession.id },
+      },
+      paneReviewMarkers: {},
+    })
+
+    useWorkspaceStore.getState().togglePaneReviewed('pane-test')
+
+    expect(useWorkspaceStore.getState().paneReviewMarkers['pane-test']).toMatchObject({ sessionId: createdSession.id })
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
+
+    useWorkspaceStore.getState().setActivePaneId(undefined)
+    expect(useWorkspaceStore.getState().paneReviewMarkers['pane-test']).toBeDefined()
+
+    useWorkspaceStore.getState().togglePaneReviewed('pane-test')
+    expect(useWorkspaceStore.getState().paneReviewMarkers['pane-test']).toBeUndefined()
+  })
+
+  test('reviewed pane markers persist valid entries and ignore malformed storage', () => {
+    const stored = loadPaneReviewMarkers({
+      getItem: () => JSON.stringify({
+        'pane-valid': { reviewedAt: 123, sessionId: 'session-1' },
+        'pane-invalid': { reviewedAt: 'now', sessionId: '' },
+      }),
+    })
+    expect(stored).toEqual({ 'pane-valid': { reviewedAt: 123, sessionId: 'session-1' } })
+    expect(loadPaneReviewMarkers({ getItem: () => '{broken' })).toEqual({})
+
+    const storage = { setItem: vi.fn(), removeItem: vi.fn() }
+    persistPaneReviewMarkers(stored, storage)
+    expect(storage.setItem).toHaveBeenCalledWith('vibelink:paneReviewMarkers', JSON.stringify(stored))
+
+    persistPaneReviewMarkers({}, storage)
+    expect(storage.removeItem).toHaveBeenCalledWith('vibelink:paneReviewMarkers')
   })
 
   test('pane completion highlights the active agent pane while the app is unfocused', () => {

@@ -21,24 +21,28 @@ describe('applyThemeToDocument', () => {
     }
     vi.stubGlobal('document', { documentElement: root })
 
-    applyThemeToDocument('tokyoNight', '#112233', '#445566')
+    applyThemeToDocument('tokyoNight', '#112233', '#445566', '#778899')
 
-    expect(setProperty.mock.calls.slice(-2).map(([name]) => name)).toEqual([
+    expect(setProperty.mock.calls.slice(-3).map(([name]) => name)).toEqual([
       '--vibelink-selected-pane-highlight',
       '--vibelink-alarm-highlight',
+      '--vibelink-reviewed-pane-highlight',
     ])
     expect(properties['--vibelink-selected-pane-highlight']).toBe('#112233')
     expect(properties['--vibelink-alarm-highlight']).toBe('#445566')
+    expect(properties['--vibelink-reviewed-pane-highlight']).toBe('#778899')
 
-    applyThemeToDocument('solarizedLight', '#112233', '#445566')
+    applyThemeToDocument('solarizedLight', '#112233', '#445566', '#778899')
 
     expect(root.dataset.vibelinkTheme).toBe('solarizedLight')
     expect(root.style.colorScheme).toBe('light')
     expect(properties['--vibelink-selected-pane-highlight']).toBe('#112233')
     expect(properties['--vibelink-alarm-highlight']).toBe('#445566')
-    expect(setProperty.mock.calls.slice(-2).map(([name]) => name)).toEqual([
+    expect(properties['--vibelink-reviewed-pane-highlight']).toBe('#778899')
+    expect(setProperty.mock.calls.slice(-3).map(([name]) => name)).toEqual([
       '--vibelink-selected-pane-highlight',
       '--vibelink-alarm-highlight',
+      '--vibelink-reviewed-pane-highlight',
     ])
   })
 })

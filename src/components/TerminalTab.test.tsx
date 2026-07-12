@@ -27,6 +27,7 @@ const api = {
 function renderTerminalTab() {
   useWorkspaceStore.setState({
     settings: normalizeSettings(defaultSettings),
+    paneReviewMarkers: {},
   })
 
   return renderToStaticMarkup(
@@ -44,6 +45,8 @@ describe('TerminalTab', () => {
     expect(html).toContain('data-pane-id="pane-1"')
     expect(html).toContain('draggable="true"')
     expect(html).toContain('class="terminal-tab-actions" data-pane-drag-disabled="true"')
+    expect(html).toContain('aria-pressed="false"')
+    expect(html).toContain('Mark as reviewed (Alt+Shift+C)')
   })
 
   test('does not leave the title text as a competing nested drag source', () => {
@@ -52,4 +55,5 @@ describe('TerminalTab', () => {
     expect(html.match(/draggable=/g)).toHaveLength(1)
     expect(html).toContain('class="terminal-tab-title"')
   })
+
 })
