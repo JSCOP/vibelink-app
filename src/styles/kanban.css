@@ -74,6 +74,38 @@
   font: 12px/1.4 var(--vibelink-sans);
 }
 
+.workspace-brief-editor {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr);
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vibelink-panel) 84%, var(--vibelink-bg));
+}
+
+.workspace-brief-editor label {
+  display: grid;
+  gap: 5px;
+  color: var(--vibelink-muted);
+  font: 11px/1.2 var(--vibelink-sans);
+}
+
+.workspace-brief-editor input,
+.workspace-brief-editor textarea {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 4px;
+  background: var(--vibelink-input);
+  color: var(--vibelink-text);
+  font: 12px/1.35 var(--vibelink-sans);
+}
+
+.workspace-brief-editor textarea {
+  resize: vertical;
+}
+
 .kanban-board {
   display: grid;
   flex: 1;

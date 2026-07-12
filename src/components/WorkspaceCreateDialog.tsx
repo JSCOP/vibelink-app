@@ -1,6 +1,8 @@
 import { open } from '@tauri-apps/plugin-dialog'
 import { useMemo, useState } from 'react'
 import { X } from 'lucide-react'
+import { agentStatusLabel } from '../ipc/agents'
+import { useWorkspaceStore } from '../state/store'
 import type { Profile } from '../state/profiles'
 import { loadWorkspaceFolderHistory, rememberWorkspaceFolder, saveWorkspaceFolderHistory, toggleFavoriteWorkspaceFolder } from '../state/workspaceFolders'
 
@@ -12,6 +14,7 @@ type WorkspaceCreateDialogProps = {
 }
 
 export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, onClose }: WorkspaceCreateDialogProps) {
+  const agentClis = useWorkspaceStore((state) => state.agentClis)
   const [name, setName] = useState('')
   const [workspaceFolder, setWorkspaceFolder] = useState('')
   const [profileId, setProfileId] = useState(defaultProfileId)
@@ -21,8 +24,15 @@ export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, on
     const folders = [...folderHistory.favorites, ...folderHistory.recent]
     return folders.filter((folder, index) => folders.findIndex((candidate) => candidate.toLowerCase() === folder.toLowerCase()) === index)
   }, [folderHistory])
+  const agentStatusById = useMemo(
+    () => Object.fromEntries(agentClis.map((status) => [status.id.toLowerCase(), status])),
+    [agentClis],
+  )
+  const selectedAgentStatus = agentStatusById[profileId.toLowerCase()]
+  const selectedProfileUnavailable = Boolean(selectedAgentStatus && !selectedAgentStatus.installed)
 
   const submit = () => {
+    if (selectedProfileUnavailable) return
     const normalizedFolder = workspaceFolder.trim()
     if (normalizedFolder) {
       const nextHistory = rememberWorkspaceFolder(folderHistory, normalizedFolder)
@@ -76,10 +86,24 @@ export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, on
 
         <label className="workspace-create-name">
           Profile
-          <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
-            {profiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>{profile.name}</option>
-            ))}
+          <select
+            value={profileId}
+            title={selectedProfileUnavailable ? `Install ${selectedAgentStatus?.displayName ?? profileId} or pick another profile` : undefined}
+            onChange={(event) => setProfileId(event.target.value)}
+          >
+            {profiles.map((profile) => {
+              const status = agentStatusById[profile.id.toLowerCase()]
+              return (
+                <option
+                  key={profile.id}
+                  value={profile.id}
+                  disabled={Boolean(status && !status.installed)}
+                  title={status && !status.installed ? `Install ${status.displayName} or pick another profile` : undefined}
+                >
+                  {profile.name}{status ? ` · ${agentStatusLabel(status)}` : ''}
+                </option>
+              )
+            })}
           </select>
         </label>
 
@@ -101,7 +125,7 @@ export function WorkspaceCreateDialog({ profiles, defaultProfileId, onCreate, on
 
         <footer className="workspace-create-footer">
           <button type="button" onClick={onClose}>Cancel</button>
-          <button type="button" className="primary-action" onClick={submit}>Create workspace</button>
+          <button type="button" className="primary-action" disabled={selectedProfileUnavailable} onClick={submit}>Create workspace</button>
         </footer>
       </section>
     </div>

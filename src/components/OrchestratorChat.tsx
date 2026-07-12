@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { type ButtonHTMLAttributes, type ComponentType, useEffect, useMemo, useState } from 'react'
 import { Archive, Bot, ChevronLeft, ChevronRight, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Square, Trash2, Wrench, type LucideProps } from 'lucide-react'
-import { hermesNewSession, hermesRefreshSessions, hermesResumeSession, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
+import { ensureHermesWorkspace, hermesNewSession, hermesRefreshSessions, hermesResumeSession, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
+import { installHermesRuntime } from '../ipc/hermesSetup'
 import type { HermesRuntimeStatus, HermesWorkspaceState, SkillApplyInput, SkillEntry } from '../ipc/types'
 import type { HermesSessionInfo, HermesTurn, PendingPermission } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
@@ -163,8 +164,8 @@ export function OrchestratorChat() {
     setRuntimeBusy(true)
     setRuntimeMessage('Installing VibeLink Agent runtime…')
     try {
-      const command = await invoke<string>('hermes_install_runtime')
-      const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: settings.hermesCommand || null })
+      const installed = await installHermesRuntime(settings.hermesCommand)
+      const { command, status } = installed
       setRuntime(status)
       setRuntimeMessage(`Installed: ${command}`)
     } catch (error) {
@@ -241,7 +242,7 @@ export function OrchestratorChat() {
     try {
       let currentWorkspace = workspace
       if (!currentWorkspace) {
-        currentWorkspace = await invoke<HermesWorkspaceState>('hermes_ensure_workspace', { sessionId, workspaceFolder: session?.workspaceFolder ?? null })
+        currentWorkspace = await ensureHermesWorkspace(sessionId, session?.workspaceFolder)
         setWorkspace(currentWorkspace)
         setHermesHome(currentWorkspace.home)
       }
@@ -298,7 +299,7 @@ export function OrchestratorChat() {
 
   const setModel = async (modelId: string) => {
     if (!modelId) return
-    await invoke('hermes_set_model', { sessionId, modelId })
+    await setHermesModel(sessionId, modelId)
   }
 
 

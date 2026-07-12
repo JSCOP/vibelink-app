@@ -1,3 +1,4 @@
+use crate::app::board::{board_task_done_native, board_task_note_native};
 use crate::protocol::{
     read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req, TaskSignal,
 };
@@ -456,6 +457,45 @@ fn fail_pending(shared: &ClientShared, message: String) {
 }
 
 fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<()> {
+    if let DaemonToClient::TaskEvent { session_id, event } = msg {
+        let session_id_text = session_id.to_string();
+        match &event {
+            TaskSignal::Done {
+                task_id,
+                commit_msg,
+                result_summary,
+                ..
+            } => {
+                board_task_done_native(
+                    &session_id_text,
+                    task_id,
+                    commit_msg.clone(),
+                    result_summary.clone(),
+                )?;
+            }
+            TaskSignal::Note {
+                task_id, message, ..
+            } => {
+                board_task_note_native(&session_id_text, task_id, message)?;
+            }
+            TaskSignal::BoardChanged {} | TaskSignal::PaneConfigured { .. } => {}
+        }
+        send_terminal_event(
+            shared,
+            TerminalEvent::Task {
+                session_id: session_id_text.clone(),
+                signal: event,
+            },
+        )?;
+        return send_terminal_event(
+            shared,
+            TerminalEvent::Task {
+                session_id: session_id_text,
+                signal: TaskSignal::BoardChanged {},
+            },
+        );
+    }
+
     let event = match msg {
         DaemonToClient::PaneExited { pane_id, exit_code } => TerminalEvent::Exited {
             pane_id: pane_id.to_string(),
@@ -463,10 +503,6 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
         },
         DaemonToClient::SessionChanged { session_id } => TerminalEvent::SessionChanged {
             session_id: session_id.to_string(),
-        },
-        DaemonToClient::TaskEvent { session_id, event } => TerminalEvent::Task {
-            session_id: session_id.to_string(),
-            signal: event,
         },
         other => bail!("not a terminal event: {other:?}"),
     };

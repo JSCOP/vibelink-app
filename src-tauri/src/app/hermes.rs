@@ -1,3 +1,4 @@
+use super::license::LicenseService;
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{bounded, Sender};
 use rusqlite::OpenFlags;
@@ -13,7 +14,6 @@ use std::thread;
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 use tracing::{debug, warn};
-use super::license::LicenseService;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -447,8 +447,9 @@ impl HermesManager {
     pub fn send_message(self: &Arc<Self>, session_id: String, text: String) -> Result<()> {
         let instance = self.instance(&session_id)?;
         let acp_session_id = instance.acp_session_id()?;
-        let prompt_text =
+        let skill_prompt =
             crate::app::skills::augment_prompt_with_enabled_skills(&session_id, &text)?;
+        let prompt_text = Self::augment_prompt_with_workspace_brief(&session_id, skill_prompt)?;
         let manager = Arc::clone(self);
         manager.set_prompt_active(&session_id, true);
         thread::Builder::new()
@@ -485,6 +486,25 @@ impl HermesManager {
             })
             .map_err(|err| anyhow!(err))?;
         Ok(())
+    }
+    fn augment_prompt_with_workspace_brief(session_id: &str, mut prompt: String) -> Result<String> {
+        let Some(brief) = crate::app::board::board_brief_get_native(session_id)? else {
+            return Ok(prompt);
+        };
+        if brief.purpose.is_empty() && brief.notes.is_empty() {
+            return Ok(prompt);
+        }
+        prompt.push_str("\n\n## Workspace brief\n");
+        if !brief.purpose.is_empty() {
+            prompt.push_str("Purpose: ");
+            prompt.push_str(&brief.purpose);
+            prompt.push('\n');
+        }
+        if !brief.notes.is_empty() {
+            prompt.push_str("Notes: ");
+            prompt.push_str(&brief.notes);
+        }
+        Ok(prompt)
     }
 
     pub fn cancel(&self, session_id: &str) -> Result<()> {
@@ -859,7 +879,10 @@ pub async fn hermes_resume_session(
 }
 
 #[tauri::command]
-pub async fn hermes_list_sessions(license: State<'_, Arc<LicenseService>>, session_id: String) -> Result<Vec<HermesSessionInfo>, String> {
+pub async fn hermes_list_sessions(
+    license: State<'_, Arc<LicenseService>>,
+    session_id: String,
+) -> Result<Vec<HermesSessionInfo>, String> {
     license.require_pro_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let home = hermes_home(&session_id)?;
@@ -1044,7 +1067,10 @@ pub async fn hermes_auth_list(
 }
 
 #[tauri::command]
-pub async fn hermes_workspace_home(license: State<'_, Arc<LicenseService>>, session_id: String) -> Result<String, String> {
+pub async fn hermes_workspace_home(
+    license: State<'_, Arc<LicenseService>>,
+    session_id: String,
+) -> Result<String, String> {
     license.require_pro_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         hermes_home(&session_id).map(|path| path.to_string_lossy().to_string())
@@ -2450,5 +2476,27 @@ INSERT INTO messages(id,session_id,role,content,reasoning_content) VALUES
 
         assert!(error.contains("Hermes workspace folder is not accessible"));
         assert!(error.contains(&home.to_string_lossy().to_string()));
+    }
+    #[test]
+    fn prompt_context_includes_workspace_brief() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        crate::app::board::board_brief_set_native(
+            &session_id,
+            "Ship onboarding".to_string(),
+            "Keep the board native-owned".to_string(),
+        )
+        .expect("set brief");
+
+        let prompt = HermesManager::augment_prompt_with_workspace_brief(
+            &session_id,
+            "User prompt".to_string(),
+        )
+        .expect("augment prompt");
+        assert!(prompt.contains("## Workspace brief"));
+        assert!(prompt.contains("Purpose: Ship onboarding"));
+        assert!(prompt.contains("Notes: Keep the board native-owned"));
+
+        std::fs::remove_file(crate::app::board::board_path(&session_id).expect("board path"))
+            .expect("cleanup board");
     }
 }

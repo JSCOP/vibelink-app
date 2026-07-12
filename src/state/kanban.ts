@@ -1,4 +1,4 @@
-import type { Task, TaskStatus } from '../ipc/types'
+import type { Task, TaskStatus, WorkspaceBrief } from '../ipc/types'
 
 export const TASK_COLUMNS: Record<TaskStatus, string> = {
   pending: 'Pending',
@@ -51,15 +51,17 @@ export function tasksByStatus(data: KanbanData, sessionId: string): Record<TaskS
 
 export function composeTaskPrompt(
   task: Task,
-  ctx: { role?: string | null; sessionId: string },
+  ctx: { role?: string | null; sessionId: string; brief?: WorkspaceBrief | null },
 ): string {
   const short = task.id.slice(0, 8)
   const title = inlineText(task.title)
   const roleLine = ctx.role ? `Role: ${inlineText(ctx.role)}` : undefined
+  const purposeLine = ctx.brief?.purpose.trim() ? `Workspace purpose: ${inlineText(ctx.brief.purpose)}` : undefined
   const worktreeLine = task.worktreePath ? `Work in isolated git worktree: ${inlineText(task.worktreePath)}` : undefined
   const description = inlineText(task.description)
   return [
     `[Task #${short}] ${title}`,
+    purposeLine,
     roleLine,
     worktreeLine,
     description || undefined,

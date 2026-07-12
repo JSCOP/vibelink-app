@@ -16,6 +16,7 @@ import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { TerminalTopbarActions } from './components/TerminalTopbarActions'
 import { ProUpsellDialog } from './components/ProUpsellDialog'
+import { SetupWizard } from './components/SetupWizard'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
@@ -48,6 +49,7 @@ function App() {
   const pageMenuRef = useRef<HTMLDivElement | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [isSetupWizardOpen, setIsSetupWizardOpen] = useState(false)
   const [isWindowMenuOpen, setIsWindowMenuOpen] = useState(false)
   const [isPageMenuOpen, setIsPageMenuOpen] = useState(false)
   const [windowActions, setWindowActions] = useState<WorkspaceWindowActions | null>(null)
@@ -86,6 +88,7 @@ function App() {
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
   const openSession = useWorkspaceStore((state) => state.openSession)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
+  const prepareSetupWizardRun = useWorkspaceStore((state) => state.prepareSetupWizardRun)
   const clearSession = useWorkspaceStore((state) => state.clearSession)
   const workspaceLayouts = useWorkspaceStore((state) => state.workspaceLayouts)
   const setActiveLayoutPage = useWorkspaceStore((state) => state.setActiveLayoutPage)
@@ -98,6 +101,7 @@ function App() {
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const activeWorkspaceLayout = activeSessionId ? workspaceLayouts[activeSessionId] : undefined
+  const setupWizardVisible = isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null)
   const activeLayoutPage = activeWorkspaceLayout?.pages.find((page) => page.id === activeWorkspaceLayout.activePageId) ?? activeWorkspaceLayout?.pages[0]
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
 
@@ -428,6 +432,12 @@ function App() {
     setIsSidebarOpen(true)
   }
 
+  const runSetupWizardAgain = () => {
+    prepareSetupWizardRun()
+    setIsSettingsOpen(false)
+    setIsSetupWizardOpen(true)
+  }
+
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
 
@@ -554,7 +564,7 @@ function App() {
             />
           </div>
         )}
-        {status === 'ready' && !activeSessionId && !isCreateOpen ? (
+        {status === 'ready' && !setupWizardVisible && !activeSessionId && !isCreateOpen ? (
           <StartupWorkspaceDialog
             sessions={orderedSessions}
             lastActiveSessionId={startupLastActiveSessionId}
@@ -562,8 +572,9 @@ function App() {
             onCreate={() => setIsCreateOpen(true)}
           />
         ) : null}
+        {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} /> : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
-        {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} /> : null}
+        {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
         {proUpsellFeature ? <ProUpsellDialog feature={proUpsellFeature} onClose={() => setProUpsellFeature(null)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}

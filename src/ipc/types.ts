@@ -55,6 +55,12 @@ export type Task = {
   createdAt: number
   updatedAt: number
 }
+export type WorkspaceBrief = {
+  purpose: string
+  notes: string
+  updatedAt: string
+}
+
 
 export type ChangeType = 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'typeChanged' | 'untracked'
 

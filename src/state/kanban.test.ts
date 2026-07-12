@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { PaneMeta, SessionMeta, Task } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
-import { normalizeKanban, tasksByStatus, tasksForSession } from './kanban'
+import { composeTaskPrompt, tasksByStatus, tasksForSession } from './kanban'
 import { loadKanban, persistKanban } from './kanbanPersistence'
 import { useWorkspaceStore } from './store'
 
@@ -48,11 +48,63 @@ const localStorageStub = {
 }
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(async (command: string) => {
-    if (command === 'delete_session') return null
+  invoke: vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'delete_session' || command === 'board_task_delete') return null
     if (command === 'list_sessions') return [nextSession]
     if (command === 'attach_session') return { layoutJson: null, panes: [] }
     if (command === 'spawn_pane') return pane
+    if (command === 'board_task_create') {
+      return taskFixture(
+        crypto.randomUUID(),
+        String(args?.sessionId),
+        String(args?.title),
+        { description: String(args?.description ?? '') },
+      )
+    }
+    if (command === 'board_task_update') {
+      const current = useWorkspaceStore.getState().kanban.tasks[String(args?.taskId)]
+      const patch = (args?.patch ?? {}) as Partial<Task>
+      const now = Date.now()
+      const status = patch.status ?? current.status
+      return {
+        ...current,
+        ...patch,
+        status,
+        statusTimestamps: status !== current.status ? { ...current.statusTimestamps, [status]: now } : current.statusTimestamps,
+        updatedAt: now,
+      }
+    }
+    if (command === 'board_task_done') {
+      const current = useWorkspaceStore.getState().kanban.tasks[String(args?.taskId)]
+      const now = Date.now()
+      return {
+        ...current,
+        status: 'done',
+        statusTimestamps: { ...current.statusTimestamps, done: now },
+        commitMessage: args?.commitMsg ?? current.commitMessage,
+        resultSummary: args?.resultSummary ?? current.resultSummary,
+        updatedAt: now,
+      }
+    }
+    if (command === 'board_task_note') {
+      const current = useWorkspaceStore.getState().kanban.tasks[String(args?.taskId)]
+      const now = Date.now()
+      const status = current.status === 'done' ? 'done' : 'in-progress'
+      return {
+        ...current,
+        status,
+        statusTimestamps: status !== current.status ? { ...current.statusTimestamps, [status]: now } : current.statusTimestamps,
+        resultSummary: [current.resultSummary, String(args?.message)].filter(Boolean).join('\n'),
+        updatedAt: now,
+      }
+    }
+    if (command === 'board_brief_set') {
+      return {
+        purpose: String(args?.purpose ?? ''),
+        notes: String(args?.notes ?? ''),
+        updatedAt: '2026-07-13T00:00:00.000Z',
+      }
+    }
     return null
   }),
 }))
@@ -74,18 +126,19 @@ function taskFixture(id: string, sessionId: string, title: string, patch: Partia
   }
 }
 
+test('composeTaskPrompt includes workspace purpose', () => {
+  const task = taskFixture('task-brief', session.id, 'Ship feature')
+  const prompt = composeTaskPrompt(task, {
+    sessionId: session.id,
+    role: 'Reviewer',
+    brief: { purpose: 'Complete onboarding', notes: 'Keep native ownership', updatedAt: 'now' },
+  })
+  expect(prompt).toContain('Workspace purpose: Complete onboarding')
+  expect(prompt).toContain('Role: Reviewer')
+})
 
-function boardWriteArgs(call: readonly unknown[]): { sessionId: string; json: string } {
-  const args = call[1]
-  if (!args || typeof args !== 'object' || !('sessionId' in args) || !('json' in args)) {
-    throw new Error('Expected board_write args')
-  }
-  const { sessionId, json } = args
-  if (typeof sessionId !== 'string' || typeof json !== 'string') {
-    throw new Error('Expected board_write sessionId and json')
-  }
-  return { sessionId, json }
-}
+
+
 
 describe('kanban store', () => {
   beforeEach(() => {
@@ -116,16 +169,14 @@ describe('kanban store', () => {
     })
   })
 
-  test('createTask adds a pending ordered task', () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: 'Details' })
+  test('createTask adds a pending ordered task', async () => { const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: 'Details' })
 
-    expect(task.status).toBe('pending')
-    expect(tasksForSession(useWorkspaceStore.getState().kanban, session.id).map((item) => item.id)).toEqual(['task-1'])
-    expect(useWorkspaceStore.getState().selectedTaskId[session.id]).toBe('task-1')
-  })
+  expect(task.status).toBe('pending')
+  expect(tasksForSession(useWorkspaceStore.getState().kanban, session.id).map((item) => item.id)).toEqual(['task-1'])
+  expect(useWorkspaceStore.getState().selectedTaskId[session.id]).toBe('task-1') })
 
   test('assignTask stores pane, role, and assigned status', async () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: 'Line one\nLine two' })
+    const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: 'Line one\nLine two' })
 
     await useWorkspaceStore.getState().assignTask(task.id, pane.id)
 
@@ -148,12 +199,12 @@ describe('kanban store', () => {
     expect(writes[1]?.[1]).toMatchObject({ sessionId: session.id, paneId: pane.id, data: '\r' })
 
 
-    useWorkspaceStore.getState().markTaskDone(task.id)
+    await useWorkspaceStore.getState().markTaskDone(task.id)
     expect(useWorkspaceStore.getState().kanban.tasks[task.id].statusTimestamps.done).toEqual(expect.any(Number))
   })
 
   test('assignTask rejects non-agent terminal panes', async () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: '' })
+    const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: '' })
     useWorkspaceStore.setState({
       panes: {
         shell: {
@@ -170,134 +221,116 @@ describe('kanban store', () => {
     expect(useWorkspaceStore.getState().error).toContain('AI agent terminal profiles')
   })
 
-  test('moveTask transitions columns', () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: '' })
+  test('moveTask transitions columns', async () => { const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Fix bug', description: '' })
 
-    useWorkspaceStore.getState().moveTask(task.id, 'in-progress')
+  await useWorkspaceStore.getState().moveTask(task.id, 'in-progress')
 
-    expect(tasksByStatus(useWorkspaceStore.getState().kanban, session.id)['in-progress'].map((item) => item.id)).toEqual([task.id])
+  expect(tasksByStatus(useWorkspaceStore.getState().kanban, session.id)['in-progress'].map((item) => item.id)).toEqual([task.id]) })
+
+  test('noteTask moves active tasks to in-progress and appends notes', async () => { const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Note me', description: '' })
+  await useWorkspaceStore.getState().updateTask(task.id, { status: 'assigned' })
+
+  await useWorkspaceStore.getState().noteTask(task.id, 'started work')
+
+  expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toMatchObject({
+    status: 'in-progress',
+    resultSummary: 'started work',
   })
+  expect(useWorkspaceStore.getState().kanban.tasks[task.id].statusTimestamps['in-progress']).toEqual(expect.any(Number)) })
 
-  test('noteTask moves active tasks to in-progress and appends notes', () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Note me', description: '' })
-    useWorkspaceStore.getState().updateTask(task.id, { status: 'assigned' })
+  test('noteTask keeps done tasks done while appending notes', async () => { const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Done note', description: '' })
+  await useWorkspaceStore.getState().markTaskDone(task.id)
 
-    useWorkspaceStore.getState().noteTask(task.id, 'started work')
+  await useWorkspaceStore.getState().noteTask(task.id, 'post-completion detail')
 
-    expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toMatchObject({
-      status: 'in-progress',
-      resultSummary: 'started work',
-    })
-    expect(useWorkspaceStore.getState().kanban.tasks[task.id].statusTimestamps['in-progress']).toEqual(expect.any(Number))
-  })
+  expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toMatchObject({
+    status: 'done',
+    resultSummary: 'post-completion detail',
+  }) })
 
-  test('noteTask keeps done tasks done while appending notes', () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Done note', description: '' })
-    useWorkspaceStore.getState().markTaskDone(task.id)
+  test('markTaskDone only updates the matching task and is idempotent', async () => { const first = await useWorkspaceStore.getState().createTask(session.id, { title: 'One', description: '' })
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'task-2') })
+  const second = await useWorkspaceStore.getState().createTask(session.id, { title: 'Two', description: '' })
 
-    useWorkspaceStore.getState().noteTask(task.id, 'post-completion detail')
+  await useWorkspaceStore.getState().markTaskDone(first.id, { commitMessage: 'done', resultSummary: 'completed result' })
+  await useWorkspaceStore.getState().markTaskDone(first.id, { commitMessage: 'done' })
 
-    expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toMatchObject({
-      status: 'done',
-      resultSummary: 'post-completion detail',
-    })
-  })
+  expect(useWorkspaceStore.getState().kanban.tasks[first.id]).toMatchObject({ status: 'done', commitMessage: 'done', resultSummary: 'completed result' })
+  expect(useWorkspaceStore.getState().kanban.tasks[second.id].status).toBe('pending') })
 
-  test('markTaskDone only updates the matching task and is idempotent', () => {
-    const first = useWorkspaceStore.getState().createTask(session.id, { title: 'One', description: '' })
-    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'task-2') })
-    const second = useWorkspaceStore.getState().createTask(session.id, { title: 'Two', description: '' })
+  test('deleteTask removes task order and clears selection', async () => { const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Remove me', description: '' })
 
-    useWorkspaceStore.getState().markTaskDone(first.id, { commitMessage: 'done', resultSummary: 'completed result' })
-    useWorkspaceStore.getState().markTaskDone(first.id, { commitMessage: 'done' })
+  await useWorkspaceStore.getState().deleteTask(task.id)
 
-    expect(useWorkspaceStore.getState().kanban.tasks[first.id]).toMatchObject({ status: 'done', commitMessage: 'done', resultSummary: 'completed result' })
-    expect(useWorkspaceStore.getState().kanban.tasks[second.id].status).toBe('pending')
-  })
+  expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toBeUndefined()
+  expect(useWorkspaceStore.getState().kanban.taskOrder[session.id]).toEqual([])
+  expect(useWorkspaceStore.getState().selectedTaskId[session.id]).toBeNull() })
 
-  test('deleteTask removes task order and clears selection', () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Remove me', description: '' })
+  test('workspace todo actions trim additions and delete only selected todo ids for one session', async () => { const ids = ['todo-1', 'todo-2', 'todo-other']
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => ids.shift() ?? 'unexpected-id') })
 
-    useWorkspaceStore.getState().deleteTask(task.id)
+  const first = useWorkspaceStore.getState().addWorkspaceTodo(session.id, '  Draft API contract  ')
+  const blank = useWorkspaceStore.getState().addWorkspaceTodo(session.id, '   ')
+  const second = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Write regression tests')
+  const other = useWorkspaceStore.getState().addWorkspaceTodo(nextSession.id, 'Other workspace item')
 
-    expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toBeUndefined()
-    expect(useWorkspaceStore.getState().kanban.taskOrder[session.id]).toEqual([])
-    expect(useWorkspaceStore.getState().selectedTaskId[session.id]).toBeNull()
-  })
+  expect(blank).toBeNull()
+  expect(useWorkspaceStore.getState().workspaceTodos[session.id].map((todo) => ({ id: todo.id, text: todo.text }))).toEqual([
+    { id: first?.id, text: 'Draft API contract' },
+    { id: second?.id, text: 'Write regression tests' },
+  ])
 
-  test('workspace todo actions trim additions and delete only selected todo ids for one session', () => {
-    const ids = ['todo-1', 'todo-2', 'todo-other']
-    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => ids.shift() ?? 'unexpected-id') })
+  useWorkspaceStore.getState().deleteWorkspaceTodos(session.id, [first?.id ?? '', 'missing-todo'])
 
-    const first = useWorkspaceStore.getState().addWorkspaceTodo(session.id, '  Draft API contract  ')
-    const blank = useWorkspaceStore.getState().addWorkspaceTodo(session.id, '   ')
-    const second = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Write regression tests')
-    const other = useWorkspaceStore.getState().addWorkspaceTodo(nextSession.id, 'Other workspace item')
+  expect(useWorkspaceStore.getState().workspaceTodos[session.id].map((todo) => todo.id)).toEqual([second?.id])
+  expect(useWorkspaceStore.getState().workspaceTodos[nextSession.id].map((todo) => todo.id)).toEqual([other?.id]) })
 
-    expect(blank).toBeNull()
-    expect(useWorkspaceStore.getState().workspaceTodos[session.id].map((todo) => ({ id: todo.id, text: todo.text }))).toEqual([
-      { id: first?.id, text: 'Draft API contract' },
-      { id: second?.id, text: 'Write regression tests' },
-    ])
+  test('setWorkspaceTodoNote stores memo text and removes blank notes without touching other workspaces', async () => { useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, ' Implementation memo ')
+  useWorkspaceStore.getState().setWorkspaceTodoNote(nextSession.id, 'Other memo')
 
-    useWorkspaceStore.getState().deleteWorkspaceTodos(session.id, [first?.id ?? '', 'missing-todo'])
+  expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBe(' Implementation memo ')
 
-    expect(useWorkspaceStore.getState().workspaceTodos[session.id].map((todo) => todo.id)).toEqual([second?.id])
-    expect(useWorkspaceStore.getState().workspaceTodos[nextSession.id].map((todo) => todo.id)).toEqual([other?.id])
-  })
+  useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, '   ')
 
-  test('setWorkspaceTodoNote stores memo text and removes blank notes without touching other workspaces', () => {
-    useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, ' Implementation memo ')
-    useWorkspaceStore.getState().setWorkspaceTodoNote(nextSession.id, 'Other memo')
+  expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBeUndefined()
+  expect(useWorkspaceStore.getState().workspaceTodoNotes[nextSession.id]).toBe('Other memo') })
 
-    expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBe(' Implementation memo ')
+  test('workspace todo actions tolerate live stores created before todo fields existed', async () => { vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'todo-live') })
+  useWorkspaceStore.setState({ workspaceTodos: undefined as never, workspaceTodoNotes: undefined as never })
 
-    useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, '   ')
+  const todo = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Recovered todo')
+  useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, 'Recovered memo')
 
-    expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBeUndefined()
-    expect(useWorkspaceStore.getState().workspaceTodoNotes[nextSession.id]).toBe('Other memo')
-  })
+  expect(todo?.id).toBe('todo-live')
+  expect(useWorkspaceStore.getState().workspaceTodos[session.id]).toHaveLength(1)
+  expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBe('Recovered memo') })
 
-  test('workspace todo actions tolerate live stores created before todo fields existed', () => {
-    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'todo-live') })
-    useWorkspaceStore.setState({ workspaceTodos: undefined as never, workspaceTodoNotes: undefined as never })
+  test('injectWorkspaceTodosToKanban creates pending tasks from uninjected todos and does not duplicate them', async () => { const ids = ['todo-1', 'todo-2', 'task-1', 'task-2']
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => ids.shift() ?? 'unexpected-id') })
+  const first = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Draft task')
+  const second = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Verify task')
+  useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, ' Shared implementation memo ')
 
-    const todo = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Recovered todo')
-    useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, 'Recovered memo')
+  const created = await useWorkspaceStore.getState().injectWorkspaceTodosToKanban(session.id, [first?.id ?? '', second?.id ?? ''])
 
-    expect(todo?.id).toBe('todo-live')
-    expect(useWorkspaceStore.getState().workspaceTodos[session.id]).toHaveLength(1)
-    expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBe('Recovered memo')
-  })
+  expect(created.map((task) => ({ id: task.id, title: task.title, description: task.description, status: task.status }))).toEqual([
+    { id: 'task-1', title: 'Draft task', description: 'Shared implementation memo', status: 'pending' },
+    { id: 'task-2', title: 'Verify task', description: 'Shared implementation memo', status: 'pending' },
+  ])
+  expect(useWorkspaceStore.getState().kanban.taskOrder[session.id]).toEqual(['task-1', 'task-2'])
+  expect(useWorkspaceStore.getState().selectedTaskId[session.id]).toBe('task-2')
+  expect(useWorkspaceStore.getState().workspaceTodos[session.id].map((todo) => ({ id: todo.id, kanbanTaskId: todo.kanbanTaskId }))).toEqual([
+    { id: first?.id, kanbanTaskId: 'task-1' },
+    { id: second?.id, kanbanTaskId: 'task-2' },
+  ])
 
-  test('injectWorkspaceTodosToKanban creates pending tasks from uninjected todos and does not duplicate them', () => {
-    const ids = ['todo-1', 'todo-2', 'task-1', 'task-2']
-    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => ids.shift() ?? 'unexpected-id') })
-    const first = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Draft task')
-    const second = useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Verify task')
-    useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, ' Shared implementation memo ')
+  const duplicateAttempt = await useWorkspaceStore.getState().injectWorkspaceTodosToKanban(session.id, [first?.id ?? '', second?.id ?? ''])
 
-    const created = useWorkspaceStore.getState().injectWorkspaceTodosToKanban(session.id, [first?.id ?? '', second?.id ?? ''])
+  expect(duplicateAttempt).toEqual([])
+  expect(useWorkspaceStore.getState().kanban.taskOrder[session.id]).toEqual(['task-1', 'task-2']) })
 
-    expect(created.map((task) => ({ id: task.id, title: task.title, description: task.description, status: task.status }))).toEqual([
-      { id: 'task-1', title: 'Draft task', description: 'Shared implementation memo', status: 'pending' },
-      { id: 'task-2', title: 'Verify task', description: 'Shared implementation memo', status: 'pending' },
-    ])
-    expect(useWorkspaceStore.getState().kanban.taskOrder[session.id]).toEqual(['task-1', 'task-2'])
-    expect(useWorkspaceStore.getState().selectedTaskId[session.id]).toBe('task-2')
-    expect(useWorkspaceStore.getState().workspaceTodos[session.id].map((todo) => ({ id: todo.id, kanbanTaskId: todo.kanbanTaskId }))).toEqual([
-      { id: first?.id, kanbanTaskId: 'task-1' },
-      { id: second?.id, kanbanTaskId: 'task-2' },
-    ])
-
-    const duplicateAttempt = useWorkspaceStore.getState().injectWorkspaceTodosToKanban(session.id, [first?.id ?? '', second?.id ?? ''])
-
-    expect(duplicateAttempt).toEqual([])
-    expect(useWorkspaceStore.getState().kanban.taskOrder[session.id]).toEqual(['task-1', 'task-2'])
-  })
-
-  test('normalizeKanban round-trips through persistence', () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Persist', description: '' })
+  test('persists view state as v2 without tasks', async () => {
+    const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Persist', description: '' })
     persistKanban({
       data: useWorkspaceStore.getState().kanban,
       viewModes: { [session.id]: 'kanban' },
@@ -317,9 +350,13 @@ describe('kanban store', () => {
       workspaceTodoNotes: { [session.id]: 'Persisted memo' },
     })
 
+    const raw = JSON.parse(storage.get('vibelink:kanban') ?? '{}')
     const loaded = loadKanban()
 
-    expect(normalizeKanban(loaded.data).tasks[task.id].title).toBe('Persist')
+    expect(raw.version).toBe(2)
+    expect(raw.data).toBeUndefined()
+    expect(raw.tasks).toBeUndefined()
+    expect(loaded.data).toEqual({ tasks: {}, taskOrder: {} })
     expect(loaded.viewModes[session.id]).toBe('kanban')
     expect(loaded.kanbanLayouts[session.id]).toBe('{"grid":true}')
     expect(loaded.orchestratorPaneIds[session.id]).toBe(pane.id)
@@ -330,55 +367,30 @@ describe('kanban store', () => {
     expect(loaded.workspaceTodoNotes[session.id]).toBe('Persisted memo')
   })
 
-  test('old persisted kanban layouts are discarded after layout schema bump', () => {
-    storage.set('vibelink:kanban', JSON.stringify({
-      version: 1,
-      data: { tasks: {}, taskOrder: {} },
-      viewModes: { [session.id]: 'kanban' },
-      kanbanLayouts: { [session.id]: '{"bad":true}' },
-      orchestratorPaneIds: {},
-    }))
+  test('old persisted kanban layouts are discarded after layout schema bump', async () => { storage.set('vibelink:kanban', JSON.stringify({
+    version: 1,
+    data: { tasks: {}, taskOrder: {} },
+    viewModes: { [session.id]: 'kanban' },
+    kanbanLayouts: { [session.id]: '{"bad":true}' },
+    orchestratorPaneIds: {},
+  }))
 
-    const loaded = loadKanban()
+  const loaded = loadKanban()
 
-    expect(loaded.viewModes[session.id]).toBe('kanban')
-    expect(loaded.kanbanLayouts[session.id]).toBeUndefined()
+  expect(loaded.viewModes[session.id]).toBe('kanban')
+  expect(loaded.kanbanLayouts[session.id]).toBeUndefined() })
+
+  test('uses native task commands without board mirror writes', async () => {
+    const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Native owner', description: '' })
+    await useWorkspaceStore.getState().moveTask(task.id, 'in-progress')
+
+    const commands = vi.mocked(invoke).mock.calls.map(([command]) => command)
+    expect(commands).toContain('board_task_create')
+    expect(commands).toContain('board_task_update')
+    expect(commands).not.toContain('board_write')
   })
 
-  test('debounces board_write for only the touched session after kanban mutations', async () => {
-    vi.useFakeTimers()
-    try {
-      const otherTask = taskFixture('other-task', nextSession.id, 'Other board')
-      useWorkspaceStore.setState({
-        sessions: [session, nextSession],
-        kanban: {
-          tasks: { [otherTask.id]: otherTask },
-          taskOrder: { [nextSession.id]: [otherTask.id] },
-        },
-      })
-      vi.mocked(invoke).mockClear()
-
-      const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Mirror me', description: '' })
-      useWorkspaceStore.getState().moveTask(task.id, 'in-progress')
-
-      expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'board_write')).toHaveLength(0)
-
-      await vi.runOnlyPendingTimersAsync()
-
-      const writes = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'board_write').map(boardWriteArgs)
-      expect(writes).toHaveLength(1)
-      expect(writes[0].sessionId).toBe(session.id)
-      const board = JSON.parse(writes[0].json)
-      expect(board).toMatchObject({
-        taskOrder: [task.id],
-        tasks: { [task.id]: expect.objectContaining({ status: 'in-progress' }) },
-      })
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('applyBoardSnapshot persists disk state locally without echoing board_write', () => {
+  test('applyBoardSnapshot updates only the in-memory cache', async () => {
     const localTask = taskFixture('local-task', session.id, 'Local draft')
     const otherTask = taskFixture('other-task', nextSession.id, 'Other board')
     const diskTask = taskFixture('disk-task', session.id, 'Loaded from disk', { status: 'done', createdAt: 10, updatedAt: 11 })
@@ -391,27 +403,18 @@ describe('kanban store', () => {
     })
     const snapshot = JSON.stringify({ tasks: { [diskTask.id]: diskTask }, taskOrder: [diskTask.id] })
     vi.mocked(invoke).mockClear()
-    localStorageStub.setItem.mockClear()
 
     useWorkspaceStore.getState().applyBoardSnapshot(session.id, snapshot)
 
     expect(useWorkspaceStore.getState().kanban.tasks[localTask.id]).toBeUndefined()
     expect(useWorkspaceStore.getState().kanban.tasks[diskTask.id]).toMatchObject({ title: 'Loaded from disk', sessionId: session.id })
     expect(useWorkspaceStore.getState().kanban.tasks[otherTask.id]).toBe(otherTask)
-    expect(loadKanban().data.tasks[diskTask.id].title).toBe('Loaded from disk')
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'board_write')).toHaveLength(0)
-
-    vi.mocked(invoke).mockClear()
-    localStorageStub.setItem.mockClear()
-
-    useWorkspaceStore.getState().applyBoardSnapshot(session.id, snapshot)
-
-    expect(localStorageStub.setItem).not.toHaveBeenCalled()
+    expect(loadKanban().data).toEqual({ tasks: {}, taskOrder: {} })
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'board_write')).toHaveLength(0)
   })
 
   test('deleteSession prunes kanban state for that session', async () => {
-    const task = useWorkspaceStore.getState().createTask(session.id, { title: 'Delete me', description: '' })
+    const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Delete me', description: '' })
     useWorkspaceStore.getState().setViewMode(session.id, 'kanban')
     useWorkspaceStore.getState().setKanbanLayout(session.id, '{"grid":true}')
     useWorkspaceStore.getState().setOrchestratorPane(session.id, pane.id)

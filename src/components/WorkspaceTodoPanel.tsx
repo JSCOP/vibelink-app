@@ -46,8 +46,8 @@ export function WorkspaceTodoPanel() {
     setSelectedIds([])
   }
 
-  const injectSelected = () => {
-    const created = injectWorkspaceTodosToKanban(sessionId, selectedInjectableIds)
+  const injectSelected = async () => {
+    const created = await injectWorkspaceTodosToKanban(sessionId, selectedInjectableIds)
     if (created.length > 0) setSelectedIds((ids) => ids.filter((id) => !selectedInjectableIds.includes(id)))
   }
 

@@ -1,6 +1,11 @@
-use crate::app::board::{board_read_native, board_write_native};
-use crate::app::license::HeadlessLicenseCache;
+use crate::app::agents::agent_cli_status_native;
+use crate::app::board::{
+    board_brief_get_native, board_brief_set_native, board_doc_native, board_read_native,
+    board_task_create_native, board_task_done_native, board_task_note_native,
+    board_task_update_native, TaskPatch, TaskStatus,
+};
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
+use crate::app::license::HeadlessLicenseCache;
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
 };
@@ -42,7 +47,8 @@ fn serve() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line_with_license(&client, session_id, &line, Some(&license)) {
+        if let Some(response) = handle_line_with_license(&client, session_id, &line, Some(&license))
+        {
             serde_json::to_writer(&mut stdout, &response)?;
             stdout.write_all(b"\n")?;
             stdout.flush()?;
@@ -52,42 +58,82 @@ fn serve() -> Result<()> {
 }
 
 /// Returns Some(response_value) to write to stdout, or None when no reply is due.
-fn handle_line_with_license(client: &DaemonClient, session_id: Uuid, line: &str, license: Option<&HeadlessLicenseCache>) -> Option<Value> {
+fn handle_line_with_license(
+    client: &DaemonClient,
+    session_id: Uuid,
+    line: &str,
+    license: Option<&HeadlessLicenseCache>,
+) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
-        Err(err) => return Some(error_response(Value::Null, -32700, format!("Parse error: {err}"))),
+        Err(err) => {
+            return Some(error_response(
+                Value::Null,
+                -32700,
+                format!("Parse error: {err}"),
+            ))
+        }
     };
     if is_notification(&request) {
         let _ = handle_notification(client, session_id, &request);
         return None;
     }
-    Some(handle_message_with_license(client, session_id, &request, license).unwrap_or_else(|err| {
-        error_response(request.get("id").cloned().unwrap_or(Value::Null), -32000, err.to_string())
-    }))
+    Some(
+        handle_message_with_license(client, session_id, &request, license).unwrap_or_else(|err| {
+            error_response(
+                request.get("id").cloned().unwrap_or(Value::Null),
+                -32000,
+                err.to_string(),
+            )
+        }),
+    )
 }
 
 fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
     handle_line_with_license(client, session_id, line, None)
 }
 
-fn handle_message_with_license(client: &DaemonClient, session_id: Uuid, request: &Value, license: Option<&HeadlessLicenseCache>) -> Result<Value> {
+fn handle_message_with_license(
+    client: &DaemonClient,
+    session_id: Uuid,
+    request: &Value,
+    license: Option<&HeadlessLicenseCache>,
+) -> Result<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     match request.get("method").and_then(Value::as_str) {
         Some("initialize") => Ok(json!({
             "jsonrpc": "2.0", "id": id,
             "result": { "protocolVersion": "2025-06-18", "serverInfo": { "name": "vibelink", "version": env!("CARGO_PKG_VERSION") }, "capabilities": { "tools": {} } }
         })),
-        Some("tools/list") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tool_schemas() } })),
+        Some("tools/list") => {
+            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tool_schemas() } }))
+        }
         Some("tools/call") => {
-            let params = request.get("params").ok_or_else(|| anyhow!("tools/call missing params"))?;
-            let name = params.get("name").and_then(Value::as_str).ok_or_else(|| anyhow!("tools/call missing name"))?;
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            if let Some(license) = license { license.require_pro()?; }
+            let params = request
+                .get("params")
+                .ok_or_else(|| anyhow!("tools/call missing params"))?;
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("tools/call missing name"))?;
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if let Some(license) = license {
+                license.require_pro()?;
+            }
             let text = call_tool(client, session_id, name, &args)?;
-            Ok(json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }))
+            Ok(
+                json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }),
+            )
         }
         Some("ping") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
-        Some(other) => Ok(error_response(id, -32601, format!("method not found: {other}"))),
+        Some(other) => Ok(error_response(
+            id,
+            -32601,
+            format!("method not found: {other}"),
+        )),
         None => Ok(error_response(id, -32600, "missing method")),
     }
 }
@@ -171,6 +217,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 },
             )
         }
+        "vibelink_agent_status" => Ok(serde_json::to_string(&agent_cli_status_native()?)?),
         "vibelink_terminal_grid_launch" => launch_terminal_grid(client, session_id, args),
         "vibelink_skill_list" => {
             let session_id = skill_session_id_arg(args, Some(&session_id.to_string()))?;
@@ -207,20 +254,23 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
             delete_skill(&id, session_id.as_deref(), scope)?;
             Ok(json!({ "ok": true }).to_string())
         }
+        "vibelink_brief_get" => Ok(serde_json::to_string(&board_brief_get_native(
+            &session_id.to_string(),
+        )?)?),
+        "vibelink_brief_set" => {
+            let purpose = required_str(args, "purpose")?.to_string();
+            let notes = required_str(args, "notes")?.to_string();
+            let brief = board_brief_set_native(&session_id.to_string(), purpose, notes)?;
+            emit_board_changed(client, session_id)?;
+            Ok(serde_json::to_string(&brief)?)
+        }
         "vibelink_task_list" => board_read_native(&session_id.to_string()),
         "vibelink_task_create" => {
             let title = required_str(args, "title")?;
-            let description = args
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let mut board = read_board_value(session_id)?;
-            let task_id = Uuid::new_v4().to_string();
-            let now = current_millis();
-            board_create_task(&mut board, &task_id, session_id, title, description, now);
-            write_board_value(session_id, &board)?;
+            let description = args.get("description").and_then(Value::as_str);
+            let task = board_task_create_native(&session_id.to_string(), title, description)?;
             emit_board_changed(client, session_id)?;
-            Ok(json!({ "taskId": task_id }).to_string())
+            Ok(serde_json::to_string(&task)?)
         }
         "vibelink_task_assign" => {
             let task_id = required_str(args, "taskId")?;
@@ -239,39 +289,18 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-            let now = current_millis();
-            let mut board = read_board_value(session_id)?;
-            let (title, description) = {
-                let task = board
-                    .pointer_mut(&format!("/tasks/{task_id}"))
-                    .ok_or_else(|| anyhow!("task not found: {task_id}"))?;
-                let title = task
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Task")
-                    .to_string();
-                let description = task
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                task["assignedPaneId"] = json!(pane_id.to_string());
-                if let Some(role) = &role {
-                    task["assignedRole"] = json!(role);
-                } else if let Some(object) = task.as_object_mut() {
-                    object.remove("assignedRole");
-                }
-                task["status"] = json!("assigned");
-                task["updatedAt"] = json!(now);
-                if !task.get("statusTimestamps").is_some_and(Value::is_object) {
-                    task["statusTimestamps"] = json!({});
-                }
-                task["statusTimestamps"]["assigned"] = json!(now);
-                (title, description)
-            };
-            let prompt = compose_task_prompt(task_id, &title, &description, role.as_deref());
-            write_board_value(session_id, &board)?;
-            emit_board_changed(client, session_id)?;
+            let board = board_doc_native(&session_id.to_string())?;
+            let task = board
+                .tasks
+                .get(task_id)
+                .ok_or_else(|| anyhow!("task not found: {task_id}"))?;
+            let prompt = compose_task_prompt(
+                task_id,
+                &task.title,
+                &task.description,
+                role.as_deref(),
+                board.brief.as_ref().map(|brief| brief.purpose.as_str()),
+            );
             let payloads = task_assign_payloads(&prompt);
             client.send(ClientToDaemon::WritePane {
                 session_id,
@@ -284,10 +313,21 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 pane_id,
                 data: payloads[1].clone(),
             })?;
-            Ok(json!({ "ok": true }).to_string())
+            let updated = board_task_update_native(
+                &session_id.to_string(),
+                task_id,
+                TaskPatch {
+                    assigned_pane_id: Some(Some(pane_id.to_string())),
+                    assigned_role: Some(role),
+                    status: Some(TaskStatus::InProgress),
+                    ..TaskPatch::default()
+                },
+            )?;
+            emit_board_changed(client, session_id)?;
+            Ok(serde_json::to_string(&updated)?)
         }
         "vibelink_task_done" => {
-            let task_id = required_str(args, "taskId")?.to_string();
+            let task_id = required_str(args, "taskId")?;
             let commit_msg = args
                 .get("commitMsg")
                 .and_then(Value::as_str)
@@ -296,29 +336,21 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 .get("resultSummary")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            relay_task_event(
-                client,
-                session_id,
-                TaskSignal::Done {
-                    task_id,
-                    commit_msg,
-                    result_summary,
-                    pane_id: None,
-                },
-            )
+            let task = board_task_done_native(
+                &session_id.to_string(),
+                task_id,
+                commit_msg,
+                result_summary,
+            )?;
+            emit_board_changed(client, session_id)?;
+            Ok(serde_json::to_string(&task)?)
         }
         "vibelink_task_note" => {
-            let task_id = required_str(args, "taskId")?.to_string();
-            let message = required_str(args, "message")?.to_string();
-            relay_task_event(
-                client,
-                session_id,
-                TaskSignal::Note {
-                    task_id,
-                    message,
-                    pane_id: None,
-                },
-            )
+            let task_id = required_str(args, "taskId")?;
+            let message = required_str(args, "message")?;
+            let task = board_task_note_native(&session_id.to_string(), task_id, message)?;
+            emit_board_changed(client, session_id)?;
+            Ok(serde_json::to_string(&task)?)
         }
         other => bail!("unknown tool: {other}"),
     }
@@ -421,8 +453,13 @@ fn tool_schemas() -> Vec<Value> {
             json!({ "type": "object", "properties": { "paneId": { "type": "string" }, "title": { "type": "string" }, "role": { "type": "string" } }, "required": ["paneId"] }),
         ),
         tool_schema(
+            "vibelink_agent_status",
+            "Detect installed agent CLIs, versions, and best-effort login state before launching agent terminals",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool_schema(
             "vibelink_terminal_grid_launch",
-            "Create or expand this workspace to a terminal grid and run one command in every grid pane. One launch = one agent kind; to mix agents, call again (e.g. a codex row then a claude row). Valid agent commands are claude, codex, and omp — do not invent other names such as claudie.",
+            "Create or expand this workspace to a terminal grid and run one command in every grid pane. Check vibelink_agent_status first, then launch an installed agent. One launch = one agent kind; to mix agents, call again. Valid agent commands are claude, codex, omp, and opencode.",
             json!({
                 "type": "object",
                 "properties": {
@@ -469,6 +506,16 @@ fn tool_schemas() -> Vec<Value> {
             "vibelink_skill_delete",
             "Delete a VibeLink-owned persisted skill by id. Returns JSON text.",
             json!({ "type": "object", "properties": { "id": { "type": "string" }, "scope": { "type": "string", "enum": ["global", "workspace"] }, "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace unless scope is global." } }, "required": ["id"] }),
+        ),
+        tool_schema(
+            "vibelink_brief_get",
+            "Read the workspace purpose and durable notes used to keep agents on target",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool_schema(
+            "vibelink_brief_set",
+            "Set the workspace purpose and durable notes",
+            json!({ "type": "object", "properties": { "purpose": { "type": "string" }, "notes": { "type": "string" } }, "required": ["purpose", "notes"] }),
         ),
         tool_schema(
             "vibelink_task_list",
@@ -989,55 +1036,18 @@ fn first_leaf_group_id(node: &Value) -> Option<String> {
         .find_map(first_leaf_group_id)
 }
 
-fn read_board_value(session_id: Uuid) -> Result<Value> {
-    let mut value: Value = serde_json::from_str(&board_read_native(&session_id.to_string())?)?;
-    if !value.is_object() {
-        value = json!({});
-    }
-    if !value.get("tasks").is_some_and(Value::is_object) {
-        value["tasks"] = json!({});
-    }
-    if !value.get("taskOrder").is_some_and(Value::is_array) {
-        value["taskOrder"] = json!([]);
-    }
-    Ok(value)
-}
-
-fn write_board_value(session_id: Uuid, value: &Value) -> Result<()> {
-    board_write_native(&session_id.to_string(), &serde_json::to_string(value)?)
-}
-
-fn board_create_task(
-    board: &mut Value,
-    task_id: &str,
-    session_id: Uuid,
-    title: &str,
-    description: &str,
-    now: u64,
-) {
-    board["tasks"][task_id] = json!({
-        "id": task_id,
-        "sessionId": session_id.to_string(),
-        "title": title,
-        "description": description,
-        "status": "pending",
-        "createdAt": now,
-        "updatedAt": now,
-    });
-    board["taskOrder"]
-        .as_array_mut()
-        .expect("taskOrder array")
-        .push(json!(task_id));
-}
-
 fn compose_task_prompt(
     task_id: &str,
     title: &str,
     description: &str,
     role: Option<&str>,
+    purpose: Option<&str>,
 ) -> String {
     let short = task_id.get(..8).unwrap_or(task_id);
     let mut lines = vec![format!("[Task #{short}] {}", inline_text(title))];
+    if let Some(purpose) = purpose.filter(|purpose| !purpose.trim().is_empty()) {
+        lines.push(format!("Workspace purpose: {}", inline_text(purpose)));
+    }
     if let Some(role) = role {
         lines.push(format!("Role: {}", inline_text(role)));
     }
@@ -1129,13 +1139,6 @@ fn required_uuid(args: &Value, key: &str) -> Result<Uuid> {
     parse_uuid(required_str(args, key)?)
 }
 
-fn current_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 fn is_notification(request: &Value) -> bool {
     request.get("id").is_none()
 }
@@ -1162,7 +1165,10 @@ mod tests {
             .collect();
         assert!(names.contains(&"vibelink_pane_list"));
         assert!(names.contains(&"vibelink_pane_configure"));
+        assert!(names.contains(&"vibelink_agent_status"));
         assert!(names.contains(&"vibelink_terminal_grid_launch"));
+        assert!(names.contains(&"vibelink_brief_get"));
+        assert!(names.contains(&"vibelink_brief_set"));
         assert!(names.contains(&"vibelink_task_create"));
         assert!(names.contains(&"vibelink_skill_list"));
         assert!(names.contains(&"vibelink_skill_get"));
@@ -1338,25 +1344,18 @@ mod tests {
     }
 
     #[test]
-    fn board_create_task_updates_snapshot_shape() {
-        let session_id = Uuid::new_v4();
-        let mut board = json!({ "tasks": {}, "taskOrder": [] });
-        board_create_task(&mut board, "task-1", session_id, "SMOKE", "desc", 42);
-        assert_eq!(board["tasks"]["task-1"]["title"], "SMOKE");
-        assert_eq!(
-            board["tasks"]["task-1"]["sessionId"],
-            session_id.to_string()
-        );
-        assert_eq!(board["taskOrder"][0], "task-1");
-    }
-
-    #[test]
     fn compose_task_prompt_includes_role_and_callbacks() {
-        let prompt =
-            compose_task_prompt("12345678-aaaa", "Fix bug", "Do the thing", Some("Reviewer"));
+        let prompt = compose_task_prompt(
+            "12345678-aaaa",
+            "Fix bug",
+            "Do the thing",
+            Some("Reviewer"),
+            Some("Ship onboarding"),
+        );
 
         assert!(prompt.contains("[Task #12345678] Fix bug"));
         assert!(prompt.contains("Role: Reviewer"));
+        assert!(prompt.contains("Workspace purpose: Ship onboarding"));
         assert!(prompt.contains("Do the thing"));
         assert!(!prompt.contains('\n'));
         assert!(prompt.contains("& $env:VIBELINK_APP_EXE cli task note --task 12345678-aaaa"));
@@ -1437,6 +1436,7 @@ mod tests {
             "Fix\n bug",
             "Line one\nLine two",
             Some("Code\nReviewer"),
+            None,
         );
 
         assert!(!prompt.contains('\n'));

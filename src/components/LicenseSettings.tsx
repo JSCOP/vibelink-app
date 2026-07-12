@@ -1,14 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useState } from 'react'
 import { useWorkspaceStore } from '../state/store'
+import { LicenseActivationForm } from './LicenseActivationForm'
 
 export function LicenseSettings() {
   const license = useWorkspaceStore((state) => state.license)
-  const activate = useWorkspaceStore((state) => state.activateLicense)
-  const revalidate = useWorkspaceStore((state) => state.revalidateLicense)
   const deactivate = useWorkspaceStore((state) => state.deactivateLicenseDevice)
   const forget = useWorkspaceStore((state) => state.forgetLocalLicense)
-  const [licenseKey, setLicenseKey] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const status = license.status
@@ -35,31 +33,7 @@ export function LicenseSettings() {
         <span className={`license-state license-state-${status?.state ?? 'loading'}`}>{status?.state ?? 'loading'}</span>
       </div>
 
-      {status ? (
-        <div className="license-summary">
-          <strong>{status.maskedKey ?? 'No license activated'}</strong>
-          <span>{status.message}</span>
-          {status.validatedAt ? <span>Validated {new Date(status.validatedAt).toLocaleString()}</span> : null}
-          {status.offlineGraceUntil ? <span>Offline grace until {new Date(status.offlineGraceUntil).toLocaleString()}</span> : null}
-        </div>
-      ) : null}
-
-      <div className="license-activate-row">
-        <input
-          aria-label="VibeLink Pro license key"
-          value={licenseKey}
-          onChange={(event) => setLicenseKey(event.target.value)}
-          placeholder="VBL-••••-••••-••••-•••• or Lemon license key"
-          autoComplete="off"
-          spellCheck={false}
-          disabled={busy}
-        />
-        <button disabled={busy || licenseKey.trim().length === 0} onClick={() => void run(async () => {
-          await activate(licenseKey)
-          setLicenseKey('')
-        })}>Activate</button>
-        <button disabled={busy || !status?.activationId} onClick={() => void run(revalidate)}>Revalidate</button>
-      </div>
+      <LicenseActivationForm />
 
       <div className="license-device-list">
         {status?.devices.map((device) => (

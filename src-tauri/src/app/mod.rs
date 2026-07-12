@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod board;
 pub mod capture;
 pub mod commands;
@@ -5,6 +6,7 @@ pub mod daemon_client;
 pub mod git;
 pub mod hermes;
 pub mod license;
+pub mod mcp_check;
 pub mod skills;
 pub mod spawn_daemon;
 
@@ -54,8 +56,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agents::agent_cli_status,
             board::board_read,
             board::board_write,
+            board::board_task_create,
+            board::board_task_update,
+            board::board_task_delete,
+            board::board_task_done,
+            board::board_task_note,
+            board::board_brief_get,
+            board::board_brief_set,
             commands::attach_pane,
             commands::attach_session,
             commands::close_pane,
@@ -94,6 +104,7 @@ pub fn run() {
             hermes::hermes_cli_command,
             hermes::hermes_install_runtime,
             hermes::hermes_ensure_workspace,
+            mcp_check::mcp_self_check,
             hermes::hermes_workspace_state,
             hermes::hermes_runtime_status,
             license::license_status,

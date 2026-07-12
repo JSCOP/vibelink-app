@@ -1,5 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { HermesModelInfo, HermesPermissionOption } from './types'
+import type { HermesModelInfo, HermesPermissionOption, HermesWorkspaceState } from './types'
 import { useWorkspaceStore } from '../state/store'
 import type { HermesPlanEntry, HermesSessionInfo, HermesTurn } from '../state/hermes'
 
@@ -121,6 +121,15 @@ export async function startHermesAgent({ sessionId, commandOverride = null, work
     })
   startPromises.set(sessionId, task)
   return task
+}
+
+
+export function ensureHermesWorkspace(sessionId: string, workspaceFolder?: string | null): Promise<HermesWorkspaceState> {
+  return invoke<HermesWorkspaceState>('hermes_ensure_workspace', { sessionId, workspaceFolder: workspaceFolder ?? null })
+}
+
+export function setHermesModel(sessionId: string, modelId: string): Promise<void> {
+  return invoke('hermes_set_model', { sessionId, modelId })
 }
 
 export async function hermesNewSession(input: StartHermesAgentInput): Promise<string> {

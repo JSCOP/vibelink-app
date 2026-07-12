@@ -17,11 +17,13 @@ import { ThemePicker } from './ThemePicker'
 import { FontPicker } from './FontPicker'
 import { useWorkspaceStore } from '../state/store'
 import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
+import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 
 type SettingsDialogProps = {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
   onClose: () => void
+  onRunSetupWizard: () => void
 }
 
 type SettingsSection =
@@ -89,7 +91,7 @@ const profileKindOptions: { value: ProfileKind; label: string }[] = [
 ]
 
 
-export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogProps) {
+export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
   const [activeSection, setActiveSection] = useState<SettingsSection>('license')
   const [search, setSearch] = useState('')
@@ -103,6 +105,9 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   const [runtimeBusy, setRuntimeBusy] = useState(false)
   const [runtimeMessage, setRuntimeMessage] = useState('')
   const [terminalMessage, setTerminalMessage] = useState('')
+  const [mcpCheckBusy, setMcpCheckBusy] = useState(false)
+  const [mcpCheck, setMcpCheck] = useState<McpCheckReport | null>(null)
+  const [rolePresetDraft, setRolePresetDraft] = useState('')
   const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null)
   const [isThemePickerOpen, setThemePickerOpen] = useState(false)
   const [isFontPickerOpen, setFontPickerOpen] = useState(false)
@@ -110,6 +115,27 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const activeSession = activeSessionId ? sessions.find((session) => session.id === activeSessionId) : undefined
+  const checkMcp = async () => {
+    if (!activeSessionId) return
+    setMcpCheckBusy(true)
+    setMcpCheck(null)
+    try {
+      setMcpCheck(await runMcpSelfCheck(activeSessionId))
+    } catch (error) {
+      setMcpCheck({ spawnOk: false, initializeOk: false, toolCount: 0, error: String(error) })
+    } finally {
+      setMcpCheckBusy(false)
+    }
+  }
+  const addRolePreset = () => {
+    const role = rolePresetDraft.trim()
+    if (!role || draft.rolePresets.some((existing) => existing.toLowerCase() === role.toLowerCase())) return
+    patchDraft({ rolePresets: [...draft.rolePresets, role] })
+    setRolePresetDraft('')
+  }
+  const removeRolePreset = (role: string) => {
+    patchDraft({ rolePresets: draft.rolePresets.filter((existing) => existing !== role) })
+  }
   const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [draft.fontFamily, installedFonts])
   const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
   const filteredSections = sections.filter((section) => section.label.toLowerCase().includes(search.trim().toLowerCase()))
@@ -498,6 +524,25 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                   <SettingsToggle label="Show terminal scrollbars" checked={draft.terminalScrollbarVisible} onChange={(checked) => patchDraft({ terminalScrollbarVisible: checked })} />
                   <SettingsToggle label="Keep terminals alive after window close" checked={draft.keepTerminalsAliveOnClose} onChange={(checked) => patchDraft({ keepTerminalsAliveOnClose: checked })} />
                 </SettingsGroup>
+                <SettingsGroup title="Agent roles" description="Reusable responsibility labels for task assignment and terminal orchestration.">
+                  <div className="vibelink-settings-actions">
+                    <input
+                      value={rolePresetDraft}
+                      placeholder="Add role preset"
+                      onChange={(event) => setRolePresetDraft(event.target.value)}
+                      onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addRolePreset() } }}
+                    />
+                    <button type="button" onClick={addRolePreset}>Add</button>
+                  </div>
+                  <div className="vibelink-role-presets">
+                    {draft.rolePresets.map((role) => (
+                      <span key={role}>
+                        {role}
+                        <button type="button" title={`Remove ${role}`} onClick={() => removeRolePreset(role)}>×</button>
+                      </span>
+                    ))}
+                  </div>
+                </SettingsGroup>
                 <SettingsGroup title="Profiles" description="Create local shell, command, and SSH terminal profiles.">
                   <div className="vibelink-profile-toolbar">
                     <button type="button" onClick={addProfile}>Add profile</button>
@@ -644,6 +689,17 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                 <ReadonlyRow label="Server" value="vibelink" />
                 <ReadonlyRow label="Command" value="app.exe mcp serve" mono />
                 <ReadonlyRow label="Scope" value={activeSessionId ? `VIBELINK_SESSION_ID=${activeSessionId}` : 'Open a workspace'} mono />
+                <div className="vibelink-settings-actions">
+                  <button type="button" disabled={!activeSessionId || mcpCheckBusy} onClick={() => void checkMcp()}>
+                    {mcpCheckBusy ? 'Checking…' : 'Run self-check'}
+                  </button>
+                </div>
+                {mcpCheck ? (
+                  <div className="setup-check-result" data-ok={mcpCheck.initializeOk ? 'true' : 'false'}>
+                    <span>Spawn {mcpCheck.spawnOk ? 'OK' : 'failed'} · Initialize {mcpCheck.initializeOk ? 'OK' : 'failed'} · {mcpCheck.toolCount} tools</span>
+                    {mcpCheck.error ? <pre>{mcpCheck.error}</pre> : null}
+                  </div>
+                ) : null}
               </SettingsGroup>
             ) : null}
 
@@ -657,6 +713,9 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
               <SettingsGroup title="About" description="VibeLink">
                 <ReadonlyRow label="Product" value="VibeLink Agent / VibeLink" />
                 <ReadonlyRow label="Runtime" value={runtime?.version ?? 'Unknown'} mono />
+                <div className="vibelink-settings-actions">
+                  <button type="button" onClick={onRunSetupWizard}>Run setup wizard again</button>
+                </div>
               </SettingsGroup>
             ) : null}
           </div>

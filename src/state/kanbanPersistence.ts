@@ -14,20 +14,21 @@ export type PersistedKanbanState = {
   workspaceTodoNotes: WorkspaceTodoNotes
 }
 
-type KanbanBlob = PersistedKanbanState & { version: 1; layoutVersion?: number }
+type KanbanBlobV1 = PersistedKanbanState & { version: 1; layoutVersion?: number }
+type KanbanBlobV2 = Omit<PersistedKanbanState, 'data'> & { version: 2; layoutVersion?: number }
 
 const storageKey = 'vibelink:kanban'
 const layoutVersion = 2
-
 
 export function loadKanban(): PersistedKanbanState {
   if (typeof window === 'undefined') return emptyPersistedKanban()
   try {
     const raw = window.localStorage.getItem(storageKey)
     if (!raw) return emptyPersistedKanban()
-    const parsed = JSON.parse(raw) as Partial<KanbanBlob>
+    const parsed = JSON.parse(raw) as Partial<KanbanBlobV1> | Partial<KanbanBlobV2>
+    const legacyData = 'data' in parsed ? parsed.data : undefined
     return {
-      data: normalizeKanban(parsed.data),
+      data: parsed.version === 1 ? normalizeKanban(legacyData) : emptyKanban(),
       viewModes: normalizeStringRecord(parsed.viewModes, isViewMode),
       kanbanLayouts: parsed.layoutVersion === layoutVersion ? normalizeStringRecord(parsed.kanbanLayouts) : {},
       orchestratorPaneIds: normalizeStringRecord(parsed.orchestratorPaneIds),
@@ -42,10 +43,9 @@ export function loadKanban(): PersistedKanbanState {
 
 export function persistKanban(state: PersistedKanbanState): void {
   if (typeof window === 'undefined') return
-  const blob: KanbanBlob = {
-    version: 1,
+  const blob: KanbanBlobV2 = {
+    version: 2,
     layoutVersion,
-    data: normalizeKanban(state.data),
     viewModes: normalizeStringRecord(state.viewModes, isViewMode),
     kanbanLayouts: normalizeStringRecord(state.kanbanLayouts),
     orchestratorPaneIds: normalizeStringRecord(state.orchestratorPaneIds),
@@ -55,6 +55,41 @@ export function persistKanban(state: PersistedKanbanState): void {
   }
   window.localStorage.setItem(storageKey, JSON.stringify(blob))
 }
+
+export function legacyTasksForSession(state: PersistedKanbanState, sessionId: string): KanbanData {
+  const taskOrder = state.data.taskOrder[sessionId] ?? []
+  return {
+    tasks: Object.fromEntries(taskOrder.flatMap((taskId) => {
+      const task = state.data.tasks[taskId]
+      return task?.sessionId === sessionId ? [[taskId, task]] : []
+    })),
+    taskOrder: { [sessionId]: taskOrder.filter((taskId) => state.data.tasks[taskId]?.sessionId === sessionId) },
+  }
+}
+export function mergeLegacyTasksIntoBoard(
+  sessionId: string,
+  boardJson: string,
+  legacyState: PersistedKanbanState,
+): string | null {
+  const legacy = legacyTasksForSession(legacyState, sessionId)
+  const legacyOrder = legacy.taskOrder[sessionId] ?? []
+  if (legacyOrder.length === 0) return null
+  try {
+    const board = JSON.parse(boardJson) as { revision?: number; tasks?: Record<string, unknown>; taskOrder?: unknown; brief?: unknown }
+    const boardTasks = board.tasks && typeof board.tasks === 'object' && !Array.isArray(board.tasks) ? board.tasks : {}
+    const boardOrder = Array.isArray(board.taskOrder) ? board.taskOrder.filter((id): id is string => typeof id === 'string') : []
+    const missingIds = legacyOrder.filter((id) => !(id in boardTasks) && Boolean(legacy.tasks[id]))
+    if (missingIds.length === 0) return null
+    return JSON.stringify({
+      ...board,
+      tasks: { ...legacy.tasks, ...boardTasks },
+      taskOrder: [...boardOrder, ...missingIds],
+    })
+  } catch {
+    return null
+  }
+}
+
 
 function emptyPersistedKanban(): PersistedKanbanState {
   return {
@@ -87,7 +122,6 @@ function isViewMode(value: string): value is ViewMode {
   return value === 'terminal' || value === 'kanban'
 }
 
-
 function normalizeHermesGatewayRecord(value: unknown): Record<string, HermesGatewayConfig> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
   return Object.fromEntries(
@@ -116,7 +150,6 @@ function normalizeHermesGateway(value: unknown): HermesGatewayConfig | null {
 function readString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback
 }
-
 
 function readGatewayPlatform(value: unknown): HermesGatewayConfig['platform'] | null {
   return value === 'telegram' || value === 'discord' || value === 'slack' ? value : null

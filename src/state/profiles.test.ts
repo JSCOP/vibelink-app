@@ -402,4 +402,29 @@ describe('terminal profiles', () => {
 
     expect(splitCommandLine(joinCommandLine(parts))).toEqual(parts)
   })
+  test('normalizes setup wizard state', () => {
+    expect(normalizeSettings({}).setupWizard).toEqual({
+      completedAt: null,
+      hermesAutoInstall: false,
+      skippedSteps: [],
+    })
+    expect(normalizeSettings({
+      setupWizard: {
+        completedAt: '2026-07-13T00:00:00.000Z',
+        hermesAutoInstall: true,
+        skippedSteps: ['agents', 'agents', ' ', 'mcp'],
+      },
+    }).setupWizard).toEqual({
+      completedAt: '2026-07-13T00:00:00.000Z',
+      hermesAutoInstall: true,
+      skippedSteps: ['agents', 'mcp'],
+    })
+  })
+
+  test('normalizes role presets with trim and case-insensitive dedupe', () => {
+    expect(defaultSettings.rolePresets).toEqual(['Planner', 'Frontend', 'Backend', 'Reviewer', 'Tester', 'Docs'])
+    expect(normalizeSettings({ rolePresets: [' Reviewer ', 'reviewer', '', 'Backend'] }).rolePresets).toEqual(['Reviewer', 'Backend'])
+    expect(normalizeSettings({ rolePresets: [] }).rolePresets).toEqual(defaultSettings.rolePresets)
+  })
+
 })

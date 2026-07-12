@@ -36,6 +36,9 @@ export function TaskAssignDialog({ taskId, onClose }: TaskAssignDialogProps) {
       <div className="kanban-dialog kanban-assign-dialog" role="dialog" aria-modal="true" aria-label="Assign task" onMouseDown={(event) => event.stopPropagation()}>
         <h2>Assign task</h2>
         {panes.length === 0 ? <p className="kanban-dialog-note">No live AI agent panes. Open a Codex, Claude, or OMP terminal before assigning work.</p> : null}
+        <datalist id="vibelink-role-presets">
+          {settings.rolePresets.map((role) => <option key={role} value={role} />)}
+        </datalist>
         {panes.length > 0 ? (
           <div className="task-pane-list">
             {panes.map((pane) => {
@@ -50,6 +53,7 @@ export function TaskAssignDialog({ taskId, onClose }: TaskAssignDialogProps) {
                   <input
                     className="task-pane-card-role"
                     aria-label={`Role for ${pane.config.title ?? pane.id}`}
+                    list="vibelink-role-presets"
                     value={settings.paneRoles[pane.id] ?? ''}
                     placeholder="Role (e.g. Reviewer)"
                     onChange={(event) => setPaneRole(pane.id, event.target.value)}

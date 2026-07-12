@@ -1,6 +1,8 @@
 import { Grid3X3, Plus } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Profile } from '../state/profiles'
+import { agentStatusLabel } from '../ipc/agents'
+import { useWorkspaceStore } from '../state/store'
 import { clampGridCols, clampGridRows, defaultTerminalGridSelection, displayGridSize, occupiedGridForPaneCount, selectedNewPaneCount, terminalGridCellState, terminalGridSelectionFromCell, terminalGridSelectionFromDimensions, terminalOccupancyGridCellState, type GridSize, type TerminalOccupancyGrid } from './newTerminalGrid'
 
 type LaunchRequest = {
@@ -38,6 +40,7 @@ function selectionStateKey(paneCount: number, preferred?: GridSize | null, occup
 
 export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, preferredGrid = null, occupancyMatrix = null, profiles, activeProfileId, onToggle, onClose, onLaunch, onSelectionCommit }: NewTerminalLauncherProps) {
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const agentClis = useWorkspaceStore((state) => state.agentClis)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
   const [occupiedPreference, setOccupiedPreference] = useState<GridSize | null>(() => preferredGrid)
   const [selectionState, setSelectionState] = useState<SelectionState>(() => ({
@@ -60,6 +63,12 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   const visibleSelection = previewSelection ?? selection
   const newPaneCount = selectedNewPaneCount(existingPaneCount, selection)
   const effectiveProfileId = profiles.some((profile) => profile.id === selectedProfileId) ? selectedProfileId : activeProfileId
+  const agentStatusById = useMemo(
+    () => Object.fromEntries(agentClis.map((status) => [status.id.toLowerCase(), status])),
+    [agentClis],
+  )
+  const selectedAgentStatus = agentStatusById[effectiveProfileId.toLowerCase()]
+  const selectedProfileUnavailable = Boolean(selectedAgentStatus && !selectedAgentStatus.installed)
   const closeLauncher = useCallback(() => {
     setIsPointerSelecting(false)
     setPreviewSelection(null)
@@ -135,7 +144,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   }
 
   const launchSelection = () => {
-    if (newPaneCount <= 0) return
+    if (newPaneCount <= 0 || selectedProfileUnavailable) return
     onLaunch({ cols: selection.cols, rows: selection.rows, occupiedGrid: occupied, profileId: effectiveProfileId })
   }
 
@@ -166,8 +175,24 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
           </header>
           <label className="new-terminal-profile">
             Profile
-            <select value={effectiveProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
-              {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+            <select
+              value={effectiveProfileId}
+              title={selectedProfileUnavailable ? `Install ${selectedAgentStatus?.displayName ?? effectiveProfileId} or pick another profile` : undefined}
+              onChange={(event) => setSelectedProfileId(event.target.value)}
+            >
+              {profiles.map((profile) => {
+                const status = agentStatusById[profile.id.toLowerCase()]
+                return (
+                  <option
+                    key={profile.id}
+                    value={profile.id}
+                    disabled={Boolean(status && !status.installed)}
+                    title={status && !status.installed ? `Install ${status.displayName} or pick another profile` : undefined}
+                  >
+                    {profile.name}{status ? ` · ${agentStatusLabel(status)}` : ''}
+                  </option>
+                )
+              })}
             </select>
           </label>
           <div className="new-terminal-summary">
@@ -213,7 +238,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
               Y
               <input type="number" min="1" max="10" value={selection.rows} onChange={(event) => commitDimensions(selection.cols, clampGridRows(Number(event.target.value)))} />
             </label>
-            <button type="button" className="primary-action" disabled={newPaneCount <= 0} onClick={launchSelection}>Create</button>
+            <button type="button" className="primary-action" disabled={newPaneCount <= 0 || selectedProfileUnavailable} onClick={launchSelection}>Create</button>
           </div>
         </section>
       ) : null}

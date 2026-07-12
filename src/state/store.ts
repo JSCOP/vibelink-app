@@ -1,14 +1,16 @@
 import { invoke } from '@tauri-apps/api/core'
 import { sendToPane, submitAgentPrompt } from '../ipc/panes'
 import { activateLicense, deactivateLicenseDevice, forgetLocalLicense, getLicenseStatus, revalidateLicense } from '../ipc/license'
+import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
+import { getHermesRuntimeStatus, installHermesRuntime } from '../ipc/hermesSetup'
 import { create } from 'zustand'
-import type { AttachedSession, HermesGatewayConfig, HermesModelInfo, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorktreeInfo } from '../ipc/types'
+import type { AttachedSession, HermesGatewayConfig, HermesModelInfo, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief, WorktreeInfo } from '../ipc/types'
 import { defaultSettings, isAgentPane, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
 import type { KanbanData } from './kanban'
 import { composeTaskPrompt } from './kanban'
-import { loadKanban, persistKanban, type ViewMode } from './kanbanPersistence'
+import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
 import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from './workspaceTodos'
 import { defaultHermesGateway, type HermesModelsState, type HermesPlanEntry, type HermesSessionInfo, type HermesStatus, type HermesTextPartKind, type HermesToolCallView, type HermesTranscriptPart, type HermesTurn, type PendingPermission } from './hermes'
 import {
@@ -21,10 +23,10 @@ import {
 } from '../layout/workspaceLayoutModel'
 
 const initialKanban = loadKanban()
+const migratedLegacySessions = new Set<string>()
+let hermesRuntimeRepair: Promise<void> | undefined
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 
-const boardMirrorDelayMs = 300
-const boardMirrorTimers = new Map<string, number>()
 
 type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 
@@ -43,6 +45,7 @@ type WorkspaceState = {
   status: Status
   error?: string
   license: { ready: boolean; status: LicenseStatus | null }
+  agentClis: AgentCliStatus[]
   settings: Settings
   kanban: KanbanData
   viewModes: Record<string, ViewMode>
@@ -52,6 +55,7 @@ type WorkspaceState = {
   hermesGateways: Record<string, HermesGatewayConfig>
   workspaceTodos: WorkspaceTodoLists
   workspaceTodoNotes: WorkspaceTodoNotes
+  workspaceBriefs: Record<string, WorkspaceBrief | null>
   hermesStatus: Record<string, HermesStatus>
   hermesTranscript: Record<string, HermesTurn[]>
   hermesPermissions: Record<string, PendingPermission[]>
@@ -78,6 +82,7 @@ type WorkspaceState = {
   deactivateLicenseDevice: (activationId: string) => Promise<LicenseStatus>
   forgetLocalLicense: () => Promise<LicenseStatus>
   bootstrap: () => Promise<void>
+  refreshAgentClis: () => Promise<AgentCliStatus[]>
   refreshSessions: () => Promise<void>
   openSession: (sessionId: string) => Promise<AttachedSession>
   attachSession: (sessionId: string) => Promise<AttachedSession>
@@ -96,29 +101,31 @@ type WorkspaceState = {
   setError: (error: string) => void
   clearError: () => void
   dismissError: () => void
+  prepareSetupWizardRun: () => void
   updateSettings: (settings: Partial<Settings>) => void
   toggleTerminalTabsVisible: () => void
   reorderWorkspaces: (orderedIds: string[]) => void
   setDefaultProfile: (profileId: string) => void
   setViewMode: (sessionId: string, mode: ViewMode) => void
-  createTask: (sessionId: string, input: { title: string; description: string }) => Task
+  createTask: (sessionId: string, input: { title: string; description: string }) => Promise<Task>
   addWorkspaceTodo: (sessionId: string, text: string) => WorkspaceTodoItem | null
   deleteWorkspaceTodo: (sessionId: string, todoId: string) => void
   deleteWorkspaceTodos: (sessionId: string, todoIds: string[]) => void
   updateWorkspaceTodoText: (sessionId: string, todoId: string, text: string) => void
   setWorkspaceTodoNote: (sessionId: string, note: string) => void
-  injectWorkspaceTodosToKanban: (sessionId: string, todoIds: string[]) => Task[]
-  updateTask: (id: string, patch: Partial<Task>) => void
-  deleteTask: (id: string) => void
-  moveTask: (id: string, status: TaskStatus) => void
+  injectWorkspaceTodosToKanban: (sessionId: string, todoIds: string[]) => Promise<Task[]>
+  updateTask: (id: string, patch: Partial<Task>) => Promise<Task | undefined>
+  deleteTask: (id: string) => Promise<void>
+  moveTask: (id: string, status: TaskStatus) => Promise<void>
   assignTask: (taskId: string, paneId: string, options?: { isolated?: boolean }) => Promise<void>
-  markTaskDone: (taskId: string, result?: { commitMessage?: string; resultSummary?: string }) => void
-  noteTask: (taskId: string, message: string) => void
+  markTaskDone: (taskId: string, result?: { commitMessage?: string; resultSummary?: string }) => Promise<void>
+  noteTask: (taskId: string, message: string) => Promise<void>
   selectTask: (sessionId: string, taskId: string | null) => void
   setKanbanLayout: (sessionId: string, json: string | null) => void
   setOrchestratorPane: (sessionId: string, paneId: string) => void
   setPaneRole: (paneId: string, role: string) => void
   applyPaneConfiguration: (paneId: string, patch: { title?: string | null; role?: string | null }) => void
+  setWorkspaceBrief: (sessionId: string, purpose: string, notes: string) => Promise<WorkspaceBrief>
   setHermesGateway: (sessionId: string, patch: Partial<HermesGatewayConfig>) => void
   addHermesUserMessage: (sessionId: string, text: string) => void
   appendHermesText: (sessionId: string, kind: HermesTextPartKind, text: string) => void
@@ -147,6 +154,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   status: 'booting',
   settings: loadSettings(),
   license: { ready: false, status: null },
+  agentClis: [],
   kanban: initialKanban.data,
   viewModes: initialKanban.viewModes,
   kanbanLayouts: initialKanban.kanbanLayouts,
@@ -156,6 +164,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaceTodos: initialKanban.workspaceTodos,
   workspaceTodoNotes: initialKanban.workspaceTodoNotes,
   hermesStatus: {},
+  workspaceBriefs: {},
   hermesTranscript: {},
   hermesPermissions: {},
   hermesUsage: {},
@@ -173,8 +182,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   bootstrap: async () => {
     set({ status: 'booting', error: undefined, license: { ready: false, status: null } })
     try {
-      const licenseStatus = await getLicenseStatus()
-      set({ license: { ready: true, status: licenseStatus } })
+      const [licenseStatus, agentClis] = await Promise.all([
+        getLicenseStatus(),
+        getAgentCliStatus().catch(() => []),
+      ])
+      set({ license: { ready: true, status: licenseStatus }, agentClis })
       let sessions = await invoke<SessionMeta[]>('list_sessions')
       if (sessions.length === 0) {
         const created = await invoke<SessionMeta>('create_session', { name: 'Workspace 1' })
@@ -182,10 +194,27 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
 
       set({ sessions, activeSessionId: undefined, panes: {}, layoutJson: null, status: 'ready' })
+      if (licenseStatus.entitled && get().settings.setupWizard.hermesAutoInstall) {
+        if (!hermesRuntimeRepair) {
+          const commandOverride = get().settings.hermesCommand
+          hermesRuntimeRepair = getHermesRuntimeStatus(commandOverride)
+            .then(async (runtime) => {
+              if (!runtime.installed) await installHermesRuntime(commandOverride)
+            })
+            .catch((error) => set({ error: `Hermes automatic repair failed: ${String(error)}` }))
+            .finally(() => { hermesRuntimeRepair = undefined })
+        }
+      }
       if (licenseStatus.entitled) void get().revalidateLicense()
     } catch (error) {
       set({ status: 'error', error: String(error) })
     }
+  },
+
+  refreshAgentClis: async () => {
+    const agentClis = await getAgentCliStatus()
+    set({ agentClis })
+    return agentClis
   },
 
   refreshLicense: async () => {
@@ -253,6 +282,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
       workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: workspaceLayout },
     }))
+    if (get().license.ready && get().license.status?.entitled) {
+      const boardJson = await invoke<string>('board_read', { sessionId })
+      const migratedJson = await migrateLegacyTasks(sessionId, boardJson)
+      get().applyBoardSnapshot(sessionId, migratedJson)
+    }
     if (previousSessionId && previousSessionId !== sessionId) {
       void invoke('detach_session', { sessionId: previousSessionId }).catch(() => {})
     }
@@ -276,7 +310,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await get().attachSession(created.id)
     await get().spawnPane(created.id, { profileId })
     set((state) => ({ hermesGateways: { ...state.hermesGateways, [created.id]: defaultHermesGateway('telegram') } }))
-    persistCurrentKanban(get(), created.id)
+    persistCurrentKanban(get())
     if (get().license.ready && get().license.status?.entitled) void invoke('hermes_ensure_workspace', { sessionId: created.id, workspaceFolder: normalizedFolder })
     return created
   },
@@ -308,6 +342,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const hermesGateways = { ...state.hermesGateways }
       const workspaceTodos = { ...state.workspaceTodos }
       const workspaceTodoNotes = { ...state.workspaceTodoNotes }
+      const workspaceBriefs = { ...state.workspaceBriefs }
       const hermesStatus = { ...state.hermesStatus }
       const hermesTranscript = { ...state.hermesTranscript }
       const hermesPermissions = { ...state.hermesPermissions }
@@ -330,6 +365,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesGateways[sessionId]
       delete workspaceTodos[sessionId]
       delete workspaceTodoNotes[sessionId]
+      delete workspaceBriefs[sessionId]
       delete hermesStatus[sessionId]
       delete hermesTranscript[sessionId]
       delete hermesPermissions[sessionId]
@@ -338,7 +374,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesPendingPrompts[sessionId]
       delete hermesCurrentSession[sessionId]
       delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
+      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
     })
     persistSettings(get().settings)
     persistCurrentKanban(get())
@@ -519,6 +555,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     persistSettings(settings)
     set({ settings })
   },
+  prepareSetupWizardRun: () => {
+    set((state) => ({
+      settings: {
+        ...state.settings,
+        setupWizard: { ...state.settings.setupWizard, completedAt: null },
+      },
+    }))
+  },
   toggleTerminalTabsVisible: () => {
     get().updateSettings({ terminalTabsVisible: !get().settings.terminalTabsVisible })
   },
@@ -540,32 +584,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   setViewMode: (sessionId: string, mode: ViewMode) => {
     set((state) => ({ viewModes: { ...state.viewModes, [sessionId]: mode } }))
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
-  createTask: (sessionId: string, input: { title: string; description: string }) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); throw new Error('VibeLink Pro license required.') }
-    const now = Date.now()
-    const task: Task = {
-      id: crypto.randomUUID(),
+  createTask: async (sessionId: string, input: { title: string; description: string }) => {
+    requireProForTaskMutation(get())
+    const task = await invoke<Task>('board_task_create', {
       sessionId,
       title: input.title.trim(),
       description: input.description,
-      status: 'pending',
-      statusTimestamps: { pending: now },
-      createdAt: now,
-      updatedAt: now,
-    }
+    })
     set((state) => ({
-      kanban: {
-        tasks: { ...state.kanban.tasks, [task.id]: task },
-        taskOrder: {
-          ...state.kanban.taskOrder,
-          [sessionId]: [...(state.kanban.taskOrder[sessionId] ?? []), task.id],
-        },
-      },
+      kanban: upsertTask(state.kanban, task),
       selectedTaskId: { ...state.selectedTaskId, [sessionId]: task.id },
     }))
-    persistCurrentKanban(get(), sessionId)
     return task
   },
   addWorkspaceTodo: (sessionId, text) => {
@@ -583,7 +614,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         },
       }
     })
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
     return todo
   },
   deleteWorkspaceTodo: (sessionId, todoId) => {
@@ -602,7 +633,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         },
       }
     })
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
   updateWorkspaceTodoText: (sessionId, todoId, text) => {
     if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
@@ -617,7 +648,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         },
       }
     })
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
   setWorkspaceTodoNote: (sessionId, note) => {
     if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
@@ -627,89 +658,56 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       else delete workspaceTodoNotes[sessionId]
       return { workspaceTodoNotes }
     })
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
-  injectWorkspaceTodosToKanban: (sessionId, todoIds) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return [] }
+  injectWorkspaceTodosToKanban: async (sessionId, todoIds) => {
+    requireProForTaskMutation(get())
     const state = get()
     const ids = new Set(todoIds)
     const todos = ((state.workspaceTodos ?? {})[sessionId] ?? []).filter((todo) => ids.has(todo.id) && !todo.kanbanTaskId)
     if (todos.length === 0) return []
-    const now = Date.now()
     const note = (state.workspaceTodoNotes ?? {})[sessionId]?.trim() ?? ''
-    const tasks: Task[] = todos.map((todo) => ({
-      id: crypto.randomUUID(),
-      sessionId,
-      title: todo.text,
-      description: note,
-      status: 'pending',
-      statusTimestamps: { pending: now },
-      createdAt: now,
-      updatedAt: now,
-    }))
+    const tasks: Task[] = []
+    for (const todo of todos) {
+      tasks.push(await get().createTask(sessionId, { title: todo.text, description: note }))
+    }
+    const now = Date.now()
     const taskByTodoId = Object.fromEntries(todos.map((todo, index) => [todo.id, tasks[index].id]))
     set((current) => ({
-      kanban: {
-        tasks: { ...current.kanban.tasks, ...Object.fromEntries(tasks.map((task) => [task.id, task])) },
-        taskOrder: {
-          ...current.kanban.taskOrder,
-          [sessionId]: [...(current.kanban.taskOrder[sessionId] ?? []), ...tasks.map((task) => task.id)],
-        },
-      },
-      selectedTaskId: { ...current.selectedTaskId, [sessionId]: tasks[tasks.length - 1]?.id ?? current.selectedTaskId[sessionId] ?? null },
       workspaceTodos: {
         ...(current.workspaceTodos ?? {}),
         [sessionId]: ((current.workspaceTodos ?? {})[sessionId] ?? []).map((todo) => taskByTodoId[todo.id] ? { ...todo, kanbanTaskId: taskByTodoId[todo.id], updatedAt: now } : todo),
       },
     }))
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
     return tasks
   },
-  updateTask: (id: string, patch: Partial<Task>) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
+  updateTask: async (id: string, patch: Partial<Task>) => {
+    requireProForTaskMutation(get())
     const sessionId = get().kanban.tasks[id]?.sessionId
-    if (!sessionId) return
-    set((state) => {
-      const task = state.kanban.tasks[id]
-      if (!task) return {}
-      const nextStatus = patch.status
-      const statusTimestamps = nextStatus && nextStatus !== task.status
-        ? { ...task.statusTimestamps, [nextStatus]: Date.now() }
-        : task.statusTimestamps
-      return {
-        kanban: {
-          ...state.kanban,
-          tasks: {
-            ...state.kanban.tasks,
-            [id]: { ...task, ...patch, statusTimestamps, id: task.id, sessionId: task.sessionId, updatedAt: Date.now() },
-          },
-        },
-      }
+    if (!sessionId) return undefined
+    const task = await invoke<Task>('board_task_update', {
+      sessionId,
+      taskId: id,
+      patch: taskPatchForNative(patch),
     })
-    persistCurrentKanban(get(), sessionId)
+    set((state) => ({ kanban: upsertTask(state.kanban, task) }))
+    return task
   },
-  deleteTask: (id: string) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
+  deleteTask: async (id: string) => {
+    requireProForTaskMutation(get())
     const task = get().kanban.tasks[id]
     if (!task) return
-    set((state) => {
-      const tasks = { ...state.kanban.tasks }
-      delete tasks[id]
-      const order = state.kanban.taskOrder[task.sessionId] ?? []
-      return {
-        kanban: {
-          tasks,
-          taskOrder: { ...state.kanban.taskOrder, [task.sessionId]: order.filter((taskId) => taskId !== id) },
-        },
-        selectedTaskId: state.selectedTaskId[task.sessionId] === id
-          ? { ...state.selectedTaskId, [task.sessionId]: null }
-          : state.selectedTaskId,
-      }
-    })
-    persistCurrentKanban(get(), task.sessionId)
+    await invoke('board_task_delete', { sessionId: task.sessionId, taskId: id })
+    set((state) => ({
+      kanban: removeTask(state.kanban, task),
+      selectedTaskId: state.selectedTaskId[task.sessionId] === id
+        ? { ...state.selectedTaskId, [task.sessionId]: null }
+        : state.selectedTaskId,
+    }))
   },
-  moveTask: (id: string, status: TaskStatus) => {
-    get().updateTask(id, { status })
+  moveTask: async (id: string, status: TaskStatus) => {
+    await get().updateTask(id, { status })
   },
   assignTask: async (taskId: string, paneId: string, options?: { isolated?: boolean }) => {
     if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
@@ -724,55 +722,55 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return
     }
     const role = get().settings.paneRoles[paneId]
-    get().updateTask(taskId, {
+    const assigned = await get().updateTask(taskId, {
       assignedPaneId: paneId,
       assignedRole: role,
       status: 'assigned',
     })
+    if (!assigned) return
     const session = get().sessions.find((item) => item.id === task.sessionId)
     if (session?.workspaceFolder) {
       try {
         if (options?.isolated) {
           const worktree = await invoke<WorktreeInfo>('git_worktree_create', { workspaceFolder: session.workspaceFolder, taskId })
-          get().updateTask(taskId, { worktreePath: worktree.worktreePath, baselineRef: 'HEAD' })
+          await get().updateTask(taskId, { worktreePath: worktree.worktreePath, baselineRef: 'HEAD' })
         } else {
           const baselineRef = await invoke<string>('git_snapshot_baseline', { workspaceFolder: session.workspaceFolder })
-          get().updateTask(taskId, { baselineRef })
+          await get().updateTask(taskId, { baselineRef })
         }
       } catch (error) {
         const currentTask = get().kanban.tasks[taskId] ?? task
         const note = `Diff baseline unavailable: ${String(error)}`
-        get().updateTask(taskId, {
+        await get().updateTask(taskId, {
           resultSummary: [currentTask.resultSummary, note].filter(Boolean).join('\n'),
         })
       }
     }
     const latestTask = get().kanban.tasks[taskId] ?? task
-    await sendToPane(task.sessionId, paneId, composeTaskPrompt(latestTask, { role, sessionId: task.sessionId }), false)
+    await sendToPane(task.sessionId, paneId, composeTaskPrompt(latestTask, { role, sessionId: task.sessionId, brief: get().workspaceBriefs[task.sessionId] }), false)
     await delay(120)
     await submitAgentPrompt(task.sessionId, paneId)
-    get().updateTask(taskId, { status: 'in-progress' })
+    await get().updateTask(taskId, { status: 'in-progress' })
   },
-  markTaskDone: (taskId: string, result?: { commitMessage?: string; resultSummary?: string }) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
+  markTaskDone: async (taskId: string, result?: { commitMessage?: string; resultSummary?: string }) => {
+    requireProForTaskMutation(get())
     const task = get().kanban.tasks[taskId]
     if (!task) return
-    get().updateTask(taskId, {
-      status: 'done',
-      commitMessage: result?.commitMessage ?? task.commitMessage,
-      resultSummary: result?.resultSummary ?? task.resultSummary,
+    const updated = await invoke<Task>('board_task_done', {
+      sessionId: task.sessionId,
+      taskId,
+      commitMsg: result?.commitMessage,
+      resultSummary: result?.resultSummary,
     })
+    set((state) => ({ kanban: upsertTask(state.kanban, updated) }))
   },
-  noteTask: (taskId: string, message: string) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
+  noteTask: async (taskId: string, message: string) => {
+    requireProForTaskMutation(get())
     const task = get().kanban.tasks[taskId]
-    if (!task) return
     const note = message.trim()
-    if (!note) return
-    get().updateTask(taskId, {
-      resultSummary: [task.resultSummary, note].filter(Boolean).join('\n'),
-      status: task.status === 'done' ? task.status : 'in-progress',
-    })
+    if (!task || !note) return
+    const updated = await invoke<Task>('board_task_note', { sessionId: task.sessionId, taskId, message: note })
+    set((state) => ({ kanban: upsertTask(state.kanban, updated) }))
   },
   selectTask: (sessionId: string, taskId: string | null) => {
     set((state) => ({ selectedTaskId: { ...state.selectedTaskId, [sessionId]: taskId } }))
@@ -784,12 +782,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       else delete kanbanLayouts[sessionId]
       return { kanbanLayouts }
     })
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
   setOrchestratorPane: (sessionId: string, paneId: string) => {
     if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
     set((state) => ({ orchestratorPaneIds: { ...state.orchestratorPaneIds, [sessionId]: paneId } }))
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
   setHermesGateway: (sessionId: string, patch: Partial<HermesGatewayConfig>) => {
     if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
@@ -797,7 +795,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const current = state.hermesGateways[sessionId] ?? defaultHermesGateway(patch.platform)
       return { hermesGateways: { ...state.hermesGateways, [sessionId]: { ...current, ...patch } } }
     })
-    persistCurrentKanban(get(), sessionId)
+    persistCurrentKanban(get())
   },
   addHermesUserMessage: (sessionId: string, text: string) => {
     set((state) => ({
@@ -905,11 +903,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return { hermesTranscript, hermesPermissions, hermesUsage }
     })
   },
+  setWorkspaceBrief: async (sessionId: string, purpose: string, notes: string) => {
+    const brief = await invoke<WorkspaceBrief>('board_brief_set', { sessionId, purpose, notes })
+    set((state) => ({ workspaceBriefs: { ...state.workspaceBriefs, [sessionId]: brief } }))
+    return brief
+  },
   applyBoardSnapshot: (sessionId: string, json: string) => {
     const snapshot = parseBoardSnapshot(sessionId, json)
     if (!snapshot) return
     const snapshotJson = JSON.stringify(snapshot)
-    if (JSON.stringify(boardSnapshotForSession(get().kanban, sessionId)) === snapshotJson) return
+    const currentJson = JSON.stringify({
+      ...boardSnapshotForSession(get().kanban, sessionId),
+      brief: get().workspaceBriefs[sessionId] ?? null,
+    })
+    if (currentJson === snapshotJson) return
     set((state) => {
       const previousIds = new Set(state.kanban.taskOrder[sessionId] ?? [])
       const tasks = { ...state.kanban.tasks }
@@ -920,6 +927,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           tasks,
           taskOrder: { ...state.kanban.taskOrder, [sessionId]: snapshot.taskOrder },
         },
+        workspaceBriefs: { ...state.workspaceBriefs, [sessionId]: snapshot.brief },
       }
     })
     persistCurrentKanban(get())
@@ -1116,7 +1124,7 @@ function persistSettings(settings: Settings): void {
   }
 }
 
-function persistCurrentKanban(state: WorkspaceState, sessionIds?: string | readonly string[]): void {
+function persistCurrentKanban(state: WorkspaceState): void {
   persistKanban({
     data: state.kanban,
     viewModes: state.viewModes,
@@ -1126,7 +1134,6 @@ function persistCurrentKanban(state: WorkspaceState, sessionIds?: string | reado
     workspaceTodos: state.workspaceTodos,
     workspaceTodoNotes: state.workspaceTodoNotes,
   })
-  if (sessionIds !== undefined && (!state.license.ready || state.license.status?.entitled)) mirrorBoardsToDisk(state, sessionIds)
 }
 
 function workspaceLayoutForSession(state: WorkspaceState, sessionId: string): WorkspaceLayoutState {
@@ -1140,21 +1147,70 @@ async function persistWorkspaceLayout(sessionId: string, layout: WorkspaceLayout
   await invoke('save_layout', { sessionId, layoutJson: serializeWorkspaceLayoutState(layout) })
 }
 
-function mirrorBoardsToDisk(state: WorkspaceState, sessionIds: string | readonly string[]): void {
-  const ids = Array.isArray(sessionIds) ? sessionIds : [sessionIds]
-  for (const sessionId of ids) {
-    if (!(sessionId in state.kanban.taskOrder)) continue
-    const timer = boardMirrorTimers.get(sessionId)
-    if (timer !== undefined) globalThis.clearTimeout(timer)
-    const nextTimer = globalThis.setTimeout(() => {
-      boardMirrorTimers.delete(sessionId)
-      const latest = useWorkspaceStore.getState()
-      if (latest.license.ready && !latest.license.status?.entitled) return
-      if (!(sessionId in latest.kanban.taskOrder)) return
-      const json = JSON.stringify(boardSnapshotForSession(latest.kanban, sessionId))
-      void invoke('board_write', { sessionId, json })
-    }, boardMirrorDelayMs)
-    boardMirrorTimers.set(sessionId, nextTimer)
+
+function requireProForTaskMutation(state: WorkspaceState): void {
+  if (state.license.ready && !state.license.status?.entitled) {
+    useWorkspaceStore.setState({ error: 'VibeLink Pro license required.' })
+    throw new Error('VibeLink Pro license required.')
+  }
+}
+
+function upsertTask(kanban: KanbanData, task: Task): KanbanData {
+  const order = kanban.taskOrder[task.sessionId] ?? []
+  return {
+    tasks: { ...kanban.tasks, [task.id]: task },
+    taskOrder: {
+      ...kanban.taskOrder,
+      [task.sessionId]: order.includes(task.id) ? order : [...order, task.id],
+    },
+  }
+}
+
+function removeTask(kanban: KanbanData, task: Task): KanbanData {
+  const tasks = { ...kanban.tasks }
+  delete tasks[task.id]
+  return {
+    tasks,
+    taskOrder: {
+      ...kanban.taskOrder,
+      [task.sessionId]: (kanban.taskOrder[task.sessionId] ?? []).filter((id) => id !== task.id),
+    },
+  }
+}
+
+function taskPatchForNative(patch: Partial<Task>): Record<string, unknown> {
+  const output: Record<string, unknown> = {}
+  for (const key of [
+    'title',
+    'description',
+    'status',
+    'assignedPaneId',
+    'assignedRole',
+    'baselineRef',
+    'worktreePath',
+    'commitMessage',
+    'resultSummary',
+  ] as const) {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) continue
+    output[key] = patch[key] ?? null
+  }
+  return output
+}
+
+async function migrateLegacyTasks(sessionId: string, boardJson: string): Promise<string> {
+  if (migratedLegacySessions.has(sessionId)) return boardJson
+  const mergedJson = mergeLegacyTasksIntoBoard(sessionId, boardJson, initialKanban)
+  if (!mergedJson) {
+    migratedLegacySessions.add(sessionId)
+    return boardJson
+  }
+  try {
+    await invoke('board_write', { sessionId, json: mergedJson })
+    const imported = await invoke<string>('board_read', { sessionId })
+    migratedLegacySessions.add(sessionId)
+    return imported
+  } catch {
+    return boardJson
   }
 }
 
@@ -1169,9 +1225,9 @@ function boardSnapshotForSession(kanban: KanbanData, sessionId: string): { tasks
   }
 }
 
-function parseBoardSnapshot(sessionId: string, json: string): { tasks: Record<string, Task>; taskOrder: string[] } | null {
+function parseBoardSnapshot(sessionId: string, json: string): { tasks: Record<string, Task>; taskOrder: string[]; brief: WorkspaceBrief | null } | null {
   try {
-    const parsed = JSON.parse(json) as { tasks?: unknown; taskOrder?: unknown }
+    const parsed = JSON.parse(json) as { tasks?: unknown; taskOrder?: unknown; brief?: unknown }
     if (typeof parsed.tasks !== 'object' || parsed.tasks === null || Array.isArray(parsed.tasks) || !Array.isArray(parsed.taskOrder)) return null
     const tasks: Record<string, Task> = {}
     for (const [taskId, value] of Object.entries(parsed.tasks)) {
@@ -1198,10 +1254,21 @@ function parseBoardSnapshot(sessionId: string, json: string): { tasks: Record<st
         updatedAt,
       }
     }
-    return { tasks, taskOrder: parsed.taskOrder.filter((taskId): taskId is string => typeof taskId === 'string' && taskId in tasks) }
+    return {
+      tasks,
+      taskOrder: parsed.taskOrder.filter((taskId): taskId is string => typeof taskId === 'string' && taskId in tasks),
+      brief: normalizeWorkspaceBrief(parsed.brief),
+    }
   } catch {
     return null
   }
+}
+
+function normalizeWorkspaceBrief(value: unknown): WorkspaceBrief | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Partial<WorkspaceBrief>
+  if (typeof record.purpose !== 'string' || typeof record.notes !== 'string' || typeof record.updatedAt !== 'string') return null
+  return { purpose: record.purpose, notes: record.notes, updatedAt: record.updatedAt }
 }
 
 function isTaskStatus(value: unknown): value is TaskStatus {

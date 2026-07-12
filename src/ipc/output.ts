@@ -33,14 +33,8 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
       if (event.signal.kind === 'done') {
         const store = useWorkspaceStore.getState()
         const assignedPaneId = store.kanban.tasks[event.signal.taskId]?.assignedPaneId
-        store.markTaskDone(event.signal.taskId, {
-          commitMessage: event.signal.commitMsg ?? undefined,
-          resultSummary: event.signal.resultSummary ?? undefined,
-        })
         const paneId = event.signal.paneId ?? assignedPaneId
         if (paneId) store.markPaneResponseComplete(paneId, 'task-done')
-      } else if (event.signal.kind === 'note') {
-        useWorkspaceStore.getState().noteTask(event.signal.taskId, event.signal.message)
       } else if (event.signal.kind === 'paneConfigured') {
         useWorkspaceStore.getState().applyPaneConfiguration(event.signal.paneId, {
           title: event.signal.title ?? undefined,

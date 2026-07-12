@@ -7,6 +7,11 @@ export type ProfileKind = 'local' | 'ssh' | 'command'
 export type ChatPersonality = 'direct' | 'balanced' | 'concise' | 'exploratory'
 export type ChatImageAttachmentMode = 'auto' | 'always' | 'never'
 export type TerminalCursorStyle = 'bar' | 'block' | 'underline'
+export type SetupWizardSettings = {
+  completedAt: string | null
+  hermesAutoInstall: boolean
+  skippedSteps: string[]
+}
 
 
 export type Profile = {
@@ -57,6 +62,7 @@ export type Settings = {
   workspaceProfileIds: Record<string, string>
   paneRoles: Record<string, string>
   workspaceOrder: string[]
+  rolePresets: string[]
   keybindings: KeybindingSettings
   hermesCommand: string
   chatPersonality: ChatPersonality
@@ -66,6 +72,7 @@ export type Settings = {
   chatImageAttachments: ChatImageAttachmentMode
   captureDir: string
   captureFfmpegPath: string
+  setupWizard: SetupWizardSettings
 }
 
 const legacyTerminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
@@ -223,6 +230,7 @@ export const defaultSettings: Settings = {
   paneRoles: {},
   workspaceOrder: [],
   hermesCommand: '',
+  rolePresets: ['Planner', 'Frontend', 'Backend', 'Reviewer', 'Tester', 'Docs'],
   chatPersonality: 'direct',
   chatReasoningBlocks: true,
   chatToolCalls: true,
@@ -231,6 +239,7 @@ export const defaultSettings: Settings = {
   captureDir: '',
   captureFfmpegPath: '',
   keybindings: { ...defaultKeybindings },
+  setupWizard: { completedAt: null, hermesAutoInstall: false, skippedSteps: [] },
 }
 
 export function normalizeSettings(value: unknown): Settings {
@@ -242,6 +251,8 @@ export function normalizeSettings(value: unknown): Settings {
   const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
   const workspaceOrder = normalizeWorkspaceOrder(record?.workspaceOrder)
+  const rolePresets = normalizeRolePresets(record?.rolePresets)
+  const setupWizard = normalizeSetupWizard(record?.setupWizard)
 
   return {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
@@ -268,12 +279,14 @@ export function normalizeSettings(value: unknown): Settings {
     workspaceOrder,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
     chatPersonality: readChatPersonality(record?.chatPersonality),
+    rolePresets,
     chatReasoningBlocks: readBoolean(record?.chatReasoningBlocks, defaultSettings.chatReasoningBlocks),
     chatToolCalls: readBoolean(record?.chatToolCalls, defaultSettings.chatToolCalls),
     chatToolCallContent: readBoolean(record?.chatToolCallContent, defaultSettings.chatToolCallContent),
     chatImageAttachments: readChatImageAttachmentMode(record?.chatImageAttachments),
     captureDir: readString(record?.captureDir, defaultSettings.captureDir),
     captureFfmpegPath: readString(record?.captureFfmpegPath, defaultSettings.captureFfmpegPath),
+    setupWizard,
   }
 }
 
@@ -667,6 +680,28 @@ function readHexColor(value: unknown, fallback: string): string {
 
 function readProfileKind(value: unknown): ProfileKind {
   return value === 'ssh' || value === 'command' || value === 'local' ? value : 'local'
+}
+
+function normalizeRolePresets(value: unknown): string[] {
+  const source = Array.isArray(value) ? readStringArray(value) : defaultSettings.rolePresets
+  const normalized = source
+    .map((role) => role.trim())
+    .filter((role, index, roles) => role.length > 0 && roles.findIndex((candidate) => candidate.toLowerCase() === role.toLowerCase()) === index)
+  return normalized.length > 0 ? normalized : [...defaultSettings.rolePresets]
+}
+
+function normalizeSetupWizard(value: unknown): SetupWizardSettings {
+  const record = isRecord(value) ? value : undefined
+  const completedAt = typeof record?.completedAt === 'string' && record.completedAt.trim()
+    ? record.completedAt
+    : null
+  return {
+    completedAt,
+    hermesAutoInstall: record?.hermesAutoInstall === true,
+    skippedSteps: readStringArray(record?.skippedSteps)
+      .map((step) => step.trim())
+      .filter((step, index, steps) => step.length > 0 && steps.indexOf(step) === index),
+  }
 }
 
 function readTerminalThemeId(value: unknown): TerminalThemeId {
