@@ -144,6 +144,12 @@ pub enum DaemonToClient {
         pane_id: Uuid,
         exit_code: Option<i32>,
     },
+    PaneResized {
+        session_id: Uuid,
+        pane_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
     SessionChanged {
         session_id: Uuid,
     },

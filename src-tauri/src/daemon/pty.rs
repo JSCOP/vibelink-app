@@ -330,7 +330,7 @@ pub fn default_shell() -> String {
 }
 
 #[cfg(windows)]
-fn resolve_program(program: &str) -> Option<String> {
+pub(crate) fn resolve_program(program: &str) -> Option<String> {
     let path = PathBuf::from(program);
     if path.components().count() > 1 {
         return path.is_file().then(|| program.to_string());
@@ -342,7 +342,7 @@ fn resolve_program(program: &str) -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn resolve_program(program: &str) -> Option<String> {
+pub(crate) fn resolve_program(program: &str) -> Option<String> {
     Some(program.to_string())
 }
 

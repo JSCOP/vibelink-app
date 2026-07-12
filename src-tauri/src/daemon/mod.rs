@@ -372,7 +372,18 @@ fn dispatch_message(
             cols,
             rows,
         } => {
-            lock_state(&state).resize_pane(session_id, pane_id, cols, rows)?;
+            let senders = lock_state(&state).resize_pane(session_id, pane_id, cols, rows)?;
+            for sender in senders {
+                send(
+                    &sender,
+                    DaemonToClient::PaneResized {
+                        session_id,
+                        pane_id,
+                        cols: cols.max(1),
+                        rows: rows.max(1),
+                    },
+                )?;
+            }
             Ok(())
         }
         ClientToDaemon::NotifySessionChanged { session_id } => {

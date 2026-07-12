@@ -3603,3 +3603,328 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 .pro-locked-panel h2 { margin: 0; color: var(--vibelink-text); }
 .pro-locked-panel p { max-width: 420px; margin: 0; }
 .pro-upsell-dialog { max-width: 480px; }
+
+.remote-settings {
+  display: grid;
+  gap: 16px;
+}
+
+.remote-state {
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 999px;
+  font: 600 11px/1 var(--vibelink-sans);
+  padding: 6px 9px;
+  text-transform: uppercase;
+}
+
+.remote-state-running {
+  background: var(--vibelink-accent-muted);
+  border-color: var(--vibelink-accent-border);
+  color: var(--vibelink-accent);
+}
+
+.remote-state-stopped {
+  color: var(--vibelink-muted);
+}
+
+.remote-status-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.remote-status-grid > div,
+.remote-pairing-panel,
+.remote-device-list {
+  background: var(--vibelink-panel-2);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 7px;
+  padding: 12px;
+}
+
+.remote-status-grid span,
+.remote-pairing-content span,
+.remote-device-row span {
+  color: var(--vibelink-muted);
+  display: block;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.remote-status-grid strong,
+.remote-status-grid code {
+  color: var(--vibelink-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.remote-actions,
+.remote-device-row,
+.remote-pairing-content,
+.remote-hints {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.remote-actions label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.remote-actions input {
+  width: 92px;
+}
+
+.remote-pairing-panel {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+
+.remote-pairing-content img {
+  background: #fff;
+  border-radius: 5px;
+  image-rendering: pixelated;
+}
+
+.remote-pairing-content strong {
+  color: var(--vibelink-accent);
+  display: block;
+  font: 700 26px/1.2 var(--vibelink-mono);
+  letter-spacing: 0.12em;
+}
+
+.remote-pairing-content small {
+  color: var(--vibelink-muted);
+}
+
+.remote-device-list h3 {
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+.remote-device-row {
+  border-top: 1px solid var(--vibelink-border-soft);
+  justify-content: space-between;
+  padding: 9px 0;
+}
+
+.remote-device-row:first-of-type {
+  border-top: 0;
+}
+
+.remote-device-row strong {
+  display: block;
+  font-size: 12px;
+}
+
+.remote-danger {
+  border-color: var(--vibelink-danger-border);
+  color: var(--vibelink-danger-text);
+  justify-self: start;
+}
+
+.remote-hints {
+  align-items: flex-start;
+  color: var(--vibelink-muted);
+  flex-direction: column;
+  font-size: 11px;
+  gap: 4px;
+}
+
+@media (max-width: 900px) {
+  .remote-status-grid { grid-template-columns: 1fr; }
+  .remote-actions { align-items: stretch; flex-direction: column; }
+  .remote-pairing-content { align-items: flex-start; flex-direction: column; }
+}
+
+.setup-wizard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--vibelink-bg) 78%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.setup-wizard {
+  width: min(920px, calc(100vw - 48px));
+  min-height: 580px;
+  max-height: calc(100vh - 48px);
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 14px;
+  background: var(--vibelink-panel);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 45%);
+}
+
+.setup-wizard-steps {
+  padding: 24px 18px;
+  background: color-mix(in srgb, var(--vibelink-panel) 76%, var(--vibelink-bg));
+  border-right: 1px solid var(--vibelink-border);
+}
+
+.setup-wizard-steps > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  color: var(--vibelink-muted);
+  border-radius: 7px;
+}
+
+.setup-wizard-steps > div.active {
+  color: var(--vibelink-text);
+  background: color-mix(in srgb, var(--vibelink-accent) 14%, transparent);
+}
+
+.setup-wizard-content {
+  min-width: 0;
+  padding: 28px;
+  overflow: auto;
+}
+
+.setup-wizard-content > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--vibelink-border);
+}
+
+.setup-wizard-content h2,
+.setup-wizard-content h3,
+.setup-wizard-content p {
+  margin-top: 0;
+}
+
+.setup-skip-link {
+  border: 0;
+  background: transparent;
+  color: var(--vibelink-muted);
+  text-decoration: underline;
+}
+
+.setup-wizard-panel {
+  display: grid;
+  gap: 18px;
+  padding-top: 26px;
+}
+
+.setup-wizard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: auto;
+}
+
+.setup-agent-list {
+  display: grid;
+  gap: 8px;
+}
+
+.setup-agent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 8px;
+}
+
+.setup-agent-row > div {
+  display: grid;
+  gap: 3px;
+}
+
+.setup-agent-row span,
+.setup-inline-message {
+  color: var(--vibelink-muted);
+}
+
+.setup-consent {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.setup-consent input {
+  margin-top: 3px;
+}
+
+.setup-pro-notice {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--vibelink-warning) 55%, var(--vibelink-border));
+  border-radius: 7px;
+  color: var(--vibelink-warning);
+}
+
+.setup-check-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 8px;
+}
+
+.setup-check-result[data-ok='true'] {
+  border-color: color-mix(in srgb, var(--vibelink-success) 58%, var(--vibelink-border));
+}
+
+.setup-check-result pre {
+  grid-column: 1 / -1;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.spin {
+  animation: setup-spin 900ms linear infinite;
+}
+
+@keyframes setup-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 720px) {
+  .setup-wizard {
+    grid-template-columns: 1fr;
+  }
+  .setup-wizard-steps {
+    display: none;
+  }
+}
+
+.vibelink-role-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vibelink-role-presets > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vibelink-panel) 85%, var(--vibelink-bg));
+}
+
+.vibelink-role-presets button {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}

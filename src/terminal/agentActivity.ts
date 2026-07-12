@@ -11,9 +11,10 @@ type OutputParseState = {
   inCsi: boolean
 }
 
+type TimerHandle = number | NodeJS.Timeout
 type PendingAgentResponse = {
   sawOutput: boolean
-  timer: number | undefined
+  timer: TimerHandle | undefined
   parse: OutputParseState
 }
 

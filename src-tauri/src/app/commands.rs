@@ -1,8 +1,10 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use super::license::LicenseService;
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
-use tauri::{ipc::Channel, State};
+use crate::remote::{PairingPayload, RemoteServer, RemoteStatus};
+use serde_json::Value;
 use std::sync::Arc;
+use tauri::{ipc::Channel, State};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -67,6 +69,60 @@ pub async fn init_terminal_output(
 #[tauri::command]
 pub fn terminal_ws_port(client: State<'_, DaemonClient>) -> u16 {
     client.ws_port()
+}
+
+#[tauri::command]
+pub fn remote_get_status(remote: State<'_, Arc<RemoteServer>>) -> RemoteStatus {
+    remote.status()
+}
+
+#[tauri::command]
+pub async fn remote_set_enabled(
+    remote: State<'_, Arc<RemoteServer>>,
+    enabled: bool,
+) -> Result<RemoteStatus, String> {
+    remote.set_enabled(enabled).map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn remote_set_port(
+    remote: State<'_, Arc<RemoteServer>>,
+    port: u16,
+) -> Result<RemoteStatus, String> {
+    remote.set_port(port).map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn remote_create_pairing(
+    remote: State<'_, Arc<RemoteServer>>,
+) -> Result<PairingPayload, String> {
+    remote.create_pairing().map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn remote_revoke_device(
+    remote: State<'_, Arc<RemoteServer>>,
+    device_id: String,
+) -> Result<(), String> {
+    remote.revoke_device(&device_id).map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn remote_regenerate_identity(
+    remote: State<'_, Arc<RemoteServer>>,
+) -> Result<RemoteStatus, String> {
+    remote.regenerate_identity().map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn set_remote_appearance(
+    remote: State<'_, Arc<RemoteServer>>,
+    appearance: Value,
+    workspace_order: Vec<String>,
+    workspace_alerts: std::collections::HashMap<String, usize>,
+) -> Result<(), String> {
+    remote.set_appearance(appearance, workspace_order, workspace_alerts);
+    Ok(())
 }
 
 #[tauri::command]
@@ -321,7 +377,12 @@ pub async fn set_pane_role(
     license.require_pro_cached().map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
-    expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneRole { req, session_id, pane_id, role }))
+    expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneRole {
+        req,
+        session_id,
+        pane_id,
+        role,
+    }))
 }
 
 #[tauri::command]

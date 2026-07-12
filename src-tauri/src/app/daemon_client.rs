@@ -370,6 +370,7 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
             DaemonToClient::Output { pane_id, data } => {
                 broadcast_output(shared, &pane_id.to_string(), &data);
             }
+            DaemonToClient::PaneResized { .. } => {}
             other => {
                 if let Err(err) = forward_terminal_event(shared, other) {
                     warn!(?err, "dropping terminal event");
@@ -492,6 +493,7 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
         DaemonToClient::Error { req, .. } => *req,
         DaemonToClient::Output { .. }
         | DaemonToClient::PaneExited { .. }
+        | DaemonToClient::PaneResized { .. }
         | DaemonToClient::SessionChanged { .. }
         | DaemonToClient::TaskEvent { .. } => None,
     }

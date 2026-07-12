@@ -233,9 +233,15 @@ impl DaemonState {
         pane_id: Uuid,
         cols: u16,
         rows: u16,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<Sender<DaemonToClient>>> {
         let pane = self.pane_in_session_mut(session_id, pane_id)?;
-        pane.resize(cols, rows)
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        if pane.config.cols == cols && pane.config.rows == rows {
+            return Ok(Vec::new());
+        }
+        pane.resize(cols, rows)?;
+        Ok(self.senders_for_pane(pane_id))
     }
 
     pub fn set_pane_title(
@@ -745,6 +751,49 @@ mod tests {
             panes[0].config.title.as_deref(),
             Some("Codex: refactor terminal")
         );
+    }
+
+    #[test]
+    fn resize_updates_metadata_and_notifies_subscribed_clients() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = unbounded();
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        state.attach_client_to_pane(client_id, pane_id);
+
+        let senders = state
+            .resize_pane(workspace.id, pane_id, 132, 41)
+            .expect("resize pane");
+        assert_eq!(senders.len(), 1);
+        let panes = state.pane_metas(workspace.id).expect("pane metadata");
+        assert_eq!((panes[0].config.cols, panes[0].config.rows), (132, 41));
+
+        senders[0]
+            .send(DaemonToClient::PaneResized {
+                session_id: workspace.id,
+                pane_id,
+                cols: 132,
+                rows: 41,
+            })
+            .expect("send resize event");
+        assert_eq!(
+            rx.recv().expect("resize event"),
+            DaemonToClient::PaneResized {
+                session_id: workspace.id,
+                pane_id,
+                cols: 132,
+                rows: 41,
+            }
+        );
+        assert!(state
+            .resize_pane(workspace.id, pane_id, 132, 41)
+            .expect("same-size resize")
+            .is_empty());
     }
 
     #[test]

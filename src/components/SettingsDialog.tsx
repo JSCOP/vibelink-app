@@ -1,9 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Terminal, X } from 'lucide-react'
+import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
 import { HermesGatewayForm } from './HermesGatewayForm'
 import { LicenseSettings } from './LicenseSettings'
+import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
@@ -29,6 +30,7 @@ type SettingsSection =
   | 'chat'
   | 'appearance'
   | 'workspace'
+  | 'remote'
   | 'safety'
   | 'memory'
   | 'voice'
@@ -45,6 +47,7 @@ const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[]
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'workspace', label: 'Workspace', icon: Monitor },
+  { id: 'remote', label: 'Remote', icon: Smartphone },
   { id: 'safety', label: 'Safety', icon: Shield },
   { id: 'memory', label: 'Memory & Context', icon: HardDrive },
   { id: 'voice', label: 'Voice', icon: Mic },
@@ -567,6 +570,8 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                 </SettingsGroup>
               </>
             ) : null}
+
+            {activeSection === 'remote' ? <RemoteSettings /> : null}
 
             {activeSection === 'safety' ? (
               <SettingsGroup title="Safety" description="VibeLink follows workspace-scoped process and agent safety rules.">

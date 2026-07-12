@@ -9,6 +9,7 @@ pub mod skills;
 pub mod spawn_daemon;
 
 use daemon_client::DaemonClient;
+use crate::remote::RemoteServer;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -36,6 +37,18 @@ pub fn run() {
                 let boxed: Box<dyn std::error::Error> = error.into();
                 boxed
             })?));
+            let data_dir = crate::daemon::paths::daemon_paths().map_err(|error| {
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            })?.data_dir;
+            let remote = Arc::new(RemoteServer::new(data_dir).map_err(|error| {
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            })?);
+            if let Err(error) = remote.start_if_enabled() {
+                tracing::warn!(?error, "remote access auto-start failed");
+            }
+            app.manage(remote);
             app.manage(capture::CaptureState::default());
             app.manage(KeepAlivePrefs::default());
             Ok(())
@@ -52,6 +65,13 @@ pub fn run() {
             commands::detach_session,
             commands::init_terminal_output,
             commands::terminal_ws_port,
+            commands::remote_get_status,
+            commands::remote_set_enabled,
+            commands::remote_set_port,
+            commands::remote_create_pairing,
+            commands::remote_revoke_device,
+            commands::remote_regenerate_identity,
+            commands::set_remote_appearance,
             hermes::hermes_cancel,
             hermes::hermes_respond_permission,
             hermes::hermes_send,
@@ -127,6 +147,9 @@ pub fn run() {
             }
             if let Some(manager) = app.try_state::<Arc<hermes::HermesManager>>() {
                 manager.shutdown_all();
+            }
+            if let Some(remote) = app.try_state::<Arc<RemoteServer>>() {
+                remote.stop();
             }
             let keep_alive = app
                 .try_state::<KeepAlivePrefs>()

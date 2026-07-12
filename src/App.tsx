@@ -28,6 +28,7 @@ import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import { requiresProWindow } from './state/licenseGate'
+import { buildRemoteAppearance } from './remote/appearancePayload'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -103,6 +104,17 @@ function App() {
   useEffect(() => {
     applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor)
   }, [settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void invoke('set_remote_appearance', {
+        appearance: { ...buildRemoteAppearance(settings), workspaceAlerts: completionCounts },
+        workspaceOrder: settings.workspaceOrder,
+        workspaceAlerts: completionCounts,
+      }).catch((caught) => console.warn('Failed to update remote appearance', caught))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [completionCounts, settings])
 
   useEffect(() => {
     void invoke('set_keep_terminals_alive_on_close', { value: settings.keepTerminalsAliveOnClose }).catch(() => {})
