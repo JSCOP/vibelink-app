@@ -46,7 +46,7 @@ describe('TerminalTab', () => {
     expect(html).toContain('draggable="true"')
     expect(html).toContain('class="terminal-tab-actions" data-pane-drag-disabled="true"')
     expect(html).toContain('aria-pressed="false"')
-    expect(html).toContain('Mark as reviewed (Alt+Shift+C)')
+    expect(html).toContain('Mark as reviewed (Alt+Q)')
   })
 
   test('does not leave the title text as a competing nested drag source', () => {

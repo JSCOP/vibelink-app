@@ -67,7 +67,7 @@ export const defaultKeybindings: KeybindingSettings = {
   closePane: 'ctrl+w',
   closeWorkspace: 'ctrl+shift+w',
   toggleMaximize: 'alt+z',
-  togglePaneReviewed: 'alt+shift+c',
+  togglePaneReviewed: 'alt+q',
   arrangePanes: 'ctrl+shift+g',
   nextTab: 'ctrl+tab',
   previousTab: 'ctrl+pgup',
@@ -95,6 +95,7 @@ const shortLivedFocusKeybindings: Partial<KeybindingSettings> = {
 }
 
 const legacyCaptureImageDefault = 'alt+shift+c'
+const legacyPaneReviewedDefault = 'alt+shift+c'
 const globalShortcutOnlyActions: Partial<Record<KeybindingActionId, true>> = {
   captureImage: true,
   captureQuickImage: true,
@@ -110,6 +111,10 @@ export function normalizeKeybindings(value: unknown): KeybindingSettings {
       const chord = normalizeKeyChord(value)
       if (id === 'captureImage' && chord === legacyCaptureImageDefault) {
         normalized[id] = defaultKeybindings.captureImage
+        continue
+      }
+      if (id === 'togglePaneReviewed' && chord === legacyPaneReviewedDefault) {
+        normalized[id] = defaultKeybindings.togglePaneReviewed
         continue
       }
       const shortLivedFocusKeybinding = shortLivedFocusKeybindings[id]
@@ -159,6 +164,11 @@ export function normalizeKeyChord(chord: string): string {
     .filter(Boolean)
     .map(normalizeKeyName)
     .join('+')
+}
+
+export function formatKeyChord(chord: string): string {
+  const labels: Record<string, string> = { alt: 'Alt', ctrl: 'Ctrl', shift: 'Shift', win: 'Win', space: 'Space', pgup: 'Page Up', pgdn: 'Page Down' }
+  return normalizeKeyChord(chord).split('+').map((part) => labels[part] ?? (part.length === 1 ? part.toUpperCase() : part)).join('+')
 }
 
 function normalizeKeyName(key: string): string {

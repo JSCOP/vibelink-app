@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { defaultKeybindings, eventToKeyChord, findKeybindingAction, handleCapturedKeybindingEvent, normalizeKeybindings } from './keybindings'
+import { defaultKeybindings, eventToKeyChord, findKeybindingAction, formatKeyChord, handleCapturedKeybindingEvent, normalizeKeybindings } from './keybindings'
 
 describe('keybindings', () => {
   it('uses Windows Terminal compatible defaults for pane close and focus movement', () => {
@@ -20,7 +20,7 @@ describe('keybindings', () => {
     expect(defaultKeybindings.captureQuickImage).toBe('alt+s')
     expect(defaultKeybindings.captureVideo).toBe('alt+shift+r')
     expect(defaultKeybindings.toggleTerminalTabs).toBe('alt+shift+t')
-    expect(defaultKeybindings.togglePaneReviewed).toBe('alt+shift+c')
+    expect(defaultKeybindings.togglePaneReviewed).toBe('alt+q')
   })
 
   it('normalizes partial stored keybindings without dropping new defaults', () => {
@@ -57,6 +57,10 @@ describe('keybindings', () => {
     expect(normalizeKeybindings({ captureImage: 'alt+shift+c' }).captureImage).toBe('alt+shift+s')
   })
 
+  it('migrates the previous three-key pane review shortcut to the one-hand default', () => {
+    expect(normalizeKeybindings({ togglePaneReviewed: 'alt+shift+c' }).togglePaneReviewed).toBe('alt+q')
+  })
+
   it('preserves custom capture image bindings during normalization', () => {
     expect(normalizeKeybindings({ captureImage: 'ctrl+alt+p' }).captureImage).toBe('ctrl+alt+p')
   })
@@ -74,6 +78,10 @@ describe('keybindings', () => {
     expect(eventToKeyChord(event)).toBe('ctrl+left')
   })
 
+  it('formats stored chords for shortcut labels', () => {
+    expect(formatKeyChord('alt+q')).toBe('Alt+Q')
+  })
+
   it('finds matching actions from user settings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'w', ctrlKey: true }))).toBe('closePane')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'a', ctrlKey: true }))).toBe('copyTerminalContents')
@@ -82,7 +90,7 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true }))).toBe('captureQuickImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'r', altKey: true, shiftKey: true }))).toBe('captureVideo')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 't', altKey: true, shiftKey: true }))).toBe('toggleTerminalTabs')
-    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', altKey: true, shiftKey: true }))).toBe('togglePaneReviewed')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'q', altKey: true }))).toBe('togglePaneReviewed')
   })
 
   it('maps Ctrl+Shift+arrow to directional pane movement', () => {

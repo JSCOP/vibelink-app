@@ -3,6 +3,7 @@ import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { CheckCircle2, Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
+import { formatKeyChord } from '../state/keybindings'
 import { useWorkspaceWindowActions } from '../layout/windowActions'
 import { hasWorkspaceWindowDragPayload, workspaceWindowDragMime } from '../layout/windowDrag'
 import type { WorkspaceWindowKind } from '../layout/workspaceLayoutModel'
@@ -35,6 +36,7 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
     ? Boolean(state.paneCompletionHighlights[paneId])
     : kind === 'terminal' && Object.keys(state.paneCompletionHighlights).length > 0)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
+  const reviewShortcut = useWorkspaceStore((state) => formatKeyChord(state.settings.keybindings.togglePaneReviewed))
   const [title, setTitle] = useState(api.title ?? params?.title ?? (kind === 'agent' ? 'VibeLink Agent' : 'Window'))
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
@@ -136,7 +138,7 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
       <div className="terminal-tab-actions" data-window-drag-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
         {isTerminalPane ? (
           <>
-            <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? 'Mark as not reviewed (Alt+Shift+C)' : 'Mark as reviewed (Alt+Shift+C)'} onClick={(event) => { activateAndStop(event); if (paneId) useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
+            <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? `Mark as not reviewed (${reviewShortcut})` : `Mark as reviewed (${reviewShortcut})`} onClick={(event) => { activateAndStop(event); if (paneId) useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
               <CheckCircle2 size={12} />
             </button>
             <button type="button" title="Split terminal pane right" onClick={(event) => { activateAndStop(event); if (paneId) void actions.splitTerminal(paneId, 'right') }}>

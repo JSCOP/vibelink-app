@@ -4,6 +4,7 @@ import { CheckCircle2, Maximize2, SplitSquareHorizontal, SplitSquareVertical, X 
 import { useWorkspaceActions } from '../layout/actions'
 import { hasPaneDragPayload, paneDragMime } from '../layout/paneDrag'
 import { useWorkspaceStore } from '../state/store'
+import { formatKeyChord } from '../state/keybindings'
 import { ProfileIcon } from './ProfileIcon'
 
 type TerminalTabProps = IDockviewPanelHeaderProps & {
@@ -35,6 +36,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
   const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
+  const reviewShortcut = useWorkspaceStore((state) => formatKeyChord(state.settings.keybindings.togglePaneReviewed))
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
   const dragStartBlockedRef = useRef(false)
@@ -155,7 +157,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
       )}
       {paneId ? (
         <div className="terminal-tab-actions" data-pane-drag-disabled="true" onMouseDown={activatePaneAndStop} onPointerDown={activatePaneAndStop}>
-          <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? 'Mark as not reviewed (Alt+Shift+C)' : 'Mark as reviewed (Alt+Shift+C)'} onClick={(event) => { activatePaneAndStop(event); useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
+          <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? `Mark as not reviewed (${reviewShortcut})` : `Mark as reviewed (${reviewShortcut})`} onClick={(event) => { activatePaneAndStop(event); useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
             <CheckCircle2 size={12} />
           </button>
           <button type="button" title="Split right" onClick={(event) => { activatePaneAndStop(event); void actions.splitPane(paneId, 'right') }}>
