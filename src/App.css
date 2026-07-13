@@ -1081,7 +1081,8 @@ button {
 }
 
 .terminal-panel-shell[data-pane-reviewed='true']::before {
-  box-shadow: inset 0 0 0 2px var(--vibelink-reviewed-pane-highlight), inset 0 0 14px color-mix(in srgb, var(--vibelink-reviewed-pane-highlight) 14%, transparent);
+  outline: 2px solid var(--vibelink-reviewed-pane-highlight);
+  outline-offset: -4px;
 }
 
 .workspace-window-terminal {
@@ -1210,7 +1211,6 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 
 .terminal-tab-reviewed {
   background: color-mix(in srgb, var(--vibelink-reviewed-pane-highlight) 10%, transparent);
-  box-shadow: inset 0 -2px 0 var(--vibelink-reviewed-pane-highlight);
 }
 
 .terminal-tab-reviewed .terminal-tab-icon,
