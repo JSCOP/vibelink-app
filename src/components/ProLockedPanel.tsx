@@ -8,7 +8,7 @@ export function ProLockedPanel({ feature }: { feature: string }) {
     <div className="pro-locked-panel">
       <LockKeyhole size={28} />
       <h2>{feature} requires VibeLink Pro</h2>
-      <p>Your saved layout and data stay in place. Activate Pro to restore this panel.</p>
+      <p>Your saved layout and data stay in place. Sign in with the Moobang account that owns Pro to restore this panel.</p>
       <button type="button" onClick={() => void invoke('open_path', { path: status?.purchaseUrl })}>Get VibeLink Pro</button>
     </div>
   )

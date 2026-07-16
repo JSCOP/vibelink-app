@@ -21,7 +21,7 @@ export function setupStepAutoPass(input: {
 export function setupStepTitle(step: SetupStepId): string {
   return ({
     welcome: 'Welcome',
-    license: 'License',
+    license: 'Account',
     agents: 'Agent CLIs',
     runtime: 'Hermes runtime',
     model: 'Model & auth',

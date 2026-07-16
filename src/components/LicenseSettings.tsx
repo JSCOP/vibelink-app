@@ -1,15 +1,18 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useState } from 'react'
 import { useWorkspaceStore } from '../state/store'
-import { LicenseActivationForm } from './LicenseActivationForm'
+import { AccountSignIn } from './AccountSignIn'
 
 export function LicenseSettings() {
   const license = useWorkspaceStore((state) => state.license)
   const deactivate = useWorkspaceStore((state) => state.deactivateLicenseDevice)
-  const forget = useWorkspaceStore((state) => state.forgetLocalLicense)
+  const revalidate = useWorkspaceStore((state) => state.revalidateLicense)
+  const signOut = useWorkspaceStore((state) => state.signOutAccount)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const status = license.status
+  const signedIn = Boolean(status?.email)
+  const plan = status?.plan ?? (status?.entitled ? 'pro' : 'core')
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
@@ -27,36 +30,46 @@ export function LicenseSettings() {
     <section className="settings-section license-settings">
       <div className="settings-section-heading">
         <div>
-          <h2>VibeLink Pro license</h2>
-          <p>License actions run immediately and are not affected by Settings Apply or Cancel.</p>
+          <h2>Moobang account</h2>
+          <p>Account actions run immediately and are not affected by Settings Apply or Cancel.</p>
         </div>
-        <span className={`license-state license-state-${status?.state ?? 'loading'}`}>{status?.state ?? 'loading'}</span>
+        <span className={`license-state license-state-${status?.state ?? 'loading'}`}>{signedIn ? plan : status?.state ?? 'loading'}</span>
       </div>
 
-      <LicenseActivationForm />
+      {!signedIn ? <AccountSignIn /> : (
+        <div className="license-summary">
+          <strong>{status?.email}</strong>
+          <span>{status?.message}</span>
+          {status?.validatedAt ? <span>Validated {new Date(status.validatedAt).toLocaleString()}</span> : null}
+          {status?.offlineGraceUntil ? <span>Offline grace until {new Date(status.offlineGraceUntil).toLocaleString()}</span> : null}
+        </div>
+      )}
 
-      <div className="license-device-list">
-        {status?.devices.map((device) => (
-          <div className="license-device-row" key={device.activationId}>
-            <div>
-              <strong>{device.deviceName}{device.current ? ' · Current' : ''}</strong>
-              <span>{device.appVersion} · {device.status}</span>
+      {signedIn && status?.devices.length ? (
+        <div className="license-device-list">
+          {status.devices.map((device) => (
+            <div className="license-device-row" key={device.activationId}>
+              <div>
+                <strong>{device.deviceName}{device.current ? ' · Current' : ''}</strong>
+                <span>{device.appVersion} · {device.status}</span>
+              </div>
+              {device.status !== 'deactivated' ? (
+                <button disabled={busy} onClick={() => void run(() => deactivate(device.activationId))}>Remove</button>
+              ) : null}
             </div>
-            {device.status !== 'deactivated' ? (
-              <button disabled={busy} onClick={() => void run(() => deactivate(device.activationId))}>Remove</button>
-            ) : null}
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : null}
 
-      <div className="license-actions">
-        {!status?.entitled ? <button onClick={() => void invoke('open_path', { path: status?.purchaseUrl })}>Get VibeLink Pro</button> : null}
-        {status && ['invalid', 'revoked', 'configurationError'].includes(status.state) ? (
+      {signedIn ? (
+        <div className="license-actions">
+          <button disabled={busy} onClick={() => void run(revalidate)}>Refresh account</button>
+          {!status?.entitled ? <button onClick={() => void invoke('open_path', { path: status?.purchaseUrl })}>Buy VibeLink Pro</button> : null}
           <button disabled={busy} onClick={() => {
-            if (window.confirm('Forget the local credential? This does not release a provider device slot.')) void run(forget)
-          }}>Forget local</button>
-        ) : null}
-      </div>
+            if (window.confirm('Sign out of this Moobang account on this device?')) void run(signOut)
+          }}>Sign out</button>
+        </div>
+      ) : null}
       {message ? <p className="settings-error">{message}</p> : null}
     </section>
   )

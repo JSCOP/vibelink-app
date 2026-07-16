@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { sendToPane, submitAgentPrompt } from '../ipc/panes'
-import { activateLicense, deactivateLicenseDevice, forgetLocalLicense, getLicenseStatus, revalidateLicense } from '../ipc/license'
+import { deactivateLicenseDevice, getLicenseStatus, revalidateLicense, signOutAccount as signOutAccountIpc } from '../ipc/license'
 import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
 import { getHermesRuntimeStatus, installHermesRuntime } from '../ipc/hermesSetup'
 import { create } from 'zustand'
@@ -77,10 +77,9 @@ type WorkspaceState = {
   recordCapture: (paneId: string | undefined, path: string) => void
   resolveCaptureMarker: (paneId: string, n: number) => string | undefined
   refreshLicense: () => Promise<LicenseStatus>
-  activateLicense: (licenseKey: string) => Promise<LicenseStatus>
   revalidateLicense: () => Promise<LicenseStatus>
   deactivateLicenseDevice: (activationId: string) => Promise<LicenseStatus>
-  forgetLocalLicense: () => Promise<LicenseStatus>
+  signOutAccount: () => Promise<LicenseStatus>
   bootstrap: () => Promise<void>
   refreshAgentClis: () => Promise<AgentCliStatus[]>
   refreshSessions: () => Promise<void>
@@ -205,7 +204,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
             .finally(() => { hermesRuntimeRepair = undefined })
         }
       }
-      if (licenseStatus.entitled) void get().revalidateLicense()
+      if (licenseStatus.email) void get().revalidateLicense()
     } catch (error) {
       set({ status: 'error', error: String(error) })
     }
@@ -223,11 +222,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return status
   },
 
-  activateLicense: async (licenseKey: string) => {
-    const status = await activateLicense(licenseKey)
-    set({ license: { ready: true, status } })
-    return status
-  },
 
   revalidateLicense: async () => {
     const status = await revalidateLicense()
@@ -241,8 +235,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return status
   },
 
-  forgetLocalLicense: async () => {
-    const status = await forgetLocalLicense()
+  signOutAccount: async () => {
+    const status = await signOutAccountIpc()
     set({ license: { ready: true, status } })
     return status
   },

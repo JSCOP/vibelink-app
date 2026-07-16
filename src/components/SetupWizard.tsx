@@ -7,7 +7,7 @@ import { getHermesRuntimeStatus, installHermesRuntime } from '../ipc/hermesSetup
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 import type { HermesRuntimeStatus } from '../ipc/types'
 import { useWorkspaceStore } from '../state/store'
-import { LicenseActivationForm } from './LicenseActivationForm'
+import { AccountSignIn } from './AccountSignIn'
 import { setupStepAutoPass, setupStepIds, setupStepTitle } from './setupWizardSteps'
 
 type SetupWizardProps = {
@@ -223,8 +223,8 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
           {step === 'license' ? (
             <div className="setup-wizard-panel">
-              <LicenseActivationForm onActivated={next} showRevalidate={false} />
-              <p>Core remains free for terminal workspaces. Agent, Kanban, Hermes, and MCP operations require Pro.</p>
+              <AccountSignIn onActivated={next} />
+              <p>Sign in to sync your Pro license. Core is free without an account.</p>
               <div className="setup-wizard-actions">
                 <button type="button" className="primary-action" onClick={next}>{entitled ? 'Continue' : 'Continue with Core (free)'}</button>
               </div>
@@ -317,7 +317,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             <div className="setup-wizard-panel">
               <h3>VibeLink is ready.</h3>
               <ul>
-                <li>{entitled ? 'Pro license active' : 'Core mode selected'}</li>
+                <li>{license.status?.email ? `${license.status.plan === 'pro' ? 'Pro' : 'Core'} account connected` : 'Core mode selected'}</li>
                 <li>{agentClis.filter((status) => status.installed).length} agent CLI(s) detected</li>
                 <li>Hermes runtime {runtime?.installed ? 'installed' : 'not installed'}</li>
                 <li>MCP {mcpReport?.initializeOk ? `verified with ${mcpReport.toolCount} tools` : 'not verified'}</li>
@@ -332,7 +332,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 }
 
 function ProNotice() {
-  return <p className="setup-pro-notice">VibeLink Pro license required. Read-only checks remain available.</p>
+  return <p className="setup-pro-notice">A Moobang account with VibeLink Pro is required. Read-only checks remain available.</p>
 }
 
 

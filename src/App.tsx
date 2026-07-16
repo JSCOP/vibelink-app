@@ -131,10 +131,10 @@ function App() {
   }, [bootstrap])
 
   useEffect(() => {
-    if (!license.ready || !license.status?.activationId) return
+    if (!license.ready || !license.status?.email) return
     const timer = window.setInterval(() => { void revalidateLicense() }, 12 * 60 * 60 * 1000)
     return () => window.clearInterval(timer)
-  }, [license.ready, license.status?.activationId, revalidateLicense])
+  }, [license.ready, license.status?.email, revalidateLicense])
 
   useEffect(() => {
     TerminalManager.setLinkActions({

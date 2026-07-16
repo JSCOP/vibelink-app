@@ -27,7 +27,7 @@ type SettingsDialogProps = {
 }
 
 type SettingsSection =
-  | 'license'
+  | 'account'
   | 'model'
   | 'chat'
   | 'appearance'
@@ -44,7 +44,7 @@ type SettingsSection =
   | 'about'
 
 const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[] = [
-  { id: 'license', label: 'License', icon: KeyRound },
+  { id: 'account', label: 'Account', icon: KeyRound },
   { id: 'model', label: 'Model', icon: Bot },
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -93,7 +93,7 @@ const profileKindOptions: { value: ProfileKind; label: string }[] = [
 
 export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
-  const [activeSection, setActiveSection] = useState<SettingsSection>('license')
+  const [activeSection, setActiveSection] = useState<SettingsSection>('account')
   const [search, setSearch] = useState('')
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
   const [defaultCaptureDir, setDefaultCaptureDir] = useState('')
@@ -375,7 +375,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
           </header>
 
           <div className="vibelink-settings-scroll">
-            {activeSection === 'license' ? <LicenseSettings /> : null}
+            {activeSection === 'account' ? <LicenseSettings /> : null}
 
             {activeSection === 'model' ? (
               <SettingsGroup title="Main model" description="Native Hermes owns provider, login, and model configuration. VibeLink displays the active workspace state.">
