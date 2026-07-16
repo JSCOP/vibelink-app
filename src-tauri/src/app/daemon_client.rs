@@ -3,7 +3,7 @@ use crate::protocol::{
     read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req, TaskSignal,
 };
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam_channel::{bounded, unbounded, Sender};
+use crossbeam_channel::{bounded, Sender, TrySendError};
 use interprocess::local_socket::{
     prelude::*, RecvHalf as LocalSocketRecvHalf, SendHalf as LocalSocketSendHalf,
 };
@@ -28,6 +28,10 @@ use super::spawn_daemon::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(10);
+// A renderer can stop reading while WebView2 is busy or suspended. Keep each
+// local client bounded; overflow is counted and surfaced after it catches up.
+
+const TERMINAL_WS_QUEUE_CAPACITY: usize = 128;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -63,11 +67,16 @@ struct ClientShared {
     pending: Mutex<HashMap<Req, Sender<DaemonToClient>>>,
     output_channel: Mutex<Option<Channel<TerminalEvent>>>,
     ws_port: u16,
-    ws_clients: Mutex<Vec<Sender<Arc<[u8]>>>>,
+    ws_clients: Mutex<Vec<TerminalWsClient>>,
     next_req: AtomicU64,
     reconnecting: AtomicBool,
     shutting_down: AtomicBool,
     connection_generation: AtomicU64,
+}
+
+struct TerminalWsClient {
+    sender: Sender<Arc<[u8]>>,
+    dropped_bytes: HashMap<String, u64>,
 }
 
 impl DaemonClient {
@@ -397,12 +406,15 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
                             Ok(ws) => ws,
                             Err(_) => return,
                         };
-                        let (tx, rx) = unbounded::<Arc<[u8]>>();
+                        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_CAPACITY);
                         shared
                             .ws_clients
                             .lock()
                             .expect("ws clients mutex poisoned")
-                            .push(tx);
+                            .push(TerminalWsClient {
+                                sender: tx,
+                                dropped_bytes: HashMap::new(),
+                            });
                         while let Ok(frame) = rx.recv() {
                             if ws
                                 .send(tungstenite::Message::Binary(frame.to_vec().into()))
@@ -430,7 +442,46 @@ fn frame_output(pane_id: &str, data: &[u8]) -> Vec<u8> {
 fn broadcast_output(shared: &ClientShared, pane_id: &str, data: &[u8]) {
     let frame: Arc<[u8]> = Arc::from(frame_output(pane_id, data).into_boxed_slice());
     let mut clients = shared.ws_clients.lock().expect("ws clients mutex poisoned");
-    clients.retain(|tx| tx.send(Arc::clone(&frame)).is_ok());
+    clients.retain_mut(|client| {
+        if let Some(dropped_bytes) = client.dropped_bytes.remove(pane_id) {
+            let message = format!(
+                "\r\n\x1b[33m[VibeLink: terminal output trimmed ({dropped_bytes} bytes) to keep the app responsive]\x1b[0m\r\n"
+            );
+            let notice: Arc<[u8]> =
+                Arc::from(frame_output(pane_id, message.as_bytes()).into_boxed_slice());
+            match client.sender.try_send(notice) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    client.dropped_bytes.insert(pane_id.to_string(), dropped_bytes);
+                    record_dropped_output(client, pane_id, data.len());
+                    return true;
+                }
+                Err(TrySendError::Disconnected(_)) => return false,
+            }
+        }
+
+        match client.sender.try_send(Arc::clone(&frame)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                record_dropped_output(client, pane_id, data.len());
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    });
+}
+
+fn record_dropped_output(client: &mut TerminalWsClient, pane_id: &str, bytes: usize) {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    if let Some(total) = client.dropped_bytes.get_mut(pane_id) {
+        *total = total.saturating_add(bytes);
+    } else {
+        warn!(
+            pane_id,
+            "terminal websocket client fell behind; trimming output"
+        );
+        client.dropped_bytes.insert(pane_id.to_string(), bytes);
+    }
 }
 
 fn remove_pending_request(shared: &ClientShared, req: Req) {
@@ -592,13 +643,16 @@ mod tests {
     #[test]
     fn output_messages_route_to_websocket_clients() {
         let (client, _peer) = test_client();
-        let (tx, rx) = unbounded::<Arc<[u8]>>();
+        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_CAPACITY);
         client
             .shared
             .ws_clients
             .lock()
             .expect("ws clients mutex")
-            .push(tx);
+            .push(TerminalWsClient {
+                sender: tx,
+                dropped_bytes: HashMap::new(),
+            });
         let pane_id = Uuid::new_v4();
         let data = b"hello".to_vec();
 
@@ -615,6 +669,61 @@ mod tests {
         let decoded_id = std::str::from_utf8(&frame[2..2 + id_len]).expect("pane id");
         assert_eq!(decoded_id, pane_id.to_string());
         assert_eq!(&frame[2 + id_len..], data.as_slice());
+    }
+
+    #[test]
+    fn slow_websocket_client_queue_is_bounded() {
+        let (client, _peer) = test_client();
+        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_CAPACITY);
+        client
+            .shared
+            .ws_clients
+            .lock()
+            .expect("ws clients mutex")
+            .push(TerminalWsClient {
+                sender: tx,
+                dropped_bytes: HashMap::new(),
+            });
+        let pane_id = Uuid::new_v4();
+        let data = vec![b'x'; 64 * 1024];
+
+        for _ in 0..300 {
+            route_daemon_message(
+                &client.shared,
+                DaemonToClient::Output {
+                    pane_id,
+                    data: data.clone(),
+                },
+            );
+        }
+
+        assert_eq!(rx.len(), TERMINAL_WS_QUEUE_CAPACITY);
+        let dropped_bytes = client.shared.ws_clients.lock().expect("ws clients mutex")[0]
+            .dropped_bytes
+            .get(&pane_id.to_string())
+            .copied()
+            .expect("dropped output count");
+        assert!(dropped_bytes > 0);
+
+        while rx.try_recv().is_ok() {}
+        route_daemon_message(
+            &client.shared,
+            DaemonToClient::Output {
+                pane_id,
+                data: b"tail".to_vec(),
+            },
+        );
+
+        let notice = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("trim notice");
+        let notice_id_len = u16::from_be_bytes([notice[0], notice[1]]) as usize;
+        let notice_text = std::str::from_utf8(&notice[2 + notice_id_len..]).expect("notice utf8");
+        assert!(notice_text.contains("terminal output trimmed"));
+
+        let tail = rx.recv_timeout(Duration::from_secs(1)).expect("tail frame");
+        let tail_id_len = u16::from_be_bytes([tail[0], tail[1]]) as usize;
+        assert_eq!(&tail[2 + tail_id_len..], b"tail");
     }
 
     #[test]
