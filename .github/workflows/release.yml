@@ -15,7 +15,7 @@ jobs:
       VIBELINK_LICENSE_API_URL: https://vibelink.moobang.net
       STORE_IDENTITY_NAME: ${{ vars.STORE_IDENTITY_NAME }}
       STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER }}
-      STORE_PUBLISHER_DISPLAY_NAME: 무방
+      STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.STORE_PUBLISHER_DISPLAY_NAME }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
