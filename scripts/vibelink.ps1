@@ -290,7 +290,9 @@ function Invoke-CiInstaller {
   if ($packageVersion -ne $cargoVersion -or $packageVersion -ne $tauriVersion) {
     throw "Version mismatch: package.json=$packageVersion, Cargo.toml=$cargoVersion, tauri.conf.json=$tauriVersion"
   }
-  $arguments = @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
+  # Pass the flag explicitly: some runners export CI=1, which Tauri's boolean
+  # environment parser rejects even though the CLI flag itself is valid.
+  $arguments = @('exec', 'tauri', 'build', '--ci', '--bundles', 'msi', 'nsis')
   if ($ConfigOverlay.Trim().Length -gt 0) {
     $overlay = [System.IO.Path]::GetFullPath($ConfigOverlay)
     if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) { throw "Config overlay not found: $overlay" }
