@@ -42,6 +42,10 @@ vi.mock('@xterm/xterm', () => {
     refresh(): void {}
     scrollToBottom(): void {}
     write(): void {}
+    resize(cols: number, rows: number): void {
+      this.cols = cols
+      this.rows = rows
+    }
     dispose(): void {}
   }
   return { Terminal: MockTerminal }
@@ -71,6 +75,7 @@ vi.mock('@xterm/addon-search', () => ({ SearchAddon: class {} }))
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: class {} }))
 
 import { TerminalManager } from './TerminalManager'
+import { useWorkspaceStore } from '../state/store'
 
 type TerminalWithDataHandler = {
   dataHandler: ((data: string) => void) | undefined
@@ -91,6 +96,7 @@ function makeContainer(): HTMLElement {
 
 beforeEach(() => {
   invokeMock.mockClear()
+  useWorkspaceStore.setState({ remoteWidePanes: {} })
 })
 
 class StubResizeObserver {
@@ -156,6 +162,22 @@ describe('TerminalManager pre-session input buffering', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('attach_pane', { sessionId: 'session-3', paneId })
     expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-3', paneId, data: '\x1b[1;1R' })
+
+    TerminalManager.dispose(paneId)
+  })
+})
+
+describe('TerminalManager remote pane sizing', () => {
+  it('adopts wider remote geometry and clears the badge at container-fit width', () => {
+    const paneId = 'pane-remote-wide'
+    const container = makeContainer()
+    TerminalManager.attach(paneId, container, { sessionId: 'session-wide' })
+
+    TerminalManager.adoptRemoteResize(paneId, 140, 24)
+    expect(useWorkspaceStore.getState().remoteWidePanes[paneId]).toBe(140)
+
+    TerminalManager.adoptRemoteResize(paneId, 80, 24)
+    expect(useWorkspaceStore.getState().remoteWidePanes[paneId]).toBeUndefined()
 
     TerminalManager.dispose(paneId)
   })

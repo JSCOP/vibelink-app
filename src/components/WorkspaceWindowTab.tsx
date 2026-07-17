@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { CheckCircle2, Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
+import { RemoteWideBadge } from './TerminalTab'
 import { useWorkspaceStore } from '../state/store'
 import { formatKeyChord } from '../state/keybindings'
 import { useWorkspaceWindowActions } from '../layout/windowActions'
@@ -135,6 +136,7 @@ export function WorkspaceWindowTab({ api, params }: WorkspaceWindowTabProps) {
           {title}
         </span>
       )}
+      {isTerminalPane && paneId ? <RemoteWideBadge paneId={paneId} /> : null}
       <div className="terminal-tab-actions" data-window-drag-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
         {isTerminalPane ? (
           <>

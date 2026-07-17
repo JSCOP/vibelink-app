@@ -13,6 +13,7 @@ import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
 import { agentActivityTracker, shouldTrackAgentInput, type AgentActivityActions } from './agentActivity'
+import { useWorkspaceStore } from '../state/store'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
@@ -69,6 +70,7 @@ type Entry = {
   lastFitRect?: { width: number; height: number }
   lastSentPtyCols?: number
   lastSentPtyRows?: number
+  remoteWide?: boolean
   container?: HTMLElement
   titleDisposable?: { dispose: () => void }
   linkDisposables?: { dispose(): void }[]
@@ -262,6 +264,33 @@ class TerminalManagerImpl {
       void invoke('attach_pane', { sessionId, paneId })
       this.flushPendingInput(entry)
     }
+  }
+
+  adoptRemoteResize(paneId: string, cols: number, rows: number): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    const proposal = entry.fit.proposeDimensions()
+    if (!proposal || cols > proposal.cols) {
+      entry.remoteWide = true
+      entry.term.resize(cols, rows)
+      useWorkspaceStore.getState().setRemoteWide(paneId, cols)
+      this.redrawAfterNextFrame(entry)
+      return
+    }
+
+    entry.remoteWide = false
+    useWorkspaceStore.getState().setRemoteWide(paneId, null)
+    if (this.safeFit(entry, true)) this.redrawAfterNextFrame(entry)
+  }
+
+  exitRemoteWide(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    useWorkspaceStore.getState().setRemoteWide(paneId, null)
+    if (!entry) return
+    entry.remoteWide = false
+    if (!this.safeFit(entry, true)) return
+    this.redrawAfterNextFrame(entry)
+    this.syncEntryPtySize(entry)
   }
 
   /** Deliver input held while the pane had no session (panel-first spawn).
@@ -472,6 +501,7 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     agentActivityTracker.clear(paneId)
+    useWorkspaceStore.getState().setRemoteWide(paneId, null)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     this.pendingPass.delete(paneId)
@@ -556,6 +586,7 @@ class TerminalManagerImpl {
   // the content — so every fit path must go through this guard, not entry.fit.fit()
   // directly. Returns true when a fit was applied (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
+    if (entry.remoteWide) return true
     const proposed = entry.fit.proposeDimensions()
     if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
     if (force || entry.term.cols !== proposed.cols || entry.term.rows !== proposed.rows) entry.fit.fit()
@@ -794,6 +825,7 @@ class TerminalManagerImpl {
   }
 
   private syncEntryPtySize(entry: Entry): void {
+    if (entry.remoteWide) return
     const sessionId = entry.sessionId
     if (!sessionId || !entry.opened) return
     this.flushOutput(entry)

@@ -45,10 +45,24 @@ pub enum ClientMessage {
         #[serde(default)]
         req_id: Option<u64>,
     },
+    SetPaneSize {
+        pane_id: String,
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        req_id: Option<u64>,
+    },
+    ClearPaneSize {
+        pane_id: String,
+        #[serde(default)]
+        req_id: Option<u64>,
+    },
     Ping {
         #[serde(default)]
         req_id: Option<u64>,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -110,6 +124,7 @@ pub enum ServerMessage {
         desktop_name: String,
         protocol_version: u16,
         app_version: String,
+        capabilities: Vec<String>,
     },
     Error {
         code: String,
@@ -188,6 +203,50 @@ mod tests {
         )
         .expect("parse hello");
         assert!(matches!(parsed, ClientMessage::Hello { protocol_version: 1, .. }));
+    }
+
+    #[test]
+    fn pane_size_messages_and_unknown_types_are_additive() {
+        let set: ClientMessage = serde_json::from_str(
+            r#"{"type":"setPaneSize","paneId":"pane-1","cols":200,"rows":32}"#,
+        )
+        .expect("parse set pane size");
+        assert!(matches!(
+            set,
+            ClientMessage::SetPaneSize {
+                pane_id,
+                cols: 200,
+                rows: 32,
+                req_id: None,
+            } if pane_id == "pane-1"
+        ));
+
+        let clear: ClientMessage = serde_json::from_str(
+            r#"{"type":"clearPaneSize","paneId":"pane-1"}"#,
+        )
+        .expect("parse clear pane size");
+        assert!(matches!(
+            clear,
+            ClientMessage::ClearPaneSize { pane_id, req_id: None } if pane_id == "pane-1"
+        ));
+
+        let unknown: ClientMessage =
+            serde_json::from_str(r#"{"type":"futureThing"}"#).expect("parse unknown message");
+        assert!(matches!(unknown, ClientMessage::Unknown));
+    }
+
+    #[test]
+    fn authed_capabilities_use_camel_case_contract() {
+        let value = serde_json::to_value(ServerMessage::Authed {
+            device_id: "device-1".into(),
+            device_token: None,
+            desktop_name: "Desktop".into(),
+            protocol_version: 1,
+            app_version: "0.0.0".into(),
+            capabilities: vec!["paneSize".into()],
+        })
+        .expect("serialize authed");
+        assert_eq!(value["capabilities"], serde_json::json!(["paneSize"]));
     }
 
     #[test]

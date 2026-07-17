@@ -42,6 +42,12 @@ pub enum TerminalEvent {
         #[serde(rename = "exitCode")]
         exit_code: Option<i32>,
     },
+    Resized {
+        #[serde(rename = "paneId")]
+        pane_id: String,
+        cols: u16,
+        rows: u16,
+    },
     SessionChanged {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -380,7 +386,6 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
             DaemonToClient::Output { pane_id, data } => {
                 broadcast_output(shared, &pane_id.to_string(), &data);
             }
-            DaemonToClient::PaneResized { .. } => {}
             other => {
                 if let Err(err) = forward_terminal_event(shared, other) {
                     warn!(?err, "dropping terminal event");
@@ -551,6 +556,11 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
         DaemonToClient::PaneExited { pane_id, exit_code } => TerminalEvent::Exited {
             pane_id: pane_id.to_string(),
             exit_code,
+        },
+        DaemonToClient::PaneResized { pane_id, cols, rows, .. } => TerminalEvent::Resized {
+            pane_id: pane_id.to_string(),
+            cols,
+            rows,
         },
         DaemonToClient::SessionChanged { session_id } => TerminalEvent::SessionChanged {
             session_id: session_id.to_string(),
@@ -738,6 +748,19 @@ mod tests {
         assert_eq!(exited["paneId"], "pane-2");
         assert_eq!(exited["exitCode"], 7);
         assert!(exited.get("pane_id").is_none());
+
+        let resized = serde_json::to_value(TerminalEvent::Resized {
+            pane_id: "pane-2".to_string(),
+            cols: 200,
+            rows: 32,
+        })
+        .expect("serialize resized terminal event");
+
+        assert_eq!(resized["kind"], "resized");
+        assert_eq!(resized["paneId"], "pane-2");
+        assert_eq!(resized["cols"], 200);
+        assert_eq!(resized["rows"], 32);
+        assert!(resized.get("pane_id").is_none());
         assert!(exited.get("exit_code").is_none());
 
         let session_changed = serde_json::to_value(TerminalEvent::SessionChanged {

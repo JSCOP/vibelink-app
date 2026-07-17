@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use local_ip_address::list_afinet_netifas;
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, net::{IpAddr, TcpListener}, path::PathBuf, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::Duration};
+use std::{collections::{HashMap, HashSet}, net::{IpAddr, TcpListener}, path::PathBuf, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::Duration};
 use tungstenite::Message;
 use uuid::Uuid;
 
@@ -34,12 +34,23 @@ struct Runtime {
     handle: JoinHandle<()>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PaneSizeOverride {
+    pub session_id: Uuid,
+    pub original_cols: u16,
+    pub original_rows: u16,
+    pub target_cols: u16,
+    pub target_rows: u16,
+    pub owners: HashSet<Uuid>,
+}
+
 pub(crate) struct RemoteShared {
     pub devices: Mutex<DeviceStore>,
     pub appearance: RwLock<Value>,
     pub workspace_order: RwLock<Vec<String>>,
     pub workspace_alerts: RwLock<HashMap<String, usize>>,
     pub client_senders: Mutex<HashMap<Uuid, Sender<Message>>>,
+    pub pane_size_overrides: Mutex<HashMap<Uuid, PaneSizeOverride>>,
     pub active_clients: AtomicUsize,
 }
 
@@ -71,6 +82,7 @@ impl RemoteServer {
                 workspace_order: RwLock::new(Vec::new()),
                 workspace_alerts: RwLock::new(HashMap::new()),
                 client_senders: Mutex::new(HashMap::new()),
+                pane_size_overrides: Mutex::new(HashMap::new()),
                 active_clients: AtomicUsize::new(0),
             }),
         })

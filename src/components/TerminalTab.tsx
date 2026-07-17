@@ -6,6 +6,7 @@ import { hasPaneDragPayload, paneDragMime } from '../layout/paneDrag'
 import { useWorkspaceStore } from '../state/store'
 import { formatKeyChord } from '../state/keybindings'
 import { ProfileIcon } from './ProfileIcon'
+import { TerminalManager } from '../terminal/TerminalManager'
 
 type TerminalTabProps = IDockviewPanelHeaderProps & {
   api: IDockviewPanelHeaderProps['api'] & {
@@ -27,6 +28,27 @@ const dragDisabledSelector = 'button, input, textarea, select, [contenteditable=
 function isPaneDragDisabledTarget(target: EventTarget | null): boolean {
   const closest = (target as { closest?: (selector: string) => Element | null } | null)?.closest
   return typeof closest === 'function' && Boolean(closest.call(target, dragDisabledSelector))
+}
+
+export function RemoteWideBadge({ paneId }: { paneId: string }) {
+  const cols = useWorkspaceStore((state) => state.remoteWidePanes[paneId])
+  if (!cols) return null
+  return (
+    <button
+      type="button"
+      className="remote-wide-badge"
+      data-pane-drag-disabled="true"
+      data-window-drag-disabled="true"
+      title="모바일 와이드 뷰 사용 중 — 클릭하면 원래 크기로 복원"
+      onClick={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        TerminalManager.exitRemoteWide(paneId)
+      }}
+    >
+      모바일 뷰 {cols}col
+    </button>
+  )
 }
 
 export function TerminalTab({ api, params }: TerminalTabProps) {
@@ -155,6 +177,7 @@ export function TerminalTab({ api, params }: TerminalTabProps) {
           {title}
         </span>
       )}
+      {paneId ? <RemoteWideBadge paneId={paneId} /> : null}
       {paneId ? (
         <div className="terminal-tab-actions" data-pane-drag-disabled="true" onMouseDown={activatePaneAndStop} onPointerDown={activatePaneAndStop}>
           <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} title={reviewed ? `Mark as not reviewed (${reviewShortcut})` : `Mark as reviewed (${reviewShortcut})`} onClick={(event) => { activatePaneAndStop(event); useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>

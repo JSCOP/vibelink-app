@@ -1257,6 +1257,24 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 }
 
 
+.remote-wide-badge {
+  background: color-mix(in srgb, var(--vibelink-blue) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-blue) 48%, var(--vibelink-border-soft));
+  border-radius: 999px;
+  color: var(--vibelink-blue);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: 700 10px/1 var(--vibelink-sans);
+  height: 20px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+
+.remote-wide-badge:hover {
+  background: color-mix(in srgb, var(--vibelink-blue) 20%, transparent);
+  color: var(--vibelink-text);
+}
+
 .terminal-tab-actions {
   display: flex;
   flex: 0 0 auto;
@@ -3608,6 +3626,13 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 .pro-locked-panel h2 { margin: 0; color: var(--vibelink-text); }
 .pro-locked-panel p { max-width: 420px; margin: 0; }
 .pro-upsell-dialog { max-width: 480px; }
+.app-shell-locked { display: grid; place-items: center; width: 100vw; height: 100vh; background: var(--vibelink-bg); }
+.app-locked-screen { display: grid; place-items: center; width: 100%; height: 100%; padding: 32px; }
+.app-locked-card { display: grid; justify-items: center; gap: 14px; max-width: 460px; text-align: center; color: var(--vibelink-muted); border: 1px solid var(--vibelink-border); border-radius: 16px; padding: 40px 32px; background: var(--vibelink-panel); }
+.app-locked-card h1 { margin: 0; color: var(--vibelink-text); font-size: 24px; }
+.app-locked-card p { margin: 0; max-width: 400px; }
+.app-locked-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.app-locked-account { font-size: 12px; }
 
 .remote-settings {
   display: grid;

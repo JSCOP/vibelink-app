@@ -11,6 +11,7 @@ type TaskSignal =
 
 type TerminalEvent =
   | { kind: 'exited'; paneId: string; exitCode?: number | null }
+  | { kind: 'resized'; paneId: string; cols: number; rows: number }
   | { kind: 'sessionChanged'; sessionId: string }
   | { kind: 'task'; sessionId: string; signal: TaskSignal }
   | { kind: 'connectionLost'; message: string }
@@ -27,6 +28,8 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
   const channel = new Channel<TerminalEvent>((event) => {
     if (event.kind === 'exited') {
       TerminalManager.markExited(event.paneId, event.exitCode)
+    } else if (event.kind === 'resized') {
+      TerminalManager.adoptRemoteResize(event.paneId, event.cols, event.rows)
     } else if (event.kind === 'sessionChanged') {
       scheduleSessionReload(event.sessionId)
     } else if (event.kind === 'task') {

@@ -1,10 +1,10 @@
-use super::{layout_order::pane_order, protocol::{encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage, WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL}, server::{desktop_name, RemoteShared}};
+use super::{layout_order::pane_order, protocol::{encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage, WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL}, server::{desktop_name, PaneSizeOverride, RemoteShared}};
 use crate::{app::spawn_daemon, protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneMeta, ReplyResult, SessionMeta}};
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 use interprocess::local_socket::prelude::*;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
-use std::{io, net::TcpStream, sync::Arc, thread, time::{Duration, Instant}};
+use std::{collections::HashMap, io, net::TcpStream, sync::Arc, thread, time::{Duration, Instant}};
 use tungstenite::{handshake::server::{Request, Response}, Message, WebSocket};
 use uuid::Uuid;
 
@@ -42,6 +42,7 @@ pub fn handle_connection(stream: TcpStream, tls_config: Arc<ServerConfig>, share
         desktop_name: desktop_name(),
         protocol_version: PROTOCOL_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
+        capabilities: vec!["paneSize".to_string()],
     })?;
 
     ws.get_mut().sock.set_read_timeout(Some(POLL_TIMEOUT))?;
@@ -50,7 +51,10 @@ pub fn handle_connection(stream: TcpStream, tls_config: Arc<ServerConfig>, share
     let (push_tx, push_rx) = bounded(DAEMON_QUEUE_CAPACITY);
     shared.client_senders.lock().expect("remote clients mutex").insert(client_key, push_tx);
 
-    let result = run_authenticated(&mut ws, &mut daemon_writer, &daemon_rx, &push_rx, &shared);
+    let result = run_authenticated(&mut ws, &mut daemon_writer, &daemon_rx, &push_rx, &shared, client_key);
+    if let Err(error) = restore_owned_overrides(&shared, client_key, &mut daemon_writer, None) {
+        tracing::warn!(?error, %client_key, "failed to restore remote pane sizes during disconnect");
+    }
     shared.client_senders.lock().expect("remote clients mutex").remove(&client_key);
     result
 }
@@ -115,10 +119,12 @@ fn run_authenticated(
     daemon_rx: &Receiver<DaemonToClient>,
     push_rx: &Receiver<Message>,
     shared: &RemoteShared,
+    client_key: Uuid,
 ) -> Result<()> {
     let mut next_req = 1_u64;
     let mut attached: Option<Uuid> = None;
     let mut attached_panes: Vec<Uuid> = Vec::new();
+    let mut pane_geometry: HashMap<Uuid, (u16, u16)> = HashMap::new();
     let appearance = shared.appearance.read().expect("remote appearance lock").clone();
     send_json(ws, &ServerMessage::Appearance { payload: appearance })?;
     let sessions = list_sessions(daemon_writer, daemon_rx, ws, &mut next_req)?;
@@ -130,7 +136,7 @@ fn run_authenticated(
         while let Ok(message) = push_rx.try_recv() { ws.send(message)?; }
         loop {
             match daemon_rx.try_recv() {
-                Ok(message) => handle_daemon_event(ws, daemon_writer, daemon_rx, shared, &mut next_req, attached, &mut attached_panes, message)?,
+                Ok(message) => handle_daemon_event(ws, daemon_writer, daemon_rx, shared, &mut next_req, attached, &mut attached_panes, &mut pane_geometry, message)?,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => bail!("remote daemon connection closed"),
             }
@@ -139,7 +145,7 @@ fn run_authenticated(
         match ws.read() {
             Ok(Message::Text(text)) => {
                 let message: ClientMessage = serde_json::from_str(text.as_ref()).context("parse remote message")?;
-                handle_client_message(ws, daemon_writer, daemon_rx, shared, &mut next_req, &mut attached, &mut attached_panes, message)?;
+                handle_client_message(ws, daemon_writer, daemon_rx, shared, client_key, &mut next_req, &mut attached, &mut attached_panes, &mut pane_geometry, message)?;
             }
             Ok(Message::Pong(_)) => last_pong = Instant::now(),
             Ok(Message::Ping(data)) => { ws.send(Message::Pong(data))?; }
@@ -164,9 +170,11 @@ fn handle_client_message(
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_rx: &Receiver<DaemonToClient>,
     shared: &RemoteShared,
+    client_key: Uuid,
     next_req: &mut u64,
     attached: &mut Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
+    pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
     message: ClientMessage,
 ) -> Result<()> {
     match message {
@@ -177,22 +185,32 @@ fn handle_client_message(
         }
         ClientMessage::AttachWorkspace { session_id, req_id } => {
             let session_id = parse_uuid(&session_id, ws, req_id)?;
-            if let Some(previous) = attached.replace(session_id) {
+            if let Some(previous) = *attached {
+                restore_owned_overrides(shared, client_key, daemon_writer, Some(previous))?;
                 write_frame(daemon_writer, &ClientToDaemon::DetachSession { session_id: previous })?;
             }
             let (layout, panes) = attach_session(daemon_writer, daemon_rx, ws, next_req, session_id)?;
             let order = pane_order(layout.as_deref(), &panes);
-            let pane_by_id: std::collections::HashMap<_, _> = panes.into_iter().map(|pane| (pane.id, pane)).collect();
+            let pane_by_id: HashMap<_, _> = panes.into_iter().map(|pane| (pane.id, pane)).collect();
             let ordered: Vec<_> = order.into_iter().filter_map(|id| pane_by_id.get(&id).cloned()).collect();
-            attached_panes.clear(); attached_panes.extend(ordered.iter().map(|pane| pane.id));
+            attached_panes.clear();
+            attached_panes.extend(ordered.iter().map(|pane| pane.id));
+            pane_geometry.clear();
+            pane_geometry.extend(ordered.iter().map(|pane| (pane.id, (pane.config.cols, pane.config.rows))));
+            *attached = Some(session_id);
             send_json(ws, &ServerMessage::WorkspaceAttached { session_id: session_id.to_string(), panes: ordered.iter().map(PaneDto::from).collect(), req_id })?;
             for pane in &ordered { write_frame(daemon_writer, &ClientToDaemon::AttachPane { session_id, pane_id: pane.id })?; }
             Ok(())
         }
-        ClientMessage::DetachWorkspace { session_id, req_id: _ } => {
-            let session_id = Uuid::parse_str(&session_id)?;
+        ClientMessage::DetachWorkspace { session_id, req_id } => {
+            let session_id = parse_uuid(&session_id, ws, req_id)?;
+            restore_owned_overrides(shared, client_key, daemon_writer, Some(session_id))?;
             write_frame(daemon_writer, &ClientToDaemon::DetachSession { session_id })?;
-            if *attached == Some(session_id) { *attached = None; attached_panes.clear(); }
+            if *attached == Some(session_id) {
+                *attached = None;
+                attached_panes.clear();
+                pane_geometry.clear();
+            }
             Ok(())
         }
         ClientMessage::WritePane { pane_id, data, req_id } => {
@@ -211,6 +229,42 @@ fn handle_client_message(
                 other => Err(anyhow!("unexpected scrollback reply: {other:?}")),
             }
         }
+        ClientMessage::SetPaneSize { pane_id, cols, rows, req_id } => {
+            let Some(session_id) = *attached else { return send_error(ws, "internal", "no workspace attached", req_id); };
+            let pane_id = parse_uuid(&pane_id, ws, req_id)?;
+            if !attached_panes.contains(&pane_id) {
+                return send_error(ws, "internal", "pane not attached", req_id);
+            }
+            let Some(&(current_cols, current_rows)) = pane_geometry.get(&pane_id) else {
+                return send_error(ws, "internal", "pane geometry unavailable", req_id);
+            };
+            let cols = cols.clamp(20, 360);
+            let rows = rows.clamp(5, 200);
+            if cols <= current_cols { return Ok(()); }
+            register_pane_size_override(
+                &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
+                session_id,
+                pane_id,
+                client_key,
+                (current_cols, current_rows),
+                (cols, rows),
+            );
+            write_frame(daemon_writer, &ClientToDaemon::ResizePane { session_id, pane_id, cols, rows })?;
+            Ok(())
+        }
+        ClientMessage::ClearPaneSize { pane_id, req_id } => {
+            let Some(_) = *attached else { return send_error(ws, "internal", "no workspace attached", req_id); };
+            let pane_id = parse_uuid(&pane_id, ws, req_id)?;
+            if let Some(restore) = clear_pane_size_override(
+                &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
+                pane_id,
+                client_key,
+            ) {
+                write_pane_resize(daemon_writer, restore)?;
+            }
+            Ok(())
+        }
+        ClientMessage::Unknown => Ok(()),
         ClientMessage::Ping { req_id } => send_json(ws, &ServerMessage::Pong { req_id }),
     }
 }
@@ -220,27 +274,154 @@ fn handle_daemon_event(
     ws: &mut RemoteSocket,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_rx: &Receiver<DaemonToClient>,
-    _shared: &RemoteShared,
+    shared: &RemoteShared,
     next_req: &mut u64,
     attached: Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
+    pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
     message: DaemonToClient,
 ) -> Result<()> {
     match message {
         DaemonToClient::Output { pane_id, data } if attached_panes.contains(&pane_id) => ws.send(Message::Binary(frame_pane_output(&pane_id.to_string(), &data).into())).map_err(Into::into),
         DaemonToClient::PaneExited { pane_id, .. } if attached_panes.contains(&pane_id) => send_json(ws, &ServerMessage::PaneExited { pane_id: pane_id.to_string() }),
-        DaemonToClient::PaneResized { session_id, pane_id, cols, rows } if attached == Some(session_id) => send_json(ws, &ServerMessage::PaneResized { pane_id: pane_id.to_string(), cols, rows }),
+        DaemonToClient::PaneResized { session_id, pane_id, cols, rows } if attached == Some(session_id) => {
+            pane_geometry.insert(pane_id, (cols, rows));
+            drop_override_for_desktop_resize(
+                &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
+                pane_id,
+                cols,
+                rows,
+            );
+            send_json(ws, &ServerMessage::PaneResized { pane_id: pane_id.to_string(), cols, rows })
+        }
         DaemonToClient::SessionChanged { session_id } if attached == Some(session_id) => {
             let (layout, panes) = attach_session(daemon_writer, daemon_rx, ws, next_req, session_id)?;
             let order = pane_order(layout.as_deref(), &panes);
-            let pane_by_id: std::collections::HashMap<_, _> = panes.into_iter().map(|pane| (pane.id, pane)).collect();
+            let pane_by_id: HashMap<_, _> = panes.into_iter().map(|pane| (pane.id, pane)).collect();
             let ordered: Vec<_> = order.into_iter().filter_map(|id| pane_by_id.get(&id).cloned()).collect();
-            attached_panes.clear(); attached_panes.extend(ordered.iter().map(|pane| pane.id));
+            attached_panes.clear();
+            attached_panes.extend(ordered.iter().map(|pane| pane.id));
+            pane_geometry.clear();
+            pane_geometry.extend(ordered.iter().map(|pane| (pane.id, (pane.config.cols, pane.config.rows))));
             send_json(ws, &ServerMessage::PanesChanged { session_id: session_id.to_string(), panes: ordered.iter().map(PaneDto::from).collect() })
         }
         DaemonToClient::Error { message, .. } => send_error(ws, "internal", &message, None),
         _ => Ok(()),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PaneResize {
+    session_id: Uuid,
+    pane_id: Uuid,
+    cols: u16,
+    rows: u16,
+}
+
+fn register_pane_size_override(
+    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
+    session_id: Uuid,
+    pane_id: Uuid,
+    owner: Uuid,
+    original: (u16, u16),
+    target: (u16, u16),
+) {
+    let entry = overrides.entry(pane_id).or_insert_with(|| PaneSizeOverride {
+        session_id,
+        original_cols: original.0,
+        original_rows: original.1,
+        target_cols: target.0,
+        target_rows: target.1,
+        owners: Default::default(),
+    });
+    entry.owners.insert(owner);
+    entry.target_cols = target.0;
+    entry.target_rows = target.1;
+}
+
+fn clear_pane_size_override(
+    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
+    pane_id: Uuid,
+    owner: Uuid,
+) -> Option<PaneResize> {
+    let restore = {
+        let entry = overrides.get_mut(&pane_id)?;
+        if !entry.owners.remove(&owner) || !entry.owners.is_empty() { return None; }
+        PaneResize {
+            session_id: entry.session_id,
+            pane_id,
+            cols: entry.original_cols,
+            rows: entry.original_rows,
+        }
+    };
+    overrides.remove(&pane_id);
+    Some(restore)
+}
+
+fn take_owned_override_restores(
+    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
+    owner: Uuid,
+    session_filter: Option<Uuid>,
+) -> Vec<PaneResize> {
+    let mut restores = Vec::new();
+    overrides.retain(|pane_id, entry| {
+        if session_filter.is_none_or(|session_id| entry.session_id == session_id)
+            && entry.owners.remove(&owner)
+            && entry.owners.is_empty()
+        {
+            restores.push(PaneResize {
+                session_id: entry.session_id,
+                pane_id: *pane_id,
+                cols: entry.original_cols,
+                rows: entry.original_rows,
+            });
+            false
+        } else {
+            true
+        }
+    });
+    restores
+}
+
+fn drop_override_for_desktop_resize(
+    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
+    pane_id: Uuid,
+    cols: u16,
+    rows: u16,
+) -> bool {
+    let should_drop = overrides
+        .get(&pane_id)
+        .is_some_and(|entry| (entry.target_cols, entry.target_rows) != (cols, rows));
+    if should_drop { overrides.remove(&pane_id); }
+    should_drop
+}
+
+fn restore_owned_overrides(
+    shared: &RemoteShared,
+    owner: Uuid,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    session_filter: Option<Uuid>,
+) -> Result<()> {
+    let restores = take_owned_override_restores(
+        &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
+        owner,
+        session_filter,
+    );
+    for restore in restores { write_pane_resize(daemon_writer, restore)?; }
+    Ok(())
+}
+
+fn write_pane_resize(
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    resize: PaneResize,
+) -> Result<()> {
+    write_frame(daemon_writer, &ClientToDaemon::ResizePane {
+        session_id: resize.session_id,
+        pane_id: resize.pane_id,
+        cols: resize.cols,
+        rows: resize.rows,
+    })?;
+    Ok(())
 }
 
 fn list_sessions(writer: &mut interprocess::local_socket::SendHalf, rx: &Receiver<DaemonToClient>, ws: &mut RemoteSocket, next_req: &mut u64) -> Result<Vec<SessionMeta>> {
@@ -320,5 +501,65 @@ mod tests {
         let c = SessionMeta { id: Uuid::new_v4(), name: "C".into(), pane_count: 0, created_at: 3, workspace_folder: None };
         let result = ordered_sessions(vec![a.clone(), b.clone(), c.clone()], &[b.id.to_string(), "missing".into(), a.id.to_string()]);
         assert_eq!(result.iter().map(|session| session.id).collect::<Vec<_>>(), vec![b.id, a.id, c.id]);
+    }
+
+    #[test]
+    fn pane_size_override_tracks_owners_and_restores_original_geometry() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let owner_a = Uuid::new_v4();
+        let owner_b = Uuid::new_v4();
+        let mut overrides = HashMap::new();
+
+        register_pane_size_override(&mut overrides, session_id, pane_id, owner_a, (80, 24), (120, 24));
+        register_pane_size_override(&mut overrides, session_id, pane_id, owner_b, (120, 24), (160, 24));
+        let entry = overrides.get(&pane_id).expect("override exists");
+        assert_eq!((entry.original_cols, entry.original_rows), (80, 24));
+        assert_eq!((entry.target_cols, entry.target_rows), (160, 24));
+        assert_eq!(entry.owners.len(), 2);
+
+        assert_eq!(clear_pane_size_override(&mut overrides, pane_id, owner_a), None);
+        assert_eq!(overrides[&pane_id].owners.len(), 1);
+        assert_eq!(
+            clear_pane_size_override(&mut overrides, pane_id, owner_b),
+            Some(PaneResize { session_id, pane_id, cols: 80, rows: 24 })
+        );
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn owned_override_restore_respects_session_filter() {
+        let owner = Uuid::new_v4();
+        let session_a = Uuid::new_v4();
+        let session_b = Uuid::new_v4();
+        let pane_a = Uuid::new_v4();
+        let pane_b = Uuid::new_v4();
+        let mut overrides = HashMap::new();
+        register_pane_size_override(&mut overrides, session_a, pane_a, owner, (80, 24), (120, 24));
+        register_pane_size_override(&mut overrides, session_b, pane_b, owner, (90, 30), (140, 30));
+
+        assert_eq!(
+            take_owned_override_restores(&mut overrides, owner, Some(session_a)),
+            vec![PaneResize { session_id: session_a, pane_id: pane_a, cols: 80, rows: 24 }]
+        );
+        assert!(overrides.contains_key(&pane_b));
+        assert_eq!(
+            take_owned_override_restores(&mut overrides, owner, None),
+            vec![PaneResize { session_id: session_b, pane_id: pane_b, cols: 90, rows: 30 }]
+        );
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn desktop_resize_drops_only_mismatched_override() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let mut overrides = HashMap::new();
+        register_pane_size_override(&mut overrides, session_id, pane_id, Uuid::new_v4(), (80, 24), (140, 30));
+
+        assert!(!drop_override_for_desktop_resize(&mut overrides, pane_id, 140, 30));
+        assert!(overrides.contains_key(&pane_id));
+        assert!(drop_override_for_desktop_resize(&mut overrides, pane_id, 120, 30));
+        assert!(!overrides.contains_key(&pane_id));
     }
 }
