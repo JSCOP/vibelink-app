@@ -76,17 +76,20 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     if is_skill_command(&command) {
         return execute_skill(command);
     }
-    if matches!(command, CliCommand::TaskDone { .. } | CliCommand::TaskNote { .. }) {
-        HeadlessLicenseCache::load()?.require_pro()?;
-    }
+    // Full lock: every daemon-touching command requires entitlement (active
+    // trial or paid Pro). Skill commands are handled above and do not touch the
+    // daemon.
+    HeadlessLicenseCache::load()
+        .context("load license cache")?
+        .require_entitled()
+        .context("VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.")?;
 
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
     let client = DaemonClient::new(stream);
-    let license = HeadlessLicenseCache::load().ok();
-    execute(&client, command, license.as_ref())
+    execute(&client, command)
 }
 
-fn execute(client: &DaemonClient, command: CliCommand, license: Option<&HeadlessLicenseCache>) -> Result<()> {
+fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
     match command {
         CliCommand::Sessions => {
             match client.request_reply(|req| ClientToDaemon::ListSessions { req })? {
@@ -100,10 +103,7 @@ fn execute(client: &DaemonClient, command: CliCommand, license: Option<&Headless
         }
         CliCommand::Panes { session_id } => {
             match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
-                ReplyResult::Attached { mut panes, .. } => {
-                    if !license.is_some_and(HeadlessLicenseCache::is_entitled) {
-                        for pane in &mut panes { pane.config.role = None; }
-                    }
+                ReplyResult::Attached { panes, .. } => {
                     serde_json::to_writer_pretty(io::stdout(), &panes)?;
                     println!();
                     Ok(())
@@ -115,7 +115,6 @@ fn execute(client: &DaemonClient, command: CliCommand, license: Option<&Headless
             session_id,
             pane_id,
         } => {
-            require_pane_access(client, session_id, pane_id, license)?;
             match client.request_reply(|req| ClientToDaemon::GetScrollback {
                 req,
                 session_id,
@@ -136,7 +135,6 @@ fn execute(client: &DaemonClient, command: CliCommand, license: Option<&Headless
             text,
             enter,
         } => {
-            require_pane_access(client, session_id, pane_id, license)?;
             let data = write_payload(text, enter);
             client.send(ClientToDaemon::WritePane {
                 session_id,
@@ -198,18 +196,6 @@ fn execute(client: &DaemonClient, command: CliCommand, license: Option<&Headless
         | CliCommand::SkillDelete { .. } => unreachable!("handled before daemon connection"),
         CliCommand::Help => unreachable!("handled before daemon connection"),
     }
-}
-
-fn require_pane_access(client: &DaemonClient, session_id: Uuid, pane_id: Uuid, license: Option<&HeadlessLicenseCache>) -> Result<()> {
-    let panes = match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
-        ReplyResult::Attached { panes, .. } => panes,
-        other => bail!("unexpected daemon response: {other:?}"),
-    };
-    let pane = panes.iter().find(|pane| pane.id == pane_id).ok_or_else(|| anyhow!("pane not found: {pane_id}"))?;
-    if pane.config.role.is_some() && !license.is_some_and(HeadlessLicenseCache::is_entitled) {
-        bail!("VibeLink Pro license required.");
-    }
-    Ok(())
 }
 
 fn is_skill_command(command: &CliCommand) -> bool {

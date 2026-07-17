@@ -18,7 +18,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   }),
 }))
 
-import { PRO_WINDOW_KINDS, requiresProWindow } from './licenseGate'
+import { isAppLocked, isProEntitled, PRO_WINDOW_KINDS, requiresProWindow } from './licenseGate'
 import { useWorkspaceStore } from './store'
 
 const unlicensed: LicenseStatus = {
@@ -60,4 +60,16 @@ describe('VibeLink Pro gates', () => {
   test('allows task creation when Pro is entitled', async () => { useWorkspaceStore.setState({ license: { ready: true, status: { ...unlicensed, state: 'validOnline', entitled: true, provider: 'vibelink' } } })
   const task = await useWorkspaceStore.getState().createTask('session-1', { title: 'Allowed', description: '' })
   expect(task.title).toBe('Allowed') })
+
+  test('isAppLocked is true only after status resolves without entitlement', () => {
+    expect(isAppLocked(null)).toBe(false)
+    expect(isAppLocked(undefined)).toBe(false)
+    expect(isAppLocked(unlicensed)).toBe(true)
+    expect(isAppLocked({ ...unlicensed, state: 'trialExpired', plan: 'none' })).toBe(true)
+    const trial: LicenseStatus = { ...unlicensed, state: 'trial', entitled: true, plan: 'trial', email: 'trial@example.com', trialEndsAt: new Date(Date.now() + 6 * 86_400_000).toISOString() }
+    expect(isAppLocked(trial)).toBe(false)
+    expect(isProEntitled(trial)).toBe(true)
+    const pro: LicenseStatus = { ...unlicensed, state: 'validOnline', entitled: true, plan: 'pro', provider: 'vibelink' }
+    expect(isAppLocked(pro)).toBe(false)
+  })
 })

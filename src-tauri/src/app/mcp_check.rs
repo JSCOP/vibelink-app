@@ -33,7 +33,7 @@ pub async fn mcp_self_check(
     session_id: String,
 ) -> Result<McpCheckReport, String> {
     license
-        .require_pro_cached()
+        .require_entitled_cached()
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let executable = std::env::current_exe().context("resolve current executable")?;

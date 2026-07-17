@@ -17,6 +17,7 @@ import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { TerminalTopbarActions } from './components/TerminalTopbarActions'
 import { ProUpsellDialog } from './components/ProUpsellDialog'
 import { SetupWizard } from './components/SetupWizard'
+import { AppLockedScreen } from './components/AppLockedScreen'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
@@ -28,7 +29,7 @@ import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
-import { requiresProWindow } from './state/licenseGate'
+import { isAppLocked, requiresProWindow } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import './styles/theme.css'
 import './styles/kanban.css'
@@ -101,7 +102,8 @@ function App() {
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const activeWorkspaceLayout = activeSessionId ? workspaceLayouts[activeSessionId] : undefined
-  const setupWizardVisible = isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null)
+  const appLocked = status === 'ready' && license.ready && isAppLocked(license.status)
+  const setupWizardVisible = !appLocked && (isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null))
   const activeLayoutPage = activeWorkspaceLayout?.pages.find((page) => page.id === activeWorkspaceLayout.activePageId) ?? activeWorkspaceLayout?.pages[0]
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
 
@@ -135,6 +137,15 @@ function App() {
     const timer = window.setInterval(() => { void revalidateLicense() }, 12 * 60 * 60 * 1000)
     return () => window.clearInterval(timer)
   }, [license.ready, license.status?.email, revalidateLicense])
+
+  useEffect(() => {
+    if (!appLocked) return
+    // A completed purchase or sign-in should unlock promptly, so revalidate
+    // whenever the locked window regains focus.
+    const onFocus = () => { void revalidateLicense() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [appLocked, revalidateLicense])
 
   useEffect(() => {
     TerminalManager.setLinkActions({
@@ -440,6 +451,14 @@ function App() {
 
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
+
+  if (appLocked) {
+    return (
+      <main className="app-shell app-shell-locked" style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
+        <AppLockedScreen />
+      </main>
+    )
+  }
 
   return (
     <main className="app-shell" data-sidebar-pinned={isSidebarPinned ? 'true' : undefined} data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>

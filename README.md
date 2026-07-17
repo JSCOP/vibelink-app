@@ -20,13 +20,14 @@ pnpm tauri:build
 
 `pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release` and performs the local release-preparation version bump. Versioned bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.13_x64_en-US.msi` and `VibeLink_0.1.13_x64-setup.exe`.
 
-## VibeLink Pro licensing
+## VibeLink trial and Pro licensing
 
-- Core remains usable without a key for terminal sessions, panes, grids, themes, profiles, and capture/recording.
-- Pro gates Agent, Kanban, Todo, Diff, task orchestration, pane roles, Hermes/MCP, git snapshots/worktrees, board writes, and related CLI/native commands.
-- Settings → License activates either a VibeLink-issued `VBL-…` key or a Lemon Squeezy key and shows the masked key plus active/review devices. One license supports three devices; current or remote devices can be removed.
-- Successful online validation stores only encrypted Windows Credential Manager state. License keys are never persisted in localStorage, Zustand settings, session JSON, or logs.
-- The last successful server timestamps grant up to seven days of offline Pro. Explicit refund/revocation/deactivation locks immediately on the next online validation; clock rollback or expired grace returns to Core.
+- VibeLink 0.3.0+ is trial-first: signing in with a Moobang account starts a server-anchored 7-day full-featured trial. The trial cannot be reset by reinstalling or changing the clock, and it unlocks every feature (terminal, grids, themes, profiles, capture, plus Agent, Kanban, Todo, Diff, Hermes/MCP, task/pane roles, git, and board operations).
+- When the trial ends, the entire app locks to a sign-in/purchase screen until a one-time VibeLink Pro purchase (₩20,000 / $20). Existing paid Pro accounts keep lifetime entitlement.
+- Sign-in is mandatory: an unentitled desktop (signed out or expired trial) locks the GUI, CLI, and MCP surfaces. Older builds (≤0.2.0) stay on the legacy free-Core model until superseded, enforced by an `appVersion` version gate on the server.
+- Settings → Account manages the Moobang account and shows plan (trial with end date, or Pro), active/review devices, and offline grace. One Pro license supports three devices; current or remote devices can be removed.
+- Successful online validation stores only encrypted Windows Credential Manager state. Session tokens are never persisted in localStorage, Zustand settings, session JSON, or logs.
+- The last successful server timestamps grant up to seven days of offline entitlement (capped at the trial end for trials). Explicit refund/revocation/deactivation or trial expiry locks at the next online validation; clock rollback also locks.
 - `VIBELINK_LICENSE_API_URL` is compiled into the application. Debug defaults to `http://localhost:3000`; release builds accept only `https://vibelink.moobang.net`.
 
 ## Signed release
@@ -74,7 +75,7 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 `sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage VibeLink-owned Markdown skills under app data; enabled persisted skills are injected into VibeLink Agent prompts for the matching workspace. The built-in terminal integration skill is `vibelink-terminal`.
 VibeLink-launched panes receive `VIBELINK_SESSION_ID`, `VIBELINK_PANE_ID`, `VIBELINK_APP_EXE`, and `VIBELINK_APP_FLAVOR`; `panes`, `read`, `write`, `task`, and workspace-scoped `skill` commands use `VIBELINK_SESSION_ID` when `--session` is omitted, so agents should run `$env:VIBELINK_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace. Spawned PTYs advertise `TERM_PROGRAM=VibeLink`.
 
-Core CLI can list sessions and use role-free terminal panes. Task commands, pane-role access, and `mcp serve` require an entitled Pro cache; unlicensed callers receive `VibeLink Pro license required.` rather than an unguarded native operation.
+On 0.3.0+ every daemon-touching CLI command and `mcp serve` require an entitled cache (active trial or paid Pro); an unentitled caller (signed out or expired trial) receives `VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.` rather than an unguarded native operation.
 
 `mcp serve` is the stdio MCP server configured as `mcp_servers.vibelink` in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The server requires `VIBELINK_SESSION_ID`, receives `VIBELINK_APP_FLAVOR`, and exposes `vibelink_pane_*`, `vibelink_terminal_grid_launch`, `vibelink_skill_*`, and `vibelink_task_*` tools. The Orchestrator provisions `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, stores secrets only in `<HERMES_HOME>\.env`, and mirrors Kanban board state to `<appData>\kanban\<session-id>.json`.
 

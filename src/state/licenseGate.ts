@@ -7,6 +7,16 @@ export function isProEntitled(status: LicenseStatus | null | undefined): boolean
   return Boolean(status?.entitled)
 }
 
+/**
+ * Full app lock: once the license status is resolved, the entire workspace is
+ * locked whenever the account is not entitled. This covers signed-out
+ * (`unlicensed`), expired trials (`trialExpired`), revoked/invalid, and clock
+ * rollback. An active trial keeps `entitled: true`, so it is never locked.
+ */
+export function isAppLocked(status: LicenseStatus | null | undefined): boolean {
+  return Boolean(status && !status.entitled)
+}
+
 export function requiresProWindow(kind: WorkspaceWindowKind): boolean {
   return PRO_WINDOW_KINDS.includes(kind)
 }

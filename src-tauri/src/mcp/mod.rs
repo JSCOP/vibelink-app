@@ -39,7 +39,7 @@ fn serve() -> Result<()> {
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
     let client = DaemonClient::new(stream);
     let license = HeadlessLicenseCache::load()?;
-    license.require_pro()?;
+    license.require_entitled()?;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -121,7 +121,7 @@ fn handle_message_with_license(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             if let Some(license) = license {
-                license.require_pro()?;
+                license.require_entitled()?;
             }
             let text = call_tool(client, session_id, name, &args)?;
             Ok(

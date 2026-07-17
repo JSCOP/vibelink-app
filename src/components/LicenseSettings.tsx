@@ -12,7 +12,10 @@ export function LicenseSettings() {
   const [message, setMessage] = useState('')
   const status = license.status
   const signedIn = Boolean(status?.email)
-  const plan = status?.plan ?? (status?.entitled ? 'pro' : 'core')
+  const plan = status?.plan ?? (status?.entitled ? 'pro' : 'none')
+  const trialDaysLeft = status?.trialEndsAt
+    ? Math.max(0, Math.ceil((new Date(status.trialEndsAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000)))
+    : null
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
@@ -40,6 +43,9 @@ export function LicenseSettings() {
         <div className="license-summary">
           <strong>{status?.email}</strong>
           <span>{status?.message}</span>
+          {plan === 'trial' && status?.trialEndsAt ? (
+            <span>Trial ends {new Date(status.trialEndsAt).toLocaleDateString()}{trialDaysLeft !== null ? ` (${trialDaysLeft} day${trialDaysLeft === 1 ? '' : 's'} left)` : ''}</span>
+          ) : null}
           {status?.validatedAt ? <span>Validated {new Date(status.validatedAt).toLocaleString()}</span> : null}
           {status?.offlineGraceUntil ? <span>Offline grace until {new Date(status.offlineGraceUntil).toLocaleString()}</span> : null}
         </div>

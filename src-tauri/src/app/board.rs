@@ -111,7 +111,7 @@ pub async fn board_read(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<String, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || board_read_native(&session_id))
         .await
         .map_err(to_string)?
@@ -125,7 +125,7 @@ pub async fn board_write(
     session_id: String,
     json: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     tauri::async_runtime::spawn_blocking(move || board_write_native(&session_for_write, &json))
         .await
@@ -142,7 +142,7 @@ pub async fn board_task_create(
     title: String,
     description: Option<String>,
 ) -> Result<Task, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_create_native(&session_for_write, &title, description.as_deref())
@@ -162,7 +162,7 @@ pub async fn board_task_update(
     task_id: String,
     patch: TaskPatch,
 ) -> Result<Task, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_update_native(&session_for_write, &task_id, patch)
@@ -181,7 +181,7 @@ pub async fn board_task_delete(
     session_id: String,
     task_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         board_task_delete_native(&session_for_write, &task_id)
@@ -201,7 +201,7 @@ pub async fn board_task_done(
     commit_msg: Option<String>,
     result_summary: Option<String>,
 ) -> Result<Task, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_done_native(&session_for_write, &task_id, commit_msg, result_summary)
@@ -221,7 +221,7 @@ pub async fn board_task_note(
     task_id: String,
     message: String,
 ) -> Result<Task, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_note_native(&session_for_write, &task_id, &message)
@@ -238,7 +238,7 @@ pub async fn board_brief_get(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<Option<Brief>, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || board_brief_get_native(&session_id))
         .await
         .map_err(to_string)?
@@ -253,7 +253,7 @@ pub async fn board_brief_set(
     purpose: String,
     notes: String,
 ) -> Result<Brief, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_for_write = session_id.clone();
     let brief = tauri::async_runtime::spawn_blocking(move || {
         board_brief_set_native(&session_for_write, purpose, notes)

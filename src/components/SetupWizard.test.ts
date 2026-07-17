@@ -22,7 +22,7 @@ describe('setup wizard auto-pass', () => {
     })).toEqual({ license: true, agents: true, runtime: true, mcp: true })
   })
 
-  test('leaves Pro setup steps incomplete in Core mode', () => {
+  test('leaves Pro setup steps incomplete when not entitled', () => {
     expect(setupStepAutoPass({
       entitled: false,
       runtimeInstalled: false,

@@ -830,7 +830,7 @@ pub async fn hermes_start(
     command_override: Option<String>,
     workspace_folder: Option<String>,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let override_for_check = command_override.clone();
     tauri::async_runtime::spawn_blocking(move || ensure_runtime_ready(&app, override_for_check))
         .await
@@ -853,7 +853,7 @@ pub async fn hermes_new_session(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<String, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.new_session(&session_id))
         .await
@@ -868,7 +868,7 @@ pub async fn hermes_resume_session(
     session_id: String,
     acp_session_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || {
         manager.resume_session(&session_id, acp_session_id)
@@ -883,7 +883,7 @@ pub async fn hermes_list_sessions(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<Vec<HermesSessionInfo>, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let home = hermes_home(&session_id)?;
         read_sessions(&home)
@@ -899,7 +899,7 @@ pub async fn hermes_session_transcript(
     session_id: String,
     acp_session_id: String,
 ) -> Result<Vec<HermesHistoryTurn>, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let home = hermes_home(&session_id)?;
         read_transcript(&home, &acp_session_id)
@@ -914,7 +914,7 @@ pub async fn hermes_archive_session(
     session_id: String,
     acp_session_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let home = hermes_home(&session_id)?;
         archive_session(&home, &acp_session_id)
@@ -931,7 +931,7 @@ pub async fn hermes_send(
     session_id: String,
     text: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager.send_message(session_id, text).map_err(to_string)
 }
 
@@ -941,7 +941,7 @@ pub async fn hermes_cancel(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager.cancel(&session_id).map_err(to_string)
 }
 
@@ -953,7 +953,7 @@ pub async fn hermes_respond_permission(
     request_id: u64,
     option_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager
         .respond_permission(&session_id, request_id, option_id)
         .map_err(to_string)
@@ -966,7 +966,7 @@ pub async fn hermes_set_model(
     session_id: String,
     model_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.set_model(&session_id, model_id))
         .await
@@ -981,7 +981,7 @@ pub async fn hermes_set_mode(
     session_id: String,
     mode_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.set_mode(&session_id, mode_id))
         .await
@@ -995,7 +995,7 @@ pub async fn hermes_stop(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager.stop(&session_id).map_err(to_string)
 }
 
@@ -1006,7 +1006,7 @@ pub async fn hermes_gateway_provision(
     gateway: HermesGatewayConfig,
     token: Option<String>,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         hermes_gateway_provision_native(&session_id, &gateway, token.as_deref())
     })
@@ -1021,7 +1021,7 @@ pub async fn hermes_gateway_start(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<u32, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager.gateway_start(session_id).map_err(to_string)
 }
 
@@ -1031,7 +1031,7 @@ pub async fn hermes_gateway_stop(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager.gateway_stop(&session_id).map_err(to_string)
 }
 
@@ -1041,7 +1041,7 @@ pub async fn hermes_gateway_status(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<HermesGatewayStatus, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     manager.gateway_status(&session_id).map_err(to_string)
 }
 
@@ -1071,7 +1071,7 @@ pub async fn hermes_workspace_home(
     license: State<'_, Arc<LicenseService>>,
     session_id: String,
 ) -> Result<String, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         hermes_home(&session_id).map(|path| path.to_string_lossy().to_string())
     })
@@ -1104,7 +1104,7 @@ pub async fn hermes_ensure_workspace(
     session_id: String,
     workspace_folder: Option<String>,
 ) -> Result<HermesWorkspaceState, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         ensure_workspace_native(&session_id, workspace_folder.as_deref())
     })

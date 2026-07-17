@@ -224,9 +224,9 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           {step === 'license' ? (
             <div className="setup-wizard-panel">
               <AccountSignIn onActivated={next} />
-              <p>Sign in to sync your Pro license. Core is free without an account.</p>
+              <p>Sign in with your Moobang account to start your 7-day free trial. Every feature is unlocked during the trial.</p>
               <div className="setup-wizard-actions">
-                <button type="button" className="primary-action" onClick={next}>{entitled ? 'Continue' : 'Continue with Core (free)'}</button>
+                <button type="button" className="primary-action" disabled={!entitled} onClick={next}>Continue</button>
               </div>
             </div>
           ) : null}
@@ -317,7 +317,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             <div className="setup-wizard-panel">
               <h3>VibeLink is ready.</h3>
               <ul>
-                <li>{license.status?.email ? `${license.status.plan === 'pro' ? 'Pro' : 'Core'} account connected` : 'Core mode selected'}</li>
+                <li>{license.status?.plan === 'pro' ? 'Pro account connected' : license.status?.plan === 'trial' ? '7-day trial active' : 'Account connected'}</li>
                 <li>{agentClis.filter((status) => status.installed).length} agent CLI(s) detected</li>
                 <li>Hermes runtime {runtime?.installed ? 'installed' : 'not installed'}</li>
                 <li>MCP {mcpReport?.initializeOk ? `verified with ${mcpReport.toolCount} tools` : 'not verified'}</li>

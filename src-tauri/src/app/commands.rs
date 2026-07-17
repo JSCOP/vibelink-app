@@ -391,7 +391,7 @@ pub async fn set_pane_role(
     pane_id: String,
     role: Option<String>,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneRole {

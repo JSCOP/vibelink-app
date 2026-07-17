@@ -122,7 +122,7 @@ export type SkillApplyInput = {
   enabled?: boolean
 }
 
-export type LicenseState = 'unlicensed' | 'core' | 'validOnline' | 'validOffline' | 'activationLimit' | 'reviewRequired' | 'invalid' | 'revoked' | 'configurationError'
+export type LicenseState = 'unlicensed' | 'core' | 'trial' | 'trialExpired' | 'validOnline' | 'validOffline' | 'activationLimit' | 'reviewRequired' | 'invalid' | 'revoked' | 'configurationError'
 
 export type LicenseDevice = {
   activationId: string
@@ -139,7 +139,7 @@ export type LicenseStatus = {
   state: LicenseState
   entitled: boolean
   provider: 'vibelink' | 'lemonsqueezy' | 'moobang' | null
-  plan?: 'core' | 'pro' | null
+  plan?: 'core' | 'pro' | 'trial' | 'none' | null
   email?: string | null
   maskedKey: string | null
   activationId: string | null
@@ -149,6 +149,7 @@ export type LicenseStatus = {
   devices: LicenseDevice[]
   validatedAt: string | null
   offlineGraceUntil: string | null
+  trialEndsAt?: string | null
   purchaseUrl: string
   message: string
 }

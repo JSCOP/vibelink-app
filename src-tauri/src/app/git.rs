@@ -52,7 +52,7 @@ pub struct WorktreeInfo {
 
 #[tauri::command]
 pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<bool, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         git_status(&workspace_folder, &["rev-parse", "--is-inside-work-tree"])
             .map(|status| status.success())
@@ -64,7 +64,7 @@ pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace
 
 #[tauri::command]
 pub async fn git_snapshot_baseline(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<String, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || snapshot_baseline_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -77,7 +77,7 @@ pub async fn git_changed_files(
     workspace_folder: String,
     base_ref: String,
 ) -> Result<Vec<ChangedFile>, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || changed_files_native(&workspace_folder, &base_ref))
         .await
         .map_err(to_string)?
@@ -91,7 +91,7 @@ pub async fn git_file_contents(
     base_ref: String,
     path: String,
 ) -> Result<FileContents, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         file_contents_native(&workspace_folder, &base_ref, &path)
     })
@@ -106,7 +106,7 @@ pub async fn git_worktree_create(
     workspace_folder: String,
     task_id: String,
 ) -> Result<WorktreeInfo, String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         worktree_create_native(&workspace_folder, &task_id)
     })
@@ -123,7 +123,7 @@ pub async fn git_worktree_remove(
     branch: String,
     force: bool,
 ) -> Result<(), String> {
-    license.require_pro_cached().map_err(to_string)?;
+    license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         worktree_remove_native(&workspace_folder, &worktree_path, &branch, force)
     })

@@ -18,6 +18,7 @@ const ACCOUNT_CLIENT_ID: &str = "vibelink-desktop";
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const ACCOUNT_PROVIDER: &str = "moobang";
 const PRO_REQUIRED_ERROR: &str = "VibeLink Pro license required.";
+const TRIAL_LOCK_ERROR: &str = "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +49,7 @@ pub struct LicenseStatusDto {
     pub devices: Vec<LicenseDeviceDto>,
     pub validated_at: Option<String>,
     pub offline_grace_until: Option<String>,
+    pub trial_ends_at: Option<String>,
     pub purchase_url: String,
     pub message: String,
 }
@@ -96,6 +98,8 @@ struct ApiAccountEntitlementDto {
     devices: Vec<LicenseDeviceDto>,
     validated_at: Option<String>,
     offline_grace_until: Option<String>,
+    #[serde(default)]
+    trial_ends_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,6 +128,8 @@ struct StoredAccount {
     devices: Vec<LicenseDeviceDto>,
     validated_at: Option<String>,
     offline_grace_until: Option<String>,
+    #[serde(default)]
+    trial_ends_at: Option<String>,
     last_observed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_session_token: Option<String>,
@@ -253,6 +259,7 @@ impl LicenseService {
                     devices: Vec::new(),
                     validated_at: None,
                     offline_grace_until: None,
+                    trial_ends_at: None,
                     last_observed_at: None,
                     pending_session_token: None,
                     pending_device_code: None,
@@ -339,7 +346,7 @@ impl LicenseService {
         self.status()
     }
 
-    pub fn require_pro_cached(&self) -> Result<()> {
+    pub fn require_entitled_cached(&self) -> Result<()> {
         let status = self.status()?;
         if status.entitled {
             Ok(())
@@ -491,25 +498,29 @@ impl HeadlessLicenseCache {
         Ok(Self { stored: read_credential(&entry)? })
     }
 
-    pub fn require_pro(&self) -> Result<()> {
-        let Some(stored) = self.stored.as_ref().filter(|stored| stored.plan.as_deref() == Some("pro")) else {
-            return Err(anyhow!(PRO_REQUIRED_ERROR));
+    pub fn require_entitled(&self) -> Result<()> {
+        let Some(stored) = self
+            .stored
+            .as_ref()
+            .filter(|stored| matches!(stored.plan.as_deref(), Some("pro") | Some("trial")))
+        else {
+            return Err(anyhow!(TRIAL_LOCK_ERROR));
         };
         let now = Utc::now();
-        let validated_at = parse_optional_time(stored.validated_at.as_deref()).ok_or_else(|| anyhow!(PRO_REQUIRED_ERROR))?;
-        let grace_until = parse_optional_time(stored.offline_grace_until.as_deref()).ok_or_else(|| anyhow!(PRO_REQUIRED_ERROR))?;
-        let last_observed = parse_optional_time(stored.last_observed_at.as_deref()).ok_or_else(|| anyhow!(PRO_REQUIRED_ERROR))?;
+        let validated_at = parse_optional_time(stored.validated_at.as_deref()).ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
+        let grace_until = parse_optional_time(stored.offline_grace_until.as_deref()).ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
+        let last_observed = parse_optional_time(stored.last_observed_at.as_deref()).ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
         if now > grace_until
             || now < validated_at - ChronoDuration::minutes(5)
             || now < last_observed - ChronoDuration::minutes(5)
         {
-            return Err(anyhow!(PRO_REQUIRED_ERROR));
+            return Err(anyhow!(TRIAL_LOCK_ERROR));
         }
         Ok(())
     }
 
     pub fn is_entitled(&self) -> bool {
-        self.require_pro().is_ok()
+        self.require_entitled().is_ok()
     }
 }
 
@@ -561,13 +572,6 @@ fn stored_from_api(
         return Err(anyhow!("account service returned an invalid entitlement"));
     }
     match api.plan.as_str() {
-        "core"
-            if api.state == "core"
-                && !api.entitled
-                && api.provider.is_none()
-                && api.activation_id.is_none()
-                && api.validated_at.is_none()
-                && api.offline_grace_until.is_none() => {}
         "pro"
             if api.state == "validOnline"
                 && api.entitled
@@ -575,6 +579,17 @@ fn stored_from_api(
                 && api.activation_id.is_some()
                 && api.validated_at.is_some()
                 && api.offline_grace_until.is_some() => {}
+        "trial"
+            if api.state == "trial"
+                && api.entitled
+                && api.activation_id.is_none()
+                && api.validated_at.is_some()
+                && api.offline_grace_until.is_some()
+                && api.trial_ends_at.is_some() => {}
+        "none"
+            if api.state == "trialExpired"
+                && !api.entitled
+                && api.trial_ends_at.is_some() => {}
         _ => return Err(anyhow!("account service returned an invalid entitlement")),
     }
     Ok(StoredAccount {
@@ -587,6 +602,7 @@ fn stored_from_api(
         devices: api.devices.clone(),
         validated_at: api.validated_at.clone(),
         offline_grace_until: api.offline_grace_until.clone(),
+        trial_ends_at: api.trial_ends_at.clone(),
         last_observed_at: Some(Utc::now().to_rfc3339()),
         pending_session_token: None,
         pending_device_code: None,
@@ -602,8 +618,8 @@ fn status_from_cache(
         return unlicensed_status(device);
     };
     match stored.plan.as_deref() {
-        Some("core") => core_status(stored, device),
-        Some("pro") => pro_status_from_cache(stored, device, now),
+        Some("pro") | Some("trial") => entitled_status_from_cache(stored, device, now),
+        Some("none") => trial_expired_status(stored, device),
         _ => {
             let mut status = configuration_error_status(
                 device,
@@ -615,28 +631,51 @@ fn status_from_cache(
     }
 }
 
-fn pro_status_from_cache(
+fn entitled_status_from_cache(
     stored: &StoredAccount,
     device: &DeviceIdentity,
     now: DateTime<Utc>,
 ) -> LicenseStatusDto {
+    let is_trial = stored.plan.as_deref() == Some("trial");
     let validated_at = parse_optional_time(stored.validated_at.as_deref());
     let grace_until = parse_optional_time(stored.offline_grace_until.as_deref());
     let last_observed = parse_optional_time(stored.last_observed_at.as_deref());
     let rollback = validated_at.is_some_and(|value| now < value - ChronoDuration::minutes(5))
         || last_observed.is_some_and(|value| now < value - ChronoDuration::minutes(5));
+    // The server caps offline_grace_until at trialEndsAt for trials, so the same
+    // grace check enforces trial expiry offline.
     let entitled = !rollback && grace_until.is_some_and(|value| now <= value);
-    LicenseStatusDto {
-        state: if rollback {
-            "invalid"
-        } else if entitled {
-            "validOffline"
+    let plan = if is_trial { "trial" } else { "pro" };
+    let state = if rollback {
+        "invalid"
+    } else if entitled {
+        if is_trial { "trial" } else { "validOffline" }
+    } else if is_trial {
+        "trialExpired"
+    } else {
+        "invalid"
+    };
+    let message = if rollback {
+        if is_trial {
+            "System clock rollback detected. Connect to validate your VibeLink trial.".to_string()
         } else {
-            "invalid"
+            "System clock rollback detected. Connect to validate VibeLink Pro.".to_string()
         }
-        .to_string(),
+    } else if entitled {
+        if is_trial {
+            "Your 7-day VibeLink trial is active. Purchase to keep VibeLink after it ends.".to_string()
+        } else {
+            "Using the last online validation within the 7-day offline grace period.".to_string()
+        }
+    } else if is_trial {
+        "Your 7-day VibeLink trial has ended. Purchase VibeLink Pro to continue.".to_string()
+    } else {
+        "Connect to validate VibeLink Pro.".to_string()
+    };
+    LicenseStatusDto {
+        state: state.to_string(),
         entitled,
-        plan: Some("pro".to_string()),
+        plan: Some(plan.to_string()),
         provider: stored.provider.clone(),
         email: stored.email.clone(),
         masked_key: None,
@@ -647,21 +686,35 @@ fn pro_status_from_cache(
         devices: stored.devices.clone(),
         validated_at: stored.validated_at.clone(),
         offline_grace_until: stored.offline_grace_until.clone(),
+        trial_ends_at: stored.trial_ends_at.clone(),
         purchase_url: purchase_url(),
-        message: if rollback {
-            "System clock rollback detected. Connect to validate VibeLink Pro."
-        } else if entitled {
-            "Using the last online validation within the 7-day offline grace period."
-        } else {
-            "Connect to validate VibeLink Pro."
-        }
-        .to_string(),
+        message,
+    }
+}
+
+fn trial_expired_status(stored: &StoredAccount, device: &DeviceIdentity) -> LicenseStatusDto {
+    LicenseStatusDto {
+        state: "trialExpired".to_string(),
+        entitled: false,
+        plan: Some("none".to_string()),
+        provider: None,
+        email: stored.email.clone(),
+        masked_key: None,
+        activation_id: None,
+        device_id: device.device_id.clone(),
+        device_name: device.device_name.clone(),
+        max_devices: stored.max_devices,
+        devices: Vec::new(),
+        validated_at: None,
+        offline_grace_until: None,
+        trial_ends_at: stored.trial_ends_at.clone(),
+        purchase_url: purchase_url(),
+        message: "Your 7-day VibeLink trial has ended. Purchase VibeLink Pro to continue.".to_string(),
     }
 }
 
 fn status_from_online_store(stored: &StoredAccount, device: &DeviceIdentity) -> LicenseStatusDto {
     match stored.plan.as_deref() {
-        Some("core") => core_status(stored, device),
         Some("pro") => LicenseStatusDto {
             state: "validOnline".to_string(),
             entitled: true,
@@ -676,30 +729,30 @@ fn status_from_online_store(stored: &StoredAccount, device: &DeviceIdentity) -> 
             devices: stored.devices.clone(),
             validated_at: stored.validated_at.clone(),
             offline_grace_until: stored.offline_grace_until.clone(),
+            trial_ends_at: None,
             purchase_url: purchase_url(),
             message: "VibeLink Pro is active on this Moobang account.".to_string(),
         },
+        Some("trial") => LicenseStatusDto {
+            state: "trial".to_string(),
+            entitled: true,
+            plan: Some("trial".to_string()),
+            provider: None,
+            email: stored.email.clone(),
+            masked_key: None,
+            activation_id: None,
+            device_id: device.device_id.clone(),
+            device_name: device.device_name.clone(),
+            max_devices: stored.max_devices,
+            devices: stored.devices.clone(),
+            validated_at: stored.validated_at.clone(),
+            offline_grace_until: stored.offline_grace_until.clone(),
+            trial_ends_at: stored.trial_ends_at.clone(),
+            purchase_url: purchase_url(),
+            message: "Your 7-day VibeLink trial is active. Purchase to keep VibeLink after it ends.".to_string(),
+        },
+        Some("none") => trial_expired_status(stored, device),
         _ => configuration_error_status(device, "Moobang account entitlement is unavailable."),
-    }
-}
-
-fn core_status(stored: &StoredAccount, device: &DeviceIdentity) -> LicenseStatusDto {
-    LicenseStatusDto {
-        state: "core".to_string(),
-        entitled: false,
-        plan: Some("core".to_string()),
-        provider: None,
-        email: stored.email.clone(),
-        masked_key: None,
-        activation_id: None,
-        device_id: device.device_id.clone(),
-        device_name: device.device_name.clone(),
-        max_devices: stored.max_devices,
-        devices: Vec::new(),
-        validated_at: None,
-        offline_grace_until: None,
-        purchase_url: purchase_url(),
-        message: "VibeLink Core is active. Upgrade to Pro for account entitlement.".to_string(),
     }
 }
 
@@ -718,8 +771,9 @@ fn unlicensed_status(device: &DeviceIdentity) -> LicenseStatusDto {
         devices: Vec::new(),
         validated_at: None,
         offline_grace_until: None,
+        trial_ends_at: None,
         purchase_url: purchase_url(),
-        message: "Sign in with a Moobang account to use VibeLink Core or Pro.".to_string(),
+        message: "Sign in with your Moobang account to start your 7-day free trial.".to_string(),
     }
 }
 
@@ -877,23 +931,6 @@ mod tests {
         }
     }
 
-    fn stored_core() -> StoredAccount {
-        StoredAccount {
-            session_token: "session-token".to_string(),
-            plan: Some("core".to_string()),
-            provider: None,
-            email: Some("core@example.com".to_string()),
-            activation_id: None,
-            max_devices: 3,
-            devices: Vec::new(),
-            validated_at: None,
-            offline_grace_until: None,
-            last_observed_at: Some(Utc::now().to_rfc3339()),
-            pending_session_token: None,
-            pending_device_code: None,
-        }
-    }
-
     fn stored_pro(
         validated_at: DateTime<Utc>,
         grace_until: DateTime<Utc>,
@@ -909,6 +946,30 @@ mod tests {
             devices: Vec::new(),
             validated_at: Some(validated_at.to_rfc3339()),
             offline_grace_until: Some(grace_until.to_rfc3339()),
+            trial_ends_at: None,
+            last_observed_at: Some(last_observed_at.to_rfc3339()),
+            pending_session_token: None,
+            pending_device_code: None,
+        }
+    }
+
+    fn stored_trial(
+        validated_at: DateTime<Utc>,
+        grace_until: DateTime<Utc>,
+        last_observed_at: DateTime<Utc>,
+        trial_ends_at: DateTime<Utc>,
+    ) -> StoredAccount {
+        StoredAccount {
+            session_token: "session-token".to_string(),
+            plan: Some("trial".to_string()),
+            provider: None,
+            email: Some("trial@example.com".to_string()),
+            activation_id: None,
+            max_devices: 3,
+            devices: Vec::new(),
+            validated_at: Some(validated_at.to_rfc3339()),
+            offline_grace_until: Some(grace_until.to_rfc3339()),
+            trial_ends_at: Some(trial_ends_at.to_rfc3339()),
             last_observed_at: Some(last_observed_at.to_rfc3339()),
             pending_session_token: None,
             pending_device_code: None,
@@ -916,14 +977,63 @@ mod tests {
     }
 
     #[test]
-    fn signed_in_core_cache_is_not_unlicensed() {
-        let status = status_from_cache(Some(&stored_core()), &device(), Utc::now());
-        assert_eq!(status.state, "core");
-        assert_eq!(status.plan.as_deref(), Some("core"));
-        assert_eq!(status.email.as_deref(), Some("core@example.com"));
-        assert!(!status.entitled);
+    fn active_trial_cache_is_entitled_with_trial_state() {
+        let now = Utc::now();
+        let cache = stored_trial(
+            now - ChronoDuration::days(1),
+            now + ChronoDuration::days(6),
+            now - ChronoDuration::hours(1),
+            now + ChronoDuration::days(6),
+        );
+        let status = status_from_cache(Some(&cache), &device(), now);
+        assert!(status.entitled);
+        assert_eq!(status.state, "trial");
+        assert_eq!(status.plan.as_deref(), Some("trial"));
+        assert_eq!(status.trial_ends_at.as_deref(), cache.trial_ends_at.as_deref());
+        assert_eq!(status.email.as_deref(), Some("trial@example.com"));
         assert!(status.masked_key.is_none());
-        assert_eq!(status.purchase_url, format!("{LICENSE_API_ORIGIN}/checkout"));
+    }
+
+    #[test]
+    fn expired_trial_cache_is_locked() {
+        let now = Utc::now();
+        // grace already elapsed (server caps grace at trial end)
+        let cache = stored_trial(
+            now - ChronoDuration::days(8),
+            now - ChronoDuration::days(1),
+            now - ChronoDuration::days(1),
+            now - ChronoDuration::days(1),
+        );
+        let status = status_from_cache(Some(&cache), &device(), now);
+        assert!(!status.entitled);
+        assert_eq!(status.state, "trialExpired");
+        assert_eq!(status.plan.as_deref(), Some("trial"));
+        assert!(status.trial_ends_at.is_some());
+    }
+
+    #[test]
+    fn trial_expired_plan_none_maps_to_locked() {
+        let mut cache = stored_trial(Utc::now(), Utc::now(), Utc::now(), Utc::now());
+        cache.plan = Some("none".to_string());
+        let status = status_from_cache(Some(&cache), &device(), Utc::now());
+        assert!(!status.entitled);
+        assert_eq!(status.state, "trialExpired");
+        assert_eq!(status.plan.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn clock_rollback_locks_cached_trial_entitlement() {
+        let now = Utc::now();
+        let cache = stored_trial(
+            now + ChronoDuration::minutes(6),
+            now + ChronoDuration::days(6),
+            now,
+            now + ChronoDuration::days(6),
+        );
+        let status = status_from_cache(Some(&cache), &device(), now);
+        assert!(!status.entitled);
+        assert_eq!(status.state, "invalid");
+        assert_eq!(status.plan.as_deref(), Some("trial"));
     }
 
     #[test]
@@ -961,32 +1071,39 @@ mod tests {
     }
 
     #[test]
-    fn account_store_and_status_dto_have_no_legacy_key_fields() {
+    fn trial_store_round_trips_and_status_dto_has_no_legacy_key_fields() {
         let device = device();
+        let now = Utc::now();
         let api = ApiAccountEntitlementDto {
-            state: "core".to_string(),
-            entitled: false,
-            plan: "core".to_string(),
+            state: "trial".to_string(),
+            entitled: true,
+            plan: "trial".to_string(),
             provider: None,
-            email: "core@example.com".to_string(),
+            email: "trial@example.com".to_string(),
             activation_id: None,
             device_id: device.device_id.clone(),
             device_name: device.device_name.clone(),
             max_devices: 3,
             devices: Vec::new(),
-            validated_at: None,
-            offline_grace_until: None,
+            validated_at: Some(now.to_rfc3339()),
+            offline_grace_until: Some((now + ChronoDuration::days(6)).to_rfc3339()),
+            trial_ends_at: Some((now + ChronoDuration::days(6)).to_rfc3339()),
         };
         let stored = stored_from_api("session-token".to_string(), &api, &device).unwrap();
         let stored_json = serde_json::to_value(&stored).unwrap();
         assert_eq!(stored_json.get("sessionToken").and_then(serde_json::Value::as_str), Some("session-token"));
+        assert_eq!(stored_json.get("trialEndsAt").and_then(serde_json::Value::as_str), api.trial_ends_at.as_deref());
         assert!(stored_json.get("licenseKey").is_none());
         assert!(stored_json.get("maskedKey").is_none());
 
+        // StoredAccount round-trips trialEndsAt through serde.
+        let reparsed: StoredAccount = serde_json::from_value(stored_json.clone()).unwrap();
+        assert_eq!(reparsed.trial_ends_at, stored.trial_ends_at);
+
         let status_json = serde_json::to_value(status_from_online_store(&stored, &device)).unwrap();
-        assert_eq!(status_json.get("plan").and_then(serde_json::Value::as_str), Some("core"));
-        assert_eq!(status_json.get("email").and_then(serde_json::Value::as_str), Some("core@example.com"));
-        assert_eq!(status_json.get("provider").and_then(serde_json::Value::as_str), None);
+        assert_eq!(status_json.get("plan").and_then(serde_json::Value::as_str), Some("trial"));
+        assert_eq!(status_json.get("state").and_then(serde_json::Value::as_str), Some("trial"));
+        assert_eq!(status_json.get("email").and_then(serde_json::Value::as_str), Some("trial@example.com"));
         assert_eq!(status_json.get("maskedKey"), Some(&serde_json::Value::Null));
 
         let start_json = serde_json::to_value(AccountSignInStartDto {
@@ -1009,5 +1126,31 @@ mod tests {
             serde_json::to_value(AccountSignInPollResult::Pending("pending".to_string())).unwrap(),
             serde_json::Value::String("pending".to_string()),
         );
+    }
+
+    #[test]
+    fn headless_require_entitled_accepts_active_trial_and_rejects_expired() {
+        let now = Utc::now();
+        let active = HeadlessLicenseCache {
+            stored: Some(stored_trial(
+                now - ChronoDuration::hours(1),
+                now + ChronoDuration::days(6),
+                now - ChronoDuration::minutes(1),
+                now + ChronoDuration::days(6),
+            )),
+        };
+        assert!(active.require_entitled().is_ok());
+        assert!(active.is_entitled());
+
+        let expired = HeadlessLicenseCache {
+            stored: Some(stored_trial(
+                now - ChronoDuration::days(8),
+                now - ChronoDuration::days(1),
+                now - ChronoDuration::days(1),
+                now - ChronoDuration::days(1),
+            )),
+        };
+        assert!(expired.require_entitled().is_err());
+        assert!(!expired.is_entitled());
     }
 }
