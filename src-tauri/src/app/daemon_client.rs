@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -29,9 +29,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(10);
 // A renderer can stop reading while WebView2 is busy or suspended. Keep each
-// local client bounded; overflow is counted and surfaced after it catches up.
-
-const TERMINAL_WS_QUEUE_CAPACITY: usize = 128;
+// local client bounded by frames AND bytes; overflow is counted and surfaced
+// after it catches up.
+const TERMINAL_WS_QUEUE_FRAMES: usize = 1024;
+const TERMINAL_WS_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+// Repeat trim notices for the same pane are throttled so a recovering stream
+// is not drowned in notice lines.
+const TRIM_NOTICE_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -82,7 +86,102 @@ struct ClientShared {
 
 struct TerminalWsClient {
     sender: Sender<Arc<[u8]>>,
-    dropped_bytes: HashMap<String, u64>,
+    queued_bytes: Arc<AtomicUsize>,
+    trims: HashMap<String, PaneTrimState>,
+}
+
+#[derive(Default)]
+struct PaneTrimState {
+    dropped_bytes: u64,
+    last_notice_at: Option<Instant>,
+}
+
+impl TerminalWsClient {
+    /// Delivers one pane output frame, prepending a throttled trim notice
+    /// after a lag. Returns `false` when the client is gone and must be
+    /// removed.
+    fn deliver_output(
+        &mut self,
+        pane_id: &str,
+        data: &[u8],
+        base_frame: &Arc<[u8]>,
+        now: Instant,
+    ) -> bool {
+        let notice = self.pending_notice(pane_id, now);
+        let frame: Arc<[u8]> = match notice.as_deref() {
+            // Merge the notice into the SAME frame as the data. A separate
+            // notice frame competes with real output for the last free queue
+            // slot; under sustained backpressure every delivered frame then
+            // becomes a notice while every data frame is dropped, filling the
+            // terminal with notices and starving actual output.
+            Some(text) => {
+                let mut body = Vec::with_capacity(text.len() + data.len());
+                body.extend_from_slice(text.as_bytes());
+                body.extend_from_slice(data);
+                Arc::from(frame_output(pane_id, &body).into_boxed_slice())
+            }
+            None => Arc::clone(base_frame),
+        };
+        let frame_len = frame.len();
+        if self
+            .queued_bytes
+            .load(Ordering::Acquire)
+            .saturating_add(frame_len)
+            > TERMINAL_WS_QUEUE_MAX_BYTES
+        {
+            self.record_dropped(pane_id, data.len());
+            return true;
+        }
+        match self.sender.try_send(frame) {
+            Ok(()) => {
+                self.queued_bytes.fetch_add(frame_len, Ordering::AcqRel);
+                if notice.is_some() {
+                    self.mark_notice_reported(pane_id, now);
+                }
+                true
+            }
+            Err(TrySendError::Full(_)) => {
+                self.record_dropped(pane_id, data.len());
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    fn pending_notice(&self, pane_id: &str, now: Instant) -> Option<String> {
+        let state = self.trims.get(pane_id)?;
+        if state.dropped_bytes == 0 {
+            return None;
+        }
+        if let Some(last) = state.last_notice_at {
+            if now.duration_since(last) < TRIM_NOTICE_MIN_INTERVAL {
+                return None;
+            }
+        }
+        let dropped_bytes = state.dropped_bytes;
+        Some(format!(
+            "\r\n\x1b[33m[VibeLink: terminal output trimmed ({dropped_bytes} bytes) to keep the app responsive]\x1b[0m\r\n"
+        ))
+    }
+
+    fn mark_notice_reported(&mut self, pane_id: &str, now: Instant) {
+        if let Some(state) = self.trims.get_mut(pane_id) {
+            state.dropped_bytes = 0;
+            state.last_notice_at = Some(now);
+        }
+    }
+
+    fn record_dropped(&mut self, pane_id: &str, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let state = self.trims.entry(pane_id.to_string()).or_default();
+        if state.dropped_bytes == 0 {
+            warn!(
+                pane_id,
+                "terminal websocket client fell behind; trimming output"
+            );
+        }
+        state.dropped_bytes = state.dropped_bytes.saturating_add(bytes);
+    }
 }
 
 impl DaemonClient {
@@ -411,16 +510,19 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
                             Ok(ws) => ws,
                             Err(_) => return,
                         };
-                        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_CAPACITY);
+                        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_FRAMES);
+                        let queued_bytes = Arc::new(AtomicUsize::new(0));
                         shared
                             .ws_clients
                             .lock()
                             .expect("ws clients mutex poisoned")
                             .push(TerminalWsClient {
                                 sender: tx,
-                                dropped_bytes: HashMap::new(),
+                                queued_bytes: Arc::clone(&queued_bytes),
+                                trims: HashMap::new(),
                             });
                         while let Ok(frame) = rx.recv() {
+                            queued_bytes.fetch_sub(frame.len(), Ordering::AcqRel);
                             if ws
                                 .send(tungstenite::Message::Binary(frame.to_vec().into()))
                                 .is_err()
@@ -445,48 +547,10 @@ fn frame_output(pane_id: &str, data: &[u8]) -> Vec<u8> {
 }
 
 fn broadcast_output(shared: &ClientShared, pane_id: &str, data: &[u8]) {
-    let frame: Arc<[u8]> = Arc::from(frame_output(pane_id, data).into_boxed_slice());
+    let base_frame: Arc<[u8]> = Arc::from(frame_output(pane_id, data).into_boxed_slice());
+    let now = Instant::now();
     let mut clients = shared.ws_clients.lock().expect("ws clients mutex poisoned");
-    clients.retain_mut(|client| {
-        if let Some(dropped_bytes) = client.dropped_bytes.remove(pane_id) {
-            let message = format!(
-                "\r\n\x1b[33m[VibeLink: terminal output trimmed ({dropped_bytes} bytes) to keep the app responsive]\x1b[0m\r\n"
-            );
-            let notice: Arc<[u8]> =
-                Arc::from(frame_output(pane_id, message.as_bytes()).into_boxed_slice());
-            match client.sender.try_send(notice) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    client.dropped_bytes.insert(pane_id.to_string(), dropped_bytes);
-                    record_dropped_output(client, pane_id, data.len());
-                    return true;
-                }
-                Err(TrySendError::Disconnected(_)) => return false,
-            }
-        }
-
-        match client.sender.try_send(Arc::clone(&frame)) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                record_dropped_output(client, pane_id, data.len());
-                true
-            }
-            Err(TrySendError::Disconnected(_)) => false,
-        }
-    });
-}
-
-fn record_dropped_output(client: &mut TerminalWsClient, pane_id: &str, bytes: usize) {
-    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-    if let Some(total) = client.dropped_bytes.get_mut(pane_id) {
-        *total = total.saturating_add(bytes);
-    } else {
-        warn!(
-            pane_id,
-            "terminal websocket client fell behind; trimming output"
-        );
-        client.dropped_bytes.insert(pane_id.to_string(), bytes);
-    }
+    clients.retain_mut(|client| client.deliver_output(pane_id, data, &base_frame, now));
 }
 
 fn remove_pending_request(shared: &ClientShared, req: Req) {
@@ -650,19 +714,41 @@ mod tests {
         assert_eq!(decoded_data, data);
     }
 
+    fn test_ws_client(
+        capacity: usize,
+    ) -> (
+        TerminalWsClient,
+        crossbeam_channel::Receiver<Arc<[u8]>>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = bounded::<Arc<[u8]>>(capacity);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        (
+            TerminalWsClient {
+                sender: tx,
+                queued_bytes: Arc::clone(&queued_bytes),
+                trims: HashMap::new(),
+            },
+            rx,
+            queued_bytes,
+        )
+    }
+
+    fn frame_text(frame: &[u8]) -> String {
+        let id_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
+        String::from_utf8(frame[2 + id_len..].to_vec()).expect("frame utf8")
+    }
+
     #[test]
     fn output_messages_route_to_websocket_clients() {
         let (client, _peer) = test_client();
-        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_CAPACITY);
+        let (ws_client, rx, _queued_bytes) = test_ws_client(TERMINAL_WS_QUEUE_FRAMES);
         client
             .shared
             .ws_clients
             .lock()
             .expect("ws clients mutex")
-            .push(TerminalWsClient {
-                sender: tx,
-                dropped_bytes: HashMap::new(),
-            });
+            .push(ws_client);
         let pane_id = Uuid::new_v4();
         let data = b"hello".to_vec();
 
@@ -684,16 +770,13 @@ mod tests {
     #[test]
     fn slow_websocket_client_queue_is_bounded() {
         let (client, _peer) = test_client();
-        let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_CAPACITY);
+        let (ws_client, rx, queued_bytes) = test_ws_client(TERMINAL_WS_QUEUE_FRAMES);
         client
             .shared
             .ws_clients
             .lock()
             .expect("ws clients mutex")
-            .push(TerminalWsClient {
-                sender: tx,
-                dropped_bytes: HashMap::new(),
-            });
+            .push(ws_client);
         let pane_id = Uuid::new_v4();
         let data = vec![b'x'; 64 * 1024];
 
@@ -707,15 +790,20 @@ mod tests {
             );
         }
 
-        assert_eq!(rx.len(), TERMINAL_WS_QUEUE_CAPACITY);
+        // The byte budget bounds the queue well below the 300 sent frames.
+        assert!(rx.len() < 300);
+        assert!(queued_bytes.load(Ordering::Acquire) <= TERMINAL_WS_QUEUE_MAX_BYTES);
         let dropped_bytes = client.shared.ws_clients.lock().expect("ws clients mutex")[0]
-            .dropped_bytes
+            .trims
             .get(&pane_id.to_string())
-            .copied()
+            .map(|state| state.dropped_bytes)
             .expect("dropped output count");
         assert!(dropped_bytes > 0);
 
+        // Simulate the connection thread catching up.
         while rx.try_recv().is_ok() {}
+        queued_bytes.store(0, Ordering::Release);
+
         route_daemon_message(
             &client.shared,
             DaemonToClient::Output {
@@ -724,16 +812,71 @@ mod tests {
             },
         );
 
-        let notice = rx
+        // ONE merged frame carries the notice AND the live data; the notice
+        // never occupies a queue slot of its own.
+        let frame = rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("trim notice");
-        let notice_id_len = u16::from_be_bytes([notice[0], notice[1]]) as usize;
-        let notice_text = std::str::from_utf8(&notice[2 + notice_id_len..]).expect("notice utf8");
-        assert!(notice_text.contains("terminal output trimmed"));
+            .expect("merged frame");
+        let text = frame_text(&frame);
+        assert!(text.contains("terminal output trimmed"));
+        assert!(text.ends_with("tail"));
+        assert!(rx.try_recv().is_err());
+    }
 
-        let tail = rx.recv_timeout(Duration::from_secs(1)).expect("tail frame");
-        let tail_id_len = u16::from_be_bytes([tail[0], tail[1]]) as usize;
-        assert_eq!(&tail[2 + tail_id_len..], b"tail");
+    #[test]
+    fn trim_notice_is_merged_and_throttled() {
+        let (mut client, rx, _queued_bytes) = test_ws_client(8);
+        let pane_id = "pane-1";
+        let now = Instant::now();
+
+        client.record_dropped(pane_id, 512);
+        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, b"data").into_boxed_slice());
+        assert!(client.deliver_output(pane_id, b"data", &base, now));
+        let text = frame_text(&rx.try_recv().expect("merged frame"));
+        assert!(text.contains("terminal output trimmed (512 bytes)"));
+        assert!(text.ends_with("data"));
+
+        // Within the throttle window a new lag stays silent...
+        client.record_dropped(pane_id, 64);
+        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, b"more").into_boxed_slice());
+        assert!(client.deliver_output(pane_id, b"more", &base, now));
+        let text = frame_text(&rx.try_recv().expect("plain frame"));
+        assert!(!text.contains("terminal output trimmed"));
+        assert_eq!(text, "more");
+
+        // ...and reports the accumulated total once the window elapses.
+        client
+            .trims
+            .get_mut(pane_id)
+            .expect("trim state")
+            .last_notice_at = now.checked_sub(TRIM_NOTICE_MIN_INTERVAL);
+        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, b"late").into_boxed_slice());
+        assert!(client.deliver_output(pane_id, b"late", &base, now));
+        let text = frame_text(&rx.try_recv().expect("late merged frame"));
+        assert!(text.contains("terminal output trimmed (64 bytes)"));
+        assert!(text.ends_with("late"));
+    }
+
+    #[test]
+    fn websocket_queue_is_byte_bounded() {
+        let (mut client, rx, _queued_bytes) = test_ws_client(TERMINAL_WS_QUEUE_FRAMES);
+        let pane_id = "pane-1";
+        let data = vec![b'x'; 1024 * 1024];
+        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, &data).into_boxed_slice());
+        let now = Instant::now();
+
+        for _ in 0..10 {
+            assert!(client.deliver_output(pane_id, &data, &base, now));
+        }
+
+        assert!(rx.len() >= 1);
+        assert!(rx.len() < 10);
+        let dropped = client
+            .trims
+            .get(pane_id)
+            .expect("trim state")
+            .dropped_bytes;
+        assert!(dropped > 0);
     }
 
     #[test]
