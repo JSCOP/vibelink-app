@@ -518,7 +518,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const activatePaneFromTarget = useCallback((event: { target: EventTarget | null }) => {
     const paneId = paneIdFromEventTarget(event.target) ?? windowPanelIdFromEventTarget(event.target)
     if (!paneId) return
-    if (useWorkspaceStore.getState().panes[paneId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId)
+    if (useWorkspaceStore.getState().panes[paneId]) {
+      useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId)
+      TerminalManager.repairAfterPointerActivation(paneId)
+    }
     activatePane(paneId)
   }, [activatePane])
 

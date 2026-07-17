@@ -42,6 +42,8 @@ vi.mock('@xterm/xterm', () => {
     refresh(): void {}
     scrollToBottom(): void {}
     write(): void {}
+    hasSelection(): boolean { return false }
+
     resize(cols: number, rows: number): void {
       this.cols = cols
       this.rows = rows
@@ -180,5 +182,35 @@ describe('TerminalManager remote pane sizing', () => {
     expect(useWorkspaceStore.getState().remoteWidePanes[paneId]).toBeUndefined()
 
     TerminalManager.dispose(paneId)
+  })
+})
+
+describe('TerminalManager pointer repair', () => {
+  it('nudges and restores an alternate-buffer PTY once per click gesture', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-pointer-repair'
+    const container = makeContainer()
+    TerminalManager.attach(paneId, container, { sessionId: 'session-repair' })
+    const manager = TerminalManager as unknown as { entries: Map<string, { term: { buffer: { active: { type: string } } } }> }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing pointer repair entry')
+    entry.term.buffer.active.type = 'alternate'
+    invokeMock.mockClear()
+
+    TerminalManager.repairAfterPointerActivation(paneId)
+    TerminalManager.repairAfterPointerActivation(paneId)
+
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
+      ['resize_pane', { sessionId: 'session-repair', paneId, cols: 80, rows: 23 }],
+    ])
+
+    vi.advanceTimersByTime(64)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
+      ['resize_pane', { sessionId: 'session-repair', paneId, cols: 80, rows: 23 }],
+      ['resize_pane', { sessionId: 'session-repair', paneId, cols: 80, rows: 24 }],
+    ])
+
+    TerminalManager.dispose(paneId)
+    vi.useRealTimers()
   })
 })

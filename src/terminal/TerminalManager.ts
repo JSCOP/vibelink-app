@@ -43,6 +43,12 @@ const RENDERER_RESET_SETTLE_MS = 1000
 // reply arrives — dropping xterm's auto-reply leaves that shell hung forever
 // with a black pane. Cap the buffer so an orphaned panel cannot grow it.
 const MAX_PENDING_INPUT_CHUNKS = 256
+// Pointer activation performs one lightweight renderer repair and, for full-
+// screen TUIs, one temporary PTY row nudge. This reproduces the repaint effect
+// of an Alt+Z maximize/restore cycle without moving Dockview geometry.
+const CLICK_REPAIR_COOLDOWN_MS = 250
+const CLICK_REPAIR_PTY_SETTLE_MS = 64
+
 
 
 
@@ -59,6 +65,9 @@ type Entry = {
   fitFrame?: number
   rendererReloadPending?: boolean
   rendererReloadTimer?: number
+  clickRepairTimer?: number
+  lastClickRepairAt?: number
+
   outputFrame?: number
   outputTimer?: number
   pendingOutput?: Uint8Array[]
@@ -85,7 +94,7 @@ class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
   private settings: TerminalVisualSettings = defaultTerminalSettings
   private linkActions: CaptureLinkActions = { onOpenPath: () => {}, resolveMarker: () => undefined }
-  private pendingPass = new Map<string, { fit: boolean; syncPty: boolean; force: boolean }>()
+  private pendingPass = new Map<string, { fit: boolean; syncPty: boolean; force: boolean; clearWebglTextureAtlas: boolean }>()
   private passFrame: number | undefined
 
   constructor() {
@@ -437,8 +446,38 @@ class TerminalManagerImpl {
   resumeRendering(): void {
     this.scheduleLayoutPass({ force: true, syncPty: true })
   }
+  repairAfterPointerActivation(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry?.opened || !entry.container) return
+    if (entry.term.hasSelection()) return
 
-  scheduleLayoutPass(options: { paneIds?: string[]; syncPty?: boolean; force?: boolean } = {}): void {
+    const now = Date.now()
+    if (entry.lastClickRepairAt !== undefined && now - entry.lastClickRepairAt < CLICK_REPAIR_COOLDOWN_MS) return
+    entry.lastClickRepairAt = now
+    this.scheduleLayoutPass({ paneIds: [paneId], force: true, clearWebglTextureAtlas: true })
+
+    if (entry.remoteWide || entry.term.buffer.active.type !== 'alternate') return
+    const sessionId = entry.sessionId
+    const cols = entry.term.cols
+    const rows = entry.term.rows
+    if (!sessionId || rows <= MIN_FIT_ROWS) return
+
+    const nudgedRows = rows - 1
+    entry.lastSentPtyCols = cols
+    entry.lastSentPtyRows = nudgedRows
+    void invoke('resize_pane', { sessionId, paneId, cols, rows: nudgedRows })
+    clearTimeout(entry.clickRepairTimer)
+    entry.clickRepairTimer = window.setTimeout(() => {
+      if (this.entries.get(paneId) !== entry || !entry.opened || entry.sessionId !== sessionId) return
+      entry.clickRepairTimer = undefined
+      entry.lastSentPtyCols = cols
+      entry.lastSentPtyRows = rows
+      void invoke('resize_pane', { sessionId, paneId, cols, rows })
+    }, CLICK_REPAIR_PTY_SETTLE_MS)
+  }
+
+
+  scheduleLayoutPass(options: { paneIds?: string[]; syncPty?: boolean; force?: boolean; clearWebglTextureAtlas?: boolean } = {}): void {
     const paneIds = options.paneIds ?? [...this.entries.keys()]
     for (const paneId of paneIds) {
       if (!this.entries.has(paneId)) continue
@@ -447,6 +486,7 @@ class TerminalManagerImpl {
         fit: true,
         syncPty: Boolean(pending?.syncPty || options.syncPty),
         force: Boolean(pending?.force || options.force),
+        clearWebglTextureAtlas: Boolean(pending?.clearWebglTextureAtlas || options.clearWebglTextureAtlas),
       })
     }
     if (this.passFrame !== undefined || this.pendingPass.size === 0) return
@@ -476,7 +516,7 @@ class TerminalManagerImpl {
           }
           if (wasAtBottom) entry.term.scrollToBottom()
           entry.forceFitOnNextMeasure = false
-          this.redraw(entry)
+          this.redraw(entry, { clearWebglTextureAtlas: pass.clearWebglTextureAtlas && entry.webgl !== undefined })
         }
         entry.lastFitRect = { width: rect.width, height: rect.height }
         if (pass.syncPty) this.syncEntryPtySize(entry)
@@ -507,6 +547,7 @@ class TerminalManagerImpl {
     this.pendingPass.delete(paneId)
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadPending = false
+    clearTimeout(entry.clickRepairTimer)
     this.cancelScheduledOutputFlush(entry)
     entry.titleDisposable?.dispose()
     entry.linkDisposables?.forEach((d) => d.dispose())

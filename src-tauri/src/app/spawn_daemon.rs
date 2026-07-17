@@ -11,11 +11,12 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
+
 
 pub type DaemonStream = LocalSocketStream;
 
@@ -29,6 +30,107 @@ const RECORDED_UNHEALTHY_RECOVERY_DELAY: Duration = Duration::from_secs(3);
 const DAEMON_BIN_DIR: &str = "daemon-bin";
 #[cfg(windows)]
 const DAEMON_EXE_PREFIX: &str = "app-daemon";
+enum SpawnedDaemon {
+    Standard(Child),
+    #[cfg(windows)]
+    Reparented(ReparentedDaemon),
+}
+
+impl SpawnedDaemon {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Standard(child) => child.id(),
+            #[cfg(windows)]
+            Self::Reparented(child) => child.pid,
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match self {
+            Self::Standard(child) => child.try_wait(),
+            #[cfg(windows)]
+            Self::Reparented(child) => child.try_wait(),
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        match self {
+            Self::Standard(child) => child.kill(),
+            #[cfg(windows)]
+            Self::Reparented(child) => child.kill(),
+        }
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        match self {
+            Self::Standard(child) => child.wait(),
+            #[cfg(windows)]
+            Self::Reparented(child) => child.wait(),
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ReparentedDaemon {
+    process: windows_sys::Win32::Foundation::HANDLE,
+    pid: u32,
+}
+
+#[cfg(windows)]
+impl ReparentedDaemon {
+    fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
+        use std::os::windows::process::ExitStatusExt;
+        use windows_sys::Win32::{
+            Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{GetExitCodeProcess, WaitForSingleObject},
+        };
+
+        match unsafe { WaitForSingleObject(self.process, 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_OBJECT_0 => {
+                let mut code = 0;
+                if unsafe { GetExitCodeProcess(self.process, &mut code) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Some(ExitStatus::from_raw(code)))
+            }
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    fn kill(&self) -> io::Result<()> {
+        if unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.process, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn wait(&self) -> io::Result<ExitStatus> {
+        use std::os::windows::process::ExitStatusExt;
+        use windows_sys::Win32::{
+            Foundation::WAIT_OBJECT_0,
+            System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE},
+        };
+
+        if unsafe { WaitForSingleObject(self.process, INFINITE) } != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut code = 0;
+        if unsafe { GetExitCodeProcess(self.process, &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(ExitStatus::from_raw(code))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ReparentedDaemon {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.process);
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(super) struct StartupRecoveryBudget {
@@ -604,7 +706,7 @@ fn terminate_daemon_pid(pid: u32) -> Result<()> {
     }
 }
 
-fn spawn_daemon_process() -> Result<Child> {
+fn spawn_daemon_process() -> Result<SpawnedDaemon> {
     match spawn_configured_daemon(true) {
         Ok(child) => Ok(child),
         Err(err) if should_retry_without_breakaway(&err) => spawn_configured_daemon(false),
@@ -612,7 +714,7 @@ fn spawn_daemon_process() -> Result<Child> {
     }
 }
 
-fn terminate_spawned_daemon(child: &mut Child) {
+fn terminate_spawned_daemon(child: &mut SpawnedDaemon) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }
@@ -632,8 +734,16 @@ fn remove_pid_file_if_matching(path: &Path, pid: u32) -> Result<bool> {
     Ok(true)
 }
 
-fn spawn_configured_daemon(include_breakaway: bool) -> Result<Child> {
+fn spawn_configured_daemon(include_breakaway: bool) -> Result<SpawnedDaemon> {
     let exe = daemon_executable().context("prepare daemon executable")?;
+    #[cfg(windows)]
+    if current_redirection_trust_enforced() {
+        match spawn_reparented_daemon(&exe, include_breakaway) {
+            Ok(child) => return Ok(child),
+            Err(err) => tracing::warn!(?err, "failed to shed inherited RedirectionGuard for daemon spawn"),
+        }
+    }
+
     let mut command = Command::new(exe);
     command
         .arg("--daemon")
@@ -642,7 +752,10 @@ fn spawn_configured_daemon(include_breakaway: bool) -> Result<Child> {
         .stderr(Stdio::null());
 
     configure_detached(&mut command, include_breakaway);
-    command.spawn().context("spawn detached daemon")
+    command
+        .spawn()
+        .map(SpawnedDaemon::Standard)
+        .context("spawn detached daemon")
 }
 
 fn daemon_executable() -> Result<PathBuf> {
@@ -795,6 +908,160 @@ fn should_retry_without_breakaway(err: &anyhow::Error) -> bool {
 #[cfg(not(windows))]
 fn should_retry_without_breakaway(_err: &anyhow::Error) -> bool {
     false
+}
+
+#[cfg(windows)]
+fn current_redirection_trust_enforced() -> bool {
+    unsafe {
+        redirection_trust_enforced(windows_sys::Win32::System::Threading::GetCurrentProcess())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+unsafe fn redirection_trust_enforced(
+    process: windows_sys::Win32::Foundation::HANDLE,
+) -> io::Result<bool> {
+    use std::{ffi::c_void, mem::size_of};
+    use windows_sys::Win32::System::Threading::GetProcessMitigationPolicy;
+
+    const PROCESS_REDIRECTION_TRUST_POLICY: i32 = 16;
+    let mut flags = 0u32;
+    if GetProcessMitigationPolicy(
+        process,
+        PROCESS_REDIRECTION_TRUST_POLICY,
+        &mut flags as *mut u32 as *mut c_void,
+        size_of::<u32>(),
+    ) == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(flags & 1 != 0)
+}
+
+#[cfg(windows)]
+fn spawn_reparented_daemon(exe: &Path, include_breakaway: bool) -> Result<SpawnedDaemon> {
+    use std::{
+        ffi::c_void,
+        mem::{size_of, zeroed},
+        os::windows::ffi::OsStrExt,
+        ptr::{null, null_mut},
+    };
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::Threading::{
+            CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+            OpenProcess, UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT,
+            LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATE_PROCESS, PROCESS_INFORMATION,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+            STARTUPINFOEXW,
+        },
+        UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId},
+    };
+
+    let shell = unsafe { GetShellWindow() };
+    if shell.is_null() {
+        bail!("desktop shell window is unavailable");
+    }
+    let mut shell_pid = 0;
+    unsafe { GetWindowThreadProcessId(shell, &mut shell_pid) };
+    if shell_pid == 0 {
+        bail!("desktop shell process is unavailable");
+    }
+
+    let parent = unsafe {
+        OpenProcess(
+            PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            shell_pid,
+        )
+    };
+    if parent.is_null() {
+        return Err(io::Error::last_os_error()).context("open desktop shell process");
+    }
+
+    let result = (|| -> Result<SpawnedDaemon> {
+        if unsafe { redirection_trust_enforced(parent) }? {
+            bail!("desktop shell also enforces RedirectionGuard");
+        }
+
+        let mut attribute_bytes = 0usize;
+        unsafe {
+            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut attribute_bytes);
+        }
+        if attribute_bytes == 0 {
+            return Err(io::Error::last_os_error()).context("measure process attribute list");
+        }
+        let words = attribute_bytes.div_ceil(size_of::<usize>());
+        let mut attribute_storage = vec![0usize; words];
+        let attribute_list = attribute_storage.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+        if unsafe { InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut attribute_bytes) } == 0 {
+            return Err(io::Error::last_os_error()).context("initialize process attribute list");
+        }
+
+        let spawn_result = (|| -> Result<SpawnedDaemon> {
+            let parent_value: HANDLE = parent;
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+                    &parent_value as *const HANDLE as *const c_void,
+                    size_of::<HANDLE>(),
+                    null_mut(),
+                    null(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error()).context("set daemon parent process");
+            }
+
+            let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
+            startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            startup.lpAttributeList = attribute_list;
+            let mut process_info: PROCESS_INFORMATION = unsafe { zeroed() };
+            let application = exe
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let mut command_line = Vec::with_capacity(application.len() + 12);
+            command_line.push(b'"' as u16);
+            command_line.extend(exe.as_os_str().encode_wide());
+            command_line.extend([b'"' as u16, b' ' as u16]);
+            command_line.extend("--daemon".encode_utf16());
+            command_line.push(0);
+
+            let created = unsafe {
+                CreateProcessW(
+                    application.as_ptr(),
+                    command_line.as_mut_ptr(),
+                    null(),
+                    null(),
+                    0,
+                    windows_creation_flags(include_breakaway) | EXTENDED_STARTUPINFO_PRESENT,
+                    null(),
+                    null(),
+                    &startup.StartupInfo,
+                    &mut process_info,
+                )
+            };
+            if created == 0 {
+                return Err(io::Error::last_os_error()).context("create daemon with desktop shell parent");
+            }
+            unsafe { CloseHandle(process_info.hThread) };
+            Ok(SpawnedDaemon::Reparented(ReparentedDaemon {
+                process: process_info.hProcess,
+                pid: process_info.dwProcessId,
+            }))
+        })();
+
+        unsafe { DeleteProcThreadAttributeList(attribute_list) };
+        spawn_result
+    })();
+
+    unsafe { CloseHandle(parent) };
+    result
 }
 
 #[cfg(windows)]
