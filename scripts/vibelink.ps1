@@ -48,7 +48,8 @@ function Assert-LocalTauriCli {
 
 function Assert-ReleaseLicenseApiUrl {
   if ([string]::IsNullOrWhiteSpace($env:VIBELINK_LICENSE_API_URL)) {
-    throw 'VIBELINK_LICENSE_API_URL is required for release builds. Set it to: $env:VIBELINK_LICENSE_API_URL = "https://vibelink.moobang.net"'
+    $env:VIBELINK_LICENSE_API_URL = 'https://vibelink.moobang.net'
+    Write-Host 'VIBELINK_LICENSE_API_URL was not set; defaulting to https://vibelink.moobang.net.' -ForegroundColor DarkGray
   }
   try {
     $uri = [System.Uri]$env:VIBELINK_LICENSE_API_URL
@@ -343,8 +344,9 @@ Versioning:
   Pass -Version x.y.z with installer actions to force a specific newer version.
 
 Release licensing:
-  Release builds require VIBELINK_LICENSE_API_URL to be exactly
-  `$env:VIBELINK_LICENSE_API_URL = "https://vibelink.moobang.net"`.
+  Release actions default VIBELINK_LICENSE_API_URL to
+  https://vibelink.moobang.net when it is not already set.
+  Any explicitly supplied value must still be exactly that HTTPS origin.
 
 Safety:
   This script does not broad-kill processes. Dev run/build only delegates to
