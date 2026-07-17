@@ -71,3 +71,67 @@ jobs:
           path: src-tauri/target/store/*.msix
           if-no-files-found: error
           retention-days: 30
+  publish-installers:
+    runs-on: windows-latest
+    environment: release
+    env:
+      VIBELINK_LICENSE_API_URL: https://vibelink.moobang.net
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate installer release contract
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Release tag must be vX.Y.Z: $tag" }
+          $version = $Matches[1]
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoText = Get-Content src-tauri/Cargo.toml -Raw
+          $cargoPackage = [regex]::Match($cargoText, '(?ms)^\[package\]\s*(.*?)(?=^\[|\z)')
+          $cargoVersion = [regex]::Match($cargoPackage.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ($packageVersion -ne $version -or $tauriVersion -ne $version -or $cargoVersion -ne $version) {
+            throw "Tag/package version mismatch: tag=$version package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
+          }
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build Windows installers
+        run: pnpm tauri:build:ci
+      - name: Verify installers and write checksums
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ github.ref_name }}'.Substring(1)
+          $msi = "src-tauri/target/release/bundle/msi/VibeLink_${version}_x64_en-US.msi"
+          $exe = "src-tauri/target/release/bundle/nsis/VibeLink_${version}_x64-setup.exe"
+          if (-not (Test-Path $msi) -or -not (Test-Path $exe)) {
+            $found = Get-ChildItem src-tauri/target/release/bundle -Recurse -File | Select-Object -ExpandProperty FullName
+            throw "Expected installer files were not found. Found:`n$($found -join "`n")"
+          }
+          $lines = @(
+            "$((Get-FileHash $exe -Algorithm SHA256).Hash.ToLower())  $(Split-Path $exe -Leaf)"
+            "$((Get-FileHash $msi -Algorithm SHA256).Hash.ToLower())  $(Split-Path $msi -Leaf)"
+          )
+          [System.IO.File]::WriteAllLines('SHA256SUMS.txt', $lines, [System.Text.Encoding]::ASCII)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '${{ github.ref_name }}'.Substring(1)
+          gh release create "v$version" `
+            "src-tauri/target/release/bundle/nsis/VibeLink_${version}_x64-setup.exe" `
+            "src-tauri/target/release/bundle/msi/VibeLink_${version}_x64_en-US.msi" `
+            SHA256SUMS.txt `
+            --repo JSCOP/vibelink-releases `
+            --title "VibeLink $version" `
+            --notes "VibeLink $version Windows installers. Unsigned; verify hashes against SHA256SUMS.txt."
