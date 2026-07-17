@@ -66,6 +66,12 @@ describe('terminal link matchers', () => {
         { index: 6, text: 'https://example.com/a' },
       ])
     })
+
+    it('stops URL matches at adjacent CJK prose', () => {
+      expect(findUrlMatches('그다음 http://10.40.20.2:30310/adx/console에서 확인')).toEqual([
+        { index: 4, text: 'http://10.40.20.2:30310/adx/console' },
+      ])
+    })
   })
 
   describe('findTerminalLinkMatches', () => {
@@ -128,17 +134,78 @@ describe('terminal link matchers', () => {
       })
       expect(continuationLinks).toBe(firstRowLinks)
     })
+
+    it('underlines the exact URL cells after wide CJK glyphs', () => {
+      // 그(2)다(2)음(2)␠(1) puts the URL at column 7 even though its string index is 4.
+      const term = stubTerminal(40, [{ text: '그다음 http://x.com/a에서 확인' }])
+      const provider = createPathLinkProvider(term, () => ({
+        onOpenPath: () => {},
+        resolveMarker: () => undefined,
+      }))
+      let links: ILink[] | undefined
+
+      provider.provideLinks(1, (found) => {
+        links = found
+      })
+
+      expect(links).toHaveLength(1)
+      expect(links?.[0]).toMatchObject({
+        text: 'http://x.com/a',
+        range: {
+          start: { x: 8, y: 1 },
+          end: { x: 21, y: 1 },
+        },
+      })
+    })
+
+    it('extends the underline across a trailing wide glyph in a path', () => {
+      const term = stubTerminal(40, [{ text: 'open E:\\캡처 done' }])
+      const provider = createPathLinkProvider(term, () => ({
+        onOpenPath: () => {},
+        resolveMarker: () => undefined,
+      }))
+      let links: ILink[] | undefined
+
+      provider.provideLinks(1, (found) => {
+        links = found
+      })
+
+      expect(links).toHaveLength(1)
+      expect(links?.[0]).toMatchObject({
+        text: 'E:\\캡처',
+        range: {
+          start: { x: 6, y: 1 },
+          end: { x: 12, y: 1 },
+        },
+      })
+    })
   })
 })
 
+const WIDE_CHAR_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFF00-\uFF60]/
+
+type StubCell = { chars: string; width: number }
+
 function stubTerminal(cols: number, rows: { text: string; isWrapped?: boolean }[]): Terminal {
-  const lines = rows.map(({ text, isWrapped }) => ({
-    isWrapped: Boolean(isWrapped),
-    translateToString: (trimRight = false, startColumn = 0, endColumn = text.length) => {
-      const value = text.slice(startColumn, endColumn)
-      return trimRight ? value.replace(/\s+$/, '') : value
-    },
-  }))
+  const lines = rows.map(({ text, isWrapped }) => {
+    const cells: StubCell[] = []
+    for (const char of text) {
+      const width = WIDE_CHAR_RE.test(char) ? 2 : 1
+      cells.push({ chars: char, width })
+      if (width === 2) cells.push({ chars: '', width: 0 })
+    }
+    while (cells.length < cols) cells.push({ chars: '', width: 1 })
+    return {
+      isWrapped: Boolean(isWrapped),
+      getCell: (x: number) => {
+        const cell = cells[x]
+        return cell && {
+          getChars: () => cell.chars,
+          getWidth: () => cell.width,
+        }
+      },
+    }
+  })
 
   return {
     cols,
@@ -146,6 +213,7 @@ function stubTerminal(cols: number, rows: { text: string; isWrapped?: boolean }[
       active: {
         length: lines.length,
         getLine: (index: number) => lines[index],
+        getNullCell: () => ({}),
       },
     },
   } as unknown as Terminal

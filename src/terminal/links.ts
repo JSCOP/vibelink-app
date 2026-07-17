@@ -1,16 +1,23 @@
-import type { ILink, ILinkProvider, Terminal } from '@xterm/xterm'
+import type { IBufferCell, ILink, ILinkProvider, Terminal } from '@xterm/xterm'
 
 export type CaptureLinkActions = {
   onOpenPath(path: string): void
   resolveMarker(paneId: string, n: number): string | undefined
 }
 
-const URL_RE = /\b((?:https?|file):\/\/[^\s"'<>]+)/gi
+// URLs are ASCII by RFC 3986 (non-ASCII must be percent-encoded); excluding
+// non-ASCII keeps adjacent prose such as "<url>에서" out of the link.
+const URL_RE = /\b((?:https?|file):\/\/[^\s"'<>\u0080-\uffff]+)/gi
 const PATH_RE = /"((?:[a-zA-Z]:[\\/]|\\\\|\/|~[\\/])[^"\r\n]+)"|'((?:[a-zA-Z]:[\\/]|\\\\|\/|~[\\/])[^'\r\n]+)'|((?:[a-zA-Z]:[\\/]|\\\\)[^\s"'<>|*?\r\n]+|~[\\/][^\s"'<>|*?\r\n]+)/g
 const MARKER_RE = /\[Image #(\d+)(?:,\s*\d+x\d+)?\]/g
 const TRAILING_LINK_PUNCTUATION_RE = /[.,;:!?)}\]]+$/
 
 type LinkMatch = { index: number; text: string }
+
+// Joined buffer text with, per UTF-16 unit, the 0-based virtual column of its
+// cell and that cell's width. Wide (CJK) glyphs occupy two columns but one
+// string unit, so match indexes cannot be used as columns directly.
+type MappedLineText = { text: string; columns: number[]; widths: number[] }
 
 export function findUrlMatches(line: string): LinkMatch[] {
   return [...line.matchAll(URL_RE)].flatMap((match) => {
@@ -56,10 +63,10 @@ export function createPathLinkProvider(term: Terminal, getActions: () => Capture
         return
       }
 
-      const key = `${group.start}:${group.end}:${group.text}`
+      const key = `${term.cols}:${group.start}:${group.end}:${group.text}`
       if (!cachedGroup || cachedGroup.key !== key) {
         const links = findTerminalLinkMatches(group.text).map(({ index, text }) => createLink(
-          rangeForVirtualSpan(group.start, term.cols, index, text.length),
+          rangeForMappedSpan(group, group.start, term.cols, index, text.length),
           text,
           (event) => {
             if (!isModifiedClick(event)) return
@@ -77,14 +84,14 @@ export function createPathLinkProvider(term: Terminal, getActions: () => Capture
 export function createImageMarkerLinkProvider(term: Terminal, paneId: string, getActions: () => CaptureLinkActions): ILinkProvider {
   return {
     provideLinks(bufferLineNumber, callback) {
-      const line = lineText(term, bufferLineNumber)
-      if (!line) {
+      const row: MappedLineText = { text: '', columns: [], widths: [] }
+      if (!appendMappedRow(row, term, bufferLineNumber - 1, 0, term.buffer.active.getNullCell())) {
         callback(undefined)
         return
       }
-      const links = findImageMarkerMatches(line).flatMap(({ index, text, n }) => {
+      const links = findImageMarkerMatches(row.text).flatMap(({ index, text, n }) => {
         if (!getActions().resolveMarker(paneId, n)) return []
-        return createSingleRowLink(bufferLineNumber, index, text, (event) => {
+        return createLink(rangeForMappedSpan(row, bufferLineNumber, term.cols, index, text.length), text, (event) => {
           if (!isModifiedClick(event)) return
           const path = getActions().resolveMarker(paneId, n)
           if (path) getActions().onOpenPath(path)
@@ -95,7 +102,7 @@ export function createImageMarkerLinkProvider(term: Terminal, paneId: string, ge
   }
 }
 
-function wrappedLineGroup(term: Terminal, bufferLineNumber: number): { start: number; end: number; text: string } | undefined {
+function wrappedLineGroup(term: Terminal, bufferLineNumber: number): (MappedLineText & { start: number; end: number }) | undefined {
   const buffer = term.buffer.active
   const lineIndex = bufferLineNumber - 1
   if (!buffer.getLine(lineIndex)) return undefined
@@ -110,41 +117,49 @@ function wrappedLineGroup(term: Terminal, bufferLineNumber: number): { start: nu
     endIndex += 1
   }
 
-  const rows: string[] = []
+  const group: MappedLineText & { start: number; end: number } = { start: startIndex + 1, end: endIndex + 1, text: '', columns: [], widths: [] }
+  const cell = buffer.getNullCell()
   for (let index = startIndex; index <= endIndex; index += 1) {
-    const line = buffer.getLine(index)
-    if (!line) return undefined
-    // Keep exactly one terminal-width slice per row; translateToString(true) would
-    // trim cells and break the virtual column-to-x-coordinate mapping.
-    rows.push(line.translateToString(false, 0, term.cols))
+    if (!appendMappedRow(group, term, index, (index - startIndex) * term.cols, cell)) return undefined
   }
-
-  return { start: startIndex + 1, end: endIndex + 1, text: rows.join('') }
+  return group
 }
 
-function rangeForVirtualSpan(startBufferLineNumber: number, cols: number, index: number, length: number): ILink['range'] {
-  const endIndex = index + length - 1
+// Appends exactly one terminal-width row so the joined text keeps a precise
+// unit-to-column mapping: width-0 filler cells behind wide glyphs are skipped
+// and empty cells become spaces.
+function appendMappedRow(target: MappedLineText, term: Terminal, lineIndex: number, columnOffset: number, cell: IBufferCell): boolean {
+  const line = term.buffer.active.getLine(lineIndex)
+  if (!line) return false
+  for (let x = 0; x < term.cols; x += 1) {
+    const loaded = line.getCell(x, cell)
+    if (!loaded) break
+    const width = loaded.getWidth()
+    if (width === 0) continue
+    const chars = loaded.getChars() || ' '
+    for (let unit = 0; unit < chars.length; unit += 1) {
+      target.columns.push(columnOffset + x)
+      target.widths.push(width)
+    }
+    target.text += chars
+  }
+  return true
+}
+
+function rangeForMappedSpan(mapped: MappedLineText, startBufferLineNumber: number, cols: number, index: number, length: number): ILink['range'] {
+  const lastIndex = index + length - 1
+  const startColumn = mapped.columns[index]
+  const endColumn = mapped.columns[lastIndex] + mapped.widths[lastIndex] - 1
   return {
     start: {
-      x: (index % cols) + 1,
-      y: startBufferLineNumber + Math.floor(index / cols),
+      x: (startColumn % cols) + 1,
+      y: startBufferLineNumber + Math.floor(startColumn / cols),
     },
     end: {
-      x: (endIndex % cols) + 1,
-      y: startBufferLineNumber + Math.floor(endIndex / cols),
+      x: (endColumn % cols) + 1,
+      y: startBufferLineNumber + Math.floor(endColumn / cols),
     },
   }
-}
-
-function lineText(term: Terminal, bufferLineNumber: number): string | undefined {
-  return term.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true)
-}
-
-function createSingleRowLink(bufferLineNumber: number, index: number, text: string, activate: (event: MouseEvent) => void): ILink {
-  return createLink({
-    start: { x: index + 1, y: bufferLineNumber },
-    end: { x: index + text.length, y: bufferLineNumber },
-  }, text, activate)
 }
 
 function createLink(range: ILink['range'], text: string, activate: (event: MouseEvent) => void): ILink {
