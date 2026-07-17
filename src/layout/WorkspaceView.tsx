@@ -1079,9 +1079,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (!api || api !== terminalApiRef.current) return
     const targetId = nearestPaneIdInDirection(paneId, api.panels.map((panel) => panel.id), direction, getPaneRect)
     if (!targetId) return
-    const position: Exclude<PaneDropPosition, 'center'> = direction === 'up' ? 'top' : direction === 'down' ? 'bottom' : direction
-    void movePaneToPosition(paneId, targetId, position)
-  }, [movePaneToPosition, panelApiForId])
+    void swapPaneLocations(paneId, targetId)
+  }, [panelApiForId, swapPaneLocations])
 
   const arrangePanes = useCallback(async (requestedGridOverride?: GridSize | null) => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
