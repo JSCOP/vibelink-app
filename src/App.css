@@ -3692,6 +3692,8 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
   background: #fff;
   border-radius: 5px;
   image-rendering: pixelated;
+  max-width: min(360px, 100%);
+  height: auto;
 }
 
 .remote-pairing-content strong {

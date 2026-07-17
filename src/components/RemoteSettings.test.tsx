@@ -7,6 +7,8 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('qrcode', () => ({ default: { toDataURL: vi.fn(async () => 'data:image/png;base64,qr') } }))
 
+import QRCode from 'qrcode'
+
 import { RemoteSettings } from './RemoteSettings'
 
 const status = {
@@ -39,6 +41,8 @@ describe('RemoteSettings', () => {
     expect(await screen.findByText('12345678')).toBeInTheDocument()
     expect(screen.getByAltText('VibeLink Mobile pairing QR')).toHaveAttribute('src', 'data:image/png;base64,qr')
     expect(invoke).toHaveBeenCalledWith('remote_create_pairing')
+    // Camera-readable contract: full 4-module quiet zone and a large bitmap.
+    expect(QRCode.toDataURL).toHaveBeenCalledWith('{}', { margin: 4, width: 720 })
   })
 
   it('revokes a paired device and refreshes status', async () => {

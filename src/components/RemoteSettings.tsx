@@ -87,7 +87,9 @@ export function RemoteSettings() {
     const next = await invoke<PairingPayload>('remote_create_pairing')
     setPairing(next)
     setNow(Date.now())
-    setQrUrl(await QRCode.toDataURL(next.qrPayload, { margin: 1, width: 240 }))
+    // margin 4 = the QR spec's minimum quiet zone; the dense multi-host JSON
+    // payload needs it plus a large optical size for phone cameras to lock on.
+    setQrUrl(await QRCode.toDataURL(next.qrPayload, { margin: 4, width: 720 }))
   })
 
   const revoke = (deviceId: string) => void run(async () => {
@@ -135,7 +137,7 @@ export function RemoteSettings() {
         {!status?.running ? <p className="vibelink-settings-note">서버가 꺼져 있으면 QR 생성 시 자동으로 켜집니다.</p> : null}
         {pairing ? (
           <div className="remote-pairing-content">
-            {qrUrl ? <img src={qrUrl} width={240} height={240} alt="VibeLink Mobile pairing QR" /> : null}
+            {qrUrl ? <img src={qrUrl} width={360} height={360} alt="VibeLink Mobile pairing QR" /> : null}
             <div><span>Pairing code</span><strong>{pairing.code}</strong><small>{expiresIn > 0 ? `${Math.floor(expiresIn / 60)}:${String(expiresIn % 60).padStart(2, '0')} 후 만료` : '만료됨'}</small></div>
           </div>
         ) : null}
