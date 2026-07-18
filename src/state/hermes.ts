@@ -28,6 +28,7 @@ export type HermesTurn = {
 
 export type PendingPermission = {
   requestId: number
+  generation: number
   title: string
   toolKind: string
   options: HermesPermissionOption[]
@@ -37,6 +38,12 @@ export type PendingPermission = {
 }
 
 export type HermesStatus = 'idle' | 'starting' | 'running' | 'busy' | 'error'
+
+export type HermesPendingPrompt = {
+  id: string
+  text: string
+  status: 'queued' | 'sending'
+}
 
 export type HermesModelsState = { available: HermesModelInfo[]; current: string }
 

@@ -107,7 +107,7 @@ vi.mock('@tauri-apps/api/core', () => ({
     }
     if (command === 'hermes_runtime_status') return { detected: true, command: 'hermes-acp.exe', cliCommand: 'hermes.exe', version: '0.18.2', home: 'C:/hermes', source: 'path', configuredModel: { provider: 'openai-codex', model: 'gpt-5.5' } }
     if (command === 'git_snapshot_baseline') return 'HEAD'
-    if (command === 'hermes_start') return null
+    if (command === 'hermes_start') return { generation: 1 }
     return null
   }),
 }))
@@ -244,7 +244,7 @@ describe('kanban store', () => {
       assignedRole: 'VibeLink Agent',
       status: 'in-progress',
     })
-    expect(useWorkspaceStore.getState().hermesPendingPrompts[session.id]?.[0]).toContain('vibelink_task_note tool')
+    expect(useWorkspaceStore.getState().hermesPendingPrompts[session.id]?.[0]?.text).toContain('vibelink_task_note tool')
     expect(useWorkspaceStore.getState().hermesTranscript[session.id]?.[0]).toMatchObject({ role: 'user' })
     expect(invoke).toHaveBeenCalledWith('hermes_start', expect.objectContaining({ sessionId: session.id, workspaceFolder: session.workspaceFolder }))
   })

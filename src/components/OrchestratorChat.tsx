@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { type ButtonHTMLAttributes, type ComponentType, useEffect, useMemo, useState } from 'react'
 import { Archive, Bot, ChevronLeft, ChevronRight, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Square, Wrench, type LucideProps } from 'lucide-react'
-import { getHermesRuntimeStatus, hermesNewSession, hermesRefreshSessions, hermesResumeSession, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
+import { dispatchHermesPrompt, getHermesRuntimeStatus, hermesNewSession, hermesRefreshSessions, hermesResumeSession, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
 import type { HermesRuntimeStatus, HermesWorkspaceState, SkillApplyInput, SkillEntry } from '../ipc/types'
 import type { HermesSessionInfo, HermesTurn, PendingPermission } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
@@ -25,7 +25,7 @@ export function OrchestratorChat() {
   const permissions = useWorkspaceStore((state) => sessionId ? state.hermesPermissions[sessionId] ?? EMPTY_PERMISSIONS : EMPTY_PERMISSIONS)
   const usage = useWorkspaceStore((state) => sessionId ? state.hermesUsage[sessionId] : undefined)
   const models = useWorkspaceStore((state) => sessionId ? state.hermesModels[sessionId] : undefined)
-  const pendingCount = useWorkspaceStore((state) => sessionId ? state.hermesPendingPrompts[sessionId]?.length ?? 0 : 0)
+  const pendingCount = useWorkspaceStore((state) => sessionId ? state.hermesPendingPrompts[sessionId]?.filter((prompt) => prompt.status === 'queued').length ?? 0 : 0)
   const currentSession = useWorkspaceStore((state) => sessionId ? state.hermesCurrentSession[sessionId] : undefined)
   const sessionList = useWorkspaceStore((state) => sessionId ? state.hermesSessions[sessionId] ?? EMPTY_HERMES_SESSIONS : EMPTY_HERMES_SESSIONS)
   const panes = useWorkspaceStore((state) => state.panes)
@@ -34,7 +34,7 @@ export function OrchestratorChat() {
   const error = useWorkspaceStore((state) => state.error)
   const setHermesStatus = useWorkspaceStore((state) => state.setHermesStatus)
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
-  const takeHermesPrompt = useWorkspaceStore((state) => state.takeHermesPrompt)
+  const claimHermesPrompt = useWorkspaceStore((state) => state.claimHermesPrompt)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const [message, setMessage] = useState('')
   const [runtime, setRuntime] = useState<HermesRuntimeStatus | null>(null)
@@ -118,13 +118,13 @@ export function OrchestratorChat() {
 
   useEffect(() => {
     if (!sessionId || status !== 'running' || pendingCount === 0) return
-    const next = takeHermesPrompt(sessionId)
+    const next = claimHermesPrompt(sessionId)
     if (next === undefined) return
     setHermesStatus(sessionId, 'busy')
     void (async () => {
       try {
         await startHermesOutputStream({ force: true })
-        await invoke('hermes_send', { sessionId, text: next })
+        await dispatchHermesPrompt(sessionId, next)
       } catch (sendError) {
         const failure = `VibeLink Agent error: ${String(sendError)}`
         setHermesStatus(sessionId, 'error')
@@ -132,7 +132,7 @@ export function OrchestratorChat() {
         useWorkspaceStore.getState().setError(failure)
       }
     })()
-  }, [sessionId, status, pendingCount, takeHermesPrompt, setHermesStatus])
+  }, [sessionId, status, pendingCount, claimHermesPrompt, setHermesStatus])
 
   useEffect(() => {
     if (!sessionId || (status !== 'running' && status !== 'busy')) return
@@ -244,7 +244,9 @@ export function OrchestratorChat() {
   const cancel = async () => {
     if (status !== 'busy') return
     await startHermesOutputStream({ force: true })
-    await invoke('hermes_cancel', { sessionId })
+    const generation = useWorkspaceStore.getState().hermesGenerations[sessionId]
+    if (generation === undefined) return
+    await invoke('hermes_cancel', { sessionId, generation })
   }
 
   const restart = async () => {

@@ -12,7 +12,7 @@ import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
 import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from './workspaceTodos'
-import type { HermesModelsState, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn, PendingPermission } from './hermes'
+import type { HermesModelsState, HermesPendingPrompt, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn, PendingPermission } from './hermes'
 import {
   normalizeWorkspaceLayoutState,
   replaceWorkspaceLayoutPage,
@@ -61,7 +61,8 @@ type WorkspaceState = {
   hermesPermissions: Record<string, PendingPermission[]>
   hermesUsage: Record<string, { size: number; used: number }>
   hermesModels: Record<string, HermesModelsState>
-  hermesPendingPrompts: Record<string, string[]>
+  hermesPendingPrompts: Record<string, HermesPendingPrompt[]>
+  hermesGenerations: Record<string, number>
   hermesCurrentSession: Record<string, string>
   hermesSessions: Record<string, HermesSessionInfo[]>
   selectedTaskId: Record<string, string | null>
@@ -137,8 +138,11 @@ type WorkspaceState = {
   endHermesTurn: (sessionId: string) => void
   setHermesModels: (sessionId: string, models: { available: HermesModelInfo[]; current: string }) => void
   setHermesStatus: (sessionId: string, status: HermesStatus) => void
+  setHermesGeneration: (sessionId: string, generation: number) => void
   enqueueHermesPrompt: (sessionId: string, text: string) => void
-  takeHermesPrompt: (sessionId: string) => string | undefined
+  claimHermesPrompt: (sessionId: string) => HermesPendingPrompt | undefined
+  ackHermesPrompt: (sessionId: string, promptId: string) => void
+  releaseHermesPrompt: (sessionId: string, promptId: string) => void
   resetHermesTranscript: (sessionId: string) => void
   setHermesCurrentSession: (sessionId: string, acpSessionId: string) => void
   setHermesSessions: (sessionId: string, sessions: HermesSessionInfo[]) => void
@@ -167,6 +171,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   hermesTranscript: {},
   hermesPermissions: {},
   hermesUsage: {},
+  hermesGenerations: {},
   hermesModels: {},
   hermesPendingPrompts: {},
   hermesCurrentSession: {},
@@ -302,8 +307,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   deleteSession: async (sessionId: string) => {
-    await invoke('delete_session', { sessionId })
     await invoke('agent_workspace_cleanup', { sessionId })
+    await invoke('delete_session', { sessionId })
     let sessions = await invoke<SessionMeta[]>('list_sessions')
     if (sessions.length === 0) {
       const created = await invoke<SessionMeta>('create_session', { name: 'Workspace 1' })
@@ -330,6 +335,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const hermesUsage = { ...state.hermesUsage }
       const hermesModels = { ...state.hermesModels }
       const hermesPendingPrompts = { ...state.hermesPendingPrompts }
+      const hermesGenerations = { ...state.hermesGenerations }
       const hermesCurrentSession = { ...state.hermesCurrentSession }
       const hermesSessions = { ...state.hermesSessions }
       const manualPaneTitles = withoutPaneKeys(state.manualPaneTitles, deletedPaneIds)
@@ -352,9 +358,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesUsage[sessionId]
       delete hermesModels[sessionId]
       delete hermesPendingPrompts[sessionId]
+      delete hermesGenerations[sessionId]
       delete hermesCurrentSession[sessionId]
       delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
+      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesGenerations, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
     })
     persistSettings(get().settings)
     persistCurrentKanban(get())
@@ -839,11 +846,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const session = get().sessions.find((item) => item.id === sessionId)
       get().setHermesStatus(sessionId, 'starting')
       try {
-        await invoke('hermes_start', {
+        const started = await invoke<{ generation: number }>('hermes_start', {
           sessionId,
           commandOverride: get().settings.hermesCommand || null,
           workspaceFolder: session?.workspaceFolder ?? null,
         })
+        get().setHermesGeneration(sessionId, started.generation)
       } catch (startError) {
         get().setHermesStatus(sessionId, 'error')
         set({ error: String(startError) })
@@ -921,6 +929,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setHermesStatus: (sessionId: string, status: HermesStatus) => {
     set((state) => ({ hermesStatus: { ...state.hermesStatus, [sessionId]: status } }))
   },
+  setHermesGeneration: (sessionId: string, generation: number) => {
+    set((state) => ({
+      hermesGenerations: { ...state.hermesGenerations, [sessionId]: generation },
+      hermesPermissions: {
+        ...state.hermesPermissions,
+        [sessionId]: (state.hermesPermissions[sessionId] ?? []).filter((permission) => permission.generation === generation),
+      },
+    }))
+  },
   setHermesCurrentSession: (sessionId: string, acpSessionId: string) => {
     set((state) => ({ hermesCurrentSession: { ...state.hermesCurrentSession, [sessionId]: acpSessionId } }))
   },
@@ -931,19 +948,42 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({ hermesTranscript: { ...state.hermesTranscript, [sessionId]: turns } }))
   },
   enqueueHermesPrompt: (sessionId, text) => {
+    const prompt: HermesPendingPrompt = { id: crypto.randomUUID(), text, status: 'queued' }
     set((state) => ({
       hermesPendingPrompts: {
         ...state.hermesPendingPrompts,
-        [sessionId]: [...(state.hermesPendingPrompts[sessionId] ?? []), text],
+        [sessionId]: [...(state.hermesPendingPrompts[sessionId] ?? []), prompt],
       },
     }))
   },
-  takeHermesPrompt: (sessionId) => {
+  claimHermesPrompt: (sessionId) => {
     const queue = get().hermesPendingPrompts[sessionId] ?? []
-    if (queue.length === 0) return undefined
-    const [next, ...rest] = queue
-    set((state) => ({ hermesPendingPrompts: { ...state.hermesPendingPrompts, [sessionId]: rest } }))
-    return next
+    if (queue.some((prompt) => prompt.status === 'sending')) return undefined
+    const index = queue.findIndex((prompt) => prompt.status === 'queued')
+    if (index < 0) return undefined
+    const claimed = { ...queue[index], status: 'sending' as const }
+    const next = [...queue]
+    next[index] = claimed
+    set((state) => ({ hermesPendingPrompts: { ...state.hermesPendingPrompts, [sessionId]: next } }))
+    return claimed
+  },
+  ackHermesPrompt: (sessionId, promptId) => {
+    set((state) => ({
+      hermesPendingPrompts: {
+        ...state.hermesPendingPrompts,
+        [sessionId]: (state.hermesPendingPrompts[sessionId] ?? []).filter((prompt) => prompt.id !== promptId),
+      },
+    }))
+  },
+  releaseHermesPrompt: (sessionId, promptId) => {
+    set((state) => ({
+      hermesPendingPrompts: {
+        ...state.hermesPendingPrompts,
+        [sessionId]: (state.hermesPendingPrompts[sessionId] ?? []).map((prompt) => (
+          prompt.id === promptId && prompt.status === 'sending' ? { ...prompt, status: 'queued' as const } : prompt
+        )),
+      },
+    }))
   },
   resetHermesTranscript: (sessionId: string) => {
     set((state) => {

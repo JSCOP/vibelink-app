@@ -1,9 +1,9 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { HermesModelInfo, HermesPermissionOption, HermesRuntimeStatus } from './types'
 import { useWorkspaceStore } from '../state/store'
-import type { HermesPlanEntry, HermesSessionInfo } from '../state/hermes'
+import type { HermesPendingPrompt, HermesPlanEntry, HermesSessionInfo } from '../state/hermes'
 
-export type HermesEvent =
+export type HermesEvent = { generation: number } & (
   | { kind: 'started'; sessionId: string; acpSessionId: string }
   | { kind: 'sessionReplay'; sessionId: string; acpSessionId: string }
   | { kind: 'userMessage'; sessionId: string; text: string }
@@ -18,6 +18,9 @@ export type HermesEvent =
   | { kind: 'turnEnded'; sessionId: string; stopReason: string }
   | { kind: 'error'; sessionId: string; message: string }
   | { kind: 'exited'; sessionId: string }
+)
+
+type HermesStartResult = { generation: number }
 
 
 /** Setup-required failures (no provider/model configured yet) are guided inline
@@ -44,11 +47,18 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
 
   const channel = new Channel<HermesEvent>((event) => {
     const store = useWorkspaceStore.getState()
+    const currentGeneration = store.hermesGenerations[event.sessionId]
+    if (currentGeneration !== undefined && event.generation < currentGeneration) return
+    if (currentGeneration !== event.generation) store.setHermesGeneration(event.sessionId, event.generation)
     if (event.kind === 'started') {
       store.setHermesStatus(event.sessionId, 'running')
       store.setHermesCurrentSession(event.sessionId, event.acpSessionId)
-      void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: event.sessionId })
-        .then((list) => store.setHermesSessions(event.sessionId, list))
+      void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: event.sessionId, generation: event.generation })
+        .then((list) => {
+          if (useWorkspaceStore.getState().hermesGenerations[event.sessionId] === event.generation) {
+            store.setHermesSessions(event.sessionId, list)
+          }
+        })
         .catch(() => undefined)
     } else if (event.kind === 'sessionReplay') {
       store.resetHermesTranscript(event.sessionId)
@@ -75,6 +85,7 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
     } else if (event.kind === 'permission') {
       store.addHermesPermission(event.sessionId, {
         requestId: event.requestId,
+        generation: event.generation,
         title: event.title,
         toolKind: event.toolKind,
         options: event.options,
@@ -105,7 +116,7 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
 
 export async function startHermesAgent({ sessionId, commandOverride = null, workspaceFolder = null, timeoutMs = DEFAULT_START_TIMEOUT_MS, restartOnTimeout = true }: StartHermesAgentInput): Promise<void> {
   const currentStatus = useWorkspaceStore.getState().hermesStatus[sessionId]
-  if (currentStatus === 'running' || currentStatus === 'busy') return
+  if ((currentStatus === 'running' || currentStatus === 'busy') && useWorkspaceStore.getState().hermesGenerations[sessionId] !== undefined) return
   const existing = startPromises.get(sessionId)
   if (existing) return existing
 
@@ -129,29 +140,51 @@ export function getHermesRuntimeStatus(commandOverride?: string | null): Promise
 }
 
 export function setHermesModel(sessionId: string, modelId: string): Promise<void> {
-  return invoke('hermes_set_model', { sessionId, modelId })
+  return invoke('hermes_set_model', { sessionId, generation: requiredHermesGeneration(sessionId), modelId })
 }
+export async function dispatchHermesPrompt(sessionId: string, prompt: HermesPendingPrompt): Promise<void> {
+  try {
+    await invoke('hermes_send', {
+      sessionId,
+      generation: requiredHermesGeneration(sessionId),
+      text: prompt.text,
+    })
+    useWorkspaceStore.getState().ackHermesPrompt(sessionId, prompt.id)
+  } catch (error) {
+    useWorkspaceStore.getState().releaseHermesPrompt(sessionId, prompt.id)
+    throw error
+  }
+}
+
 
 export async function hermesNewSession(input: StartHermesAgentInput): Promise<string> {
   await startHermesAgent(input)
-  const acpId = await invoke<string>('hermes_new_session', { sessionId: input.sessionId })
+  const generation = requiredHermesGeneration(input.sessionId)
+  const acpId = await invoke<string>('hermes_new_session', { sessionId: input.sessionId, generation })
+  if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   const store = useWorkspaceStore.getState()
   store.setHermesCurrentSession(input.sessionId, acpId)
   store.setHermesTranscript(input.sessionId, [])
-  void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: input.sessionId })
-    .then((list) => store.setHermesSessions(input.sessionId, list))
+  void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: input.sessionId, generation })
+    .then((list) => {
+      if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] === generation) store.setHermesSessions(input.sessionId, list)
+    })
     .catch(() => undefined)
   return acpId
 }
 
 export async function hermesResumeSession(input: StartHermesAgentInput, acpSessionId: string): Promise<void> {
   await startHermesAgent(input)
-  await invoke('hermes_resume_session', { sessionId: input.sessionId, acpSessionId })
+  const generation = requiredHermesGeneration(input.sessionId)
+  await invoke('hermes_resume_session', { sessionId: input.sessionId, generation, acpSessionId })
+  if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   useWorkspaceStore.getState().setHermesCurrentSession(input.sessionId, acpSessionId)
 }
 
 export async function hermesRefreshSessions(sessionId: string): Promise<void> {
-  const list = await invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId })
+  const generation = requiredHermesGeneration(sessionId)
+  const list = await invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId, generation })
+  if (useWorkspaceStore.getState().hermesGenerations[sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   useWorkspaceStore.getState().setHermesSessions(sessionId, list)
 }
 
@@ -159,22 +192,32 @@ async function startHermesAgentOnce({ sessionId, commandOverride, workspaceFolde
   const store = useWorkspaceStore.getState()
   await startHermesOutputStream({ force: true })
   store.setHermesStatus(sessionId, 'starting')
-  await invoke('hermes_start', { sessionId, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
-  await waitForHermesReady(sessionId, timeoutMs)
+  const result = await invoke<HermesStartResult>('hermes_start', { sessionId, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
+  store.setHermesGeneration(sessionId, result.generation)
+  await waitForHermesReady(sessionId, result.generation, timeoutMs)
 }
 
-function waitForHermesReady(sessionId: string, timeoutMs: number): Promise<void> {
-  const current = useWorkspaceStore.getState().hermesStatus[sessionId]
-  if (current === 'running') return Promise.resolve()
-  if (current === 'error') return Promise.reject(new Error('Hermes ACP startup failed'))
+function waitForHermesReady(sessionId: string, generation: number, timeoutMs: number): Promise<void> {
+  const state = useWorkspaceStore.getState()
+  const currentGeneration = state.hermesGenerations[sessionId]
+  const currentStatus = state.hermesStatus[sessionId]
+  if (currentGeneration === generation && currentStatus === 'running') return Promise.resolve()
+  if (currentGeneration === generation && currentStatus === 'error') return Promise.reject(new Error('Hermes ACP startup failed'))
+  if (currentGeneration !== undefined && currentGeneration !== generation) return Promise.reject(new Error('HERMES_SESSION_REPLACED'))
 
   return new Promise((resolve, reject) => {
     const timeout = globalThis.setTimeout(() => {
       unsubscribe()
       reject(new Error(`Hermes ACP session did not become ready within ${Math.round(timeoutMs / 1000)}s`))
     }, timeoutMs)
-    const unsubscribe = useWorkspaceStore.subscribe((state) => {
-      const status = state.hermesStatus[sessionId]
+    const unsubscribe = useWorkspaceStore.subscribe((nextState) => {
+      if (nextState.hermesGenerations[sessionId] !== generation) {
+        globalThis.clearTimeout(timeout)
+        unsubscribe()
+        reject(new Error('HERMES_SESSION_REPLACED'))
+        return
+      }
+      const status = nextState.hermesStatus[sessionId]
       if (status === 'running') {
         globalThis.clearTimeout(timeout)
         unsubscribe()
@@ -188,6 +231,12 @@ function waitForHermesReady(sessionId: string, timeoutMs: number): Promise<void>
   })
 }
 
+
+function requiredHermesGeneration(sessionId: string): number {
+  const generation = useWorkspaceStore.getState().hermesGenerations[sessionId]
+  if (generation === undefined) throw new Error('Hermes ACP session is not ready')
+  return generation
+}
 
 function isStartTimeout(error: unknown): boolean {
   return String(error).includes('did not become ready')
