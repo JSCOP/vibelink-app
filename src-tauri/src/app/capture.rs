@@ -414,29 +414,51 @@ pub async fn ensure_ffmpeg(
 pub async fn open_path(path: String) -> Result<(), String> {
     let target = normalize_open_target(&path)?;
 
+    // Windows: call ShellExecuteW directly from this process instead of
+    // spawning an intermediary (rundll32). An intermediary breaks the
+    // foreground-activation permission chain, so the viewer/Explorer window
+    // opened for a file or folder appears BEHIND the app and looks like the
+    // click did nothing. URLs only worked because browsers self-activate.
     #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("rundll32.exe");
-        command.args(["url.dll,FileProtocolHandler"]).arg(&target);
-        command
-    };
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let target_wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = tauri::async_runtime::spawn_blocking(move || unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                target_wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            ) as isize
+        })
+        .await
+        .map_err(to_string)?;
+        // Per ShellExecuteW docs, values <= 32 are error codes.
+        if result <= 32 {
+            return Err(format!("open failed (ShellExecute code {result}): {target}"));
+        }
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
-    let mut command = {
+    {
         let mut command = Command::new("open");
         command.arg(&target);
-        command
-    };
+        hide_console(&mut command).spawn().map_err(to_string)?;
+        Ok(())
+    }
 
     #[cfg(not(any(windows, target_os = "macos")))]
-    let mut command = {
+    {
         let mut command = Command::new("xdg-open");
         command.arg(&target);
-        command
-    };
-
-    hide_console(&mut command).spawn().map_err(to_string)?;
-    Ok(())
+        hide_console(&mut command).spawn().map_err(to_string)?;
+        Ok(())
+    }
 }
 
 #[tauri::command]
