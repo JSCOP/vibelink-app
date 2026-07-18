@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'installers', 'open-installers', 'version-preview')]
+  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'dev-release', 'installers', 'open-installers', 'version-preview')]
   [string]$Action = 'menu',
   [string]$Version = '',
   [string]$ConfigOverlay = ''
@@ -329,7 +329,7 @@ Actions:
   installer-dev      Dev-flavor installer; auto-bumps patch version first.
   installer-release  Production installer; auto-bumps patch version first.
   installers         Builds both installers after one shared patch bump.
-  installer-ci      CI installer without version bump; accepts -ConfigOverlay path.
+  dev-release       Current-version local release installers without version bump or publication.
   open-installers    Open existing dev and release NSIS installer output folders.
   version-preview    Shows the next installer version without changing files.
 
@@ -364,6 +364,7 @@ function Invoke-Action([string]$Name) {
     'installer-dev' { Invoke-DevInstaller }
     'installer-release' { Invoke-ReleaseInstaller }
     'installer-ci' { Invoke-CiInstaller }
+    'dev-release' { Invoke-CiInstaller }
     'installers' { Invoke-AllInstallers }
     'open-installers' { Open-InstallerOutputs }
     'version-preview' { Invoke-InstallerVersionBump -DryRun }
@@ -381,8 +382,9 @@ function Show-Menu {
     Write-Host '5. Create dev-flavor installer'
     Write-Host '6. Create release installer'
     Write-Host '7. Create both installers'
-    Write-Host 'v. Preview next installer version'
     Write-Host '8. Open installer output folders'
+    Write-Host '9. Create current-version dev release installers (no bump/publish)'
+    Write-Host 'v. Preview next installer version without changing files'
     Write-Host 'h. Help / debug vs release explanation'
     Write-Host 'q. Quit'
     $choice = Read-Host 'Select'
@@ -397,6 +399,7 @@ function Show-Menu {
         '6' { Invoke-ReleaseInstaller }
         '7' { Invoke-AllInstallers }
         '8' { Open-InstallerOutputs }
+        '9' { Invoke-CiInstaller }
         'v' { Invoke-InstallerVersionBump -DryRun }
         'version' { Invoke-InstallerVersionBump -DryRun }
         'h' { Show-HelpText }
