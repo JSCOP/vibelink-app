@@ -1,12 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, Play, TextSelect } from 'lucide-react'
+import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, Play, Sparkles, TextSelect } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { pathFromTerminalSelection } from '../terminal/selectionPath'
 import { useWorkspaceActions } from './actions'
 import { hasPaneDragPayload, paneDragMime, paneDropPositionFromPoint, type PaneDropPosition } from './paneDrag'
+import { planningWorkspaceLayoutPageId } from './workspaceLayoutModel'
+import { getHermesRuntimeStatus } from '../ipc/hermes'
 
 type TerminalPanelParams = {
   paneId: string
@@ -21,7 +23,7 @@ type ContextMenuState = {
 }
 
 const CONTEXT_MENU_WIDTH = 232
-const CONTEXT_MENU_HEIGHT = 206
+const CONTEXT_MENU_HEIGHT = 238
 
 export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -37,9 +39,14 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const setError = useWorkspaceStore((state) => state.setError)
+  const hermesCommand = useWorkspaceStore((state) => state.settings?.hermesCommand ?? '')
+  const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
+  const setActiveLayoutPage = useWorkspaceStore((state) => state.setActiveLayoutPage)
+  const paneTitle = useWorkspaceStore((state) => paneId ? state.panes[paneId]?.config.title : undefined)
   const actions = useWorkspaceActions()
   const [dropPosition, setDropPosition] = useState<PaneDropPosition | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [hermesDetected, setHermesDetected] = useState(false)
   const onTitleChange = useCallback((title: string) => {
     if (!paneId) return
     void applyTerminalTitle(paneId, title)
@@ -70,6 +77,14 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     if (position === 'center') void actions.swapPaneLocations(sourcePaneId, paneId)
     else void actions.movePaneToPosition(sourcePaneId, paneId, position)
   }
+
+  useEffect(() => {
+    let cancelled = false
+    void getHermesRuntimeStatus(hermesCommand)
+      .then((runtime) => { if (!cancelled) setHermesDetected(runtime.detected) })
+      .catch(() => { if (!cancelled) setHermesDetected(false) })
+    return () => { cancelled = true }
+  }, [hermesCommand])
 
   const onContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!paneId) return
@@ -117,6 +132,17 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     closeContextMenu()
     if (!path) return
     void invoke(command, { path }).catch((error) => setError(`${errorMessage}: ${String(error)}`))
+  }
+
+  const askVibeLinkAgent = async () => {
+    closeContextMenu()
+    if (!paneId || !activeSessionId || !hermesDetected) return
+    const selection = TerminalManager.getSelection(paneId)
+    const captured = limitUtf8Tail(selection.trim() ? selection : TerminalManager.getRecentOutput(paneId, 120), 8 * 1024)
+    const title = paneTitle?.trim() || props.params?.title?.trim() || paneId
+    const prompt = `From VibeLink pane "${title}":\n\`\`\`\n${captured}\n\`\`\`\nExplain what happened and propose the next command or fix.`
+    setActiveLayoutPage(activeSessionId, planningWorkspaceLayoutPageId)
+    await sendAgentPrompt(activeSessionId, prompt)
   }
 
   useEffect(() => {
@@ -191,6 +217,9 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
                 </button>
               </>
             ) : null}
+            <button type="button" role="menuitem" disabled={!hermesDetected} title={hermesDetected ? 'Ask VibeLink Agent about this pane' : 'Install Hermes Agent to use this'} onClick={() => void askVibeLinkAgent()}>
+              <Sparkles size={13} /> Ask VibeLink Agent
+            </button>
             <button type="button" role="menuitem" onClick={pasteClipboard}>
               <ClipboardPaste size={13} /> Paste
             </button>
@@ -206,6 +235,12 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     </div>
   )
 })
+
+function limitUtf8Tail(value: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(value)
+  if (bytes.byteLength <= maxBytes) return value
+  return new TextDecoder().decode(bytes.slice(bytes.byteLength - maxBytes)).replace(/^\uFFFD/, '')
+}
 
 export function PlaceholderPanel() {
   return <div className="placeholder-panel">Select or create a workspace.</div>

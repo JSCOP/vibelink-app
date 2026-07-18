@@ -28,6 +28,10 @@ enum CliCommand {
         text: String,
         enter: bool,
     },
+    AgentSend {
+        session_id: Uuid,
+        prompt: String,
+    },
     TaskDone {
         session_id: Uuid,
         pane_id: Option<Uuid>,
@@ -82,7 +86,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     HeadlessLicenseCache::load()
         .context("load license cache")?
         .require_entitled()
-        .context("VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.")?;
+        .context(
+            "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.",
+        )?;
 
     let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
     let client = DaemonClient::new(stream);
@@ -143,6 +149,19 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             })?;
             println!("{{\"ok\":true}}");
             Ok(())
+        }
+        CliCommand::AgentSend { session_id, prompt } => {
+            match client.request_reply(|req| ClientToDaemon::TaskEvent {
+                req,
+                session_id,
+                event: TaskSignal::AgentPrompt { prompt },
+            })? {
+                ReplyResult::Ok => {
+                    println!("{{\"ok\":true}}");
+                    Ok(())
+                }
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
         }
         CliCommand::TaskDone {
             session_id,
@@ -264,6 +283,7 @@ fn execute_skill(command: CliCommand) -> Result<()> {
         | CliCommand::Panes { .. }
         | CliCommand::Read { .. }
         | CliCommand::Write { .. }
+        | CliCommand::AgentSend { .. }
         | CliCommand::TaskDone { .. }
         | CliCommand::TaskNote { .. }
         | CliCommand::Help => unreachable!("not a skill command"),
@@ -299,12 +319,44 @@ fn parse_args(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<CliComm
             let session_id = parse_optional_session_flag_or_env(&tokens[1..], "panes")?;
             Ok(CliCommand::Panes { session_id })
         }
+        "agent" => parse_agent(&tokens[1..]),
         "read" => parse_read(&tokens[1..]),
         "write" => parse_write(&tokens[1..]),
         "task" => parse_task(&tokens[1..]),
         "skill" => parse_skill(&tokens[1..]),
         other => bail!("usage: unknown cli command `{other}`\n{}", usage()),
     }
+}
+
+fn parse_agent(tokens: &[String]) -> Result<CliCommand> {
+    let Some(command) = tokens.first().map(String::as_str) else {
+        return Err(usage_error("agent requires send"));
+    };
+    if command != "send" {
+        bail!("usage: unknown agent command `{command}`\n{}", usage());
+    }
+    let mut session_id = None;
+    let mut prompt = None;
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--session" => {
+                session_id = Some(parse_uuid(next_flag_value(tokens, index, "--session")?)?);
+                index += 2;
+            }
+            "--prompt" => {
+                prompt = Some(next_flag_value(tokens, index, "--prompt")?.to_string());
+                index += 2;
+            }
+            other => bail!("usage: unknown agent send option `{other}`\n{}", usage()),
+        }
+    }
+    Ok(CliCommand::AgentSend {
+        session_id: session_id.or_else(session_id_from_env).ok_or_else(|| {
+            usage_error("agent send requires --session <uuid> or VIBELINK_SESSION_ID")
+        })?,
+        prompt: prompt.ok_or_else(|| usage_error("agent send requires --prompt <text>"))?,
+    })
 }
 
 fn parse_read(tokens: &[String]) -> Result<CliCommand> {
@@ -788,7 +840,7 @@ fn print_usage(mut writer: impl Write) -> Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]\n  app.exe cli task done --task <id> [--session <session-id>] [--pane <pane-id>] [--commit-msg <msg>] [--result-summary <text>]\n  app.exe cli task note --task <id> --message <text> [--session <session-id>] [--pane <pane-id>]\n  app.exe cli skill list [--session <session-id>]\n  app.exe cli skill show --id <id> [--scope global|workspace] [--session <session-id>]\n  app.exe cli skill apply --id <id> --content <markdown> [--name <name>] [--category <category>] [--description <text>] [--scope global|workspace] [--session <session-id>] [--enabled true|false]\n  app.exe cli skill delete --id <id> [--scope global|workspace] [--session <session-id>]"
+    "usage:\n  app.exe cli sessions\n  app.exe cli panes [--session <session-id>]\n  app.exe cli read [--session <session-id>] --pane <pane-id>\n  app.exe cli write [--session <session-id>] --pane <pane-id> --text <text> [--enter]\n  app.exe cli agent send --prompt <text> [--session <session-id>]\n  app.exe cli task done --task <id> [--session <session-id>] [--pane <pane-id>] [--commit-msg <msg>] [--result-summary <text>]\n  app.exe cli task note --task <id> --message <text> [--session <session-id>] [--pane <pane-id>]\n  app.exe cli skill list [--session <session-id>]\n  app.exe cli skill show --id <id> [--scope global|workspace] [--session <session-id>]\n  app.exe cli skill apply --id <id> --content <markdown> [--name <name>] [--category <category>] [--description <text>] [--scope global|workspace] [--session <session-id>]\n  app.exe cli skill delete --id <id> [--scope global|workspace] [--session <session-id>]"
 }
 
 fn session_id_from_env() -> Option<Uuid> {
@@ -914,6 +966,29 @@ mod tests {
                 pane_id,
                 text: "pwd".to_string(),
                 enter: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_agent_send_accepts_session_and_prompt() {
+        let session_id = Uuid::new_v4();
+        let parsed = parse_args([
+            "cli",
+            "agent",
+            "send",
+            "--session",
+            &session_id.to_string(),
+            "--prompt",
+            "summarize this workspace",
+        ])
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            CliCommand::AgentSend {
+                session_id,
+                prompt: "summarize this workspace".to_string(),
             }
         );
     }

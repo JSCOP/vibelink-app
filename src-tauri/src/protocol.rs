@@ -179,6 +179,9 @@ pub enum TaskSignal {
         #[serde(rename = "paneId")]
         pane_id: Option<Uuid>,
     },
+    AgentPrompt {
+        prompt: String,
+    },
     BoardChanged {},
     PaneConfigured {
         #[serde(rename = "paneId")]

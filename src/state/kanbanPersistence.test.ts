@@ -25,7 +25,6 @@ function legacyState(): PersistedKanbanState {
     viewModes: { [task.sessionId]: 'kanban' },
     kanbanLayouts: {},
     orchestratorPaneIds: {},
-    hermesGateways: {},
     workspaceTodos: {},
     workspaceTodoNotes: {},
   }

@@ -1,8 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
-import { HermesGatewayForm } from './HermesGatewayForm'
+import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
 import { LicenseSettings } from './LicenseSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
@@ -18,6 +17,7 @@ import { FontPicker } from './FontPicker'
 import { useWorkspaceStore } from '../state/store'
 import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
+import { HermesInstallGuidance } from './HermesInstallGuidance'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -102,8 +102,6 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const [authList, setAuthList] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [ffmpegStatus, setFfmpegStatus] = useState('')
-  const [runtimeBusy, setRuntimeBusy] = useState(false)
-  const [runtimeMessage, setRuntimeMessage] = useState('')
   const [terminalMessage, setTerminalMessage] = useState('')
   const [mcpCheckBusy, setMcpCheckBusy] = useState(false)
   const [mcpCheck, setMcpCheck] = useState<McpCheckReport | null>(null)
@@ -155,14 +153,14 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     let cancelled = false
     void invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
       .then((next) => { if (!cancelled) setRuntime(next) })
-      .catch((error) => { if (!cancelled) setRuntime({ installed: false, command: draft.hermesCommand || 'hermes-acp', version: String(error) }) })
+      .catch(() => { if (!cancelled) setRuntime({ detected: false, command: null, cliCommand: null, version: null, home: null, source: null, configuredModel: null }) })
     if (activeSessionId) {
-      void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId })
+      void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId, workspaceFolder: activeSession?.workspaceFolder ?? null })
         .then((state) => { if (!cancelled) setWorkspaceState(state) })
         .catch(() => { if (!cancelled) setWorkspaceState(null) })
     }
     return () => { cancelled = true }
-  }, [activeSection, activeSessionId, draft.hermesCommand])
+  }, [activeSection, activeSession?.workspaceFolder, activeSessionId, draft.hermesCommand])
 
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
   const previewHighlightColors = (patch: Partial<Pick<Settings, 'selectedPaneHighlightColor' | 'alarmHighlightColor' | 'reviewedPaneHighlightColor'>>) => {
@@ -240,56 +238,31 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
       const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
       setRuntime(status)
       if (activeSessionId) {
-        const state = await invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId })
+        const state = await invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId: activeSessionId, workspaceFolder: activeSession?.workspaceFolder ?? null })
         setWorkspaceState(state)
       }
     } catch (error) {
       setTerminalMessage(String(error))
     }
   }
-  const installRuntime = async () => {
-    setRuntimeBusy(true)
-    setRuntimeMessage('Installing...')
-    try {
-      const command = await invoke<string>('hermes_install_runtime')
-      const status = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: draft.hermesCommand || null })
-      setRuntime(status)
-      setRuntimeMessage(`Installed: ${command}`)
-    } catch (error) {
-      setRuntimeMessage(String(error))
-    } finally {
-      setRuntimeBusy(false)
-    }
-  }
   const openHermesTerminal = async (mode: 'model' | 'custom-provider' | 'auth' | 'status') => {
     if (!activeSessionId) return
     setTerminalMessage('Opening Hermes CLI terminal...')
     try {
-      const state = await invoke<HermesWorkspaceState>('hermes_ensure_workspace', {
-        sessionId: activeSessionId,
-        workspaceFolder: activeSession?.workspaceFolder ?? null,
-      })
-      setWorkspaceState(state)
       const hermesCommand = await invoke<string>('hermes_cli_command', { commandOverride: draft.hermesCommand || null })
       const intro = mode === 'custom-provider'
-        ? 'Custom provider setup is owned by native Hermes. Use the model setup flow and choose/add the custom provider there.'
+        ? 'Custom provider setup is owned by Hermes. Use the model setup flow and choose or add the custom provider there.'
         : mode === 'model'
-          ? 'Use native Hermes model setup to select provider, model, and provider-specific options.'
+          ? 'Use Hermes model setup to select provider, model, and provider-specific options.'
           : mode === 'auth'
-            ? 'Use native Hermes auth for provider login and credential refresh.'
-            : 'Use native Hermes status commands for this workspace.'
+            ? 'Use Hermes auth for provider login and credential refresh.'
+            : 'Use Hermes status commands for the global installation.'
       const action = mode === 'auth'
         ? `& ${quotePowerShellString(hermesCommand)} auth`
         : mode === 'status'
           ? `& ${quotePowerShellString(hermesCommand)} status`
           : `& ${quotePowerShellString(hermesCommand)} model`
-      const script = [
-        `$env:HERMES_HOME=${quotePowerShellString(state.home)}`,
-        `Write-Host ${quotePowerShellString(`HERMES_HOME: ${state.home}`)}`,
-        `Write-Host ${quotePowerShellString(`Hermes CLI: ${hermesCommand}`)}`,
-        `Write-Host ${quotePowerShellString(intro)}`,
-        action,
-      ].join('; ')
+      const script = [`Write-Host ${quotePowerShellString(intro)}`, action].join('; ')
       await spawnPane(activeSessionId, {
         shell: 'pwsh.exe',
         args: ['-NoLogo', '-NoExit', '-Command', script],
@@ -298,6 +271,23 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
         icon: 'sparkles',
       })
       setTerminalMessage('Hermes CLI terminal opened.')
+    } catch (error) {
+      setTerminalMessage(String(error))
+    }
+  }
+  const openHermesGateway = async (action: 'setup' | 'status' | 'run') => {
+    if (!activeSessionId || !runtime?.detected) return
+    setTerminalMessage('Opening Hermes gateway terminal...')
+    try {
+      const hermesCommand = await invoke<string>('hermes_cli_command', { commandOverride: draft.hermesCommand || null })
+      await spawnPane(activeSessionId, {
+        shell: 'pwsh.exe',
+        args: ['-NoLogo', '-NoExit', '-Command', `& ${quotePowerShellString(hermesCommand)} gateway ${action}`],
+        cwd: activeSession?.workspaceFolder ?? null,
+        title: `Hermes gateway ${action}`,
+        icon: 'message-square',
+      })
+      setTerminalMessage('Hermes gateway terminal opened.')
     } catch (error) {
       setTerminalMessage(String(error))
     }
@@ -378,46 +368,33 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             {activeSection === 'account' ? <LicenseSettings /> : null}
 
             {activeSection === 'model' ? (
-              <SettingsGroup title="Main model" description="Native Hermes owns provider, login, and model configuration. VibeLink displays the active workspace state.">
+              <SettingsGroup title="Main model" description="Hermes owns provider, login, and model configuration. VibeLink reads the global installation without modifying it.">
                 <ReadonlyRow label="Workspace" value={activeSession?.name ?? 'No workspace'} />
-                <ReadonlyRow label="Provider" value={workspaceState?.model?.provider ?? 'Not configured'} />
-                <ReadonlyRow label="Model" value={workspaceState?.model?.model ?? 'Not configured'} />
-                <ReadonlyRow label="Base URL" value={workspaceState?.model?.baseUrl || 'Native provider default'} mono />
-                <ReadonlyRow label="HERMES_HOME" value={workspaceState?.home ?? 'Open a workspace to resolve'} mono />
-                <ReadonlyRow label="Runtime" value={`${runtime?.installed ? 'Installed' : 'Not installed'} · ${runtime?.command ?? 'hermes-acp'}`} mono />
+                <ReadonlyRow label="Global HERMES_HOME" value={runtime?.home ?? workspaceState?.home ?? 'Not resolved'} mono />
+                <ReadonlyRow label="Runtime command" value={runtime?.command ?? 'Not detected'} mono />
+                <ReadonlyRow label="Version" value={runtime?.version ?? 'Not detected'} />
+                <ReadonlyRow label="Provider" value={workspaceState?.model?.provider || runtime?.configuredModel?.provider || 'Hermes default'} />
+                <ReadonlyRow label="Model" value={workspaceState?.model?.model ?? runtime?.configuredModel?.model ?? 'Not configured'} />
+                <ReadonlyRow label="Base URL" value={workspaceState?.model?.baseUrl || runtime?.configuredModel?.baseUrl || 'Hermes provider default'} mono />
                 <label>
                   hermes-acp override
                   <input value={draft.hermesCommand} placeholder="hermes-acp" onChange={(event) => patchDraft({ hermesCommand: event.target.value })} />
                 </label>
+                <HermesInstallGuidance
+                  runtime={runtime}
+                  commandOverride={draft.hermesCommand || null}
+                  sessionId={activeSessionId}
+                  workspaceFolder={activeSession?.workspaceFolder ?? null}
+                  onStatus={setRuntime}
+                />
                 <div className="vibelink-settings-actions">
-                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('model')}>
-                    <Settings2 size={14} /> Configure model
-                  </button>
-                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('custom-provider')}>
-                    <Terminal size={14} /> Custom provider
-                  </button>
-                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('auth')}>
-                    <KeyRound size={14} /> Login / auth
-                  </button>
-                  <button type="button" onClick={() => void refreshHermesState()}>
-                    <RefreshCw size={14} /> Refresh
-                  </button>
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('model')}><Settings2 size={14} /> Configure model</button>
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('custom-provider')}><Terminal size={14} /> Custom provider</button>
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('auth')}><KeyRound size={14} /> Login / auth</button>
+                  <button type="button" onClick={() => void refreshHermesState()}><RefreshCw size={14} /> Refresh</button>
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('status')}><Terminal size={14} /> Open status CLI</button>
                 </div>
-                <div className="vibelink-settings-actions">
-                  <button type="button" disabled={runtimeBusy} onClick={() => void installRuntime()}>
-                    <Play size={14} /> {runtimeBusy ? 'Installing...' : 'Install / update runtime'}
-                  </button>
-                  <button type="button" disabled={!activeSessionId} onClick={() => void openHermesTerminal('status')}>
-                    <Terminal size={14} /> Open status CLI
-                  </button>
-                </div>
-                {runtime?.version || runtimeMessage || terminalMessage ? (
-                  <div className="vibelink-settings-note">
-                    {runtime?.version ? <span>{runtime.version}</span> : null}
-                    {runtimeMessage ? <span>{runtimeMessage}</span> : null}
-                    {terminalMessage ? <span>{terminalMessage}</span> : null}
-                  </div>
-                ) : null}
+                {terminalMessage ? <div className="vibelink-settings-note"><span>{terminalMessage}</span></div> : null}
               </SettingsGroup>
             ) : null}
 
@@ -672,8 +649,13 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             ) : null}
 
             {activeSection === 'messaging' ? (
-              <SettingsGroup title="Messaging" description="Choose the chat platform that can deliver prompts to VibeLink Agent for this workspace.">
-                {activeSessionId ? <HermesGatewayForm sessionId={activeSessionId} /> : <p>Open a workspace to configure messaging.</p>}
+              <SettingsGroup title="Messaging" description="Messaging gateways (Telegram, Discord, Slack, WhatsApp…) are owned by your Hermes install.">
+                <div className="vibelink-settings-actions">
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('setup')}>Set up gateway</button>
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('status')}>Gateway status</button>
+                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('run')}>Run gateway</button>
+                </div>
+                {!runtime?.detected ? <p>Install Hermes Agent to configure messaging.</p> : null}
               </SettingsGroup>
             ) : null}
 
@@ -685,7 +667,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             ) : null}
 
             {activeSection === 'mcp' ? (
-              <SettingsGroup title="MCP servers" description="VibeLink injects only its workspace MCP bridge into native Hermes config.">
+              <SettingsGroup title="MCP servers" description="VibeLink registers its workspace MCP bridge per agent session over ACP; your Hermes config file is never modified.">
                 <ReadonlyRow label="Server" value="vibelink" />
                 <ReadonlyRow label="Command" value="app.exe mcp serve" mono />
                 <ReadonlyRow label="Scope" value={activeSessionId ? `VIBELINK_SESSION_ID=${activeSessionId}` : 'Open a workspace'} mono />
@@ -704,8 +686,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             ) : null}
 
             {activeSection === 'archived' ? (
-              <SettingsGroup title="Archived Chats" description="Archived agent chats remain in native Hermes state.db.">
-                <ReadonlyRow label="Management" value="Use the VibeLink Agent session list to remove or resume sessions." />
+              <SettingsGroup title="Archived Chats" description="Archived agent chats remain owned by your Hermes installation.">
+                <ReadonlyRow label="Management" value="Use the VibeLink Agent session list to resume available sessions." />
               </SettingsGroup>
             ) : null}
 

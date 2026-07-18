@@ -1,4 +1,4 @@
-import type { HermesGatewayConfig, HermesModelInfo, HermesPermissionOption } from '../ipc/types'
+import type { HermesModelInfo, HermesPermissionOption } from '../ipc/types'
 
 export type HermesToolCallView = {
   id: string
@@ -43,22 +43,6 @@ export type HermesModelsState = { available: HermesModelInfo[]; current: string 
 export type HermesSessionInfo = {
   id: string
   title: string | null
-  source: string
-  model: string | null
-  startedAt: number | null
-  endedAt: number | null
-  messageCount: number
-  archived: boolean
+  updatedAt: string | null
+  cwd: string | null
 }
-
-
-
-export function defaultHermesGateway(platform: HermesGatewayConfig['platform'] = 'telegram'): HermesGatewayConfig {
-  return {
-    platform,
-    tokenEnv: platform === 'telegram' ? 'TELEGRAM_BOT_TOKEN' : platform === 'discord' ? 'DISCORD_BOT_TOKEN' : 'SLACK_BOT_TOKEN',
-    tokenSet: false,
-    allowedUsers: '',
-  }
-}
-

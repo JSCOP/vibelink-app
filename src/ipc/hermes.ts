@@ -1,10 +1,12 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { HermesModelInfo, HermesPermissionOption, HermesWorkspaceState } from './types'
+import type { HermesModelInfo, HermesPermissionOption, HermesRuntimeStatus } from './types'
 import { useWorkspaceStore } from '../state/store'
-import type { HermesPlanEntry, HermesSessionInfo, HermesTurn } from '../state/hermes'
+import type { HermesPlanEntry, HermesSessionInfo } from '../state/hermes'
 
 export type HermesEvent =
   | { kind: 'started'; sessionId: string; acpSessionId: string }
+  | { kind: 'sessionReplay'; sessionId: string; acpSessionId: string }
+  | { kind: 'userMessage'; sessionId: string; text: string }
   | { kind: 'message'; sessionId: string; text: string }
   | { kind: 'thought'; sessionId: string; text: string }
   | { kind: 'toolCall'; sessionId: string; toolCallId: string; title: string; toolKind: string; status: string }
@@ -17,7 +19,6 @@ export type HermesEvent =
   | { kind: 'error'; sessionId: string; message: string }
   | { kind: 'exited'; sessionId: string }
 
-type HermesHistoryTurn = { role: 'user' | 'assistant'; text: string; thoughts: string }
 
 /** Setup-required failures (no provider/model configured yet) are guided inline
  *  by the agent panel's empty state, so they must not raise the global banner. */
@@ -44,18 +45,16 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
   const channel = new Channel<HermesEvent>((event) => {
     const store = useWorkspaceStore.getState()
     if (event.kind === 'started') {
-      const prev = store.hermesCurrentSession[event.sessionId]
       store.setHermesStatus(event.sessionId, 'running')
       store.setHermesCurrentSession(event.sessionId, event.acpSessionId)
-      const transcript = store.hermesTranscript[event.sessionId] ?? []
-      if (prev !== event.acpSessionId && transcript.length === 0) {
-        void invoke<HermesHistoryTurn[]>('hermes_session_transcript', { sessionId: event.sessionId, acpSessionId: event.acpSessionId })
-          .then((turns) => store.setHermesTranscript(event.sessionId, turns.map(historyToTurn)))
-          .catch(() => undefined)
-      }
       void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: event.sessionId })
         .then((list) => store.setHermesSessions(event.sessionId, list))
         .catch(() => undefined)
+    } else if (event.kind === 'sessionReplay') {
+      store.resetHermesTranscript(event.sessionId)
+      store.setHermesCurrentSession(event.sessionId, event.acpSessionId)
+    } else if (event.kind === 'userMessage') {
+      store.addHermesUserMessage(event.sessionId, event.text)
     } else if (event.kind === 'message') {
       store.appendHermesText(event.sessionId, 'message', event.text)
     } else if (event.kind === 'thought') {
@@ -124,8 +123,9 @@ export async function startHermesAgent({ sessionId, commandOverride = null, work
 }
 
 
-export function ensureHermesWorkspace(sessionId: string, workspaceFolder?: string | null): Promise<HermesWorkspaceState> {
-  return invoke<HermesWorkspaceState>('hermes_ensure_workspace', { sessionId, workspaceFolder: workspaceFolder ?? null })
+
+export function getHermesRuntimeStatus(commandOverride?: string | null): Promise<HermesRuntimeStatus> {
+  return invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: commandOverride || null })
 }
 
 export function setHermesModel(sessionId: string, modelId: string): Promise<void> {
@@ -147,10 +147,7 @@ export async function hermesNewSession(input: StartHermesAgentInput): Promise<st
 export async function hermesResumeSession(input: StartHermesAgentInput, acpSessionId: string): Promise<void> {
   await startHermesAgent(input)
   await invoke('hermes_resume_session', { sessionId: input.sessionId, acpSessionId })
-  const turns = await invoke<HermesHistoryTurn[]>('hermes_session_transcript', { sessionId: input.sessionId, acpSessionId })
-  const store = useWorkspaceStore.getState()
-  store.setHermesTranscript(input.sessionId, turns.map(historyToTurn))
-  store.setHermesCurrentSession(input.sessionId, acpSessionId)
+  useWorkspaceStore.getState().setHermesCurrentSession(input.sessionId, acpSessionId)
 }
 
 export async function hermesRefreshSessions(sessionId: string): Promise<void> {
@@ -191,9 +188,6 @@ function waitForHermesReady(sessionId: string, timeoutMs: number): Promise<void>
   })
 }
 
-function historyToTurn(history: HermesHistoryTurn): HermesTurn {
-  return { role: history.role === 'user' ? 'user' : 'assistant', text: history.text, thoughts: history.thoughts, toolCalls: [] }
-}
 
 function isStartTimeout(error: unknown): boolean {
   return String(error).includes('did not become ready')

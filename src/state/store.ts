@@ -2,17 +2,16 @@ import { invoke } from '@tauri-apps/api/core'
 import { sendToPane, submitAgentPrompt } from '../ipc/panes'
 import { deactivateLicenseDevice, getLicenseStatus, revalidateLicense, signOutAccount as signOutAccountIpc } from '../ipc/license'
 import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
-import { getHermesRuntimeStatus, installHermesRuntime } from '../ipc/hermesSetup'
 import { create } from 'zustand'
-import type { AttachedSession, HermesGatewayConfig, HermesModelInfo, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief, WorktreeInfo } from '../ipc/types'
+import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief, WorktreeInfo } from '../ipc/types'
 import { defaultSettings, isAgentPane, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
 import type { KanbanData } from './kanban'
-import { composeTaskPrompt } from './kanban'
+import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
 import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from './workspaceTodos'
-import { defaultHermesGateway, type HermesModelsState, type HermesPlanEntry, type HermesSessionInfo, type HermesStatus, type HermesTextPartKind, type HermesToolCallView, type HermesTranscriptPart, type HermesTurn, type PendingPermission } from './hermes'
+import type { HermesModelsState, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn, PendingPermission } from './hermes'
 import {
   normalizeWorkspaceLayoutState,
   replaceWorkspaceLayoutPage,
@@ -24,7 +23,6 @@ import {
 
 const initialKanban = loadKanban()
 const migratedLegacySessions = new Set<string>()
-let hermesRuntimeRepair: Promise<void> | undefined
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 
 
@@ -52,7 +50,6 @@ type WorkspaceState = {
   kanbanLayouts: Record<string, string>
   workspaceLayouts: Record<string, WorkspaceLayoutState>
   orchestratorPaneIds: Record<string, string>
-  hermesGateways: Record<string, HermesGatewayConfig>
   workspaceTodos: WorkspaceTodoLists
   workspaceTodoNotes: WorkspaceTodoNotes
   workspaceBriefs: Record<string, WorkspaceBrief | null>
@@ -125,9 +122,9 @@ type WorkspaceState = {
   setPaneRole: (paneId: string, role: string) => void
   applyPaneConfiguration: (paneId: string, patch: { title?: string | null; role?: string | null }) => void
   setWorkspaceBrief: (sessionId: string, purpose: string, notes: string) => Promise<WorkspaceBrief>
-  setHermesGateway: (sessionId: string, patch: Partial<HermesGatewayConfig>) => void
   addHermesUserMessage: (sessionId: string, text: string) => void
   appendHermesText: (sessionId: string, kind: HermesTextPartKind, text: string) => void
+  sendAgentPrompt: (sessionId: string, text: string) => Promise<void>
   addHermesToolCall: (sessionId: string, call: Omit<HermesToolCallView, 'content'> & { content?: string }) => void
   updateHermesToolCall: (sessionId: string, toolCallId: string, patch: { status: string; content: string }) => void
   setHermesPlan: (sessionId: string, entries: HermesPlanEntry[]) => void
@@ -159,7 +156,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   kanbanLayouts: initialKanban.kanbanLayouts,
   workspaceLayouts: {},
   orchestratorPaneIds: initialKanban.orchestratorPaneIds,
-  hermesGateways: initialKanban.hermesGateways,
   workspaceTodos: initialKanban.workspaceTodos,
   workspaceTodoNotes: initialKanban.workspaceTodoNotes,
   hermesStatus: {},
@@ -193,17 +189,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
 
       set({ sessions, activeSessionId: undefined, panes: {}, layoutJson: null, status: 'ready' })
-      if (licenseStatus.entitled && get().settings.setupWizard.hermesAutoInstall) {
-        if (!hermesRuntimeRepair) {
-          const commandOverride = get().settings.hermesCommand
-          hermesRuntimeRepair = getHermesRuntimeStatus(commandOverride)
-            .then(async (runtime) => {
-              if (!runtime.installed) await installHermesRuntime(commandOverride)
-            })
-            .catch((error) => set({ error: `Hermes automatic repair failed: ${String(error)}` }))
-            .finally(() => { hermesRuntimeRepair = undefined })
-        }
-      }
       if (licenseStatus.email) void get().revalidateLicense()
     } catch (error) {
       set({ status: 'error', error: String(error) })
@@ -303,9 +288,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
     await get().attachSession(created.id)
     await get().spawnPane(created.id, { profileId })
-    set((state) => ({ hermesGateways: { ...state.hermesGateways, [created.id]: defaultHermesGateway('telegram') } }))
     persistCurrentKanban(get())
-    if (get().license.ready && get().license.status?.entitled) void invoke('hermes_ensure_workspace', { sessionId: created.id, workspaceFolder: normalizedFolder })
     return created
   },
 
@@ -316,6 +299,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   deleteSession: async (sessionId: string) => {
     await invoke('delete_session', { sessionId })
+    await invoke('agent_workspace_cleanup', { sessionId })
     let sessions = await invoke<SessionMeta[]>('list_sessions')
     if (sessions.length === 0) {
       const created = await invoke<SessionMeta>('create_session', { name: 'Workspace 1' })
@@ -333,7 +317,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const workspaceLayouts = { ...state.workspaceLayouts }
       const orchestratorPaneIds = { ...state.orchestratorPaneIds }
       const selectedTaskId = { ...state.selectedTaskId }
-      const hermesGateways = { ...state.hermesGateways }
       const workspaceTodos = { ...state.workspaceTodos }
       const workspaceTodoNotes = { ...state.workspaceTodoNotes }
       const workspaceBriefs = { ...state.workspaceBriefs }
@@ -356,7 +339,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete workspaceLayouts[sessionId]
       delete orchestratorPaneIds[sessionId]
       delete selectedTaskId[sessionId]
-      delete hermesGateways[sessionId]
       delete workspaceTodos[sessionId]
       delete workspaceTodoNotes[sessionId]
       delete workspaceBriefs[sessionId]
@@ -368,7 +350,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesPendingPrompts[sessionId]
       delete hermesCurrentSession[sessionId]
       delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, hermesGateways, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
+      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
     })
     persistSettings(get().settings)
     persistCurrentKanban(get())
@@ -706,23 +688,50 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   assignTask: async (taskId: string, paneId: string, options?: { isolated?: boolean }) => {
     if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
     const task = get().kanban.tasks[taskId]
-    const pane = get().panes[paneId]
-    if (!task || !pane?.alive) {
-      set({ error: 'Cannot assign task to a missing or closed pane' })
+    if (!task) { set({ error: 'Cannot assign a missing task' }); return }
+    const session = get().sessions.find((item) => item.id === task.sessionId)
+
+    if (paneId === 'vibelink-agent') {
+      const runtime = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: get().settings.hermesCommand || null })
+      if (!runtime.detected) {
+        set({ error: 'Hermes Agent is not installed. Install it from https://hermes-agent.nousresearch.com/ and re-check.' })
+        return
+      }
+      if (session?.workspaceFolder) {
+        try {
+          if (options?.isolated) {
+            const worktree = await invoke<WorktreeInfo>('git_worktree_create', { workspaceFolder: session.workspaceFolder, taskId })
+            await get().updateTask(taskId, { worktreePath: worktree.worktreePath, baselineRef: 'HEAD' })
+          } else {
+            const baselineRef = await invoke<string>('git_snapshot_baseline', { workspaceFolder: session.workspaceFolder })
+            await get().updateTask(taskId, { baselineRef })
+          }
+        } catch (baselineError) {
+          const currentTask = get().kanban.tasks[taskId] ?? task
+          const note = `Diff baseline unavailable: ${String(baselineError)}`
+          await get().updateTask(taskId, { resultSummary: [currentTask.resultSummary, note].filter(Boolean).join('\n') })
+        }
+      }
+      const assigned = await get().updateTask(taskId, { assignedPaneId: undefined, assignedRole: 'VibeLink Agent', status: 'assigned' })
+      if (!assigned) return
+      const latestTask = get().kanban.tasks[taskId] ?? assigned
+      await get().sendAgentPrompt(task.sessionId, composeAgentTaskPrompt(latestTask, {
+        brief: get().workspaceBriefs[task.sessionId],
+        worktreePath: latestTask.worktreePath,
+      }))
+      await get().updateTask(taskId, { status: 'in-progress' })
       return
     }
+
+    const pane = get().panes[paneId]
+    if (!pane?.alive) { set({ error: 'Cannot assign task to a missing or closed pane' }); return }
     if (!isAgentPane(pane, get().settings)) {
       set({ error: 'Tasks can only be assigned to AI agent terminal profiles such as Codex, Claude, or OMP.' })
       return
     }
     const role = get().settings.paneRoles[paneId]
-    const assigned = await get().updateTask(taskId, {
-      assignedPaneId: paneId,
-      assignedRole: role,
-      status: 'assigned',
-    })
+    const assigned = await get().updateTask(taskId, { assignedPaneId: paneId, assignedRole: role, status: 'assigned' })
     if (!assigned) return
-    const session = get().sessions.find((item) => item.id === task.sessionId)
     if (session?.workspaceFolder) {
       try {
         if (options?.isolated) {
@@ -732,12 +741,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           const baselineRef = await invoke<string>('git_snapshot_baseline', { workspaceFolder: session.workspaceFolder })
           await get().updateTask(taskId, { baselineRef })
         }
-      } catch (error) {
+      } catch (baselineError) {
         const currentTask = get().kanban.tasks[taskId] ?? task
-        const note = `Diff baseline unavailable: ${String(error)}`
-        await get().updateTask(taskId, {
-          resultSummary: [currentTask.resultSummary, note].filter(Boolean).join('\n'),
-        })
+        const note = `Diff baseline unavailable: ${String(baselineError)}`
+        await get().updateTask(taskId, { resultSummary: [currentTask.resultSummary, note].filter(Boolean).join('\n') })
       }
     }
     const latestTask = get().kanban.tasks[taskId] ?? task
@@ -783,13 +790,31 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({ orchestratorPaneIds: { ...state.orchestratorPaneIds, [sessionId]: paneId } }))
     persistCurrentKanban(get())
   },
-  setHermesGateway: (sessionId: string, patch: Partial<HermesGatewayConfig>) => {
-    if (get().license.ready && !get().license.status?.entitled) { set({ error: 'VibeLink Pro license required.' }); return }
-    set((state) => {
-      const current = state.hermesGateways[sessionId] ?? defaultHermesGateway(patch.platform)
-      return { hermesGateways: { ...state.hermesGateways, [sessionId]: { ...current, ...patch } } }
-    })
-    persistCurrentKanban(get())
+  sendAgentPrompt: async (sessionId: string, text: string) => {
+    const prompt = text.trim()
+    if (!prompt) return
+    const runtime = await invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: get().settings.hermesCommand || null })
+    if (!runtime.detected) {
+      set({ error: 'Hermes Agent is not installed. Install it from https://hermes-agent.nousresearch.com/ and re-check.' })
+      return
+    }
+    get().addHermesUserMessage(sessionId, prompt)
+    get().enqueueHermesPrompt(sessionId, prompt)
+    const status = get().hermesStatus[sessionId]
+    if (status !== 'running' && status !== 'busy' && status !== 'starting') {
+      const session = get().sessions.find((item) => item.id === sessionId)
+      get().setHermesStatus(sessionId, 'starting')
+      try {
+        await invoke('hermes_start', {
+          sessionId,
+          commandOverride: get().settings.hermesCommand || null,
+          workspaceFolder: session?.workspaceFolder ?? null,
+        })
+      } catch (startError) {
+        get().setHermesStatus(sessionId, 'error')
+        set({ error: String(startError) })
+      }
+    }
   },
   addHermesUserMessage: (sessionId: string, text: string) => {
     set((state) => ({
@@ -1124,7 +1149,6 @@ function persistCurrentKanban(state: WorkspaceState): void {
     viewModes: state.viewModes,
     kanbanLayouts: state.kanbanLayouts,
     orchestratorPaneIds: state.orchestratorPaneIds,
-    hermesGateways: state.hermesGateways,
     workspaceTodos: state.workspaceTodos,
     workspaceTodoNotes: state.workspaceTodoNotes,
   })

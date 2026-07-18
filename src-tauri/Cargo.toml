@@ -39,7 +39,6 @@ indexmap = { version = "2", features = ["serde"] }
 tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
 sysinfo = "0.33"
 tungstenite = "0.29"
 rustls = { version = "0.23", features = ["ring"] }

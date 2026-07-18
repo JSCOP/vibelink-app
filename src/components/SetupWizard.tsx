@@ -2,12 +2,12 @@ import { invoke } from '@tauri-apps/api/core'
 import { CheckCircle2, Circle, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { agentStatusLabel, type AgentCliStatus } from '../ipc/agents'
-import { ensureHermesWorkspace, setHermesModel, startHermesAgent } from '../ipc/hermes'
-import { getHermesRuntimeStatus, installHermesRuntime } from '../ipc/hermesSetup'
+import { getHermesRuntimeStatus, setHermesModel, startHermesAgent } from '../ipc/hermes'
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 import type { HermesRuntimeStatus } from '../ipc/types'
 import { useWorkspaceStore } from '../state/store'
 import { AccountSignIn } from './AccountSignIn'
+import { HermesInstallGuidance } from './HermesInstallGuidance'
 import { setupStepAutoPass, setupStepIds, setupStepTitle } from './setupWizardSteps'
 
 type SetupWizardProps = {
@@ -29,7 +29,6 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   const [stepIndex, setStepIndex] = useState(0)
   const [skippedSteps, setSkippedSteps] = useState<string[]>(settings.setupWizard.skippedSteps)
   const [runtime, setRuntime] = useState<HermesRuntimeStatus | null>(null)
-  const [runtimeBusy, setRuntimeBusy] = useState(false)
   const [runtimeMessage, setRuntimeMessage] = useState('')
   const [modelBusy, setModelBusy] = useState(false)
   const [modelMessage, setModelMessage] = useState('')
@@ -41,10 +40,10 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   const models = activeSessionId ? hermesModels[activeSessionId] : undefined
   const autoPass = useMemo(() => setupStepAutoPass({
     entitled,
-    runtimeInstalled: Boolean(runtime?.installed),
+    runtimeDetected: Boolean(runtime?.detected),
     agentClis,
     mcp: mcpReport,
-  }), [agentClis, entitled, mcpReport, runtime?.installed])
+  }), [agentClis, entitled, mcpReport, runtime?.detected])
 
   useEffect(() => {
     void getHermesRuntimeStatus(settings.hermesCommand)
@@ -118,30 +117,14 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
     }
   }
 
-  const installRuntime = async () => {
-    if (!entitled) return
-    setRuntimeBusy(true)
-    setRuntimeMessage('Installing and verifying the managed runtime…')
-    updateSettings({ setupWizard: { ...settings.setupWizard, hermesAutoInstall: true, skippedSteps } })
-    try {
-      const installed = await withSetupTimeout(installHermesRuntime(settings.hermesCommand))
-      setRuntime(installed.status)
-      setRuntimeMessage(`Installed: ${installed.command}`)
-    } catch (error) {
-      setRuntimeMessage(String(error))
-    } finally {
-      setRuntimeBusy(false)
-    }
-  }
 
   const prepareModel = async () => {
-    if (!entitled || !runtime?.installed) return
+    if (!entitled || !runtime?.detected) return
     setModelBusy(true)
     setModelMessage('Starting Hermes and loading available models…')
     try {
       const sessionId = await ensureActiveSession()
       const session = sessions.find((item) => item.id === sessionId)
-      await withSetupTimeout(ensureHermesWorkspace(sessionId, session?.workspaceFolder))
       await withSetupTimeout(startHermesAgent({
         sessionId,
         commandOverride: settings.hermesCommand || null,
@@ -158,10 +141,9 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   const openHermesCli = async (verb: 'auth' | 'model') => {
     const sessionId = await ensureActiveSession()
     const session = sessions.find((item) => item.id === sessionId)
-    const workspace = await ensureHermesWorkspace(sessionId, session?.workspaceFolder)
     const command = await invoke<string>('hermes_cli_command', { commandOverride: settings.hermesCommand || null })
     const action = verb === 'auth' ? 'auth' : 'model'
-    const script = `$env:HERMES_HOME=${quotePowerShell(workspace.home)}; & ${quotePowerShell(command)} ${action}`
+    const script = `& ${quotePowerShell(command)} ${action}`
     await spawnPane(sessionId, {
       shell: 'pwsh.exe',
       args: ['-NoLogo', '-NoExit', '-Command', script],
@@ -213,7 +195,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           {step === 'welcome' ? (
             <div className="setup-wizard-panel">
               <h3>One workspace for terminals, agents, and durable work.</h3>
-              <p>VibeLink can detect your coding agents, install Hermes, verify MCP, and keep Kanban tasks synchronized without manual wiring.</p>
+              <p>VibeLink can detect your coding agents, connect to your Hermes Agent, verify MCP, and keep Kanban tasks synchronized without manual wiring.</p>
               <div className="setup-wizard-actions">
                 <button type="button" className="primary-action" onClick={next}>Start setup</button>
                 <button type="button" onClick={skipEverything}>Skip everything</button>
@@ -256,21 +238,15 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           {step === 'runtime' ? (
             <div className="setup-wizard-panel">
               {!entitled ? <ProNotice /> : null}
-              <label className="setup-consent">
-                <input
-                  type="checkbox"
-                  checked={settings.setupWizard.hermesAutoInstall}
-                  disabled={!entitled || runtimeBusy}
-                  onChange={(event) => updateSettings({ setupWizard: { ...settings.setupWizard, hermesAutoInstall: event.target.checked, skippedSteps } })}
-                />
-                Install and maintain the Hermes agent runtime automatically
-              </label>
-              <p>{runtime?.installed ? `Installed: ${runtime.command}` : 'The managed runtime is not installed yet.'}</p>
+              <HermesInstallGuidance
+                runtime={runtime}
+                commandOverride={settings.hermesCommand || null}
+                sessionId={activeSessionId ?? sessions[0]?.id}
+                workspaceFolder={sessions.find((item) => item.id === (activeSessionId ?? sessions[0]?.id))?.workspaceFolder ?? null}
+                onStatus={setRuntime}
+              />
               {runtimeMessage ? <p className="setup-inline-message">{runtimeMessage}</p> : null}
               <div className="setup-wizard-actions">
-                <button type="button" disabled={!entitled || runtimeBusy || !settings.setupWizard.hermesAutoInstall} onClick={() => void installRuntime()}>
-                  {runtimeBusy ? <Loader2 className="spin" size={14} /> : null}{runtime?.installed ? 'Repair / verify' : 'Install runtime'}
-                </button>
                 <button type="button" className="primary-action" onClick={next}>Continue</button>
               </div>
             </div>
@@ -279,11 +255,11 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
           {step === 'model' ? (
             <div className="setup-wizard-panel">
               {!entitled ? <ProNotice /> : null}
-              {entitled && !runtime?.installed ? <p>Install the Hermes runtime first, or skip this step.</p> : null}
+              {entitled && !runtime?.detected ? <p>Install Hermes Agent first, or skip this step.</p> : null}
               <div className="setup-wizard-actions">
-                <button type="button" disabled={!entitled || !runtime?.installed || modelBusy} onClick={() => void prepareModel()}>{modelBusy ? <Loader2 className="spin" size={14} /> : null}Start / refresh Hermes</button>
-                <button type="button" disabled={!entitled || !runtime?.installed} onClick={() => void openHermesCli('auth')}>Hermes auth</button>
-                <button type="button" disabled={!entitled || !runtime?.installed} onClick={() => void openHermesCli('model')}>Hermes model</button>
+                <button type="button" disabled={!entitled || !runtime?.detected || modelBusy} onClick={() => void prepareModel()}>{modelBusy ? <Loader2 className="spin" size={14} /> : null}Start / refresh Hermes</button>
+                <button type="button" disabled={!entitled || !runtime?.detected} onClick={() => void openHermesCli('auth')}>Hermes auth</button>
+                <button type="button" disabled={!entitled || !runtime?.detected} onClick={() => void openHermesCli('model')}>Hermes model</button>
               </div>
               {models?.available.length ? (
                 <label>
@@ -319,7 +295,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
               <ul>
                 <li>{license.status?.plan === 'pro' ? 'Pro account connected' : license.status?.plan === 'trial' ? '7-day trial active' : 'Account connected'}</li>
                 <li>{agentClis.filter((status) => status.installed).length} agent CLI(s) detected</li>
-                <li>Hermes runtime {runtime?.installed ? 'installed' : 'not installed'}</li>
+                <li>Hermes Agent {runtime?.detected ? 'detected' : 'not detected'}</li>
                 <li>MCP {mcpReport?.initializeOk ? `verified with ${mcpReport.toolCount} tools` : 'not verified'}</li>
               </ul>
               <div className="setup-wizard-actions"><button type="button" className="primary-action" onClick={finish}>Finish</button></div>

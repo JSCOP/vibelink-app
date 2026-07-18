@@ -74,6 +74,59 @@ export function composeTaskPrompt(
     .join(' | ')
 }
 
+export function composeAgentTaskPrompt(
+  task: Task,
+  ctx: { brief?: WorkspaceBrief | null; worktreePath?: string | null },
+): string {
+  const short = task.id.slice(0, 8)
+  const title = inlineText(task.title)
+  const purposeLine = ctx.brief?.purpose.trim() ? `Workspace purpose: ${inlineText(ctx.brief.purpose)}` : undefined
+  const worktreeLine = ctx.worktreePath ? `Work in isolated git worktree: ${inlineText(ctx.worktreePath)}` : undefined
+  const description = inlineText(task.description)
+  return [
+    `[Task #${short}] ${title}`,
+    purposeLine,
+    worktreeLine,
+    description || undefined,
+    `Report progress with the vibelink_task_note tool (taskId ${task.id}).`,
+    `When finished, call vibelink_task_done (taskId ${task.id}) with a short resultSummary.`,
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join(' | ')
+}
+
+export function composeWorkspaceDigestPrompt(input: {
+  workspaceName: string
+  brief?: WorkspaceBrief | null
+  tasks: Task[]
+  terminalOutputs: Array<{ title: string; output: string }>
+}): string {
+  const grouped = input.tasks.reduce<Record<TaskStatus, Task[]>>((result, task) => {
+    result[task.status].push(task)
+    return result
+  }, { pending: [], assigned: [], 'in-progress': [], done: [] })
+  const kanbanLines = (Object.keys(TASK_COLUMNS) as TaskStatus[]).map((status) => {
+    const tasks = grouped[status]
+    const titles = tasks.map((task) => inlineText(task.title)).join('; ')
+    return `- ${TASK_COLUMNS[status]} (${tasks.length})${titles ? `: ${titles}` : ''}`
+  })
+  const terminalSections = input.terminalOutputs.length > 0
+    ? input.terminalOutputs.map(({ title, output }) => `### ${inlineText(title)}\n<terminal_output>\n${output}\n</terminal_output>`).join('\n')
+    : 'No live terminal output was available.'
+
+  return [
+    'Create a concise advisor digest for this VibeLink workspace.',
+    'Report: current progress, blockers or risks, and the three highest-priority next actions. Do not change files or run commands unless I ask after reviewing the digest.',
+    `Workspace: ${inlineText(input.workspaceName)}`,
+    input.brief?.purpose.trim() ? `Purpose: ${input.brief.purpose.trim()}` : 'Purpose: not recorded',
+    input.brief?.notes.trim() ? `Notes: ${input.brief.notes.trim()}` : 'Notes: none',
+    '## Kanban',
+    ...kanbanLines,
+    '## Recent terminal output',
+    terminalSections,
+  ].join('\n')
+}
+
 function inlineText(value: string): string {
   return value.trim().replace(/\s+/g, ' ')
 }

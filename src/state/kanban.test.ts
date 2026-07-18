@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { PaneMeta, SessionMeta, Task } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
-import { composeTaskPrompt, tasksByStatus, tasksForSession } from './kanban'
+import { composeAgentTaskPrompt, composeTaskPrompt, composeWorkspaceDigestPrompt, tasksByStatus, tasksForSession } from './kanban'
 import { loadKanban, persistKanban } from './kanbanPersistence'
 import { useWorkspaceStore } from './store'
 
@@ -105,6 +105,9 @@ vi.mock('@tauri-apps/api/core', () => ({
         updatedAt: '2026-07-13T00:00:00.000Z',
       }
     }
+    if (command === 'hermes_runtime_status') return { detected: true, command: 'hermes-acp.exe', cliCommand: 'hermes.exe', version: '0.18.2', home: 'C:/hermes', source: 'path', configuredModel: { provider: 'openai-codex', model: 'gpt-5.5' } }
+    if (command === 'git_snapshot_baseline') return 'HEAD'
+    if (command === 'hermes_start') return null
     return null
   }),
 }))
@@ -135,6 +138,35 @@ test('composeTaskPrompt includes workspace purpose', () => {
   })
   expect(prompt).toContain('Workspace purpose: Complete onboarding')
   expect(prompt).toContain('Role: Reviewer')
+})
+
+test('composeAgentTaskPrompt uses MCP task callbacks', () => {
+  const task = taskFixture('task-agent', session.id, 'Ship feature')
+  const prompt = composeAgentTaskPrompt(task, {
+    brief: { purpose: 'Complete onboarding', notes: '', updatedAt: 'now' },
+    worktreePath: 'E:/repo/.worktrees/task-agent',
+  })
+  expect(prompt).toContain('Workspace purpose: Complete onboarding')
+  expect(prompt).toContain('Work in isolated git worktree: E:/repo/.worktrees/task-agent')
+  expect(prompt).toContain('vibelink_task_note tool (taskId task-agent)')
+  expect(prompt).toContain('vibelink_task_done (taskId task-agent)')
+})
+
+test('composeWorkspaceDigestPrompt summarizes brief, board, and terminals', () => {
+  const prompt = composeWorkspaceDigestPrompt({
+    workspaceName: 'Repo',
+    brief: { purpose: 'Ship safely', notes: 'Review migrations', updatedAt: 'now' },
+    tasks: [
+      taskFixture('task-pending', session.id, 'Write docs'),
+      taskFixture('task-active', session.id, 'Implement feature', { status: 'in-progress' }),
+    ],
+    terminalOutputs: [{ title: 'Build', output: 'error: compile failed' }],
+  })
+  expect(prompt).toContain('Purpose: Ship safely')
+  expect(prompt).toContain('Pending (1): Write docs')
+  expect(prompt).toContain('In Progress (1): Implement feature')
+  expect(prompt).toContain('### Build\n<terminal_output>\nerror: compile failed')
+  expect(prompt).toContain('three highest-priority next actions')
 })
 
 
@@ -201,6 +233,20 @@ describe('kanban store', () => {
 
     await useWorkspaceStore.getState().markTaskDone(task.id)
     expect(useWorkspaceStore.getState().kanban.tasks[task.id].statusTimestamps.done).toEqual(expect.any(Number))
+  })
+
+  test('assignTask queues work for VibeLink Agent', async () => {
+    const task = await useWorkspaceStore.getState().createTask(session.id, { title: 'Agent task', description: 'Use MCP callbacks' })
+
+    await useWorkspaceStore.getState().assignTask(task.id, 'vibelink-agent')
+
+    expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toMatchObject({
+      assignedRole: 'VibeLink Agent',
+      status: 'in-progress',
+    })
+    expect(useWorkspaceStore.getState().hermesPendingPrompts[session.id]?.[0]).toContain('vibelink_task_note tool')
+    expect(useWorkspaceStore.getState().hermesTranscript[session.id]?.[0]).toMatchObject({ role: 'user' })
+    expect(invoke).toHaveBeenCalledWith('hermes_start', expect.objectContaining({ sessionId: session.id, workspaceFolder: session.workspaceFolder }))
   })
 
   test('assignTask rejects non-agent terminal panes', async () => {
@@ -336,14 +382,6 @@ describe('kanban store', () => {
       viewModes: { [session.id]: 'kanban' },
       kanbanLayouts: { [session.id]: '{"grid":true}' },
       orchestratorPaneIds: { [session.id]: pane.id },
-      hermesGateways: {
-        [session.id]: {
-          platform: 'telegram',
-          tokenEnv: 'TELEGRAM_BOT_TOKEN',
-          tokenSet: true,
-          allowedUsers: '123',
-        },
-      },
       workspaceTodos: {
         [session.id]: [{ id: 'todo-1', text: 'Plan persistence', kanbanTaskId: task.id, createdAt: 11, updatedAt: 12 }],
       },
@@ -360,7 +398,6 @@ describe('kanban store', () => {
     expect(loaded.viewModes[session.id]).toBe('kanban')
     expect(loaded.kanbanLayouts[session.id]).toBe('{"grid":true}')
     expect(loaded.orchestratorPaneIds[session.id]).toBe(pane.id)
-    expect(loaded.hermesGateways[session.id]).toMatchObject({ platform: 'telegram', tokenSet: true })
     expect(loaded.workspaceTodos[session.id]).toEqual([
       { id: 'todo-1', text: 'Plan persistence', kanbanTaskId: task.id, createdAt: 11, updatedAt: 12 },
     ])
@@ -418,7 +455,6 @@ describe('kanban store', () => {
     useWorkspaceStore.getState().setViewMode(session.id, 'kanban')
     useWorkspaceStore.getState().setKanbanLayout(session.id, '{"grid":true}')
     useWorkspaceStore.getState().setOrchestratorPane(session.id, pane.id)
-    useWorkspaceStore.getState().setHermesGateway(session.id, { tokenSet: true, allowedUsers: '123' })
     useWorkspaceStore.getState().addWorkspaceTodo(session.id, 'Session todo')
     useWorkspaceStore.getState().setWorkspaceTodoNote(session.id, 'Session memo')
 
@@ -429,7 +465,6 @@ describe('kanban store', () => {
     expect(useWorkspaceStore.getState().viewModes[session.id]).toBeUndefined()
     expect(useWorkspaceStore.getState().kanbanLayouts[session.id]).toBeUndefined()
     expect(useWorkspaceStore.getState().orchestratorPaneIds[session.id]).toBeUndefined()
-    expect(useWorkspaceStore.getState().hermesGateways[session.id]).toBeUndefined()
     expect(useWorkspaceStore.getState().workspaceTodos[session.id]).toBeUndefined()
     expect(useWorkspaceStore.getState().workspaceTodoNotes[session.id]).toBeUndefined()
   })

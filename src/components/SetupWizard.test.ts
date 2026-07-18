@@ -16,7 +16,7 @@ describe('setup wizard auto-pass', () => {
   test('pre-checks license and runtime when already satisfied', () => {
     expect(setupStepAutoPass({
       entitled: true,
-      runtimeInstalled: true,
+      runtimeDetected: true,
       agentClis: [detectedAgent],
       mcp: { spawnOk: true, initializeOk: true, toolCount: 16 },
     })).toEqual({ license: true, agents: true, runtime: true, mcp: true })
@@ -25,7 +25,7 @@ describe('setup wizard auto-pass', () => {
   test('leaves Pro setup steps incomplete when not entitled', () => {
     expect(setupStepAutoPass({
       entitled: false,
-      runtimeInstalled: false,
+      runtimeDetected: false,
       agentClis: [],
       mcp: null,
     })).toEqual({ license: false, agents: false, runtime: false, mcp: false })

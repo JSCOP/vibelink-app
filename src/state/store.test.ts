@@ -471,12 +471,8 @@ describe('workspace store profiles', () => {
     store.setHermesSessions('session-1', [{
       id: 'acp-1',
       title: null,
-      source: 'discord',
-      model: null,
-      startedAt: 1,
-      endedAt: null,
-      messageCount: 2,
-      archived: false,
+      updatedAt: '2026-07-18T00:00:00.000Z',
+      cwd: 'E:/repo',
     }])
 
     expect(useWorkspaceStore.getState().hermesTranscript['session-1']).toEqual([{ role: 'assistant', text: 'restored', thoughts: 'thinking', toolCalls: [] }])
@@ -643,7 +639,7 @@ describe('workspace store profiles', () => {
     useWorkspaceStore.setState({
       sessions: [createdSession, secondSession],
       hermesCurrentSession: { [createdSession.id]: 'acp-1' },
-      hermesSessions: { [createdSession.id]: [{ id: 'acp-1', title: null, source: 'discord', model: null, startedAt: 1, endedAt: null, messageCount: 1, archived: false }] },
+      hermesSessions: { [createdSession.id]: [{ id: 'acp-1', title: null, updatedAt: '2026-07-18T00:00:00.000Z', cwd: 'E:/repo' }] },
       hermesTranscript: { [createdSession.id]: [{ role: 'user', text: 'hello', thoughts: '', toolCalls: [] }] },
     })
 

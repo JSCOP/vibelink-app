@@ -42,7 +42,7 @@ Tag releases require `vX.Y.Z` to match `package.json`, `src-tauri/Cargo.toml`, a
 - Dev and production daemons are isolated. `ProjectDirs::from("com", "vibelink", ...)` resolves production under `C:\Users\<user>\AppData\Roaming\vibelink\VibeLink\data` and development under `C:\Users\<user>\AppData\Roaming\vibelink\VibeLink Dev\data`; their sockets are `vibelink-prod-daemon-*` and `vibelink-dev-daemon-*`.
 - IPC uses `interprocess` local sockets with MessagePack frames and a 4-byte big-endian length prefix.
 - Sessions persist under the flavor-specific data root as `sessions.json`. Panes are intentionally not persisted or reconstructed after daemon restart.
-- The Kanban Orchestrator panel embeds Hermes Agent through ACP stdio (`hermes-acp`). Each workspace gets its own `HERMES_HOME` under app data, plus `mcp_servers.vibelink` running `app.exe mcp serve` so Hermes can list/read/write panes and update board tasks. Hermes Agent is MIT licensed: https://github.com/NousResearch/hermes-agent.
+- The VibeLink Agent panel connects over ACP stdio to the user's system-installed Hermes Agent (`hermes-acp`). VibeLink does not install, pin, update, or configure Hermes globally. Each ACP session uses the user's global `HERMES_HOME`; VibeLink registers `app.exe mcp serve` through ACP session metadata so Hermes can list/read/write panes and update board tasks. Hermes Agent is MIT licensed: https://github.com/NousResearch/hermes-agent.
 
 ## UI
 
@@ -63,6 +63,7 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 .\target\debug\app.exe cli panes [--session <session-id>]
 .\target\debug\app.exe cli read [--session <session-id>] --pane <pane-id>
 .\target\debug\app.exe cli write [--session <session-id>] --pane <pane-id> --text "pwd" --enter
+.\target\debug\app.exe cli agent send --prompt "Summarize this workspace" [--session <session-id>]
 .\target\debug\app.exe cli task done --task <task-id> [--session <session-id>] [--pane <pane-id>] [--commit-msg "summary"]
 .\target\debug\app.exe cli task note --task <task-id> --message "progress" [--session <session-id>] [--pane <pane-id>]
 .\target\debug\app.exe cli skill list [--session <session-id>]
@@ -72,12 +73,12 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 .\target\debug\app.exe mcp serve
 ```
 
-`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage VibeLink-owned Markdown skills under app data; enabled persisted skills are injected into VibeLink Agent prompts for the matching workspace. The built-in terminal integration skill is `vibelink-terminal`.
-VibeLink-launched panes receive `VIBELINK_SESSION_ID`, `VIBELINK_PANE_ID`, `VIBELINK_APP_EXE`, and `VIBELINK_APP_FLAVOR`; `panes`, `read`, `write`, `task`, and workspace-scoped `skill` commands use `VIBELINK_SESSION_ID` when `--session` is omitted, so agents should run `$env:VIBELINK_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace. Spawned PTYs advertise `TERM_PROGRAM=VibeLink`.
+`sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `agent send` relays a prompt to the VibeLink Agent panel for the current workspace. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage VibeLink-owned Markdown skills under app data; enabled persisted skills are injected into VibeLink Agent prompts for the matching workspace. The built-in terminal integration skill is `vibelink-terminal`.
+VibeLink-launched panes receive `VIBELINK_SESSION_ID`, `VIBELINK_PANE_ID`, `VIBELINK_APP_EXE`, and `VIBELINK_APP_FLAVOR`; `panes`, `read`, `write`, `agent`, `task`, and workspace-scoped `skill` commands use `VIBELINK_SESSION_ID` when `--session` is omitted, so agents should run `$env:VIBELINK_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace. Spawned PTYs advertise `TERM_PROGRAM=VibeLink`.
 
 On 0.3.0+ every daemon-touching CLI command and `mcp serve` require an entitled cache (active trial or paid Pro); an unentitled caller (signed out or expired trial) receives `VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.` rather than an unguarded native operation.
 
-`mcp serve` is the stdio MCP server configured as `mcp_servers.vibelink` in each workspace's Hermes `config.yaml`; it is normally launched by Hermes, not by a user shell. The server requires `VIBELINK_SESSION_ID`, receives `VIBELINK_APP_FLAVOR`, and exposes `vibelink_pane_*`, `vibelink_terminal_grid_launch`, `vibelink_skill_*`, and `vibelink_task_*` tools. The Orchestrator provisions `hermes-agent[acp,mcp]==0.17.0` with bundled `uv`, stores secrets only in `<HERMES_HOME>\.env`, and mirrors Kanban board state to `<appData>\kanban\<session-id>.json`.
+`mcp serve` is a session-scoped stdio MCP server registered through ACP when VibeLink opens or resumes a Hermes session; VibeLink never edits the user's global Hermes `config.yaml`. The server requires `VIBELINK_SESSION_ID`, receives `VIBELINK_APP_FLAVOR`, and exposes `vibelink_pane_*`, `vibelink_terminal_grid_launch`, `vibelink_skill_*`, `vibelink_task_*`, and workspace-brief tools. Install or update Hermes independently with its official installer and `hermes update`; VibeLink only detects `hermes-acp` / `hermes` and connects to the installed version.
 
 ## Daemon smoke checks
 

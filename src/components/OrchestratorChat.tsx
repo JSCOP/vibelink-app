@@ -1,14 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 import { type ButtonHTMLAttributes, type ComponentType, useEffect, useMemo, useState } from 'react'
-import { Archive, Bot, ChevronLeft, ChevronRight, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Square, Trash2, Wrench, type LucideProps } from 'lucide-react'
-import { ensureHermesWorkspace, hermesNewSession, hermesRefreshSessions, hermesResumeSession, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
-import { installHermesRuntime } from '../ipc/hermesSetup'
+import { Archive, Bot, ChevronLeft, ChevronRight, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Square, Wrench, type LucideProps } from 'lucide-react'
+import { getHermesRuntimeStatus, hermesNewSession, hermesRefreshSessions, hermesResumeSession, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
 import type { HermesRuntimeStatus, HermesWorkspaceState, SkillApplyInput, SkillEntry } from '../ipc/types'
 import type { HermesSessionInfo, HermesTurn, PendingPermission } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
+import { composeWorkspaceDigestPrompt, tasksForSession } from '../state/kanban'
 import { HermesMessage } from './HermesMessage'
 import { HermesPermissionPrompt } from './HermesPermissionPrompt'
-import { HermesGatewayForm } from './HermesGatewayForm'
+import { HermesInstallGuidance } from './HermesInstallGuidance'
 
 type AgentSection = 'chat' | 'skills' | 'messaging' | 'artifacts'
 
@@ -28,23 +28,23 @@ export function OrchestratorChat() {
   const pendingCount = useWorkspaceStore((state) => sessionId ? state.hermesPendingPrompts[sessionId]?.length ?? 0 : 0)
   const currentSession = useWorkspaceStore((state) => sessionId ? state.hermesCurrentSession[sessionId] : undefined)
   const sessionList = useWorkspaceStore((state) => sessionId ? state.hermesSessions[sessionId] ?? EMPTY_HERMES_SESSIONS : EMPTY_HERMES_SESSIONS)
+  const panes = useWorkspaceStore((state) => state.panes)
+  const kanban = useWorkspaceStore((state) => state.kanban)
+  const workspaceBrief = useWorkspaceStore((state) => sessionId ? state.workspaceBriefs[sessionId] : null)
   const error = useWorkspaceStore((state) => state.error)
   const setHermesStatus = useWorkspaceStore((state) => state.setHermesStatus)
-  const addHermesUserMessage = useWorkspaceStore((state) => state.addHermesUserMessage)
-  const enqueueHermesPrompt = useWorkspaceStore((state) => state.enqueueHermesPrompt)
+  const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
   const takeHermesPrompt = useWorkspaceStore((state) => state.takeHermesPrompt)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const [message, setMessage] = useState('')
   const [runtime, setRuntime] = useState<HermesRuntimeStatus | null>(null)
-  const [runtimeBusy, setRuntimeBusy] = useState(false)
-  const [runtimeMessage, setRuntimeMessage] = useState('')
   const [workspace, setWorkspace] = useState<HermesWorkspaceState | null>(null)
   const [hermesCli, setHermesCli] = useState('')
-  const [hermesHome, setHermesHome] = useState('')
   const [activeSince, setActiveSince] = useState<number | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [agentSection, setAgentSection] = useState<AgentSection>('chat')
   const [sessionSearch, setSessionSearch] = useState('')
+  const [sessionListError, setSessionListError] = useState('')
   const [isSidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (typeof window === 'undefined') return false
     return window.localStorage.getItem('vibelink:agentSidebarCollapsed') === '1'
@@ -53,14 +53,15 @@ export function OrchestratorChat() {
   const session = useMemo(() => sessions.find((item) => item.id === sessionId), [sessions, sessionId])
   const sessionOptions = useMemo(() => {
     if (!currentSession || sessionList.some((item) => item.id === currentSession)) return sessionList
-    return [{ id: currentSession, title: null, source: 'current', model: null, startedAt: null, endedAt: null, messageCount: 0, archived: false }, ...sessionList]
-  }, [currentSession, sessionList])
+    return [{ id: currentSession, title: null, updatedAt: null, cwd: session?.workspaceFolder ?? null }, ...sessionList]
+  }, [currentSession, session?.workspaceFolder, sessionList])
+  const workspaceTasks = useMemo(() => sessionId ? tasksForSession(kanban, sessionId) : [], [kanban, sessionId])
   const filteredSessionOptions = useMemo(() => {
     const needle = sessionSearch.trim().toLowerCase()
     if (!needle) return sessionOptions
     return sessionOptions.filter((item) => sessionLabel(item).toLowerCase().includes(needle))
   }, [sessionOptions, sessionSearch])
-  const workspaceFolderLabel = session?.workspaceFolder?.trim() || workspace?.workspaceFolder || 'none (using HERMES_HOME)'
+  const workspaceFolderLabel = session?.workspaceFolder?.trim() || workspace?.workspaceFolder || 'VibeLink agent workspace'
   const statusLabel = status === 'busy' ? 'waiting for response' : status
   const canSend = Boolean(message.trim())
   const activeElapsed = activeSince ? formatElapsed(now - activeSince) : '0s'
@@ -80,46 +81,31 @@ export function OrchestratorChat() {
 
   useEffect(() => {
     let cancelled = false
-    void invoke<HermesRuntimeStatus>('hermes_runtime_status', { commandOverride: settings.hermesCommand || null })
-      .then((status) => {
-        if (!cancelled) setRuntime(status)
-      })
-      .catch((error) => {
-        if (!cancelled) setRuntime({ installed: false, command: settings.hermesCommand || 'hermes-acp', version: String(error) })
+    void getHermesRuntimeStatus(settings.hermesCommand)
+      .then((next) => { if (!cancelled) setRuntime(next) })
+      .catch(() => {
+        if (!cancelled) setRuntime({ detected: false, command: null, cliCommand: null, version: null, home: null, source: null, configuredModel: null })
       })
     void invoke<string>('hermes_cli_command', { commandOverride: settings.hermesCommand || null })
       .then((command) => { if (!cancelled) setHermesCli(command) })
-      .catch((error) => { if (!cancelled) setHermesCli(String(error)) })
+      .catch(() => { if (!cancelled) setHermesCli('') })
     if (sessionId) {
-      void invoke<HermesWorkspaceState>('hermes_ensure_workspace', { sessionId, workspaceFolder: session?.workspaceFolder ?? null })
-        .then((state) => {
-          if (!cancelled) {
-            setWorkspace(state)
-            setHermesHome(state.home)
-          }
-        })
-        .catch((error) => {
-          if (!cancelled) {
-            setWorkspace(null)
-            setHermesHome(String(error))
-          }
-        })
+      void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId, workspaceFolder: session?.workspaceFolder ?? null })
+        .then((state) => { if (!cancelled) setWorkspace(state) })
+        .catch(() => { if (!cancelled) setWorkspace(null) })
     }
     return () => { cancelled = true }
   }, [settings.hermesCommand, sessionId, session?.workspaceFolder])
 
   useEffect(() => {
     if (!sessionId || (status !== 'running' && status !== 'busy' && status !== 'starting')) return
-    void startHermesOutputStream().catch((error) => useWorkspaceStore.getState().setError(String(error)))
+    void startHermesOutputStream().catch((streamError) => useWorkspaceStore.getState().setError(String(streamError)))
   }, [sessionId, status])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      if (status === 'starting' || status === 'busy') {
-        setActiveSince((value) => value ?? Date.now())
-      } else {
-        setActiveSince(null)
-      }
+      if (status === 'starting' || status === 'busy') setActiveSince((value) => value ?? Date.now())
+      else setActiveSince(null)
     }, 0)
     return () => window.clearTimeout(timer)
   }, [status])
@@ -139,18 +125,20 @@ export function OrchestratorChat() {
       try {
         await startHermesOutputStream({ force: true })
         await invoke('hermes_send', { sessionId, text: next })
-      } catch (error) {
-        const message = `VibeLink Agent error: ${String(error)}`
+      } catch (sendError) {
+        const failure = `VibeLink Agent error: ${String(sendError)}`
         setHermesStatus(sessionId, 'error')
-        useWorkspaceStore.getState().appendHermesText(sessionId, 'message', message)
-        useWorkspaceStore.getState().setError(message)
+        useWorkspaceStore.getState().appendHermesText(sessionId, 'message', failure)
+        useWorkspaceStore.getState().setError(failure)
       }
     })()
   }, [sessionId, status, pendingCount, takeHermesPrompt, setHermesStatus])
 
   useEffect(() => {
-    if (!sessionId) return
-    void hermesRefreshSessions(sessionId).catch(() => undefined)
+    if (!sessionId || (status !== 'running' && status !== 'busy')) return
+    void hermesRefreshSessions(sessionId)
+      .then(() => setSessionListError(''))
+      .catch((listError) => setSessionListError(String(listError)))
   }, [sessionId, status])
 
   useEffect(() => {
@@ -160,28 +148,13 @@ export function OrchestratorChat() {
 
   if (!sessionId) return <div className="orchestrator-chat hermes-chat">Open a workspace.</div>
 
-  const installRuntime = async () => {
-    setRuntimeBusy(true)
-    setRuntimeMessage('Installing VibeLink Agent runtime…')
-    try {
-      const installed = await installHermesRuntime(settings.hermesCommand)
-      const { command, status } = installed
-      setRuntime(status)
-      setRuntimeMessage(`Installed: ${command}`)
-    } catch (error) {
-      setRuntimeMessage(String(error))
-    } finally {
-      setRuntimeBusy(false)
-    }
-  }
-
   const refreshWorkspace = async () => {
     try {
-      const state = await invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId })
+      const state = await invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId, workspaceFolder: session?.workspaceFolder ?? null })
       setWorkspace(state)
-      setHermesHome(state.home)
-    } catch (error) {
-      useWorkspaceStore.getState().setError(String(error))
+      setRuntime(await getHermesRuntimeStatus(settings.hermesCommand))
+    } catch (refreshError) {
+      useWorkspaceStore.getState().setError(String(refreshError))
     }
   }
 
@@ -192,9 +165,9 @@ export function OrchestratorChat() {
         commandOverride: settings.hermesCommand || null,
         workspaceFolder: session?.workspaceFolder ?? null,
       })
-    } catch (error) {
+    } catch (startError) {
       setHermesStatus(sessionId, 'error')
-      useWorkspaceStore.getState().setError(String(error))
+      useWorkspaceStore.getState().setError(String(startError))
     }
   }
 
@@ -206,8 +179,8 @@ export function OrchestratorChat() {
         commandOverride: settings.hermesCommand || null,
         workspaceFolder: session?.workspaceFolder ?? null,
       }, acpSessionId)
-    } catch (error) {
-      useWorkspaceStore.getState().setError(String(error))
+    } catch (resumeError) {
+      useWorkspaceStore.getState().setError(String(resumeError))
     }
   }
 
@@ -218,72 +191,54 @@ export function OrchestratorChat() {
         commandOverride: settings.hermesCommand || null,
         workspaceFolder: session?.workspaceFolder ?? null,
       })
-    } catch (error) {
-      useWorkspaceStore.getState().setError(String(error))
-    }
-  }
-
-  const archiveHermesSession = async () => {
-    if (!currentSession) return
-    if (typeof window !== 'undefined' && !window.confirm('Remove this Hermes thread from the session list?')) return
-    try {
-      await invoke('hermes_archive_session', { sessionId, acpSessionId: currentSession })
-      const remaining = await invoke<typeof sessionList>('hermes_list_sessions', { sessionId })
-      useWorkspaceStore.getState().setHermesSessions(sessionId, remaining)
-      const replacement = remaining.find((item) => item.id !== currentSession)
-      if (replacement) await switchHermesSession(replacement.id)
-      else await createHermesSession()
-    } catch (error) {
-      useWorkspaceStore.getState().setError(String(error))
+    } catch (createError) {
+      useWorkspaceStore.getState().setError(String(createError))
     }
   }
 
   const openHermesTerminal = async (verb: 'auth' | 'model' | 'shell') => {
     try {
-      let currentWorkspace = workspace
-      if (!currentWorkspace) {
-        currentWorkspace = await ensureHermesWorkspace(sessionId, session?.workspaceFolder)
-        setWorkspace(currentWorkspace)
-        setHermesHome(currentWorkspace.home)
-      }
-      const home = currentWorkspace.home
       const hermesCommand = await invoke<string>('hermes_cli_command', { commandOverride: settings.hermesCommand || null })
       const action = verb === 'auth'
         ? `& ${quotePowerShellString(hermesCommand)} auth`
         : verb === 'model'
           ? `& ${quotePowerShellString(hermesCommand)} model`
           : `Write-Host ${quotePowerShellString('Use this terminal for Hermes CLI commands, e.g. hermes auth, hermes model, hermes status.')}`
-      const script = [
-        `$env:HERMES_HOME=${quotePowerShellString(home)}`,
-        `Write-Host ${quotePowerShellString(`HERMES_HOME: ${home}`)}`,
-        `Write-Host ${quotePowerShellString(`Hermes CLI: ${hermesCommand}`)}`,
-        action,
-      ].join('; ')
       await spawnPane(sessionId, {
         shell: 'pwsh.exe',
-        args: ['-NoLogo', '-NoExit', '-Command', script],
+        args: ['-NoLogo', '-NoExit', '-Command', action],
         cwd: session?.workspaceFolder ?? null,
         title: verb === 'model' ? 'Hermes model setup' : verb === 'auth' ? 'Hermes auth CLI' : 'Hermes CLI',
         icon: 'sparkles',
       })
-    } catch (error) {
-      useWorkspaceStore.getState().setError(String(error))
+    } catch (terminalError) {
+      useWorkspaceStore.getState().setError(String(terminalError))
     }
   }
 
   const send = async () => {
     const text = message.trim()
     if (!text) return
-    addHermesUserMessage(sessionId, text)
     setMessage('')
-    enqueueHermesPrompt(sessionId, text)
-    if (status !== 'running' && status !== 'busy') {
-      void startHermesAgent({
-        sessionId,
-        commandOverride: settings.hermesCommand || null,
-        workspaceFolder: session?.workspaceFolder ?? null,
-      }).catch(() => {})
-    }
+    await sendAgentPrompt(sessionId, text)
+  }
+
+  const sendWorkspaceDigest = async () => {
+    if (!sessionId || !session) return
+    const { TerminalManager } = await import('../terminal/TerminalManager')
+    const terminalOutputs = Object.values(panes)
+      .filter((pane) => pane.alive && pane.config.paneId !== 'vibelink-agent')
+      .map((pane) => ({
+        title: pane.config.title?.trim() || pane.id,
+        output: TerminalManager.getRecentOutput(pane.id, 40).slice(-2048).trim(),
+      }))
+      .filter(({ output }) => output.length > 0)
+    await sendAgentPrompt(sessionId, composeWorkspaceDigestPrompt({
+      workspaceName: session.name,
+      brief: workspaceBrief,
+      tasks: workspaceTasks,
+      terminalOutputs,
+    }))
   }
 
   const cancel = async () => {
@@ -298,18 +253,19 @@ export function OrchestratorChat() {
   }
 
   const setModel = async (modelId: string) => {
-    if (!modelId) return
-    await setHermesModel(sessionId, modelId)
+    if (modelId) await setHermesModel(sessionId, modelId)
   }
 
-
-  if (!runtime?.installed && !settings.hermesCommand) {
+  if (!runtime?.detected) {
     return (
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
-        <h3>VibeLink Agent runtime is not installed</h3>
-        <p>Install the managed uv-bundled agent runtime, or set a hermes-acp override in Settings.</p>
-        <button type="button" onClick={() => void installRuntime()} disabled={runtimeBusy}>{runtimeBusy ? 'Installing…' : 'Install VibeLink Agent runtime'}</button>
-        {runtimeMessage ? <p>{runtimeMessage}</p> : null}
+        <HermesInstallGuidance
+          runtime={runtime}
+          commandOverride={settings.hermesCommand || null}
+          sessionId={sessionId}
+          workspaceFolder={session?.workspaceFolder ?? null}
+          onStatus={setRuntime}
+        />
       </div>
     )
   }
@@ -317,18 +273,18 @@ export function OrchestratorChat() {
   if (!workspace?.model) {
     return (
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
-        <h3>Configure this workspace&apos;s VibeLink Agent</h3>
-        <p>Provider, login, and model selection come from the native Hermes CLI. Run <code>hermes model</code>, complete login if prompted, then Refresh.</p>
-        {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed to start — this workspace has no provider/model configured yet. Use Model below to run <code>hermes model</code>, complete login if prompted, then Refresh.</p> : null}
+        <h3>Configure VibeLink Agent</h3>
+        <p>Provider, login, and model selection come from the Hermes CLI. Run <code>hermes model</code>, complete login if prompted, then Refresh.</p>
+        {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed to start — Hermes has no configured model yet.</p> : null}
         <div className="hermes-runtime-note">
           <small>Hermes CLI: {hermesCli || 'resolving…'}</small>
           <small>Workspace folder: {workspaceFolderLabel}</small>
-          <small>Workspace HERMES_HOME: {hermesHome || 'resolving…'}</small>
-          <small>ACP: {runtime?.command ?? 'hermes-acp'}</small>
+          <small>Global HERMES_HOME: {workspace?.home || runtime.home || 'resolving…'}</small>
+          <small>ACP: {runtime.command ?? 'hermes-acp'}</small>
         </div>
         <HeaderButton icon={Settings2} label="Model" title="Configure model and login" onClick={() => void openHermesTerminal('model')} />
         <HeaderButton icon={KeyRound} label="Auth" title="Open Hermes auth CLI" onClick={() => void openHermesTerminal('auth')} />
-        <HeaderButton icon={RefreshCw} label="Refresh" title="Refresh Hermes workspace state" onClick={() => void refreshWorkspace()} />
+        <HeaderButton icon={RefreshCw} label="Refresh" title="Refresh Hermes global state" onClick={() => void refreshWorkspace()} />
       </div>
     )
   }
@@ -337,31 +293,20 @@ export function OrchestratorChat() {
     <div className={`orchestrator-chat hermes-chat vibelink-agent-shell${isSidebarCollapsed ? ' vibelink-agent-sidebar-collapsed' : ''}`}>
       {!isSidebarCollapsed ? (
         <aside className="vibelink-agent-sidebar" aria-label="VibeLink Agent sidebar">
-          <div className="vibelink-agent-sidebar-toolbar">
-            <span>Agent menu</span>
-          </div>
+          <div className="vibelink-agent-sidebar-toolbar"><span>Agent menu</span></div>
           <nav className="vibelink-agent-nav" aria-label="VibeLink Agent sections">
             <button
               type="button"
               className={agentSection === 'chat' ? 'active' : undefined}
               disabled={status === 'busy' || status === 'starting'}
               title="Start a new VibeLink Agent session"
-              onClick={() => {
-                setAgentSection('chat')
-                void createHermesSession()
-              }}
+              onClick={() => { setAgentSection('chat'); void createHermesSession() }}
             >
               <Bot size={14} /> New session
             </button>
-            <button type="button" className={agentSection === 'skills' ? 'active' : undefined} onClick={() => setAgentSection('skills')}>
-              <Wrench size={14} /> Skills & Tools
-            </button>
-            <button type="button" className={agentSection === 'messaging' ? 'active' : undefined} onClick={() => setAgentSection('messaging')}>
-              <MessageSquare size={14} /> Messaging
-            </button>
-            <button type="button" className={agentSection === 'artifacts' ? 'active' : undefined} onClick={() => setAgentSection('artifacts')}>
-              <FileText size={14} /> Artifacts
-            </button>
+            <button type="button" className={agentSection === 'skills' ? 'active' : undefined} onClick={() => setAgentSection('skills')}><Wrench size={14} /> Skills & Tools</button>
+            <button type="button" className={agentSection === 'messaging' ? 'active' : undefined} onClick={() => setAgentSection('messaging')}><MessageSquare size={14} /> Messaging</button>
+            <button type="button" className={agentSection === 'artifacts' ? 'active' : undefined} onClick={() => setAgentSection('artifacts')}><FileText size={14} /> Artifacts</button>
           </nav>
           <div className="vibelink-agent-session-search">
             <Search size={13} />
@@ -369,16 +314,11 @@ export function OrchestratorChat() {
           </div>
           <div className="vibelink-agent-session-list">
             <div className="vibelink-agent-session-heading">Sessions {filteredSessionOptions.length}/{sessionOptions.length}</div>
+            {sessionListError ? <p className="hermes-form-message">{sessionListError}</p> : null}
             {filteredSessionOptions.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={item.id === currentSession ? 'active' : undefined}
-                disabled={status === 'busy'}
-                onClick={() => void switchHermesSession(item.id)}
-              >
-                <span>{item.title?.trim() || `Session ${item.id.slice(0, 8)}`}</span>
-                <small>{item.messageCount} msg · {item.source || 'native'}</small>
+              <button key={item.id} type="button" className={item.id === currentSession ? 'active' : undefined} disabled={status === 'busy'} onClick={() => void switchHermesSession(item.id)}>
+                <span>{item.title?.trim() || item.id.slice(0, 8)}</span>
+                <small>{formatRelativeTime(item.updatedAt)}</small>
               </button>
             ))}
           </div>
@@ -399,21 +339,25 @@ export function OrchestratorChat() {
               {isSidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
             </button>
             <h3>VibeLink Agent</h3>
-            <p>{workspace.model.provider} / {workspace.model.model} · {statusLabel}</p>
+            <p>{workspace.model.provider || 'default'} / {workspace.model.model} · {statusLabel}</p>
           </div>
           {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed. Check the transcript/top banner, then re-auth or restart.</p> : null}
           <div className="hermes-chat-controls">
+            <HeaderButton icon={FileText} label="Digest" title="Ask VibeLink Agent for a workspace progress digest" disabled={status === 'busy' || status === 'starting'} onClick={() => void sendWorkspaceDigest()} />
             <HeaderButton icon={KeyRound} label="Auth" title="Open Hermes auth CLI" onClick={() => void openHermesTerminal('auth')} />
             <HeaderButton icon={Settings2} label="Model" title="Configure model and login" onClick={() => void openHermesTerminal('model')} />
-            <HeaderButton icon={RefreshCw} label="Refresh" title="Refresh agent workspace state" onClick={() => void refreshWorkspace()} />
-            {currentSession ? <HeaderButton icon={Trash2} label="Remove" title="Remove selected VibeLink Agent thread" disabled={status === 'busy'} onClick={() => void archiveHermesSession()} /> : null}
+            <HeaderButton icon={RefreshCw} label="Refresh" title="Refresh agent global state" onClick={() => void refreshWorkspace()} />
             <HeaderButton icon={Plus} label="New" title="Start a new VibeLink Agent session" disabled={status === 'busy' || status === 'starting'} onClick={() => void createHermesSession()} />
             {models?.available.length ? (
               <select value={models.current} onChange={(event) => void setModel(event.target.value)} title="Agent models">
                 {models.available.map((model) => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
               </select>
-            ) : <span className="hermes-model-pill" title="Hermes did not return a selectable model list; using the configured workspace model.">{workspace.model.model}</span>}
-            {status === 'busy' ? <HeaderButton icon={Square} label="Cancel" title="Cancel active agent response" onClick={() => void cancel()} /> : status === 'running' ? <HeaderButton icon={RotateCcw} label="Restart" title="Restart VibeLink Agent after model/auth changes" onClick={() => void restart()} /> : <HeaderButton icon={Play} label={status === 'starting' ? 'Starting' : 'Start'} title="Start VibeLink Agent" disabled={status === 'starting'} onClick={() => void start()} />}
+            ) : <span className="hermes-model-pill" title="Hermes did not return a selectable model list; using its configured model.">{workspace.model.model}</span>}
+            {status === 'busy'
+              ? <HeaderButton icon={Square} label="Cancel" title="Cancel active agent response" onClick={() => void cancel()} />
+              : status === 'running'
+                ? <HeaderButton icon={RotateCcw} label="Restart" title="Restart VibeLink Agent after model/auth changes" onClick={() => void restart()} />
+                : <HeaderButton icon={Play} label={status === 'starting' ? 'Starting' : 'Start'} title="Start VibeLink Agent" disabled={status === 'starting'} onClick={() => void start()} />}
           </div>
         </header>
 
@@ -425,7 +369,6 @@ export function OrchestratorChat() {
                 <small>{usage.used}/{usage.size}</small>
               </div>
             ) : null}
-
             <div className="hermes-live-status" aria-live="polite">
               <strong>{liveState}</strong>
               <span>Elapsed {activeSince ? activeElapsed : '—'}</span>
@@ -433,7 +376,6 @@ export function OrchestratorChat() {
               <span>Tool calls {toolCallCount}</span>
               {usage ? <span>Context {usage.used}/{usage.size}</span> : null}
             </div>
-
             <div className="hermes-transcript">
               {transcript.length === 0 ? (
                 <div className="vibelink-agent-empty">
@@ -452,9 +394,7 @@ export function OrchestratorChat() {
                 />
               ))}
             </div>
-
             {permissions.map((permission) => <HermesPermissionPrompt key={permission.requestId} sessionId={sessionId} permission={permission} />)}
-
             <footer className="hermes-composer">
               <textarea
                 value={message}
@@ -471,9 +411,8 @@ export function OrchestratorChat() {
             </footer>
           </>
         ) : null}
-
         {agentSection === 'skills' ? <AgentSkillsPanel sessionId={sessionId} /> : null}
-        {agentSection === 'messaging' ? <AgentMessagingPanel sessionId={sessionId} /> : null}
+        {agentSection === 'messaging' ? <AgentMessagingPanel sessionId={sessionId} cliCommand={hermesCli} detected={runtime.detected} /> : null}
         {agentSection === 'artifacts' ? <AgentArtifactsPanel transcript={transcript} permissions={permissions.length} /> : null}
       </section>
     </div>
@@ -594,17 +533,32 @@ function AgentSkillsPanel({ sessionId }: { sessionId: string }) {
   )
 }
 
-function AgentMessagingPanel({ sessionId }: { sessionId: string }) {
+function AgentMessagingPanel({ sessionId, cliCommand, detected }: { sessionId: string; cliCommand: string; detected: boolean }) {
+  const spawnPane = useWorkspaceStore((state) => state.spawnPane)
+  const launch = async (action: 'setup' | 'status' | 'run') => {
+    if (!detected || !cliCommand) return
+    await spawnPane(sessionId, {
+      shell: 'pwsh.exe',
+      args: ['-NoLogo', '-NoExit', '-Command', `& ${quotePowerShellString(cliCommand)} gateway ${action}`],
+      title: `Hermes gateway ${action}`,
+      icon: 'message-square',
+    })
+  }
   return (
     <div className="vibelink-agent-section">
       <div className="vibelink-agent-section-title">
         <MessageSquare size={16} />
         <div>
           <h4>Messaging</h4>
-          <p>Connect messaging gateways that can deliver prompts to VibeLink Agent.</p>
+          <p>Messaging gateways (Telegram, Discord, Slack, WhatsApp…) are owned by your Hermes install.</p>
         </div>
       </div>
-      <HermesGatewayForm sessionId={sessionId} />
+      <div className="vibelink-settings-actions">
+        <button type="button" disabled={!detected} title={detected ? 'Run hermes gateway setup' : 'Install Hermes Agent to use this'} onClick={() => void launch('setup')}>Set up gateway</button>
+        <button type="button" disabled={!detected} title={detected ? 'Run hermes gateway status' : 'Install Hermes Agent to use this'} onClick={() => void launch('status')}>Gateway status</button>
+        <button type="button" disabled={!detected} title={detected ? 'Run hermes gateway run' : 'Install Hermes Agent to use this'} onClick={() => void launch('run')}>Run gateway</button>
+      </div>
+      {!detected ? <p className="hermes-form-message">Install Hermes Agent, then re-check detection.</p> : null}
     </div>
   )
 }
@@ -725,10 +679,25 @@ function formatSkillUpdatedAt(value: SkillEntry['updatedAt']): string {
   return new Date(timestamp).toLocaleString()
 }
 
-function sessionLabel(session: { id: string; title: string | null; source: string; messageCount: number }): string {
-  const title = session.title?.trim() || `Session ${session.id.slice(0, 8)}`
-  const source = session.source.trim() || 'unknown'
-  return `${title} · ${session.messageCount}msg · ${source}`
+function sessionLabel(session: HermesSessionInfo): string {
+  const title = session.title?.trim() || session.id.slice(0, 8)
+  return `${title} · ${formatRelativeTime(session.updatedAt)}`
+}
+
+function formatRelativeTime(value: string | null): string {
+  if (!value) return 'time unknown'
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return value
+  const seconds = Math.round((timestamp - Date.now()) / 1000)
+  const absolute = Math.abs(seconds)
+  const [amount, unit] = absolute < 60
+    ? [seconds, 'second']
+    : absolute < 3600
+      ? [Math.round(seconds / 60), 'minute']
+      : absolute < 86400
+        ? [Math.round(seconds / 3600), 'hour']
+        : [Math.round(seconds / 86400), 'day']
+  return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(amount, unit as Intl.RelativeTimeFormatUnit)
 }
 
 function HeaderButton({ icon: Icon, label, ...props }: { icon: ComponentType<LucideProps>; label: string } & ButtonHTMLAttributes<HTMLButtonElement>) {

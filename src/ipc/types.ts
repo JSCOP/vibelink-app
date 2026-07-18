@@ -81,20 +81,20 @@ export type HermesConfiguredModel = { provider: string; model: string; baseUrl?:
 
 export type HermesWorkspaceState = { home: string; workspaceFolder: string; model: HermesConfiguredModel | null }
 
-export type HermesRuntimeStatus = { installed: boolean; command: string; version?: string }
+export type HermesRuntimeStatus = {
+  detected: boolean
+  command: string | null
+  cliCommand: string | null
+  version: string | null
+  home: string | null
+  source: 'override' | 'path' | 'installer' | null
+  configuredModel: HermesConfiguredModel | null
+}
 
 export type HermesModelInfo = { id: string; name: string }
 
 export type HermesPermissionOption = { optionId: string; name: string; kind: string }
 
-export type HermesGatewayConfig = {
-  platform: 'telegram' | 'discord' | 'slack'
-  tokenEnv: string
-  tokenSet: boolean
-  allowedUsers: string
-}
-
-export type HermesGatewayStatus = { running: boolean; pid?: number }
 
 export type SkillScope = 'global' | 'workspace'
 

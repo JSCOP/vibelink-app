@@ -42,7 +42,7 @@ pub fn run() {
                 let boxed: Box<dyn std::error::Error> = err.into();
                 boxed
             })?;
-            app.manage(DaemonClient::new(stream));
+            app.manage(DaemonClient::new_with_app(stream, app.handle().clone()));
             app.manage(Arc::new(hermes::HermesManager::new()));
             app.manage(Arc::new(license::LicenseService::new().map_err(
                 |error| {
@@ -114,20 +114,12 @@ pub fn run() {
             hermes::hermes_new_session,
             hermes::hermes_resume_session,
             hermes::hermes_list_sessions,
-            hermes::hermes_session_transcript,
-            hermes::hermes_archive_session,
             hermes::init_hermes_output,
-            hermes::hermes_gateway_provision,
-            hermes::hermes_gateway_start,
-            hermes::hermes_gateway_status,
-            hermes::hermes_gateway_stop,
             hermes::hermes_auth_list,
-            hermes::hermes_workspace_home,
             hermes::hermes_cli_command,
-            hermes::hermes_install_runtime,
-            hermes::hermes_ensure_workspace,
             mcp_check::mcp_self_check,
             hermes::hermes_workspace_state,
+            hermes::agent_workspace_cleanup,
             hermes::hermes_runtime_status,
             license::license_status,
             license::license_revalidate,

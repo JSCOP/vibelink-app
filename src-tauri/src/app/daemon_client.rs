@@ -17,7 +17,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::ipc::Channel;
+use tauri::{ipc::Channel, AppHandle, Emitter};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -67,6 +67,13 @@ pub enum TerminalEvent {
     ConnectionRestored,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentPromptEvent {
+    session_id: String,
+    prompt: String,
+}
+
 #[derive(Clone)]
 pub struct DaemonClient {
     shared: Arc<ClientShared>,
@@ -76,6 +83,7 @@ struct ClientShared {
     writer: Mutex<LocalSocketSendHalf>,
     pending: Mutex<HashMap<Req, Sender<DaemonToClient>>>,
     output_channel: Mutex<Option<Channel<TerminalEvent>>>,
+    app_handle: Option<AppHandle>,
     ws_port: u16,
     ws_clients: Mutex<Vec<TerminalWsClient>>,
     next_req: AtomicU64,
@@ -186,6 +194,14 @@ impl TerminalWsClient {
 
 impl DaemonClient {
     pub fn new(stream: DaemonStream) -> Self {
+        Self::new_inner(stream, None)
+    }
+
+    pub fn new_with_app(stream: DaemonStream, app_handle: AppHandle) -> Self {
+        Self::new_inner(stream, Some(app_handle))
+    }
+
+    fn new_inner(stream: DaemonStream, app_handle: Option<AppHandle>) -> Self {
         let (reader, writer) = split_daemon_stream(stream);
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind terminal ws listener");
@@ -194,6 +210,7 @@ impl DaemonClient {
             writer: Mutex::new(writer),
             pending: Mutex::new(HashMap::new()),
             output_channel: Mutex::new(None),
+            app_handle,
             ws_port,
             ws_clients: Mutex::new(Vec::new()),
             next_req: AtomicU64::new(1),
@@ -593,6 +610,18 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
                     result_summary.clone(),
                 )?;
             }
+            TaskSignal::AgentPrompt { prompt } => {
+                if let Some(app_handle) = &shared.app_handle {
+                    app_handle.emit(
+                        "vibelink://agent-prompt",
+                        AgentPromptEvent {
+                            session_id: session_id_text,
+                            prompt: prompt.clone(),
+                        },
+                    )?;
+                }
+                return Ok(());
+            }
             TaskSignal::Note {
                 task_id, message, ..
             } => {
@@ -621,7 +650,12 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
             pane_id: pane_id.to_string(),
             exit_code,
         },
-        DaemonToClient::PaneResized { pane_id, cols, rows, .. } => TerminalEvent::Resized {
+        DaemonToClient::PaneResized {
+            pane_id,
+            cols,
+            rows,
+            ..
+        } => TerminalEvent::Resized {
             pane_id: pane_id.to_string(),
             cols,
             rows,
@@ -871,11 +905,7 @@ mod tests {
 
         assert!(rx.len() >= 1);
         assert!(rx.len() < 10);
-        let dropped = client
-            .trims
-            .get(pane_id)
-            .expect("trim state")
-            .dropped_bytes;
+        let dropped = client.trims.get(pane_id).expect("trim state").dropped_bytes;
         assert!(dropped > 0);
     }
 

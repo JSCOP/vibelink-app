@@ -2835,53 +2835,6 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
   white-space: pre-wrap;
 }
 
-.hermes-gateway {
-  background: var(--vibelink-input-strong);
-  border: 1px solid var(--vibelink-border-soft);
-  border-radius: 3px;
-  display: grid;
-  gap: 8px;
-  padding: 8px;
-}
-
-.hermes-gateway-platforms {
-  background: var(--vibelink-input);
-  border: 1px solid var(--vibelink-border-soft);
-  display: grid;
-  gap: 2px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding: 2px;
-}
-
-.hermes-gateway-platforms button {
-  border: 1px solid transparent;
-  color: var(--vibelink-muted);
-  min-height: 26px;
-  padding: 0 6px;
-}
-
-.hermes-gateway-platforms button.selected {
-  background: var(--vibelink-active);
-  border-color: var(--vibelink-accent-border);
-  color: var(--vibelink-text);
-}
-
-.hermes-gateway label {
-  color: var(--vibelink-muted);
-  display: grid;
-  gap: 5px;
-  font: 12px/1.2 var(--vibelink-sans);
-  margin: 0;
-}
-
-.hermes-gateway input {
-  background: var(--vibelink-input);
-  border: 1px solid var(--vibelink-border);
-  color: var(--vibelink-text);
-  min-height: 28px;
-  min-width: 0;
-  padding: 0 8px;
-}
 
 .hermes-inline-note,
 .hermes-form-message {

@@ -21,14 +21,14 @@ import { AppLockedScreen } from './components/AppLockedScreen'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
-import { startHermesAgent, startHermesOutputStream } from './ipc/hermes'
-import type { HermesWorkspaceState } from './ipc/types'
+import { getHermesRuntimeStatus, startHermesAgent, startHermesOutputStream } from './ipc/hermes'
+import type { HermesRuntimeStatus } from './ipc/types'
 import { paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
-import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
+import { planningWorkspaceLayoutPageId, workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import { isAppLocked, requiresProWindow } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
@@ -43,7 +43,17 @@ type CaptureShortcutRegistration = { action: CaptureShortcutAction; label: strin
 type FfmpegDownloadProgress = { downloaded: number; total?: number | null }
 type CaptureRecordingState = { startedAtMs: number }
 type CaptureRecordingEvent = { startedAtMs: number; path: string }
+type AgentPromptEvent = { sessionId: string; prompt: string }
 
+
+let hermesWarmupRuntime: { commandOverride: string | null; promise: Promise<HermesRuntimeStatus> } | undefined
+
+function hermesWarmupStatus(commandOverride: string | null): Promise<HermesRuntimeStatus> {
+  if (!hermesWarmupRuntime || hermesWarmupRuntime.commandOverride !== commandOverride) {
+    hermesWarmupRuntime = { commandOverride, promise: getHermesRuntimeStatus(commandOverride) }
+  }
+  return hermesWarmupRuntime.promise
+}
 
 function App() {
   const apiRef = useRef<DockviewApi | null>(null)
@@ -167,6 +177,11 @@ function App() {
         const lease = applyRemotePaneLeaseEvent(event.payload)
         TerminalManager.setRemotePaneLease(event.payload.paneId, lease)
       }),
+      listen<AgentPromptEvent>('vibelink://agent-prompt', (event) => {
+        const state = useWorkspaceStore.getState()
+        state.setActiveLayoutPage(event.payload.sessionId, planningWorkspaceLayoutPageId)
+        void state.sendAgentPrompt(event.payload.sessionId, event.payload.prompt)
+      }),
       listen<{ mode: 'image' | 'quick' | 'video'; path: string }>('capture://saved', (event) => {
         const state = useWorkspaceStore.getState()
         state.recordCapture(state.activePaneId, event.payload.path)
@@ -231,12 +246,12 @@ function App() {
     const sessionId = activeSessionId
     const workspaceFolder = activeSession?.workspaceFolder ?? null
     const commandOverride = settings.hermesCommand || null
-    // Workspace switch work is intentionally backgrounded: the derived profile
-    // changes with activeSessionId immediately, while ACP warmup runs in parallel.
-    // Warmup only helps once `hermes model` has configured the workspace; without
-    // a provider the handshake can only fail, so skip it instead of surfacing errors.
-    void invoke<HermesWorkspaceState>('hermes_workspace_state', { sessionId })
-      .then((state) => state.model ? startHermesAgent({ sessionId, commandOverride, workspaceFolder }) : undefined)
+    // Workspace switch work is intentionally backgrounded. Detection is cached
+    // for this app run; Hermes remains the model/configuration authority.
+    void hermesWarmupStatus(commandOverride)
+      .then((runtime) => runtime.detected && runtime.configuredModel
+        ? startHermesAgent({ sessionId, commandOverride, workspaceFolder })
+        : undefined)
       .catch(() => {})
   }, [activeSessionId, activeSession?.workspaceFolder, license.ready, license.status?.entitled, settings.hermesCommand])
 

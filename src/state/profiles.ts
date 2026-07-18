@@ -9,7 +9,6 @@ export type ChatImageAttachmentMode = 'auto' | 'always' | 'never'
 export type TerminalCursorStyle = 'bar' | 'block' | 'underline'
 export type SetupWizardSettings = {
   completedAt: string | null
-  hermesAutoInstall: boolean
   skippedSteps: string[]
 }
 
@@ -239,7 +238,7 @@ export const defaultSettings: Settings = {
   captureDir: '',
   captureFfmpegPath: '',
   keybindings: { ...defaultKeybindings },
-  setupWizard: { completedAt: null, hermesAutoInstall: false, skippedSteps: [] },
+  setupWizard: { completedAt: null, skippedSteps: [] },
 }
 
 export function normalizeSettings(value: unknown): Settings {
@@ -697,7 +696,6 @@ function normalizeSetupWizard(value: unknown): SetupWizardSettings {
     : null
   return {
     completedAt,
-    hermesAutoInstall: record?.hermesAutoInstall === true,
     skippedSteps: readStringArray(record?.skippedSteps)
       .map((step) => step.trim())
       .filter((step, index, steps) => step.length > 0 && steps.indexOf(step) === index),

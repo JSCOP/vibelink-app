@@ -47,13 +47,16 @@ describe('Hermes ACP startup', () => {
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
   })
 
-  test('started event restores transcript and session list from backend', async () => {
+  test('ACP replay restores transcript and session list from backend', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'hermes_start') {
-        queueMicrotask(() => emitHermesEvent?.({ kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
+        queueMicrotask(() => {
+          emitHermesEvent?.({ kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-a' })
+          emitHermesEvent?.({ kind: 'userMessage', sessionId: 'session-a', text: 'hello' })
+          emitHermesEvent?.({ kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' })
+        })
       }
-      if (command === 'hermes_session_transcript') return [{ role: 'user', text: 'hello', thoughts: '' }]
-      if (command === 'hermes_list_sessions') return [{ id: 'acp-a', title: null, source: 'discord', model: null, startedAt: 1, endedAt: null, messageCount: 1, archived: false }]
+      if (command === 'hermes_list_sessions') return [{ id: 'acp-a', title: null, updatedAt: '2026-07-18T00:00:00.000Z', cwd: 'E:/repo' }]
       return null
     })
     const { startHermesAgent } = await import('./hermes')
@@ -66,23 +69,30 @@ describe('Hermes ACP startup', () => {
     expect(useWorkspaceStore.getState().hermesSessions['session-a']).toHaveLength(1)
   })
 
-  test('explicit resume replaces transcript for the selected ACP session', async () => {
+  test('explicit resume replaces transcript from replay events', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_resume_session') return null
-      if (command === 'hermes_session_transcript') return [{ role: 'assistant', text: 'restored', thoughts: 'reasoning' }]
+      if (command === 'hermes_resume_session') {
+        emitHermesEvent?.({ kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-b' })
+        emitHermesEvent?.({ kind: 'userMessage', sessionId: 'session-a', text: 'restored prompt' })
+        emitHermesEvent?.({ kind: 'message', sessionId: 'session-a', text: 'restored answer' })
+      }
       return null
     })
     useWorkspaceStore.setState({
       hermesStatus: { 'session-a': 'running' },
       hermesTranscript: { 'session-a': [{ role: 'user', text: 'old', thoughts: '', toolCalls: [] }] },
     })
-    const { hermesResumeSession } = await import('./hermes')
+    const { hermesResumeSession, startHermesOutputStream } = await import('./hermes')
+    await startHermesOutputStream({ force: true })
 
     await hermesResumeSession({ sessionId: 'session-a', timeoutMs: 100 }, 'acp-b')
 
     expect(invoke).toHaveBeenCalledWith('hermes_resume_session', { sessionId: 'session-a', acpSessionId: 'acp-b' })
     expect(useWorkspaceStore.getState().hermesCurrentSession['session-a']).toBe('acp-b')
-    expect(useWorkspaceStore.getState().hermesTranscript['session-a']).toEqual([{ role: 'assistant', text: 'restored', thoughts: 'reasoning', toolCalls: [] }])
+    expect(useWorkspaceStore.getState().hermesTranscript['session-a']).toEqual([
+      { role: 'user', text: 'restored prompt', thoughts: '', toolCalls: [] },
+      { role: 'assistant', text: 'restored answer', thoughts: '', toolCalls: [], parts: [{ kind: 'message', text: 'restored answer' }] },
+    ])
   })
 
   test('dedupes concurrent startup requests for one workspace', async () => {

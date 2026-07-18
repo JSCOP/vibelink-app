@@ -405,18 +405,15 @@ describe('terminal profiles', () => {
   test('normalizes setup wizard state', () => {
     expect(normalizeSettings({}).setupWizard).toEqual({
       completedAt: null,
-      hermesAutoInstall: false,
       skippedSteps: [],
     })
     expect(normalizeSettings({
       setupWizard: {
         completedAt: '2026-07-13T00:00:00.000Z',
-        hermesAutoInstall: true,
         skippedSteps: ['agents', 'agents', ' ', 'mcp'],
       },
     }).setupWizard).toEqual({
       completedAt: '2026-07-13T00:00:00.000Z',
-      hermesAutoInstall: true,
       skippedSteps: ['agents', 'mcp'],
     })
   })
