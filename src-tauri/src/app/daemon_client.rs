@@ -412,7 +412,15 @@ fn spawn_reader_loop(reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, gen
 fn reader_loop(mut reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, mut generation: u64) {
     loop {
         match read_frame::<_, DaemonToClient>(&mut reader) {
-            Ok(msg) => route_daemon_message(&shared, msg),
+            Ok(msg) => {
+                if !reader_generation_is_current(
+                    shared.connection_generation.load(Ordering::Acquire),
+                    generation,
+                ) {
+                    break;
+                }
+                route_daemon_message(&shared, msg)
+            }
             Err(err) => {
                 if !reader_generation_is_current(
                     shared.connection_generation.load(Ordering::Acquire),

@@ -5,9 +5,12 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+    },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -27,7 +30,8 @@ const FFMPEG_ZIP_NAME: &str = "ffmpeg.zip";
 
 #[derive(Default)]
 pub struct CaptureState {
-    pub recording: Mutex<Option<Recording>>,
+    pub recording: Arc<Mutex<Option<Recording>>>,
+    next_recording_generation: AtomicU64,
     ffmpeg_provisioning: Mutex<FfmpegProvisioning>,
     ffmpeg_provisioning_changed: Condvar,
 }
@@ -39,10 +43,12 @@ struct FfmpegProvisioning {
     completed: Option<(u64, Result<String, String>)>,
 }
 
+#[derive(Clone)]
 pub struct Recording {
-    pub child: std::process::Child,
-    pub path: PathBuf,
-    pub started_at_ms: u64,
+    generation: u64,
+    child: Arc<Mutex<std::process::Child>>,
+    path: PathBuf,
+    started_at_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -65,6 +71,84 @@ pub struct CaptureRecordingState {
     started_at_ms: u64,
 }
 
+fn recording_generation_is_current(current_generation: u64, monitor_generation: u64) -> bool {
+    current_generation == monitor_generation
+}
+
+fn take_recording_if_generation(
+    recording: &Mutex<Option<Recording>>,
+    generation: u64,
+) -> Option<Recording> {
+    let mut slot = recording.lock().ok()?;
+    if !slot
+        .as_ref()
+        .is_some_and(|current| recording_generation_is_current(current.generation, generation))
+    {
+        return None;
+    }
+    slot.take()
+}
+
+fn spawn_recording_monitor(
+    recording_slot: Arc<Mutex<Option<Recording>>>,
+    app: tauri::AppHandle,
+    recording: Recording,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name(format!("vibelink-capture-monitor-{}", recording.generation))
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            let finished = match recording.child.lock() {
+                Ok(mut child) => child
+                    .try_wait()
+                    .map(|status| status.is_some())
+                    .map_err(to_string),
+                Err(_) => Err("recording child unavailable".to_string()),
+            };
+            match finished {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(_) if stop_recording_child(&recording.child).is_ok() => {}
+                Err(_) => break,
+            }
+            if let Some(retired) =
+                take_recording_if_generation(&recording_slot, recording.generation)
+            {
+                let _ = app.emit(
+                    "capture://recording-stopped",
+                    CaptureRecordingEvent {
+                        started_at_ms: retired.started_at_ms,
+                        path: retired.path.to_string_lossy().into_owned(),
+                    },
+                );
+            }
+            break;
+        })
+        .map(|_| ())
+        .map_err(to_string)
+}
+
+fn stop_recording_child(child: &Mutex<std::process::Child>) -> Result<(), String> {
+    let mut child = child
+        .lock()
+        .map_err(|_| "recording child unavailable".to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"q");
+        let _ = stdin.flush();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait().map_err(to_string)? {
+            Some(_) => return Ok(()),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            None => {
+                child.kill().map_err(to_string)?;
+                child.wait().map_err(to_string)?;
+                return Ok(());
+            }
+        }
+    }
+}
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -774,6 +858,10 @@ pub async fn start_video_capture(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
+    let generation = state
+        .next_recording_generation
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
     let mut child = hide_console(&mut command).spawn().map_err(to_string)?;
     thread::sleep(Duration::from_millis(400));
     match child.try_wait() {
@@ -781,6 +869,7 @@ pub async fn start_video_capture(
         Ok(None) => {}
         Err(error) => {
             let _ = child.kill();
+            let _ = child.wait();
             return Err(error.to_string());
         }
     }
@@ -796,11 +885,21 @@ pub async fn start_video_capture(
         let _ = child.wait();
         return Err("already recording".to_string());
     }
-    *slot = Some(Recording {
-        child,
+    let recording = Recording {
+        generation,
+        child: Arc::new(Mutex::new(child)),
         path: output,
         started_at_ms,
-    });
+    };
+    *slot = Some(recording.clone());
+    drop(slot);
+    if let Err(error) =
+        spawn_recording_monitor(Arc::clone(&state.recording), app.clone(), recording.clone())
+    {
+        take_recording_if_generation(&state.recording, generation);
+        let _ = stop_recording_child(&recording.child);
+        return Err(error);
+    }
     let _ = app.emit(
         "capture://recording-started",
         CaptureRecordingEvent {
@@ -819,17 +918,23 @@ pub fn capture_recording_state(
     supervisor
         .authorize(Capability::WorkspaceRead)
         .map_err(to_string)?;
-    let mut slot = state
+    let recording = state
         .recording
         .lock()
-        .map_err(|_| "recording state unavailable".to_string())?;
-    let Some(recording) = slot.as_mut() else {
+        .map_err(|_| "recording state unavailable".to_string())?
+        .clone();
+    let Some(recording) = recording else {
         return Ok(None);
     };
 
-    match recording.child.try_wait() {
+    let status = recording
+        .child
+        .lock()
+        .map_err(|_| "recording child unavailable".to_string())?
+        .try_wait();
+    match status {
         Ok(Some(_)) => {
-            *slot = None;
+            take_recording_if_generation(&state.recording, recording.generation);
             Ok(None)
         }
         Ok(None) => Ok(Some(CaptureRecordingState {
@@ -848,7 +953,7 @@ pub async fn stop_video_capture(
     supervisor
         .authorize(Capability::WorkspaceMutate)
         .map_err(to_string)?;
-    let mut recording = {
+    let recording = {
         let mut slot = state
             .recording
             .lock()
@@ -856,11 +961,7 @@ pub async fn stop_video_capture(
         slot.take().ok_or_else(|| "not recording".to_string())?
     };
 
-    if let Some(mut stdin) = recording.child.stdin.take() {
-        let _ = stdin.write_all(b"q");
-        let _ = stdin.flush();
-    }
-    let _ = recording.child.wait();
+    stop_recording_child(&recording.child)?;
 
     let path = recording.path.to_string_lossy().to_string();
     copy_path_to_clipboard(&path);
@@ -936,5 +1037,43 @@ mod tests {
         assert!(traversal_escape.contains("escapes image directory"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_recording_monitor_cannot_retire_new_generation() {
+        fn recording(generation: u64) -> Recording {
+            let mut child =
+                Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()))
+                    .args(["/D", "/Q", "/C", "more"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn recording child");
+            assert!(child.stdin.is_some());
+            Recording {
+                generation,
+                child: Arc::new(Mutex::new(child)),
+                path: PathBuf::from(format!("capture-{generation}.mp4")),
+                started_at_ms: generation,
+            }
+        }
+
+        let stale = recording(1);
+        let current = recording(2);
+        let slot = Mutex::new(Some(current.clone()));
+
+        assert!(take_recording_if_generation(&slot, stale.generation).is_none());
+        assert_eq!(
+            slot.lock()
+                .expect("recording slot")
+                .as_ref()
+                .map(|recording| recording.generation),
+            Some(2)
+        );
+
+        stop_recording_child(&stale.child).expect("stop stale child");
+        let current = take_recording_if_generation(&slot, 2).expect("take current child");
+        stop_recording_child(&current.child).expect("stop current child");
     }
 }
