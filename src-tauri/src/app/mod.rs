@@ -9,6 +9,8 @@ pub mod license;
 pub mod mcp_check;
 pub mod skills;
 pub mod spawn_daemon;
+#[cfg(windows)]
+mod window_chrome;
 
 use daemon_client::DaemonClient;
 use crate::remote::RemoteServer;
@@ -29,6 +31,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            #[cfg(windows)]
+            {
+                let main_window = app.get_webview_window("main").ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "main window not found")
+                })?;
+                window_chrome::disable_system_menu(&main_window)?;
+            }
             let stream = spawn_daemon::ensure_daemon().map_err(|err| {
                 let boxed: Box<dyn std::error::Error> = err.into();
                 boxed
