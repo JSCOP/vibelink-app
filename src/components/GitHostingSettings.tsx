@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Check, KeyRound, LoaderCircle, Trash2 } from 'lucide-react'
 import './GitHostingSettings.css'
 
@@ -11,12 +11,12 @@ export function GitHostingSettings() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
-  const refresh = async (nextHost = host) => {
+  const refresh = useCallback(async (nextHost = host) => {
     if (!nextHost.trim()) { setTokenPresent(false); return }
     try { setTokenPresent(await invoke<boolean>('hosting_token_status', { host: nextHost.trim() })) }
     catch (reason) { setMessage(String(reason)) }
-  }
-  useEffect(() => { const timer = window.setTimeout(() => { void refresh() }, 250); return () => window.clearTimeout(timer) }, [host])
+  }, [host])
+  useEffect(() => { const timer = window.setTimeout(() => { void refresh() }, 250); return () => window.clearTimeout(timer) }, [refresh])
 
   const run = async (operation: () => Promise<unknown>, success: string) => {
     setBusy(true)

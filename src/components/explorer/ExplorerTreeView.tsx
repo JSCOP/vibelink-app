@@ -32,6 +32,8 @@ export type ExplorerTreeViewProps = {
 
 export function ExplorerTreeView({ nodes, selectedPath, loading, error, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({ count: nodes.length, getScrollElement: () => scrollRef.current, estimateSize: () => 24, overscan: 20 })
   const virtualItems = virtualizer.getVirtualItems()
   const rows = virtualItems.length > 0 ? virtualItems : nodes.map((_, index) => ({ index, key: index, start: index * 24, size: 24, end: (index + 1) * 24, lane: 0 }))

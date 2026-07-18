@@ -62,36 +62,34 @@ export function GitWindow() {
 
   useEffect(() => {
     if (!sessionId) return
-    const selectedExists = orderedEntries.some((entry) => entry.path === gitState.selectedPath)
-    if (selectedExists) return
-    const first = orderedEntries[0] ?? null
-    setSelectedPath(sessionId, first?.path ?? null)
-    setSelectedArea(first && status.staged.some((entry) => entry.path === first.path) ? 'staged' : 'unstaged')
+    const timer = window.setTimeout(() => {
+      const selectedExists = orderedEntries.some((entry) => entry.path === gitState.selectedPath)
+      if (selectedExists) return
+      const first = orderedEntries[0] ?? null
+      setSelectedPath(sessionId, first?.path ?? null)
+      setSelectedArea(first && status.staged.some((entry) => entry.path === first.path) ? 'staged' : 'unstaged')
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [gitState.selectedPath, orderedEntries, sessionId, setSelectedPath, status.staged])
 
   useEffect(() => {
-    if (!workspaceFolder || !gitState.selectedPath) {
-      setContents(null)
-      setDiffError(null)
-      return
-    }
     let cancelled = false
-    setDiffLoading(true)
-    setDiffError(null)
-    invoke<FileContents>('git_working_file_contents', { workspaceFolder, path: gitState.selectedPath, area: selectedArea })
-      .then((next) => {
-        if (!cancelled) setContents(next)
-      })
-      .catch((reason) => {
-        if (!cancelled) {
-          setContents(null)
-          setDiffError(String(reason))
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setDiffLoading(false)
-      })
-    return () => { cancelled = true }
+    const timer = window.setTimeout(() => {
+      if (!workspaceFolder || !gitState.selectedPath) {
+        setContents(null)
+        setDiffError(null)
+        return
+      }
+      setDiffLoading(true)
+      setDiffError(null)
+      void invoke<FileContents>('git_working_file_contents', { workspaceFolder, path: gitState.selectedPath, area: selectedArea })
+        .then((next) => { if (!cancelled) setContents(next) })
+        .catch((reason) => {
+          if (!cancelled) { setContents(null); setDiffError(String(reason)) }
+        })
+        .finally(() => { if (!cancelled) setDiffLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [gitState.selectedPath, selectedArea, workspaceFolder, gitState.lastRefreshAt])
 
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {

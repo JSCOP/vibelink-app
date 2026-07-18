@@ -49,7 +49,7 @@ export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: Br
     }
   }, [workspaceFolder])
 
-  useEffect(() => { void reload() }, [reload])
+  useEffect(() => { const timer = window.setTimeout(() => { void reload() }, 0); return () => window.clearTimeout(timer) }, [reload])
 
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     void runGitMutation(sessionId, workspaceFolder, operation)
@@ -112,15 +112,16 @@ export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: Br
   }, [baseRef, headRef, workspaceFolder])
 
   useEffect(() => {
-    if (!selectedPath) {
-      setContents(null)
-      return
-    }
-    setLoading(true)
-    void invoke<FileContents>('git_diff_refs_file', { workspaceFolder, baseRef, headRef, path: selectedPath })
-      .then(setContents)
-      .catch((reason) => setError(String(reason)))
-      .finally(() => setLoading(false))
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      if (!selectedPath) { setContents(null); return }
+      setLoading(true)
+      void invoke<FileContents>('git_diff_refs_file', { workspaceFolder, baseRef, headRef, path: selectedPath })
+        .then((next) => { if (!cancelled) setContents(next) })
+        .catch((reason) => { if (!cancelled) setError(String(reason)) })
+        .finally(() => { if (!cancelled) setLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [baseRef, headRef, selectedPath, workspaceFolder])
 
   const stashDialog: StashDialogState = {

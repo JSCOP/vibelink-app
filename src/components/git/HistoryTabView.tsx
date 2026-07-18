@@ -69,6 +69,8 @@ function parseRef(ref: string): { label: string; kind: 'head' | 'tag' | 'ref' } 
 
 export function HistoryTabView({ commits, graph, hasMore, loading, error, search, author, pathFilter, selectedSha, detail, detailLoading, compareMode, compareFiles, selectedPath, contents, contentsLoading, contentsError, onSearchChange, onAuthorChange, onClearPathFilter, onSelectCommit, onLoadMore, onSelectFile, onCopySha, onCompareHead, onCreateBranch, onCreateTag }: HistoryTabViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({ count: commits.length, getScrollElement: () => scrollRef.current, estimateSize: () => ROW_HEIGHT, overscan: 12 })
   const virtualItems = virtualizer.getVirtualItems()
   const rows = virtualItems.length > 0

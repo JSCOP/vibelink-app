@@ -30,6 +30,7 @@ export function HistoryTab({ sessionId, workspaceFolder, pathFilter }: HistoryTa
   const [contentsLoading, setContentsLoading] = useState(false)
   const [contentsError, setContentsError] = useState<string | null>(null)
   const requestGeneration = useRef(0)
+  const loadPageRef = useRef<(reset: boolean) => Promise<void>>(async () => {})
   const runGitMutation = useGitStore((state) => state.runGitMutation)
   const setActiveTab = useGitStore((state) => state.setActiveTab)
 
@@ -76,8 +77,10 @@ export function HistoryTab({ sessionId, workspaceFolder, pathFilter }: HistoryTa
     }
   }, [commits.length, debouncedAuthor, debouncedSearch, pathFilter, workspaceFolder])
 
+  useEffect(() => { loadPageRef.current = loadPage }, [loadPage])
   useEffect(() => {
-    void loadPage(true)
+    const timer = window.setTimeout(() => { void loadPageRef.current(true) }, 0)
+    return () => window.clearTimeout(timer)
   }, [debouncedAuthor, debouncedSearch, pathFilter, workspaceFolder])
 
   const selectCommit = useCallback((sha: string) => {
@@ -97,23 +100,23 @@ export function HistoryTab({ sessionId, workspaceFolder, pathFilter }: HistoryTa
   }, [workspaceFolder])
 
   useEffect(() => {
-    if (!selectedSha || !selectedPath) {
-      setContents(null)
-      return
-    }
-    setContentsLoading(true)
-    setContentsError(null)
-    const command = compareMode ? 'git_diff_refs_file' : 'git_commit_file_contents'
-    const args = compareMode
-      ? { workspaceFolder, baseRef: selectedSha, headRef: 'HEAD', path: selectedPath }
-      : { workspaceFolder, sha: selectedSha, path: selectedPath }
-    void invoke<FileContents>(command, args)
-      .then(setContents)
-      .catch((reason) => {
-        setContents(null)
-        setContentsError(String(reason))
-      })
-      .finally(() => setContentsLoading(false))
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      if (!selectedSha || !selectedPath) { setContents(null); return }
+      setContentsLoading(true)
+      setContentsError(null)
+      const command = compareMode ? 'git_diff_refs_file' : 'git_commit_file_contents'
+      const args = compareMode
+        ? { workspaceFolder, baseRef: selectedSha, headRef: 'HEAD', path: selectedPath }
+        : { workspaceFolder, sha: selectedSha, path: selectedPath }
+      void invoke<FileContents>(command, args)
+        .then((next) => { if (!cancelled) setContents(next) })
+        .catch((reason) => {
+          if (!cancelled) { setContents(null); setContentsError(String(reason)) }
+        })
+        .finally(() => { if (!cancelled) setContentsLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [compareMode, selectedPath, selectedSha, workspaceFolder])
 
   const compareHead = useCallback(() => {

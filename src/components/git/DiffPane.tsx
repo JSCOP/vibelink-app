@@ -76,7 +76,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
   )
 }
 
-export const diffStyles = {
+const diffStyles = {
   variables: {
     dark: {
       diffViewerBackground: 'var(--vibelink-bg)',

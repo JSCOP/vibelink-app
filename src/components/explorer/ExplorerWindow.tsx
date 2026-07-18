@@ -60,22 +60,24 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
 
   useEffect(() => {
     let cancelled = false
-    setTextFile(null)
-    setImageSrc(null)
-    setViewerError(null)
-    if (!selectedNode || selectedNode.entry.isDir) { setViewerLoading(false); return }
-    setViewerLoading(true)
-    const extension = selectedNode.name.split('.').pop()?.toLowerCase() ?? ''
-    const request = IMAGE_EXTENSIONS.has(extension)
-      ? invoke<string>('fs_read_image', { workspaceFolder, relPath: selectedNode.path }).then((base64) => ({ image: `data:${imageMime(extension)};base64,${base64}` }))
-      : invoke<TextFile>('fs_read_text', { workspaceFolder, relPath: selectedNode.path }).then((text) => ({ text }))
-    void request.then((result) => {
-      if (cancelled) return
-      if ('image' in result) setImageSrc(result.image)
-      else setTextFile(result.text)
-    }).catch((reason) => { if (!cancelled) setViewerError(String(reason)) }).finally(() => { if (!cancelled) setViewerLoading(false) })
-    return () => { cancelled = true }
-  }, [selectedNode?.path, selectedNode?.entry.isDir, selectedNode?.entry.size, workspaceFolder])
+    const timer = window.setTimeout(() => {
+      setTextFile(null)
+      setImageSrc(null)
+      setViewerError(null)
+      if (!selectedNode || selectedNode.entry.isDir) { setViewerLoading(false); return }
+      setViewerLoading(true)
+      const extension = selectedNode.name.split('.').pop()?.toLowerCase() ?? ''
+      const request = IMAGE_EXTENSIONS.has(extension)
+        ? invoke<string>('fs_read_image', { workspaceFolder, relPath: selectedNode.path }).then((base64) => ({ image: `data:${imageMime(extension)};base64,${base64}` }))
+        : invoke<TextFile>('fs_read_text', { workspaceFolder, relPath: selectedNode.path }).then((text) => ({ text }))
+      void request.then((result) => {
+        if (cancelled) return
+        if ('image' in result) setImageSrc(result.image)
+        else setTextFile(result.text)
+      }).catch((reason) => { if (!cancelled) setViewerError(String(reason)) }).finally(() => { if (!cancelled) setViewerLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [selectedNode, workspaceFolder])
 
   const reloadPaths = useCallback(async (...paths: string[]) => {
     const unique = new Set(paths.map(parentPath).concat(paths).filter((path) => session.childrenByPath.has(path) || path === ''))
@@ -184,7 +186,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       { id: 'diff', label: 'Diff vs HEAD', disabled: !changed, onClick: wrap(() => openGit(node, false)) },
       { id: 'history', label: 'File History', onClick: wrap(() => openGit(node, true)) },
     ]
-  }, [absolutePath, beginRename, createEntry, decorations, deleteNode, editorCommand, gitSession.status, mutateGit, openGit, openTerminal])
+  }, [absolutePath, beginRename, createEntry, decorations, deleteNode, editorCommand, gitSession.status, mutateGit, openGit, openTerminal, workspaceFolder])
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (nodes.length === 0) return

@@ -59,8 +59,7 @@ export function PullRequestsTab({ sessionId, workspaceFolder, repoInfo, hostingI
     } finally { setLoading(false) }
   }, [hostingInfo.provider, hostingInfo.tokenPresent, onHostingChanged, workspaceFolder])
 
-  useEffect(() => { void loadPrs() }, [loadPrs])
-  useEffect(() => { setError(hostingError) }, [hostingError])
+  useEffect(() => { const timer = window.setTimeout(() => { void loadPrs() }, 0); return () => window.clearTimeout(timer) }, [loadPrs])
   useEffect(() => {
     if (!hostingInfo.tokenPresent || !sourceBranch) return
     void Promise.all([
@@ -131,14 +130,16 @@ export function PullRequestsTab({ sessionId, workspaceFolder, repoInfo, hostingI
   }, [hostingInfo.provider, workspaceFolder])
 
   useEffect(() => {
-    if (!selectedPath || !diffRefs) { setContents(null); return }
     let cancelled = false
-    setDiffLoading(true)
-    void invoke<FileContents>('git_diff_refs_file', { workspaceFolder, baseRef: diffRefs.base, headRef: diffRefs.head, path: selectedPath })
-      .then((next) => { if (!cancelled) setContents(next) })
-      .catch((reason) => { if (!cancelled) setError(String(reason)) })
-      .finally(() => { if (!cancelled) setDiffLoading(false) })
-    return () => { cancelled = true }
+    const timer = window.setTimeout(() => {
+      if (!selectedPath || !diffRefs) { setContents(null); return }
+      setDiffLoading(true)
+      void invoke<FileContents>('git_diff_refs_file', { workspaceFolder, baseRef: diffRefs.base, headRef: diffRefs.head, path: selectedPath })
+        .then((next) => { if (!cancelled) setContents(next) })
+        .catch((reason) => { if (!cancelled) setError(String(reason)) })
+        .finally(() => { if (!cancelled) setDiffLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [diffRefs, selectedPath, workspaceFolder])
 
   const pushBranch = useCallback(async () => {
@@ -169,8 +170,9 @@ export function PullRequestsTab({ sessionId, workspaceFolder, repoInfo, hostingI
   const openUrl = useCallback((url: string) => { void invoke('open_path', { path: url }) }, [])
   const copyUrl = useCallback((url: string) => { void navigator.clipboard.writeText(url) }, [])
   const deviceView = useMemo(() => deviceCode ? { userCode: deviceCode.userCode, verificationUri: deviceCode.verificationUri } : null, [deviceCode])
+  const visibleError = error ?? hostingError
 
-  return <PullRequestsTabView provider={hostingInfo.provider} host={hostingInfo.host} tokenPresent={hostingInfo.tokenPresent} loading={loading} error={error} prs={prs} ciByNumber={ciByNumber} selectedNumber={selectedNumber} detail={detail} files={files} selectedPath={selectedPath} contents={contents} diffLoading={diffLoading} mode={mode} token={token} deviceCode={deviceView} created={created} createTitle={createTitle} createBody={createBody} createTarget={createTarget} createTargets={createTargets} createDraft={createDraft} sourceBranch={sourceBranch} needsPush={!repoInfo.upstream} onRefresh={() => { void loadPrs() }} onTokenChange={setToken} onSaveToken={() => { void saveToken() }} onDeviceSignIn={() => { void startDeviceSignIn() }} onOpenUrl={openUrl} onCopyUrl={copyUrl} onSelectPr={(number) => { void selectPr(number) }} onSelectFile={setSelectedPath} onModeChange={setMode} onCreateTitleChange={setCreateTitle} onCreateBodyChange={setCreateBody} onCreateTargetChange={setCreateTarget} onCreateDraftChange={setCreateDraft} onPushBranch={() => { void pushBranch() }} onCreate={() => { void createPr() }} />
+  return <PullRequestsTabView provider={hostingInfo.provider} host={hostingInfo.host} tokenPresent={hostingInfo.tokenPresent} loading={loading} error={visibleError} prs={prs} ciByNumber={ciByNumber} selectedNumber={selectedNumber} detail={detail} files={files} selectedPath={selectedPath} contents={contents} diffLoading={diffLoading} mode={mode} token={token} deviceCode={deviceView} created={created} createTitle={createTitle} createBody={createBody} createTarget={createTarget} createTargets={createTargets} createDraft={createDraft} sourceBranch={sourceBranch} needsPush={!repoInfo.upstream} onRefresh={() => { void loadPrs() }} onTokenChange={setToken} onSaveToken={() => { void saveToken() }} onDeviceSignIn={() => { void startDeviceSignIn() }} onOpenUrl={openUrl} onCopyUrl={copyUrl} onSelectPr={(number) => { void selectPr(number) }} onSelectFile={setSelectedPath} onModeChange={setMode} onCreateTitleChange={setCreateTitle} onCreateBodyChange={setCreateBody} onCreateTargetChange={setCreateTarget} onCreateDraftChange={setCreateDraft} onPushBranch={() => { void pushBranch() }} onCreate={() => { void createPr() }} />
 }
 
 function branchTargets(branches: BranchInfo[]): string[] {

@@ -277,6 +277,7 @@ fn parse_github_pr_detail_base(body: &str) -> Result<GithubPrDetailBase> {
     Ok(GithubPrDetailBase { pull, head_sha })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_github_pr_detail(body: &str, checks: Vec<CiCheck>) -> Result<PrDetail> {
     Ok(parse_github_pr_detail_base(body)?.into_detail(checks))
 }

@@ -19,45 +19,38 @@ export function TaskDiffView() {
   useEffect(() => {
     if (!task?.baselineRef || !workspaceFolder) return
     let cancelled = false
-    setLoading(true)
-    setError(null)
-    invoke<ChangedFile[]>('git_changed_files', { workspaceFolder, baseRef: task.baselineRef })
-      .then((nextFiles) => {
-        if (cancelled) return
-        setFiles(nextFiles)
-        setSelectedPath(nextFiles[0]?.path ?? null)
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(String(reason))
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => { cancelled = true }
+    const timer = window.setTimeout(() => {
+      setLoading(true)
+      setError(null)
+      void invoke<ChangedFile[]>('git_changed_files', { workspaceFolder, baseRef: task.baselineRef })
+        .then((nextFiles) => {
+          if (cancelled) return
+          setFiles(nextFiles)
+          setSelectedPath(nextFiles[0]?.path ?? null)
+        })
+        .catch((reason) => { if (!cancelled) setError(String(reason)) })
+        .finally(() => { if (!cancelled) setLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [task?.baselineRef, task?.updatedAt, workspaceFolder])
 
   useEffect(() => {
-    if (!task?.baselineRef || !workspaceFolder || !selectedPath) {
-      setContents(null)
-      return
-    }
     let cancelled = false
-    setLoading(true)
-    setError(null)
-    invoke<FileContents>('git_file_contents', { workspaceFolder, baseRef: task.baselineRef, path: selectedPath })
-      .then((nextContents) => {
-        if (!cancelled) setContents(nextContents)
-      })
-      .catch((reason) => {
-        if (!cancelled) {
-          setContents(null)
-          setError(String(reason))
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => { cancelled = true }
+    const timer = window.setTimeout(() => {
+      if (!task?.baselineRef || !workspaceFolder || !selectedPath) {
+        setContents(null)
+        return
+      }
+      setLoading(true)
+      setError(null)
+      void invoke<FileContents>('git_file_contents', { workspaceFolder, baseRef: task.baselineRef, path: selectedPath })
+        .then((nextContents) => { if (!cancelled) setContents(nextContents) })
+        .catch((reason) => {
+          if (!cancelled) { setContents(null); setError(String(reason)) }
+        })
+        .finally(() => { if (!cancelled) setLoading(false) })
+    }, 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
   }, [selectedPath, task?.baselineRef, workspaceFolder])
 
   if (!task) return <div className="task-diff-empty">Select a task to view its diff.</div>
