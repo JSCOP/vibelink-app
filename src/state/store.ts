@@ -33,12 +33,14 @@ type Status = 'booting' | 'ready' | 'error'
 export type PaneCompletionSource = 'agent-response' | 'task-done'
 export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource; sessionId: string }
 export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
+export type PaneLifecycleState = 'spawning' | 'live' | 'closing' | 'closed'
 
 
 type WorkspaceState = {
   sessions: SessionMeta[]
   activeSessionId?: string
   panes: Record<string, PaneMeta>
+  paneLifecycle: Record<string, PaneLifecycleState>
   layoutJson?: string | null
   manualPaneTitles: ManualPaneTitleMap
   status: Status
@@ -147,6 +149,7 @@ type WorkspaceState = {
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sessions: [],
   panes: {},
+  paneLifecycle: {},
   manualPaneTitles: {},
   status: 'booting',
   settings: loadSettings(),
@@ -188,8 +191,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         const created = await invoke<SessionMeta>('create_session', { name: 'Workspace 1' })
         sessions = [created]
       }
-
-      set({ sessions, activeSessionId: undefined, panes: {}, layoutJson: null, status: 'ready' })
+      set({ sessions, activeSessionId: undefined, panes: {}, paneLifecycle: {}, layoutJson: null, status: 'ready' })
       if (licenseStatus.email) void get().revalidateLicense()
     } catch (error) {
       set({ status: 'error', error: String(error) })
@@ -257,6 +259,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeSessionId: sessionId,
       activePaneId: undefined,
       panes,
+      paneLifecycle: Object.fromEntries(attached.panes.map((pane) => [pane.id, 'live' as const])),
       paneCompletionHighlights: reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
       paneReviewMarkers: reconcilePaneReviewMarkers(state.paneReviewMarkers, sessionId, panes),
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
@@ -364,6 +367,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   spawnPane: async (sessionId: string, overrides?: SpawnPaneOptions) => {
     const paneId = overrides?.paneId ?? crypto.randomUUID()
+    set((state) => ({ paneLifecycle: { ...state.paneLifecycle, [paneId]: 'spawning' } }))
     const profile = overrides && 'profileId' in overrides
       ? profileById(get().settings, overrides.profileId)
       : selectedProfileForWorkspace(get().settings, sessionId)
@@ -385,21 +389,49 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       cols: overrides?.cols ?? 120,
       rows: overrides?.rows ?? 32,
     }
-    const pane = await invoke<PaneMeta>('spawn_pane', { sessionId, cfg })
-    set((state) => ({ panes: { ...state.panes, [pane.id]: pane } }))
-    await get().refreshSessions()
-    return pane
+    try {
+      const pane = await invoke<PaneMeta>('spawn_pane', { sessionId, cfg })
+      if (get().paneLifecycle[paneId] !== 'spawning') {
+        await invoke('cancel_pane_spawn', { sessionId, paneId }).catch(() => {})
+        throw new Error('PANE_SPAWN_CANCELLED')
+      }
+      set((state) => ({
+        panes: { ...state.panes, [pane.id]: pane },
+        paneLifecycle: { ...state.paneLifecycle, [paneId]: 'live' },
+      }))
+      await get().refreshSessions()
+      return pane
+    } catch (error) {
+      set((state) => {
+        const panes = { ...state.panes }
+        delete panes[paneId]
+        return {
+          panes,
+          paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closed' },
+        }
+      })
+      throw error
+    }
   },
 
   closePane: async (paneId: string) => {
     const sessionId = get().activeSessionId
     if (!sessionId) return
-    await invoke('close_pane', { sessionId, paneId })
+    const previous = get().paneLifecycle[paneId] ?? (get().panes[paneId] ? 'live' : 'closed')
+    if (previous === 'closing' || previous === 'closed') return
+    set((state) => ({ paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closing' } }))
+    try {
+      await invoke(previous === 'spawning' ? 'cancel_pane_spawn' : 'close_pane', { sessionId, paneId })
+    } catch (error) {
+      set((state) => ({ paneLifecycle: { ...state.paneLifecycle, [paneId]: previous } }))
+      throw error
+    }
     set((state) => {
       const panes = { ...state.panes }
       delete panes[paneId]
       return {
         panes,
+        paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closed' },
         activePaneId: state.activePaneId === paneId ? undefined : state.activePaneId,
         paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
         paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
@@ -412,6 +444,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await invoke('clear_session', { sessionId })
     set((state) => ({
       panes: state.activeSessionId === sessionId ? {} : state.panes,
+      paneLifecycle: state.activeSessionId === sessionId ? {} : state.paneLifecycle,
       activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
       paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
       paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),

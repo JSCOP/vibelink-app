@@ -416,6 +416,25 @@ pub async fn spawn_pane(
 }
 
 #[tauri::command]
+pub async fn cancel_pane_spawn(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    pane_id: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    expect_ok(client.request_reply(|req| ClientToDaemon::CancelPaneSpawn {
+        req,
+        session_id,
+        pane_id,
+    }))
+}
+
+#[tauri::command]
 pub async fn attach_pane(
     supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,

@@ -103,6 +103,7 @@ describe('workspace store profiles', () => {
       activeSessionId: undefined,
       activePaneId: undefined,
       panes: {},
+      paneLifecycle: {},
       manualPaneTitles: {},
       layoutJson: null,
       workspaceLayouts: {},
@@ -695,6 +696,54 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().manualPaneTitles).toEqual({ [survivorPane.id]: true })
     expect(useWorkspaceStore.getState().capturesByPane).toEqual({ [survivorPane.id]: ['keep.png'] })
     expect(useWorkspaceStore.getState().settings.paneRoles).toEqual({ [survivorPane.id]: 'Keep' })
+  })
+
+  test('cancels a pane closed before its spawn reply arrives', async () => {
+    let resolveSpawn: ((pane: PaneMeta) => void) | undefined
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'spawn_pane') {
+        return await new Promise<PaneMeta>((resolve) => { resolveSpawn = resolve })
+      }
+      if (command === 'cancel_pane_spawn') return null
+      if (command === 'list_sessions') return []
+      return null
+    })
+    useWorkspaceStore.setState({ activeSessionId: 'session-1' })
+
+    const spawning = useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
+    expect(useWorkspaceStore.getState().paneLifecycle['pane-test']).toBe('spawning')
+
+    await useWorkspaceStore.getState().closePane('pane-test')
+    resolveSpawn?.(spawnedPane)
+
+    await expect(spawning).rejects.toThrow('PANE_SPAWN_CANCELLED')
+    expect(useWorkspaceStore.getState().paneLifecycle['pane-test']).toBe('closed')
+    expect(useWorkspaceStore.getState().panes['pane-test']).toBeUndefined()
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'cancel_pane_spawn')).toHaveLength(2)
+    expect(invoke).not.toHaveBeenCalledWith('close_pane', expect.anything())
+  })
+
+  test('deduplicates concurrent closes for a live pane', async () => {
+    let releaseClose: (() => void) | undefined
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'close_pane') await new Promise<void>((resolve) => { releaseClose = resolve })
+      if (command === 'list_sessions') return []
+      return null
+    })
+    useWorkspaceStore.setState({
+      activeSessionId: 'session-1',
+      panes: { [spawnedPane.id]: spawnedPane },
+      paneLifecycle: { [spawnedPane.id]: 'live' },
+    })
+
+    const first = useWorkspaceStore.getState().closePane(spawnedPane.id)
+    const duplicate = useWorkspaceStore.getState().closePane(spawnedPane.id)
+    await duplicate
+    releaseClose?.()
+    await first
+
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'close_pane')).toHaveLength(1)
+    expect(useWorkspaceStore.getState().paneLifecycle[spawnedPane.id]).toBe('closed')
   })
 
   test('queues Hermes prompts FIFO and drains once', () => {

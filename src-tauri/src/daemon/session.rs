@@ -8,9 +8,12 @@ use std::{
     collections::{HashMap, HashSet},
     io::Write,
     sync::{Arc, Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+
+const SPAWN_CANCELLATION_TTL: Duration = Duration::from_secs(60);
+const MAX_SPAWN_CANCELLATIONS: usize = 4096;
 
 pub struct Session {
     pub meta: SessionMeta,
@@ -23,6 +26,7 @@ pub struct DaemonState {
     clients: HashMap<Uuid, Sender<DaemonToClient>>,
     pane_clients: HashMap<Uuid, HashSet<Uuid>>,
     session_clients: HashMap<Uuid, HashSet<Uuid>>,
+    spawn_cancellations: HashMap<(Uuid, Uuid), Instant>,
 }
 
 fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, ScrollbackRing> {
@@ -38,6 +42,7 @@ impl DaemonState {
             clients: HashMap::new(),
             pane_clients: HashMap::new(),
             session_clients: HashMap::new(),
+            spawn_cancellations: HashMap::new(),
         }
     }
 
@@ -182,6 +187,42 @@ impl DaemonState {
         session.panes.insert(meta.id, pane);
         session.meta.pane_count = session.panes.len();
         Ok(meta)
+    }
+
+    pub fn cancel_pane_spawn(
+        &mut self,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<Option<Pane>> {
+        self.session(session_id)?;
+        self.prune_spawn_cancellations();
+        if self.spawn_cancellations.len() >= MAX_SPAWN_CANCELLATIONS {
+            if let Some(oldest) = self
+                .spawn_cancellations
+                .iter()
+                .min_by_key(|(_, expires_at)| *expires_at)
+                .map(|(key, _)| *key)
+            {
+                self.spawn_cancellations.remove(&oldest);
+            }
+        }
+        self.spawn_cancellations.insert(
+            (session_id, pane_id),
+            Instant::now() + SPAWN_CANCELLATION_TTL,
+        );
+        self.close_pane(session_id, pane_id)
+    }
+
+    pub fn pane_spawn_cancelled(&mut self, session_id: Uuid, pane_id: Uuid) -> bool {
+        self.prune_spawn_cancellations();
+        self.spawn_cancellations
+            .contains_key(&(session_id, pane_id))
+    }
+
+    fn prune_spawn_cancellations(&mut self) {
+        let now = Instant::now();
+        self.spawn_cancellations
+            .retain(|_, expires_at| *expires_at > now);
     }
 
     pub fn close_pane(&mut self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
@@ -598,6 +639,30 @@ mod tests {
         assert_eq!(closed.expect("closed pane").meta().config, config);
         assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
         assert!(state.persisted_sessions()[0].panes.is_empty());
+    }
+
+    #[test]
+    fn cancel_pane_spawn_records_tombstone_and_removes_live_pane() {
+        let mut state = DaemonState::new();
+        let meta = state.create_session("Workspace".to_string(), None);
+        let pending_id = Uuid::new_v4();
+
+        assert!(state
+            .cancel_pane_spawn(meta.id, pending_id)
+            .expect("cancel pending pane")
+            .is_none());
+        assert!(state.pane_spawn_cancelled(meta.id, pending_id));
+
+        let live_id = Uuid::new_v4();
+        state
+            .insert_pane(meta.id, Pane::for_test(test_config(live_id), true))
+            .expect("insert live pane");
+        assert!(state
+            .cancel_pane_spawn(meta.id, live_id)
+            .expect("cancel live pane")
+            .is_some());
+        assert!(state.pane_spawn_cancelled(meta.id, live_id));
+        assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
     }
 
     #[test]

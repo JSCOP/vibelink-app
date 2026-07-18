@@ -12,7 +12,7 @@ import { WorkspaceActionsContext, type WorkspaceActions, type SplitDirection } f
 import { WorkspaceWindowActionsContext, type WorkspaceChromeState, type WorkspaceWindowActions } from './windowActions'
 import { TEMPLATES, type GridTemplate } from './templates'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
-import { withSuppressedPanelRemoval } from './suppression'
+import { withAllowedPanelRemoval, withSuppressedPanelRemoval } from './suppression'
 import { paneIdFromEventTarget } from './paneActivation'
 import { nearestPaneIdInDirection, swapPanelIdsInDockviewLayout, type PaneDirection } from './paneSwap'
 import type { PaneDropPosition } from './paneDrag'
@@ -669,11 +669,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       layoutTerminalDockview(api)
       const size = await measuredSpawnSize(pending.id)
       try {
-        await spawnPane(sessionId, { paneId: pending.id, cols: size?.cols, rows: size?.rows })
+        await withAllowedPanelRemoval(suppressPanelRemovalRef, () => spawnPane(sessionId, { paneId: pending.id, cols: size?.cols, rows: size?.rows }))
       } catch (error) {
         api.getPanel(pending.id)?.api.close()
         TerminalManager.dispose(pending.id)
-        useWorkspaceStore.getState().setError(String(error))
+        if (!String(error).includes('PANE_SPAWN_CANCELLED')) useWorkspaceStore.getState().setError(String(error))
         return
       }
       // Splitting halves the sibling pane; recover it alongside the new one.
@@ -1137,11 +1137,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
           layoutTerminalDockview(terminalApi)
           const size = await measuredSpawnSize(pending.id)
           try {
-            await spawnPane(sessionId, { paneId: pending.id, profileId, cols: size?.cols, rows: size?.rows })
+            await withAllowedPanelRemoval(suppressPanelRemovalRef, () => spawnPane(sessionId, { paneId: pending.id, profileId, cols: size?.cols, rows: size?.rows }))
           } catch (error) {
             terminalApi.getPanel(pending.id)?.api.close()
             TerminalManager.dispose(pending.id)
-            useWorkspaceStore.getState().setError(String(error))
+            if (!String(error).includes('PANE_SPAWN_CANCELLED')) useWorkspaceStore.getState().setError(String(error))
             return
           }
           TerminalManager.focus(pending.id)
@@ -1341,13 +1341,13 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       try {
         for (const pending of pendingPanes) {
           const size = await measuredSpawnSize(pending.id)
-          await spawnPane(sessionId, {
+          await withAllowedPanelRemoval(suppressPanelRemovalRef, () => spawnPane(sessionId, {
             paneId: pending.id,
             profileId,
             title: pending.config.title ?? undefined,
             cols: size?.cols,
             rows: size?.rows,
-          })
+          }))
         }
       } catch (error) {
         for (const pending of pendingPanes) {
@@ -1356,7 +1356,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
             TerminalManager.dispose(pending.id)
           }
         }
-        useWorkspaceStore.getState().setError(String(error))
+        if (!String(error).includes('PANE_SPAWN_CANCELLED')) useWorkspaceStore.getState().setError(String(error))
       }
 
       reflowTerminalsAfterLayout({ syncPty: true, recover: true })
@@ -1506,7 +1506,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
-      if (!useWorkspaceStore.getState().panes[panel.id]) {
+      const paneState = useWorkspaceStore.getState()
+      if (!paneState.panes[panel.id] && paneState.paneLifecycle[panel.id] !== 'spawning') {
         persistLayoutSoon()
         return
       }
@@ -1594,7 +1595,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
-      if (!useWorkspaceStore.getState().panes[panel.id]) {
+      const paneState = useWorkspaceStore.getState()
+      if (!paneState.panes[panel.id] && paneState.paneLifecycle[panel.id] !== 'spawning') {
         // Top-level window removal mutates the outer Dockview first, while the
         // nested terminal Dockview still holds the previous host geometry.
         // Settle both overlays in order, then recover xterm and restore input

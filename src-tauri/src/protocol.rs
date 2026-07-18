@@ -182,6 +182,11 @@ pub enum ClientToDaemon {
         #[serde(default)]
         attach: bool,
     },
+    CancelPaneSpawn {
+        req: Req,
+        session_id: Uuid,
+        pane_id: Uuid,
+    },
     AttachPane {
         req: Req,
         session_id: Uuid,

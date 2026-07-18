@@ -236,6 +236,7 @@ pub fn run() {
             commands::save_layout,
             commands::set_pane_title,
             commands::spawn_pane,
+            commands::cancel_pane_spawn,
             commands::write_pane,
             skills::vibelink_skill_list,
             skills::vibelink_skill_get,

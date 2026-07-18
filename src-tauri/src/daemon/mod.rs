@@ -403,6 +403,7 @@ fn request_capability(
         | ClientToDaemon::DeleteSession { .. }
         | ClientToDaemon::SaveLayout { .. }
         | ClientToDaemon::SpawnPane { .. }
+        | ClientToDaemon::CancelPaneSpawn { .. }
         | ClientToDaemon::ResizePane { .. }
         | ClientToDaemon::NotifySessionChanged { .. }
         | ClientToDaemon::SetPaneTitle { .. }
@@ -850,6 +851,25 @@ fn dispatch_message(
                 },
             )
         }
+        ClientToDaemon::CancelPaneSpawn {
+            req,
+            session_id,
+            pane_id,
+        } => {
+            let pane = lock_state(&state).cancel_pane_spawn(session_id, pane_id)?;
+            persist_state(&state, sessions_path)?;
+            send_ok(tx, req)?;
+            if let Some(mut pane) = pane {
+                thread::Builder::new()
+                    .name(format!("vibelink-cancel-pty-{pane_id}"))
+                    .spawn(move || {
+                        if let Err(error) = pane.kill() {
+                            warn!(?error, %pane_id, "failed to kill cancelled pane spawn");
+                        }
+                    })?;
+            }
+            Ok(())
+        }
         ClientToDaemon::AttachPane {
             req,
             session_id,
@@ -1048,6 +1068,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::DeleteSession { req, .. }
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
+        | ClientToDaemon::CancelPaneSpawn { req, .. }
         | ClientToDaemon::AttachPane { req, .. }
         | ClientToDaemon::WritePane { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
@@ -1106,6 +1127,9 @@ fn spawn_pane_for_session(
     mut cfg: crate::protocol::PaneConfig,
     attach_client: Option<Uuid>,
 ) -> Result<crate::protocol::PaneMeta> {
+    if lock_state(&state).pane_spawn_cancelled(session_id, cfg.pane_id) {
+        bail!("PANE_SPAWN_CANCELLED");
+    }
     lock_state(&state).pane_metas(session_id)?;
 
     let pane_id = cfg.pane_id;
@@ -1115,6 +1139,14 @@ fn spawn_pane_for_session(
     let reader = spawned.reader;
     let meta = {
         let mut guard = lock_state(&state);
+        if guard.pane_spawn_cancelled(session_id, pane_id) {
+            drop(guard);
+            let mut pane = spawned.pane;
+            if let Err(error) = pane.kill() {
+                warn!(?error, %pane_id, "failed to kill pane cancelled during spawn");
+            }
+            bail!("PANE_SPAWN_CANCELLED");
+        }
         let meta = match guard.insert_pane_or_recover(session_id, spawned.pane) {
             Ok(meta) => meta,
             Err((err, mut pane)) => {
@@ -1597,6 +1629,14 @@ mod tests {
                 pane_id,
             }),
             Some(7)
+        );
+        assert_eq!(
+            request_id(&ClientToDaemon::CancelPaneSpawn {
+                req: 9,
+                session_id,
+                pane_id,
+            }),
+            Some(9)
         );
         assert_eq!(
             request_id(&ClientToDaemon::WritePane {
