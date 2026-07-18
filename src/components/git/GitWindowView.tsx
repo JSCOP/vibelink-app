@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, ChevronDown, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import type { ChangeType, FileContents, RepoInfo, StatusEntry, WorkingStatus } from '../../ipc/types'
 import type { GitTab } from '../../state/git'
 import { DiffPane } from './DiffPane'
@@ -70,6 +70,9 @@ export type GitWindowViewProps = {
   onCommitMessageChange: (value: string) => void
   onAmendChange: (value: boolean) => void
   onCommit: () => void
+  historyContent: ReactNode
+  branchesContent: ReactNode
+  pullRequestsContent: ReactNode
 }
 
 const CHANGE_BADGES: Record<ChangeType, string> = {
@@ -111,7 +114,7 @@ function GitActionButton({ action, subject }: { action: GitRowAction; subject?: 
   )
 }
 
-export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit }: GitWindowViewProps) {
+export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
   if (!workspaceFolder) {
     return (
       <div ref={setRootElement} className="git-window git-window-empty" data-git-window="true">
@@ -258,9 +261,10 @@ export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, statu
           <div className="git-window-main-divider" role="separator" aria-orientation="vertical" />
           <DiffPane files={[]} selectedPath={selectedPath} onSelect={() => {}} contents={contents} loading={diffLoading} splitView error={diffError} hideFileList />
         </section>
-      ) : (
-        <div className="git-window-coming-soon" data-git-tab={activeTab}>{activeTab === 'history' ? 'History' : activeTab === 'branches' ? 'Branches' : 'Pull Requests'} — coming in this build.</div>
-      )}
+      ) : activeTab === 'history' ? historyContent
+        : activeTab === 'branches' ? branchesContent
+          : pullRequestsContent
+      }
       {clone.open ? <CloneDialog clone={clone} /> : null}
     </div>
   )

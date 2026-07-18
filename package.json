@@ -13,6 +13,7 @@
     "tauri:build:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vibelink.ps1 -Action installer-ci"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.6",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-global-shortcut": "^2.3.2",

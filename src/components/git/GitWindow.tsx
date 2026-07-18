@@ -7,6 +7,8 @@ import { emptyGitSessionState, useGitStore, type GitTab } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { QuickPick } from '../QuickPick'
 import type { PickerEntry } from '../pickerModel'
+import { BranchesTab } from './BranchesTab'
+import { HistoryTab } from './HistoryTab'
 import { GitWindowView, type GitChangeGroup, type GitCloneViewState, type GitRowAction } from './GitWindowView'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
@@ -265,6 +267,9 @@ export function GitWindow() {
           () => invoke<string>('git_commit', { workspaceFolder, message: commitMessage, amend, signoff: false }),
           () => setCommitMessage(''),
         )}
+        historyContent={sessionId && workspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={workspaceFolder} pathFilter={gitState.pathFilter} /> : null}
+        branchesContent={sessionId && workspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={workspaceFolder} repoInfo={repoInfo} status={status} /> : null}
+        pullRequestsContent={<div className="git-window-coming-soon">Pull Requests — coming in this build.</div>}
       />
       {branchPickerOpen && branches.length > 0 ? (
         <QuickPick
