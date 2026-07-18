@@ -1,9 +1,10 @@
+use crate::app::authorization::Capability;
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
 use crate::app::license::HeadlessLicenseCache;
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
 };
-use crate::protocol::{ClientToDaemon, ReplyResult, TaskSignal};
+use crate::protocol::{ClientKind, ClientToDaemon, ReplyResult, TaskSignal};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::{
@@ -77,22 +78,21 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         print_usage(io::stdout())?;
         return Ok(());
     }
+    require_cli_control()?;
     if is_skill_command(&command) {
         return execute_skill(command);
     }
-    // Full lock: every daemon-touching command requires entitlement (active
-    // trial or paid Pro). Skill commands are handled above and do not touch the
-    // daemon.
+
+    let stream = crate::app::spawn_daemon::ensure_daemon_for(ClientKind::Cli)
+        .context("connect to daemon")?;
+    let client = DaemonClient::new_with_kind(stream, ClientKind::Cli);
+    execute(&client, command)
+}
+
+fn require_cli_control() -> Result<()> {
     HeadlessLicenseCache::load()
         .context("load license cache")?
-        .require_entitled()
-        .context(
-            "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.",
-        )?;
-
-    let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
-    let client = DaemonClient::new(stream);
-    execute(&client, command)
+        .require_capability(Capability::CliControl)
 }
 
 fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {

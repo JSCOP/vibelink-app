@@ -1,10 +1,117 @@
+use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub type Req = u64;
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
+pub const DAEMON_AUTH_REQUIRED: &str = "AUTH_REQUIRED";
+pub const DAEMON_PROTOCOL_MISMATCH: &str = "DAEMON_PROTOCOL_MISMATCH";
+pub const DAEMON_AUTH_DOMAIN: &[u8] = b"vibelink-daemon-auth-v1\0";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthorizationStateWire {
+    Trial,
+    TrialExpired,
+    ValidOnline,
+    Unlicensed,
+    ConfigurationError,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationLease {
+    pub state: AuthorizationStateWire,
+    pub entitled: bool,
+    pub observed_at: DateTime<Utc>,
+    pub lease_until: DateTime<Utc>,
+    pub offline_grace_until: Option<DateTime<Utc>>,
+    pub policy_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClientKind {
+    App,
+    Cli,
+    Mcp,
+    Remote,
+    StartupProbe,
+    Shutdown,
+}
+
+impl ClientKind {
+    const fn proof_tag(self) -> u8 {
+        match self {
+            Self::App => 1,
+            Self::Cli => 2,
+            Self::Mcp => 3,
+            Self::Remote => 4,
+            Self::StartupProbe => 5,
+            Self::Shutdown => 6,
+        }
+    }
+}
+
+pub fn daemon_auth_proof(
+    secret: &[u8; 32],
+    protocol_version: u32,
+    boot_id: Uuid,
+    nonce: &[u8; 32],
+    client_id: Uuid,
+    client_kind: ClientKind,
+) -> [u8; 32] {
+    let mut message = Vec::with_capacity(DAEMON_AUTH_DOMAIN.len() + 4 + 16 + 32 + 16 + 1);
+    message.extend_from_slice(DAEMON_AUTH_DOMAIN);
+    message.extend_from_slice(&protocol_version.to_be_bytes());
+    message.extend_from_slice(boot_id.as_bytes());
+    message.extend_from_slice(nonce);
+    message.extend_from_slice(client_id.as_bytes());
+    message.push(client_kind.proof_tag());
+    hmac_sha256(secret, &message)
+}
+
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (&left, &right) in left.iter().zip(right) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK_LEN: usize = 64;
+    let mut key_block = [0_u8; BLOCK_LEN];
+    if key.len() > BLOCK_LEN {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36_u8; BLOCK_LEN];
+    let mut outer_pad = [0x5c_u8; BLOCK_LEN];
+    for index in 0..BLOCK_LEN {
+        inner_pad[index] ^= key_block[index];
+        outer_pad[index] ^= key_block[index];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
 
 #[derive(Debug, Error)]
 pub enum FrameError {
@@ -23,10 +130,19 @@ pub type FrameResult<T> = Result<T, FrameError>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientToDaemon {
     Hello {
+        protocol_version: u32,
         client_id: Uuid,
+        client_kind: ClientKind,
+    },
+    Authenticate {
+        client_id: Uuid,
+        proof: [u8; 32],
     },
     Ping {
         req: Req,
+    },
+    AuthorizationHeartbeat {
+        snapshot: AuthorizationLease,
     },
     ListSessions {
         req: Req,
@@ -125,6 +241,20 @@ pub enum ClientToDaemon {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonToClient {
+    Challenge {
+        protocol_version: u32,
+        boot_id: Uuid,
+        nonce: [u8; 32],
+        expires_at_unix_ms: i64,
+    },
+    Authenticated {
+        policy_epoch: u64,
+        lease_until_unix_ms: i64,
+    },
+    AuthorizationChanged {
+        code: String,
+        policy_epoch: u64,
+    },
     Pong {
         req: Req,
     },
@@ -419,6 +549,99 @@ mod tests {
         assert_eq!(decoded, message);
     }
 
+    #[test]
+    fn admission_messages_and_valid_proof_round_trip() {
+        let secret = [0x42; 32];
+        let boot_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let nonce = [0x24; 32];
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            boot_id,
+            &nonce,
+            client_id,
+            ClientKind::Cli,
+        );
+        let message = ClientToDaemon::Authenticate { client_id, proof };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode admission frame");
+        let decoded: ClientToDaemon = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
+
+        assert_eq!(decoded, message);
+        assert!(constant_time_eq(
+            &proof,
+            &daemon_auth_proof(
+                &secret,
+                DAEMON_PROTOCOL_VERSION,
+                boot_id,
+                &nonce,
+                client_id,
+                ClientKind::Cli,
+            )
+        ));
+    }
+
+    #[test]
+    fn admission_proof_binds_secret_version_nonce_identity_and_kind() {
+        let secret = [7_u8; 32];
+        let boot_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let nonce = [9_u8; 32];
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            boot_id,
+            &nonce,
+            client_id,
+            ClientKind::App,
+        );
+
+        assert!(!constant_time_eq(
+            &proof,
+            &daemon_auth_proof(
+                &[8_u8; 32],
+                DAEMON_PROTOCOL_VERSION,
+                boot_id,
+                &nonce,
+                client_id,
+                ClientKind::App,
+            )
+        ));
+        assert!(!constant_time_eq(
+            &proof,
+            &daemon_auth_proof(
+                &secret,
+                DAEMON_PROTOCOL_VERSION + 1,
+                boot_id,
+                &nonce,
+                client_id,
+                ClientKind::App,
+            )
+        ));
+        assert!(!constant_time_eq(
+            &proof,
+            &daemon_auth_proof(
+                &secret,
+                DAEMON_PROTOCOL_VERSION,
+                boot_id,
+                &[10_u8; 32],
+                client_id,
+                ClientKind::App,
+            )
+        ));
+        assert!(!constant_time_eq(
+            &proof,
+            &daemon_auth_proof(
+                &secret,
+                DAEMON_PROTOCOL_VERSION,
+                boot_id,
+                &nonce,
+                client_id,
+                ClientKind::Mcp,
+            )
+        ));
+    }
     #[test]
     fn read_frame_rejects_frames_larger_than_cap() {
         let mut bytes = ((MAX_FRAME_LEN as u32) + 1).to_be_bytes().to_vec();

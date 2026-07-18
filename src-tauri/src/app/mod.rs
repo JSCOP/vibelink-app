@@ -2,10 +2,10 @@ pub mod agents;
 pub mod authorization;
 pub mod board;
 pub mod capture;
-pub mod entitlement;
 pub mod commands;
 pub mod daemon_client;
 pub mod fsops;
+pub mod entitlement;
 pub mod git;
 pub mod hermes;
 pub mod license;
@@ -45,23 +45,21 @@ pub fn run() {
                 let boxed: Box<dyn std::error::Error> = err.into();
                 boxed
             })?;
-            app.manage(DaemonClient::new_with_app(stream, app.handle().clone()));
-            app.manage(Arc::new(hermes::HermesManager::new()));
+            let daemon_client = DaemonClient::new_with_app(stream, app.handle().clone());
+            app.manage(daemon_client.clone());
+            let hermes = Arc::new(hermes::HermesManager::new());
+            app.manage(Arc::clone(&hermes));
             let license = Arc::new(license::LicenseService::new().map_err(|error| {
                 let boxed: Box<dyn std::error::Error> = error.into();
                 boxed
             })?);
-            let entitlement = entitlement::EntitlementSupervisor::new(
-                Arc::clone(&license),
-                app.handle().clone(),
-            )
-            .map_err(|error| {
-                let boxed: Box<dyn std::error::Error> = error.into();
-                boxed
-            })?;
-            entitlement.start_background();
+            let entitlement =
+                entitlement::EntitlementSupervisor::new(Arc::clone(&license), app.handle().clone())
+                    .map_err(|error| {
+                        let boxed: Box<dyn std::error::Error> = error.into();
+                        boxed
+                    })?;
             app.manage(license);
-            app.manage(entitlement);
             let data_dir = crate::daemon::paths::daemon_paths()
                 .map_err(|error| {
                     let boxed: Box<dyn std::error::Error> = error.into();
@@ -78,10 +76,31 @@ pub fn run() {
                     boxed
                 })?,
             );
-            if let Err(error) = remote.start_if_enabled() {
-                tracing::warn!(?error, "remote access auto-start failed");
-            }
+            let remote_observer = Arc::clone(&remote);
+            let hermes_observer = Arc::clone(&hermes);
+            let daemon_observer = daemon_client.clone();
+            entitlement
+                .subscribe(Arc::new(move |snapshot| {
+                    let entitled = snapshot.entitled;
+                    if let Err(error) =
+                        daemon_observer.send_authorization_heartbeat(snapshot.clone())
+                    {
+                        tracing::warn!(?error, "daemon authorization heartbeat failed");
+                    }
+                    if let Err(error) = remote_observer.update_authorization(snapshot) {
+                        tracing::warn!(?error, "remote authorization update failed");
+                    }
+                    if !entitled {
+                        hermes_observer.shutdown_all();
+                    }
+                }))
+                .map_err(|error| {
+                    let boxed: Box<dyn std::error::Error> = error.into();
+                    boxed
+                })?;
+            entitlement.start_background();
             app.manage(remote);
+            app.manage(entitlement);
             app.manage(capture::CaptureState::default());
             app.manage(KeepAlivePrefs::default());
             Ok(())
@@ -106,6 +125,7 @@ pub fn run() {
             commands::detach_session,
             commands::init_terminal_output,
             commands::terminal_ws_port,
+            commands::terminal_ws_token,
             commands::remote_get_status,
             commands::remote_get_pane_lease,
             commands::remote_set_enabled,

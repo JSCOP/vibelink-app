@@ -1,5 +1,5 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
 use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteServer, RemoteStatus};
 use serde_json::Value;
@@ -50,18 +50,26 @@ pub async fn ping(client: State<'_, DaemonClient>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn set_keep_terminals_alive_on_close(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     prefs: State<'_, super::KeepAlivePrefs>,
     value: bool,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     prefs.0.store(value, std::sync::atomic::Ordering::Release);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn init_terminal_output(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     channel: Channel<TerminalEvent>,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::TerminalRead)
+        .map_err(to_string)?;
     client.set_output_channel(channel);
     Ok(())
 }
@@ -69,6 +77,17 @@ pub async fn init_terminal_output(
 #[tauri::command]
 pub fn terminal_ws_port(client: State<'_, DaemonClient>) -> u16 {
     client.ws_port()
+}
+
+#[tauri::command]
+pub fn terminal_ws_token(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::TerminalRead)
+        .map_err(to_string)?;
+    Ok(client.ws_token())
 }
 
 #[tauri::command]
@@ -86,54 +105,82 @@ pub fn remote_get_pane_lease(
 
 #[tauri::command]
 pub async fn remote_set_enabled(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
     enabled: bool,
 ) -> Result<RemoteStatus, String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     remote.set_enabled(enabled).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn remote_set_port(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
     port: u16,
 ) -> Result<RemoteStatus, String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     remote.set_port(port).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn remote_create_pairing(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
 ) -> Result<PairingPayload, String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     remote.create_pairing().map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn remote_revoke_device(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
     device_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     remote.revoke_device(&device_id).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn remote_regenerate_identity(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
 ) -> Result<RemoteStatus, String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     remote.regenerate_identity().map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn remote_firewall_status(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
 ) -> Result<bool, String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     let port = remote.status().port;
     crate::remote::firewall::is_configured(port).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn remote_setup_firewall(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
 ) -> Result<bool, String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     let port = remote.status().port;
     crate::remote::firewall::setup(port).map_err(to_string)?;
     crate::remote::firewall::is_configured(port).map_err(to_string)
@@ -141,17 +188,27 @@ pub async fn remote_setup_firewall(
 
 #[tauri::command]
 pub async fn set_remote_appearance(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     remote: State<'_, Arc<RemoteServer>>,
     appearance: Value,
     workspace_order: Vec<String>,
     workspace_alerts: std::collections::HashMap<String, usize>,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::RemoteConnect)
+        .map_err(to_string)?;
     remote.set_appearance(appearance, workspace_order, workspace_alerts);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<SessionMeta>, String> {
+pub async fn list_sessions(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+) -> Result<Vec<SessionMeta>, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     match client
         .request_reply(|req| ClientToDaemon::ListSessions { req })
         .map_err(to_string)?
@@ -163,8 +220,12 @@ pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<Sessio
 
 #[tauri::command]
 pub async fn resource_snapshot(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
 ) -> Result<ResourceSnapshotDto, String> {
+    supervisor
+        .authorize(Capability::TerminalRead)
+        .map_err(to_string)?;
     let data = match client
         .request_reply(|req| ClientToDaemon::ResourceSnapshot { req })
         .map_err(to_string)?
@@ -208,7 +269,13 @@ pub async fn resource_snapshot(
 }
 
 #[tauri::command]
-pub async fn restart_daemon(client: State<'_, DaemonClient>) -> Result<(), String> {
+pub async fn restart_daemon(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || client.restart())
         .await
@@ -218,10 +285,14 @@ pub async fn restart_daemon(client: State<'_, DaemonClient>) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn create_session(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     name: String,
     workspace_folder: Option<String>,
 ) -> Result<SessionMeta, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     match client
         .request_reply(|req| ClientToDaemon::CreateSession {
             req,
@@ -237,10 +308,14 @@ pub async fn create_session(
 
 #[tauri::command]
 pub async fn rename_session(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     name: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::RenameSession {
         req,
@@ -251,18 +326,26 @@ pub async fn rename_session(
 
 #[tauri::command]
 pub async fn delete_session(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::DeleteSession { req, session_id }))
 }
 
 #[tauri::command]
 pub async fn attach_session(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
 ) -> Result<AttachedSession, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     match client
         .request_reply(|req| ClientToDaemon::AttachSession { req, session_id })
@@ -275,9 +358,13 @@ pub async fn attach_session(
 
 #[tauri::command]
 pub async fn detach_session(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::TerminalRead)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     client
         .send(ClientToDaemon::DetachSession { session_id })
@@ -286,10 +373,14 @@ pub async fn detach_session(
 
 #[tauri::command]
 pub async fn save_layout(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     layout_json: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     client
         .send(ClientToDaemon::SaveLayout {
@@ -301,10 +392,14 @@ pub async fn save_layout(
 
 #[tauri::command]
 pub async fn spawn_pane(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     cfg: PaneConfig,
 ) -> Result<PaneMeta, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     match client
         .request_reply(|req| ClientToDaemon::SpawnPane {
@@ -322,10 +417,14 @@ pub async fn spawn_pane(
 
 #[tauri::command]
 pub async fn attach_pane(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     pane_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::TerminalRead)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
@@ -338,11 +437,15 @@ pub async fn attach_pane(
 
 #[tauri::command]
 pub async fn write_pane(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     pane_id: String,
     data: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::TerminalWrite)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
@@ -356,12 +459,16 @@ pub async fn write_pane(
 
 #[tauri::command]
 pub async fn resize_pane(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     pane_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::TerminalWrite)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     client
@@ -376,11 +483,15 @@ pub async fn resize_pane(
 
 #[tauri::command]
 pub async fn set_pane_title(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     pane_id: String,
     title: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneTitle {
@@ -394,12 +505,14 @@ pub async fn set_pane_title(
 #[tauri::command]
 pub async fn set_pane_role(
     client: State<'_, DaemonClient>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     pane_id: String,
     role: Option<String>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneRole {
@@ -412,10 +525,14 @@ pub async fn set_pane_role(
 
 #[tauri::command]
 pub async fn close_pane(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     pane_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::ClosePane {
@@ -427,15 +544,24 @@ pub async fn close_pane(
 
 #[tauri::command]
 pub async fn clear_session(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     expect_ok(client.request_reply(|req| ClientToDaemon::ClearSession { req, session_id }))
 }
 
 #[tauri::command]
-pub async fn list_installed_fonts() -> Result<Vec<String>, String> {
+pub async fn list_installed_fonts(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+) -> Result<Vec<String>, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     list_fonts_native().map_err(to_string)
 }
 

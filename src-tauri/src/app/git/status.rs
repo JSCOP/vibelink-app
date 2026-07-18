@@ -1,6 +1,6 @@
 use super::exec::{git_read, git_read_output};
 use super::{change_type_from_status, to_string, ChangeType};
-use crate::app::license::LicenseService;
+use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::Result;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -61,10 +61,12 @@ pub struct StatusEntry {
 
 #[tauri::command]
 pub async fn git_repo_info(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<RepoInfo, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || git_repo_info_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -73,10 +75,12 @@ pub async fn git_repo_info(
 
 #[tauri::command]
 pub async fn git_working_status(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<WorkingStatus, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || git_working_status_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -88,10 +92,18 @@ pub(crate) fn git_repo_info_native(workspace_folder: &str) -> Result<RepoInfo> {
     if !root_output.status.success() {
         return Ok(RepoInfo::default());
     }
-    let root = String::from_utf8_lossy(&root_output.stdout).trim().to_string();
+    let root = String::from_utf8_lossy(&root_output.stdout)
+        .trim()
+        .to_string();
     let status = git_read(
         &root,
-        ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=no"],
+        [
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=no",
+        ],
     )?;
     let mut info = RepoInfo {
         is_repo: true,
@@ -149,7 +161,9 @@ fn parse_branch_headers(bytes: &[u8], info: &mut RepoInfo) {
 }
 
 fn repo_state(root: &str) -> Result<RepoState> {
-    let git_dir = String::from_utf8_lossy(&git_read(root, ["rev-parse", "--git-dir"])?).trim().to_string();
+    let git_dir = String::from_utf8_lossy(&git_read(root, ["rev-parse", "--git-dir"])?)
+        .trim()
+        .to_string();
     let path = if Path::new(&git_dir).is_absolute() {
         PathBuf::from(git_dir)
     } else {
@@ -201,7 +215,9 @@ pub(crate) fn parse_working_status(bytes: &[u8]) -> WorkingStatus {
         }
         let record = &records[index];
         index += 1;
-        let Some(kind) = record.chars().next() else { continue };
+        let Some(kind) = record.chars().next() else {
+            continue;
+        };
         match kind {
             '?' => {
                 let path = record.strip_prefix("? ").unwrap_or_default().to_string();
@@ -224,7 +240,9 @@ pub(crate) fn parse_working_status(bytes: &[u8]) -> WorkingStatus {
             }
             '1' | '2' => {
                 let field_count = if kind == '2' { 10 } else { 9 };
-                let Some((xy, path)) = status_fields(record, field_count) else { continue };
+                let Some((xy, path)) = status_fields(record, field_count) else {
+                    continue;
+                };
                 let old_path = if kind == '2' && index < records.len() {
                     let old = records[index].clone();
                     index += 1;

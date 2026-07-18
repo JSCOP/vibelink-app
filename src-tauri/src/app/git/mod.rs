@@ -10,13 +10,12 @@ pub(crate) mod status;
 #[cfg(test)]
 mod test_support;
 
-
 use self::exec::{
     git_exit_status, git_read as git_output, git_read_allow_fail as git_output_allow_fail,
     git_write,
 };
 use self::paths::{parent_dir, resolve_repo_file_path, validate_base_ref};
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::sync::Arc;
@@ -24,12 +23,12 @@ use tauri::State;
 
 #[cfg(test)]
 use self::exec::CREATE_NO_WINDOW;
+#[cfg(all(test, windows))]
+use std::os::windows::process::CommandExt;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
-#[cfg(all(test, windows))]
-use std::os::windows::process::CommandExt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,8 +69,13 @@ pub struct WorktreeInfo {
 }
 
 #[tauri::command]
-pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<bool, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+pub async fn git_is_available(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    workspace_folder: String,
+) -> Result<bool, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         git_exit_status(&workspace_folder, ["rev-parse", "--is-inside-work-tree"])
             .map(|status| status.success())
@@ -82,8 +86,13 @@ pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace
 }
 
 #[tauri::command]
-pub async fn git_snapshot_baseline(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<String, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+pub async fn git_snapshot_baseline(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    workspace_folder: String,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || snapshot_baseline_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -92,11 +101,13 @@ pub async fn git_snapshot_baseline(license: State<'_, Arc<LicenseService>>, work
 
 #[tauri::command]
 pub async fn git_changed_files(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
 ) -> Result<Vec<ChangedFile>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || changed_files_native(&workspace_folder, &base_ref))
         .await
         .map_err(to_string)?
@@ -105,12 +116,14 @@ pub async fn git_changed_files(
 
 #[tauri::command]
 pub async fn git_file_contents(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
     path: String,
 ) -> Result<FileContents, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         file_contents_native(&workspace_folder, &base_ref, &path)
     })
@@ -121,11 +134,13 @@ pub async fn git_file_contents(
 
 #[tauri::command]
 pub async fn git_worktree_create(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     task_id: String,
 ) -> Result<WorktreeInfo, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         worktree_create_native(&workspace_folder, &task_id)
     })
@@ -136,13 +151,15 @@ pub async fn git_worktree_create(
 
 #[tauri::command]
 pub async fn git_worktree_remove(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     worktree_path: String,
     branch: String,
     force: bool,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         worktree_remove_native(&workspace_folder, &worktree_path, &branch, force)
     })
@@ -299,8 +316,12 @@ pub(crate) fn parse_numstat(bytes: &[u8]) -> Vec<(String, (u32, u32, bool))> {
             continue;
         }
         let mut fields = record.splitn(3, '\t');
-        let Some(additions) = fields.next() else { continue };
-        let Some(deletions) = fields.next() else { continue };
+        let Some(additions) = fields.next() else {
+            continue;
+        };
+        let Some(deletions) = fields.next() else {
+            continue;
+        };
         let Some(path) = fields.next() else { continue };
         let path = if path.is_empty() && index + 1 < records.len() {
             index += 1;
@@ -357,7 +378,6 @@ pub(crate) fn change_type_from_status(status: char) -> ChangeType {
     }
 }
 
-
 fn short_task_id(task_id: &str) -> String {
     let short: String = task_id
         .chars()
@@ -370,7 +390,6 @@ fn short_task_id(task_id: &str) -> String {
         short
     }
 }
-
 
 pub(crate) fn to_string(err: impl std::fmt::Display) -> String {
     err.to_string()

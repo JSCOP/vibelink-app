@@ -6,6 +6,7 @@ import { create } from 'zustand'
 import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief, WorktreeInfo } from '../ipc/types'
 import { defaultSettings, isAgentPane, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
+import { authorizationErrorMessage } from './licenseGate'
 import type { Settings } from './profiles'
 import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
@@ -479,7 +480,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
   },
 
-  setError: (error: string) => set({ error, status: 'error' }),
+  setError: (error: string) => set({ error: authorizationErrorMessage(error), status: 'error' }),
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
   setActivePaneId: (paneId) => set({ activePaneId: paneId }),

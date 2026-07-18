@@ -4,12 +4,13 @@ use super::{
         encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage,
         WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL,
     },
-    server::{desktop_name, PaneLease, RemotePaneLeaseEvent, RemoteShared},
+    server::{desktop_name, ActiveRemoteClient, PaneLease, RemotePaneLeaseEvent, RemoteShared},
 };
 use crate::{
-    app::spawn_daemon,
+    app::{authorization::Capability, spawn_daemon},
     protocol::{
-        read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneMeta, ReplyResult, SessionMeta,
+        read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient, PaneMeta, ReplyResult,
+        SessionMeta,
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,7 +21,10 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     net::TcpStream,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -112,6 +116,12 @@ pub fn handle_connection(
     tls_config: Arc<ServerConfig>,
     shared: Arc<RemoteShared>,
 ) -> Result<()> {
+    shared
+        .authorize(Capability::RemoteConnect)
+        .map_err(|denied| anyhow!(denied.code.as_str()))?;
+    let disconnect_socket = stream
+        .try_clone()
+        .context("clone remote socket for live revocation")?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -146,10 +156,13 @@ pub fn handle_connection(
         _ => bail!("remote hello must be a text frame"),
     };
     let (device_id, device_token) = authenticate(&mut ws, &shared, hello)?;
+    shared
+        .authorize(Capability::RemoteConnect)
+        .map_err(|denied| anyhow!(denied.code.as_str()))?;
     send_json(
         &mut ws,
         &ServerMessage::Authed {
-            device_id,
+            device_id: device_id.clone(),
             device_token,
             desktop_name: desktop_name(),
             protocol_version: PROTOCOL_VERSION,
@@ -162,11 +175,26 @@ pub fn handle_connection(
     let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let client_key = Uuid::new_v4();
     let (push_tx, push_rx) = bounded(PUSH_QUEUE_CAPACITY);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let devices = shared.devices.lock().expect("remote devices mutex");
+    if !devices.contains(&device_id) {
+        send_error(&mut ws, "authFailed", "remote device was revoked", None)?;
+        bail!("remote device was revoked before session registration");
+    }
     shared
         .client_senders
         .lock()
         .expect("remote clients mutex")
-        .insert(client_key, push_tx);
+        .insert(
+            client_key,
+            ActiveRemoteClient {
+                device_id,
+                sender: push_tx,
+                cancelled: Arc::clone(&cancelled),
+                socket: Some(disconnect_socket),
+            },
+        );
+    drop(devices);
 
     let result = run_authenticated(
         &mut ws,
@@ -175,6 +203,7 @@ pub fn handle_connection(
         &push_rx,
         &shared,
         client_key,
+        &cancelled,
     );
     if let Err(error) = restore_owned_leases(&shared, client_key, &mut daemon_writer, None) {
         tracing::warn!(?error, %client_key, "failed to restore remote pane leases during disconnect");
@@ -209,6 +238,14 @@ fn authenticate(
         )?;
         bail!("protocol mismatch");
     }
+    let _authorization = match shared.authorization_guard(Capability::RemoteConnect) {
+        Ok(authorization) => authorization,
+        Err(denied) => {
+            let code = denied.code.as_str();
+            send_error(ws, code, "remote authorization denied", None)?;
+            bail!(code);
+        }
+    };
     let mut devices = shared.devices.lock().expect("remote devices mutex");
     match auth {
         AuthRequest::Pair { code, device_name } => {
@@ -240,15 +277,9 @@ fn auth_error_code(error: &super::devices::AuthFailure) -> &'static str {
 }
 
 fn open_daemon_connection() -> Result<(interprocess::local_socket::SendHalf, DaemonInbox)> {
-    let stream =
-        spawn_daemon::connect_daemon().context("connect dedicated remote daemon client")?;
-    let (reader, mut writer) = stream.split();
-    write_frame(
-        &mut writer,
-        &ClientToDaemon::Hello {
-            client_id: Uuid::new_v4(),
-        },
-    )?;
+    let stream = spawn_daemon::connect_authenticated_daemon(ClientKind::Remote)
+        .context("connect authenticated remote daemon client")?;
+    let (reader, writer) = stream.split();
     let (senders, inbox) = daemon_channels(DAEMON_OUTPUT_QUEUE_CAPACITY);
     thread::Builder::new()
         .name("vibelink-remote-daemon-reader".to_string())
@@ -277,7 +308,11 @@ fn run_authenticated(
     push_rx: &Receiver<Message>,
     shared: &RemoteShared,
     client_key: Uuid,
+    cancelled: &AtomicBool,
 ) -> Result<()> {
+    shared
+        .authorize(Capability::RemoteConnect)
+        .map_err(|denied| anyhow!(denied.code.as_str()))?;
     let mut next_req = 1_u64;
     let mut attached: Option<Uuid> = None;
     let mut attached_panes: Vec<Uuid> = Vec::new();
@@ -313,6 +348,14 @@ fn run_authenticated(
     let mut last_ping = Instant::now();
     let mut last_pong = Instant::now();
     loop {
+        if let Err(denied) = shared.authorize(Capability::RemoteConnect) {
+            let code = denied.code.as_str();
+            let _ = send_error(ws, code, "remote authorization denied", None);
+            bail!(code);
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(());
+        }
         while let Some(message) = daemon_inbox.try_control()? {
             handle_daemon_control(
                 ws,
@@ -328,7 +371,11 @@ fn run_authenticated(
             )?;
         }
         while let Ok(message) = push_rx.try_recv() {
+            let close = matches!(message, Message::Close(_));
             ws.send(message)?;
+            if close {
+                return Ok(());
+            }
         }
         for _ in 0..MAX_OUTPUT_FRAMES_PER_LOOP {
             if daemon_inbox.has_pending_control() {
@@ -403,6 +450,15 @@ fn handle_client_message(
     pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
     message: ClientMessage,
 ) -> Result<()> {
+    if let Err(denied) = authorize_client_message(shared, &message) {
+        let code = denied.code.as_str();
+        return send_error(
+            ws,
+            code,
+            "remote authorization denied",
+            message_req_id(&message),
+        );
+    }
     match message {
         ClientMessage::Hello { .. } => {
             send_error(ws, "authFailed", "hello may only be sent once", None)
@@ -547,6 +603,13 @@ fn handle_client_message(
                 return send_error(ws, "internal", "pane geometry unavailable", req_id);
             };
             let target = (cols.clamp(20, 360), rows.clamp(5, 200));
+            let _authorization = match shared.authorization_guard(Capability::RemoteConnect) {
+                Ok(authorization) => authorization,
+                Err(denied) => {
+                    let code = denied.code.as_str();
+                    return send_error(ws, code, "remote authorization denied", req_id);
+                }
+            };
             let claim = claim_pane_lease(
                 &mut shared.pane_leases.lock().expect("remote pane leases mutex"),
                 session_id,
@@ -604,6 +667,37 @@ fn handle_client_message(
         }
         ClientMessage::Unknown => Ok(()),
         ClientMessage::Ping { req_id } => send_json(ws, &ServerMessage::Pong { req_id }),
+    }
+}
+
+fn authorize_client_message(
+    shared: &RemoteShared,
+    message: &ClientMessage,
+) -> std::result::Result<(), crate::app::authorization::AuthorizationDenied> {
+    let capability = match message {
+        ClientMessage::AttachWorkspace { .. } | ClientMessage::ClaimPane { .. } => {
+            Some(Capability::RemoteConnect)
+        }
+        ClientMessage::WritePane { .. } => Some(Capability::TerminalWrite),
+        _ => None,
+    };
+    if let Some(capability) = capability {
+        shared.authorize(capability)?;
+    }
+    Ok(())
+}
+
+fn message_req_id(message: &ClientMessage) -> Option<u64> {
+    match message {
+        ClientMessage::ListWorkspaces { req_id }
+        | ClientMessage::AttachWorkspace { req_id, .. }
+        | ClientMessage::DetachWorkspace { req_id, .. }
+        | ClientMessage::WritePane { req_id, .. }
+        | ClientMessage::RefreshPane { req_id, .. }
+        | ClientMessage::ClaimPane { req_id, .. }
+        | ClientMessage::ReleasePane { req_id, .. }
+        | ClientMessage::Ping { req_id } => *req_id,
+        ClientMessage::Hello { .. } | ClientMessage::Unknown => None,
     }
 }
 
@@ -1257,5 +1351,90 @@ mod tests {
         );
         assert!(leases.contains_key(&pane_b));
         assert!(leases.contains_key(&pane_other));
+    }
+    fn authorization_messages() -> Vec<ClientMessage> {
+        vec![
+            ClientMessage::AttachWorkspace {
+                session_id: Uuid::new_v4().to_string(),
+                req_id: Some(1),
+            },
+            ClientMessage::WritePane {
+                pane_id: Uuid::new_v4().to_string(),
+                data: "input".to_string(),
+                req_id: Some(2),
+            },
+            ClientMessage::ClaimPane {
+                pane_id: Uuid::new_v4().to_string(),
+                cols: 48,
+                rows: 32,
+                req_id: Some(3),
+            },
+        ]
+    }
+
+    fn authorization_snapshot(
+        entitled: bool,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> crate::app::authorization::AuthorizationSnapshot {
+        crate::app::authorization::AuthorizationSnapshot {
+            state: if entitled {
+                crate::app::authorization::AuthorizationState::ValidOnline
+            } else {
+                crate::app::authorization::AuthorizationState::TrialExpired
+            },
+            entitled,
+            observed_at: chrono::Utc::now(),
+            lease_until,
+            offline_grace_until: None,
+            policy_epoch: 9,
+        }
+    }
+
+    #[test]
+    fn authorization_denies_remote_resume_input_and_new_leases_but_allows_entitled_v1_messages() {
+        let directory = std::env::temp_dir().join(format!(
+            "vibelink-remote-bridge-authorization-{}",
+            Uuid::new_v4()
+        ));
+        let server = crate::remote::server::RemoteServer::new(directory.clone())
+            .expect("create remote server");
+
+        for message in authorization_messages() {
+            assert_eq!(
+                authorize_client_message(&server.shared, &message)
+                    .expect_err("unentitled message must fail")
+                    .code
+                    .as_str(),
+                "ENTITLEMENT_REQUIRED"
+            );
+        }
+
+        server
+            .update_authorization(authorization_snapshot(
+                true,
+                chrono::Utc::now() - chrono::Duration::milliseconds(1),
+            ))
+            .expect("store stale authorization");
+        for message in authorization_messages() {
+            assert_eq!(
+                authorize_client_message(&server.shared, &message)
+                    .expect_err("stale message must fail")
+                    .code
+                    .as_str(),
+                "AUTHORIZATION_STALE"
+            );
+        }
+
+        server
+            .update_authorization(authorization_snapshot(
+                true,
+                chrono::Utc::now() + chrono::Duration::minutes(1),
+            ))
+            .expect("authorize remote");
+        for message in authorization_messages() {
+            authorize_client_message(&server.shared, &message)
+                .expect("entitled protocol-v1 message must remain authorized");
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

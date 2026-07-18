@@ -1,4 +1,4 @@
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -29,11 +29,11 @@ pub struct McpCheckReport {
 
 #[tauri::command]
 pub async fn mcp_self_check(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<McpCheckReport, String> {
-    license
-        .require_entitled_cached()
+    supervisor
+        .authorize(Capability::McpCall)
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let executable = std::env::current_exe().context("resolve current executable")?;

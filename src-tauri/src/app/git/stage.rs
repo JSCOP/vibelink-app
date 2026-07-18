@@ -1,7 +1,7 @@
 use super::exec::{ensure_success, git_read, git_read_output, git_write, git_write_output};
 use super::paths::{resolve_repo_file_path, validate_repo_relative_path};
 use super::to_string;
-use crate::app::license::LicenseService;
+use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::sync::Arc;
@@ -16,70 +16,84 @@ pub struct StashInfo {
 
 #[tauri::command]
 pub async fn git_init(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || git_write(&workspace_folder, ["init"]).map(|_| ())).await
 }
 
 #[tauri::command]
 pub async fn git_stage(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || stage_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
 pub async fn git_unstage(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || unstage_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
 pub async fn git_stage_all(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || git_write(&workspace_folder, ["add", "-A"]).map(|_| ())).await
 }
 
 #[tauri::command]
 pub async fn git_unstage_all(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || unstage_all_native(&workspace_folder)).await
 }
 
 #[tauri::command]
 pub async fn git_discard(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || discard_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
 pub async fn git_commit(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     message: String,
     amend: bool,
     signoff: bool,
 ) -> Result<String, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         commit_native(&workspace_folder, &message, amend, signoff)
     })
@@ -90,21 +104,25 @@ pub async fn git_commit(
 
 #[tauri::command]
 pub async fn git_stash_save(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     message: String,
     include_untracked: bool,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     spawn_unit(move || stash_save_native(&workspace_folder, &message, include_untracked)).await
 }
 
 #[tauri::command]
 pub async fn git_stash_list(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<Vec<StashInfo>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || stash_list_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -115,11 +133,13 @@ macro_rules! stash_command {
     ($name:ident, $verb:literal) => {
         #[tauri::command]
         pub async fn $name(
-            license: State<'_, Arc<LicenseService>>,
+            supervisor: State<'_, Arc<EntitlementSupervisor>>,
             workspace_folder: String,
             index: u32,
         ) -> Result<(), String> {
-            license.require_entitled_cached().map_err(to_string)?;
+            supervisor
+                .authorize(Capability::WorkspaceMutate)
+                .map_err(to_string)?;
             spawn_unit(move || {
                 let stash_ref = format!("stash@{{{index}}}");
                 git_write(&workspace_folder, ["stash", $verb, &stash_ref]).map(|_| ())
@@ -148,7 +168,11 @@ fn unstage_native(repo: &str, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["restore".to_string(), "--staged".to_string(), "--".to_string()];
+    let mut args = vec![
+        "restore".to_string(),
+        "--staged".to_string(),
+        "--".to_string(),
+    ];
     args.extend(paths.iter().cloned());
     let output = git_write_output(repo, &args)?;
     if output.status.success() {
@@ -172,7 +196,10 @@ fn unstage_all_native(repo: &str) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    if !git_read_output(repo, ["rev-parse", "--verify", "HEAD"])?.status.success() {
+    if !git_read_output(repo, ["rev-parse", "--verify", "HEAD"])?
+        .status
+        .success()
+    {
         Ok(())
     } else {
         ensure_success(output).map(|_| ())
@@ -270,8 +297,11 @@ mod tests {
     fn stage_commit_and_log_round_trip() {
         let repo = test_repo();
         std::fs::write(repo.join("hello.txt"), "hello\n").expect("write file");
-        stage_native(repo.to_str().expect("utf8 repo"), &["hello.txt".to_string()])
-            .expect("stage");
+        stage_native(
+            repo.to_str().expect("utf8 repo"),
+            &["hello.txt".to_string()],
+        )
+        .expect("stage");
         let sha = commit_native(repo.to_str().expect("utf8 repo"), "initial", false, false)
             .expect("commit");
         let page = git_log_native(

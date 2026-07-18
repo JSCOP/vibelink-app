@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 
-export type AgentAuthState = 'loggedIn' | 'loggedOut' | 'unknown'
+export type AgentAuthState = 'loggedIn' | 'unknown'
 
 export type AgentCliStatus = {
   id: string
@@ -19,6 +19,5 @@ export function getAgentCliStatus(): Promise<AgentCliStatus[]> {
 export function agentStatusLabel(status: AgentCliStatus): string {
   if (!status.installed) return 'Not found'
   if (status.auth === 'loggedIn') return 'Installed · Logged in'
-  if (status.auth === 'loggedOut') return 'Installed · Logged out'
   return 'Installed · Login unknown'
 }

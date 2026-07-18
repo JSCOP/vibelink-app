@@ -1,3 +1,4 @@
+use crate::protocol::{AuthorizationLease, AuthorizationStateWire};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -15,42 +16,43 @@ pub enum AuthorizationState {
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizationSnapshot {
     pub state: AuthorizationState,
-    pub plan: Option<String>,
     pub entitled: bool,
     pub observed_at: DateTime<Utc>,
     pub lease_until: DateTime<Utc>,
+    pub offline_grace_until: Option<DateTime<Utc>>,
     pub policy_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
-    PaneCreate,
-    PaneInput,
-    PaneResume,
-    TaskStart,
-    ToolInvoke,
-    ConfigMutate,
-    SkillMutate,
-    RemoteStart,
-    RemotePair,
-    RemoteWrite,
     AccountStatus,
     AccountSignIn,
     PurchaseOpen,
     DaemonShutdown,
+    WorkspaceRead,
+    WorkspaceMutate,
+    TerminalRead,
+    TerminalWrite,
+    McpCall,
+    CliControl,
+    RemoteConnect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorizationErrorCode {
+    AuthRequired,
     EntitlementRequired,
     AuthorizationStale,
+    DaemonProtocolMismatch,
 }
 
 impl AuthorizationErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AuthRequired => "AUTH_REQUIRED",
             Self::EntitlementRequired => "ENTITLEMENT_REQUIRED",
             Self::AuthorizationStale => "AUTHORIZATION_STALE",
+            Self::DaemonProtocolMismatch => "DAEMON_PROTOCOL_MISMATCH",
         }
     }
 }
@@ -89,23 +91,61 @@ impl AuthorizationSnapshot {
     }
 }
 
+impl From<AuthorizationSnapshot> for AuthorizationLease {
+    fn from(snapshot: AuthorizationSnapshot) -> Self {
+        Self {
+            state: match snapshot.state {
+                AuthorizationState::Trial => AuthorizationStateWire::Trial,
+                AuthorizationState::TrialExpired => AuthorizationStateWire::TrialExpired,
+                AuthorizationState::ValidOnline => AuthorizationStateWire::ValidOnline,
+                AuthorizationState::Unlicensed => AuthorizationStateWire::Unlicensed,
+                AuthorizationState::ConfigurationError => {
+                    AuthorizationStateWire::ConfigurationError
+                }
+            },
+            entitled: snapshot.entitled,
+            observed_at: snapshot.observed_at,
+            lease_until: snapshot.lease_until,
+            offline_grace_until: snapshot.offline_grace_until,
+            policy_epoch: snapshot.policy_epoch,
+        }
+    }
+}
+
+impl From<AuthorizationLease> for AuthorizationSnapshot {
+    fn from(snapshot: AuthorizationLease) -> Self {
+        Self {
+            state: match snapshot.state {
+                AuthorizationStateWire::Trial => AuthorizationState::Trial,
+                AuthorizationStateWire::TrialExpired => AuthorizationState::TrialExpired,
+                AuthorizationStateWire::ValidOnline => AuthorizationState::ValidOnline,
+                AuthorizationStateWire::Unlicensed => AuthorizationState::Unlicensed,
+                AuthorizationStateWire::ConfigurationError => {
+                    AuthorizationState::ConfigurationError
+                }
+            },
+            entitled: snapshot.entitled,
+            observed_at: snapshot.observed_at,
+            lease_until: snapshot.lease_until,
+            offline_grace_until: snapshot.offline_grace_until,
+            policy_epoch: snapshot.policy_epoch,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Duration;
 
-    const ENTITLED_CAPABILITIES: [Capability; 11] = [
-        Capability::PaneCreate,
-        Capability::PaneInput,
-        Capability::PaneResume,
-        Capability::TaskStart,
-        Capability::ToolInvoke,
-        Capability::ConfigMutate,
-        Capability::SkillMutate,
-        Capability::RemoteStart,
-        Capability::RemotePair,
-        Capability::RemoteWrite,
-        Capability::AccountStatus,
+    const ENTITLED_CAPABILITIES: [Capability; 7] = [
+        Capability::WorkspaceRead,
+        Capability::WorkspaceMutate,
+        Capability::TerminalRead,
+        Capability::TerminalWrite,
+        Capability::McpCall,
+        Capability::CliControl,
+        Capability::RemoteConnect,
     ];
 
     fn snapshot(entitled: bool, lease_until: DateTime<Utc>) -> AuthorizationSnapshot {
@@ -115,10 +155,10 @@ mod tests {
             } else {
                 AuthorizationState::TrialExpired
             },
-            plan: Some(if entitled { "pro" } else { "none" }.to_string()),
             entitled,
             observed_at: lease_until - Duration::hours(1),
             lease_until,
+            offline_grace_until: Some(lease_until),
             policy_epoch: 4,
         }
     }
@@ -136,9 +176,7 @@ mod tests {
     fn unentitled_snapshot_fails_closed_with_stable_code() {
         let now = Utc::now();
         let locked = snapshot(false, now);
-        for capability in ENTITLED_CAPABILITIES.into_iter().filter(|capability| {
-            !matches!(capability, Capability::AccountStatus)
-        }) {
+        for capability in ENTITLED_CAPABILITIES {
             assert_eq!(
                 locked.authorize(capability, now),
                 Err(AuthorizationDenied {
@@ -147,7 +185,10 @@ mod tests {
                 "{capability:?}"
             );
         }
-        assert_eq!(AuthorizationErrorCode::EntitlementRequired.as_str(), "ENTITLEMENT_REQUIRED");
+        assert_eq!(
+            AuthorizationErrorCode::EntitlementRequired.as_str(),
+            "ENTITLEMENT_REQUIRED"
+        );
     }
 
     #[test]
@@ -155,12 +196,23 @@ mod tests {
         let now = Utc::now();
         let stale = snapshot(true, now - Duration::milliseconds(1));
         assert_eq!(
-            stale.authorize(Capability::PaneInput, now),
+            stale.authorize(Capability::TerminalWrite, now),
             Err(AuthorizationDenied {
                 code: AuthorizationErrorCode::AuthorizationStale,
             })
         );
-        assert_eq!(AuthorizationErrorCode::AuthorizationStale.as_str(), "AUTHORIZATION_STALE");
+        assert_eq!(
+            AuthorizationErrorCode::AuthorizationStale.as_str(),
+            "AUTHORIZATION_STALE"
+        );
+        assert_eq!(
+            AuthorizationErrorCode::AuthRequired.as_str(),
+            "AUTH_REQUIRED"
+        );
+        assert_eq!(
+            AuthorizationErrorCode::DaemonProtocolMismatch.as_str(),
+            "DAEMON_PROTOCOL_MISMATCH"
+        );
     }
 
     #[test]

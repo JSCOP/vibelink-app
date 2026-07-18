@@ -18,7 +18,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   }),
 }))
 
-import { isAppLocked, isProEntitled, PRO_WINDOW_KINDS, requiresProWindow } from './licenseGate'
+import { authorizationErrorMessage, isAppLocked, isProEntitled, PRO_WINDOW_KINDS, requiresProWindow } from './licenseGate'
 import { useWorkspaceStore } from './store'
 
 const unlicensed: LicenseStatus = {
@@ -71,5 +71,13 @@ describe('VibeLink Pro gates', () => {
     expect(isProEntitled(trial)).toBe(true)
     const pro: LicenseStatus = { ...unlicensed, state: 'validOnline', entitled: true, plan: 'pro', provider: 'vibelink' }
     expect(isAppLocked(pro)).toBe(false)
+  })
+
+  test('maps stable native authorization codes without leaking policy internals', () => {
+    expect(authorizationErrorMessage('ENTITLEMENT_REQUIRED')).toContain('entitled Moobang account')
+    expect(authorizationErrorMessage('AUTHORIZATION_STALE')).toContain('authorization expired')
+    expect(authorizationErrorMessage('AUTH_REQUIRED')).toContain('background service')
+    expect(authorizationErrorMessage('DAEMON_PROTOCOL_MISMATCH')).toContain('different versions')
+    expect(authorizationErrorMessage('other failure')).toBe('other failure')
   })
 })

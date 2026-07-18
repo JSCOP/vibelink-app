@@ -1,10 +1,11 @@
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use std::{
     borrow::Cow,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -375,22 +376,42 @@ fn resolve_capture_image_file(dir: &str, path: &str) -> Result<PathBuf, String> 
     Ok(canonical)
 }
 
+fn read_capture_file_native(dir: &str, path: &str) -> Result<Vec<u8>, String> {
+    let path = resolve_capture_image_file(dir, path)?;
+    std::fs::read(path).map_err(to_string)
+}
+
 #[tauri::command]
-pub async fn default_capture_dir() -> Result<String, String> {
+pub async fn default_capture_dir(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     Ok(default_capture_root().to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn check_ffmpeg(ffmpeg_path: String) -> Result<(), String> {
+pub async fn check_ffmpeg(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    ffmpeg_path: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     resolve_ffmpeg(&ffmpeg_path).map(|_| ())
 }
 
 #[tauri::command]
 pub async fn ensure_ffmpeg(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
     ffmpeg_path: String,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     if let Ok(program) = resolve_ffmpeg(&ffmpeg_path) {
         return Ok(program);
     }
@@ -411,7 +432,13 @@ pub async fn ensure_ffmpeg(
 }
 
 #[tauri::command]
-pub async fn open_path(path: String) -> Result<(), String> {
+pub async fn open_path(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    path: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let target = normalize_open_target(&path)?;
 
     // Windows: call ShellExecuteW directly from this process instead of
@@ -439,7 +466,9 @@ pub async fn open_path(path: String) -> Result<(), String> {
         .map_err(to_string)?;
         // Per ShellExecuteW docs, values <= 32 are error codes.
         if result <= 32 {
-            return Err(format!("open failed (ShellExecute code {result}): {target}"));
+            return Err(format!(
+                "open failed (ShellExecute code {result}): {target}"
+            ));
         }
         return Ok(());
     }
@@ -462,7 +491,13 @@ pub async fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn reveal_path(path: String) -> Result<(), String> {
+pub async fn reveal_path(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    path: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let target = normalize_local_target(&path)?;
 
     #[cfg(windows)]
@@ -508,7 +543,9 @@ fn normalize_open_target(path: &str) -> Result<String, String> {
         return Ok(target.to_string());
     }
 
-    Ok(normalize_local_target(target)?.to_string_lossy().into_owned())
+    Ok(normalize_local_target(target)?
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn normalize_local_target(path: &str) -> Result<PathBuf, String> {
@@ -524,7 +561,8 @@ fn normalize_local_target(path: &str) -> Result<PathBuf, String> {
 }
 
 fn trim_open_target(path: &str) -> &str {
-    path.trim().trim_matches(|character| matches!(character, '"' | '\'' | '`'))
+    path.trim()
+        .trim_matches(|character| matches!(character, '"' | '\'' | '`'))
 }
 
 fn is_supported_uri(target: &str) -> bool {
@@ -546,11 +584,15 @@ fn expand_home_path(target: &str) -> PathBuf {
 
 #[tauri::command]
 pub async fn open_capture_overlay(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     mode: String,
     dir: String,
     ffmpeg_path: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     if let Some(window) = app.get_webview_window("capture-overlay") {
         window.close().map_err(to_string)?;
     }
@@ -600,6 +642,7 @@ pub async fn open_capture_overlay(
 
 #[tauri::command]
 pub async fn capture_region_image(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     dir: String,
     file_name: String,
     monitor_x: i32,
@@ -609,6 +652,9 @@ pub async fn capture_region_image(
     w: u32,
     h: u32,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let dir = resolve_dir(&dir, "Images").map_err(to_string)?;
     let monitor = Monitor::from_point(monitor_x + 1, monitor_y + 1).map_err(to_string)?;
     let full = monitor.capture_image().map_err(to_string)?;
@@ -633,18 +679,31 @@ pub async fn capture_region_image(
 }
 
 #[tauri::command]
-pub async fn clipboard_write_image(png_bytes: Vec<u8>) -> Result<(), String> {
+pub async fn clipboard_write_image(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    png_bytes: Vec<u8>,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     copy_png_to_clipboard(&png_bytes)
 }
 
 #[tauri::command]
-pub fn read_capture_file(dir: String, path: String) -> Result<Vec<u8>, String> {
-    let path = resolve_capture_image_file(&dir, &path)?;
-    std::fs::read(path).map_err(to_string)
+pub fn read_capture_file(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    dir: String,
+    path: String,
+) -> Result<Vec<u8>, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
+    read_capture_file_native(&dir, &path)
 }
 
 #[tauri::command]
 pub async fn start_video_capture(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
     dir: String,
@@ -655,6 +714,9 @@ pub async fn start_video_capture(
     w: u32,
     h: u32,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let w = w & !1;
     let h = h & !1;
     if w < 16 || h < 16 {
@@ -751,8 +813,12 @@ pub async fn start_video_capture(
 
 #[tauri::command]
 pub fn capture_recording_state(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<Option<CaptureRecordingState>, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     let mut slot = state
         .recording
         .lock()
@@ -775,9 +841,13 @@ pub fn capture_recording_state(
 
 #[tauri::command]
 pub async fn stop_video_capture(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let mut recording = {
         let mut slot = state
             .recording
@@ -827,7 +897,8 @@ mod tests {
 
     #[test]
     fn local_target_preserves_spaces_and_strips_quotes() {
-        let root = std::env::temp_dir().join(format!("vibelink-open-path-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("vibelink-open-path-{}", uuid::Uuid::new_v4()));
         let file = root.join("VibeLink Voice setup.exe");
         std::fs::create_dir_all(&root).expect("create temp directory");
         std::fs::write(&file, b"installer").expect("write temp file");
@@ -851,17 +922,16 @@ mod tests {
         std::fs::write(&outside, b"outside").expect("write outside file");
 
         let dir = root.to_string_lossy().into_owned();
-        let bytes = read_capture_file(dir.clone(), inside.to_string_lossy().into_owned())
+        let bytes = read_capture_file_native(&dir, &inside.to_string_lossy())
             .expect("inside image can be read");
         assert_eq!(bytes, b"inside");
 
-        let absolute_escape =
-            read_capture_file(dir.clone(), outside.to_string_lossy().into_owned())
-                .expect_err("absolute path outside Images is rejected");
+        let absolute_escape = read_capture_file_native(&dir, &outside.to_string_lossy())
+            .expect_err("absolute path outside Images is rejected");
         assert!(absolute_escape.contains("escapes image directory"));
 
         let traversal = format!("..{}outside.png", std::path::MAIN_SEPARATOR);
-        let traversal_escape = read_capture_file(dir, traversal)
+        let traversal_escape = read_capture_file_native(&dir, &traversal)
             .expect_err("relative traversal outside Images is rejected");
         assert!(traversal_escape.contains("escapes image directory"));
 

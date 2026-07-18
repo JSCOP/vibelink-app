@@ -70,7 +70,6 @@ pub struct AgentCliStatus {
 #[serde(rename_all = "camelCase")]
 pub enum AuthState {
     LoggedIn,
-    LoggedOut,
     Unknown,
 }
 

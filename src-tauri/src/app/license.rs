@@ -1,6 +1,4 @@
-use super::authorization::{
-    AuthorizationSnapshot, AuthorizationState, Capability,
-};
+use super::authorization::{AuthorizationSnapshot, AuthorizationState, Capability};
 use super::entitlement::EntitlementSupervisor;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -21,8 +19,6 @@ const LEGACY_CREDENTIAL_ACCOUNT: &str = "active-license";
 const ACCOUNT_CLIENT_ID: &str = "vibelink-desktop";
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const ACCOUNT_PROVIDER: &str = "moobang";
-const PRO_REQUIRED_ERROR: &str = "VibeLink Pro license required.";
-const TRIAL_LOCK_ERROR: &str = "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,7 +172,10 @@ impl LicenseService {
     }
 
     pub fn status(&self) -> Result<LicenseStatusDto> {
-        let cache = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?;
+        let cache = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?;
         Ok(status_from_cache(cache.as_ref(), &self.device, Utc::now()))
     }
 
@@ -189,16 +188,22 @@ impl LicenseService {
             Ok(api) => api,
             Err(HttpOutcome::Business(error)) => return Err(api_error(error)),
             Err(HttpOutcome::Unavailable) => {
-                return Err(anyhow!("Account service is unreachable at {LICENSE_API_ORIGIN}."));
+                return Err(anyhow!(
+                    "Account service is unreachable at {LICENSE_API_ORIGIN}."
+                ));
             }
             Err(HttpOutcome::Malformed(message)) => return Err(anyhow!(message)),
         };
         if api.device_code.is_empty() || api.user_code.is_empty() || api.interval == 0 {
-            return Err(anyhow!("account service returned an invalid device authorization response"));
+            return Err(anyhow!(
+                "account service returned an invalid device authorization response"
+            ));
         }
         let expected_prefix = format!("{LICENSE_API_ORIGIN}/");
         if !api.verification_uri_complete.starts_with(&expected_prefix) {
-            return Err(anyhow!("account service returned a verification URL outside the configured origin"));
+            return Err(anyhow!(
+                "account service returned a verification URL outside the configured origin"
+            ));
         }
         Ok(AccountSignInStartDto {
             user_code: api.user_code,
@@ -232,19 +237,22 @@ impl LicenseService {
                 "device_code": device_code,
                 "client_id": ACCOUNT_CLIENT_ID,
             });
-            let token: ApiDeviceTokenDto = match self.post_json("/api/auth/device/token", body, None) {
-                Ok(token) => token,
-                Err(HttpOutcome::Business(error)) if token_error_is_pending(&error.code) => {
-                    return Ok(AccountSignInPollResult::Pending("pending".to_string()));
-                }
-                Err(HttpOutcome::Business(error)) => return Err(api_error(error)),
-                Err(HttpOutcome::Unavailable) => {
-                    return Ok(AccountSignInPollResult::Status(self.configuration_or_offline_status(
-                        &format!("Account service is unreachable at {LICENSE_API_ORIGIN}."),
-                    )));
-                }
-                Err(HttpOutcome::Malformed(message)) => return Err(anyhow!(message)),
-            };
+            let token: ApiDeviceTokenDto =
+                match self.post_json("/api/auth/device/token", body, None) {
+                    Ok(token) => token,
+                    Err(HttpOutcome::Business(error)) if token_error_is_pending(&error.code) => {
+                        return Ok(AccountSignInPollResult::Pending("pending".to_string()));
+                    }
+                    Err(HttpOutcome::Business(error)) => return Err(api_error(error)),
+                    Err(HttpOutcome::Unavailable) => {
+                        return Ok(AccountSignInPollResult::Status(
+                            self.configuration_or_offline_status(&format!(
+                                "Account service is unreachable at {LICENSE_API_ORIGIN}."
+                            )),
+                        ));
+                    }
+                    Err(HttpOutcome::Malformed(message)) => return Err(anyhow!(message)),
+                };
             if token.access_token.is_empty() {
                 return Err(anyhow!("account service returned an empty session token"));
             }
@@ -278,11 +286,17 @@ impl LicenseService {
             self.store_credential(pending)?;
             token.access_token
         };
-        Ok(AccountSignInPollResult::Status(self.resolve_entitlement(&session_token, true)?))
+        Ok(AccountSignInPollResult::Status(
+            self.resolve_entitlement(&session_token, true)?,
+        ))
     }
 
     pub fn revalidate(&self) -> Result<LicenseStatusDto> {
-        let stored = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?.clone();
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone();
         let Some(stored) = stored else {
             return self.status();
         };
@@ -290,7 +304,11 @@ impl LicenseService {
     }
 
     pub fn deactivate_device(&self, activation_id: String) -> Result<LicenseStatusDto> {
-        let stored = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?.clone();
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone();
         let Some(mut stored) = stored else {
             return self.status();
         };
@@ -311,7 +329,9 @@ impl LicenseService {
                     self.status()
                 } else {
                     if overview.plan != "pro" {
-                        return Err(anyhow!("account service returned an invalid device overview"));
+                        return Err(anyhow!(
+                            "account service returned an invalid device overview"
+                        ));
                     }
                     stored.plan = Some(overview.plan);
                     stored.provider = Some(ACCOUNT_PROVIDER.to_string());
@@ -325,7 +345,9 @@ impl LicenseService {
                 self.clear_credential()?;
                 self.status()
             }
-            Err(HttpOutcome::Business(error)) if removing_current && error.code == "ACTIVATION_NOT_FOUND" => {
+            Err(HttpOutcome::Business(error))
+                if removing_current && error.code == "ACTIVATION_NOT_FOUND" =>
+            {
                 self.clear_credential()?;
                 self.status()
             }
@@ -336,7 +358,11 @@ impl LicenseService {
     }
 
     pub fn sign_out(&self) -> Result<LicenseStatusDto> {
-        let stored = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?.clone();
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone();
         if let Some(stored) = stored.as_ref() {
             if let Some(activation_id) = stored.activation_id.as_ref() {
                 let _ = self.post_json::<ApiAccountOverviewDto>(
@@ -351,7 +377,10 @@ impl LicenseService {
     }
 
     pub fn authorization_snapshot(&self, policy_epoch: u64) -> Result<AuthorizationSnapshot> {
-        let cache = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?;
+        let cache = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?;
         Ok(authorization_snapshot_from_cache(
             cache.as_ref(),
             &self.device,
@@ -382,28 +411,22 @@ impl LicenseService {
     }
 
     pub fn persist_observed_now(&self) -> Result<()> {
-        let stored = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?.clone();
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone();
         let Some(mut stored) = stored else {
             return Ok(());
         };
         let now = Utc::now();
-        if parse_optional_time(stored.last_observed_at.as_deref()).is_some_and(|previous| now <= previous) {
+        if parse_optional_time(stored.last_observed_at.as_deref())
+            .is_some_and(|previous| now <= previous)
+        {
             return Ok(());
         }
         stored.last_observed_at = Some(now.to_rfc3339());
         self.store_credential(stored)
-    }
-
-    pub fn require_capability_cached(&self, capability: Capability) -> Result<()> {
-        let now = Utc::now();
-        let snapshot = self.authorization_snapshot(0)?;
-        snapshot
-            .authorize(capability, now)
-            .map_err(|denied| anyhow!(denied.code.as_str()))
-    }
-
-    pub fn require_entitled_cached(&self) -> Result<()> {
-        self.require_capability_cached(Capability::ToolInvoke)
     }
 
     fn resolve_entitlement(&self, session_token: &str, register: bool) -> Result<LicenseStatusDto> {
@@ -428,7 +451,10 @@ impl LicenseService {
                 Ok(status)
             }
             Err(HttpOutcome::Business(error)) => {
-                if matches!(error.code.as_str(), "DEVICE_NOT_REGISTERED" | "LICENSE_INACTIVE") {
+                if matches!(
+                    error.code.as_str(),
+                    "DEVICE_NOT_REGISTERED" | "LICENSE_INACTIVE"
+                ) {
                     self.invalidate_cached_activation()?;
                 }
                 Ok(self.business_status(error))
@@ -466,14 +492,22 @@ impl LicenseService {
         }
     }
 
-    fn store_online(&self, session_token: String, api: ApiAccountEntitlementDto) -> Result<LicenseStatusDto> {
+    fn store_online(
+        &self,
+        session_token: String,
+        api: ApiAccountEntitlementDto,
+    ) -> Result<LicenseStatusDto> {
         let stored = stored_from_api(session_token, &api, &self.device)?;
         self.store_credential(stored.clone())?;
         Ok(status_from_online_store(&stored, &self.device))
     }
 
     fn invalidate_cached_activation(&self) -> Result<()> {
-        let stored = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?.clone();
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone();
         let Some(mut stored) = stored else {
             return Ok(());
         };
@@ -481,7 +515,9 @@ impl LicenseService {
         stored.validated_at = None;
         stored.offline_grace_until = None;
         stored.last_observed_at = None;
-        stored.devices.retain(|device| device.device_id != self.device.device_id);
+        stored
+            .devices
+            .retain(|device| device.device_id != self.device.device_id);
         self.store_credential(stored)
     }
 
@@ -519,19 +555,27 @@ impl LicenseService {
 
     fn store_credential(&self, stored: StoredAccount) -> Result<()> {
         let json = serde_json::to_string(&stored)?;
-        self.credential
-            .set_password(&json)
-            .map_err(|error| anyhow!(error).context("write Windows Credential Manager account entry"))?;
-        *self.cache.write().map_err(|_| anyhow!("license cache poisoned"))? = Some(stored);
+        self.credential.set_password(&json).map_err(|error| {
+            anyhow!(error).context("write Windows Credential Manager account entry")
+        })?;
+        *self
+            .cache
+            .write()
+            .map_err(|_| anyhow!("license cache poisoned"))? = Some(stored);
         Ok(())
     }
 
     fn clear_credential(&self) -> Result<()> {
         let deletion = match self.credential.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(anyhow!(error).context("delete Windows Credential Manager account entry")),
+            Err(error) => {
+                Err(anyhow!(error).context("delete Windows Credential Manager account entry"))
+            }
         };
-        *self.cache.write().map_err(|_| anyhow!("license cache poisoned"))? = None;
+        *self
+            .cache
+            .write()
+            .map_err(|_| anyhow!("license cache poisoned"))? = None;
         deletion
     }
 }
@@ -568,14 +612,6 @@ impl HeadlessLicenseCache {
             .authorize(capability, now)
             .map_err(|denied| anyhow!(denied.code.as_str()))
     }
-
-    pub fn require_entitled(&self) -> Result<()> {
-        self.require_capability(Capability::ToolInvoke)
-    }
-
-    pub fn is_entitled(&self) -> bool {
-        self.require_entitled().is_ok()
-    }
 }
 
 #[derive(Debug)]
@@ -598,7 +634,9 @@ fn remove_legacy_credential(service: &str) -> Result<()> {
         .context("open legacy Windows Credential Manager license entry")?;
     match legacy.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(anyhow!(error).context("delete legacy Windows Credential Manager license entry")),
+        Err(error) => {
+            Err(anyhow!(error).context("delete legacy Windows Credential Manager license entry"))
+        }
     }
 }
 
@@ -640,10 +678,7 @@ fn stored_from_api(
                 && api.validated_at.is_some()
                 && api.offline_grace_until.is_some()
                 && api.trial_ends_at.is_some() => {}
-        "none"
-            if api.state == "trialExpired"
-                && !api.entitled
-                && api.trial_ends_at.is_some() => {}
+        "none" if api.state == "trialExpired" && !api.entitled && api.trial_ends_at.is_some() => {}
         _ => return Err(anyhow!("account service returned an invalid entitlement")),
     }
     Ok(StoredAccount {
@@ -682,7 +717,8 @@ fn authorization_snapshot_from_status(
     now: DateTime<Utc>,
     policy_epoch: u64,
 ) -> AuthorizationSnapshot {
-    let lease_until = parse_optional_time(status.offline_grace_until.as_deref())
+    let offline_grace_until = parse_optional_time(status.offline_grace_until.as_deref());
+    let lease_until = offline_grace_until
         .or_else(|| parse_optional_time(status.trial_ends_at.as_deref()))
         .unwrap_or(observed_at.min(now));
     let state = match status.state.as_str() {
@@ -694,9 +730,9 @@ fn authorization_snapshot_from_status(
     };
     AuthorizationSnapshot {
         state,
-        plan: status.plan,
         entitled: status.entitled,
         observed_at,
+        offline_grace_until,
         lease_until,
         policy_epoch,
     }
@@ -742,7 +778,11 @@ fn entitled_status_from_cache(
     let state = if rollback {
         "invalid"
     } else if entitled {
-        if is_trial { "trial" } else { "validOffline" }
+        if is_trial {
+            "trial"
+        } else {
+            "validOffline"
+        }
     } else if is_trial {
         "trialExpired"
     } else {
@@ -756,7 +796,8 @@ fn entitled_status_from_cache(
         }
     } else if entitled {
         if is_trial {
-            "Your 7-day VibeLink trial is active. Purchase to keep VibeLink after it ends.".to_string()
+            "Your 7-day VibeLink trial is active. Purchase to keep VibeLink after it ends."
+                .to_string()
         } else {
             "Using the last online validation within the 7-day offline grace period.".to_string()
         }
@@ -802,7 +843,8 @@ fn trial_expired_status(stored: &StoredAccount, device: &DeviceIdentity) -> Lice
         offline_grace_until: None,
         trial_ends_at: stored.trial_ends_at.clone(),
         purchase_url: purchase_url(),
-        message: "Your 7-day VibeLink trial has ended. Purchase VibeLink Pro to continue.".to_string(),
+        message: "Your 7-day VibeLink trial has ended. Purchase VibeLink Pro to continue."
+            .to_string(),
     }
 }
 
@@ -842,7 +884,9 @@ fn status_from_online_store(stored: &StoredAccount, device: &DeviceIdentity) -> 
             offline_grace_until: stored.offline_grace_until.clone(),
             trial_ends_at: stored.trial_ends_at.clone(),
             purchase_url: purchase_url(),
-            message: "Your 7-day VibeLink trial is active. Purchase to keep VibeLink after it ends.".to_string(),
+            message:
+                "Your 7-day VibeLink trial is active. Purchase to keep VibeLink after it ends."
+                    .to_string(),
         },
         Some("none") => trial_expired_status(stored, device),
         _ => configuration_error_status(device, "Moobang account entitlement is unavailable."),
@@ -899,7 +943,9 @@ fn purchase_url() -> String {
 }
 
 fn load_or_create_device_identity() -> Result<DeviceIdentity> {
-    let path = crate::daemon::paths::daemon_paths()?.data_dir.join("license-device.json");
+    let path = crate::daemon::paths::daemon_paths()?
+        .data_dir
+        .join("license-device.json");
     if path.exists() {
         let identity: DeviceIdentity = serde_json::from_str(
             &fs::read_to_string(&path).context("read license device identity")?,
@@ -927,7 +973,9 @@ fn load_or_create_device_identity() -> Result<DeviceIdentity> {
 }
 
 fn write_atomic_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| anyhow!("license device path has no parent"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("license device path has no parent"))?;
     fs::create_dir_all(parent)?;
     let temp = path.with_extension("tmp");
     {
@@ -944,10 +992,12 @@ fn write_atomic_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
 pub async fn license_status(
     supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let supervisor = Arc::clone(supervisor.inner());
-    tauri::async_runtime::spawn_blocking(move || supervisor.sync_cached().map_err(|error| error.to_string()))
-        .await
-        .map_err(|error| error.to_string())?
+    let service = supervisor.service();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.status().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -955,9 +1005,11 @@ pub async fn account_sign_in_start(
     supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<AccountSignInStartDto, String> {
     let service = supervisor.service();
-    tauri::async_runtime::spawn_blocking(move || service.start_sign_in().map_err(|error| error.to_string()))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        service.start_sign_in().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -987,9 +1039,11 @@ pub async fn license_revalidate(
     supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
     let supervisor = Arc::clone(supervisor.inner());
-    tauri::async_runtime::spawn_blocking(move || supervisor.refresh_now().map_err(|error| error.to_string()))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        supervisor.refresh_now().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1107,7 +1161,10 @@ mod tests {
         assert!(status.entitled);
         assert_eq!(status.state, "trial");
         assert_eq!(status.plan.as_deref(), Some("trial"));
-        assert_eq!(status.trial_ends_at.as_deref(), cache.trial_ends_at.as_deref());
+        assert_eq!(
+            status.trial_ends_at.as_deref(),
+            cache.trial_ends_at.as_deref()
+        );
         assert_eq!(status.email.as_deref(), Some("trial@example.com"));
         assert!(status.masked_key.is_none());
     }
@@ -1157,22 +1214,32 @@ mod tests {
     #[test]
     fn pro_offline_grace_includes_exact_boundary_and_excludes_after() {
         let now = Utc::now();
-        let cache = stored_pro(now - ChronoDuration::days(7), now, now - ChronoDuration::hours(1));
+        let cache = stored_pro(
+            now - ChronoDuration::days(7),
+            now,
+            now - ChronoDuration::hours(1),
+        );
         let boundary = status_from_cache(Some(&cache), &device(), now);
         assert!(boundary.entitled);
         assert_eq!(boundary.state, "validOffline");
-        assert!(!status_from_cache(
-            Some(&cache),
-            &device(),
-            now + ChronoDuration::milliseconds(1),
-        )
-        .entitled);
+        assert!(
+            !status_from_cache(
+                Some(&cache),
+                &device(),
+                now + ChronoDuration::milliseconds(1),
+            )
+            .entitled
+        );
     }
 
     #[test]
     fn clock_rollback_locks_cached_pro_entitlement() {
         let now = Utc::now();
-        let cache = stored_pro(now + ChronoDuration::minutes(6), now + ChronoDuration::days(7), now);
+        let cache = stored_pro(
+            now + ChronoDuration::minutes(6),
+            now + ChronoDuration::days(7),
+            now,
+        );
         let status = status_from_cache(Some(&cache), &device(), now);
         assert!(!status.entitled);
         assert_eq!(status.state, "invalid");
@@ -1209,8 +1276,18 @@ mod tests {
         };
         let stored = stored_from_api("session-token".to_string(), &api, &device).unwrap();
         let stored_json = serde_json::to_value(&stored).unwrap();
-        assert_eq!(stored_json.get("sessionToken").and_then(serde_json::Value::as_str), Some("session-token"));
-        assert_eq!(stored_json.get("trialEndsAt").and_then(serde_json::Value::as_str), api.trial_ends_at.as_deref());
+        assert_eq!(
+            stored_json
+                .get("sessionToken")
+                .and_then(serde_json::Value::as_str),
+            Some("session-token")
+        );
+        assert_eq!(
+            stored_json
+                .get("trialEndsAt")
+                .and_then(serde_json::Value::as_str),
+            api.trial_ends_at.as_deref()
+        );
         assert!(stored_json.get("licenseKey").is_none());
         assert!(stored_json.get("maskedKey").is_none());
 
@@ -1219,9 +1296,18 @@ mod tests {
         assert_eq!(reparsed.trial_ends_at, stored.trial_ends_at);
 
         let status_json = serde_json::to_value(status_from_online_store(&stored, &device)).unwrap();
-        assert_eq!(status_json.get("plan").and_then(serde_json::Value::as_str), Some("trial"));
-        assert_eq!(status_json.get("state").and_then(serde_json::Value::as_str), Some("trial"));
-        assert_eq!(status_json.get("email").and_then(serde_json::Value::as_str), Some("trial@example.com"));
+        assert_eq!(
+            status_json.get("plan").and_then(serde_json::Value::as_str),
+            Some("trial")
+        );
+        assert_eq!(
+            status_json.get("state").and_then(serde_json::Value::as_str),
+            Some("trial")
+        );
+        assert_eq!(
+            status_json.get("email").and_then(serde_json::Value::as_str),
+            Some("trial@example.com")
+        );
         assert_eq!(status_json.get("maskedKey"), Some(&serde_json::Value::Null));
 
         let start_json = serde_json::to_value(AccountSignInStartDto {
@@ -1247,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_require_entitled_accepts_active_trial_and_rejects_expired() {
+    fn headless_capability_policy_accepts_active_trial_and_rejects_expired() {
         let now = Utc::now();
         let active = HeadlessLicenseCache {
             stored: Some(stored_trial(
@@ -1258,8 +1344,7 @@ mod tests {
             )),
             device: device(),
         };
-        assert!(active.require_entitled().is_ok());
-        assert!(active.is_entitled());
+        assert!(active.require_capability(Capability::CliControl).is_ok());
 
         let expired = HeadlessLicenseCache {
             stored: Some(stored_trial(
@@ -1270,7 +1355,54 @@ mod tests {
             )),
             device: device(),
         };
-        assert!(expired.require_entitled().is_err());
-        assert!(!expired.is_entitled());
+        assert!(expired.require_capability(Capability::CliControl).is_err());
+    }
+
+    #[test]
+    fn headless_policy_returns_stable_entitlement_error() {
+        let now = Utc::now();
+        let expired = HeadlessLicenseCache {
+            stored: Some(stored_trial(
+                now - ChronoDuration::days(8),
+                now - ChronoDuration::days(1),
+                now - ChronoDuration::days(1),
+                now - ChronoDuration::days(1),
+            )),
+            device: device(),
+        };
+        assert_eq!(
+            expired
+                .require_capability(Capability::TerminalWrite)
+                .unwrap_err()
+                .to_string(),
+            "ENTITLEMENT_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn business_revocation_status_overrides_an_entitled_cache_snapshot() {
+        let now = Utc::now();
+        let mut status = status_from_cache(
+            Some(&stored_pro(
+                now - ChronoDuration::hours(1),
+                now + ChronoDuration::days(1),
+                now,
+            )),
+            &device(),
+            now,
+        );
+        status.state = "revoked".to_string();
+        status.entitled = false;
+        let snapshot = authorization_snapshot_from_status(status, now, now, 7);
+        assert_eq!(snapshot.state, AuthorizationState::Unlicensed);
+        assert_eq!(snapshot.policy_epoch, 7);
+        assert_eq!(
+            snapshot
+                .authorize(Capability::WorkspaceMutate, now)
+                .unwrap_err()
+                .code
+                .as_str(),
+            "ENTITLEMENT_REQUIRED"
+        );
     }
 }

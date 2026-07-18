@@ -1,4 +1,4 @@
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{bounded, Sender};
 use serde::Serialize;
@@ -702,22 +702,28 @@ impl HermesInstance {
 
 #[tauri::command]
 pub async fn init_hermes_output(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     manager: State<'_, Arc<HermesManager>>,
     channel: Channel<HermesEvent>,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     manager.set_output_channel(channel);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn hermes_start(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     manager: State<'_, Arc<HermesManager>>,
     session_id: String,
     command_override: Option<String>,
     workspace_folder: Option<String>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager
         .start(session_id, command_override, workspace_folder)
         .map_err(to_string)
@@ -726,10 +732,12 @@ pub async fn hermes_start(
 #[tauri::command]
 pub async fn hermes_new_session(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<String, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.new_session(&session_id))
         .await
@@ -740,11 +748,13 @@ pub async fn hermes_new_session(
 #[tauri::command]
 pub async fn hermes_resume_session(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     acp_session_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || {
         manager.resume_session(&session_id, acp_session_id)
@@ -757,10 +767,12 @@ pub async fn hermes_resume_session(
 #[tauri::command]
 pub async fn hermes_list_sessions(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<Vec<HermesSessionInfo>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.list_sessions(&session_id))
         .await
@@ -771,33 +783,39 @@ pub async fn hermes_list_sessions(
 #[tauri::command]
 pub async fn hermes_send(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     text: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager.send_message(session_id, text).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_cancel(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager.cancel(&session_id).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_respond_permission(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     request_id: u64,
     option_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager
         .respond_permission(&session_id, request_id, option_id)
         .map_err(to_string)
@@ -806,11 +824,13 @@ pub async fn hermes_respond_permission(
 #[tauri::command]
 pub async fn hermes_set_model(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     model_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.set_model(&session_id, model_id))
         .await
@@ -821,11 +841,13 @@ pub async fn hermes_set_model(
 #[tauri::command]
 pub async fn hermes_set_mode(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     mode_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || manager.set_mode(&session_id, mode_id))
         .await
@@ -836,15 +858,23 @@ pub async fn hermes_set_mode(
 #[tauri::command]
 pub async fn hermes_stop(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager.stop(&session_id).map_err(to_string)
 }
 
 #[tauri::command]
-pub async fn hermes_cli_command(command_override: Option<String>) -> Result<String, String> {
+pub async fn hermes_cli_command(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    command_override: Option<String>,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || resolve_hermes_command(command_override))
         .await
         .map_err(to_string)?
@@ -853,9 +883,13 @@ pub async fn hermes_cli_command(command_override: Option<String>) -> Result<Stri
 
 #[tauri::command]
 pub async fn hermes_auth_list(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     command_override: Option<String>,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         hermes_auth_list_native(&session_id, command_override)
     })
@@ -866,8 +900,12 @@ pub async fn hermes_auth_list(
 
 #[tauri::command]
 pub async fn hermes_runtime_status(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     command_override: Option<String>,
 ) -> Result<HermesRuntimeStatus, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || hermes_runtime_status_native(command_override))
         .await
         .map_err(to_string)?
@@ -876,9 +914,13 @@ pub async fn hermes_runtime_status(
 
 #[tauri::command]
 pub async fn hermes_workspace_state(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     workspace_folder: Option<String>,
 ) -> Result<HermesWorkspaceState, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         read_workspace_state_native(&session_id, workspace_folder.as_deref())
     })
@@ -890,8 +932,12 @@ pub async fn hermes_workspace_state(
 #[tauri::command]
 pub async fn agent_workspace_cleanup(
     manager: State<'_, Arc<HermesManager>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || -> Result<()> {
         manager.stop(&session_id)?;

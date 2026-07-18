@@ -6,13 +6,23 @@ pub mod query_filter;
 pub mod scrollback;
 pub mod session;
 
+use crate::app::{
+    authorization::{AuthorizationErrorCode, AuthorizationSnapshot, Capability},
+    license::HeadlessLicenseCache,
+    spawn_daemon::load_or_create_ipc_secret,
+};
 use crate::daemon::persistence::{load_sessions, save_sessions};
 use crate::daemon::pty::{Pane, SharedChild};
 use crate::daemon::session::DaemonState;
-use crate::protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req};
-use anyhow::Result;
+use crate::protocol::{
+    constant_time_eq, daemon_auth_proof, read_frame, write_frame, ClientKind, ClientToDaemon,
+    DaemonToClient, ReplyResult, Req, DAEMON_AUTH_REQUIRED, DAEMON_PROTOCOL_VERSION,
+};
+use anyhow::{bail, Result};
+use chrono::Utc;
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+use rand::{rngs::OsRng, RngCore};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
@@ -22,21 +32,108 @@ use std::{
         Arc, LazyLock, Mutex, MutexGuard,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 type SharedState = Arc<Mutex<DaemonState>>;
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+type SharedConnections = Arc<Mutex<std::collections::HashMap<Uuid, ConnectionControl>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 256;
 const PERSIST_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
+const AUTH_CHALLENGE_TTL: Duration = Duration::from_secs(3);
+const POLICY_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 static PERSISTENCE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static DEBOUNCED_PERSISTER: LazyLock<Mutex<Option<DebouncedPersister>>> =
     LazyLock::new(|| Mutex::new(None));
 
 struct DebouncedPersister {
     dirty: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct ConnectionControl {
+    sender: Sender<DaemonToClient>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AuthenticatedClient {
+    client_id: Uuid,
+    client_kind: ClientKind,
+}
+
+struct PendingChallenge {
+    boot_id: Uuid,
+    nonce: [u8; 32],
+    client_id: Uuid,
+    client_kind: ClientKind,
+    expires_at: Instant,
+    consumed: bool,
+}
+
+impl PendingChallenge {
+    fn verify(
+        &mut self,
+        secret: &[u8; 32],
+        client_id: Uuid,
+        proof: &[u8; 32],
+        now: Instant,
+    ) -> std::result::Result<(), AuthorizationErrorCode> {
+        if self.consumed {
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+        self.consumed = true;
+        if now > self.expires_at || client_id != self.client_id {
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+        let expected = daemon_auth_proof(
+            secret,
+            DAEMON_PROTOCOL_VERSION,
+            self.boot_id,
+            &self.nonce,
+            self.client_id,
+            self.client_kind,
+        );
+        if !constant_time_eq(&expected, proof) {
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct PolicyHeartbeat {
+    deadline: Option<Instant>,
+    policy_epoch: u64,
+    revoked: bool,
+}
+
+impl PolicyHeartbeat {
+    fn note_app_connection(&mut self) {
+        self.deadline = Some(Instant::now() + POLICY_HEARTBEAT_TTL);
+        self.revoked = false;
+    }
+
+    fn update(&mut self, snapshot: AuthorizationSnapshot) {
+        let now_wall = Utc::now();
+        let remaining = snapshot
+            .lease_until
+            .signed_duration_since(now_wall)
+            .to_std()
+            .unwrap_or_default()
+            .min(POLICY_HEARTBEAT_TTL);
+        self.deadline = Some(Instant::now() + remaining);
+        self.policy_epoch = snapshot.policy_epoch;
+        self.revoked = snapshot
+            .authorize(Capability::WorkspaceRead, now_wall)
+            .is_err();
+    }
+
+    fn stale(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now > deadline)
+    }
 }
 
 fn lock_state(state: &SharedState) -> MutexGuard<'_, DaemonState> {
@@ -79,8 +176,19 @@ fn run_inner() -> Result<()> {
     let state = Arc::new(Mutex::new(DaemonState::new()));
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
 
+    let ipc_secret = Arc::new(load_or_create_ipc_secret()?);
+    let boot_id = Uuid::new_v4();
+    let policy_heartbeat = Arc::new(Mutex::new(PolicyHeartbeat::default()));
+    let connections = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let sessions_path = Arc::new(paths.sessions.clone());
     let shutdown = Arc::new(AtomicBool::new(false));
+    spawn_policy_monitor(
+        Arc::clone(&state),
+        Arc::clone(&sessions_path),
+        Arc::clone(&connections),
+        Arc::clone(&policy_heartbeat),
+        Arc::clone(&shutdown),
+    )?;
     let socket_name = paths::socket_name_string();
     let name = socket_name.as_str().to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
@@ -95,9 +203,23 @@ fn run_inner() -> Result<()> {
                 let state = Arc::clone(&state);
                 let sessions_path = Arc::clone(&sessions_path);
                 let shutdown = Arc::clone(&shutdown);
+                let ipc_secret = Arc::clone(&ipc_secret);
+                let policy_heartbeat = Arc::clone(&policy_heartbeat);
+                let connections = Arc::clone(&connections);
                 thread::Builder::new()
                     .name("vibelink-daemon-client".to_string())
-                    .spawn(move || handle_connection(stream, state, sessions_path, shutdown))?;
+                    .spawn(move || {
+                        handle_connection(
+                            stream,
+                            state,
+                            sessions_path,
+                            shutdown,
+                            boot_id,
+                            ipc_secret,
+                            policy_heartbeat,
+                            connections,
+                        )
+                    })?;
             }
             Err(err) => warn!(?err, "failed to accept daemon client"),
         }
@@ -168,20 +290,321 @@ fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> 
     Ok(())
 }
 
+fn unix_time_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn send_admission_error<S: Write>(stream: &mut S, code: AuthorizationErrorCode) {
+    let _ = write_frame(
+        stream,
+        &DaemonToClient::Error {
+            req: None,
+            message: code.as_str().to_string(),
+        },
+    );
+}
+
+fn authenticate_connection<S: Read + Write>(
+    stream: &mut S,
+    boot_id: Uuid,
+    secret: &[u8; 32],
+) -> std::result::Result<AuthenticatedClient, AuthorizationErrorCode> {
+    let (client_id, client_kind) = match read_frame::<_, ClientToDaemon>(stream) {
+        Ok(ClientToDaemon::Hello {
+            protocol_version,
+            client_id,
+            client_kind,
+        }) if protocol_version == DAEMON_PROTOCOL_VERSION => (client_id, client_kind),
+        Ok(ClientToDaemon::Hello { .. }) => {
+            send_admission_error(stream, AuthorizationErrorCode::DaemonProtocolMismatch);
+            return Err(AuthorizationErrorCode::DaemonProtocolMismatch);
+        }
+        Ok(_) | Err(_) => {
+            send_admission_error(stream, AuthorizationErrorCode::AuthRequired);
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+    };
+
+    let mut nonce = [0_u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+    let mut pending = PendingChallenge {
+        boot_id,
+        nonce,
+        client_id,
+        client_kind,
+        expires_at: Instant::now() + AUTH_CHALLENGE_TTL,
+        consumed: false,
+    };
+    write_frame(
+        stream,
+        &DaemonToClient::Challenge {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            boot_id,
+            nonce,
+            expires_at_unix_ms: unix_time_millis() + AUTH_CHALLENGE_TTL.as_millis() as i64,
+        },
+    )
+    .map_err(|_| AuthorizationErrorCode::AuthRequired)?;
+
+    let (authenticate_client_id, proof) = match read_frame::<_, ClientToDaemon>(stream) {
+        Ok(ClientToDaemon::Authenticate { client_id, proof }) => (client_id, proof),
+        Ok(_) | Err(_) => {
+            send_admission_error(stream, AuthorizationErrorCode::AuthRequired);
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+    };
+    if let Err(code) = pending.verify(secret, authenticate_client_id, &proof, Instant::now()) {
+        send_admission_error(stream, code);
+        return Err(code);
+    }
+
+    let (policy_epoch, lease_until_unix_ms) = HeadlessLicenseCache::load()
+        .map(|cache| {
+            let snapshot = cache.authorization_snapshot(0);
+            (
+                snapshot.policy_epoch,
+                snapshot.lease_until.timestamp_millis(),
+            )
+        })
+        .unwrap_or_else(|_| (0, unix_time_millis()));
+    write_frame(
+        stream,
+        &DaemonToClient::Authenticated {
+            policy_epoch,
+            lease_until_unix_ms,
+        },
+    )
+    .map_err(|_| AuthorizationErrorCode::AuthRequired)?;
+    Ok(AuthenticatedClient {
+        client_id,
+        client_kind,
+    })
+}
+
+fn request_capability(
+    msg: &ClientToDaemon,
+) -> std::result::Result<Capability, AuthorizationErrorCode> {
+    match msg {
+        ClientToDaemon::Hello { .. } | ClientToDaemon::Authenticate { .. } => {
+            Err(AuthorizationErrorCode::AuthRequired)
+        }
+        ClientToDaemon::Ping { .. } | ClientToDaemon::AuthorizationHeartbeat { .. } => {
+            Ok(Capability::AccountStatus)
+        }
+        ClientToDaemon::Shutdown { .. } => Ok(Capability::DaemonShutdown),
+        ClientToDaemon::ListSessions { .. }
+        | ClientToDaemon::AttachSession { .. }
+        | ClientToDaemon::DetachSession { .. } => Ok(Capability::WorkspaceRead),
+        ClientToDaemon::CreateSession { .. }
+        | ClientToDaemon::RenameSession { .. }
+        | ClientToDaemon::DeleteSession { .. }
+        | ClientToDaemon::SaveLayout { .. }
+        | ClientToDaemon::SpawnPane { .. }
+        | ClientToDaemon::ResizePane { .. }
+        | ClientToDaemon::NotifySessionChanged { .. }
+        | ClientToDaemon::SetPaneTitle { .. }
+        | ClientToDaemon::SetPaneRole { .. }
+        | ClientToDaemon::ClosePane { .. }
+        | ClientToDaemon::ClearSession { .. }
+        | ClientToDaemon::TaskEvent { .. } => Ok(Capability::WorkspaceMutate),
+        ClientToDaemon::AttachPane { .. }
+        | ClientToDaemon::GetScrollback { .. }
+        | ClientToDaemon::ResourceSnapshot { .. } => Ok(Capability::TerminalRead),
+        ClientToDaemon::WritePane { .. } => Ok(Capability::TerminalWrite),
+    }
+}
+
+fn client_capability(
+    client_kind: ClientKind,
+    msg: &ClientToDaemon,
+) -> std::result::Result<Option<Capability>, AuthorizationErrorCode> {
+    match client_kind {
+        ClientKind::App => Ok(None),
+        ClientKind::Cli => Ok(Some(Capability::CliControl)),
+        ClientKind::Mcp => Ok(Some(Capability::McpCall)),
+        ClientKind::Remote => Ok(Some(Capability::RemoteConnect)),
+        ClientKind::StartupProbe if matches!(msg, ClientToDaemon::Ping { .. }) => Ok(None),
+        ClientKind::Shutdown
+            if matches!(
+                msg,
+                ClientToDaemon::Ping { .. } | ClientToDaemon::Shutdown { .. }
+            ) =>
+        {
+            Ok(None)
+        }
+        ClientKind::StartupProbe | ClientKind::Shutdown => {
+            Err(AuthorizationErrorCode::AuthRequired)
+        }
+    }
+}
+
+fn authorize_daemon_message(
+    msg: &ClientToDaemon,
+    client_kind: ClientKind,
+) -> std::result::Result<(), AuthorizationErrorCode> {
+    authorize_daemon_message_with(msg, client_kind, || {
+        HeadlessLicenseCache::load().map(|cache| cache.authorization_snapshot(0))
+    })
+}
+
+fn authorize_daemon_message_with<F>(
+    msg: &ClientToDaemon,
+    client_kind: ClientKind,
+    load_snapshot: F,
+) -> std::result::Result<(), AuthorizationErrorCode>
+where
+    F: FnOnce() -> Result<AuthorizationSnapshot>,
+{
+    let operation = request_capability(msg)?;
+    let ingress = client_capability(client_kind, msg)?;
+    let snapshot = load_snapshot().map_err(|_| AuthorizationErrorCode::AuthorizationStale)?;
+    let now = Utc::now();
+    if let Some(ingress) = ingress {
+        snapshot
+            .authorize(ingress, now)
+            .map_err(|denied| denied.code)?;
+    }
+    snapshot
+        .authorize(operation, now)
+        .map_err(|denied| denied.code)
+}
+
+fn revoke_daemon_authorization(
+    state: &SharedState,
+    sessions_path: &Path,
+    connections: &SharedConnections,
+    shutdown: &Arc<AtomicBool>,
+    code: AuthorizationErrorCode,
+    policy_epoch: u64,
+    terminate_daemon: bool,
+) {
+    let controls = lock_mutex(connections)
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for control in controls {
+        let _ = control.sender.send_timeout(
+            DaemonToClient::AuthorizationChanged {
+                code: code.as_str().to_string(),
+                policy_epoch,
+            },
+            Duration::from_millis(250),
+        );
+        control.cancelled.store(true, Ordering::Release);
+    }
+    kill_all_panes(state);
+    if let Err(error) = persist_state(state, sessions_path) {
+        warn!(?error, "failed to persist authorization revocation cleanup");
+    }
+    if terminate_daemon {
+        shutdown.store(true, Ordering::Release);
+        let _ = crate::app::spawn_daemon::connect_daemon();
+    }
+}
+
+fn heartbeat_revocation(
+    heartbeat: &Mutex<PolicyHeartbeat>,
+    now: Instant,
+) -> Option<(AuthorizationErrorCode, u64, bool)> {
+    let mut heartbeat = lock_mutex(heartbeat);
+    if heartbeat.revoked {
+        return Some((
+            AuthorizationErrorCode::EntitlementRequired,
+            heartbeat.policy_epoch,
+            false,
+        ));
+    }
+    if heartbeat.stale(now) {
+        heartbeat.revoked = true;
+        return Some((
+            AuthorizationErrorCode::AuthorizationStale,
+            heartbeat.policy_epoch,
+            true,
+        ));
+    }
+    None
+}
+
+fn spawn_policy_monitor(
+    state: SharedState,
+    sessions_path: Arc<PathBuf>,
+    connections: SharedConnections,
+    heartbeat: Arc<Mutex<PolicyHeartbeat>>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("vibelink-daemon-policy".to_string())
+        .spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_secs(1));
+                if let Some((code, epoch, terminate_daemon)) =
+                    heartbeat_revocation(&heartbeat, Instant::now())
+                {
+                    revoke_daemon_authorization(
+                        &state,
+                        &sessions_path,
+                        &connections,
+                        &shutdown,
+                        code,
+                        epoch,
+                        terminate_daemon,
+                    );
+                    if terminate_daemon {
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(())
+}
+
 fn handle_connection(
-    stream: LocalSocketStream,
+    mut stream: LocalSocketStream,
     state: SharedState,
     sessions_path: Arc<PathBuf>,
     shutdown: Arc<AtomicBool>,
+    boot_id: Uuid,
+    ipc_secret: Arc<[u8; 32]>,
+    policy_heartbeat: Arc<Mutex<PolicyHeartbeat>>,
+    connections: SharedConnections,
 ) {
     if let Err(err) = stream.set_send_timeout(Some(CLIENT_WRITE_TIMEOUT)) {
         warn!(?err, "failed to set daemon client write timeout");
     }
-    let client_id = Uuid::new_v4();
+    if let Err(err) = stream.set_recv_timeout(Some(AUTH_CHALLENGE_TTL)) {
+        warn!(?err, "failed to set daemon admission timeout");
+    }
+    let authenticated = match authenticate_connection(&mut stream, boot_id, &ipc_secret) {
+        Ok(authenticated) => authenticated,
+        Err(error) => {
+            warn!(code = error.as_str(), "daemon client admission rejected");
+            return;
+        }
+    };
+    if let Err(err) = stream.set_recv_timeout(Some(Duration::from_secs(1))) {
+        warn!(?err, "failed to set daemon client read timeout");
+    }
+    if authenticated.client_kind == ClientKind::App {
+        lock_mutex(&policy_heartbeat).note_app_connection();
+    }
+
+    let client_id = authenticated.client_id;
+    let client_kind = authenticated.client_kind;
     let (mut reader, mut writer) = stream.split();
     let (tx, rx) = bounded::<DaemonToClient>(CLIENT_QUEUE_CAPACITY);
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     lock_state(&state).add_client(client_id, tx.clone());
+    lock_mutex(&connections).insert(
+        client_id,
+        ConnectionControl {
+            sender: tx.clone(),
+            cancelled: Arc::clone(&cancelled),
+        },
+    );
 
     let writer_thread = thread::Builder::new()
         .name("vibelink-daemon-client-writer".to_string())
@@ -195,12 +618,38 @@ fn handle_connection(
         });
 
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        if let Some((code, epoch, terminate_daemon)) =
+            heartbeat_revocation(&policy_heartbeat, Instant::now())
+        {
+            revoke_daemon_authorization(
+                &state,
+                &sessions_path,
+                &connections,
+                &shutdown,
+                code,
+                epoch,
+                terminate_daemon,
+            );
+            break;
+        }
+
         let msg = match read_frame::<_, ClientToDaemon>(&mut reader) {
             Ok(msg) => msg,
             Err(crate::protocol::FrameError::Io(err))
                 if err.kind() == io::ErrorKind::UnexpectedEof =>
             {
                 break
+            }
+            Err(crate::protocol::FrameError::Io(err))
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
             }
             Err(err) => {
                 error!(?err, "failed to read daemon frame");
@@ -209,6 +658,59 @@ fn handle_connection(
         };
 
         let request_id = request_id(&msg);
+        if let Err(code) = authorize_daemon_message(&msg, client_kind) {
+            let _ = tx.send(DaemonToClient::Error {
+                req: request_id,
+                message: code.as_str().to_string(),
+            });
+            if matches!(
+                code,
+                AuthorizationErrorCode::EntitlementRequired
+                    | AuthorizationErrorCode::AuthorizationStale
+            ) {
+                let epoch = lock_mutex(&policy_heartbeat).policy_epoch;
+                revoke_daemon_authorization(
+                    &state,
+                    &sessions_path,
+                    &connections,
+                    &shutdown,
+                    code,
+                    epoch,
+                    false,
+                );
+            } else {
+                cancelled.store(true, Ordering::Release);
+            }
+            break;
+        }
+
+        if let ClientToDaemon::AuthorizationHeartbeat { snapshot } = &msg {
+            if client_kind != ClientKind::App {
+                let _ = tx.send(DaemonToClient::Error {
+                    req: request_id,
+                    message: DAEMON_AUTH_REQUIRED.to_string(),
+                });
+                break;
+            }
+            let mut heartbeat = lock_mutex(&policy_heartbeat);
+            heartbeat.update(snapshot.clone().into());
+            let revoked = heartbeat.revoked;
+            let epoch = heartbeat.policy_epoch;
+            drop(heartbeat);
+            if revoked {
+                revoke_daemon_authorization(
+                    &state,
+                    &sessions_path,
+                    &connections,
+                    &shutdown,
+                    AuthorizationErrorCode::EntitlementRequired,
+                    epoch,
+                    false,
+                );
+                break;
+            }
+        }
+
         if let Err(err) = dispatch_message(
             Arc::clone(&state),
             &sessions_path,
@@ -229,6 +731,7 @@ fn handle_connection(
     }
 
     lock_state(&state).remove_client(client_id);
+    lock_mutex(&connections).remove(&client_id);
     drop(tx);
     if let Ok(writer_thread) = writer_thread {
         let _ = writer_thread.join();
@@ -244,7 +747,10 @@ fn dispatch_message(
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
     match msg {
-        ClientToDaemon::Hello { .. } => Ok(()),
+        ClientToDaemon::Hello { .. } | ClientToDaemon::Authenticate { .. } => {
+            bail!(DAEMON_AUTH_REQUIRED)
+        }
+        ClientToDaemon::AuthorizationHeartbeat { .. } => Ok(()),
         ClientToDaemon::Ping { req } => send(tx, DaemonToClient::Pong { req }),
         ClientToDaemon::ListSessions { req } => {
             let sessions = lock_state(&state).list_sessions();
@@ -549,6 +1055,8 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::ResourceSnapshot { req }
         | ClientToDaemon::Shutdown { req } => Some(*req),
         ClientToDaemon::Hello { .. }
+        | ClientToDaemon::Authenticate { .. }
+        | ClientToDaemon::AuthorizationHeartbeat { .. }
         | ClientToDaemon::DetachSession { .. }
         | ClientToDaemon::SaveLayout { .. }
         | ClientToDaemon::AttachPane { .. }
@@ -753,6 +1261,228 @@ fn kill_all_panes(state: &SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::authorization::AuthorizationState;
+    use std::io::Cursor;
+
+    struct AdmissionScript {
+        read: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl AdmissionScript {
+        fn from_client_message(message: &ClientToDaemon) -> Self {
+            let mut read = Vec::new();
+            write_frame(&mut read, message).expect("encode client frame");
+            Self {
+                read: Cursor::new(read),
+                written: Vec::new(),
+            }
+        }
+
+        fn response(&self) -> DaemonToClient {
+            read_frame(&mut Cursor::new(self.written.clone())).expect("decode daemon response")
+        }
+    }
+
+    impl Read for AdmissionScript {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.read.read(buffer)
+        }
+    }
+
+    impl Write for AdmissionScript {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.written.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn authorization_snapshot(
+        entitled: bool,
+        lease_until: chrono::DateTime<Utc>,
+    ) -> AuthorizationSnapshot {
+        AuthorizationSnapshot {
+            state: if entitled {
+                AuthorizationState::ValidOnline
+            } else {
+                AuthorizationState::TrialExpired
+            },
+            entitled,
+            observed_at: Utc::now(),
+            lease_until,
+            offline_grace_until: None,
+            policy_epoch: 9,
+        }
+    }
+
+    fn pending_challenge() -> (PendingChallenge, [u8; 32]) {
+        let secret = [0x51_u8; 32];
+        (
+            PendingChallenge {
+                boot_id: Uuid::new_v4(),
+                nonce: [0x31_u8; 32],
+                client_id: Uuid::new_v4(),
+                client_kind: ClientKind::Cli,
+                expires_at: Instant::now() + AUTH_CHALLENGE_TTL,
+                consumed: false,
+            },
+            secret,
+        )
+    }
+
+    #[test]
+    fn valid_current_admission_proof_succeeds() {
+        let (mut challenge, secret) = pending_challenge();
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            challenge.boot_id,
+            &challenge.nonce,
+            challenge.client_id,
+            challenge.client_kind,
+        );
+
+        assert_eq!(
+            challenge.verify(&secret, challenge.client_id, &proof, Instant::now()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn wrong_secret_expired_nonce_and_replay_fail_closed() {
+        let (mut wrong_secret, secret) = pending_challenge();
+        let wrong_proof = daemon_auth_proof(
+            &[0x52_u8; 32],
+            DAEMON_PROTOCOL_VERSION,
+            wrong_secret.boot_id,
+            &wrong_secret.nonce,
+            wrong_secret.client_id,
+            wrong_secret.client_kind,
+        );
+        assert_eq!(
+            wrong_secret.verify(
+                &secret,
+                wrong_secret.client_id,
+                &wrong_proof,
+                Instant::now()
+            ),
+            Err(AuthorizationErrorCode::AuthRequired)
+        );
+
+        let (mut expired, secret) = pending_challenge();
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            expired.boot_id,
+            &expired.nonce,
+            expired.client_id,
+            expired.client_kind,
+        );
+        assert_eq!(
+            expired.verify(
+                &secret,
+                expired.client_id,
+                &proof,
+                expired.expires_at + Duration::from_millis(1),
+            ),
+            Err(AuthorizationErrorCode::AuthRequired)
+        );
+
+        let (mut replayed, secret) = pending_challenge();
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            replayed.boot_id,
+            &replayed.nonce,
+            replayed.client_id,
+            replayed.client_kind,
+        );
+        assert!(replayed
+            .verify(&secret, replayed.client_id, &proof, Instant::now())
+            .is_ok());
+        assert_eq!(
+            replayed.verify(&secret, replayed.client_id, &proof, Instant::now()),
+            Err(AuthorizationErrorCode::AuthRequired)
+        );
+    }
+
+    #[test]
+    fn unauthenticated_command_and_shutdown_are_rejected_as_first_frame() {
+        for message in [
+            ClientToDaemon::Ping { req: 1 },
+            ClientToDaemon::Shutdown { req: 2 },
+        ] {
+            let mut stream = AdmissionScript::from_client_message(&message);
+            assert_eq!(
+                authenticate_connection(&mut stream, Uuid::new_v4(), &[7_u8; 32]),
+                Err(AuthorizationErrorCode::AuthRequired)
+            );
+            assert_eq!(
+                stream.response(),
+                DaemonToClient::Error {
+                    req: None,
+                    message: "AUTH_REQUIRED".to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn expired_entitlement_and_logout_fail_next_request_with_stable_codes() {
+        let message = ClientToDaemon::WritePane {
+            session_id: Uuid::new_v4(),
+            pane_id: Uuid::new_v4(),
+            data: b"whoami\r".to_vec(),
+        };
+        let active = authorization_snapshot(true, Utc::now() + chrono::Duration::minutes(1));
+        assert_eq!(
+            authorize_daemon_message_with(&message, ClientKind::Cli, || Ok(active)),
+            Ok(())
+        );
+
+        let logged_out = authorization_snapshot(false, Utc::now());
+        assert_eq!(
+            authorize_daemon_message_with(&message, ClientKind::Cli, || Ok(logged_out)),
+            Err(AuthorizationErrorCode::EntitlementRequired)
+        );
+
+        let expired = authorization_snapshot(true, Utc::now() - chrono::Duration::milliseconds(1));
+        assert_eq!(
+            authorize_daemon_message_with(&message, ClientKind::App, || Ok(expired)),
+            Err(AuthorizationErrorCode::AuthorizationStale)
+        );
+    }
+
+    #[test]
+    fn stale_policy_heartbeat_requires_daemon_shutdown() {
+        let heartbeat = Mutex::new(PolicyHeartbeat {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            policy_epoch: 12,
+            revoked: false,
+        });
+
+        assert_eq!(
+            heartbeat_revocation(&heartbeat, Instant::now()),
+            Some((AuthorizationErrorCode::AuthorizationStale, 12, true))
+        );
+    }
+
+    #[test]
+    fn heartbeat_lease_is_bounded_to_ninety_seconds() {
+        let mut heartbeat = PolicyHeartbeat::default();
+        heartbeat.update(authorization_snapshot(
+            true,
+            Utc::now() + chrono::Duration::hours(1),
+        ));
+        let deadline = heartbeat.deadline.expect("heartbeat deadline");
+
+        assert!(deadline <= Instant::now() + POLICY_HEARTBEAT_TTL);
+        assert!(!heartbeat.revoked);
+    }
 
     #[test]
     fn ping_reply_can_be_sent() {
