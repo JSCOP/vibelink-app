@@ -214,7 +214,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const activeLayoutPageId = activeLayoutPage?.id ?? null
   const remotePaneLeases = useRemotePaneLeaseStore((state) => state.leases)
   const remoteLeasedPaneIds = useMemo(() => paneIdsForSession(remotePaneLeases, activeSessionId), [activeSessionId, remotePaneLeases])
-  remoteLeaseActiveRef.current = remoteLeasedPaneIds.length > 0
+  const remoteLeaseActive = remoteLeasedPaneIds.length > 0
+
+  useEffect(() => {
+    remoteLeaseActiveRef.current = remoteLeaseActive
+  }, [remoteLeaseActive])
 
   const paneList = useMemo(() => Object.values(panes), [panes])
 

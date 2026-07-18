@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useWorkspaceStore } from '../state/store'
 import { AccountSignIn } from './AccountSignIn'
 
@@ -13,8 +13,22 @@ export function LicenseSettings() {
   const status = license.status
   const signedIn = Boolean(status?.email)
   const plan = status?.plan ?? (status?.entitled ? 'pro' : 'none')
-  const trialDaysLeft = status?.trialEndsAt
-    ? Math.max(0, Math.ceil((new Date(status.trialEndsAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000)))
+  const trialEndsAt = status?.trialEndsAt
+  const [nowMs, setNowMs] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (!trialEndsAt) return
+    const updateNow = () => setNowMs(Date.now())
+    const initialTimer = window.setTimeout(updateNow, 0)
+    const interval = window.setInterval(updateNow, 60_000)
+    return () => {
+      window.clearTimeout(initialTimer)
+      window.clearInterval(interval)
+    }
+  }, [trialEndsAt])
+
+  const trialDaysLeft = trialEndsAt && nowMs !== null
+    ? Math.max(0, Math.ceil((new Date(trialEndsAt).getTime() - nowMs) / (24 * 60 * 60 * 1000)))
     : null
 
   const run = async (action: () => Promise<unknown>) => {
