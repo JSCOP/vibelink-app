@@ -7,6 +7,7 @@ mod daemon;
 mod mcp;
 mod protocol;
 mod remote;
+mod storage;
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
