@@ -18,7 +18,8 @@ vi.mock('@xterm/xterm', () => {
     modes = { mouseTrackingMode: 'none' }
     buffer = { active: { type: 'normal', viewportY: 0, baseY: 0, length: 0 } }
     dataHandler: ((data: string) => void) | undefined
-    loadAddon(): void {}
+    resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined
+    loadAddon(addon: { activate?: (terminal: MockTerminal) => void }): void { addon.activate?.(this) }
     attachCustomKeyEventHandler(): void {}
     attachCustomWheelEventHandler(): void {}
     registerLinkProvider(): { dispose(): void } {
@@ -28,7 +29,8 @@ vi.mock('@xterm/xterm', () => {
       this.dataHandler = handler
       return { dispose() {} }
     }
-    onResize(): { dispose(): void } {
+    onResize(handler: (size: { cols: number; rows: number }) => void): { dispose(): void } {
+      this.resizeHandler = handler
       return { dispose() {} }
     }
     onTitleChange(): { dispose(): void } {
@@ -47,6 +49,7 @@ vi.mock('@xterm/xterm', () => {
     resize(cols: number, rows: number): void {
       this.cols = cols
       this.rows = rows
+      this.resizeHandler?.({ cols, rows })
     }
     dispose(): void {}
   }
@@ -55,10 +58,12 @@ vi.mock('@xterm/xterm', () => {
 
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
+    private terminal: { resize(cols: number, rows: number): void } | undefined
+    activate(terminal: { resize(cols: number, rows: number): void }): void { this.terminal = terminal }
     proposeDimensions(): { cols: number; rows: number } {
       return { cols: 80, rows: 24 }
     }
-    fit(): void {}
+    fit(): void { this.terminal?.resize(80, 24) }
   }
   return { FitAddon: MockFitAddon }
 })
@@ -170,16 +175,27 @@ describe('TerminalManager pre-session input buffering', () => {
 })
 
 describe('TerminalManager remote pane sizing', () => {
-  it('adopts wider remote geometry and clears the badge at container-fit width', () => {
-    const paneId = 'pane-remote-wide'
+  it('restores an oversized daemon resize to desktop fit geometry and syncs the PTY back', () => {
+    const paneId = 'pane-legacy-remote-wide'
     const container = makeContainer()
     TerminalManager.attach(paneId, container, { sessionId: 'session-wide' })
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { cols: number; rows: number; resize(cols: number, rows: number): void } }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing remote resize entry')
 
-    TerminalManager.adoptRemoteResize(paneId, 140, 24)
-    expect(useWorkspaceStore.getState().remoteWidePanes[paneId]).toBe(140)
+    entry.term.resize(160, 48)
+    useWorkspaceStore.getState().setRemoteWide(paneId, { cols: 160, rows: 48 })
+    invokeMock.mockClear()
 
-    TerminalManager.adoptRemoteResize(paneId, 80, 24)
+    TerminalManager.adoptRemoteResize(paneId, 160, 48)
+
+    expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 80, rows: 24 })
     expect(useWorkspaceStore.getState().remoteWidePanes[paneId]).toBeUndefined()
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
+      ['resize_pane', { sessionId: 'session-wide', paneId, cols: 80, rows: 24 }],
+    ])
 
     TerminalManager.dispose(paneId)
   })

@@ -79,7 +79,6 @@ type Entry = {
   lastFitRect?: { width: number; height: number }
   lastSentPtyCols?: number
   lastSentPtyRows?: number
-  remoteWide?: boolean
   container?: HTMLElement
   titleDisposable?: { dispose: () => void }
   linkDisposables?: { dispose(): void }[]
@@ -276,30 +275,27 @@ class TerminalManagerImpl {
   }
 
   adoptRemoteResize(paneId: string, cols: number, rows: number): void {
+    useWorkspaceStore.getState().setRemoteWide(paneId, null)
     const entry = this.entries.get(paneId)
     if (!entry) return
     const proposal = entry.fit.proposeDimensions()
-    if (!proposal || cols > proposal.cols) {
-      entry.remoteWide = true
-      entry.term.resize(cols, rows)
-      useWorkspaceStore.getState().setRemoteWide(paneId, cols)
-      this.redrawAfterNextFrame(entry)
-      return
+    if (!proposal || cols !== proposal.cols || rows !== proposal.rows) {
+      // A daemon resize can originate from a legacy remote peer. The desktop
+      // container remains authoritative, so invalidate the last-sent cache and
+      // force the fitted geometry back to the shared PTY.
+      entry.lastSentPtyCols = undefined
+      entry.lastSentPtyRows = undefined
     }
-
-    entry.remoteWide = false
-    useWorkspaceStore.getState().setRemoteWide(paneId, null)
-    if (this.safeFit(entry, true)) this.redrawAfterNextFrame(entry)
+    this.restoreDesktopFit(entry)
   }
 
   exitRemoteWide(paneId: string): void {
-    const entry = this.entries.get(paneId)
     useWorkspaceStore.getState().setRemoteWide(paneId, null)
+    const entry = this.entries.get(paneId)
     if (!entry) return
-    entry.remoteWide = false
-    if (!this.safeFit(entry, true)) return
-    this.redrawAfterNextFrame(entry)
-    this.syncEntryPtySize(entry)
+    entry.lastSentPtyCols = undefined
+    entry.lastSentPtyRows = undefined
+    this.restoreDesktopFit(entry)
   }
 
   /** Deliver input held while the pane had no session (panel-first spawn).
@@ -456,7 +452,7 @@ class TerminalManagerImpl {
     entry.lastClickRepairAt = now
     this.scheduleLayoutPass({ paneIds: [paneId], force: true, clearWebglTextureAtlas: true })
 
-    if (entry.remoteWide || entry.term.buffer.active.type !== 'alternate') return
+    if (entry.term.buffer.active.type !== 'alternate') return
     const sessionId = entry.sessionId
     const cols = entry.term.cols
     const rows = entry.term.rows
@@ -627,11 +623,33 @@ class TerminalManagerImpl {
   // the content — so every fit path must go through this guard, not entry.fit.fit()
   // directly. Returns true when a fit was applied (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
-    if (entry.remoteWide) return true
     const proposed = entry.fit.proposeDimensions()
     if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
     if (force || entry.term.cols !== proposed.cols || entry.term.rows !== proposed.rows) entry.fit.fit()
     return true
+  }
+
+  private restoreDesktopFit(entry: Entry, attempt = 0): void {
+    try {
+      if (!this.safeFit(entry, true)) {
+        entry.forceFitOnNextMeasure = true
+        if (attempt < MAX_FIT_ATTEMPTS) {
+          window.setTimeout(() => {
+            if (this.entries.get(entry.paneId) === entry && entry.opened) this.restoreDesktopFit(entry, attempt + 1)
+          }, DEGENERATE_FIT_RETRY_MS)
+        }
+        return
+      }
+      entry.forceFitOnNextMeasure = false
+      this.redrawAfterNextFrame(entry)
+      this.syncEntryPtySize(entry)
+    } catch {
+      if (attempt < MAX_FIT_ATTEMPTS) {
+        window.setTimeout(() => {
+          if (this.entries.get(entry.paneId) === entry && entry.opened) this.restoreDesktopFit(entry, attempt + 1)
+        }, DEGENERATE_FIT_RETRY_MS)
+      }
+    }
   }
 
   private forceFitAndRepaint(entry: Entry, attempt = 0): boolean {
@@ -866,7 +884,6 @@ class TerminalManagerImpl {
   }
 
   private syncEntryPtySize(entry: Entry): void {
-    if (entry.remoteWide) return
     const sessionId = entry.sessionId
     if (!sessionId || !entry.opened) return
     this.flushOutput(entry)

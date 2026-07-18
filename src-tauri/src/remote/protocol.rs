@@ -236,17 +236,17 @@ mod tests {
     }
 
     #[test]
-    fn authed_capabilities_use_camel_case_contract() {
+    fn authed_capabilities_may_be_empty() {
         let value = serde_json::to_value(ServerMessage::Authed {
             device_id: "device-1".into(),
             device_token: None,
             desktop_name: "Desktop".into(),
             protocol_version: 1,
             app_version: "0.0.0".into(),
-            capabilities: vec!["paneSize".into()],
+            capabilities: Vec::new(),
         })
         .expect("serialize authed");
-        assert_eq!(value["capabilities"], serde_json::json!(["paneSize"]));
+        assert_eq!(value["capabilities"], serde_json::json!([]));
     }
 
     #[test]

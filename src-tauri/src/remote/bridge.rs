@@ -1,10 +1,10 @@
-use super::{layout_order::pane_order, protocol::{encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage, WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL}, server::{desktop_name, PaneSizeOverride, RemoteShared}};
+use super::{layout_order::pane_order, protocol::{encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage, WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL}, server::{desktop_name, RemoteShared}};
 use crate::{app::spawn_daemon, protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneMeta, ReplyResult, SessionMeta}};
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use interprocess::local_socket::prelude::*;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
-use std::{collections::HashMap, io, net::TcpStream, sync::Arc, thread, time::{Duration, Instant}};
+use std::{collections::{HashMap, VecDeque}, io, net::TcpStream, sync::Arc, thread, time::{Duration, Instant}};
 use tungstenite::{handshake::server::{Request, Response}, Message, WebSocket};
 use uuid::Uuid;
 
@@ -12,9 +12,69 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_TIMEOUT: Duration = Duration::from_millis(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(60);
-const DAEMON_QUEUE_CAPACITY: usize = 1024;
+const DAEMON_OUTPUT_QUEUE_CAPACITY: usize = 1024;
+const PUSH_QUEUE_CAPACITY: usize = 1024;
+const MAX_OUTPUT_FRAMES_PER_LOOP: usize = 32;
 
 type RemoteSocket = WebSocket<StreamOwned<ServerConnection, TcpStream>>;
+
+struct DaemonSenders {
+    control: Sender<DaemonToClient>,
+    output: Sender<DaemonToClient>,
+}
+
+struct DaemonInbox {
+    control: Receiver<DaemonToClient>,
+    output: Receiver<DaemonToClient>,
+    deferred_control: VecDeque<DaemonToClient>,
+}
+
+impl DaemonInbox {
+    fn try_control(&mut self) -> Result<Option<DaemonToClient>> {
+        if let Some(message) = self.deferred_control.pop_front() { return Ok(Some(message)); }
+        match self.control.try_recv() {
+            Ok(message) => Ok(Some(message)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => bail!("remote daemon connection closed"),
+        }
+    }
+
+    fn recv_new_control_timeout(&self, timeout: Duration) -> Result<DaemonToClient> {
+        self.control.recv_timeout(timeout).map_err(Into::into)
+    }
+
+    fn defer_control(&mut self, message: DaemonToClient) {
+        self.deferred_control.push_back(message);
+    }
+
+    fn has_pending_control(&self) -> bool {
+        !self.deferred_control.is_empty() || !self.control.is_empty()
+    }
+
+    fn try_output(&self) -> Result<Option<DaemonToClient>> {
+        match self.output.try_recv() {
+            Ok(message) => Ok(Some(message)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => bail!("remote daemon connection closed"),
+        }
+    }
+}
+
+fn daemon_channels(output_capacity: usize) -> (DaemonSenders, DaemonInbox) {
+    let (control_tx, control_rx) = unbounded();
+    let (output_tx, output_rx) = bounded(output_capacity);
+    (
+        DaemonSenders { control: control_tx, output: output_tx },
+        DaemonInbox { control: control_rx, output: output_rx, deferred_control: VecDeque::new() },
+    )
+}
+
+fn route_daemon_message(senders: &DaemonSenders, message: DaemonToClient) -> bool {
+    match message {
+        output @ DaemonToClient::Output { .. } => senders.output.try_send(output).is_ok(),
+        control => senders.control.send(control).is_ok(),
+    }
+}
 
 pub fn handle_connection(stream: TcpStream, tls_config: Arc<ServerConfig>, shared: Arc<RemoteShared>) -> Result<()> {
     stream.set_nonblocking(false)?;
@@ -42,19 +102,16 @@ pub fn handle_connection(stream: TcpStream, tls_config: Arc<ServerConfig>, share
         desktop_name: desktop_name(),
         protocol_version: PROTOCOL_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
-        capabilities: vec!["paneSize".to_string()],
+        capabilities: Vec::new(),
     })?;
 
     ws.get_mut().sock.set_read_timeout(Some(POLL_TIMEOUT))?;
-    let (mut daemon_writer, daemon_rx) = open_daemon_connection()?;
+    let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let client_key = Uuid::new_v4();
-    let (push_tx, push_rx) = bounded(DAEMON_QUEUE_CAPACITY);
+    let (push_tx, push_rx) = bounded(PUSH_QUEUE_CAPACITY);
     shared.client_senders.lock().expect("remote clients mutex").insert(client_key, push_tx);
 
-    let result = run_authenticated(&mut ws, &mut daemon_writer, &daemon_rx, &push_rx, &shared, client_key);
-    if let Err(error) = restore_owned_overrides(&shared, client_key, &mut daemon_writer, None) {
-        tracing::warn!(?error, %client_key, "failed to restore remote pane sizes during disconnect");
-    }
+    let result = run_authenticated(&mut ws, &mut daemon_writer, &mut daemon_inbox, &push_rx, &shared);
     shared.client_senders.lock().expect("remote clients mutex").remove(&client_key);
     result
 }
@@ -96,19 +153,23 @@ fn auth_error_code(error: &super::devices::AuthFailure) -> &'static str {
     }
 }
 
-fn open_daemon_connection() -> Result<(interprocess::local_socket::SendHalf, Receiver<DaemonToClient>)> {
+fn open_daemon_connection() -> Result<(interprocess::local_socket::SendHalf, DaemonInbox)> {
     let stream = spawn_daemon::connect_daemon().context("connect dedicated remote daemon client")?;
     let (reader, mut writer) = stream.split();
     write_frame(&mut writer, &ClientToDaemon::Hello { client_id: Uuid::new_v4() })?;
-    let (tx, rx) = bounded(DAEMON_QUEUE_CAPACITY);
-    thread::Builder::new().name("vibelink-remote-daemon-reader".to_string()).spawn(move || daemon_reader(reader, tx))?;
-    Ok((writer, rx))
+    let (senders, inbox) = daemon_channels(DAEMON_OUTPUT_QUEUE_CAPACITY);
+    thread::Builder::new().name("vibelink-remote-daemon-reader".to_string()).spawn(move || daemon_reader(reader, senders))?;
+    Ok((writer, inbox))
 }
 
-fn daemon_reader(mut reader: interprocess::local_socket::RecvHalf, tx: Sender<DaemonToClient>) {
+fn daemon_reader(mut reader: interprocess::local_socket::RecvHalf, senders: DaemonSenders) {
     while let Ok(message) = read_frame::<_, DaemonToClient>(&mut reader) {
-        if tx.try_send(message).is_err() {
-            tracing::warn!("dropping remote daemon frame for slow client");
+        let output = matches!(&message, DaemonToClient::Output { .. });
+        if route_daemon_message(&senders, message) { continue; }
+        if output {
+            tracing::warn!("dropping remote daemon output for slow client");
+        } else {
+            break;
         }
     }
 }
@@ -116,36 +177,39 @@ fn daemon_reader(mut reader: interprocess::local_socket::RecvHalf, tx: Sender<Da
 fn run_authenticated(
     ws: &mut RemoteSocket,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
-    daemon_rx: &Receiver<DaemonToClient>,
+    daemon_inbox: &mut DaemonInbox,
     push_rx: &Receiver<Message>,
     shared: &RemoteShared,
-    client_key: Uuid,
 ) -> Result<()> {
     let mut next_req = 1_u64;
     let mut attached: Option<Uuid> = None;
     let mut attached_panes: Vec<Uuid> = Vec::new();
-    let mut pane_geometry: HashMap<Uuid, (u16, u16)> = HashMap::new();
     let appearance = shared.appearance.read().expect("remote appearance lock").clone();
     send_json(ws, &ServerMessage::Appearance { payload: appearance })?;
-    let sessions = list_sessions(daemon_writer, daemon_rx, ws, &mut next_req)?;
+    let sessions = list_sessions(daemon_writer, daemon_inbox, &mut next_req)?;
     send_workspaces(ws, ordered_sessions(sessions, &shared.workspace_order.read().expect("remote workspace order lock")), &shared.workspace_alerts.read().expect("remote workspace alerts lock"), None)?;
 
     let mut last_ping = Instant::now();
     let mut last_pong = Instant::now();
     loop {
+        while let Some(message) = daemon_inbox.try_control()? {
+            handle_daemon_control(ws, daemon_writer, daemon_inbox, &mut next_req, attached, &mut attached_panes, message)?;
+        }
         while let Ok(message) = push_rx.try_recv() { ws.send(message)?; }
-        loop {
-            match daemon_rx.try_recv() {
-                Ok(message) => handle_daemon_event(ws, daemon_writer, daemon_rx, shared, &mut next_req, attached, &mut attached_panes, &mut pane_geometry, message)?,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => bail!("remote daemon connection closed"),
+        for _ in 0..MAX_OUTPUT_FRAMES_PER_LOOP {
+            if daemon_inbox.has_pending_control() { break; }
+            let Some(message) = daemon_inbox.try_output()? else { break; };
+            if let DaemonToClient::Output { pane_id, data } = message {
+                if attached_panes.contains(&pane_id) {
+                    ws.send(Message::Binary(frame_pane_output(&pane_id.to_string(), &data).into()))?;
+                }
             }
         }
 
         match ws.read() {
             Ok(Message::Text(text)) => {
                 let message: ClientMessage = serde_json::from_str(text.as_ref()).context("parse remote message")?;
-                handle_client_message(ws, daemon_writer, daemon_rx, shared, client_key, &mut next_req, &mut attached, &mut attached_panes, &mut pane_geometry, message)?;
+                handle_client_message(ws, daemon_writer, daemon_inbox, shared, &mut next_req, &mut attached, &mut attached_panes, message)?;
             }
             Ok(Message::Pong(_)) => last_pong = Instant::now(),
             Ok(Message::Ping(data)) => { ws.send(Message::Pong(data))?; }
@@ -168,35 +232,30 @@ fn run_authenticated(
 fn handle_client_message(
     ws: &mut RemoteSocket,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
-    daemon_rx: &Receiver<DaemonToClient>,
+    daemon_inbox: &mut DaemonInbox,
     shared: &RemoteShared,
-    client_key: Uuid,
     next_req: &mut u64,
     attached: &mut Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
-    pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
     message: ClientMessage,
 ) -> Result<()> {
     match message {
         ClientMessage::Hello { .. } => send_error(ws, "authFailed", "hello may only be sent once", None),
         ClientMessage::ListWorkspaces { req_id } => {
-            let sessions = list_sessions(daemon_writer, daemon_rx, ws, next_req)?;
+            let sessions = list_sessions(daemon_writer, daemon_inbox, next_req)?;
             send_workspaces(ws, ordered_sessions(sessions, &shared.workspace_order.read().expect("remote workspace order lock")), &shared.workspace_alerts.read().expect("remote workspace alerts lock"), req_id)
         }
         ClientMessage::AttachWorkspace { session_id, req_id } => {
             let session_id = parse_uuid(&session_id, ws, req_id)?;
             if let Some(previous) = *attached {
-                restore_owned_overrides(shared, client_key, daemon_writer, Some(previous))?;
                 write_frame(daemon_writer, &ClientToDaemon::DetachSession { session_id: previous })?;
             }
-            let (layout, panes) = attach_session(daemon_writer, daemon_rx, ws, next_req, session_id)?;
+            let (layout, panes) = attach_session(daemon_writer, daemon_inbox, next_req, session_id)?;
             let order = pane_order(layout.as_deref(), &panes);
             let pane_by_id: HashMap<_, _> = panes.into_iter().map(|pane| (pane.id, pane)).collect();
             let ordered: Vec<_> = order.into_iter().filter_map(|id| pane_by_id.get(&id).cloned()).collect();
             attached_panes.clear();
             attached_panes.extend(ordered.iter().map(|pane| pane.id));
-            pane_geometry.clear();
-            pane_geometry.extend(ordered.iter().map(|pane| (pane.id, (pane.config.cols, pane.config.rows))));
             *attached = Some(session_id);
             send_json(ws, &ServerMessage::WorkspaceAttached { session_id: session_id.to_string(), panes: ordered.iter().map(PaneDto::from).collect(), req_id })?;
             for pane in &ordered { write_frame(daemon_writer, &ClientToDaemon::AttachPane { session_id, pane_id: pane.id })?; }
@@ -204,12 +263,10 @@ fn handle_client_message(
         }
         ClientMessage::DetachWorkspace { session_id, req_id } => {
             let session_id = parse_uuid(&session_id, ws, req_id)?;
-            restore_owned_overrides(shared, client_key, daemon_writer, Some(session_id))?;
             write_frame(daemon_writer, &ClientToDaemon::DetachSession { session_id })?;
             if *attached == Some(session_id) {
                 *attached = None;
                 attached_panes.clear();
-                pane_geometry.clear();
             }
             Ok(())
         }
@@ -223,86 +280,41 @@ fn handle_client_message(
             let Some(session_id) = *attached else { return send_error(ws, "internal", "no workspace attached", req_id); };
             let pane_id = parse_uuid(&pane_id, ws, req_id)?;
             let req = take_req(next_req);
-            let reply = request_reply(daemon_writer, daemon_rx, ws, req, ClientToDaemon::GetScrollback { req, session_id, pane_id })?;
+            let reply = request_reply(daemon_writer, daemon_inbox, req, ClientToDaemon::GetScrollback { req, session_id, pane_id })?;
             match reply {
                 ReplyResult::ScrollbackData(data) => send_json(ws, &ServerMessage::PaneBuffer { pane_id: pane_id.to_string(), data_b64: encode_buffer(&data), req_id }),
                 other => Err(anyhow!("unexpected scrollback reply: {other:?}")),
             }
         }
-        ClientMessage::SetPaneSize { pane_id, cols, rows, req_id } => {
-            let Some(session_id) = *attached else { return send_error(ws, "internal", "no workspace attached", req_id); };
-            let pane_id = parse_uuid(&pane_id, ws, req_id)?;
-            if !attached_panes.contains(&pane_id) {
-                return send_error(ws, "internal", "pane not attached", req_id);
-            }
-            let Some(&(current_cols, current_rows)) = pane_geometry.get(&pane_id) else {
-                return send_error(ws, "internal", "pane geometry unavailable", req_id);
-            };
-            let cols = cols.clamp(20, 360);
-            let rows = rows.clamp(5, 200);
-            if cols <= current_cols { return Ok(()); }
-            register_pane_size_override(
-                &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
-                session_id,
-                pane_id,
-                client_key,
-                (current_cols, current_rows),
-                (cols, rows),
-            );
-            write_frame(daemon_writer, &ClientToDaemon::ResizePane { session_id, pane_id, cols, rows })?;
-            Ok(())
-        }
-        ClientMessage::ClearPaneSize { pane_id, req_id } => {
-            let Some(_) = *attached else { return send_error(ws, "internal", "no workspace attached", req_id); };
-            let pane_id = parse_uuid(&pane_id, ws, req_id)?;
-            if let Some(restore) = clear_pane_size_override(
-                &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
-                pane_id,
-                client_key,
-            ) {
-                write_pane_resize(daemon_writer, restore)?;
-            }
-            Ok(())
-        }
+        ClientMessage::SetPaneSize { .. } | ClientMessage::ClearPaneSize { .. } => Ok(()),
         ClientMessage::Unknown => Ok(()),
         ClientMessage::Ping { req_id } => send_json(ws, &ServerMessage::Pong { req_id }),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_daemon_event(
+
+
+fn handle_daemon_control(
     ws: &mut RemoteSocket,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
-    daemon_rx: &Receiver<DaemonToClient>,
-    shared: &RemoteShared,
+    daemon_inbox: &mut DaemonInbox,
     next_req: &mut u64,
     attached: Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
-    pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
     message: DaemonToClient,
 ) -> Result<()> {
     match message {
-        DaemonToClient::Output { pane_id, data } if attached_panes.contains(&pane_id) => ws.send(Message::Binary(frame_pane_output(&pane_id.to_string(), &data).into())).map_err(Into::into),
         DaemonToClient::PaneExited { pane_id, .. } if attached_panes.contains(&pane_id) => send_json(ws, &ServerMessage::PaneExited { pane_id: pane_id.to_string() }),
         DaemonToClient::PaneResized { session_id, pane_id, cols, rows } if attached == Some(session_id) => {
-            pane_geometry.insert(pane_id, (cols, rows));
-            drop_override_for_desktop_resize(
-                &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
-                pane_id,
-                cols,
-                rows,
-            );
             send_json(ws, &ServerMessage::PaneResized { pane_id: pane_id.to_string(), cols, rows })
         }
         DaemonToClient::SessionChanged { session_id } if attached == Some(session_id) => {
-            let (layout, panes) = attach_session(daemon_writer, daemon_rx, ws, next_req, session_id)?;
+            let (layout, panes) = attach_session(daemon_writer, daemon_inbox, next_req, session_id)?;
             let order = pane_order(layout.as_deref(), &panes);
             let pane_by_id: HashMap<_, _> = panes.into_iter().map(|pane| (pane.id, pane)).collect();
             let ordered: Vec<_> = order.into_iter().filter_map(|id| pane_by_id.get(&id).cloned()).collect();
             attached_panes.clear();
             attached_panes.extend(ordered.iter().map(|pane| pane.id));
-            pane_geometry.clear();
-            pane_geometry.extend(ordered.iter().map(|pane| (pane.id, (pane.config.cols, pane.config.rows))));
             send_json(ws, &ServerMessage::PanesChanged { session_id: session_id.to_string(), panes: ordered.iter().map(PaneDto::from).collect() })
         }
         DaemonToClient::Error { message, .. } => send_error(ws, "internal", &message, None),
@@ -310,149 +322,42 @@ fn handle_daemon_event(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PaneResize {
-    session_id: Uuid,
-    pane_id: Uuid,
-    cols: u16,
-    rows: u16,
-}
 
-fn register_pane_size_override(
-    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
-    session_id: Uuid,
-    pane_id: Uuid,
-    owner: Uuid,
-    original: (u16, u16),
-    target: (u16, u16),
-) {
-    let entry = overrides.entry(pane_id).or_insert_with(|| PaneSizeOverride {
-        session_id,
-        original_cols: original.0,
-        original_rows: original.1,
-        target_cols: target.0,
-        target_rows: target.1,
-        owners: Default::default(),
-    });
-    entry.owners.insert(owner);
-    entry.target_cols = target.0;
-    entry.target_rows = target.1;
-}
-
-fn clear_pane_size_override(
-    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
-    pane_id: Uuid,
-    owner: Uuid,
-) -> Option<PaneResize> {
-    let restore = {
-        let entry = overrides.get_mut(&pane_id)?;
-        if !entry.owners.remove(&owner) || !entry.owners.is_empty() { return None; }
-        PaneResize {
-            session_id: entry.session_id,
-            pane_id,
-            cols: entry.original_cols,
-            rows: entry.original_rows,
-        }
-    };
-    overrides.remove(&pane_id);
-    Some(restore)
-}
-
-fn take_owned_override_restores(
-    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
-    owner: Uuid,
-    session_filter: Option<Uuid>,
-) -> Vec<PaneResize> {
-    let mut restores = Vec::new();
-    overrides.retain(|pane_id, entry| {
-        if session_filter.is_none_or(|session_id| entry.session_id == session_id)
-            && entry.owners.remove(&owner)
-            && entry.owners.is_empty()
-        {
-            restores.push(PaneResize {
-                session_id: entry.session_id,
-                pane_id: *pane_id,
-                cols: entry.original_cols,
-                rows: entry.original_rows,
-            });
-            false
-        } else {
-            true
-        }
-    });
-    restores
-}
-
-fn drop_override_for_desktop_resize(
-    overrides: &mut HashMap<Uuid, PaneSizeOverride>,
-    pane_id: Uuid,
-    cols: u16,
-    rows: u16,
-) -> bool {
-    let should_drop = overrides
-        .get(&pane_id)
-        .is_some_and(|entry| (entry.target_cols, entry.target_rows) != (cols, rows));
-    if should_drop { overrides.remove(&pane_id); }
-    should_drop
-}
-
-fn restore_owned_overrides(
-    shared: &RemoteShared,
-    owner: Uuid,
-    daemon_writer: &mut interprocess::local_socket::SendHalf,
-    session_filter: Option<Uuid>,
-) -> Result<()> {
-    let restores = take_owned_override_restores(
-        &mut shared.pane_size_overrides.lock().expect("remote pane size overrides mutex"),
-        owner,
-        session_filter,
-    );
-    for restore in restores { write_pane_resize(daemon_writer, restore)?; }
-    Ok(())
-}
-
-fn write_pane_resize(
-    daemon_writer: &mut interprocess::local_socket::SendHalf,
-    resize: PaneResize,
-) -> Result<()> {
-    write_frame(daemon_writer, &ClientToDaemon::ResizePane {
-        session_id: resize.session_id,
-        pane_id: resize.pane_id,
-        cols: resize.cols,
-        rows: resize.rows,
-    })?;
-    Ok(())
-}
-
-fn list_sessions(writer: &mut interprocess::local_socket::SendHalf, rx: &Receiver<DaemonToClient>, ws: &mut RemoteSocket, next_req: &mut u64) -> Result<Vec<SessionMeta>> {
+fn list_sessions(writer: &mut interprocess::local_socket::SendHalf, inbox: &mut DaemonInbox, next_req: &mut u64) -> Result<Vec<SessionMeta>> {
     let req = take_req(next_req);
-    match request_reply(writer, rx, ws, req, ClientToDaemon::ListSessions { req })? {
+    match request_reply(writer, inbox, req, ClientToDaemon::ListSessions { req })? {
         ReplyResult::Sessions(sessions) => Ok(sessions),
         other => Err(anyhow!("unexpected session list reply: {other:?}")),
     }
 }
 
-fn attach_session(writer: &mut interprocess::local_socket::SendHalf, rx: &Receiver<DaemonToClient>, ws: &mut RemoteSocket, next_req: &mut u64, session_id: Uuid) -> Result<(Option<String>, Vec<PaneMeta>)> {
+fn attach_session(writer: &mut interprocess::local_socket::SendHalf, inbox: &mut DaemonInbox, next_req: &mut u64, session_id: Uuid) -> Result<(Option<String>, Vec<PaneMeta>)> {
     let req = take_req(next_req);
-    match request_reply(writer, rx, ws, req, ClientToDaemon::AttachSession { req, session_id })? {
+    match request_reply(writer, inbox, req, ClientToDaemon::AttachSession { req, session_id })? {
         ReplyResult::Attached { layout_json, panes } => Ok((layout_json, panes)),
         other => Err(anyhow!("unexpected attach reply: {other:?}")),
     }
 }
 
-fn request_reply(writer: &mut interprocess::local_socket::SendHalf, rx: &Receiver<DaemonToClient>, ws: &mut RemoteSocket, req: u64, message: ClientToDaemon) -> Result<ReplyResult> {
+fn request_control_result(inbox: &mut DaemonInbox, req: u64, message: DaemonToClient) -> Result<Option<ReplyResult>> {
+    match message {
+        DaemonToClient::Reply { req: reply_req, result } if reply_req == req => Ok(Some(result)),
+        DaemonToClient::Error { req: Some(reply_req), message } if reply_req == req => bail!(message),
+        unrelated => {
+            inbox.defer_control(unrelated);
+            Ok(None)
+        }
+    }
+}
+
+fn request_reply(writer: &mut interprocess::local_socket::SendHalf, inbox: &mut DaemonInbox, req: u64, message: ClientToDaemon) -> Result<ReplyResult> {
     write_frame(writer, &message)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { bail!("daemon request {req} timed out"); }
-        match rx.recv_timeout(remaining) {
-            Ok(DaemonToClient::Reply { req: reply_req, result }) if reply_req == req => return Ok(result),
-            Ok(DaemonToClient::Error { req: Some(reply_req), message }) if reply_req == req => bail!(message),
-            Ok(DaemonToClient::Output { pane_id, data }) => { ws.send(Message::Binary(frame_pane_output(&pane_id.to_string(), &data).into()))?; }
-            Ok(_) => {}
-            Err(error) => return Err(error.into()),
-        }
+        let message = inbox.recv_new_control_timeout(remaining)?;
+        if let Some(result) = request_control_result(inbox, req, message)? { return Ok(result); }
     }
 }
 
@@ -504,62 +409,40 @@ mod tests {
     }
 
     #[test]
-    fn pane_size_override_tracks_owners_and_restores_original_geometry() {
-        let session_id = Uuid::new_v4();
+    fn full_output_queue_drops_output_but_not_control() {
+        let (senders, mut inbox) = daemon_channels(1);
         let pane_id = Uuid::new_v4();
-        let owner_a = Uuid::new_v4();
-        let owner_b = Uuid::new_v4();
-        let mut overrides = HashMap::new();
+        let session_id = Uuid::new_v4();
 
-        register_pane_size_override(&mut overrides, session_id, pane_id, owner_a, (80, 24), (120, 24));
-        register_pane_size_override(&mut overrides, session_id, pane_id, owner_b, (120, 24), (160, 24));
-        let entry = overrides.get(&pane_id).expect("override exists");
-        assert_eq!((entry.original_cols, entry.original_rows), (80, 24));
-        assert_eq!((entry.target_cols, entry.target_rows), (160, 24));
-        assert_eq!(entry.owners.len(), 2);
+        assert!(route_daemon_message(&senders, DaemonToClient::Output { pane_id, data: vec![1] }));
+        assert!(!route_daemon_message(&senders, DaemonToClient::Output { pane_id, data: vec![2] }));
+        assert!(route_daemon_message(&senders, DaemonToClient::SessionChanged { session_id }));
+        assert!(route_daemon_message(&senders, DaemonToClient::Reply { req: 7, result: ReplyResult::Ok }));
+        assert!(route_daemon_message(&senders, DaemonToClient::PaneResized { session_id, pane_id, cols: 80, rows: 24 }));
 
-        assert_eq!(clear_pane_size_override(&mut overrides, pane_id, owner_a), None);
-        assert_eq!(overrides[&pane_id].owners.len(), 1);
-        assert_eq!(
-            clear_pane_size_override(&mut overrides, pane_id, owner_b),
-            Some(PaneResize { session_id, pane_id, cols: 80, rows: 24 })
-        );
-        assert!(overrides.is_empty());
+        assert_eq!(inbox.try_control().expect("session control"), Some(DaemonToClient::SessionChanged { session_id }));
+        assert_eq!(inbox.try_control().expect("reply control"), Some(DaemonToClient::Reply { req: 7, result: ReplyResult::Ok }));
+        assert_eq!(inbox.try_control().expect("resize control"), Some(DaemonToClient::PaneResized { session_id, pane_id, cols: 80, rows: 24 }));
+        assert_eq!(inbox.try_output().expect("output receive"), Some(DaemonToClient::Output { pane_id, data: vec![1] }));
+        assert_eq!(inbox.try_output().expect("empty output queue"), None);
     }
 
     #[test]
-    fn owned_override_restore_respects_session_filter() {
-        let owner = Uuid::new_v4();
-        let session_a = Uuid::new_v4();
-        let session_b = Uuid::new_v4();
-        let pane_a = Uuid::new_v4();
-        let pane_b = Uuid::new_v4();
-        let mut overrides = HashMap::new();
-        register_pane_size_override(&mut overrides, session_a, pane_a, owner, (80, 24), (120, 24));
-        register_pane_size_override(&mut overrides, session_b, pane_b, owner, (90, 30), (140, 30));
-
-        assert_eq!(
-            take_owned_override_restores(&mut overrides, owner, Some(session_a)),
-            vec![PaneResize { session_id: session_a, pane_id: pane_a, cols: 80, rows: 24 }]
-        );
-        assert!(overrides.contains_key(&pane_b));
-        assert_eq!(
-            take_owned_override_restores(&mut overrides, owner, None),
-            vec![PaneResize { session_id: session_b, pane_id: pane_b, cols: 90, rows: 30 }]
-        );
-        assert!(overrides.is_empty());
-    }
-
-    #[test]
-    fn desktop_resize_drops_only_mismatched_override() {
+    fn unrelated_control_is_deferred_while_waiting_for_reply() {
+        let (_, mut inbox) = daemon_channels(1);
         let session_id = Uuid::new_v4();
-        let pane_id = Uuid::new_v4();
-        let mut overrides = HashMap::new();
-        register_pane_size_override(&mut overrides, session_id, pane_id, Uuid::new_v4(), (80, 24), (140, 30));
 
-        assert!(!drop_override_for_desktop_resize(&mut overrides, pane_id, 140, 30));
-        assert!(overrides.contains_key(&pane_id));
-        assert!(drop_override_for_desktop_resize(&mut overrides, pane_id, 120, 30));
-        assert!(!overrides.contains_key(&pane_id));
+        for _ in 0..2 {
+            assert_eq!(
+                request_control_result(&mut inbox, 7, DaemonToClient::SessionChanged { session_id }).expect("defer control"),
+                None,
+            );
+        }
+        assert_eq!(
+            request_control_result(&mut inbox, 7, DaemonToClient::Reply { req: 7, result: ReplyResult::Ok }).expect("match reply"),
+            Some(ReplyResult::Ok),
+        );
+        assert_eq!(inbox.try_control().expect("first deferred control"), Some(DaemonToClient::SessionChanged { session_id }));
+        assert_eq!(inbox.try_control().expect("second deferred control"), Some(DaemonToClient::SessionChanged { session_id }));
     }
 }
