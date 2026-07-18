@@ -147,6 +147,20 @@ impl Pane {
         Ok(())
     }
 
+    pub fn kill_and_wait(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.kill()?;
+        let Some(pid) = self.root_pid else {
+            return Ok(());
+        };
+        if !crate::daemon::proc::wait_for_process_exit(pid, timeout)? {
+            anyhow::bail!(
+                "PTY process {pid} did not exit within {}ms",
+                timeout.as_millis()
+            );
+        }
+        Ok(())
+    }
+
     pub fn root_pid(&self) -> Option<u32> {
         self.root_pid
     }
@@ -676,6 +690,7 @@ mod tests {
             1
         );
     }
+
 
     #[test]
     fn kill_does_not_wait_for_child_lock() {

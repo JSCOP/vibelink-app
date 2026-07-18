@@ -1042,7 +1042,7 @@ mod tests {
     #[test]
     fn stale_recording_monitor_cannot_retire_new_generation() {
         fn recording(generation: u64) -> Recording {
-            let mut child =
+            let child =
                 Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()))
                     .args(["/D", "/Q", "/C", "more"])
                     .stdin(Stdio::piped())

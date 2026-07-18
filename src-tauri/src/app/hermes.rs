@@ -1167,6 +1167,19 @@ pub async fn hermes_workspace_state(
     .map_err(to_string)
 }
 
+fn cleanup_agent_workspace_at(
+    manager: &HermesManager,
+    session_id: &str,
+    path: &Path,
+) -> Result<()> {
+    manager.stop(session_id)?;
+    if path.exists() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("delete VibeLink agent workspace {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn agent_workspace_cleanup(
     manager: State<'_, Arc<HermesManager>>,
@@ -1178,13 +1191,8 @@ pub async fn agent_workspace_cleanup(
         .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || -> Result<()> {
-        manager.stop(&session_id)?;
         let path = agent_workspace_dir(&session_id)?;
-        if path.exists() {
-            std::fs::remove_dir_all(&path)
-                .with_context(|| format!("delete VibeLink agent workspace {}", path.display()))?;
-        }
-        Ok(())
+        cleanup_agent_workspace_at(&manager, &session_id, &path)
     })
     .await
     .map_err(to_string)?
@@ -2196,6 +2204,36 @@ mod tests {
             .expect("stop generation");
 
         assert_eq!(manager.current_generation("session-1"), None);
+        assert!(instance
+            .child
+            .lock()
+            .expect("child mutex")
+            .try_wait()
+            .expect("child status")
+            .is_some());
+    }
+
+    #[test]
+    fn workspace_cleanup_stops_child_before_removing_owned_files() {
+        let manager = HermesManager::new();
+        let instance = Arc::new(test_instance());
+        manager.instances.lock().expect("instances mutex").insert(
+            "session-cleanup".to_string(),
+            HermesInstanceEntry {
+                generation: 8,
+                instance: Arc::clone(&instance),
+            },
+        );
+        let path =
+            std::env::temp_dir().join(format!("vibelink-hermes-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create Agent workspace");
+        std::fs::write(path.join("metadata.json"), b"owned").expect("write Agent metadata");
+
+        cleanup_agent_workspace_at(&manager, "session-cleanup", &path)
+            .expect("cleanup Agent workspace");
+
+        assert_eq!(manager.current_generation("session-cleanup"), None);
+        assert!(!path.exists());
         assert!(instance
             .child
             .lock()

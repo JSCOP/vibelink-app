@@ -790,18 +790,8 @@ fn dispatch_message(
         ClientToDaemon::DeleteSession { req, session_id } => {
             let panes = lock_state(&state).delete_session(session_id)?;
             persist_state(&state, sessions_path)?;
-            send_ok(tx, req)?;
-            for mut pane in panes {
-                let pane_id = pane.id;
-                thread::Builder::new()
-                    .name(format!("vibelink-close-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(err) = pane.kill() {
-                            warn!(?err, %pane_id, "failed to kill deleted pane");
-                        }
-                    })?;
-            }
-            Ok(())
+            kill_owned_panes(panes, "deleted session")?;
+            send_ok(tx, req)
         }
         ClientToDaemon::AttachSession { req, session_id } => {
             let (layout_json, panes) = {
@@ -858,17 +848,10 @@ fn dispatch_message(
         } => {
             let pane = lock_state(&state).cancel_pane_spawn(session_id, pane_id)?;
             persist_state(&state, sessions_path)?;
-            send_ok(tx, req)?;
-            if let Some(mut pane) = pane {
-                thread::Builder::new()
-                    .name(format!("vibelink-cancel-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(error) = pane.kill() {
-                            warn!(?error, %pane_id, "failed to kill cancelled pane spawn");
-                        }
-                    })?;
+            if let Some(pane) = pane {
+                kill_owned_panes(vec![pane], "cancelled spawn")?;
             }
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::AttachPane {
             req,
@@ -944,33 +927,16 @@ fn dispatch_message(
         } => {
             let pane = lock_state(&state).close_pane(session_id, pane_id)?;
             persist_state(&state, sessions_path)?;
-            send_ok(tx, req)?;
-            if let Some(mut pane) = pane {
-                thread::Builder::new()
-                    .name(format!("vibelink-close-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(err) = pane.kill() {
-                            warn!(?err, pane_id = %pane_id, "failed to kill closed pane");
-                        }
-                    })?;
+            if let Some(pane) = pane {
+                kill_owned_panes(vec![pane], "closed pane")?;
             }
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::ClearSession { req, session_id } => {
             let panes = lock_state(&state).close_session_panes(session_id)?;
             persist_state(&state, sessions_path)?;
-            send_ok(tx, req)?;
-            for mut pane in panes {
-                let pane_id = pane.id;
-                thread::Builder::new()
-                    .name(format!("vibelink-close-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(err) = pane.kill() {
-                            warn!(?err, pane_id = %pane_id, "failed to kill cleared pane");
-                        }
-                    })?;
-            }
-            Ok(())
+            kill_owned_panes(panes, "cleared session")?;
+            send_ok(tx, req)
         }
         ClientToDaemon::GetScrollback {
             req,
@@ -1252,6 +1218,24 @@ fn notify_session_changed(state: &SharedState, session_id: Uuid) -> Result<()> {
     let senders = lock_state(state).senders_for_session(session_id);
     for sender in senders {
         let _ = sender.send(DaemonToClient::SessionChanged { session_id });
+    }
+    Ok(())
+}
+
+fn kill_owned_panes(panes: Vec<Pane>, operation: &str) -> Result<()> {
+    let mut first_error = None;
+    for mut pane in panes {
+        let pane_id = pane.id;
+        if let Err(error) = pane.kill_and_wait(Duration::from_secs(5)) {
+            warn!(?error, %pane_id, operation, "failed to terminate owned pane");
+            if first_error.is_none() {
+                first_error =
+                    Some(error.context(format!("terminate pane {pane_id} for {operation}")));
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(())
 }

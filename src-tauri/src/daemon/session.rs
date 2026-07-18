@@ -666,6 +666,37 @@ mod tests {
     }
 
     #[test]
+    fn immediate_spawn_close_stress_leaves_no_pane_records() {
+        let mut state = DaemonState::new();
+        let session = state.create_session("Workspace".to_string(), None);
+
+        for iteration in 0..1_000 {
+            let pane_id = Uuid::new_v4();
+            if iteration % 2 == 0 {
+                assert!(state
+                    .cancel_pane_spawn(session.id, pane_id)
+                    .expect("cancel pre-insert pane")
+                    .is_none());
+                assert!(state.pane_spawn_cancelled(session.id, pane_id));
+            } else {
+                state
+                    .insert_pane(session.id, Pane::for_test(test_config(pane_id), true))
+                    .expect("insert racing pane");
+                assert!(state
+                    .cancel_pane_spawn(session.id, pane_id)
+                    .expect("cancel inserted pane")
+                    .is_some());
+            }
+        }
+
+        assert!(state
+            .pane_metas(session.id)
+            .expect("pane metas after stress")
+            .is_empty());
+        assert!(state.persisted_sessions()[0].panes.is_empty());
+    }
+
+    #[test]
     fn persisted_sessions_exclude_live_panes() {
         let mut state = DaemonState::new();
         let meta = state.create_session("Workspace".to_string(), None);

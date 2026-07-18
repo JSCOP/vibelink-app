@@ -58,6 +58,50 @@ pub fn kill_process_tree(root: u32) {
     }
 }
 
+/// Return whether the exact PID is still present.
+pub fn process_exists(pid: u32) -> bool {
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.process(Pid::from_u32(pid)).is_some()
+}
+
+#[cfg(windows)]
+pub fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> std::io::Result<bool> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject},
+    };
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    let process = unsafe { OpenProcess(SYNCHRONIZE_ACCESS, 0, pid) };
+    if process.is_null() {
+        if !process_exists(pid) {
+            return Ok(true);
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+    let result = unsafe { WaitForSingleObject(process, timeout_ms) };
+    unsafe { CloseHandle(process) };
+    match result {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    while process_exists(pid) {
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Ok(true)
+}
+
 /// Return working-set bytes and process count for `root` plus all descendants.
 pub fn tree_metrics(sys: &System, root: u32) -> (u64, u32) {
     let children = child_map(sys);
