@@ -25,7 +25,7 @@ import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneC
 import { activeWorkspaceLayoutPage, createDefaultWorkspaceDockviewLayout, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
-import { waitForDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleNestedDockviewLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { GitWindow } from '../components/git/GitWindow'
@@ -210,6 +210,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const terminalResizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
   const terminalResizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
   const terminalDockLayoutFrameRef = useRef<number | undefined>()
+  const workspaceLayoutMutationRef = useRef(0)
+  const workspaceLayoutMutationActiveRef = useRef(false)
   const remotePaneVisibilityRef = useRef<RemotePaneVisibilityState[]>([])
   const remoteLeaseActiveRef = useRef(false)
   const remoteUnleasedTerminalLayoutRef = useRef<{ sessionId: string; layout: unknown } | null>(null)
@@ -315,6 +317,8 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   useEffect(() => () => {
     clearResizeInteraction()
     clearTerminalResizeInteraction()
+    workspaceLayoutMutationRef.current += 1
+    workspaceLayoutMutationActiveRef.current = false
     if (terminalDockLayoutFrameRef.current !== undefined) {
       cancelAnimationFrame(terminalDockLayoutFrameRef.current)
       terminalDockLayoutFrameRef.current = undefined
@@ -372,18 +376,77 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   // geometry). Sequence explicitly: force the outer overlay reposition, then
   // measure the terminal dock ONE FRAME LATER so it reads the corrected host.
   const scheduleTerminalDockLayout = useCallback(() => {
+    if (workspaceLayoutMutationActiveRef.current) return
     if (terminalDockLayoutFrameRef.current !== undefined) cancelAnimationFrame(terminalDockLayoutFrameRef.current)
     terminalDockLayoutFrameRef.current = requestAnimationFrame(() => {
+      if (workspaceLayoutMutationActiveRef.current) {
+        terminalDockLayoutFrameRef.current = undefined
+        return
+      }
       // Dockview's overlay resize registers its own rAF inside this call…
       if (apiRef.current) forceOverlayReposition(apiRef.current)
       // …which runs first in the next frame (registration order), so this
       // nested callback measures post-reposition geometry.
       terminalDockLayoutFrameRef.current = requestAnimationFrame(() => {
         terminalDockLayoutFrameRef.current = undefined
-        if (terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
+        if (!workspaceLayoutMutationActiveRef.current && terminalApiRef.current) layoutTerminalDockview(terminalApiRef.current)
       })
     })
   }, [layoutTerminalDockview])
+
+  const settleWorkspaceWindowMutation = useCallback(async (options: { restoreTerminalFocus?: boolean } = {}) => {
+    const outerApi = apiRef.current
+    const terminalApi = terminalApiRef.current
+    if (!outerApi || !terminalApi) return
+    const generation = ++workspaceLayoutMutationRef.current
+    workspaceLayoutMutationActiveRef.current = true
+    if (terminalDockLayoutFrameRef.current !== undefined) {
+      cancelAnimationFrame(terminalDockLayoutFrameRef.current)
+      terminalDockLayoutFrameRef.current = undefined
+    }
+    const isCurrent = () => workspaceLayoutMutationRef.current === generation
+      && apiRef.current === outerApi
+      && terminalApiRef.current === terminalApi
+
+    try {
+      await settleNestedDockviewLayout({
+        layoutOuter: () => {
+          if (isCurrent()) layoutDockview(outerApi)
+        },
+        refreshOuter: () => {
+          if (isCurrent()) forceOverlayReposition(outerApi)
+        },
+        outerIsSettled: () => !isCurrent() || terminalWindowOverlayMatchesGroup(dockRef.current),
+        layoutInner: () => {
+          if (isCurrent()) layoutTerminalDockview(terminalApi)
+        },
+        refreshInner: () => {
+          if (isCurrent()) forceOverlayReposition(terminalApi)
+        },
+        innerIsSettled: () => !isCurrent() || terminalPaneOverlaysMatchGroups(terminalDockRef.current),
+        recover: () => {
+          if (isCurrent()) reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+        },
+        restoreFocus: options.restoreTerminalFocus
+          ? () => {
+              if (!isCurrent() || outerApi.activePanel?.id !== workspaceWindowDescriptors.terminal.panelId) return
+              const paneId = terminalApi.activePanel?.id
+              if (!paneId || !useWorkspaceStore.getState().panes[paneId]) return
+              useWorkspaceStore.getState().setActivePaneId(paneId)
+              TerminalManager.focus(paneId)
+            }
+          : undefined,
+      })
+    } finally {
+      if (workspaceLayoutMutationRef.current === generation) {
+        workspaceLayoutMutationActiveRef.current = false
+        if (terminalDockLayoutFrameRef.current !== undefined) {
+          cancelAnimationFrame(terminalDockLayoutFrameRef.current)
+          terminalDockLayoutFrameRef.current = undefined
+        }
+      }
+    }
+  }, [layoutDockview, layoutTerminalDockview])
 
   const syncRemoteLeasedPanes = useCallback(() => {
     const api = terminalApiRef.current
@@ -1100,12 +1163,12 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         return
       }
       addWorkspaceWindowPanel(windowApi, kind, windowApi.activePanel ? { referencePanel: windowApi.activePanel.id, direction: 'right' } : undefined)
-      layoutDockview(windowApi)
+      await settleWorkspaceWindowMutation()
       loadedSessionRef.current = sessionId
       loadedPageRef.current = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId ?? loadedPageRef.current
       await saveCurrentPageLayout()
     })
-  }, [addTerminalPanel, addWorkspaceWindowPanel, ensureTerminalWindowPanel, layoutDockview, layoutTerminalDockview, loadTerminalPaneLayout, saveCurrentPageLayout, spawnPane])
+  }, [addTerminalPanel, addWorkspaceWindowPanel, ensureTerminalWindowPanel, layoutTerminalDockview, loadTerminalPaneLayout, saveCurrentPageLayout, settleWorkspaceWindowMutation, spawnPane])
 
   const focusPane = useCallback((direction: PaneDirection) => {
     const topActivePanelId = apiRef.current?.activePanel?.id
@@ -1532,22 +1595,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
       if (!useWorkspaceStore.getState().panes[panel.id]) {
-        // Closing a workspace window (Agent/Kanban/...) resizes and can
-        // re-host the terminal window, and dockview's own overlay reposition
-        // can read half-transition geometry. Force the OUTER layout first,
-        // then — a frame later, once the overlay has followed — re-layout the
-        // inner dock against the corrected host and recover pane content.
-        // Sequencing matters: scheduling both in the same frame would measure
-        // the terminal dock against the stale pre-close overlay size.
-        requestAnimationFrame(() => {
-          layoutDockview(event.api)
-          // scheduleTerminalDockLayout defers one more frame internally, so
-          // the inner dock measures the post-layout overlay, not this frame's.
-          requestAnimationFrame(() => {
-            scheduleTerminalDockLayout()
-            reflowTerminalsAfterLayout({ syncPty: true, recover: true })
-          })
-        })
+        // Top-level window removal mutates the outer Dockview first, while the
+        // nested terminal Dockview still holds the previous host geometry.
+        // Settle both overlays in order, then recover xterm and restore input
+        // focus only if the Terminal window became active.
+        void settleWorkspaceWindowMutation({ restoreTerminalFocus: true })
         persistLayoutSoon()
         return
       }
@@ -1558,7 +1610,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     loadedSessionRef.current = null
     loadedPageRef.current = null
     loadActiveSessionLayout()
-  }, [clearResizeInteraction, closePaneInStore, layoutDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, syncChromeState])
+  }, [clearResizeInteraction, closePaneInStore, layoutDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, settleWorkspaceWindowMutation, syncChromeState])
 
   useEffect(() => {
     syncRemoteLeasedPanes()
@@ -1989,6 +2041,37 @@ function forceOverlayReposition(api: DockviewApi): void {
   if (!container || typeof container !== 'object' || !('updateAllPositions' in container)) return
   if (typeof container.updateAllPositions !== 'function') return
   container.updateAllPositions()
+}
+
+function terminalWindowOverlayMatchesGroup(root: HTMLElement | null): boolean {
+  if (!root) return false
+  const panelId = workspaceWindowDescriptors.terminal.panelId
+  const tab = root.querySelector<HTMLElement>(`.workspace-window-tab[data-window-panel-id="${panelId}"]`)
+  const panel = root.querySelector<HTMLElement>(`.workspace-window-panel[data-window-panel-id="${panelId}"]`)
+  const content = tab?.closest<HTMLElement>('.dv-groupview')?.querySelector<HTMLElement>(':scope > .dv-content-container')
+  return Boolean(panel && content && overlayRectsMatch(panel, content))
+}
+
+function terminalPaneOverlaysMatchGroups(root: HTMLElement | null): boolean {
+  if (!root) return false
+  const panels = [...root.querySelectorAll<HTMLElement>('.terminal-panel-shell[data-pane-id]')]
+  if (panels.length === 0) return true
+  const tabs = [...root.querySelectorAll<HTMLElement>('.terminal-tab[data-pane-id]')]
+  return panels.every((panel) => {
+    const paneId = panel.dataset.paneId
+    const tab = tabs.find((candidate) => candidate.dataset.paneId === paneId)
+    const content = tab?.closest<HTMLElement>('.dv-groupview')?.querySelector<HTMLElement>(':scope > .dv-content-container')
+    return Boolean(content && overlayRectsMatch(panel, content))
+  })
+}
+
+function overlayRectsMatch(first: HTMLElement, second: HTMLElement): boolean {
+  const firstRect = first.getBoundingClientRect()
+  const secondRect = second.getBoundingClientRect()
+  return Math.abs(firstRect.left - secondRect.left) <= 1
+    && Math.abs(firstRect.top - secondRect.top) <= 1
+    && Math.abs(firstRect.width - secondRect.width) <= 1
+    && Math.abs(firstRect.height - secondRect.height) <= 1
 }
 
 function applyLiveResizeSession(api: DockviewApi, session: ResizeDragSession, delta: number): boolean {
