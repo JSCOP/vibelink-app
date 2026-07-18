@@ -43,6 +43,8 @@ const RENDERER_RESET_SETTLE_MS = 1000
 // reply arrives — dropping xterm's auto-reply leaves that shell hung forever
 // with a black pane. Cap the buffer so an orphaned panel cannot grow it.
 const MAX_PENDING_INPUT_CHUNKS = 256
+const MAX_PENDING_INPUT_BYTES = 256 * 1024
+const inputEncoder = new TextEncoder()
 // Pointer activation performs one lightweight renderer repair and, for full-
 // screen TUIs, one temporary PTY row nudge. This reproduces the repaint effect
 // of an Alt+Z maximize/restore cycle without moving Dockview geometry.
@@ -52,6 +54,8 @@ const CLICK_REPAIR_PTY_SETTLE_MS = 64
 
 
 
+type PendingInputChunk = { data: string; bytes: number }
+
 type Entry = {
   paneId: string
   term: Terminal
@@ -60,7 +64,13 @@ type Entry = {
   daemonAttached: boolean
   dataWired: boolean
   sessionId?: string
-  pendingInput?: string[]
+  pendingInput?: PendingInputChunk[]
+  pendingInputBytes?: number
+  inputTrimNoticeWritten?: boolean
+  attachFailureNoticeWritten?: boolean
+  daemonGeneration: number
+  attachingSessionId?: string
+  inputFlush?: Promise<void>
   observer?: ResizeObserver
   fitFrame?: number
   rendererReloadPending?: boolean
@@ -181,7 +191,7 @@ class TerminalManagerImpl {
       return true
     })
 
-    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]) }
+    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]) }
     this.entries.set(paneId, entry)
     entry.linkDisposables = [
       term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
@@ -195,6 +205,11 @@ class TerminalManagerImpl {
     const entry = this.getOrCreate(paneId)
     const previousSessionId = entry.sessionId
     entry.sessionId = options.sessionId
+    if (previousSessionId && previousSessionId !== options.sessionId) {
+      entry.daemonGeneration += 1
+      entry.daemonAttached = false
+      entry.attachingSessionId = undefined
+    }
     entry.container = container
     entry.term.options.theme = terminalThemeById(this.settings.terminalThemeId)
     this.applyScrollbarVisibility(entry)
@@ -213,16 +228,7 @@ class TerminalManagerImpl {
       entry.term.onData((data) => {
         if (shouldTrackAgentInput(entry.term.buffer.active.type)) agentActivityTracker.noteUserInput(paneId, data)
         else agentActivityTracker.clear(paneId)
-        const sessionId = entry.sessionId
-        if (sessionId) {
-          void invoke('write_pane', { sessionId, paneId, data })
-          return
-        }
-        // No session yet (panel-first spawn): hold the input. Dropping it can
-        // hang the shell forever — ConPTY blocks the child on its startup DSR
-        // (ESC[6n) until xterm's CPR auto-reply is delivered.
-        entry.pendingInput ??= []
-        if (entry.pendingInput.length < MAX_PENDING_INPUT_CHUNKS) entry.pendingInput.push(data)
+        this.enqueueInput(entry, data)
       })
       entry.term.onResize(({ cols, rows }) => {
         const sessionId = entry.sessionId
@@ -242,14 +248,14 @@ class TerminalManagerImpl {
         : undefined
     }
 
-    if (options.sessionId && (!entry.daemonAttached || previousSessionId !== options.sessionId)) {
-      // Fit synchronously before the daemon attach so a scrollback replay
+    if (options.sessionId && previousSessionId !== options.sessionId) {
+      // Fit synchronously before the acknowledged daemon attach so replay
       // parses at the pane's real geometry instead of the constructor default.
       this.safeFit(entry)
-      entry.daemonAttached = true
-      void invoke('attach_pane', { sessionId: options.sessionId, paneId })
+      this.beginDaemonAttach(entry, options.sessionId)
+    } else if (options.sessionId && !entry.daemonAttached && entry.attachingSessionId !== options.sessionId) {
+      this.beginDaemonAttach(entry, options.sessionId)
     }
-    if (options.sessionId) this.flushPendingInput(entry)
 
     entry.observer?.disconnect()
     entry.observer = new ResizeObserver(() => this.scheduleLayoutPass({ paneIds: [paneId] }))
@@ -270,9 +276,7 @@ class TerminalManagerImpl {
       const entry = this.entries.get(paneId)
       if (!entry) continue
       entry.sessionId = sessionId
-      entry.daemonAttached = true
-      void invoke('attach_pane', { sessionId, paneId })
-      this.flushPendingInput(entry)
+      this.beginDaemonAttach(entry, sessionId)
     }
   }
 
@@ -321,16 +325,84 @@ class TerminalManagerImpl {
   }
 
 
-  /** Deliver input held while the pane had no session (panel-first spawn).
-   *  Chunks stay in emission order; the CPR reply to ConPTY's startup DSR
-   *  must reach the PTY or the child shell never starts. */
+  /** Queue every input chunk until attach and each daemon write are acknowledged.
+   *  The first chunk is removed only after its matching write succeeds. */
+  private enqueueInput(entry: Entry, data: string): void {
+    const bytes = inputEncoder.encode(data).byteLength
+    entry.pendingInput ??= []
+    const pendingBytes = entry.pendingInputBytes ?? 0
+    if (entry.pendingInput.length >= MAX_PENDING_INPUT_CHUNKS || pendingBytes + bytes > MAX_PENDING_INPUT_BYTES) {
+      if (!entry.inputTrimNoticeWritten) {
+        entry.term.write('\r\n\x1b[33m[input buffer full; additional input dropped]\x1b[0m\r\n')
+        entry.inputTrimNoticeWritten = true
+      }
+      return
+    }
+    entry.pendingInput.push({ data, bytes })
+    entry.pendingInputBytes = pendingBytes + bytes
+    this.flushPendingInput(entry)
+  }
+
+  private beginDaemonAttach(entry: Entry, sessionId: string): void {
+    entry.daemonGeneration += 1
+    const generation = entry.daemonGeneration
+    entry.daemonAttached = false
+    entry.attachingSessionId = sessionId
+    void invoke('attach_pane', { sessionId, paneId: entry.paneId }).then(() => {
+      const current = this.entries.get(entry.paneId)
+      if (current !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId) return
+      entry.attachingSessionId = undefined
+      entry.daemonAttached = true
+      entry.attachFailureNoticeWritten = false
+      this.flushPendingInput(entry)
+    }).catch(() => {
+      const current = this.entries.get(entry.paneId)
+      if (current !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId) return
+      entry.attachingSessionId = undefined
+      entry.daemonAttached = false
+      if (!entry.attachFailureNoticeWritten) {
+        entry.term.write('\r\n\x1b[33m[terminal attach failed; input retained for retry]\x1b[0m\r\n')
+        entry.attachFailureNoticeWritten = true
+      }
+    })
+  }
+
   private flushPendingInput(entry: Entry): void {
+    if (!entry.sessionId || !entry.daemonAttached || !entry.pendingInput?.length || entry.inputFlush) return
+    const generation = entry.daemonGeneration
     const sessionId = entry.sessionId
-    const pending = entry.pendingInput
-    if (!sessionId || !pending?.length) return
-    entry.pendingInput = undefined
-    for (const data of pending) {
-      void invoke('write_pane', { sessionId, paneId: entry.paneId, data })
+    const flush = this.flushInputLoop(entry, sessionId, generation)
+    entry.inputFlush = flush
+    void flush.finally(() => {
+      const current = this.entries.get(entry.paneId)
+      if (current !== entry || entry.inputFlush !== flush) return
+      entry.inputFlush = undefined
+      if (!entry.pendingInput?.length) entry.inputTrimNoticeWritten = false
+      else if (entry.daemonAttached) this.flushPendingInput(entry)
+    })
+  }
+
+  private async flushInputLoop(entry: Entry, sessionId: string, generation: number): Promise<void> {
+    while (entry.pendingInput?.length) {
+      if (this.entries.get(entry.paneId) !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId || !entry.daemonAttached) return
+      const chunk = entry.pendingInput[0]
+      try {
+        await invoke('write_pane', { sessionId, paneId: entry.paneId, data: chunk.data })
+      } catch {
+        if (this.entries.get(entry.paneId) === entry && entry.daemonGeneration === generation && entry.sessionId === sessionId) {
+          entry.daemonAttached = false
+          entry.attachingSessionId = undefined
+          if (!entry.attachFailureNoticeWritten) {
+            entry.term.write('\r\n\x1b[33m[terminal write failed; input retained for retry]\x1b[0m\r\n')
+            entry.attachFailureNoticeWritten = true
+          }
+        }
+        return
+      }
+      if (this.entries.get(entry.paneId) !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId || entry.pendingInput[0] !== chunk) return
+      entry.pendingInput.shift()
+      entry.pendingInputBytes = Math.max(0, (entry.pendingInputBytes ?? 0) - chunk.bytes)
+      if (entry.pendingInput.length === 0) entry.pendingInput = undefined
     }
   }
 

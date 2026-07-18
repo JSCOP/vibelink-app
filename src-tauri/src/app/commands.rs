@@ -427,12 +427,11 @@ pub async fn attach_pane(
         .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
-    client
-        .send(ClientToDaemon::AttachPane {
-            session_id,
-            pane_id,
-        })
-        .map_err(to_string)
+    expect_ok(client.request_reply(|req| ClientToDaemon::AttachPane {
+        req,
+        session_id,
+        pane_id,
+    }))
 }
 
 #[tauri::command]
@@ -448,13 +447,12 @@ pub async fn write_pane(
         .map_err(to_string)?;
     let session_id = parse_uuid(&session_id).map_err(to_string)?;
     let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
-    client
-        .send(ClientToDaemon::WritePane {
-            session_id,
-            pane_id,
-            data: data.into_bytes(),
-        })
-        .map_err(to_string)
+    expect_ok(client.request_reply(|req| ClientToDaemon::WritePane {
+        req,
+        session_id,
+        pane_id,
+        data: data.into_bytes(),
+    }))
 }
 
 #[tauri::command]

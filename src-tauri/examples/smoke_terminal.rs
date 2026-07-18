@@ -309,10 +309,18 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         other => bail!("unexpected spawn response: {other:?}"),
     }
 
-    daemon.send(&ClientToDaemon::AttachPane {
-        session_id,
-        pane_id,
-    })?;
+    match request_reply(
+        daemon,
+        3,
+        ClientToDaemon::AttachPane {
+            req: 3,
+            session_id,
+            pane_id,
+        },
+    )? {
+        ReplyResult::Ok => {}
+        other => bail!("unexpected attach response: {other:?}"),
+    }
     let output = collect_output(daemon, session_id, pane_id, &case.expected)
         .with_context(|| format!("capture output for {}", case.name))?;
     Ok(sample_output(&output))
@@ -360,6 +368,7 @@ fn collect_output(
                     .any(|window| window == b"\x1b[6n")
                 {
                     daemon.send(&ClientToDaemon::WritePane {
+                        req: 4,
                         session_id,
                         pane_id,
                         data: b"\x1b[1;1R".to_vec(),
@@ -377,6 +386,10 @@ fn collect_output(
                 }
                 break;
             }
+            Some(DaemonToClient::Reply {
+                req: 4,
+                result: ReplyResult::Ok,
+            }) => {}
             Some(DaemonToClient::Error { message, .. }) => bail!(message),
             Some(DaemonToClient::Output { .. } | DaemonToClient::PaneExited { .. }) => {}
             Some(other) => bail!("unexpected terminal frame: {other:?}"),

@@ -851,14 +851,16 @@ fn dispatch_message(
             )
         }
         ClientToDaemon::AttachPane {
+            req,
             session_id,
             pane_id,
         } => {
             info!(%client_id, %session_id, %pane_id, "attaching pane");
             lock_state(&state).attach_pane(client_id, session_id, pane_id)?;
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::WritePane {
+            req,
             session_id,
             pane_id,
             data,
@@ -870,7 +872,7 @@ fn dispatch_message(
             let mut writer = lock_mutex(&writer);
             writer.write_all(&data)?;
             writer.flush()?;
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::ResizePane {
             session_id,
@@ -1046,6 +1048,8 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::DeleteSession { req, .. }
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
+        | ClientToDaemon::AttachPane { req, .. }
+        | ClientToDaemon::WritePane { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
         | ClientToDaemon::SetPaneRole { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
@@ -1059,8 +1063,6 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::AuthorizationHeartbeat { .. }
         | ClientToDaemon::DetachSession { .. }
         | ClientToDaemon::SaveLayout { .. }
-        | ClientToDaemon::AttachPane { .. }
-        | ClientToDaemon::WritePane { .. }
         | ClientToDaemon::ResizePane { .. }
         | ClientToDaemon::NotifySessionChanged { .. } => None,
     }
@@ -1434,6 +1436,7 @@ mod tests {
     #[test]
     fn expired_entitlement_and_logout_fail_next_request_with_stable_codes() {
         let message = ClientToDaemon::WritePane {
+            req: 1,
             session_id: Uuid::new_v4(),
             pane_id: Uuid::new_v4(),
             data: b"whoami\r".to_vec(),
@@ -1581,6 +1584,29 @@ mod tests {
         };
 
         assert_eq!(request_id(&msg), Some(42));
+    }
+
+    #[test]
+    fn request_id_tracks_attach_and_write_acknowledgements() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        assert_eq!(
+            request_id(&ClientToDaemon::AttachPane {
+                req: 7,
+                session_id,
+                pane_id,
+            }),
+            Some(7)
+        );
+        assert_eq!(
+            request_id(&ClientToDaemon::WritePane {
+                req: 8,
+                session_id,
+                pane_id,
+                data: b"input".to_vec(),
+            }),
+            Some(8)
+        );
     }
 
     #[test]

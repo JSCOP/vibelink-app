@@ -142,13 +142,18 @@ fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {
             enter,
         } => {
             let data = write_payload(text, enter);
-            client.send(ClientToDaemon::WritePane {
+            match client.request_reply(|req| ClientToDaemon::WritePane {
+                req,
                 session_id,
                 pane_id,
                 data,
-            })?;
-            println!("{{\"ok\":true}}");
-            Ok(())
+            })? {
+                ReplyResult::Ok => {
+                    println!("{{\"ok\":true}}");
+                    Ok(())
+                }
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
         }
         CliCommand::AgentSend { session_id, prompt } => {
             match client.request_reply(|req| ClientToDaemon::TaskEvent {

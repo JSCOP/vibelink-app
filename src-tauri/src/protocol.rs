@@ -183,10 +183,12 @@ pub enum ClientToDaemon {
         attach: bool,
     },
     AttachPane {
+        req: Req,
         session_id: Uuid,
         pane_id: Uuid,
     },
     WritePane {
+        req: Req,
         session_id: Uuid,
         pane_id: Uuid,
         data: Vec<u8>,

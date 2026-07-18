@@ -188,11 +188,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 if index > 0 {
                     std::thread::sleep(Duration::from_millis(120));
                 }
-                client.send(ClientToDaemon::WritePane {
-                    session_id,
-                    pane_id,
-                    data: payload,
-                })?;
+                write_pane(client, session_id, pane_id, payload)?;
             }
             Ok(json!({ "ok": true }).to_string())
         }
@@ -310,17 +306,9 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 board.brief.as_ref().map(|brief| brief.purpose.as_str()),
             );
             let payloads = task_assign_payloads(&prompt);
-            client.send(ClientToDaemon::WritePane {
-                session_id,
-                pane_id,
-                data: payloads[0].clone(),
-            })?;
+            write_pane(client, session_id, pane_id, payloads[0].clone())?;
             std::thread::sleep(Duration::from_millis(120));
-            client.send(ClientToDaemon::WritePane {
-                session_id,
-                pane_id,
-                data: payloads[1].clone(),
-            })?;
+            write_pane(client, session_id, pane_id, payloads[1].clone())?;
             let updated = board_task_update_native(
                 &session_id.to_string(),
                 task_id,
@@ -634,11 +622,7 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
             if !write_to_existing && !created_id_set.contains(&pane.id) {
                 continue;
             }
-            client.send(ClientToDaemon::WritePane {
-                session_id,
-                pane_id: pane.id,
-                data: payload.clone(),
-            })?;
+            write_pane(client, session_id, pane.id, payload.clone())?;
             command_pane_ids.push(pane.id.to_string());
         }
     }
@@ -661,6 +645,18 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
 fn attached_panes(client: &DaemonClient, session_id: Uuid) -> Result<Vec<PaneMeta>> {
     match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
         ReplyResult::Attached { panes, .. } => Ok(panes),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn write_pane(client: &DaemonClient, session_id: Uuid, pane_id: Uuid, data: Vec<u8>) -> Result<()> {
+    match client.request_reply(|req| ClientToDaemon::WritePane {
+        req,
+        session_id,
+        pane_id,
+        data,
+    })? {
+        ReplyResult::Ok => Ok(()),
         other => bail!("unexpected daemon response: {other:?}"),
     }
 }

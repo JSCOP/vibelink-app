@@ -518,13 +518,20 @@ fn handle_client_message(
                 },
             )?;
             for pane in &ordered {
-                write_frame(
+                let req = take_req(next_req);
+                match request_reply(
                     daemon_writer,
-                    &ClientToDaemon::AttachPane {
+                    daemon_inbox,
+                    req,
+                    ClientToDaemon::AttachPane {
+                        req,
                         session_id,
                         pane_id: pane.id,
                     },
-                )?;
+                )? {
+                    ReplyResult::Ok => {}
+                    other => bail!("unexpected attach pane response: {other:?}"),
+                }
             }
             Ok(())
         }
@@ -548,14 +555,21 @@ fn handle_client_message(
                 return send_error(ws, "internal", "no workspace attached", req_id);
             };
             let pane_id = parse_uuid(&pane_id, ws, req_id)?;
-            write_frame(
+            let req = take_req(next_req);
+            match request_reply(
                 daemon_writer,
-                &ClientToDaemon::WritePane {
+                daemon_inbox,
+                req,
+                ClientToDaemon::WritePane {
+                    req,
                     session_id,
                     pane_id,
                     data: data.into_bytes(),
                 },
-            )?;
+            )? {
+                ReplyResult::Ok => {}
+                other => bail!("unexpected write pane response: {other:?}"),
+            }
             Ok(())
         }
         ClientMessage::RefreshPane { pane_id, req_id } => {
