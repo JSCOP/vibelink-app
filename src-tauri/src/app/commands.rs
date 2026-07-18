@@ -1,7 +1,7 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use super::license::LicenseService;
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
-use crate::remote::{PairingPayload, RemoteServer, RemoteStatus};
+use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteServer, RemoteStatus};
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::{ipc::Channel, State};
@@ -74,6 +74,14 @@ pub fn terminal_ws_port(client: State<'_, DaemonClient>) -> u16 {
 #[tauri::command]
 pub fn remote_get_status(remote: State<'_, Arc<RemoteServer>>) -> RemoteStatus {
     remote.status()
+}
+
+#[tauri::command]
+pub fn remote_get_pane_lease(
+    remote: State<'_, Arc<RemoteServer>>,
+    pane_id: String,
+) -> Result<Option<RemotePaneLeaseStatus>, String> {
+    remote.pane_lease(&pane_id).map_err(to_string)
 }
 
 #[tauri::command]

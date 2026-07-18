@@ -31,6 +31,7 @@ import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import { isAppLocked, requiresProWindow } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
+import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -162,6 +163,10 @@ function App() {
       onResponseComplete: (paneId) => useWorkspaceStore.getState().markPaneResponseComplete(paneId),
     })
     const unlisteners = [
+      listen<RemotePaneLeaseEvent>('remote://pane-lease', (event) => {
+        const lease = applyRemotePaneLeaseEvent(event.payload)
+        TerminalManager.setRemotePaneLease(event.payload.paneId, lease)
+      }),
       listen<{ mode: 'image' | 'quick' | 'video'; path: string }>('capture://saved', (event) => {
         const state = useWorkspaceStore.getState()
         state.recordCapture(state.activePaneId, event.payload.path)

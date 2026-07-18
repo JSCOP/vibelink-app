@@ -1257,24 +1257,6 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 }
 
 
-.remote-wide-badge {
-  background: color-mix(in srgb, var(--vibelink-blue) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--vibelink-blue) 48%, var(--vibelink-border-soft));
-  border-radius: 999px;
-  color: var(--vibelink-blue);
-  cursor: pointer;
-  flex: 0 0 auto;
-  font: 700 10px/1 var(--vibelink-sans);
-  height: 20px;
-  padding: 0 7px;
-  white-space: nowrap;
-}
-
-.remote-wide-badge:hover {
-  background: color-mix(in srgb, var(--vibelink-blue) 20%, transparent);
-  color: var(--vibelink-text);
-}
-
 .terminal-tab-actions {
   display: flex;
   flex: 0 0 auto;

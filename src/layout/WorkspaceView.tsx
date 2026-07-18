@@ -33,6 +33,8 @@ import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { ProLockedPanel } from '../components/ProLockedPanel'
 import { requiresProWindow } from '../state/licenseGate'
+import { useRemotePaneLeaseStore } from '../remote/paneLease'
+import { hideRemoteLeasedPane, paneIdsForSession, restoreRemoteLeasedPane, type RemotePaneVisibilityState } from './remotePaneVisibility'
 
 
 type WorkspaceViewProps = {
@@ -186,6 +188,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const terminalResizeDragRef = useRef<{ removeListeners: () => void } | null>(null)
   const terminalResizeHoverRef = useRef<{ pointer: ResizePointer; handle: ConnectedResizeHandle } | null>(null)
   const terminalDockLayoutFrameRef = useRef<number | undefined>()
+  const remotePaneVisibilityRef = useRef<RemotePaneVisibilityState[]>([])
+  const remoteLeaseActiveRef = useRef(false)
+  const remoteUnleasedTerminalLayoutRef = useRef<{ sessionId: string; layout: unknown } | null>(null)
   const [resizeHandles, setResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   // Preview state lives outside React state: a drag writes it per frame and
   // routing that through useState would reconcile both dockview trees per
@@ -207,6 +212,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const workspaceLayout = useWorkspaceStore((state) => activeSessionId ? state.workspaceLayouts[activeSessionId] : undefined)
   const activeLayoutPage = workspaceLayout ? activeWorkspaceLayoutPage(workspaceLayout) : null
   const activeLayoutPageId = activeLayoutPage?.id ?? null
+  const remotePaneLeases = useRemotePaneLeaseStore((state) => state.leases)
+  const remoteLeasedPaneIds = useMemo(() => paneIdsForSession(remotePaneLeases, activeSessionId), [activeSessionId, remotePaneLeases])
+  remoteLeaseActiveRef.current = remoteLeasedPaneIds.length > 0
 
   const paneList = useMemo(() => Object.values(panes), [panes])
 
@@ -216,7 +224,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const layout = windowApi.toJSON() as unknown as Record<string, unknown>
     const terminalApi = terminalApiRef.current
     if (terminalApi && terminalApi.totalPanels > 0 && isDockElementMeasurable(terminalDockRef.current)) {
-      layout.vibelinkTerminalLayout = terminalApi.toJSON()
+      const leaseSnapshot = remoteUnleasedTerminalLayoutRef.current
+      layout.vibelinkTerminalLayout = remoteLeaseActiveRef.current && leaseSnapshot?.sessionId === loadedSessionRef.current
+        ? leaseSnapshot.layout
+        : terminalApi.toJSON()
     } else if (pendingTerminalLayoutRef.current) {
       layout.vibelinkTerminalLayout = pendingTerminalLayoutRef.current
     }
@@ -285,7 +296,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   }, [clearResizeInteraction, clearTerminalResizeInteraction])
 
   const persistLayoutSoon = useCallback(() => {
-    if (interactiveResizeActive) return
+    if (interactiveResizeActive || remoteLeaseActiveRef.current) return
     const api = apiRef.current
     if (!api || !activeSessionId || suppressPanelRemovalRef.current || !isDockElementMeasurable(dockRef.current)) return
     window.clearTimeout(saveTimerRef.current)
@@ -293,7 +304,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const currentApi = apiRef.current
       const currentSessionId = useWorkspaceStore.getState().activeSessionId
       const currentPageId = currentSessionId ? useWorkspaceStore.getState().workspaceLayouts[currentSessionId]?.activePageId : null
-      if (!currentApi || !currentSessionId || !currentPageId || !isDockElementMeasurable(dockRef.current)) return
+      if (!currentApi || !currentSessionId || !currentPageId || remoteLeaseActiveRef.current || !isDockElementMeasurable(dockRef.current)) return
       // Serializing while maximized round-trips dockview through
       // exit/re-enter maximize and repaints every pane; retry after restore.
       if (currentApi.hasMaximizedGroup() || terminalApiRef.current?.hasMaximizedGroup()) return
@@ -347,6 +358,26 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       })
     })
   }, [layoutTerminalDockview])
+
+  const syncRemoteLeasedPanes = useCallback(() => {
+    const api = terminalApiRef.current
+    if (!api) return
+    void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+      for (const state of [...remotePaneVisibilityRef.current].reverse()) restoreRemoteLeasedPane(api, state)
+      remotePaneVisibilityRef.current = []
+      if (remoteLeasedPaneIds.length > 0 && activeSessionId && remoteUnleasedTerminalLayoutRef.current?.sessionId !== activeSessionId) {
+        remoteUnleasedTerminalLayoutRef.current = { sessionId: activeSessionId, layout: api.toJSON() }
+      }
+      for (const paneId of remoteLeasedPaneIds) {
+        const state = hideRemoteLeasedPane(api, paneId)
+        if (state) remotePaneVisibilityRef.current.push(state)
+      }
+      if (remoteLeasedPaneIds.length === 0) remoteUnleasedTerminalLayoutRef.current = null
+      layoutTerminalDockview(api)
+    }).then(() => {
+      if (remoteLeasedPaneIds.length === 0) persistLayoutSoon()
+    }).catch(() => undefined)
+  }, [activeSessionId, layoutTerminalDockview, persistLayoutSoon, remoteLeasedPaneIds])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
     api.addPanel({
@@ -1354,8 +1385,9 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       if (!api) return
       if (loadedTerminalPageRef.current === null) loadTerminalPaneLayout()
       else layoutTerminalDockview(api)
+      requestAnimationFrame(syncRemoteLeasedPanes)
     })
-  }, [layoutTerminalDockview, loadTerminalPaneLayout])
+  }, [layoutTerminalDockview, loadTerminalPaneLayout, syncRemoteLeasedPanes])
 
   const handleTerminalReady = useCallback((event: DockviewReadyEvent) => {
     terminalApiRef.current = event.api
@@ -1418,8 +1450,11 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       reflowTerminalsAfterLayout({ syncPty: true, recover: true })
     })
     loadedTerminalPageRef.current = null
-    requestAnimationFrame(() => loadTerminalPaneLayout())
-  }, [applyGridLayout, clearTerminalResizeInteraction, closePaneInStore, loadTerminalPaneLayout, persistLayoutSoon, refreshTerminalResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis])
+    requestAnimationFrame(() => {
+      loadTerminalPaneLayout()
+      requestAnimationFrame(syncRemoteLeasedPanes)
+    })
+  }, [applyGridLayout, clearTerminalResizeInteraction, closePaneInStore, loadTerminalPaneLayout, persistLayoutSoon, refreshTerminalResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, syncRemoteLeasedPanes])
 
   const terminalWindowBridge = useMemo<TerminalWindowBridge>(() => ({
     onReady: handleTerminalReady,
@@ -1497,6 +1532,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     loadedPageRef.current = null
     loadActiveSessionLayout()
   }, [clearResizeInteraction, closePaneInStore, layoutDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, syncChromeState])
+
+  useEffect(() => {
+    syncRemoteLeasedPanes()
+  }, [syncRemoteLeasedPanes])
 
   useEffect(() => {
     loadActiveSessionLayout()

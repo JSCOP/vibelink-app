@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const invokeMock = vi.hoisted(() => {
-  const invoke: (command: string, args?: Record<string, unknown>) => Promise<void> = () => Promise.resolve()
+  const invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> = () => Promise.resolve()
   return vi.fn(invoke)
 })
 
@@ -82,7 +82,6 @@ vi.mock('@xterm/addon-search', () => ({ SearchAddon: class {} }))
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: class {} }))
 
 import { TerminalManager } from './TerminalManager'
-import { useWorkspaceStore } from '../state/store'
 
 type TerminalWithDataHandler = {
   dataHandler: ((data: string) => void) | undefined
@@ -102,8 +101,8 @@ function makeContainer(): HTMLElement {
 }
 
 beforeEach(() => {
-  invokeMock.mockClear()
-  useWorkspaceStore.setState({ remoteWidePanes: {} })
+  invokeMock.mockReset()
+  invokeMock.mockResolvedValue(undefined)
 })
 
 class StubResizeObserver {
@@ -174,9 +173,9 @@ describe('TerminalManager pre-session input buffering', () => {
   })
 })
 
-describe('TerminalManager remote pane sizing', () => {
-  it('restores an oversized daemon resize to desktop fit geometry and syncs the PTY back', () => {
-    const paneId = 'pane-legacy-remote-wide'
+describe('TerminalManager remote pane leases', () => {
+  it('restores an unleased daemon resize to desktop fit geometry and syncs the PTY back', async () => {
+    const paneId = 'pane-unleased-resize'
     const container = makeContainer()
     TerminalManager.attach(paneId, container, { sessionId: 'session-wide' })
     const manager = TerminalManager as unknown as {
@@ -184,19 +183,34 @@ describe('TerminalManager remote pane sizing', () => {
     }
     const entry = manager.entries.get(paneId)
     if (!entry) throw new Error('missing remote resize entry')
-
     entry.term.resize(160, 48)
-    useWorkspaceStore.getState().setRemoteWide(paneId, { cols: 160, rows: 48 })
     invokeMock.mockClear()
 
     TerminalManager.adoptRemoteResize(paneId, 160, 48)
-
-    expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 80, rows: 24 })
-    expect(useWorkspaceStore.getState().remoteWidePanes[paneId]).toBeUndefined()
+    await vi.waitFor(() => expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 80, rows: 24 }))
     expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
       ['resize_pane', { sessionId: 'session-wide', paneId, cols: 80, rows: 24 }],
     ])
+    TerminalManager.dispose(paneId)
+  })
 
+  it('keeps leased remote geometry without fitting or syncing it back', async () => {
+    const paneId = 'pane-leased-resize'
+    invokeMock.mockImplementation(async (command) => command === 'remote_get_pane_lease'
+      ? { sessionId: 'session-mobile', paneId, cols: 48, rows: 27 }
+      : undefined)
+    const container = makeContainer()
+    TerminalManager.attach(paneId, container, { sessionId: 'session-mobile' })
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { cols: number; rows: number } }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing leased resize entry')
+    invokeMock.mockClear()
+
+    TerminalManager.adoptRemoteResize(paneId, 48, 27)
+    await vi.waitFor(() => expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 48, rows: 27 }))
+    expect(invokeMock.mock.calls.some(([command]) => command === 'resize_pane')).toBe(false)
     TerminalManager.dispose(paneId)
   })
 })
@@ -228,5 +242,26 @@ describe('TerminalManager pointer repair', () => {
 
     TerminalManager.dispose(paneId)
     vi.useRealTimers()
+  })
+})
+
+describe('TerminalManager recent output capture', () => {
+  it('returns only the requested tail lines', () => {
+    const paneId = 'pane-recent-output'
+    const manager = TerminalManager as unknown as { entries: Map<string, unknown> }
+    const lines = ['one', 'two', 'three', 'four']
+    manager.entries.set(paneId, {
+      term: {
+        buffer: {
+          active: {
+            length: lines.length,
+            getLine: (index: number) => ({ translateToString: () => lines[index] }),
+          },
+        },
+      },
+    })
+
+    expect(TerminalManager.getRecentOutput(paneId, 3)).toBe('two\nthree\nfour')
+    manager.entries.delete(paneId)
   })
 })

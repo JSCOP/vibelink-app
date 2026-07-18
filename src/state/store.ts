@@ -68,14 +68,12 @@ type WorkspaceState = {
   activePaneId?: string
   paneCompletionHighlights: Record<string, PaneCompletionHighlight>
   paneReviewMarkers: Record<string, PaneReviewMarker>
-  remoteWidePanes: Record<string, number>
   capturesByPane: Record<string, string[]>
   recentCaptures: string[]
   setActivePaneId: (paneId?: string) => void
   markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource) => void
   clearPaneCompletionHighlight: (paneId: string) => void
   togglePaneReviewed: (paneId: string) => void
-  setRemoteWide: (paneId: string, cols: number | null) => void
   recordCapture: (paneId: string | undefined, path: string) => void
   resolveCaptureMarker: (paneId: string, n: number) => string | undefined
   refreshLicense: () => Promise<LicenseStatus>
@@ -177,7 +175,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activePaneId: undefined,
   paneCompletionHighlights: {},
   paneReviewMarkers: loadPaneReviewMarkers(),
-  remoteWidePanes: {},
   capturesByPane: {},
   recentCaptures: [],
 
@@ -504,11 +501,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
   setActivePaneId: (paneId) => set({ activePaneId: paneId }),
-  setRemoteWide: (paneId, cols) => set((state) => ({
-    remoteWidePanes: cols === null
-      ? withoutPaneKey(state.remoteWidePanes, paneId)
-      : { ...state.remoteWidePanes, [paneId]: cols },
-  })),
   markPaneResponseComplete: (paneId, source = 'agent-response') => set((state) => {
     const pane = state.panes[paneId]
     const sessionId = state.activeSessionId

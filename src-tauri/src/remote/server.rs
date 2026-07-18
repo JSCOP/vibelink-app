@@ -1,10 +1,26 @@
-use super::{bridge, config::RemoteConfig, devices::{DevicePublic, DeviceStore, PairingInfo}, identity::RemoteIdentity, protocol::ServerMessage};
+use super::{
+    bridge,
+    config::RemoteConfig,
+    devices::{DevicePublic, DeviceStore, PairingInfo},
+    identity::RemoteIdentity,
+    protocol::ServerMessage,
+};
 use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::Sender;
 use local_ip_address::list_afinet_netifas;
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, net::{IpAddr, TcpListener}, path::PathBuf, sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, TcpListener},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 use tungstenite::Message;
 use uuid::Uuid;
 
@@ -29,11 +45,52 @@ pub struct PairingPayload {
     pub qr_payload: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseStatus {
+    pub session_id: String,
+    pub pane_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseEvent {
+    pub session_id: String,
+    pub pane_id: String,
+    pub leased: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PaneLease {
+    pub session_id: Uuid,
+    pub owner: Uuid,
+    pub original_cols: u16,
+    pub original_rows: u16,
+    pub target_cols: u16,
+    pub target_rows: u16,
+}
+
+impl PaneLease {
+    pub fn status(&self, pane_id: Uuid) -> RemotePaneLeaseStatus {
+        RemotePaneLeaseStatus {
+            session_id: self.session_id.to_string(),
+            pane_id: pane_id.to_string(),
+            cols: self.target_cols,
+            rows: self.target_rows,
+        }
+    }
+}
+
 struct Runtime {
     shutdown: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
-
 
 pub(crate) struct RemoteShared {
     pub devices: Mutex<DeviceStore>,
@@ -41,7 +98,15 @@ pub(crate) struct RemoteShared {
     pub workspace_order: RwLock<Vec<String>>,
     pub workspace_alerts: RwLock<HashMap<String, usize>>,
     pub client_senders: Mutex<HashMap<Uuid, Sender<Message>>>,
+    pub pane_leases: Mutex<HashMap<Uuid, PaneLease>>,
+    pane_lease_notifier: Arc<dyn Fn(RemotePaneLeaseEvent) + Send + Sync>,
     pub active_clients: AtomicUsize,
+}
+
+impl RemoteShared {
+    pub fn notify_pane_lease(&self, event: RemotePaneLeaseEvent) {
+        (self.pane_lease_notifier)(event);
+    }
 }
 
 pub struct RemoteServer {
@@ -54,6 +119,13 @@ pub struct RemoteServer {
 
 impl RemoteServer {
     pub fn new(data_dir: PathBuf) -> Result<Self> {
+        Self::new_with_pane_lease_notifier(data_dir, |_| {})
+    }
+
+    pub fn new_with_pane_lease_notifier<F>(data_dir: PathBuf, notifier: F) -> Result<Self>
+    where
+        F: Fn(RemotePaneLeaseEvent) + Send + Sync + 'static,
+    {
         let remote_dir = data_dir.join("remote");
         std::fs::create_dir_all(&remote_dir)?;
         let config_path = remote_dir.join("config.json");
@@ -72,23 +144,34 @@ impl RemoteServer {
                 workspace_order: RwLock::new(Vec::new()),
                 workspace_alerts: RwLock::new(HashMap::new()),
                 client_senders: Mutex::new(HashMap::new()),
+                pane_leases: Mutex::new(HashMap::new()),
+                pane_lease_notifier: Arc::new(notifier),
                 active_clients: AtomicUsize::new(0),
             }),
         })
     }
 
     pub fn start_if_enabled(&self) -> Result<()> {
-        if self.config.lock().expect("remote config mutex").enabled { self.start()?; }
+        if self.config.lock().expect("remote config mutex").enabled {
+            self.start()?;
+        }
         Ok(())
     }
 
     pub fn start(&self) -> Result<()> {
         let mut runtime = self.runtime.lock().expect("remote runtime mutex");
-        if runtime.is_some() { return Ok(()); }
+        if runtime.is_some() {
+            return Ok(());
+        }
         let port = self.config.lock().expect("remote config mutex").port;
-        let listener = TcpListener::bind(("0.0.0.0", port)).with_context(|| format!("bind remote access port {port}"))?;
+        let listener = TcpListener::bind(("0.0.0.0", port))
+            .with_context(|| format!("bind remote access port {port}"))?;
         listener.set_nonblocking(true)?;
-        let tls_config = self.identity.read().expect("remote identity lock").server_config()?;
+        let tls_config = self
+            .identity
+            .read()
+            .expect("remote identity lock")
+            .server_config()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_shutdown = Arc::clone(&shutdown);
         let shared = Arc::clone(&self.shared);
@@ -123,8 +206,17 @@ impl RemoteServer {
         let runtime = self.runtime.lock().expect("remote runtime mutex").take();
         if let Some(runtime) = runtime {
             runtime.shutdown.store(true, Ordering::Release);
-            let senders: Vec<_> = self.shared.client_senders.lock().expect("remote clients mutex").values().cloned().collect();
-            for sender in senders { let _ = sender.try_send(Message::Close(None)); }
+            let senders: Vec<_> = self
+                .shared
+                .client_senders
+                .lock()
+                .expect("remote clients mutex")
+                .values()
+                .cloned()
+                .collect();
+            for sender in senders {
+                let _ = sender.try_send(Message::Close(None));
+            }
             let _ = runtime.handle.join();
         }
     }
@@ -135,14 +227,27 @@ impl RemoteServer {
             enabled: config.enabled,
             running: self.runtime.lock().expect("remote runtime mutex").is_some(),
             port: config.port,
-            fingerprint: self.identity.read().expect("remote identity lock").fingerprint(),
+            fingerprint: self
+                .identity
+                .read()
+                .expect("remote identity lock")
+                .fingerprint(),
             hosts: local_hosts(),
-            devices: self.shared.devices.lock().expect("remote devices mutex").list_public(),
+            devices: self
+                .shared
+                .devices
+                .lock()
+                .expect("remote devices mutex")
+                .list_public(),
         }
     }
 
     pub fn set_enabled(&self, enabled: bool) -> Result<RemoteStatus> {
-        if enabled { self.start()?; } else { self.stop(); }
+        if enabled {
+            self.start()?;
+        } else {
+            self.stop();
+        }
         let mut config = self.config.lock().expect("remote config mutex");
         config.enabled = enabled;
         config.save(&self.config_path)?;
@@ -151,63 +256,145 @@ impl RemoteServer {
     }
 
     pub fn set_port(&self, port: u16) -> Result<RemoteStatus> {
-        if port < 1024 { return Err(anyhow!("remote port must be between 1024 and 65535")); }
+        if port < 1024 {
+            return Err(anyhow!("remote port must be between 1024 and 65535"));
+        }
         let was_running = self.runtime.lock().expect("remote runtime mutex").is_some();
-        if was_running { self.stop(); }
+        if was_running {
+            self.stop();
+        }
         {
             let mut config = self.config.lock().expect("remote config mutex");
             config.port = port;
             config.save(&self.config_path)?;
         }
-        if was_running { self.start()?; }
+        if was_running {
+            self.start()?;
+        }
         Ok(self.status())
     }
 
     pub fn create_pairing(&self) -> Result<PairingPayload> {
-        let PairingInfo { code, expires_at } = self.shared.devices.lock().expect("remote devices mutex").create_pairing_code();
+        let PairingInfo { code, expires_at } = self
+            .shared
+            .devices
+            .lock()
+            .expect("remote devices mutex")
+            .create_pairing_code();
         let status = self.status();
         let desktop_name = desktop_name();
         let qr_payload = serde_json::to_string(&serde_json::json!({
             "v": 1, "name": desktop_name, "hosts": status.hosts, "port": status.port,
             "fp": status.fingerprint, "code": code,
         }))?;
-        Ok(PairingPayload { code, expires_at, qr_payload })
+        Ok(PairingPayload {
+            code,
+            expires_at,
+            qr_payload,
+        })
     }
 
     pub fn revoke_device(&self, device_id: &str) -> Result<()> {
-        self.shared.devices.lock().expect("remote devices mutex").revoke(device_id)
+        self.shared
+            .devices
+            .lock()
+            .expect("remote devices mutex")
+            .revoke(device_id)
     }
 
     pub fn regenerate_identity(&self) -> Result<RemoteStatus> {
         let was_running = self.runtime.lock().expect("remote runtime mutex").is_some();
-        if was_running { self.stop(); }
-        self.identity.write().expect("remote identity lock").regenerate()?;
-        self.shared.devices.lock().expect("remote devices mutex").revoke_all()?;
-        if was_running { self.start()?; }
+        if was_running {
+            self.stop();
+        }
+        self.identity
+            .write()
+            .expect("remote identity lock")
+            .regenerate()?;
+        self.shared
+            .devices
+            .lock()
+            .expect("remote devices mutex")
+            .revoke_all()?;
+        if was_running {
+            self.start()?;
+        }
         Ok(self.status())
     }
 
-    pub fn set_appearance(&self, appearance: Value, workspace_order: Vec<String>, workspace_alerts: HashMap<String, usize>) {
-        *self.shared.appearance.write().expect("remote appearance lock") = appearance.clone();
-        *self.shared.workspace_order.write().expect("remote workspace order lock") = workspace_order;
-        *self.shared.workspace_alerts.write().expect("remote workspace alerts lock") = workspace_alerts;
-        let message = serde_json::to_string(&ServerMessage::Appearance { payload: appearance }).expect("serialize appearance");
-        let senders: Vec<_> = self.shared.client_senders.lock().expect("remote clients mutex").values().cloned().collect();
-        for sender in senders { let _ = sender.try_send(Message::Text(message.clone().into())); }
+    pub fn pane_lease(&self, pane_id: &str) -> Result<Option<RemotePaneLeaseStatus>> {
+        let pane_id = Uuid::parse_str(pane_id).context("parse pane lease id")?;
+        Ok(self
+            .shared
+            .pane_leases
+            .lock()
+            .expect("remote pane leases mutex")
+            .get(&pane_id)
+            .map(|lease| lease.status(pane_id)))
+    }
+
+    pub fn set_appearance(
+        &self,
+        appearance: Value,
+        workspace_order: Vec<String>,
+        workspace_alerts: HashMap<String, usize>,
+    ) {
+        *self
+            .shared
+            .appearance
+            .write()
+            .expect("remote appearance lock") = appearance.clone();
+        *self
+            .shared
+            .workspace_order
+            .write()
+            .expect("remote workspace order lock") = workspace_order;
+        *self
+            .shared
+            .workspace_alerts
+            .write()
+            .expect("remote workspace alerts lock") = workspace_alerts;
+        let message = serde_json::to_string(&ServerMessage::Appearance {
+            payload: appearance,
+        })
+        .expect("serialize appearance");
+        let senders: Vec<_> = self
+            .shared
+            .client_senders
+            .lock()
+            .expect("remote clients mutex")
+            .values()
+            .cloned()
+            .collect();
+        for sender in senders {
+            let _ = sender.try_send(Message::Text(message.clone().into()));
+        }
     }
 }
 
-impl Drop for RemoteServer { fn drop(&mut self) { self.stop(); } }
+impl Drop for RemoteServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 pub(crate) fn desktop_name() -> String {
-    sysinfo::System::host_name().filter(|name| !name.trim().is_empty()).unwrap_or_else(|| "VibeLink Desktop".to_string())
+    sysinfo::System::host_name()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "VibeLink Desktop".to_string())
 }
 
 pub(crate) fn local_hosts() -> Vec<String> {
-    let mut hosts: Vec<_> = list_afinet_netifas().unwrap_or_default().into_iter().filter_map(|(_, ip)| match ip {
-        IpAddr::V4(value) if !value.is_loopback() && !value.is_link_local() => Some(value.to_string()),
-        _ => None,
-    }).collect();
+    let mut hosts: Vec<_> = list_afinet_netifas()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, ip)| match ip {
+            IpAddr::V4(value) if !value.is_loopback() && !value.is_link_local() => {
+                Some(value.to_string())
+            }
+            _ => None,
+        })
+        .collect();
     hosts.sort();
     hosts.dedup();
     hosts
@@ -220,7 +407,8 @@ mod tests {
 
     #[test]
     fn server_binds_configured_port_and_reports_running() {
-        let directory = std::env::temp_dir().join(format!("vibelink-remote-server-{}", Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-remote-server-{}", Uuid::new_v4()));
         let probe = TcpListener::bind(("127.0.0.1", 0)).expect("reserve test port");
         let port = probe.local_addr().expect("probe address").port();
         drop(probe);
@@ -228,7 +416,11 @@ mod tests {
         server.set_port(port).expect("set remote port");
         server.start().expect("start remote server");
         assert!(server.status().running);
-        TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_secs(1)).expect("connect remote listener");
+        TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse().unwrap(),
+            Duration::from_secs(1),
+        )
+        .expect("connect remote listener");
         server.stop();
         assert!(!server.status().running);
         let _ = std::fs::remove_dir_all(directory);

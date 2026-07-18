@@ -7,14 +7,22 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const SUBPROTOCOL: &str = "vibelink-remote-v1";
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "mode", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "mode",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AuthRequest {
     Pair { code: String, device_name: String },
     Token { device_id: String, token: String },
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ClientMessage {
     Hello {
         protocol_version: u16,
@@ -45,14 +53,14 @@ pub enum ClientMessage {
         #[serde(default)]
         req_id: Option<u64>,
     },
-    SetPaneSize {
+    ClaimPane {
         pane_id: String,
         cols: u16,
         rows: u16,
         #[serde(default)]
         req_id: Option<u64>,
     },
-    ClearPaneSize {
+    ReleasePane {
         pane_id: String,
         #[serde(default)]
         req_id: Option<u64>,
@@ -115,7 +123,11 @@ impl From<&PaneMeta> for PaneDto {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerMessage {
     Authed {
         device_id: String,
@@ -151,6 +163,16 @@ pub enum ServerMessage {
         pane_id: String,
         cols: u16,
         rows: u16,
+    },
+    PaneLease {
+        pane_id: String,
+        leased: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<u64>,
     },
     PaneExited {
         pane_id: String,
@@ -202,32 +224,36 @@ mod tests {
             r#"{"type":"hello","protocolVersion":1,"auth":{"mode":"pair","code":"12345678","deviceName":"Phone"}}"#,
         )
         .expect("parse hello");
-        assert!(matches!(parsed, ClientMessage::Hello { protocol_version: 1, .. }));
+        assert!(matches!(
+            parsed,
+            ClientMessage::Hello {
+                protocol_version: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn pane_size_messages_and_unknown_types_are_additive() {
-        let set: ClientMessage = serde_json::from_str(
-            r#"{"type":"setPaneSize","paneId":"pane-1","cols":200,"rows":32}"#,
-        )
-        .expect("parse set pane size");
+    fn pane_lease_messages_and_unknown_types_are_additive() {
+        let claim: ClientMessage =
+            serde_json::from_str(r#"{"type":"claimPane","paneId":"pane-1","cols":52,"rows":38}"#)
+                .expect("parse pane claim");
         assert!(matches!(
-            set,
-            ClientMessage::SetPaneSize {
+            claim,
+            ClientMessage::ClaimPane {
                 pane_id,
-                cols: 200,
-                rows: 32,
+                cols: 52,
+                rows: 38,
                 req_id: None,
             } if pane_id == "pane-1"
         ));
 
-        let clear: ClientMessage = serde_json::from_str(
-            r#"{"type":"clearPaneSize","paneId":"pane-1"}"#,
-        )
-        .expect("parse clear pane size");
+        let release: ClientMessage =
+            serde_json::from_str(r#"{"type":"releasePane","paneId":"pane-1"}"#)
+                .expect("parse pane release");
         assert!(matches!(
-            clear,
-            ClientMessage::ClearPaneSize { pane_id, req_id: None } if pane_id == "pane-1"
+            release,
+            ClientMessage::ReleasePane { pane_id, req_id: None } if pane_id == "pane-1"
         ));
 
         let unknown: ClientMessage =
@@ -251,9 +277,16 @@ mod tests {
 
     #[test]
     fn workspace_alert_count_uses_camel_case_contract() {
-        let workspace = WorkspaceDto::from_session(SessionMeta {
-            id: uuid::Uuid::new_v4(), name: "VibeLink".into(), pane_count: 2, created_at: 1, workspace_folder: None,
-        }, 3);
+        let workspace = WorkspaceDto::from_session(
+            SessionMeta {
+                id: uuid::Uuid::new_v4(),
+                name: "VibeLink".into(),
+                pane_count: 2,
+                created_at: 1,
+                workspace_folder: None,
+            },
+            3,
+        );
         let value = serde_json::to_value(workspace).expect("serialize workspace");
         assert_eq!(value["alertCount"], 3);
     }

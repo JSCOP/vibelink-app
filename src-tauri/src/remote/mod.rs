@@ -7,4 +7,4 @@ mod layout_order;
 pub mod protocol;
 mod server;
 
-pub use server::{PairingPayload, RemoteServer, RemoteStatus};
+pub use server::{PairingPayload, RemotePaneLeaseStatus, RemoteServer, RemoteStatus};

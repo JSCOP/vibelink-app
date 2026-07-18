@@ -1,14 +1,10 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup } from '@testing-library/react'
 import { WorkspaceActionsContext, type WorkspaceActions } from '../layout/actions'
 import { normalizeSettings, defaultSettings } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
-const exitRemoteWideMock = vi.hoisted(() => vi.fn())
-vi.mock('../terminal/TerminalManager', () => ({
-  TerminalManager: { exitRemoteWide: exitRemoteWideMock },
-}))
 
 import { TerminalTab } from './TerminalTab'
 
@@ -35,7 +31,6 @@ function renderTerminalTab() {
   useWorkspaceStore.setState({
     settings: normalizeSettings(defaultSettings),
     paneReviewMarkers: {},
-    remoteWidePanes: {},
   })
 
   return renderToStaticMarkup(
@@ -66,20 +61,4 @@ describe('TerminalTab', () => {
     expect(html).toContain('class="terminal-tab-title"')
   })
 
-
-  test('renders the remote wide badge and restores the pane on click', () => {
-    useWorkspaceStore.setState({
-      settings: normalizeSettings(defaultSettings),
-      paneReviewMarkers: {},
-      remoteWidePanes: { 'pane-1': 160 },
-    })
-    render(
-      <WorkspaceActionsContext.Provider value={actions}>
-        <TerminalTab api={api as never} containerApi={{} as never} tabLocation="header" params={{ paneId: 'pane-1', title: 'Hermes CLI', icon: 'terminal' }} />
-      </WorkspaceActionsContext.Provider>,
-    )
-
-    fireEvent.click(screen.getByTitle('모바일 와이드 뷰 사용 중 — 클릭하면 원래 크기로 복원'))
-    expect(exitRemoteWideMock).toHaveBeenCalledWith('pane-1')
-  })
 })

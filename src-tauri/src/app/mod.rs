@@ -15,7 +15,7 @@ mod window_chrome;
 use daemon_client::DaemonClient;
 use crate::remote::RemoteServer;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub struct KeepAlivePrefs(pub std::sync::atomic::AtomicBool);
 
@@ -44,18 +44,28 @@ pub fn run() {
             })?;
             app.manage(DaemonClient::new(stream));
             app.manage(Arc::new(hermes::HermesManager::new()));
-            app.manage(Arc::new(license::LicenseService::new().map_err(|error| {
-                let boxed: Box<dyn std::error::Error> = error.into();
-                boxed
-            })?));
-            let data_dir = crate::daemon::paths::daemon_paths().map_err(|error| {
-                let boxed: Box<dyn std::error::Error> = error.into();
-                boxed
-            })?.data_dir;
-            let remote = Arc::new(RemoteServer::new(data_dir).map_err(|error| {
-                let boxed: Box<dyn std::error::Error> = error.into();
-                boxed
-            })?);
+            app.manage(Arc::new(license::LicenseService::new().map_err(
+                |error| {
+                    let boxed: Box<dyn std::error::Error> = error.into();
+                    boxed
+                },
+            )?));
+            let data_dir = crate::daemon::paths::daemon_paths()
+                .map_err(|error| {
+                    let boxed: Box<dyn std::error::Error> = error.into();
+                    boxed
+                })?
+                .data_dir;
+            let app_handle = app.handle().clone();
+            let remote = Arc::new(
+                RemoteServer::new_with_pane_lease_notifier(data_dir, move |event| {
+                    let _ = app_handle.emit("remote://pane-lease", event);
+                })
+                .map_err(|error| {
+                    let boxed: Box<dyn std::error::Error> = error.into();
+                    boxed
+                })?,
+            );
             if let Err(error) = remote.start_if_enabled() {
                 tracing::warn!(?error, "remote access auto-start failed");
             }
@@ -85,6 +95,7 @@ pub fn run() {
             commands::init_terminal_output,
             commands::terminal_ws_port,
             commands::remote_get_status,
+            commands::remote_get_pane_lease,
             commands::remote_set_enabled,
             commands::remote_set_port,
             commands::remote_create_pairing,

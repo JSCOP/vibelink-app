@@ -13,7 +13,7 @@ import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
 import { agentActivityTracker, shouldTrackAgentInput, type AgentActivityActions } from './agentActivity'
-import { useWorkspaceStore } from '../state/store'
+import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
@@ -79,6 +79,8 @@ type Entry = {
   lastFitRect?: { width: number; height: number }
   lastSentPtyCols?: number
   lastSentPtyRows?: number
+  remoteLease?: boolean
+  remoteResizeGeneration?: number
   container?: HTMLElement
   titleDisposable?: { dispose: () => void }
   linkDisposables?: { dispose(): void }[]
@@ -179,7 +181,7 @@ class TerminalManagerImpl {
       return true
     })
 
-    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false }
+    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]) }
     this.entries.set(paneId, entry)
     entry.linkDisposables = [
       term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
@@ -275,28 +277,49 @@ class TerminalManagerImpl {
   }
 
   adoptRemoteResize(paneId: string, cols: number, rows: number): void {
-    useWorkspaceStore.getState().setRemoteWide(paneId, null)
+    const entry = this.entries.get(paneId)
+    const generation = (entry?.remoteResizeGeneration ?? 0) + 1
+    if (entry) entry.remoteResizeGeneration = generation
+    void refreshRemotePaneLease(paneId).then((lease) => {
+      const current = this.entries.get(paneId)
+      if (!current || current.remoteResizeGeneration !== generation) return
+      if (lease) {
+        current.remoteLease = true
+        current.lastSentPtyCols = cols
+        current.lastSentPtyRows = rows
+        if (current.term.cols !== cols || current.term.rows !== rows) current.term.resize(cols, rows)
+        this.redrawAfterNextFrame(current)
+        return
+      }
+      current.remoteLease = false
+      current.lastSentPtyCols = undefined
+      current.lastSentPtyRows = undefined
+      this.restoreDesktopFit(current)
+    }).catch(() => {
+      const current = this.entries.get(paneId)
+      if (!current || current.remoteResizeGeneration !== generation || current.remoteLease) return
+      current.lastSentPtyCols = undefined
+      current.lastSentPtyRows = undefined
+      this.restoreDesktopFit(current)
+    })
+  }
+
+  setRemotePaneLease(paneId: string, lease: RemotePaneLeaseStatus | null): void {
     const entry = this.entries.get(paneId)
     if (!entry) return
-    const proposal = entry.fit.proposeDimensions()
-    if (!proposal || cols !== proposal.cols || rows !== proposal.rows) {
-      // A daemon resize can originate from a legacy remote peer. The desktop
-      // container remains authoritative, so invalidate the last-sent cache and
-      // force the fitted geometry back to the shared PTY.
-      entry.lastSentPtyCols = undefined
-      entry.lastSentPtyRows = undefined
+    entry.remoteLease = lease !== null
+    entry.lastSentPtyCols = undefined
+    entry.lastSentPtyRows = undefined
+    if (lease) {
+      clearTimeout(entry.clickRepairTimer)
+      entry.clickRepairTimer = undefined
+      if (entry.term.cols !== lease.cols || entry.term.rows !== lease.rows) entry.term.resize(lease.cols, lease.rows)
+      this.redrawAfterNextFrame(entry)
+      return
     }
     this.restoreDesktopFit(entry)
   }
 
-  exitRemoteWide(paneId: string): void {
-    useWorkspaceStore.getState().setRemoteWide(paneId, null)
-    const entry = this.entries.get(paneId)
-    if (!entry) return
-    entry.lastSentPtyCols = undefined
-    entry.lastSentPtyRows = undefined
-    this.restoreDesktopFit(entry)
-  }
 
   /** Deliver input held while the pane had no session (panel-first spawn).
    *  Chunks stay in emission order; the CPR reply to ConPTY's startup DSR
@@ -384,6 +407,18 @@ class TerminalManagerImpl {
     return this.entries.get(paneId)?.term.getSelection() ?? ''
   }
 
+  getRecentOutput(paneId: string, maxLines: number): string {
+    const entry = this.entries.get(paneId)
+    if (!entry || maxLines <= 0) return ''
+    const buffer = entry.term.buffer.active
+    const firstLine = Math.max(0, buffer.length - Math.floor(maxLines))
+    const lines: string[] = []
+    for (let index = firstLine; index < buffer.length; index += 1) {
+      lines.push(buffer.getLine(index)?.translateToString(true) ?? '')
+    }
+    return lines.join('\n').replace(/^\s+/, '')
+  }
+
   selectAll(paneId: string): void {
     this.entries.get(paneId)?.term.selectAll()
   }
@@ -445,6 +480,7 @@ class TerminalManagerImpl {
   repairAfterPointerActivation(paneId: string): void {
     const entry = this.entries.get(paneId)
     if (!entry?.opened || !entry.container) return
+    if (entry.remoteLease) return
     if (entry.term.hasSelection()) return
 
     const now = Date.now()
@@ -537,7 +573,6 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     agentActivityTracker.clear(paneId)
-    useWorkspaceStore.getState().setRemoteWide(paneId, null)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     this.pendingPass.delete(paneId)
@@ -623,6 +658,7 @@ class TerminalManagerImpl {
   // the content — so every fit path must go through this guard, not entry.fit.fit()
   // directly. Returns true when a fit was applied (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
+    if (entry.remoteLease) return true
     const proposed = entry.fit.proposeDimensions()
     if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
     if (force || entry.term.cols !== proposed.cols || entry.term.rows !== proposed.rows) entry.fit.fit()
@@ -884,6 +920,7 @@ class TerminalManagerImpl {
   }
 
   private syncEntryPtySize(entry: Entry): void {
+    if (entry.remoteLease) return
     const sessionId = entry.sessionId
     if (!sessionId || !entry.opened) return
     this.flushOutput(entry)
