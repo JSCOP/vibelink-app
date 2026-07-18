@@ -28,6 +28,7 @@ import { vibelinkDockviewTheme } from './dockviewTheme'
 import { waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
+import { GitWindow } from '../components/git/GitWindow'
 import { OrchestratorChat } from '../components/OrchestratorChat'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { ErrorBoundary } from '../components/ErrorBoundary'
@@ -72,6 +73,7 @@ const components = {
   agent: AgentWindowPanel,
   kanban: KanbanWindowPanel,
   diff: DiffWindowPanel,
+  gitWindow: GitWindowPanel,
   todo: TodoWindowPanel,
   placeholder: PlaceholderPanel,
 }
@@ -162,6 +164,14 @@ function DiffWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-diff">
       <ProPanelBoundary feature="Task diff"><ErrorBoundary label="Diff panel"><TaskDiffView /></ErrorBoundary></ProPanelBoundary>
+    </WindowPanelShell>
+  )
+}
+
+function GitWindowPanel(props: IDockviewPanelProps) {
+  return (
+    <WindowPanelShell panelId={props.api.id} className="workspace-window-git">
+      <ProPanelBoundary feature="Git"><ErrorBoundary label="Git panel"><GitWindow /></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }

@@ -1,6 +1,6 @@
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 
-export type WorkspaceWindowKind = 'terminal' | 'agent' | 'kanban' | 'diff' | 'todo'
+export type WorkspaceWindowKind = 'terminal' | 'agent' | 'kanban' | 'diff' | 'todo' | 'git' | 'explorer'
 
 export type WorkspaceLayoutPage = {
   id: string
@@ -76,6 +76,22 @@ export const workspaceWindowDescriptors: Record<WorkspaceWindowKind, WorkspaceWi
     component: 'diff',
     title: 'Diff',
     icon: 'git-compare',
+    singleton: true,
+  },
+  git: {
+    kind: 'git',
+    panelId: 'git',
+    component: 'gitWindow',
+    title: 'Git',
+    icon: 'git-branch',
+    singleton: true,
+  },
+  explorer: {
+    kind: 'explorer',
+    panelId: 'explorer',
+    component: 'explorerWindow',
+    title: 'Explorer',
+    icon: 'folder-tree',
     singleton: true,
   },
   todo: {

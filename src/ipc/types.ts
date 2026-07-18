@@ -77,6 +77,80 @@ export type FileContents = { old: string; new: string; binary: boolean }
 
 export type WorktreeInfo = { worktreePath: string; branch: string }
 
+export type RepoState = 'clean' | 'merging' | 'rebasing' | 'cherryPicking' | 'reverting'
+
+export type RemoteInfo = { name: string; url: string }
+
+export type RepoInfo = {
+  isRepo: boolean
+  root: string | null
+  branch: string | null
+  detachedSha: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  state: RepoState
+  remotes: RemoteInfo[]
+}
+
+export type StatusEntry = { path: string; oldPath: string | null; changeType: ChangeType }
+
+export type WorkingStatus = {
+  staged: StatusEntry[]
+  unstaged: StatusEntry[]
+  untracked: StatusEntry[]
+  conflicted: StatusEntry[]
+  truncated: boolean
+}
+
+export type LogOptions = {
+  refName?: string | null
+  path?: string | null
+  skip: number
+  limit: number
+  search?: string | null
+  author?: string | null
+}
+
+export type CommitInfo = {
+  sha: string
+  parents: string[]
+  refs: string[]
+  authorName: string
+  authorEmail: string
+  authorDate: string
+  subject: string
+}
+
+export type LogPage = { commits: CommitInfo[]; hasMore: boolean }
+
+export type CommitDetail = {
+  sha: string
+  parents: string[]
+  authorName: string
+  authorEmail: string
+  authorDate: string
+  committerName: string
+  committerDate: string
+  body: string
+  files: ChangedFile[]
+}
+
+export type BranchInfo = {
+  name: string
+  isHead: boolean
+  isRemote: boolean
+  upstream: string | null
+  ahead: number
+  behind: number
+  lastCommitSubject: string
+  lastCommitDate: string
+}
+
+export type StashInfo = { index: number; message: string }
+export type TagInfo = { name: string; sha: string; message: string | null }
+export type CloneProgress = { line: string; done: boolean }
+
 export type HermesConfiguredModel = { provider: string; model: string; baseUrl?: string | null }
 
 export type HermesWorkspaceState = { home: string; workspaceFolder: string; model: HermesConfiguredModel | null }

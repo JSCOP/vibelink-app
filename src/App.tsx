@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Camera, Ellipsis, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Camera, Ellipsis, GitBranch, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
@@ -24,6 +24,7 @@ import { startTerminalOutputStream } from './ipc/output'
 import { getHermesRuntimeStatus, startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import type { HermesRuntimeStatus } from './ipc/types'
 import { paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
+import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
@@ -157,6 +158,13 @@ function App() {
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [appLocked, revalidateLicense])
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSession?.workspaceFolder) return
+    const onFocus = () => { void useGitStore.getState().refreshGit(activeSessionId, activeSession.workspaceFolder) }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [activeSessionId, activeSession?.workspaceFolder])
 
   useEffect(() => {
     TerminalManager.setLinkActions({
@@ -520,6 +528,9 @@ function App() {
                 </button>
                 <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('todo')}>
                   <ListTodo size={14} /> Todo List
+                </button>
+                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('git')}>
+                  <GitBranch size={14} /> Git
                 </button>
                 <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('diff')}>
                   <GitCompare size={14} /> Diff

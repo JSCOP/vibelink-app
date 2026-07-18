@@ -1,0 +1,100 @@
+import { useState, type CSSProperties } from 'react'
+import ReactDiffViewer from 'react-diff-viewer-continued'
+import type { ChangedFile, FileContents } from '../../ipc/types'
+
+export type DiffPaneProps = {
+  files: ChangedFile[]
+  selectedPath: string | null
+  onSelect: (path: string) => void
+  contents: FileContents | null
+  loading: boolean
+  splitView: boolean
+  title?: string
+  error?: string | null
+  onOpenInEditor?: (() => void) | null
+  hideFileList?: boolean
+}
+
+export function DiffPane({ files, selectedPath, onSelect, contents, loading, splitView, title, error = null, onOpenInEditor = null, hideFileList = false }: DiffPaneProps) {
+  const [listWidth, setListWidth] = useState(260)
+
+  const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const startX = event.clientX
+    const startWidth = listWidth
+    const move = (moveEvent: PointerEvent) => setListWidth(Math.max(180, Math.min(520, startWidth + moveEvent.clientX - startX)))
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  const showSelectHint = hideFileList && !selectedPath
+
+  return (
+    <div className="task-diff-view git-diff-pane" style={{ '--file-list-width': `${listWidth}px` } as CSSProperties}>
+      {!hideFileList ? (
+        <>
+          <aside className="task-diff-files git-diff-files">
+            {title ? <h3>{title}</h3> : null}
+            {error ? <div className="kanban-error">{error}</div> : null}
+            {files.map((file) => (
+              <button
+                key={`${file.changeType}:${file.path}`}
+                type="button"
+                className={selectedPath === file.path ? 'active' : undefined}
+                title={file.oldPath ? `${file.path} (from ${file.oldPath})` : file.path}
+                onClick={() => onSelect(file.path)}
+              >
+                <span>{file.changeType}</span>
+                {file.path}
+              </button>
+            ))}
+          </aside>
+          <div className="task-diff-resizer git-diff-resizer" role="separator" aria-orientation="vertical" onPointerDown={startResize} />
+        </>
+      ) : null}
+      <main className="task-diff-content git-diff-content">
+        {loading ? <div className="task-diff-empty git-diff-empty">Loading diff…</div> : null}
+        {!loading && contents?.binary ? <div className="task-diff-empty git-diff-empty">binary — not shown</div> : null}
+        {!loading && error && !contents ? (
+          <div className="task-diff-empty git-diff-empty">
+            {error}
+            {onOpenInEditor ? <button type="button" onClick={onOpenInEditor}>Open in editor</button> : null}
+          </div>
+        ) : null}
+        {!loading && !error && !contents && showSelectHint ? (
+          <div className="task-diff-empty git-diff-empty">Select a file to view its diff.</div>
+        ) : null}
+        {!loading && contents && !contents.binary ? (
+          <ReactDiffViewer oldValue={contents.old} newValue={contents.new} splitView={splitView} useDarkTheme styles={diffStyles} />
+        ) : null}
+      </main>
+    </div>
+  )
+}
+
+export const diffStyles = {
+  variables: {
+    dark: {
+      diffViewerBackground: 'var(--vibelink-bg)',
+      diffViewerColor: 'var(--vibelink-text)',
+      addedBackground: 'rgba(46, 160, 67, 0.18)',
+      removedBackground: 'rgba(248, 81, 73, 0.18)',
+      wordAddedBackground: 'rgba(46, 160, 67, 0.35)',
+      wordRemovedBackground: 'rgba(248, 81, 73, 0.35)',
+      gutterBackground: 'var(--vibelink-panel)',
+      gutterBackgroundDark: 'var(--vibelink-panel)',
+      highlightBackground: 'var(--vibelink-input)',
+      codeFoldGutterBackground: 'var(--vibelink-panel)',
+      codeFoldBackground: 'var(--vibelink-panel)',
+      emptyLineBackground: 'var(--vibelink-bg)',
+      gutterColor: 'var(--vibelink-muted)',
+      addedGutterBackground: 'rgba(46, 160, 67, 0.18)',
+      removedGutterBackground: 'rgba(248, 81, 73, 0.18)',
+      codeFoldContentColor: 'var(--vibelink-muted)',
+    },
+  },
+}
