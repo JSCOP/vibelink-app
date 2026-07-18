@@ -13,6 +13,7 @@ export type TerminalGridLaunchRequest = {
 
 export type WorkspaceWindowActions = {
   activateWindow: (panelId: string) => void
+  openWindow: (kind: WorkspaceWindowKind) => Promise<void>
   splitTerminal: (paneId: string, direction: SplitDirection) => Promise<void>
   closeWindow: (panelId: string) => Promise<void>
   toggleMaximize: (panelId: string) => void

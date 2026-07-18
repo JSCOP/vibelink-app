@@ -64,6 +64,7 @@ export type Settings = {
   rolePresets: string[]
   keybindings: KeybindingSettings
   hermesCommand: string
+  externalEditorCommand: string
   chatPersonality: ChatPersonality
   chatReasoningBlocks: boolean
   chatToolCalls: boolean
@@ -229,6 +230,7 @@ export const defaultSettings: Settings = {
   paneRoles: {},
   workspaceOrder: [],
   hermesCommand: '',
+  externalEditorCommand: 'code',
   rolePresets: ['Planner', 'Frontend', 'Backend', 'Reviewer', 'Tester', 'Docs'],
   chatPersonality: 'direct',
   chatReasoningBlocks: true,
@@ -277,6 +279,7 @@ export function normalizeSettings(value: unknown): Settings {
     paneRoles,
     workspaceOrder,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
+    externalEditorCommand: readString(record?.externalEditorCommand, defaultSettings.externalEditorCommand),
     chatPersonality: readChatPersonality(record?.chatPersonality),
     rolePresets,
     chatReasoningBlocks: readBoolean(record?.chatReasoningBlocks, defaultSettings.chatReasoningBlocks),

@@ -3,6 +3,7 @@ pub mod board;
 pub mod capture;
 pub mod commands;
 pub mod daemon_client;
+pub mod fsops;
 pub mod git;
 pub mod hermes;
 pub mod license;
@@ -12,8 +13,8 @@ pub mod spawn_daemon;
 #[cfg(windows)]
 mod window_chrome;
 
-use daemon_client::DaemonClient;
 use crate::remote::RemoteServer;
+use daemon_client::DaemonClient;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
@@ -128,10 +129,19 @@ pub fn run() {
             license::account_sign_in_start,
             license::account_sign_in_poll,
             license::account_sign_out,
+            fsops::fs_create_dir,
+            fsops::fs_create_file,
+            fsops::fs_delete,
+            fsops::fs_list_dir,
+            fsops::fs_read_image,
+            fsops::fs_read_text,
+            fsops::fs_rename,
+            fsops::open_in_editor,
             git::branch::git_branch_create,
             git::branch::git_branch_delete,
             git::branch::git_branch_rename,
             git::branch::git_branches,
+            git::status::git_check_ignored,
             git::git_changed_files,
             git::branch::git_checkout,
             git::remote::git_clone,

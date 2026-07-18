@@ -29,6 +29,7 @@ import { waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { GitWindow } from '../components/git/GitWindow'
+import { ExplorerWindow } from '../components/explorer/ExplorerWindow'
 import { OrchestratorChat } from '../components/OrchestratorChat'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { ErrorBoundary } from '../components/ErrorBoundary'
@@ -74,6 +75,7 @@ const components = {
   kanban: KanbanWindowPanel,
   diff: DiffWindowPanel,
   gitWindow: GitWindowPanel,
+  explorerWindow: ExplorerWindowPanel,
   todo: TodoWindowPanel,
   placeholder: PlaceholderPanel,
 }
@@ -172,6 +174,16 @@ function GitWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-git">
       <ProPanelBoundary feature="Git"><ErrorBoundary label="Git panel"><GitWindow /></ErrorBoundary></ProPanelBoundary>
+    </WindowPanelShell>
+  )
+}
+
+function ExplorerWindowPanel(props: IDockviewPanelProps) {
+  const sessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const workspaceFolder = useWorkspaceStore((state) => state.sessions.find((session) => session.id === state.activeSessionId)?.workspaceFolder ?? null)
+  return (
+    <WindowPanelShell panelId={props.api.id} className="workspace-window-explorer">
+      <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <ExplorerWindow sessionId={sessionId} workspaceFolder={workspaceFolder} /> : <div className="placeholder-panel">Select a local workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -1344,6 +1356,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
 
   const windowActions = useMemo<WorkspaceWindowActions>(() => ({
     activateWindow: activatePane,
+    openWindow: (kind) => openWorkspaceWindow(kind),
     splitTerminal: splitPane,
     closeWindow,
     toggleMaximize,
@@ -1354,7 +1367,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     arrangeTerminals: (grid) => { void arrangePanes(grid) },
     launchTerminalGrid,
     getTerminalLayoutSnapshot: () => terminalApiRef.current?.toJSON() ?? null,
-  }), [activatePane, arrangePanes, clearTerminalPanes, closeWindow, launchTerminalGrid, movePaneToPosition, renamePaneTitle, splitPane, swapPaneLocations, toggleMaximize])
+  }), [activatePane, arrangePanes, clearTerminalPanes, closeWindow, launchTerminalGrid, movePaneToPosition, openWorkspaceWindow, renamePaneTitle, splitPane, swapPaneLocations, toggleMaximize])
 
   useEffect(() => {
     onActionsReady?.(windowActions)

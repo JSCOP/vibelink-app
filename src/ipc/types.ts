@@ -151,6 +151,16 @@ export type StashInfo = { index: number; message: string }
 export type TagInfo = { name: string; sha: string; message: string | null }
 export type CloneProgress = { line: string; done: boolean }
 
+export type DirEntryInfo = {
+  name: string
+  isDir: boolean
+  isSymlink: boolean
+  size: number
+  modifiedAt: string | null
+}
+
+export type TextFile = { content: string; truncated: boolean; binary: boolean }
+
 export type HermesConfiguredModel = { provider: string; model: string; baseUrl?: string | null }
 
 export type HermesWorkspaceState = { home: string; workspaceFolder: string; model: HermesConfiguredModel | null }

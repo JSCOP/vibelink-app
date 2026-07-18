@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
+import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
 import { LicenseSettings } from './LicenseSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
@@ -32,6 +32,7 @@ type SettingsSection =
   | 'chat'
   | 'appearance'
   | 'workspace'
+  | 'integrations'
   | 'remote'
   | 'safety'
   | 'memory'
@@ -49,6 +50,7 @@ const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[]
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'workspace', label: 'Workspace', icon: Monitor },
+  { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'remote', label: 'Remote', icon: Smartphone },
   { id: 'safety', label: 'Safety', icon: Shield },
   { id: 'memory', label: 'Memory & Context', icon: HardDrive },
@@ -591,6 +593,16 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                   </div>
                 </SettingsGroup>
               </>
+            ) : null}
+
+            {activeSection === 'integrations' ? (
+              <SettingsGroup title="External editor" description="Explorer and large-diff actions append the selected absolute path to this command.">
+                <label>
+                  Editor command
+                  <input value={draft.externalEditorCommand} placeholder="code" onChange={(event) => patchDraft({ externalEditorCommand: event.target.value })} />
+                </label>
+                <div className="vibelink-settings-note"><span>Leave empty to hide Open in Editor actions.</span></div>
+              </SettingsGroup>
             ) : null}
 
             {activeSection === 'remote' ? <RemoteSettings /> : null}

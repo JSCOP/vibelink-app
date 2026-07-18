@@ -193,6 +193,12 @@ describe('terminal profiles', () => {
     expect(fallback.terminalThemeId).toBe(defaultSettings.terminalThemeId)
   })
 
+  test('normalizes the external editor command', () => {
+    expect(defaultSettings.externalEditorCommand).toBe('code')
+    expect(normalizeSettings({}).externalEditorCommand).toBe('code')
+    expect(normalizeSettings({ externalEditorCommand: 'cursor --reuse-window' }).externalEditorCommand).toBe('cursor --reuse-window')
+  })
+
   test('normalizes configurable pane highlight colors', () => {
     expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')

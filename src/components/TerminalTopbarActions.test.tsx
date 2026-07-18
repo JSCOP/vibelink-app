@@ -8,6 +8,7 @@ import { defaultTerminalGridSelection, terminalAlignGridForNewPaneBasis } from '
 
 const actions: WorkspaceWindowActions = {
   activateWindow: vi.fn(),
+  openWindow: vi.fn(),
   splitTerminal: vi.fn(),
   closeWindow: vi.fn(),
   toggleMaximize: vi.fn(),
