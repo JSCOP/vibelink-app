@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { create } from 'zustand'
-import type { RepoInfo, WorkingStatus } from '../ipc/types'
+import type { CiStatus, HostingInfo, RepoInfo, WorkingStatus } from '../ipc/types'
 
 export type GitTab = 'changes' | 'history' | 'branches' | 'pullRequests'
 
@@ -13,6 +13,10 @@ export type GitSessionState = {
   selectedPath: string | null
   activeTab: GitTab
   pathFilter: string | null
+  hostingInfo: HostingInfo | null
+  ciStatus: CiStatus | null
+  hostingError: string | null
+  lastHostingRefreshAt: number
 }
 
 type GitMutation = () => Promise<unknown>
@@ -21,6 +25,7 @@ type GitStore = {
   sessions: Record<string, GitSessionState>
   refreshGit: (sessionId: string, workspaceFolder: string | null | undefined) => Promise<void>
   runGitMutation: (sessionId: string, workspaceFolder: string, mutation: GitMutation) => Promise<void>
+  refreshHosting: (sessionId: string, workspaceFolder: string | null | undefined, refName?: string, force?: boolean) => Promise<void>
   setSelectedPath: (sessionId: string, selectedPath: string | null) => void
   setActiveTab: (sessionId: string, activeTab: GitTab, pathFilter?: string | null) => void
   clearError: (sessionId: string) => void
@@ -37,6 +42,10 @@ export const emptyGitSessionState: GitSessionState = {
   selectedPath: null,
   activeTab: 'changes',
   pathFilter: null,
+  hostingInfo: null,
+  ciStatus: null,
+  hostingError: null,
+  lastHostingRefreshAt: 0,
 }
 
 export const useGitStore = create<GitStore>((set, get) => ({
@@ -87,6 +96,30 @@ export const useGitStore = create<GitStore>((set, get) => ({
           },
         },
       }))
+    }
+  },
+  refreshHosting: async (sessionId, workspaceFolder, refName = 'HEAD', force = false) => {
+    const current = get().sessions[sessionId] ?? emptyGitSessionState
+    if (!workspaceFolder) {
+      set((state) => ({ sessions: { ...state.sessions, [sessionId]: { ...current, hostingInfo: null, ciStatus: null, hostingError: null, lastHostingRefreshAt: Date.now() } } }))
+      return
+    }
+    if (!force && Date.now() - current.lastHostingRefreshAt < 60_000) return
+    let detectedHostingInfo: HostingInfo | null = null
+    try {
+      const hostingInfo = detectedHostingInfo = await invoke<HostingInfo>('hosting_detect', { workspaceFolder })
+      let ciStatus: CiStatus | null = null
+      if (hostingInfo.provider && hostingInfo.tokenPresent) {
+        ciStatus = await invoke<CiStatus>('hosting_ci_status', { workspaceFolder, refName })
+      }
+      set((state) => ({ sessions: { ...state.sessions, [sessionId]: { ...(state.sessions[sessionId] ?? emptyGitSessionState), hostingInfo, ciStatus, hostingError: null, lastHostingRefreshAt: Date.now() } } }))
+    } catch (reason) {
+      const message = String(reason)
+      set((state) => {
+        const next = state.sessions[sessionId] ?? emptyGitSessionState
+        const visibleHostingInfo = detectedHostingInfo ?? next.hostingInfo
+        return { sessions: { ...state.sessions, [sessionId]: { ...next, hostingInfo: message.includes('AUTH:') && visibleHostingInfo ? { ...visibleHostingInfo, tokenPresent: false } : visibleHostingInfo, ciStatus: null, hostingError: message, lastHostingRefreshAt: Date.now() } } }
+      })
     }
   },
   runGitMutation: async (sessionId, workspaceFolder, mutation) => {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { RepoInfo, WorkingStatus } from '../ipc/types'
+import type { HostingInfo, RepoInfo, WorkingStatus } from '../ipc/types'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
@@ -18,6 +18,7 @@ const repoInfo: RepoInfo = {
   remotes: [],
 }
 const status: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+const hostingInfo: HostingInfo = { provider: 'github', host: 'github.com', owner: 'JSCOP', repo: 'vibelink-app', webUrl: 'https://github.com/JSCOP/vibelink-app', tokenPresent: true }
 
 beforeEach(() => {
   invoke.mockReset()
@@ -45,5 +46,23 @@ describe('git store', () => {
     await useGitStore.getState().refreshGit('session-1', null)
     expect(invoke).not.toHaveBeenCalled()
     expect(useGitStore.getState().sessions['session-1']).toEqual(emptyGitSessionState)
+  })
+
+  test('refreshes hosting detection and CI without coupling local Git state', async () => {
+    invoke.mockImplementation(async (command: string) => command === 'hosting_detect' ? hostingInfo : { state: 'success', checks: [] })
+    await useGitStore.getState().refreshHosting('session-1', 'C:/repo', 'HEAD', true)
+    expect(invoke).toHaveBeenCalledWith('hosting_detect', { workspaceFolder: 'C:/repo' })
+    expect(invoke).toHaveBeenCalledWith('hosting_ci_status', { workspaceFolder: 'C:/repo', refName: 'HEAD' })
+    expect(useGitStore.getState().sessions['session-1']).toMatchObject({ hostingInfo, ciStatus: { state: 'success', checks: [] }, hostingError: null })
+  })
+
+  test('authentication failures keep the detected provider visible without changing local Git state', async () => {
+    useGitStore.setState({ sessions: { 'session-1': { ...emptyGitSessionState, repoInfo, status } } })
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'hosting_detect') return hostingInfo
+      throw 'AUTH: token rejected'
+    })
+    await useGitStore.getState().refreshHosting('session-1', 'C:/repo', 'HEAD', true)
+    expect(useGitStore.getState().sessions['session-1']).toMatchObject({ repoInfo, status, hostingInfo: { provider: 'github', tokenPresent: false }, ciStatus: null, hostingError: 'AUTH: token rejected' })
   })
 })

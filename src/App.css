@@ -4061,6 +4061,30 @@ button.git-window-primary-action,
   font-weight: 400;
 }
 
+.git-window-ci-dot {
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 8px;
+  width: 8px;
+}
+
+.git-window-ci-dot[data-state='success'] {
+  background: var(--vibelink-accent);
+}
+
+.git-window-ci-dot[data-state='failure'] {
+  background: var(--vibelink-danger);
+}
+
+.git-window-ci-dot[data-state='pending'] {
+  background: var(--vibelink-warning);
+}
+
+.git-window-ci-dot[data-state='none'] {
+  background: transparent;
+  border: 1px solid var(--vibelink-border);
+}
+
 .git-window-status-spacer {
   flex: 1;
 }

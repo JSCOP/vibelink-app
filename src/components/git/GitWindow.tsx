@@ -9,6 +9,7 @@ import { QuickPick } from '../QuickPick'
 import type { PickerEntry } from '../pickerModel'
 import { BranchesTab } from './BranchesTab'
 import { HistoryTab } from './HistoryTab'
+import { PullRequestsTab } from './PullRequestsTab'
 import { GitWindowView, type GitChangeGroup, type GitCloneViewState, type GitRowAction } from './GitWindowView'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
@@ -21,6 +22,7 @@ export function GitWindow() {
   const workspaceFolder = useMemo(() => sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null, [sessionId, sessions])
   const gitState = useGitStore((state) => sessionId ? state.sessions[sessionId] : undefined) ?? emptyGitSessionState
   const refreshGit = useGitStore((state) => state.refreshGit)
+  const refreshHosting = useGitStore((state) => state.refreshHosting)
   const runGitMutation = useGitStore((state) => state.runGitMutation)
   const setSelectedPath = useGitStore((state) => state.setSelectedPath)
   const setActiveTab = useGitStore((state) => state.setActiveTab)
@@ -42,11 +44,15 @@ export function GitWindow() {
   useEffect(() => {
     if (!sessionId) return
     void refreshGit(sessionId, workspaceFolder)
+    void refreshHosting(sessionId, workspaceFolder)
     const timer = window.setInterval(() => {
-      if (rootRef.current?.offsetParent !== null) void refreshGit(sessionId, workspaceFolder)
+      if (rootRef.current?.offsetParent !== null) {
+        void refreshGit(sessionId, workspaceFolder)
+        void refreshHosting(sessionId, workspaceFolder)
+      }
     }, 3_000)
     return () => window.clearInterval(timer)
-  }, [refreshGit, sessionId, workspaceFolder])
+  }, [refreshGit, refreshHosting, sessionId, workspaceFolder])
 
   const status = gitState.status ?? EMPTY_STATUS
   const orderedEntries = useMemo(
@@ -241,7 +247,8 @@ export function GitWindow() {
         refreshing={gitState.refreshing}
         error={gitState.error}
         activeTab={gitState.activeTab}
-        pullRequestsVisible={false}
+        pullRequestsVisible={Boolean(gitState.hostingInfo?.provider)}
+        ciStatus={gitState.ciStatus}
         commitMessage={commitMessage}
         amend={amend}
         canCommit={Boolean(commitMessage.trim()) && (amend || status.staged.length > 0)}
@@ -269,7 +276,7 @@ export function GitWindow() {
         )}
         historyContent={sessionId && workspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={workspaceFolder} pathFilter={gitState.pathFilter} /> : null}
         branchesContent={sessionId && workspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={workspaceFolder} repoInfo={repoInfo} status={status} /> : null}
-        pullRequestsContent={<div className="git-window-coming-soon">Pull Requests — coming in this build.</div>}
+        pullRequestsContent={sessionId && workspaceFolder && repoInfo && gitState.hostingInfo ? <PullRequestsTab sessionId={sessionId} workspaceFolder={workspaceFolder} repoInfo={repoInfo} hostingInfo={gitState.hostingInfo} hostingError={gitState.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true)} /> : null}
       />
       {branchPickerOpen && branches.length > 0 ? (
         <QuickPick

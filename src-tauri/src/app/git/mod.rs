@@ -1,6 +1,7 @@
 pub(crate) mod branch;
 pub(crate) mod diff;
 mod exec;
+pub(crate) mod hosting;
 pub(crate) mod log;
 pub(crate) mod paths;
 pub(crate) mod remote;

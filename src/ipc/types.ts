@@ -161,6 +161,23 @@ export type DirEntryInfo = {
 
 export type TextFile = { content: string; truncated: boolean; binary: boolean }
 
+export type HostingInfo = {
+  provider: 'github' | 'gitlab' | null
+  host: string | null
+  owner: string | null
+  repo: string | null
+  webUrl: string | null
+  tokenPresent: boolean
+}
+
+export type CreatePrRequest = { title: string; body: string; sourceBranch: string; targetBranch: string; draft: boolean }
+export type PrInfo = { number: number; title: string; author: string; sourceBranch: string; targetBranch: string; draft: boolean; url: string; state: string }
+export type PrCreated = { number: number; url: string }
+export type CiCheck = { name: string; state: string; url: string | null }
+export type CiStatus = { state: 'success' | 'failure' | 'pending' | 'none'; checks: CiCheck[] }
+export type PrDetail = PrInfo & { body: string; checks: CiCheck[] }
+export type DeviceCodeInfo = { userCode: string; verificationUri: string; interval: number; deviceCodeHandle: string }
+
 export type HermesConfiguredModel = { provider: string; model: string; baseUrl?: string | null }
 
 export type HermesWorkspaceState = { home: string; workspaceFolder: string; model: HermesConfiguredModel | null }

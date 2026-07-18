@@ -1,7 +1,7 @@
 import { AlertTriangle, Check, ChevronDown, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
 import type { ComponentType, ReactNode } from 'react'
-import type { ChangeType, FileContents, RepoInfo, StatusEntry, WorkingStatus } from '../../ipc/types'
+import type { ChangeType, CiStatus, FileContents, RepoInfo, StatusEntry, WorkingStatus } from '../../ipc/types'
 import type { GitTab } from '../../state/git'
 import { DiffPane } from './DiffPane'
 
@@ -48,6 +48,7 @@ export type GitWindowViewProps = {
   error: string | null
   activeTab: GitTab
   pullRequestsVisible: boolean
+  ciStatus: CiStatus | null
   commitMessage: string
   amend: boolean
   canCommit: boolean
@@ -114,7 +115,7 @@ function GitActionButton({ action, subject }: { action: GitRowAction; subject?: 
   )
 }
 
-export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
+export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
   if (!workspaceFolder) {
     return (
       <div ref={setRootElement} className="git-window git-window-empty" data-git-window="true">
@@ -178,6 +179,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, statu
           <span className="git-window-branch-name">{branchLabel}</span>
           <ChevronDown size={12} aria-hidden="true" />
         </button>
+        {ciStatus ? <span className="git-window-ci-dot" data-state={ciStatus.state} title={`CI: ${ciStatus.state}`} /> : null}
         <span className="git-window-sync-count" title="Ahead" data-zero={repoInfo.ahead === 0 || undefined}>↑{repoInfo.ahead}</span>
         <span className="git-window-sync-count" title="Behind" data-zero={repoInfo.behind === 0 || undefined}>↓{repoInfo.behind}</span>
         <span className="git-window-status-spacer" />

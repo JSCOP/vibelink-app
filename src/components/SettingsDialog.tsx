@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, Bot, Box, ChevronDown, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
+import { Archive, Bot, Box, ChevronDown, GitPullRequest, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
 import { LicenseSettings } from './LicenseSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
@@ -18,6 +18,7 @@ import { useWorkspaceStore } from '../state/store'
 import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
+import { GitHostingSettings } from './GitHostingSettings'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -33,6 +34,7 @@ type SettingsSection =
   | 'appearance'
   | 'workspace'
   | 'integrations'
+  | 'gitHosting'
   | 'remote'
   | 'safety'
   | 'memory'
@@ -51,6 +53,7 @@ const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[]
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'workspace', label: 'Workspace', icon: Monitor },
   { id: 'integrations', label: 'Integrations', icon: Plug },
+  { id: 'gitHosting', label: 'Git Hosting', icon: GitPullRequest },
   { id: 'remote', label: 'Remote', icon: Smartphone },
   { id: 'safety', label: 'Safety', icon: Shield },
   { id: 'memory', label: 'Memory & Context', icon: HardDrive },
@@ -602,6 +605,12 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                   <input value={draft.externalEditorCommand} placeholder="code" onChange={(event) => patchDraft({ externalEditorCommand: event.target.value })} />
                 </label>
                 <div className="vibelink-settings-note"><span>Leave empty to hide Open in Editor actions.</span></div>
+              </SettingsGroup>
+            ) : null}
+
+            {activeSection === 'gitHosting' ? (
+              <SettingsGroup title="GitHub & GitLab" description="Tokens stay in Windows Credential Manager and are scoped per host. Provider overrides support self-hosted instances.">
+                <GitHostingSettings />
               </SettingsGroup>
             ) : null}
 
