@@ -1,3 +1,7 @@
+use super::authorization::{
+    AuthorizationSnapshot, AuthorizationState, Capability,
+};
+use super::entitlement::EntitlementSupervisor;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use keyring::Entry;
@@ -346,13 +350,60 @@ impl LicenseService {
         self.status()
     }
 
-    pub fn require_entitled_cached(&self) -> Result<()> {
-        let status = self.status()?;
-        if status.entitled {
-            Ok(())
-        } else {
-            Err(anyhow!(PRO_REQUIRED_ERROR))
+    pub fn authorization_snapshot(&self, policy_epoch: u64) -> Result<AuthorizationSnapshot> {
+        let cache = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?;
+        Ok(authorization_snapshot_from_cache(
+            cache.as_ref(),
+            &self.device,
+            Utc::now(),
+            policy_epoch,
+        ))
+    }
+
+    pub fn authorization_snapshot_for_status(
+        &self,
+        status: LicenseStatusDto,
+        policy_epoch: u64,
+    ) -> Result<AuthorizationSnapshot> {
+        let observed_at = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .as_ref()
+            .and_then(|stored| parse_optional_time(stored.last_observed_at.as_deref()))
+            .or_else(|| parse_optional_time(status.validated_at.as_deref()))
+            .unwrap_or_else(Utc::now);
+        Ok(authorization_snapshot_from_status(
+            status,
+            observed_at,
+            Utc::now(),
+            policy_epoch,
+        ))
+    }
+
+    pub fn persist_observed_now(&self) -> Result<()> {
+        let stored = self.cache.read().map_err(|_| anyhow!("license cache poisoned"))?.clone();
+        let Some(mut stored) = stored else {
+            return Ok(());
+        };
+        let now = Utc::now();
+        if parse_optional_time(stored.last_observed_at.as_deref()).is_some_and(|previous| now <= previous) {
+            return Ok(());
         }
+        stored.last_observed_at = Some(now.to_rfc3339());
+        self.store_credential(stored)
+    }
+
+    pub fn require_capability_cached(&self, capability: Capability) -> Result<()> {
+        let now = Utc::now();
+        let snapshot = self.authorization_snapshot(0)?;
+        snapshot
+            .authorize(capability, now)
+            .map_err(|denied| anyhow!(denied.code.as_str()))
+    }
+
+    pub fn require_entitled_cached(&self) -> Result<()> {
+        self.require_capability_cached(Capability::ToolInvoke)
     }
 
     fn resolve_entitlement(&self, session_token: &str, register: bool) -> Result<LicenseStatusDto> {
@@ -487,6 +538,7 @@ impl LicenseService {
 
 pub struct HeadlessLicenseCache {
     stored: Option<StoredAccount>,
+    device: DeviceIdentity,
 }
 
 impl HeadlessLicenseCache {
@@ -495,28 +547,30 @@ impl HeadlessLicenseCache {
         remove_legacy_credential(service)?;
         let entry = Entry::new(service, CREDENTIAL_ACCOUNT)
             .context("open Windows Credential Manager account entry")?;
-        Ok(Self { stored: read_credential(&entry)? })
+        Ok(Self {
+            stored: read_credential(&entry)?,
+            device: load_or_create_device_identity()?,
+        })
+    }
+
+    pub fn authorization_snapshot(&self, policy_epoch: u64) -> AuthorizationSnapshot {
+        authorization_snapshot_from_cache(
+            self.stored.as_ref(),
+            &self.device,
+            Utc::now(),
+            policy_epoch,
+        )
+    }
+
+    pub fn require_capability(&self, capability: Capability) -> Result<()> {
+        let now = Utc::now();
+        self.authorization_snapshot(0)
+            .authorize(capability, now)
+            .map_err(|denied| anyhow!(denied.code.as_str()))
     }
 
     pub fn require_entitled(&self) -> Result<()> {
-        let Some(stored) = self
-            .stored
-            .as_ref()
-            .filter(|stored| matches!(stored.plan.as_deref(), Some("pro") | Some("trial")))
-        else {
-            return Err(anyhow!(TRIAL_LOCK_ERROR));
-        };
-        let now = Utc::now();
-        let validated_at = parse_optional_time(stored.validated_at.as_deref()).ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
-        let grace_until = parse_optional_time(stored.offline_grace_until.as_deref()).ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
-        let last_observed = parse_optional_time(stored.last_observed_at.as_deref()).ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
-        if now > grace_until
-            || now < validated_at - ChronoDuration::minutes(5)
-            || now < last_observed - ChronoDuration::minutes(5)
-        {
-            return Err(anyhow!(TRIAL_LOCK_ERROR));
-        }
-        Ok(())
+        self.require_capability(Capability::ToolInvoke)
     }
 
     pub fn is_entitled(&self) -> bool {
@@ -607,6 +661,45 @@ fn stored_from_api(
         pending_session_token: None,
         pending_device_code: None,
     })
+}
+fn authorization_snapshot_from_cache(
+    stored: Option<&StoredAccount>,
+    device: &DeviceIdentity,
+    now: DateTime<Utc>,
+    policy_epoch: u64,
+) -> AuthorizationSnapshot {
+    let status = status_from_cache(stored, device, now);
+    let observed_at = stored
+        .and_then(|account| parse_optional_time(account.last_observed_at.as_deref()))
+        .or_else(|| parse_optional_time(status.validated_at.as_deref()))
+        .unwrap_or(now);
+    authorization_snapshot_from_status(status, observed_at, now, policy_epoch)
+}
+
+fn authorization_snapshot_from_status(
+    status: LicenseStatusDto,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    policy_epoch: u64,
+) -> AuthorizationSnapshot {
+    let lease_until = parse_optional_time(status.offline_grace_until.as_deref())
+        .or_else(|| parse_optional_time(status.trial_ends_at.as_deref()))
+        .unwrap_or(observed_at.min(now));
+    let state = match status.state.as_str() {
+        "trial" => AuthorizationState::Trial,
+        "trialExpired" => AuthorizationState::TrialExpired,
+        "validOnline" | "validOffline" => AuthorizationState::ValidOnline,
+        "unlicensed" | "revoked" => AuthorizationState::Unlicensed,
+        _ => AuthorizationState::ConfigurationError,
+    };
+    AuthorizationSnapshot {
+        state,
+        plan: status.plan,
+        entitled: status.entitled,
+        observed_at,
+        lease_until,
+        policy_epoch,
+    }
 }
 
 fn status_from_cache(
@@ -849,19 +942,19 @@ fn write_atomic_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
 
 #[tauri::command]
 pub async fn license_status(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
-    tauri::async_runtime::spawn_blocking(move || service.status().map_err(|error| error.to_string()))
+    let supervisor = Arc::clone(supervisor.inner());
+    tauri::async_runtime::spawn_blocking(move || supervisor.sync_cached().map_err(|error| error.to_string()))
         .await
         .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub async fn account_sign_in_start(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<AccountSignInStartDto, String> {
-    let service = Arc::clone(service.inner());
+    let service = supervisor.service();
     tauri::async_runtime::spawn_blocking(move || service.start_sign_in().map_err(|error| error.to_string()))
         .await
         .map_err(|error| error.to_string())?
@@ -869,12 +962,21 @@ pub async fn account_sign_in_start(
 
 #[tauri::command]
 pub async fn account_sign_in_poll(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     device_code: String,
 ) -> std::result::Result<AccountSignInPollResult, String> {
-    let service = Arc::clone(service.inner());
+    let supervisor = Arc::clone(supervisor.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        service.poll_sign_in(device_code).map_err(|error| error.to_string())
+        let result = supervisor
+            .service()
+            .poll_sign_in(device_code)
+            .map_err(|error| error.to_string())?;
+        if let AccountSignInPollResult::Status(status) = &result {
+            supervisor
+                .publish_status(status.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(result)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -882,22 +984,29 @@ pub async fn account_sign_in_poll(
 
 #[tauri::command]
 pub async fn license_revalidate(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
-    tauri::async_runtime::spawn_blocking(move || service.revalidate().map_err(|error| error.to_string()))
+    let supervisor = Arc::clone(supervisor.inner());
+    tauri::async_runtime::spawn_blocking(move || supervisor.refresh_now().map_err(|error| error.to_string()))
         .await
         .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub async fn license_deactivate_device(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     activation_id: String,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
+    let supervisor = Arc::clone(supervisor.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        service.deactivate_device(activation_id).map_err(|error| error.to_string())
+        let status = supervisor
+            .service()
+            .deactivate_device(activation_id)
+            .map_err(|error| error.to_string())?;
+        supervisor
+            .publish_status(status.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(status)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -905,19 +1014,28 @@ pub async fn license_deactivate_device(
 
 #[tauri::command]
 pub async fn account_sign_out(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
-    tauri::async_runtime::spawn_blocking(move || service.sign_out().map_err(|error| error.to_string()))
-        .await
-        .map_err(|error| error.to_string())?
+    let supervisor = Arc::clone(supervisor.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = supervisor
+            .service()
+            .sign_out()
+            .map_err(|error| error.to_string())?;
+        supervisor
+            .publish_status(status.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(status)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub async fn license_forget_local(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    account_sign_out(service).await
+    account_sign_out(supervisor).await
 }
 
 #[cfg(test)]
@@ -1138,6 +1256,7 @@ mod tests {
                 now - ChronoDuration::minutes(1),
                 now + ChronoDuration::days(6),
             )),
+            device: device(),
         };
         assert!(active.require_entitled().is_ok());
         assert!(active.is_entitled());
@@ -1149,6 +1268,7 @@ mod tests {
                 now - ChronoDuration::days(1),
                 now - ChronoDuration::days(1),
             )),
+            device: device(),
         };
         assert!(expired.require_entitled().is_err());
         assert!(!expired.is_entitled());

@@ -1,6 +1,8 @@
 pub mod agents;
+pub mod authorization;
 pub mod board;
 pub mod capture;
+pub mod entitlement;
 pub mod commands;
 pub mod daemon_client;
 pub mod fsops;
@@ -45,12 +47,21 @@ pub fn run() {
             })?;
             app.manage(DaemonClient::new_with_app(stream, app.handle().clone()));
             app.manage(Arc::new(hermes::HermesManager::new()));
-            app.manage(Arc::new(license::LicenseService::new().map_err(
-                |error| {
-                    let boxed: Box<dyn std::error::Error> = error.into();
-                    boxed
-                },
-            )?));
+            let license = Arc::new(license::LicenseService::new().map_err(|error| {
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            })?);
+            let entitlement = entitlement::EntitlementSupervisor::new(
+                Arc::clone(&license),
+                app.handle().clone(),
+            )
+            .map_err(|error| {
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            })?;
+            entitlement.start_background();
+            app.manage(license);
+            app.manage(entitlement);
             let data_dir = crate::daemon::paths::daemon_paths()
                 .map_err(|error| {
                     let boxed: Box<dyn std::error::Error> = error.into();
