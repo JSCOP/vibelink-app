@@ -1,7 +1,10 @@
 use super::{authorization::Capability, entitlement::EntitlementSupervisor};
+use crate::storage::{
+    load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{bounded, Sender};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -31,6 +34,19 @@ const HERMES_BIN: &str = if cfg!(windows) {
     "hermes"
 };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const LAST_ACP_SESSION_SCHEMA_VERSION: u64 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LastAcpSessionDocument {
+    schema_version: u64,
+    acp_session_id: String,
+}
+
+struct LoadedLastAcpSession {
+    acp_session_id: Option<String>,
+    legacy: bool,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1014,6 +1030,70 @@ fn vibelink_mcp_servers(session_id: &str, flavor: &str) -> Value {
     }])
 }
 
+fn load_last_acp_session(path: &Path) -> Result<Option<String>> {
+    let report = load_with_recovery(
+        path,
+        LoadedLastAcpSession {
+            acp_session_id: None,
+            legacy: false,
+        },
+        parse_last_acp_session,
+    )?;
+    let loaded = report.value;
+    if loaded.legacy {
+        save_last_acp_session(
+            path,
+            loaded
+                .acp_session_id
+                .as_deref()
+                .expect("legacy Hermes metadata always has a session id"),
+        )?;
+    }
+    Ok(loaded.acp_session_id)
+}
+
+fn parse_last_acp_session(
+    bytes: &[u8],
+) -> std::result::Result<LoadedLastAcpSession, DocumentError> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|error| DocumentError::Invalid(anyhow!(error)))?;
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"') {
+        let document: LastAcpSessionDocument = parse_json(bytes)?;
+        require_supported_schema(document.schema_version, LAST_ACP_SESSION_SCHEMA_VERSION)?;
+        return Ok(LoadedLastAcpSession {
+            acp_session_id: Some(require_acp_session_id(document.acp_session_id)?),
+            legacy: false,
+        });
+    }
+    Ok(LoadedLastAcpSession {
+        acp_session_id: Some(require_acp_session_id(trimmed.to_string())?),
+        legacy: true,
+    })
+}
+
+fn require_acp_session_id(value: String) -> std::result::Result<String, DocumentError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(DocumentError::Invalid(anyhow!(
+            "Hermes session metadata contains an empty session id"
+        )));
+    }
+    Ok(value)
+}
+
+fn save_last_acp_session(path: &Path, acp_session_id: &str) -> Result<()> {
+    let acp_session_id = require_acp_session_id(acp_session_id.to_string())
+        .map_err(|_| anyhow!("Hermes session id is empty"))?;
+    write_json(
+        path,
+        &LastAcpSessionDocument {
+            schema_version: LAST_ACP_SESSION_SCHEMA_VERSION,
+            acp_session_id,
+        },
+    )
+}
+
 fn handshake(
     vibelink_session_id: &str,
     cwd: &str,
@@ -1039,10 +1119,7 @@ fn handshake(
     );
 
     let session_file = home.join("last-acp-session");
-    let saved_session = std::fs::read_to_string(&session_file)
-        .ok()
-        .and_then(non_empty)
-        .map(|value| value.trim().to_string());
+    let saved_session = load_last_acp_session(&session_file)?;
 
     let (response, resumed_session) = if let Some(session_id) = saved_session.as_deref() {
         let _ = manager.send_event(HermesEvent::SessionReplay {
@@ -1090,7 +1167,7 @@ fn finalize_acp_session(
     resumed_session: Option<&str>,
 ) -> Result<()> {
     let acp_session_id = acp_session_id_from_response(response, resumed_session)?;
-    std::fs::write(home.join("last-acp-session"), &acp_session_id)?;
+    save_last_acp_session(&home.join("last-acp-session"), &acp_session_id)?;
     *instance
         .acp_session_id
         .lock()
@@ -1844,6 +1921,119 @@ mod tests {
         .expect("response id");
 
         assert_eq!(session_id, "new-session");
+    }
+
+    fn hermes_metadata_path(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-hermes-metadata-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create Hermes metadata test directory");
+        root.join("last-acp-session")
+    }
+
+    fn hermes_metadata_backup_path(path: &Path) -> PathBuf {
+        path.with_file_name(format!(
+            "{}.bak",
+            path.file_name().unwrap().to_string_lossy()
+        ))
+    }
+
+    fn cleanup_hermes_metadata(path: &Path) {
+        if let Some(root) = path.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn hermes_legacy_session_metadata_migrates_to_schema_v1() {
+        let path = hermes_metadata_path("legacy");
+        std::fs::write(&path, " legacy-session\n").unwrap();
+
+        let loaded = load_last_acp_session(&path).expect("load legacy Hermes metadata");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.as_deref(), Some("legacy-session"));
+        assert_eq!(document["schemaVersion"], LAST_ACP_SESSION_SCHEMA_VERSION);
+        assert_eq!(document["acpSessionId"], "legacy-session");
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_corrupt_primary_recovers_valid_backup() {
+        let path = hermes_metadata_path("backup");
+        save_last_acp_session(&path, "first-session").unwrap();
+        save_last_acp_session(&path, "second-session").unwrap();
+        std::fs::write(&path, b"{").unwrap();
+
+        let loaded = load_last_acp_session(&path).expect("recover Hermes metadata backup");
+
+        assert_eq!(loaded.as_deref(), Some("first-session"));
+        assert_eq!(
+            parse_last_acp_session(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .acp_session_id
+                .as_deref(),
+            Some("first-session")
+        );
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_corrupt_primary_and_backup_return_safe_default() {
+        let path = hermes_metadata_path("default");
+        std::fs::write(&path, b"{").unwrap();
+        std::fs::write(hermes_metadata_backup_path(&path), b"[").unwrap();
+
+        let loaded = load_last_acp_session(&path).expect("default corrupt Hermes metadata");
+
+        assert!(loaded.is_none());
+        assert!(!path.exists());
+        assert!(!hermes_metadata_backup_path(&path).exists());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count(),
+            2
+        );
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_newer_metadata_schema_errors_without_overwrite() {
+        let path = hermes_metadata_path("newer");
+        let future = br#"{"schemaVersion":2,"acpSessionId":"future-session"}"#;
+        std::fs::write(&path, future).unwrap();
+
+        let error = load_last_acp_session(&path).expect_err("future Hermes schema should fail");
+
+        assert!(error.to_string().contains("unsupported storage schema 2"));
+        assert!(!path.exists());
+        let quarantined = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .expect("future Hermes metadata quarantine");
+        assert_eq!(std::fs::read(quarantined.path()).unwrap(), future);
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_session_metadata_persists_normally() {
+        let path = hermes_metadata_path("roundtrip");
+
+        save_last_acp_session(&path, "current-session").expect("save Hermes metadata");
+        let loaded = load_last_acp_session(&path).expect("load Hermes metadata");
+
+        assert_eq!(loaded.as_deref(), Some("current-session"));
+        let document: LastAcpSessionDocument =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document.schema_version, LAST_ACP_SESSION_SCHEMA_VERSION);
+        assert_eq!(document.acp_session_id, "current-session");
+        cleanup_hermes_metadata(&path);
     }
 
     #[test]

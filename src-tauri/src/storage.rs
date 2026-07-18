@@ -514,13 +514,18 @@ mod tests {
             schema_version: 1,
             value: "second".into(),
         };
+        let third = TestDocument {
+            schema_version: 1,
+            value: "third".into(),
+        };
         write_json(&path, &first).unwrap();
         write_json(&path, &second).unwrap();
+        write_json(&path, &third).unwrap();
 
-        assert_eq!(parse_test(&fs::read(&path).unwrap()).unwrap(), second);
+        assert_eq!(parse_test(&fs::read(&path).unwrap()).unwrap(), third);
         assert_eq!(
             parse_test(&fs::read(backup_path(&path)).unwrap()).unwrap(),
-            first
+            second
         );
         cleanup(&path);
     }

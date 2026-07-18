@@ -1,20 +1,23 @@
-use anyhow::{Context, Result};
+use crate::storage::{
+    load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError, LoadSource,
+};
+use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::{rngs::OsRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
+const DEVICES_SCHEMA_VERSION: u64 = 1;
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 const LOCKOUT_DURATION: Duration = Duration::from_secs(60);
 const MAX_FAILED_ATTEMPTS: u8 = 5;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRecord {
     pub id: String,
@@ -63,9 +66,39 @@ pub enum AuthFailure {
     RateLimited,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevicesDocument {
+    schema_version: u64,
+    #[serde(default)]
+    devices: Vec<DeviceRecord>,
+    #[serde(default)]
+    re_pair_required: bool,
+}
+
+struct LoadedDevices {
+    document: DevicesDocument,
+    legacy: bool,
+}
+
+impl Default for LoadedDevices {
+    fn default() -> Self {
+        Self {
+            document: DevicesDocument {
+                schema_version: DEVICES_SCHEMA_VERSION,
+                devices: Vec::new(),
+                re_pair_required: false,
+            },
+            legacy: false,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct DeviceStore {
     path: PathBuf,
     records: Vec<DeviceRecord>,
+    re_pair_required: bool,
     pairing: Option<ActivePairing>,
     failed_attempts: u8,
     locked_until: Option<SystemTime>,
@@ -73,21 +106,22 @@ pub struct DeviceStore {
 
 impl DeviceStore {
     pub fn load(path: PathBuf) -> Result<Self> {
-        let records = if path.exists() {
-            serde_json::from_slice(
-                &fs::read(&path).with_context(|| format!("read {}", path.display()))?,
-            )
-            .with_context(|| format!("parse {}", path.display()))?
-        } else {
-            Vec::new()
-        };
-        Ok(Self {
+        let report = load_with_recovery(&path, LoadedDevices::default(), parse_devices)?;
+        let recovered_without_backup =
+            report.source == LoadSource::Default && !report.quarantined.is_empty();
+        let rewrite = report.value.legacy || report.source == LoadSource::Default;
+        let store = Self {
             path,
-            records,
+            records: report.value.document.devices,
+            re_pair_required: report.value.document.re_pair_required || recovered_without_backup,
             pairing: None,
             failed_attempts: 0,
             locked_until: None,
-        })
+        };
+        if rewrite {
+            store.save()?;
+        }
+        Ok(store)
     }
 
     pub fn list_public(&self) -> Vec<DevicePublic> {
@@ -96,6 +130,14 @@ impl DeviceStore {
 
     pub fn contains(&self, device_id: &str) -> bool {
         self.records.iter().any(|record| record.id == device_id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn re_pair_required(&self) -> bool {
+        self.re_pair_required
     }
 
     pub fn create_pairing_code(&mut self) -> PairingInfo {
@@ -141,9 +183,12 @@ impl DeviceStore {
             created_at: now,
             last_seen_at: now,
         };
+        let previous_re_pair_required = self.re_pair_required;
         self.records.push(record.clone());
+        self.re_pair_required = false;
         if self.save().is_err() {
             self.records.pop();
+            self.re_pair_required = previous_re_pair_required;
             return Err(AuthFailure::Failed);
         }
         Ok((record, token))
@@ -177,9 +222,10 @@ impl DeviceStore {
         self.save()
     }
 
-    pub fn revoke_all(&mut self) -> Result<()> {
+    pub fn reset_for_identity_change(&mut self) -> Result<()> {
         self.records.clear();
         self.pairing = None;
+        self.re_pair_required = true;
         self.save()
     }
 
@@ -209,13 +255,35 @@ impl DeviceStore {
     }
 
     fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary = temporary_path(&self.path);
-        fs::write(&temporary, serde_json::to_vec_pretty(&self.records)?)?;
-        fs::rename(&temporary, &self.path)?;
-        Ok(())
+        write_json(
+            &self.path,
+            &DevicesDocument {
+                schema_version: DEVICES_SCHEMA_VERSION,
+                devices: self.records.clone(),
+                re_pair_required: self.re_pair_required,
+            },
+        )
+    }
+}
+
+fn parse_devices(bytes: &[u8]) -> std::result::Result<LoadedDevices, DocumentError> {
+    let value: serde_json::Value = parse_json(bytes)?;
+    if value.get("schemaVersion").is_some() {
+        let document: DevicesDocument = serde_json::from_value(value)?;
+        require_supported_schema(document.schema_version, DEVICES_SCHEMA_VERSION)?;
+        Ok(LoadedDevices {
+            document,
+            legacy: false,
+        })
+    } else {
+        Ok(LoadedDevices {
+            document: DevicesDocument {
+                schema_version: DEVICES_SCHEMA_VERSION,
+                devices: serde_json::from_value(value)?,
+                re_pair_required: false,
+            },
+            legacy: true,
+        })
     }
 }
 
@@ -242,12 +310,6 @@ fn sanitize_device_name(value: &str) -> String {
     }
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(".tmp");
-    PathBuf::from(value)
-}
-
 fn unix_secs(value: SystemTime) -> i64 {
     value
         .duration_since(UNIX_EPOCH)
@@ -258,17 +320,26 @@ fn unix_secs(value: SystemTime) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    fn store() -> DeviceStore {
-        DeviceStore::load(
-            std::env::temp_dir().join(format!("vibelink-remote-devices-{}.json", Uuid::new_v4())),
-        )
-        .unwrap()
+    fn path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "vibelink-remote-devices-{label}-{}",
+                Uuid::new_v4()
+            ))
+            .join("devices.json")
+    }
+
+    fn pair(store: &mut DeviceStore, name: &str) -> (DeviceRecord, String) {
+        let pairing = store.create_pairing_code();
+        store.consume_pairing(&pairing.code, name).unwrap()
     }
 
     #[test]
     fn pairing_consumes_once_and_tokens_verify() {
-        let mut store = store();
+        let path = path("pairing");
+        let mut store = DeviceStore::load(path.clone()).unwrap();
         let pairing = store.create_pairing_code();
         let (record, token) = store.consume_pairing(&pairing.code, "Phone").unwrap();
         assert!(store.verify_token(&record.id, &token).unwrap());
@@ -276,11 +347,13 @@ mod tests {
             store.consume_pairing(&pairing.code, "Other"),
             Err(AuthFailure::PairExpired)
         ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn five_failures_trigger_rate_limit() {
-        let mut store = store();
+        let path = path("rate-limit");
+        let mut store = DeviceStore::load(path.clone()).unwrap();
         let pairing = store.create_pairing_code();
         for _ in 0..4 {
             assert!(matches!(
@@ -296,5 +369,96 @@ mod tests {
             store.consume_pairing(&pairing.code, "Phone"),
             Err(AuthFailure::RateLimited)
         ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn legacy_device_array_is_rewritten_as_schema_one_document() {
+        let path = path("legacy");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = vec![DeviceRecord {
+            id: "device-1".into(),
+            name: "Phone".into(),
+            token_hash: "hash".into(),
+            created_at: 1,
+            last_seen_at: 2,
+        }];
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let store = DeviceStore::load(path.clone()).unwrap();
+        assert!(store.contains("device-1"));
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["schemaVersion"], 1);
+        assert_eq!(document["devices"][0]["id"], "device-1");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn corrupt_device_primary_recovers_from_valid_backup() {
+        let path = path("recovery");
+        let directory = path.parent().unwrap().to_path_buf();
+        let mut store = DeviceStore::load(path.clone()).unwrap();
+        let (first, _) = pair(&mut store, "First phone");
+        let _ = pair(&mut store, "Second phone");
+        fs::write(&path, b"[").unwrap();
+
+        let recovered = DeviceStore::load(path.clone()).unwrap();
+        assert!(recovered.contains(&first.id));
+        assert_eq!(recovered.list_public().len(), 1);
+        assert!(!recovered.re_pair_required());
+        assert!(fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("devices.json.corrupt-")));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn corrupt_devices_without_backup_start_empty_and_require_re_pair() {
+        let path = path("corrupt-default");
+        let directory = path.parent().unwrap().to_path_buf();
+        let _ = DeviceStore::load(path.clone()).unwrap();
+        let _ = fs::remove_file(path.with_file_name("devices.json.bak"));
+        fs::write(&path, b"not json").unwrap();
+
+        let recovered = DeviceStore::load(path.clone()).unwrap();
+        assert!(recovered.is_empty());
+        assert!(recovered.re_pair_required());
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["schemaVersion"], 1);
+        assert_eq!(document["rePairRequired"], true);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn newer_device_schema_errors_without_rewriting_empty_state() {
+        let path = path("newer");
+        let directory = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            &path,
+            br#"{"schemaVersion":2,"devices":[],"rePairRequired":false}"#,
+        )
+        .unwrap();
+
+        let error = DeviceStore::load(path.clone())
+            .err()
+            .expect("newer schema must fail")
+            .to_string();
+        assert!(error.contains("unsupported storage schema 2"));
+        assert!(!path.exists());
+        assert!(fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("devices.json.corrupt-")));
+        let _ = fs::remove_dir_all(directory);
     }
 }

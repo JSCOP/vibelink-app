@@ -39,6 +39,7 @@ pub struct RemoteStatus {
     pub fingerprint: String,
     pub hosts: Vec<String>,
     pub devices: Vec<DevicePublic>,
+    pub re_pair_required: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -211,8 +212,16 @@ impl RemoteServer {
         let config_path = remote_dir.join("config.json");
         let devices_path = remote_dir.join("devices.json");
         let config = RemoteConfig::load(&config_path)?;
-        let identity = RemoteIdentity::load_or_generate(&remote_dir)?;
-        let devices = DeviceStore::load(devices_path.clone())?;
+        let mut identity = RemoteIdentity::load_or_generate(&remote_dir)?;
+        let mut devices = DeviceStore::load(devices_path)?;
+        if identity.generated_on_load() && !devices.is_empty() && !identity.requires_device_reset()
+        {
+            identity.mark_device_reset_required()?;
+        }
+        if identity.requires_device_reset() {
+            devices.reset_for_identity_change()?;
+            identity.acknowledge_device_reset()?;
+        }
         let authorization = locked_authorization_snapshot();
         Ok(Self {
             config_path,
@@ -369,6 +378,9 @@ impl RemoteServer {
 
     pub fn status(&self) -> RemoteStatus {
         let config = self.config.lock().expect("remote config mutex").clone();
+        let devices = self.shared.devices.lock().expect("remote devices mutex");
+        let re_pair_required = devices.re_pair_required();
+        let devices = devices.list_public();
         RemoteStatus {
             enabled: config.enabled,
             running: self
@@ -384,12 +396,8 @@ impl RemoteServer {
                 .expect("remote identity lock")
                 .fingerprint(),
             hosts: local_hosts(),
-            devices: self
-                .shared
-                .devices
-                .lock()
-                .expect("remote devices mutex")
-                .list_public(),
+            devices,
+            re_pair_required,
         }
     }
 
@@ -464,15 +472,15 @@ impl RemoteServer {
         if was_running {
             self.stop();
         }
-        self.identity
-            .write()
-            .expect("remote identity lock")
-            .regenerate()?;
         self.shared
             .devices
             .lock()
             .expect("remote devices mutex")
-            .revoke_all()?;
+            .reset_for_identity_change()?;
+        self.identity
+            .write()
+            .expect("remote identity lock")
+            .regenerate()?;
         if was_running {
             self.start()?;
         }
@@ -929,6 +937,73 @@ mod tests {
             .expect("remote clients")
             .remove(&other_key);
         server.shared.release_abandoned_leases();
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn identity_regeneration_clears_devices_and_persists_re_pair_status() {
+        let directory = temp_directory("identity-regeneration");
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let first_fingerprint = server.status().fingerprint;
+        {
+            let mut devices = server.shared.devices.lock().expect("remote devices");
+            let pairing = devices.create_pairing_code();
+            devices
+                .consume_pairing(&pairing.code, "Phone")
+                .expect("pair device");
+        }
+        assert_eq!(server.status().devices.len(), 1);
+        assert!(!server.status().re_pair_required);
+
+        let regenerated = server.regenerate_identity().expect("regenerate identity");
+        assert_ne!(regenerated.fingerprint, first_fingerprint);
+        assert!(regenerated.devices.is_empty());
+        assert!(regenerated.re_pair_required);
+        let regenerated_fingerprint = regenerated.fingerprint;
+        drop(server);
+
+        let reloaded = RemoteServer::new(directory.clone()).expect("reload remote server");
+        assert_eq!(reloaded.status().fingerprint, regenerated_fingerprint);
+        assert!(reloaded.status().devices.is_empty());
+        assert!(reloaded.status().re_pair_required);
+        {
+            let mut devices = reloaded.shared.devices.lock().expect("remote devices");
+            let pairing = devices.create_pairing_code();
+            devices
+                .consume_pairing(&pairing.code, "Replacement phone")
+                .expect("re-pair device");
+        }
+        assert!(!reloaded.status().re_pair_required);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn one_sided_identity_recovery_clears_persisted_devices() {
+        let directory = temp_directory("one-sided-identity");
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let first_fingerprint = server.status().fingerprint;
+        {
+            let mut devices = server.shared.devices.lock().expect("remote devices");
+            let pairing = devices.create_pairing_code();
+            devices
+                .consume_pairing(&pairing.code, "Phone")
+                .expect("pair device");
+        }
+        drop(server);
+        std::fs::remove_file(directory.join("remote").join("key.pem"))
+            .expect("remove one side of identity");
+
+        let recovered = RemoteServer::new(directory.clone()).expect("recover remote server");
+        let recovered_status = recovered.status();
+        assert_ne!(recovered_status.fingerprint, first_fingerprint);
+        assert!(recovered_status.devices.is_empty());
+        assert!(recovered_status.re_pair_required);
+        let recovered_fingerprint = recovered_status.fingerprint;
+        drop(recovered);
+
+        let stable = RemoteServer::new(directory.clone()).expect("reload recovered server");
+        assert_eq!(stable.status().fingerprint, recovered_fingerprint);
+        assert!(stable.status().re_pair_required);
         let _ = std::fs::remove_dir_all(directory);
     }
 }

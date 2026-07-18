@@ -1,13 +1,14 @@
 use super::authorization::{AuthorizationSnapshot, AuthorizationState, Capability};
 use super::entitlement::EntitlementSupervisor;
+use crate::storage::{
+    load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError, LoadSource,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use keyring::Entry;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
+    path::Path,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -19,6 +20,7 @@ const LEGACY_CREDENTIAL_ACCOUNT: &str = "active-license";
 const ACCOUNT_CLIENT_ID: &str = "vibelink-desktop";
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const ACCOUNT_PROVIDER: &str = "moobang";
+const DEVICE_IDENTITY_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +144,19 @@ struct StoredAccount {
 struct DeviceIdentity {
     device_id: String,
     device_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceIdentityDocument {
+    schema_version: u64,
+    device_id: String,
+    device_name: String,
+}
+
+struct LoadedDeviceIdentity {
+    identity: DeviceIdentity,
+    legacy: bool,
 }
 
 pub struct LicenseService {
@@ -642,9 +657,14 @@ fn remove_legacy_credential(service: &str) -> Result<()> {
 
 fn read_credential(entry: &Entry) -> Result<Option<StoredAccount>> {
     match entry.get_password() {
-        Ok(json) => Ok(Some(
-            serde_json::from_str(&json).context("parse stored Moobang account credential")?,
-        )),
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(stored) => Ok(Some(stored)),
+            Err(_) => match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(anyhow!(error)
+                    .context("delete malformed Windows Credential Manager account entry")),
+            },
+        },
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(anyhow!(error).context("read Windows Credential Manager account entry")),
     }
@@ -946,46 +966,80 @@ fn load_or_create_device_identity() -> Result<DeviceIdentity> {
     let path = crate::daemon::paths::daemon_paths()?
         .data_dir
         .join("license-device.json");
-    if path.exists() {
-        let identity: DeviceIdentity = serde_json::from_str(
-            &fs::read_to_string(&path).context("read license device identity")?,
-        )
-        .context("parse license device identity")?;
-        Uuid::parse_str(&identity.device_id).context("validate license device id")?;
-        return Ok(identity);
+    load_or_create_device_identity_at(&path)
+}
+
+fn load_or_create_device_identity_at(path: &Path) -> Result<DeviceIdentity> {
+    let report = load_with_recovery(
+        path,
+        LoadedDeviceIdentity {
+            identity: DeviceIdentity {
+                device_id: String::new(),
+                device_name: String::new(),
+            },
+            legacy: false,
+        },
+        parse_device_identity,
+    )?;
+    let mut loaded = report.value;
+    if report.source == LoadSource::Default {
+        loaded.identity = new_device_identity();
+        write_device_identity(path, &loaded.identity)?;
+    } else if loaded.legacy {
+        write_device_identity(path, &loaded.identity)?;
     }
+    Ok(loaded.identity)
+}
+
+fn parse_device_identity(bytes: &[u8]) -> std::result::Result<LoadedDeviceIdentity, DocumentError> {
+    let value: serde_json::Value = parse_json(bytes)?;
+    let (identity, legacy) = if value.get("schemaVersion").is_some() {
+        let document: DeviceIdentityDocument = serde_json::from_value(value)?;
+        require_supported_schema(document.schema_version, DEVICE_IDENTITY_SCHEMA_VERSION)?;
+        (
+            DeviceIdentity {
+                device_id: document.device_id,
+                device_name: document.device_name,
+            },
+            false,
+        )
+    } else {
+        (serde_json::from_value(value)?, true)
+    };
+    Uuid::parse_str(&identity.device_id).map_err(|_| {
+        DocumentError::Invalid(anyhow!(
+            "license device identity contains an invalid device id"
+        ))
+    })?;
+    Ok(LoadedDeviceIdentity { identity, legacy })
+}
+
+fn write_device_identity(path: &Path, identity: &DeviceIdentity) -> Result<()> {
+    write_json(
+        path,
+        &DeviceIdentityDocument {
+            schema_version: DEVICE_IDENTITY_SCHEMA_VERSION,
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+        },
+    )
+}
+
+fn new_device_identity() -> DeviceIdentity {
     let device_name = std::env::var("COMPUTERNAME")
         .unwrap_or_else(|_| "Windows device".to_string())
         .chars()
         .filter(|character| !character.is_control())
         .take(64)
         .collect::<String>();
-    let identity = DeviceIdentity {
+    DeviceIdentity {
         device_id: Uuid::new_v4().to_string(),
         device_name: if device_name.is_empty() {
             "Windows device".to_string()
         } else {
             device_name
         },
-    };
-    write_atomic_json(path, &identity)?;
-    Ok(identity)
-}
-
-fn write_atomic_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("license device path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let temp = path.with_extension("tmp");
-    {
-        let mut file = fs::File::create(&temp).context("create license device temp file")?;
-        file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
-        file.flush()?;
-        file.sync_all()?;
     }
-    fs::rename(&temp, &path).context("replace license device identity")?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -1101,6 +1155,102 @@ mod tests {
             device_id: Uuid::new_v4().to_string(),
             device_name: "Test device".to_string(),
         }
+    }
+
+    fn temp_storage_path(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-license-storage-{label}-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create license test directory");
+        root.join("license-device.json")
+    }
+
+    fn cleanup_storage_path(path: &Path) {
+        if let Some(root) = path.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn malformed_account_credential_is_deleted_and_loads_locked() {
+        let entry = Entry::new_with_credential(Box::new(keyring::mock::MockCredential::default()));
+        entry
+            .set_password(r#"{"sessionToken":"secret""#)
+            .expect("store malformed credential");
+
+        assert!(read_credential(&entry)
+            .expect("clear malformed credential")
+            .is_none());
+        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
+        assert!(!status_from_cache(None, &device(), Utc::now()).entitled);
+    }
+
+    #[test]
+    fn credential_store_read_failures_are_preserved() {
+        let credential = keyring::mock::MockCredential::default();
+        credential.set_error(keyring::Error::NoStorageAccess(Box::new(
+            std::io::Error::other("credential store locked"),
+        )));
+        let entry = Entry::new_with_credential(Box::new(credential));
+
+        let error = read_credential(&entry).expect_err("storage failure should propagate");
+        assert!(error
+            .to_string()
+            .contains("read Windows Credential Manager account entry"));
+    }
+
+    #[test]
+    fn device_identity_migrates_legacy_shape_to_schema_v1() {
+        let path = temp_storage_path("legacy");
+        let legacy = device();
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let loaded = load_or_create_device_identity_at(&path).expect("load legacy identity");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.device_id, legacy.device_id);
+        assert_eq!(document["schemaVersion"], DEVICE_IDENTITY_SCHEMA_VERSION);
+        assert_eq!(document["deviceId"], legacy.device_id);
+        cleanup_storage_path(&path);
+    }
+
+    #[test]
+    fn device_identity_recovers_valid_backup() {
+        let path = temp_storage_path("backup");
+        let first = device();
+        let second = device();
+        write_device_identity(&path, &first).unwrap();
+        write_device_identity(&path, &second).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+
+        let loaded = load_or_create_device_identity_at(&path).expect("recover identity backup");
+        let primary = parse_device_identity(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.device_id, first.device_id);
+        assert_eq!(primary.identity.device_id, first.device_id);
+        cleanup_storage_path(&path);
+    }
+
+    #[test]
+    fn device_identity_newer_schema_errors_without_overwrite() {
+        let path = temp_storage_path("newer");
+        let future = br#"{"schemaVersion":2,"deviceId":"00000000-0000-0000-0000-000000000001","deviceName":"Future"}"#;
+        std::fs::write(&path, future).unwrap();
+
+        let error = load_or_create_device_identity_at(&path)
+            .expect_err("future identity schema should fail");
+
+        assert!(error.to_string().contains("unsupported storage schema 2"));
+        assert!(!path.exists());
+        let quarantined = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .expect("future identity quarantine");
+        assert_eq!(std::fs::read(quarantined.path()).unwrap(), future);
+        cleanup_storage_path(&path);
     }
 
     fn stored_pro(

@@ -1,7 +1,12 @@
 use super::{
     authorization::Capability, daemon_client::DaemonClient, entitlement::EntitlementSupervisor,
 };
-use crate::protocol::{ClientToDaemon, ReplyResult, TaskSignal};
+use crate::{
+    protocol::{ClientToDaemon, ReplyResult, TaskSignal},
+    storage::{
+        load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError,
+    },
+};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,9 +21,17 @@ use uuid::Uuid;
 static BOARD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+const BOARD_SCHEMA_VERSION: u64 = 1;
+
+fn board_schema_version() -> u64 {
+    BOARD_SCHEMA_VERSION
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoardDoc {
+    #[serde(default = "board_schema_version")]
+    pub schema_version: u64,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]
@@ -27,6 +40,18 @@ pub struct BoardDoc {
     pub task_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<Brief>,
+}
+
+impl Default for BoardDoc {
+    fn default() -> Self {
+        Self {
+            schema_version: BOARD_SCHEMA_VERSION,
+            revision: 0,
+            tasks: HashMap::new(),
+            task_order: Vec::new(),
+            brief: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -461,18 +486,21 @@ fn read_board_doc(session_id: &str) -> Result<BoardDoc> {
 }
 
 fn read_board_doc_from_path(path: &Path) -> Result<BoardDoc> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => parse_board_doc(&contents),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BoardDoc::default()),
-        Err(err) => Err(err.into()),
-    }
+    Ok(load_with_recovery(path, BoardDoc::default(), parse_board_doc_bytes)?.value)
 }
 
 fn parse_board_doc(json: &str) -> Result<BoardDoc> {
-    if json.trim().is_empty() {
-        return Ok(BoardDoc::default());
-    }
-    let mut board: BoardDoc = serde_json::from_str(json).context("parse board JSON")?;
+    parse_board_doc_bytes(json.as_bytes()).map_err(|error| match error {
+        DocumentError::Invalid(error) => error.context("parse board JSON"),
+        DocumentError::UnsupportedSchema { found, supported } => {
+            anyhow!("unsupported storage schema {found}; supported through {supported}")
+        }
+    })
+}
+
+fn parse_board_doc_bytes(bytes: &[u8]) -> std::result::Result<BoardDoc, DocumentError> {
+    let mut board: BoardDoc = parse_json(bytes)?;
+    require_supported_schema(board.schema_version, BOARD_SCHEMA_VERSION)?;
     board.task_order.retain(|id| board.tasks.contains_key(id));
     let mut missing = board
         .tasks
@@ -492,14 +520,7 @@ fn parse_board_doc(json: &str) -> Result<BoardDoc> {
 }
 
 fn write_board_doc_to_path(path: &Path, board: &BoardDoc) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(board)?)?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("replace board file {}", path.display()))?;
-    Ok(())
+    write_json(path, board)
 }
 
 fn apply_task_patch(task: &mut Task, patch: TaskPatch) -> Result<()> {
@@ -571,33 +592,108 @@ fn to_string(err: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
-    fn test_path() -> PathBuf {
-        std::env::temp_dir().join(format!("vibelink-board-{}.json", Uuid::new_v4()))
+    fn test_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vibelink-board-{label}-{}.json", Uuid::new_v4()))
+    }
+
+    fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut value = path.as_os_str().to_os_string();
+        value.push(suffix);
+        PathBuf::from(value)
+    }
+
+    fn backup_path(path: &Path) -> PathBuf {
+        sibling_with_suffix(path, ".bak")
+    }
+
+    fn temporary_path(path: &Path) -> PathBuf {
+        sibling_with_suffix(path, ".tmp")
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(backup_path(path));
+        let _ = fs::remove_file(temporary_path(path));
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(file_name) = path.file_name().map(|name| name.to_string_lossy()) else {
+            return;
+        };
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let candidate = entry.file_name();
+                let candidate = candidate.to_string_lossy();
+                if candidate.starts_with(file_name.as_ref()) && candidate.contains(".corrupt-") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    fn quarantined_files(path: &Path) -> Vec<PathBuf> {
+        let parent = path.parent().expect("board parent");
+        let file_name = path.file_name().expect("board name").to_string_lossy();
+        fs::read_dir(parent)
+            .expect("read board parent")
+            .flatten()
+            .filter_map(|entry| {
+                let candidate = entry.file_name();
+                let candidate = candidate.to_string_lossy();
+                (candidate.starts_with(file_name.as_ref()) && candidate.contains(".corrupt-"))
+                    .then(|| entry.path())
+            })
+            .collect()
+    }
+
+    fn sample_task(id: &str, title: &str, created_at: u64) -> Task {
+        Task {
+            id: id.to_string(),
+            session_id: "session-1".to_string(),
+            title: title.to_string(),
+            description: String::new(),
+            status: TaskStatus::Pending,
+            status_timestamps: HashMap::from([(TaskStatus::Pending, created_at)]),
+            assigned_pane_id: None,
+            assigned_role: None,
+            baseline_ref: None,
+            worktree_path: None,
+            commit_message: None,
+            result_summary: None,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    fn sample_board(revision: u64, title: &str) -> BoardDoc {
+        let task = sample_task("task-1", title, 1);
+        BoardDoc {
+            schema_version: BOARD_SCHEMA_VERSION,
+            revision,
+            task_order: vec![task.id.clone()],
+            tasks: HashMap::from([(task.id.clone(), task)]),
+            brief: Some(Brief {
+                purpose: "Ship safely".to_string(),
+                notes: "Keep state durable".to_string(),
+                updated_at: "2026-07-19T00:00:00Z".to_string(),
+            }),
+        }
     }
 
     #[test]
-    fn task_mutations_increment_revision_and_round_trip() {
-        let path = test_path();
+    fn task_mutations_increment_revision_and_write_schema_v1() {
+        let path = test_path("round-trip");
         let session_id = Uuid::new_v4().to_string();
         let task = mutate_board_path(&path, |board| {
-            let now = current_millis();
-            let task = Task {
-                id: "task-1".to_string(),
-                session_id: session_id.clone(),
-                title: "Ship it".to_string(),
-                description: String::new(),
-                status: TaskStatus::Pending,
-                status_timestamps: HashMap::from([(TaskStatus::Pending, now)]),
-                assigned_pane_id: None,
-                assigned_role: None,
-                baseline_ref: None,
-                worktree_path: None,
-                commit_message: None,
-                result_summary: None,
-                created_at: now,
-                updated_at: now,
-            };
+            let task = sample_task("task-1", "Ship it", current_millis());
+            let mut task = task;
+            task.session_id = session_id.clone();
             board.task_order.push(task.id.clone());
             board.tasks.insert(task.id.clone(), task.clone());
             Ok(task)
@@ -628,26 +724,104 @@ mod tests {
         .expect("finish task");
 
         let reloaded = read_board_doc_from_path(&path).expect("reload board");
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read board file"))
+                .expect("parse board file");
+        assert_eq!(reloaded.schema_version, BOARD_SCHEMA_VERSION);
         assert_eq!(reloaded.revision, 3);
         assert_eq!(reloaded.tasks["task-1"].status, TaskStatus::Done);
         assert_eq!(
             reloaded.tasks["task-1"].result_summary.as_deref(),
             Some("note")
         );
-        std::fs::remove_file(path).expect("cleanup board");
+        assert_eq!(stored["schemaVersion"], BOARD_SCHEMA_VERSION);
+        cleanup(&path);
     }
 
     #[test]
-    fn revisionless_board_is_normalized() {
-        let path = test_path();
-        std::fs::write(
+    fn legacy_revisionless_board_defaults_schema_and_normalizes_task_order() {
+        let path = test_path("legacy");
+        fs::write(
             &path,
-            r#"{"tasks":{"task-1":{"id":"task-1","sessionId":"session-1","title":"Old","description":"","status":"pending","statusTimestamps":{"pending":1},"createdAt":1,"updatedAt":1}},"taskOrder":["task-1"]}"#,
+            r#"{"tasks":{"task-1":{"id":"task-1","sessionId":"session-1","title":"Old","description":"","status":"pending","statusTimestamps":{"pending":1},"createdAt":1,"updatedAt":1}},"taskOrder":["missing"]}"#,
         )
-        .expect("seed board");
+        .expect("seed legacy board");
+
         let board = read_board_doc_from_path(&path).expect("read legacy board");
+        assert_eq!(board.schema_version, BOARD_SCHEMA_VERSION);
         assert_eq!(board.revision, 0);
         assert_eq!(board.task_order, vec!["task-1"]);
-        std::fs::remove_file(path).expect("cleanup board");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn truncated_primary_recovers_valid_board_backup() {
+        let path = test_path("backup-recovery");
+        let first = sample_board(7, "First");
+        let second = sample_board(8, "Second");
+        write_board_doc_to_path(&path, &first).expect("write first board");
+        write_board_doc_to_path(&path, &second).expect("write second board");
+        fs::write(&path, b"{").expect("truncate board primary");
+
+        let recovered = read_board_doc_from_path(&path).expect("recover board");
+        assert_eq!(recovered.revision, first.revision);
+        assert_eq!(recovered.tasks["task-1"].title, "First");
+        let restored = read_board_doc_from_path(&path).expect("reload restored board");
+        assert_eq!(restored.tasks["task-1"].title, "First");
+        assert_eq!(quarantined_files(&path).len(), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn invalid_primary_and_backup_start_empty_board_after_quarantine() {
+        let path = test_path("invalid-both");
+        fs::write(&path, b"{").expect("write invalid board primary");
+        fs::write(backup_path(&path), b"[").expect("write invalid board backup");
+
+        let board = read_board_doc_from_path(&path).expect("load safe empty board");
+        assert_eq!(board.schema_version, BOARD_SCHEMA_VERSION);
+        assert_eq!(board.revision, 0);
+        assert!(board.tasks.is_empty());
+        assert!(board.task_order.is_empty());
+        assert!(!path.exists());
+        assert!(!backup_path(&path).exists());
+        assert_eq!(quarantined_files(&path).len(), 2);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn stale_temp_is_removed_before_loading_board() {
+        let path = test_path("stale-temp");
+        let board = sample_board(4, "Stored");
+        write_board_doc_to_path(&path, &board).expect("write board");
+        let temporary = temporary_path(&path);
+        fs::write(&temporary, b"stale partial write").expect("write stale board temp");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)
+            .expect("open stale board temp")
+            .set_modified(SystemTime::now() - Duration::from_secs(10 * 60 + 1))
+            .expect("age stale board temp");
+
+        let loaded = read_board_doc_from_path(&path).expect("load board with stale temp");
+        assert_eq!(loaded.revision, board.revision);
+        assert!(!temporary.exists());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn newer_schema_errors_without_overwriting_board() {
+        let path = test_path("newer-schema");
+        fs::write(
+            &path,
+            br#"{"schemaVersion":2,"revision":99,"tasks":{},"taskOrder":[]}"#,
+        )
+        .expect("write newer board schema");
+
+        let error = read_board_doc_from_path(&path).expect_err("reject newer board schema");
+        assert!(error.to_string().contains("unsupported storage schema 2"));
+        assert!(!path.exists());
+        assert_eq!(quarantined_files(&path).len(), 1);
+        cleanup(&path);
     }
 }
