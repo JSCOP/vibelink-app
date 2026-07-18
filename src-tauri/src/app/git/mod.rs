@@ -1,18 +1,36 @@
-use anyhow::{anyhow, bail, Context, Result};
+pub(crate) mod branch;
+pub(crate) mod diff;
+mod exec;
+pub(crate) mod log;
+pub(crate) mod paths;
+pub(crate) mod remote;
+pub(crate) mod stage;
+pub(crate) mod status;
+#[cfg(test)]
+mod test_support;
+
+
+use self::exec::{
+    git_exit_status, git_read as git_output, git_read_allow_fail as git_output_allow_fail,
+    git_write,
+};
+use self::paths::{parent_dir, resolve_repo_file_path, validate_base_ref};
+use super::license::LicenseService;
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
-use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use tauri::State;
-use super::license::LicenseService;
 
-#[cfg(windows)]
+#[cfg(test)]
+use self::exec::CREATE_NO_WINDOW;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::process::Command;
+#[cfg(all(test, windows))]
 use std::os::windows::process::CommandExt;
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeType {
     Added,
@@ -54,7 +72,7 @@ pub struct WorktreeInfo {
 pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<bool, String> {
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
-        git_status(&workspace_folder, &["rev-parse", "--is-inside-work-tree"])
+        git_exit_status(&workspace_folder, ["rev-parse", "--is-inside-work-tree"])
             .map(|status| status.success())
             .map_err(to_string)
     })
@@ -133,7 +151,7 @@ pub async fn git_worktree_remove(
 }
 
 fn snapshot_baseline_native(repo: &str) -> Result<String> {
-    let stash = git_output(repo, &["stash", "create"])?;
+    let stash = git_write(repo, ["stash", "create"])?;
     let stash = String::from_utf8_lossy(&stash).trim().to_string();
     if !stash.is_empty() {
         return Ok(stash);
@@ -151,20 +169,10 @@ fn changed_files_native(repo: &str, base_ref: &str) -> Result<Vec<ChangedFile>> 
     validate_base_ref(base_ref)?;
     let mut files = parse_name_status(&git_output(
         repo,
-        &["diff", "-M", "-C", "-z", "--name-status", base_ref],
+        ["diff", "-M", "-C", "-z", "--name-status", base_ref, "--"],
     )?);
-    let stats = parse_numstat(&git_output(repo, &["diff", "--numstat", "-z", base_ref])?);
-    for file in &mut files {
-        if let Some((additions, deletions, binary)) = stats
-            .iter()
-            .find(|(path, _)| path == &file.path)
-            .map(|(_, stats)| *stats)
-        {
-            file.additions = additions;
-            file.deletions = deletions;
-            file.binary = binary;
-        }
-    }
+    let stats = git_output(repo, ["diff", "-M", "--numstat", "-z", base_ref, "--"])?;
+    merge_numstat(&mut files, &stats);
 
     let untracked = git_output(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     for path in split_nul(&untracked) {
@@ -217,9 +225,9 @@ fn worktree_create_native(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
     let worktree_path = data_dir.join("worktrees").join(&short);
     std::fs::create_dir_all(parent_dir(&worktree_path)?)?;
     let path_string = worktree_path.to_string_lossy().to_string();
-    git_output(
+    git_write(
         repo,
-        &["worktree", "add", "-b", &branch, &path_string, "HEAD"],
+        ["worktree", "add", "-b", &branch, &path_string, "HEAD"],
     )?;
     Ok(WorktreeInfo {
         worktree_path: path_string,
@@ -238,12 +246,12 @@ fn worktree_remove_native(
         remove_args.push("--force");
     }
     remove_args.push(worktree_path);
-    git_output(repo, &remove_args)?;
-    git_output(repo, &["branch", "-D", branch])?;
+    git_write(repo, remove_args)?;
+    git_write(repo, ["branch", "-D", branch])?;
     Ok(())
 }
 
-fn parse_name_status(bytes: &[u8]) -> Vec<ChangedFile> {
+pub(crate) fn parse_name_status(bytes: &[u8]) -> Vec<ChangedFile> {
     let tokens = split_nul(bytes);
     let mut files = Vec::new();
     let mut index = 0;
@@ -276,28 +284,60 @@ fn parse_name_status(bytes: &[u8]) -> Vec<ChangedFile> {
     files
 }
 
-fn parse_numstat(bytes: &[u8]) -> Vec<(String, (u32, u32, bool))> {
-    split_nul(bytes)
-        .into_iter()
-        .filter_map(|record| {
-            let mut fields = record.split('\t');
-            let additions = fields.next()?;
-            let deletions = fields.next()?;
-            let path = fields.next()?.to_string();
-            let binary = additions == "-" || deletions == "-";
-            Some((
-                path,
-                (
-                    additions.parse().unwrap_or(0),
-                    deletions.parse().unwrap_or(0),
-                    binary,
-                ),
-            ))
-        })
-        .collect()
+pub(crate) fn parse_numstat(bytes: &[u8]) -> Vec<(String, (u32, u32, bool))> {
+    let records = bytes
+        .split(|byte| *byte == 0)
+        .map(|record| String::from_utf8_lossy(record).to_string())
+        .collect::<Vec<_>>();
+    let mut stats = Vec::new();
+    let mut index = 0;
+    while index < records.len() {
+        let record = &records[index];
+        index += 1;
+        if record.is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(3, '\t');
+        let Some(additions) = fields.next() else { continue };
+        let Some(deletions) = fields.next() else { continue };
+        let Some(path) = fields.next() else { continue };
+        let path = if path.is_empty() && index + 1 < records.len() {
+            index += 1;
+            let new_path = records[index].clone();
+            index += 1;
+            new_path
+        } else {
+            path.to_string()
+        };
+        let binary = additions == "-" || deletions == "-";
+        stats.push((
+            path,
+            (
+                additions.parse().unwrap_or(0),
+                deletions.parse().unwrap_or(0),
+                binary,
+            ),
+        ));
+    }
+    stats
 }
 
-fn split_nul(bytes: &[u8]) -> Vec<String> {
+pub(crate) fn merge_numstat(files: &mut [ChangedFile], bytes: &[u8]) {
+    let stats = parse_numstat(bytes);
+    for file in files {
+        if let Some((additions, deletions, binary)) = stats
+            .iter()
+            .find(|(path, _)| path == &file.path)
+            .map(|(_, stats)| *stats)
+        {
+            file.additions = additions;
+            file.deletions = deletions;
+            file.binary = binary;
+        }
+    }
+}
+
+pub(crate) fn split_nul(bytes: &[u8]) -> Vec<String> {
     bytes
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
@@ -305,7 +345,7 @@ fn split_nul(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn change_type_from_status(status: char) -> ChangeType {
+pub(crate) fn change_type_from_status(status: char) -> ChangeType {
     match status {
         'A' => ChangeType::Added,
         'D' => ChangeType::Deleted,
@@ -316,100 +356,6 @@ fn change_type_from_status(status: char) -> ChangeType {
     }
 }
 
-fn validate_base_ref(base_ref: &str) -> Result<()> {
-    if base_ref.is_empty() {
-        bail!("git base ref must not be empty");
-    }
-    if base_ref.starts_with('-') {
-        bail!("git base ref must not start with '-'");
-    }
-    if !base_ref.chars().all(is_allowed_base_ref_char) {
-        bail!("git base ref contains unsupported characters");
-    }
-    Ok(())
-}
-
-fn is_allowed_base_ref_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | '@' | '~' | '^')
-}
-
-fn resolve_repo_file_path(repo: &str, path: &str) -> Result<PathBuf> {
-    let relative = validate_repo_relative_path(path)?;
-    let repo_root = Path::new(repo)
-        .canonicalize()
-        .with_context(|| format!("canonicalize git repo {}", repo))?;
-    let joined = repo_root.join(relative);
-    if !joined.starts_with(&repo_root) {
-        bail!("git file path escapes workspace");
-    }
-    if let Ok(canonical) = joined.canonicalize() {
-        if !canonical.starts_with(&repo_root) {
-            bail!("git file path escapes workspace");
-        }
-        return Ok(canonical);
-    }
-    Ok(joined)
-}
-
-fn validate_repo_relative_path(path: &str) -> Result<&Path> {
-    let relative = Path::new(path);
-    if relative.is_absolute() {
-        bail!("git file path must be relative");
-    }
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::Prefix(_) | Component::RootDir | Component::ParentDir
-        )
-    }) {
-        bail!("git file path must stay within the workspace");
-    }
-    Ok(relative)
-}
-
-fn git_output(repo: &str, args: &[&str]) -> Result<Vec<u8>> {
-    let output = git_command(repo, args).output()?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(anyhow!(stderr_or_status(&output)))
-    }
-}
-
-fn git_output_allow_fail(repo: &str, args: &[&str]) -> Result<Option<Vec<u8>>> {
-    let output = git_command(repo, args).output()?;
-    if output.status.success() {
-        Ok(Some(output.stdout))
-    } else {
-        Ok(None)
-    }
-}
-
-fn git_status(repo: &str, args: &[&str]) -> Result<std::process::ExitStatus> {
-    Ok(git_command(repo, args).status()?)
-}
-
-fn git_command(repo: &str, args: &[&str]) -> Command {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(repo)
-        .arg("-c")
-        .arg("core.quotepath=false");
-    command.args(args);
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
-
-fn stderr_or_status(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        format!("git exited with status {}", output.status)
-    } else {
-        stderr
-    }
-}
 
 fn short_task_id(task_id: &str) -> String {
     let short: String = task_id
@@ -424,13 +370,8 @@ fn short_task_id(task_id: &str) -> String {
     }
 }
 
-fn parent_dir(path: &Path) -> Result<PathBuf> {
-    path.parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))
-}
 
-fn to_string(err: impl std::fmt::Display) -> String {
+pub(crate) fn to_string(err: impl std::fmt::Display) -> String {
     err.to_string()
 }
 

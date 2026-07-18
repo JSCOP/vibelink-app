@@ -53,6 +53,7 @@ time = "0.3"
 ureq = { version = "2", features = ["json"] }
 keyring = { version = "3", features = ["windows-native"] }
 chrono = { version = "0.4", features = ["serde"] }
+trash = "5"
 
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
