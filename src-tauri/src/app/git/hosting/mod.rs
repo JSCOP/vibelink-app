@@ -3,7 +3,7 @@ pub(crate) mod detect;
 pub(crate) mod github;
 pub(crate) mod gitlab;
 
-use crate::app::license::LicenseService;
+use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -97,48 +97,48 @@ pub(crate) trait HostingClient {
 }
 
 #[tauri::command]
-pub async fn hosting_detect(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<HostingInfo, String> {
-    entitled_spawn(license, move || detect::detect_hosting(&workspace_folder)).await
+pub async fn hosting_detect(supervisor: State<'_, Arc<EntitlementSupervisor>>, workspace_folder: String) -> Result<HostingInfo, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || detect::detect_hosting(&workspace_folder)).await
 }
 
 #[tauri::command]
-pub async fn hosting_token_set(license: State<'_, Arc<LicenseService>>, host: String, token: String) -> Result<(), String> {
-    entitled_spawn(license, move || auth::set_token(&host, &token)).await
+pub async fn hosting_token_set(supervisor: State<'_, Arc<EntitlementSupervisor>>, host: String, token: String) -> Result<(), String> {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || auth::set_token(&host, &token)).await
 }
 
 #[tauri::command]
-pub async fn hosting_token_clear(license: State<'_, Arc<LicenseService>>, host: String) -> Result<(), String> {
-    entitled_spawn(license, move || auth::clear_token(&host)).await
+pub async fn hosting_token_clear(supervisor: State<'_, Arc<EntitlementSupervisor>>, host: String) -> Result<(), String> {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || auth::clear_token(&host)).await
 }
 
 #[tauri::command]
-pub async fn hosting_token_status(license: State<'_, Arc<LicenseService>>, host: String) -> Result<bool, String> {
-    entitled_spawn(license, move || auth::token_status(&host)).await
+pub async fn hosting_token_status(supervisor: State<'_, Arc<EntitlementSupervisor>>, host: String) -> Result<bool, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || auth::token_status(&host)).await
 }
 
 #[tauri::command]
-pub async fn hosting_provider_override(license: State<'_, Arc<LicenseService>>, host: String, provider: String) -> Result<(), String> {
-    entitled_spawn(license, move || detect::set_provider_override(&host, &provider)).await
+pub async fn hosting_provider_override(supervisor: State<'_, Arc<EntitlementSupervisor>>, host: String, provider: String) -> Result<(), String> {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || detect::set_provider_override(&host, &provider)).await
 }
 
 #[tauri::command]
-pub async fn hosting_github_device_start(license: State<'_, Arc<LicenseService>>) -> Result<DeviceCodeInfo, String> {
-    entitled_spawn(license, auth::github_device_start).await
+pub async fn hosting_github_device_start(supervisor: State<'_, Arc<EntitlementSupervisor>>) -> Result<DeviceCodeInfo, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, auth::github_device_start).await
 }
 
 #[tauri::command]
-pub async fn hosting_github_device_poll(license: State<'_, Arc<LicenseService>>, handle: String) -> Result<bool, String> {
-    entitled_spawn(license, move || auth::github_device_poll(&handle)).await
+pub async fn hosting_github_device_poll(supervisor: State<'_, Arc<EntitlementSupervisor>>, handle: String) -> Result<bool, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || auth::github_device_poll(&handle)).await
 }
 
 #[tauri::command]
-pub async fn hosting_prs_list(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<Vec<PrInfo>, String> {
-    entitled_spawn(license, move || with_client(&workspace_folder, |client| client.list_prs())).await
+pub async fn hosting_prs_list(supervisor: State<'_, Arc<EntitlementSupervisor>>, workspace_folder: String) -> Result<Vec<PrInfo>, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || with_client(&workspace_folder, |client| client.list_prs())).await
 }
 
 #[tauri::command]
-pub async fn hosting_pr_create(license: State<'_, Arc<LicenseService>>, workspace_folder: String, request: CreatePrRequest) -> Result<PrCreated, String> {
-    entitled_spawn(license, move || {
+pub async fn hosting_pr_create(supervisor: State<'_, Arc<EntitlementSupervisor>>, workspace_folder: String, request: CreatePrRequest) -> Result<PrCreated, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         if request.title.trim().is_empty() || request.source_branch.trim().is_empty() || request.target_branch.trim().is_empty() {
             bail!("pull request title, source branch, and target branch are required");
         }
@@ -147,13 +147,13 @@ pub async fn hosting_pr_create(license: State<'_, Arc<LicenseService>>, workspac
 }
 
 #[tauri::command]
-pub async fn hosting_pr_detail(license: State<'_, Arc<LicenseService>>, workspace_folder: String, number: u64) -> Result<PrDetail, String> {
-    entitled_spawn(license, move || with_client(&workspace_folder, |client| client.pr_detail(number))).await
+pub async fn hosting_pr_detail(supervisor: State<'_, Arc<EntitlementSupervisor>>, workspace_folder: String, number: u64) -> Result<PrDetail, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || with_client(&workspace_folder, |client| client.pr_detail(number))).await
 }
 
 #[tauri::command]
-pub async fn hosting_ci_status(license: State<'_, Arc<LicenseService>>, workspace_folder: String, ref_name: String) -> Result<CiStatus, String> {
-    entitled_spawn(license, move || {
+pub async fn hosting_ci_status(supervisor: State<'_, Arc<EntitlementSupervisor>>, workspace_folder: String, ref_name: String) -> Result<CiStatus, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         if ref_name.trim().is_empty() { bail!("CI reference must not be empty"); }
         with_client(&workspace_folder, |client| client.ci_status(&ref_name))
     }).await
@@ -178,12 +178,16 @@ where
     operation(client.as_ref()).map_err(|error| anyhow::anyhow!(auth::redact_error(&host, &error.to_string())))
 }
 
-async fn entitled_spawn<T, F>(license: State<'_, Arc<LicenseService>>, operation: F) -> Result<T, String>
+async fn authorized_spawn<T, F>(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    capability: Capability,
+    operation: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor.authorize(capability).map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(operation).await.map_err(to_string)?.map_err(to_string)
 }
 
