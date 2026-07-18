@@ -23,6 +23,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Release contract tests
+        run: pnpm test:release-contract
       - name: Frontend tests
         run: pnpm exec vitest run
       - name: Lint
