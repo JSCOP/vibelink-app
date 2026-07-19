@@ -18,6 +18,9 @@ import { useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { GitWindow } from './GitWindow'
 
+const withResolvers = <T,>() => (Promise as PromiseConstructor & {
+  withResolvers: <Value>() => { promise: Promise<Value>; resolve: (value: Value | PromiseLike<Value>) => void; reject: (reason?: unknown) => void }
+}).withResolvers<T>()
 const repoInfo: RepoInfo = {
   isRepo: true,
   root: 'C:/repo',
@@ -73,31 +76,108 @@ describe('GitWindow Changes tab', () => {
       paths: ['file.txt'],
     }))
   })
-  test('expands a nested repository and diffs a selected child file', async () => {
-    const nestedStatus: WorkingStatus = {
+  test('expands an untracked directory and diffs a selected child file', async () => {
+    const untrackedDirectoryStatus: WorkingStatus = {
       staged: [],
       unstaged: [],
       conflicted: [],
-      untracked: [{ path: 'vendor/tool/', oldPath: null, changeType: 'untracked', repoKind: 'nestedRepo' }],
+      untracked: [{ path: 'vendor/assets/', oldPath: null, changeType: 'untracked', repoKind: null }],
       truncated: false,
     }
     invoke.mockImplementation(async (command: string) => {
       if (command === 'git_repo_info') return repoInfo
-      if (command === 'git_working_status') return nestedStatus
+      if (command === 'git_working_status') return untrackedDirectoryStatus
       if (command === 'git_dir_entries') return [{ name: 'README.md', isDir: false, repoKind: null, ignored: false }]
-      if (command === 'git_working_file_contents') return { old: '', new: '# Nested repo', binary: false }
+      if (command === 'git_working_file_contents') return { old: '', new: '# Asset notes', binary: false }
       return null
     })
 
     render(<GitWindow />)
-    fireEvent.click(await screen.findByTitle('vendor/tool'))
+    fireEvent.click(await screen.findByTitle('vendor/assets'))
     expect(await screen.findByText('README.md')).toBeTruthy()
-    expect(screen.getByText('git repo')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /README\.md/ }))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', {
-      workspaceFolder: 'C:/repo/vendor/tool',
-      path: 'README.md',
+      workspaceFolder: 'C:/repo',
+      path: 'vendor/assets/README.md',
       area: 'unstaged',
     }))
   })
+})
+
+test('clears diff loading when refresh removes the selected file', async () => {
+  const deferred = withResolvers<unknown>()
+  let currentStatus = status
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return currentStatus
+    if (command === 'git_working_file_contents') return deferred.promise
+    return null
+  })
+
+  render(<GitWindow />)
+  expect(await screen.findByText('Loading diff…')).toBeTruthy()
+  currentStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+  fireEvent.click(screen.getByTitle('Refresh'))
+  expect(await screen.findByText('Select a file to view its diff.')).toBeTruthy()
+  expect(screen.queryByText('Loading diff…')).toBeNull()
+  deferred.resolve({ old: 'old', new: 'new', binary: false })
+})
+
+test('loads actual nested repository changes instead of every filesystem entry', async () => {
+  const outerStatus: WorkingStatus = {
+    staged: [],
+    unstaged: [{ path: 'vendor/tool', oldPath: null, changeType: 'modified', repoKind: 'submodule' }],
+    conflicted: [],
+    untracked: [],
+    truncated: false,
+  }
+  const nestedStatus: WorkingStatus = {
+    staged: [],
+    unstaged: [{ path: 'src/changed.ts', oldPath: null, changeType: 'modified' }],
+    conflicted: [],
+    untracked: [],
+    truncated: false,
+  }
+  invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return args?.workspaceFolder === 'C:/repo/vendor/tool' ? nestedStatus : outerStatus
+    if (command === 'git_dir_entries') return [{ name: 'README.md', isDir: false, repoKind: null, ignored: false }]
+    if (command === 'git_working_file_contents') return { old: 'old', new: 'new', binary: false }
+    return null
+  })
+
+  render(<GitWindow />)
+  fireEvent.click(await screen.findByTitle('vendor/tool'))
+  expect(await screen.findByText('src/')).toBeTruthy()
+  expect(screen.queryByText('README.md')).toBeNull()
+  fireEvent.click(screen.getByTitle('vendor/tool/src'))
+  fireEvent.click(await screen.findByRole('button', { name: /changed\.ts/ }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', {
+    workspaceFolder: 'C:/repo/vendor/tool',
+    path: 'src/changed.ts',
+    area: 'unstaged',
+  }))
+})
+
+test('does not request a file diff for a repository directory row', async () => {
+  const repoDirectoryStatus: WorkingStatus = {
+    staged: [],
+    unstaged: [{ path: 'vendor/tool', oldPath: null, changeType: 'modified', repoKind: 'submodule' }],
+    conflicted: [],
+    untracked: [],
+    truncated: false,
+  }
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return repoDirectoryStatus
+    if (command === 'git_working_file_contents') return { old: '', new: '', binary: false }
+    return null
+  })
+
+  render(<GitWindow />)
+  expect(await screen.findByText('Select a file to view its diff.')).toBeTruthy()
+  const settled = withResolvers<void>()
+  window.setTimeout(settled.resolve, 25)
+  await settled.promise
+  expect(invoke).not.toHaveBeenCalledWith('git_working_file_contents', expect.objectContaining({ path: 'vendor/tool' }))
 })

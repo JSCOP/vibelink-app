@@ -41,6 +41,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const decorations = useMemo(() => deriveGitDecorations(gitSession.status), [gitSession.status])
   const nodes = useMemo(() => flattenExplorerTree(session, decorations), [decorations, session])
   const selectedNode = nodes.find((node) => node.path === session.selectedPath) ?? null
+  const selectedHasDiff = Boolean(selectedNode && !selectedNode.entry.isDir && decorations.has(selectedNode.path))
 
   useEffect(() => { void loadChildren(sessionId, workspaceFolder, '') }, [loadChildren, sessionId, workspaceFolder])
   useEffect(() => {
@@ -239,8 +240,10 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         error={viewerError}
         imageFit={imageFit}
         canOpenEditor={Boolean(editorCommand)}
+        canOpenDiff={selectedHasDiff}
         onToggleImageFit={() => setImageFit((value) => !value)}
         onOpenEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
+        onOpenDiff={() => { if (selectedNode && selectedHasDiff) void openGit(selectedNode, false) }}
         onOpenTerminal={() => { if (selectedNode) void openTerminal(selectedNode) }}
         onReveal={() => { if (selectedNode) void invoke('reveal_path', { path: absolutePath(selectedNode.path) }) }}
         onCopyPath={() => { if (selectedNode) void navigator.clipboard.writeText(absolutePath(selectedNode.path)) }}

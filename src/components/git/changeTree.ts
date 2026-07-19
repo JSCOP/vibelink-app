@@ -1,4 +1,4 @@
-import type { GitDirEntry, RepoKind, StatusEntry } from '../../ipc/types'
+import type { ChangeType, GitDirEntry, RepoKind, StatusEntry, WorkingStatus } from '../../ipc/types'
 
 export type ChangeTreeState = {
   collapsedDirs: ReadonlySet<string>
@@ -36,6 +36,9 @@ export type ChangeTreeFsEntryNode = {
   depth: number
   ignored: boolean
   repoRoot: string | null
+  changeType: ChangeType | null
+  oldPath: string | null
+  diffArea: 'staged' | 'unstaged' | null
 }
 
 export type ChangeTreeNode = ChangeTreeDirNode | ChangeTreeEntryNode | ChangeTreeFsEntryNode
@@ -141,9 +144,67 @@ function appendFsNodes(
       })
       if (expanded && Array.isArray(grandChildren)) appendFsNodes(nodes, childPath, grandChildren, depth + 1, childRepoRoot, state)
     } else {
-      nodes.push({ kind: 'fsEntry', path: childPath, name: child.name, depth, ignored: child.ignored, repoRoot })
+      nodes.push({
+        kind: 'fsEntry',
+        path: childPath,
+        name: child.name,
+        depth,
+        ignored: child.ignored,
+        repoRoot,
+        changeType: child.changeType ?? null,
+        oldPath: child.oldPath ?? null,
+        diffArea: child.diffArea ?? null,
+      })
     }
   }
+}
+
+export function nestedStatusChildren(repoRoot: string, status: WorkingStatus): Map<string, GitDirEntry[]> {
+  const entriesByPath = new Map<string, { entry: StatusEntry; diffArea: 'staged' | 'unstaged' }>()
+  const addEntries = (entries: StatusEntry[], diffArea: 'staged' | 'unstaged') => {
+    for (const entry of entries) entriesByPath.set(entry.path.replace(/\/$/, ''), { entry, diffArea })
+  }
+  addEntries(status.untracked, 'unstaged')
+  addEntries(status.staged, 'staged')
+  addEntries(status.unstaged, 'unstaged')
+  addEntries(status.conflicted, 'unstaged')
+
+  const childMaps = new Map<string, Map<string, GitDirEntry>>()
+  const childrenFor = (parent: string) => {
+    const existing = childMaps.get(parent)
+    if (existing) return existing
+    const created = new Map<string, GitDirEntry>()
+    childMaps.set(parent, created)
+    return created
+  }
+
+  for (const [path, value] of entriesByPath) {
+    if (!path) continue
+    const segments = path.split('/')
+    for (let index = 0; index < segments.length; index += 1) {
+      const name = segments[index]
+      const parent = index === 0 ? repoRoot : `${repoRoot}/${segments.slice(0, index).join('/')}`
+      const leaf = index === segments.length - 1
+      const isDir = !leaf || Boolean(value.entry.repoKind) || value.entry.path.endsWith('/')
+      const current = childrenFor(parent).get(name)
+      childrenFor(parent).set(name, {
+        name,
+        isDir,
+        repoKind: leaf ? value.entry.repoKind ?? null : current?.repoKind ?? null,
+        ignored: false,
+        changeType: leaf ? value.entry.changeType : current?.changeType ?? null,
+        oldPath: leaf ? value.entry.oldPath : current?.oldPath ?? null,
+        diffArea: leaf ? value.diffArea : current?.diffArea ?? null,
+      })
+    }
+  }
+
+  const children = new Map<string, GitDirEntry[]>()
+  for (const [parent, entries] of childMaps) {
+    children.set(parent, [...entries.values()].sort((left, right) => Number(right.isDir) - Number(left.isDir) || left.name.localeCompare(right.name)))
+  }
+  if (!children.has(repoRoot)) children.set(repoRoot, [])
+  return children
 }
 
 function anyPrefixCollapsed(segments: string[], length: number, collapsed: ReadonlySet<string>): boolean {

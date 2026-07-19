@@ -11,7 +11,7 @@ import { BranchesTab } from './BranchesTab'
 import { HistoryTab } from './HistoryTab'
 import { PullRequestsTab } from './PullRequestsTab'
 import { GitWindowView, type GitChangeGroup, type GitChangeRow, type GitCloneViewState, type GitRowAction } from './GitWindowView'
-import { buildChangeTree } from './changeTree'
+import { buildChangeTree, nestedStatusChildren } from './changeTree'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
 
@@ -40,6 +40,8 @@ export function GitWindow() {
   const [diffLoading, setDiffLoading] = useState(false)
   const [selectedDiffTarget, setSelectedDiffTarget] = useState<DiffTarget | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
+  const [diffRefreshRevision, setDiffRefreshRevision] = useState(0)
+  const diffRequestGeneration = useRef(0)
   const [branchPickerOpen, setBranchPickerOpen] = useState(false)
   const [branches, setBranches] = useState<BranchInfo[]>([])
   const [cloneOpen, setCloneOpen] = useState(false)
@@ -83,50 +85,59 @@ export function GitWindow() {
 
 
   useEffect(() => {
+    if (!gitState.status) return
     if (!sessionId) return
     const timer = window.setTimeout(() => {
-      const selectedExists = orderedEntries.some((entry) => entry.path === gitState.selectedPath)
+      const selectedEntry = orderedEntries.find((entry) => entry.path === gitState.selectedPath)
+      const selectedExists = Boolean(selectedEntry && !selectedEntry.repoKind && !selectedEntry.path.endsWith('/'))
         || (gitState.selectedPath ? loadedFsFilePaths.has(gitState.selectedPath) : false)
       if (selectedExists) return
-      const first = orderedEntries.find((entry) => !entry.path.endsWith('/')) ?? null
+      const first = orderedEntries.find((entry) => !entry.repoKind && !entry.path.endsWith('/')) ?? null
       setSelectedDiffTarget(null)
       setSelectedPath(sessionId, first?.path ?? null)
       setSelectedArea(first && status.staged.some((entry) => entry.path === first.path) ? 'staged' : 'unstaged')
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [gitState.selectedPath, loadedFsFilePaths, orderedEntries, sessionId, setSelectedPath, status.staged])
+  }, [gitState.selectedPath, gitState.status, loadedFsFilePaths, orderedEntries, sessionId, setSelectedPath, status.staged])
 
   useEffect(() => {
-    let cancelled = false
+    const generation = diffRequestGeneration.current + 1
+    diffRequestGeneration.current = generation
     const timer = window.setTimeout(() => {
       const diffWorkspaceFolder = selectedDiffTarget?.workspaceFolder ?? workspaceFolder
       const diffPath = selectedDiffTarget?.path ?? gitState.selectedPath
       if (!diffWorkspaceFolder || !diffPath) {
         setContents(null)
         setDiffError(null)
+        setDiffLoading(false)
         return
       }
+      setContents(null)
       setDiffLoading(true)
       setDiffError(null)
       void invoke<FileContents>('git_working_file_contents', { workspaceFolder: diffWorkspaceFolder, path: diffPath, area: selectedArea })
-        .then((next) => { if (!cancelled) setContents(next) })
+        .then((next) => { if (diffRequestGeneration.current === generation) setContents(next) })
         .catch((reason) => {
-          if (!cancelled) { setContents(null); setDiffError(String(reason)) }
+          if (diffRequestGeneration.current === generation) { setContents(null); setDiffError(String(reason)) }
         })
-        .finally(() => { if (!cancelled) setDiffLoading(false) })
+        .finally(() => { if (diffRequestGeneration.current === generation) setDiffLoading(false) })
     }, 0)
-    return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [gitState.selectedPath, selectedArea, selectedDiffTarget, workspaceFolder, gitState.lastRefreshAt])
+    return () => window.clearTimeout(timer)
+  }, [diffRefreshRevision, gitState.selectedPath, selectedArea, selectedDiffTarget, workspaceFolder])
 
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     if (!sessionId || !workspaceFolder) return
-    void runGitMutation(sessionId, workspaceFolder, operation).then(after).catch(() => {})
+    void runGitMutation(sessionId, workspaceFolder, operation).then(() => {
+      setDiffRefreshRevision((current) => current + 1)
+      after?.()
+    }).catch(() => {})
   }, [runGitMutation, sessionId, workspaceFolder])
 
   const selectEntry = useCallback((entry: StatusEntry, area: DiffArea, target: DiffTarget | null = null) => {
     if (!sessionId) return
     setSelectedArea(area)
     setSelectedDiffTarget(target)
+    setDiffRefreshRevision((current) => current + 1)
     setSelectedPath(sessionId, entry.path)
   }, [sessionId, setSelectedPath])
 
@@ -141,7 +152,7 @@ export function GitWindow() {
 
   const rowAction = useCallback((id: string, label: string, action: () => void, danger = false): GitRowAction => ({ id, label, danger, onClick: action }), [])
 
-  const toggleDirectory = useCallback((path: string, fsBacked: boolean) => {
+  const toggleDirectory = useCallback((path: string, fsBacked: boolean, repoKind: StatusEntry['repoKind'] = null) => {
     if (!fsBacked) {
       setCollapsedDirs((current) => {
         const next = new Set(current)
@@ -162,8 +173,17 @@ export function GitWindow() {
     setExpandedFsDirs((current) => new Set(current).add(path))
     if (!workspaceFolder || fsChildren.has(path)) return
     setFsChildren((current) => new Map(current).set(path, 'loading'))
-    void invoke<GitDirEntry[]>('git_dir_entries', { workspaceFolder, relPath: path })
-      .then((entries) => setFsChildren((current) => new Map(current).set(path, entries)))
+    const request = repoKind
+      ? invoke<WorkingStatus>('git_working_status', { workspaceFolder: joinWorkspacePath(workspaceFolder, path) })
+          .then((nestedStatus) => nestedStatusChildren(path, nestedStatus))
+      : invoke<GitDirEntry[]>('git_dir_entries', { workspaceFolder, relPath: path })
+          .then((entries) => new Map([[path, entries]]))
+    void request
+      .then((loadedChildren) => setFsChildren((current) => {
+        const next = new Map(current)
+        for (const [parent, children] of loadedChildren) next.set(parent, children)
+        return next
+      }))
       .catch((reason) => {
         setFsChildren((current) => new Map(current).set(path, []))
         setContents(null)
@@ -196,18 +216,24 @@ export function GitWindow() {
           selected: false,
           actions: node.entry ? actionsFor(node.entry) : [],
           onSelect: () => {},
-          onToggle: () => toggleDirectory(node.path, node.fsBacked),
+          onToggle: () => toggleDirectory(node.path, node.fsBacked, node.repoKind),
         }
       }
       const entry: StatusEntry = node.kind === 'entry'
         ? node.entry
-        : { path: node.path, oldPath: null, changeType: 'untracked', repoKind: null }
+        : {
+            path: node.path,
+            oldPath: node.oldPath,
+            changeType: node.changeType ?? 'untracked',
+            repoKind: null,
+          }
       const target = node.kind === 'fsEntry' && node.repoRoot && workspaceFolder
         ? {
             workspaceFolder: joinWorkspacePath(workspaceFolder, node.repoRoot),
             path: node.path.slice(node.repoRoot.length).replace(/^\/+/, ''),
           }
         : null
+      const diffArea = node.kind === 'fsEntry' ? node.diffArea ?? area : area
       return {
         id: `${groupId}:file:${node.path}`,
         kind: 'file',
@@ -218,9 +244,9 @@ export function GitWindow() {
         oldPath: entry.oldPath,
         repoKind: entry.repoKind ?? null,
         ignored: node.kind === 'fsEntry' && node.ignored,
-        selected: gitState.selectedPath === node.path && selectedArea === area,
+        selected: gitState.selectedPath === node.path && selectedArea === diffArea,
         actions: node.kind === 'entry' ? actionsFor(entry) : [],
-        onSelect: () => selectEntry(entry, area, target),
+        onSelect: () => selectEntry(entry, diffArea, target),
       }
     })
 
@@ -347,7 +373,10 @@ export function GitWindow() {
         diffLoading={diffLoading}
         diffError={diffError}
         clone={clone}
-        onRefresh={() => { if (sessionId) void refreshGit(sessionId, workspaceFolder) }}
+        onRefresh={() => {
+          if (!sessionId) return
+          void refreshGit(sessionId, workspaceFolder).then(() => setDiffRefreshRevision((current) => current + 1))
+        }}
         onInitialize={() => mutate(() => invoke('git_init', { workspaceFolder }))}
         onOpenClone={() => setCloneOpen(true)}
         onOpenBranchPicker={openBranchPicker}

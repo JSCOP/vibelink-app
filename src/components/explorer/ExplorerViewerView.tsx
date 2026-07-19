@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Copy, ExternalLink, FileCode2, FileText, Folder, Image as ImageIcon, LoaderCircle, Maximize2, Minimize2, Terminal, TriangleAlert } from 'lucide-react'
+import { Copy, ExternalLink, FileCode2, FileText, Folder, GitCompare, Image as ImageIcon, LoaderCircle, Maximize2, Minimize2, Terminal, TriangleAlert } from 'lucide-react'
 import type { DirEntryInfo, TextFile } from '../../ipc/types'
 import './ExplorerViewerView.css'
 
@@ -12,14 +12,16 @@ export type ExplorerViewerViewProps = {
   error: string | null
   imageFit: boolean
   canOpenEditor: boolean
+  canOpenDiff: boolean
   onToggleImageFit: () => void
   onOpenEditor: () => void
+  onOpenDiff: () => void
   onOpenTerminal: () => void
   onReveal: () => void
   onCopyPath: () => void
 }
 
-export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenEditor, onToggleImageFit, onOpenEditor, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
+export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenEditor, canOpenDiff, onToggleImageFit, onOpenEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
   const lineCount = useMemo(() => (textFile && !textFile.binary ? countLines(textFile.content) : null), [textFile])
   const [imageProbe, setImageProbe] = useState<{ src: string; width: number; height: number } | null>(null)
   const imageDims = imageSrc && imageProbe && imageProbe.src === imageSrc ? imageProbe : null
@@ -49,6 +51,7 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           </div>
         </div>
         <div className="explorer-viewer-actions">
+          {canOpenDiff ? <button type="button" title="View diff in Git" onClick={onOpenDiff}><GitCompare size={13} /></button> : null}
           <button type="button" title="Copy path" onClick={onCopyPath}><Copy size={13} /></button>
           <button type="button" title="Reveal in File Explorer" onClick={onReveal}><ExternalLink size={13} /></button>
           <button type="button" title="Open terminal here" onClick={onOpenTerminal}><Terminal size={13} /></button>

@@ -32,6 +32,9 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
   }
 
   const showSelectHint = hideFileList && !selectedPath
+  const noDifferences = Boolean(contents && !contents.binary && contents.old === contents.new)
+  const noFiles = !hideFileList && files.length === 0 && !selectedPath
+  const noContents = !loading && !error && !contents && !showSelectHint && !noFiles
 
   return (
     <div className="task-diff-view git-diff-pane" style={{ '--file-list-width': `${listWidth}px` } as CSSProperties}>
@@ -65,10 +68,13 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
             {onOpenInEditor ? <button type="button" onClick={onOpenInEditor}>Open in editor</button> : null}
           </div>
         ) : null}
+        {!loading && !error && noDifferences ? <div className="task-diff-empty git-diff-empty">No differences to show.</div> : null}
+        {!loading && !error && noFiles ? <div className="task-diff-empty git-diff-empty">No changed files.</div> : null}
         {!loading && !error && !contents && showSelectHint ? (
           <div className="task-diff-empty git-diff-empty">Select a file to view its diff.</div>
         ) : null}
-        {!loading && contents && !contents.binary ? (
+        {noContents ? <div className="task-diff-empty git-diff-empty">No diff available for this file.</div> : null}
+        {!loading && contents && !contents.binary && !noDifferences ? (
           <ReactDiffViewer oldValue={contents.old} newValue={contents.new} splitView={splitView} useDarkTheme styles={diffStyles} />
         ) : null}
       </main>

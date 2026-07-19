@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { GitDirEntry, StatusEntry } from '../../ipc/types'
-import { buildChangeTree } from './changeTree'
+import type { GitDirEntry, StatusEntry, WorkingStatus } from '../../ipc/types'
+import { buildChangeTree, nestedStatusChildren } from './changeTree'
 
 const modified = (path: string): StatusEntry => ({ path, oldPath: null, changeType: 'modified', repoKind: null })
 
@@ -56,6 +56,34 @@ describe('buildChangeTree', () => {
 
     expect(nodes).toHaveLength(2)
     expect(nodes[1]).toMatchObject({ kind: 'dir', path: 'vendor/lib', repoKind: 'submodule', fsBacked: true })
+  })
+
+  it('projects only actual nested repository changes into the expanded tree', () => {
+    const status: WorkingStatus = {
+      staged: [{ path: 'src/staged.ts', oldPath: null, changeType: 'modified' }],
+      unstaged: [{ path: 'src/changed.ts', oldPath: null, changeType: 'modified' }],
+      untracked: [],
+      conflicted: [],
+      truncated: false,
+    }
+    const children = nestedStatusChildren('vendor/lib', status)
+    const nodes = buildChangeTree([
+      { path: 'vendor/lib', oldPath: null, changeType: 'modified', repoKind: 'submodule' },
+    ], {
+      collapsedDirs: new Set(),
+      expandedFsDirs: new Set(['vendor/lib', 'vendor/lib/src']),
+      fsChildren: children,
+    })
+
+    expect(nodes.map((node) => [node.kind, node.path])).toEqual([
+      ['dir', 'vendor'],
+      ['dir', 'vendor/lib'],
+      ['dir', 'vendor/lib/src'],
+      ['fsEntry', 'vendor/lib/src/changed.ts'],
+      ['fsEntry', 'vendor/lib/src/staged.ts'],
+    ])
+    expect(nodes[3]).toMatchObject({ changeType: 'modified', diffArea: 'unstaged', repoRoot: 'vendor/lib' })
+    expect(nodes[4]).toMatchObject({ changeType: 'modified', diffArea: 'staged', repoRoot: 'vendor/lib' })
   })
 
   it('hides descendants while a status folder is collapsed', () => {
