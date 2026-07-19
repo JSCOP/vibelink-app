@@ -24,7 +24,6 @@ $TauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
 $ManifestTemplate = Join-Path $RepoRoot 'src-tauri\AppxManifest.xml.template'
 $ReleaseRoot = Join-Path $RepoRoot 'src-tauri\target\release'
 $ReleaseExe = Join-Path $ReleaseRoot 'app.exe'
-$ReleaseResources = Join-Path $ReleaseRoot 'resources'
 $IconRoot = Join-Path $RepoRoot 'src-tauri\icons'
 $StoreRoot = Join-Path $RepoRoot 'src-tauri\target\store'
 $StageRoot = Join-Path $StoreRoot 'package'
@@ -104,9 +103,6 @@ if (-not $SkipBuild) {
 if (-not (Test-Path -LiteralPath $ReleaseExe -PathType Leaf)) {
   throw "Release executable is missing: $ReleaseExe"
 }
-if (-not (Test-Path -LiteralPath $ReleaseResources -PathType Container)) {
-  throw "Release resources are missing: $ReleaseResources"
-}
 
 if (Test-Path -LiteralPath $StageRoot) {
   Remove-Item -LiteralPath $StageRoot -Recurse -Force
@@ -114,7 +110,6 @@ if (Test-Path -LiteralPath $StageRoot) {
 New-Item -ItemType Directory -Path (Join-Path $StageRoot 'Assets') -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $OutputPath) -Force | Out-Null
 Copy-Item -LiteralPath $ReleaseExe -Destination (Join-Path $StageRoot 'app.exe')
-Copy-Item -LiteralPath $ReleaseResources -Destination (Join-Path $StageRoot 'resources') -Recurse
 foreach ($asset in @('StoreLogo.png', 'Square44x44Logo.png', 'Square150x150Logo.png')) {
   $source = Join-Path $IconRoot $asset
   if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Store asset is missing: $source" }
