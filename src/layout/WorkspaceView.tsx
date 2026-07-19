@@ -25,7 +25,7 @@ import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneC
 import { activeWorkspaceLayoutPage, createDefaultWorkspaceDockviewLayout, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
-import { settleNestedDockviewLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleDockviewOverlayLayout, settleNestedDockviewLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { GitWindow } from '../components/git/GitWindow'
@@ -171,9 +171,12 @@ function DiffWindowPanel(props: IDockviewPanelProps) {
 }
 
 function GitWindowPanel(props: IDockviewPanelProps) {
+  const sessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const workspaceFolder = useWorkspaceStore((state) => state.sessions.find((session) => session.id === state.activeSessionId)?.workspaceFolder ?? null)
+  const workspaceKey = `${sessionId ?? 'none'}:${workspaceFolder ?? ''}`
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-git">
-      <ProPanelBoundary feature="Git"><ErrorBoundary label="Git panel"><GitWindow /></ErrorBoundary></ProPanelBoundary>
+      <ProPanelBoundary feature="Git"><ErrorBoundary label="Git panel"><GitWindow key={workspaceKey} /></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -1555,6 +1558,32 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     clearResizePreview: clearTerminalResizePreview,
     startResize: startTerminalConnectedResize,
   }), [clearTerminalResizePreview, handleTerminalReady, previewTerminalResizeHandle, setTerminalDockElement, startTerminalConnectedResize, terminalPreviewStore, terminalResizeHandles])
+  const settleWorkspaceMaximizedLayout = useCallback(async () => {
+    const api = apiRef.current
+    if (!api) return
+    const generation = ++workspaceLayoutMutationRef.current
+    workspaceLayoutMutationActiveRef.current = true
+    const isCurrent = () => workspaceLayoutMutationRef.current === generation && apiRef.current === api
+    try {
+      await settleDockviewOverlayLayout({
+        layout: () => {
+          if (isCurrent()) layoutDockview(api)
+        },
+        refresh: () => {
+          if (isCurrent()) forceOverlayReposition(api)
+        },
+        isSettled: () => !isCurrent() || workspaceWindowOverlaysMatchGroups(dockRef.current),
+        complete: () => {
+          if (!isCurrent()) return
+          scheduleTerminalDockLayout()
+          reflowTerminalsAfterLayout({ syncPty: true, recover: true })
+        },
+      })
+    } finally {
+      if (workspaceLayoutMutationRef.current === generation) workspaceLayoutMutationActiveRef.current = false
+    }
+  }, [layoutDockview, scheduleTerminalDockLayout])
+
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     apiRef.current = event.api
@@ -1567,10 +1596,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       const hasMaximizedGroup = event.api.hasMaximizedGroup()
       clearResizeInteraction({ clearHandles: hasMaximizedGroup })
       if (!hasMaximizedGroup && isDockElementMeasurable(dockRef.current)) refreshResizeHandles(event.api)
-      // Force outer/inner layout before the terminal dirty pass.
-      requestAnimationFrame(() => layoutDockview(event.api))
-      scheduleTerminalDockLayout()
-      reflowTerminalsAfterLayout({ syncPty: true })
+      void settleWorkspaceMaximizedLayout()
     }
 
     if (hasActivePanelChange) activePanelApi.onDidActivePanelChange(updateActivePaneId)
@@ -1610,7 +1636,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     loadedSessionRef.current = null
     loadedPageRef.current = null
     loadActiveSessionLayout()
-  }, [clearResizeInteraction, closePaneInStore, layoutDockview, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, settleWorkspaceWindowMutation, syncChromeState])
+  }, [clearResizeInteraction, closePaneInStore, loadActiveSessionLayout, onApiReady, persistLayoutSoon, refreshResizeHandles, scheduleLayoutReflow, scheduleTerminalDockLayout, setActivePaneFromApis, settleWorkspaceMaximizedLayout, settleWorkspaceWindowMutation, syncChromeState])
 
   useEffect(() => {
     syncRemoteLeasedPanes()
@@ -2041,6 +2067,20 @@ function forceOverlayReposition(api: DockviewApi): void {
   if (!container || typeof container !== 'object' || !('updateAllPositions' in container)) return
   if (typeof container.updateAllPositions !== 'function') return
   container.updateAllPositions()
+}
+
+function workspaceWindowOverlaysMatchGroups(root: HTMLElement | null): boolean {
+  if (!root) return false
+  const panels = [...root.querySelectorAll<HTMLElement>('.workspace-window-panel[data-window-panel-id]')]
+    .filter((panel) => isDockElementMeasurable(panel))
+  if (panels.length === 0) return false
+  const tabs = [...root.querySelectorAll<HTMLElement>('.workspace-window-tab[data-window-panel-id]')]
+  return panels.every((panel) => {
+    const panelId = panel.dataset.windowPanelId
+    const tab = tabs.find((candidate) => candidate.dataset.windowPanelId === panelId)
+    const content = tab?.closest<HTMLElement>('.dv-groupview')?.querySelector<HTMLElement>(':scope > .dv-content-container')
+    return Boolean(content && overlayRectsMatch(panel, content))
+  })
 }
 
 function terminalWindowOverlayMatchesGroup(root: HTMLElement | null): boolean {

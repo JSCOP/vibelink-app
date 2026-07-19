@@ -38,10 +38,12 @@ type NormalizeOptions = {
 }
 export const terminalWorkspaceLayoutPageId = 'terminal'
 export const planningWorkspaceLayoutPageId = 'planning'
+export const gitWorkspaceLayoutPageId = 'git-page'
 
 const fixedWorkspaceLayoutPages = [
   { id: terminalWorkspaceLayoutPageId, name: 'Terminal' },
   { id: planningWorkspaceLayoutPageId, name: 'Kanban + Agent' },
+  { id: gitWorkspaceLayoutPageId, name: 'Git' },
 ] as const
 
 
@@ -115,7 +117,7 @@ export function normalizeWorkspaceLayoutState(raw: string | null | undefined, op
   if (isWorkspaceLayoutBlob(parsed)) {
     const pages = normalizeFixedPages(parsed.pages, now, terminalPaneIds)
     const requested = typeof parsed.activePageId === 'string' ? parsed.activePageId : ''
-    const activePageId = requested === terminalWorkspaceLayoutPageId || requested === planningWorkspaceLayoutPageId
+    const activePageId = fixedWorkspaceLayoutPages.some((page) => page.id === requested)
       ? requested
       : terminalWorkspaceLayoutPageId
     return { version: 2, activePageId, pages }
@@ -132,19 +134,21 @@ export function normalizeWorkspaceLayoutState(raw: string | null | undefined, op
     pages: [
       createPage(terminalWorkspaceLayoutPageId, 'Terminal', terminalLayout, now),
       createPage(planningWorkspaceLayoutPageId, 'Kanban + Agent', planningLayout, now),
+      createPage(gitWorkspaceLayoutPageId, 'Git', null, now),
     ],
   }
 }
 
 export function createDefaultWorkspaceDockviewLayout(pageId: string): Record<string, unknown> {
-  const planning = pageId === planningWorkspaceLayoutPageId
-  const descriptors = planning
+  const descriptors = pageId === planningWorkspaceLayoutPageId
     ? [workspaceWindowDescriptors.kanban, workspaceWindowDescriptors.agent]
-    : [workspaceWindowDescriptors.terminal]
+    : pageId === gitWorkspaceLayoutPageId
+      ? [workspaceWindowDescriptors.explorer, workspaceWindowDescriptors.git]
+      : [workspaceWindowDescriptors.terminal]
   const panels: Record<string, unknown> = {}
   const layout: Record<string, unknown> = { panels }
   for (const descriptor of descriptors) rewritePanel(layout, descriptor)
-  const sizes = planning ? [700, 300] : [1000]
+  const sizes = pageId === planningWorkspaceLayoutPageId ? [700, 300] : pageId === gitWorkspaceLayoutPageId ? [300, 700] : [1000]
   layout.grid = {
     root: {
       type: 'branch',
@@ -155,7 +159,8 @@ export function createDefaultWorkspaceDockviewLayout(pageId: string): Record<str
     height: 600,
     orientation: 'HORIZONTAL',
   }
-  layout.activeGroup = `window-${descriptors[0].panelId}`
+  const activeDescriptor = pageId === gitWorkspaceLayoutPageId ? workspaceWindowDescriptors.git : descriptors[0]
+  layout.activeGroup = `window-${activeDescriptor.panelId}`
   return layout
 }
 

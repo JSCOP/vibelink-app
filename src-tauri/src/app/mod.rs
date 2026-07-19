@@ -162,6 +162,7 @@ pub fn run() {
             git::branch::git_conflict_take,
             git::diff::git_diff_refs,
             git::diff::git_diff_refs_file,
+            git::status::git_dir_entries,
             git::stage::git_discard,
             git::remote::git_fetch,
             git::git_file_contents,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { settleNestedDockviewLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleDockviewOverlayLayout, settleNestedDockviewLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
 
 describe('waitForDockviewOverlayLayout', () => {
   it('waits for two distinct animation frames before continuing a split layout', async () => {
@@ -25,6 +25,34 @@ describe('waitForDockviewOverlayLayout', () => {
     callbacks.shift()?.(2)
     await pending
     expect(settled).toBe(true)
+  })
+  it('retries an outer maximize layout until its overlay matches the group', async () => {
+    const frames: FrameRequestCallback[] = []
+    const scheduleFrame = vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const order: string[] = []
+    let checks = 0
+    const pending = settleDockviewOverlayLayout({
+      layout: () => order.push('layout'),
+      refresh: () => order.push('refresh'),
+      isSettled: () => {
+        order.push('check')
+        checks += 1
+        return checks === 2
+      },
+      complete: () => order.push('complete'),
+    }, scheduleFrame)
+
+    expect(order).toEqual(['layout'])
+    frames.shift()?.(1)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(order).toEqual(['layout', 'refresh', 'check'])
+    frames.shift()?.(2)
+    await pending
+    expect(order).toEqual(['layout', 'refresh', 'check', 'refresh', 'check', 'complete'])
   })
 
   it('recovers only after both nested overlay layers match their groups', async () => {

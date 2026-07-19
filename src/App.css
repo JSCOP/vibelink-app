@@ -4396,6 +4396,46 @@ button.git-window-primary-action,
   padding: 0 8px 0 4px;
 }
 
+.git-window-change-row[data-ignored] {
+  opacity: 0.52;
+}
+
+.git-window-change-row .git-window-change-file {
+  padding-left: calc(4px + var(--git-tree-depth, 0) * 14px);
+}
+
+.git-window-tree-dir .git-window-change-file {
+  align-items: center;
+}
+
+.git-window-tree-chevron {
+  color: var(--vibelink-muted);
+  flex: 0 0 auto;
+}
+
+.git-window-repo-kind-badge {
+  background: color-mix(in srgb, var(--vibelink-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-accent) 38%, transparent);
+  border-radius: 999px;
+  color: var(--vibelink-accent);
+  flex: 0 0 auto;
+  font: 600 9px/1 var(--vibelink-sans);
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+
+.git-window-repo-kind-badge[data-repo-kind='submodule'] {
+  background: color-mix(in srgb, var(--vibelink-cyan) 14%, transparent);
+  border-color: color-mix(in srgb, var(--vibelink-cyan) 38%, transparent);
+  color: var(--vibelink-cyan);
+}
+
+.git-window-tree-count {
+  color: var(--vibelink-muted);
+  flex: 0 0 auto;
+  font: 10px/1 var(--vibelink-mono);
+}
+
 .git-window-change-row:hover {
   background: var(--vibelink-hover);
 }

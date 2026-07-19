@@ -229,11 +229,12 @@ describe('workspace store profiles', () => {
       pages: [
         { id: 'terminal', name: 'Terminal', layoutJson: null },
         { id: 'planning', name: 'Kanban + Agent', layoutJson: null },
+        { id: 'git-page', name: 'Git', layoutJson: null },
       ],
     })
   })
 
-  test('attachSession normalizes persisted layouts to the two fixed pages', async () => {
+  test('attachSession normalizes persisted layouts to the fixed pages', async () => {
     const persistedLayout = JSON.stringify({
       version: 2,
       activePageId: 'scratch',
@@ -255,9 +256,10 @@ describe('workspace store profiles', () => {
       pages: [
         { id: 'terminal', name: 'Terminal', layoutJson: null },
         { id: 'planning', name: 'Kanban + Agent', layoutJson: null, createdAt: 2, updatedAt: 3 },
+        { id: 'git-page', name: 'Git', layoutJson: null },
       ],
     })
-    expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}').pages.map((page: { id: string }) => page.id)).toEqual(['terminal', 'planning'])
+    expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}').pages.map((page: { id: string }) => page.id)).toEqual(['terminal', 'planning', 'git-page'])
   })
 
   test('attachSession detaches the previously active workspace', async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   createDefaultWorkspaceDockviewLayout,
+  gitWorkspaceLayoutPageId,
   normalizeWorkspaceLayoutState,
   planningWorkspaceLayoutPageId,
   terminalWorkspaceLayoutPageId,
@@ -8,7 +9,7 @@ import {
 } from './workspaceLayoutModel'
 
 describe('normalizeWorkspaceLayoutState', () => {
-  it('creates exactly the two fixed pages from null state with Terminal active', () => {
+  it('creates exactly the three fixed pages from null state with Terminal active', () => {
     const state = normalizeWorkspaceLayoutState(null, { now: 10 })
 
     expect(state).toEqual({
@@ -17,6 +18,7 @@ describe('normalizeWorkspaceLayoutState', () => {
       pages: [
         { id: terminalWorkspaceLayoutPageId, name: 'Terminal', layoutJson: null, createdAt: 10, updatedAt: 10 },
         { id: planningWorkspaceLayoutPageId, name: 'Kanban + Agent', layoutJson: null, createdAt: 10, updatedAt: 10 },
+        { id: gitWorkspaceLayoutPageId, name: 'Git', layoutJson: null, createdAt: 10, updatedAt: 10 },
       ],
     })
   })
@@ -50,6 +52,27 @@ describe('normalizeWorkspaceLayoutState', () => {
     })
     expect(Object.keys(planning.panels as Record<string, unknown>)).not.toContain(workspaceWindowDescriptors.terminal.panelId)
   })
+  it('defines an Explorer + Git reset layout for the Git page', () => {
+    const git = createDefaultWorkspaceDockviewLayout(gitWorkspaceLayoutPageId)
+
+    expect(git).toMatchObject({
+      grid: {
+        orientation: 'HORIZONTAL',
+        root: {
+          data: [
+            { data: { views: [workspaceWindowDescriptors.explorer.panelId] }, size: 300 },
+            { data: { views: [workspaceWindowDescriptors.git.panelId] }, size: 700 },
+          ],
+        },
+      },
+      panels: {
+        [workspaceWindowDescriptors.explorer.panelId]: { contentComponent: 'explorerWindow' },
+        [workspaceWindowDescriptors.git.panelId]: { contentComponent: 'gitWindow' },
+      },
+      activeGroup: `window-${workspaceWindowDescriptors.git.panelId}`,
+    })
+    expect(Object.keys(git.panels as Record<string, unknown>)).not.toContain(workspaceWindowDescriptors.terminal.panelId)
+  })
 
   it('preserves fixed page layouts and timestamps while removing arbitrary pages', () => {
     const terminalLayout = fixedWorkspaceDockLayout(workspaceWindowDescriptors.terminal.panelId, 'terminalWindow')
@@ -68,6 +91,7 @@ describe('normalizeWorkspaceLayoutState', () => {
     expect(state.pages).toEqual([
       { id: terminalWorkspaceLayoutPageId, name: 'Terminal', layoutJson: terminalLayout, createdAt: 10, updatedAt: 20 },
       { id: planningWorkspaceLayoutPageId, name: 'Kanban + Agent', layoutJson: planningLayout, createdAt: 30, updatedAt: 40 },
+      { id: gitWorkspaceLayoutPageId, name: 'Git', layoutJson: null, createdAt: 99, updatedAt: 99 },
     ])
     expect(normalizeWorkspaceLayoutState(JSON.stringify({ ...state, activePageId: 'scratch' }), { now: 99 }).activePageId).toBe(terminalWorkspaceLayoutPageId)
   })
@@ -88,7 +112,7 @@ describe('normalizeWorkspaceLayoutState', () => {
     const state = normalizeWorkspaceLayoutState(layout, { terminalPaneIds: ['pane-1'], now: 1 })
     const pageLayout = JSON.parse(state.pages[0].layoutJson ?? '{}')
 
-    expect(state.pages.map((page) => page.id)).toEqual([terminalWorkspaceLayoutPageId, planningWorkspaceLayoutPageId])
+    expect(state.pages.map((page) => page.id)).toEqual([terminalWorkspaceLayoutPageId, planningWorkspaceLayoutPageId, gitWorkspaceLayoutPageId])
     expect(pageLayout.vibelinkTerminalLayout.panels['pane-1']).toMatchObject({ contentComponent: 'terminal' })
     expect(pageLayout.panels[workspaceWindowDescriptors.terminal.panelId]).toMatchObject({ contentComponent: 'terminalWindow' })
     expect(pageLayout.panels[workspaceWindowDescriptors.agent.panelId]).toBeUndefined()

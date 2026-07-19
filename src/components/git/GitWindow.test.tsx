@@ -73,4 +73,31 @@ describe('GitWindow Changes tab', () => {
       paths: ['file.txt'],
     }))
   })
+  test('expands a nested repository and diffs a selected child file', async () => {
+    const nestedStatus: WorkingStatus = {
+      staged: [],
+      unstaged: [],
+      conflicted: [],
+      untracked: [{ path: 'vendor/tool/', oldPath: null, changeType: 'untracked', repoKind: 'nestedRepo' }],
+      truncated: false,
+    }
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'git_repo_info') return repoInfo
+      if (command === 'git_working_status') return nestedStatus
+      if (command === 'git_dir_entries') return [{ name: 'README.md', isDir: false, repoKind: null, ignored: false }]
+      if (command === 'git_working_file_contents') return { old: '', new: '# Nested repo', binary: false }
+      return null
+    })
+
+    render(<GitWindow />)
+    fireEvent.click(await screen.findByTitle('vendor/tool'))
+    expect(await screen.findByText('README.md')).toBeTruthy()
+    expect(screen.getByText('git repo')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /README\.md/ }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', {
+      workspaceFolder: 'C:/repo/vendor/tool',
+      path: 'README.md',
+      area: 'unstaged',
+    }))
+  })
 })
