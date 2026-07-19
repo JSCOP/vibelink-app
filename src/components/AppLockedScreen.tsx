@@ -11,7 +11,11 @@ function trialDaysLeft(trialEndsAt: string | null | undefined): number | null {
   return Math.max(0, Math.ceil((ends - Date.now()) / (24 * 60 * 60 * 1000)))
 }
 
-export function AppLockedScreen() {
+type AppLockedScreenProps = {
+  onReportBug?: () => void
+}
+
+export function AppLockedScreen({ onReportBug }: AppLockedScreenProps) {
   const status = useWorkspaceStore((state) => state.license.status)
   const revalidateLicense = useWorkspaceStore((state) => state.revalidateLicense)
   const signOutAccount = useWorkspaceStore((state) => state.signOutAccount)
@@ -67,6 +71,7 @@ export function AppLockedScreen() {
               <button type="button" disabled={busy} onClick={() => void signOut()}>
                 Sign out
               </button>
+              {onReportBug ? <button type="button" disabled={busy} onClick={onReportBug}>Report a bug</button> : null}
             </div>
             {status?.email ? <p className="app-locked-account">Signed in as {status.email}</p> : null}
           </>

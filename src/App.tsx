@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Bug, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
@@ -18,6 +18,7 @@ import { TerminalTopbarActions } from './components/TerminalTopbarActions'
 import { ProUpsellDialog } from './components/ProUpsellDialog'
 import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
+import { BugReportDialog } from './components/BugReportDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
 import { startTerminalOutputStream } from './ipc/output'
@@ -61,6 +62,7 @@ function App() {
   const windowMenuRef = useRef<HTMLDivElement | null>(null)
   const pageMenuRef = useRef<HTMLDivElement | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isBugReportOpen, setIsBugReportOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
   const [isSetupWizardOpen, setIsSetupWizardOpen] = useState(false)
   const [isWindowMenuOpen, setIsWindowMenuOpen] = useState(false)
@@ -483,7 +485,8 @@ function App() {
   if (appLocked) {
     return (
       <main className="app-shell app-shell-locked" style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
-        <AppLockedScreen />
+        <AppLockedScreen onReportBug={license.status?.email ? () => setIsBugReportOpen(true) : undefined} />
+        {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
       </main>
     )
   }
@@ -581,6 +584,9 @@ function App() {
           <button type="button" className="topbar-icon-button" title="Capture video" onClick={() => void openVideoCapture()}>
             <Video size={16} />
           </button>
+          <button type="button" className="topbar-icon-button" title="Report a bug" onClick={() => setIsBugReportOpen(true)}>
+            <Bug size={16} />
+          </button>
           <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
             <Settings2 size={16} />
           </button>
@@ -628,6 +634,7 @@ function App() {
         {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} /> : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
+        {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
         {proUpsellFeature ? <ProUpsellDialog feature={proUpsellFeature} onClose={() => setProUpsellFeature(null)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}

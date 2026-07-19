@@ -129,6 +129,7 @@ pub fn run() {
             license::account_sign_in_start,
             license::account_sign_in_poll,
             license::account_sign_out,
+            license::bug_report_submit,
             fsops::fs_create_dir,
             fsops::fs_create_file,
             fsops::fs_delete,

@@ -72,6 +72,32 @@ pub enum AccountSignInPollResult {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BugReportInputDto {
+    pub category: String,
+    pub title: String,
+    pub description: String,
+    pub steps_to_reproduce: Option<String>,
+    pub contact_allowed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BugReportCreatedDto {
+    pub id: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NormalizedBugReport {
+    category: String,
+    title: String,
+    description: String,
+    steps_to_reproduce: Option<String>,
+    contact_allowed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct ApiDeviceCodeDto {
     device_code: String,
     user_code: String,
@@ -375,6 +401,65 @@ impl LicenseService {
         }
         self.clear_credential()?;
         self.status()
+    }
+
+    pub fn submit_bug_report(&self, input: BugReportInputDto) -> Result<BugReportCreatedDto> {
+        let report = normalize_bug_report(input)?;
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone()
+            .filter(|stored| !stored.session_token.is_empty() && stored.email.is_some())
+            .ok_or_else(|| {
+                anyhow!("Sign in with your Moobang account before submitting a bug report.")
+            })?;
+        let url = format!("{LICENSE_API_ORIGIN}/api/account/bug-reports");
+        let body = serde_json::json!({
+            "source": "desktop",
+            "category": report.category,
+            "title": report.title,
+            "description": report.description,
+            "stepsToReproduce": report.steps_to_reproduce,
+            "appVersion": env!("CARGO_PKG_VERSION"),
+            "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "contactAllowed": report.contact_allowed,
+        });
+        let request = self
+            .agent
+            .post(&url)
+            .set("Accept", "application/json")
+            .set("Authorization", &format!("Bearer {}", stored.session_token));
+        match request.send_json(body) {
+            Ok(response) => response
+                .into_json::<BugReportCreatedDto>()
+                .map_err(|error| {
+                    anyhow!("Bug report service returned an invalid response: {error}")
+                }),
+            Err(ureq::Error::Status(401, _)) => Err(anyhow!(
+                "Your Moobang account session expired. Sign in again before submitting the report."
+            )),
+            Err(ureq::Error::Status(429, _)) => Err(anyhow!(
+                "Daily bug report limit reached (20 reports per account)."
+            )),
+            Err(ureq::Error::Status(422, _)) => {
+                Err(anyhow!("Check the bug report fields and try again."))
+            }
+            Err(ureq::Error::Status(status, _)) if status >= 500 => {
+                Err(anyhow!("Bug report service is temporarily unavailable."))
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let code = response
+                    .into_json::<ApiErrorDto>()
+                    .ok()
+                    .map(|error| error.code)
+                    .unwrap_or_else(|| format!("HTTP_{status}"));
+                Err(anyhow!("Bug report submission failed: {code}"))
+            }
+            Err(ureq::Error::Transport(_)) => Err(anyhow!(
+                "Bug report service is unreachable. Check your connection and try again."
+            )),
+        }
     }
 
     pub fn require_entitled_cached(&self) -> Result<()> {
@@ -859,6 +944,49 @@ fn api_error(error: ApiErrorDto) -> anyhow::Error {
     }
 }
 
+fn normalize_bug_report(input: BugReportInputDto) -> Result<NormalizedBugReport> {
+    if !matches!(
+        input.category.as_str(),
+        "crash" | "terminal" | "agent" | "account" | "billing" | "remote" | "other"
+    ) {
+        return Err(anyhow!("Choose a valid bug report area."));
+    }
+    let title = normalize_report_text(input.title, 4, 120, "summary")?;
+    let description = normalize_report_text(input.description, 10, 4000, "description")?;
+    let steps_to_reproduce = match input.steps_to_reproduce {
+        Some(value) if !value.trim().is_empty() => {
+            Some(normalize_report_text(value, 1, 4000, "reproduction steps")?)
+        }
+        _ => None,
+    };
+    Ok(NormalizedBugReport {
+        category: input.category,
+        title,
+        description,
+        steps_to_reproduce,
+        contact_allowed: input.contact_allowed,
+    })
+}
+
+fn normalize_report_text(value: String, min: usize, max: usize, label: &str) -> Result<String> {
+    let normalized = value.trim().to_string();
+    let length = normalized.chars().count();
+    if length < min || length > max {
+        return Err(anyhow!(
+            "Bug report {label} must be {min}-{max} characters."
+        ));
+    }
+    if normalized
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(anyhow!(
+            "Bug report {label} contains unsupported control characters."
+        ));
+    }
+    Ok(normalized)
+}
+
 fn parse_optional_time(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
@@ -998,6 +1126,21 @@ pub async fn license_forget_local(
     service: tauri::State<'_, Arc<LicenseService>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
     account_sign_out(service).await
+}
+
+#[tauri::command]
+pub async fn bug_report_submit(
+    service: tauri::State<'_, Arc<LicenseService>>,
+    input: BugReportInputDto,
+) -> std::result::Result<BugReportCreatedDto, String> {
+    let service = Arc::clone(service.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        service
+            .submit_bug_report(input)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
@@ -1264,5 +1407,46 @@ mod tests {
         };
         assert!(expired.require_entitled().is_err());
         assert!(!expired.is_entitled());
+    }
+
+    #[test]
+    fn bug_report_input_is_trimmed_without_collecting_extra_diagnostics() {
+        let report = normalize_bug_report(BugReportInputDto {
+            category: "terminal".to_string(),
+            title: "  Terminal turns blank  ".to_string(),
+            description: "  The pane becomes blank after restore.  ".to_string(),
+            steps_to_reproduce: Some("  Open two panes and maximize one.  ".to_string()),
+            contact_allowed: true,
+        })
+        .unwrap();
+        assert_eq!(report.category, "terminal");
+        assert_eq!(report.title, "Terminal turns blank");
+        assert_eq!(report.description, "The pane becomes blank after restore.");
+        assert_eq!(
+            report.steps_to_reproduce.as_deref(),
+            Some("Open two panes and maximize one.")
+        );
+        assert!(report.contact_allowed);
+    }
+
+    #[test]
+    fn bug_report_input_rejects_invalid_category_and_oversized_content() {
+        let invalid_category = normalize_bug_report(BugReportInputDto {
+            category: "security-token".to_string(),
+            title: "Valid summary".to_string(),
+            description: "A sufficiently detailed description.".to_string(),
+            steps_to_reproduce: None,
+            contact_allowed: false,
+        });
+        assert!(invalid_category.is_err());
+
+        let oversized = normalize_bug_report(BugReportInputDto {
+            category: "other".to_string(),
+            title: "Valid summary".to_string(),
+            description: "x".repeat(4001),
+            steps_to_reproduce: None,
+            contact_allowed: false,
+        });
+        assert!(oversized.is_err());
     }
 }
