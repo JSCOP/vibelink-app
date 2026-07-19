@@ -164,7 +164,9 @@ fn is_osc_query(payload: &[u8]) -> bool {
         return false;
     }
     let is_answerable_code = matches!(
-        std::str::from_utf8(code).ok().and_then(|s| s.parse::<u32>().ok()),
+        std::str::from_utf8(code)
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok()),
         Some(4) | Some(5) | Some(10..=19) | Some(52)
     );
     is_answerable_code && (payload.ends_with(b";?") || &payload[first_end + 1..] == b"?")
@@ -238,7 +240,10 @@ mod tests {
         // SCORC restore cursor.
         assert_eq!(filter(b"\x1b[u"), b"\x1b[u".to_vec());
         // Alt-screen + mouse modes must replay so terminal state reconstructs.
-        assert_eq!(filter(b"\x1b[?1049h\x1b[?1000h"), b"\x1b[?1049h\x1b[?1000h".to_vec());
+        assert_eq!(
+            filter(b"\x1b[?1049h\x1b[?1000h"),
+            b"\x1b[?1049h\x1b[?1000h".to_vec()
+        );
     }
 
     #[test]
@@ -254,7 +259,10 @@ mod tests {
             b"\x1b]4;5;rgb:aa/bb/cc\x07".to_vec()
         );
         // OSC 52 clipboard *write* is kept.
-        assert_eq!(filter(b"\x1b]52;c;aGVsbG8=\x07"), b"\x1b]52;c;aGVsbG8=\x07".to_vec());
+        assert_eq!(
+            filter(b"\x1b]52;c;aGVsbG8=\x07"),
+            b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+        );
     }
 
     #[test]
@@ -262,7 +270,10 @@ mod tests {
         assert_eq!(filter(b"a\x1bP+q544e\x1b\\b"), b"ab".to_vec());
         assert_eq!(filter(b"a\x1bP$qm\x1b\\b"), b"ab".to_vec());
         // Sixel data (DCS q without intermediate prefix) passes through.
-        assert_eq!(filter(b"\x1bPq#0;2;0;0;0\x1b\\"), b"\x1bPq#0;2;0;0;0\x1b\\".to_vec());
+        assert_eq!(
+            filter(b"\x1bPq#0;2;0;0;0\x1b\\"),
+            b"\x1bPq#0;2;0;0;0\x1b\\".to_vec()
+        );
     }
 
     #[test]

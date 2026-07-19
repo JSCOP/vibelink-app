@@ -1,9 +1,17 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
-use rustls::{pki_types::{CertificateDer, PrivateKeyDer}, ServerConfig};
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer},
+    ServerConfig,
+};
 use sha2::{Digest, Sha256};
-use std::{fs, io::{BufReader, Cursor}, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    fs,
+    io::{BufReader, Cursor},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use time::{Duration, OffsetDateTime};
 
 pub struct RemoteIdentity {
@@ -25,15 +33,22 @@ impl RemoteIdentity {
     }
 
     fn load(cert_path: PathBuf, key_path: PathBuf) -> Result<Self> {
-        let cert_bytes = fs::read(&cert_path).with_context(|| format!("read {}", cert_path.display()))?;
-        let key_bytes = fs::read(&key_path).with_context(|| format!("read {}", key_path.display()))?;
+        let cert_bytes =
+            fs::read(&cert_path).with_context(|| format!("read {}", cert_path.display()))?;
+        let key_bytes =
+            fs::read(&key_path).with_context(|| format!("read {}", key_path.display()))?;
         let cert_der = rustls_pemfile::certs(&mut BufReader::new(Cursor::new(cert_bytes)))
             .next()
             .transpose()?
             .ok_or_else(|| anyhow!("remote certificate PEM contains no certificate"))?;
         let key_der = rustls_pemfile::private_key(&mut BufReader::new(Cursor::new(key_bytes)))?
             .ok_or_else(|| anyhow!("remote key PEM contains no private key"))?;
-        Ok(Self { cert_path, key_path, cert_der, key_der })
+        Ok(Self {
+            cert_path,
+            key_path,
+            cert_der,
+            key_der,
+        })
     }
 
     pub fn fingerprint(&self) -> String {
@@ -78,10 +93,16 @@ mod tests {
 
     #[test]
     fn identity_persists_fingerprint_and_regeneration_changes_it() {
-        let directory = std::env::temp_dir().join(format!("vibelink-remote-identity-{}", Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-remote-identity-{}", Uuid::new_v4()));
         let mut identity = RemoteIdentity::load_or_generate(&directory).unwrap();
         let first = identity.fingerprint();
-        assert_eq!(RemoteIdentity::load_or_generate(&directory).unwrap().fingerprint(), first);
+        assert_eq!(
+            RemoteIdentity::load_or_generate(&directory)
+                .unwrap()
+                .fingerprint(),
+            first
+        );
         identity.regenerate().unwrap();
         assert_ne!(identity.fingerprint(), first);
         let _ = fs::remove_dir_all(directory);

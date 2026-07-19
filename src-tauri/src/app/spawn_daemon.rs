@@ -17,7 +17,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-
 pub type DaemonStream = LocalSocketStream;
 
 const STARTUP_PING_REQ: Req = 0;
@@ -99,7 +98,8 @@ impl ReparentedDaemon {
     }
 
     fn kill(&self) -> io::Result<()> {
-        if unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.process, 1) } == 0 {
+        if unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.process, 1) } == 0
+        {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -740,7 +740,10 @@ fn spawn_configured_daemon(include_breakaway: bool) -> Result<SpawnedDaemon> {
     if current_redirection_trust_enforced() {
         match spawn_reparented_daemon(&exe, include_breakaway) {
             Ok(child) => return Ok(child),
-            Err(err) => tracing::warn!(?err, "failed to shed inherited RedirectionGuard for daemon spawn"),
+            Err(err) => tracing::warn!(
+                ?err,
+                "failed to shed inherited RedirectionGuard for daemon spawn"
+            ),
         }
     }
 
@@ -995,7 +998,9 @@ fn spawn_reparented_daemon(exe: &Path, include_breakaway: bool) -> Result<Spawne
         let words = attribute_bytes.div_ceil(size_of::<usize>());
         let mut attribute_storage = vec![0usize; words];
         let attribute_list = attribute_storage.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
-        if unsafe { InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut attribute_bytes) } == 0 {
+        if unsafe { InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut attribute_bytes) }
+            == 0
+        {
             return Err(io::Error::last_os_error()).context("initialize process attribute list");
         }
 
@@ -1047,7 +1052,8 @@ fn spawn_reparented_daemon(exe: &Path, include_breakaway: bool) -> Result<Spawne
                 )
             };
             if created == 0 {
-                return Err(io::Error::last_os_error()).context("create daemon with desktop shell parent");
+                return Err(io::Error::last_os_error())
+                    .context("create daemon with desktop shell parent");
             }
             unsafe { CloseHandle(process_info.hThread) };
             Ok(SpawnedDaemon::Reparented(ReparentedDaemon {

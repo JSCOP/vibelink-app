@@ -439,7 +439,9 @@ pub async fn open_path(path: String) -> Result<(), String> {
         .map_err(to_string)?;
         // Per ShellExecuteW docs, values <= 32 are error codes.
         if result <= 32 {
-            return Err(format!("open failed (ShellExecute code {result}): {target}"));
+            return Err(format!(
+                "open failed (ShellExecute code {result}): {target}"
+            ));
         }
         return Ok(());
     }
@@ -508,7 +510,9 @@ fn normalize_open_target(path: &str) -> Result<String, String> {
         return Ok(target.to_string());
     }
 
-    Ok(normalize_local_target(target)?.to_string_lossy().into_owned())
+    Ok(normalize_local_target(target)?
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn normalize_local_target(path: &str) -> Result<PathBuf, String> {
@@ -524,7 +528,8 @@ fn normalize_local_target(path: &str) -> Result<PathBuf, String> {
 }
 
 fn trim_open_target(path: &str) -> &str {
-    path.trim().trim_matches(|character| matches!(character, '"' | '\'' | '`'))
+    path.trim()
+        .trim_matches(|character| matches!(character, '"' | '\'' | '`'))
 }
 
 fn is_supported_uri(target: &str) -> bool {
@@ -827,7 +832,8 @@ mod tests {
 
     #[test]
     fn local_target_preserves_spaces_and_strips_quotes() {
-        let root = std::env::temp_dir().join(format!("vibelink-open-path-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("vibelink-open-path-{}", uuid::Uuid::new_v4()));
         let file = root.join("VibeLink Voice setup.exe");
         std::fs::create_dir_all(&root).expect("create temp directory");
         std::fs::write(&file, b"installer").expect("write temp file");

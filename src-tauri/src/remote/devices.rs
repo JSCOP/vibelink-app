@@ -3,7 +3,11 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::{rngs::OsRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, path::{Path, PathBuf}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -70,12 +74,20 @@ pub struct DeviceStore {
 impl DeviceStore {
     pub fn load(path: PathBuf) -> Result<Self> {
         let records = if path.exists() {
-            serde_json::from_slice(&fs::read(&path).with_context(|| format!("read {}", path.display()))?)
-                .with_context(|| format!("parse {}", path.display()))?
+            serde_json::from_slice(
+                &fs::read(&path).with_context(|| format!("read {}", path.display()))?,
+            )
+            .with_context(|| format!("parse {}", path.display()))?
         } else {
             Vec::new()
         };
-        Ok(Self { path, records, pairing: None, failed_attempts: 0, locked_until: None })
+        Ok(Self {
+            path,
+            records,
+            pairing: None,
+            failed_attempts: 0,
+            locked_until: None,
+        })
     }
 
     pub fn list_public(&self) -> Vec<DevicePublic> {
@@ -85,11 +97,21 @@ impl DeviceStore {
     pub fn create_pairing_code(&mut self) -> PairingInfo {
         let code = format!("{:08}", OsRng.gen_range(0..100_000_000_u32));
         let expires_at = SystemTime::now() + PAIRING_TTL;
-        self.pairing = Some(ActivePairing { code: code.clone(), expires_at });
-        PairingInfo { code, expires_at: unix_secs(expires_at) }
+        self.pairing = Some(ActivePairing {
+            code: code.clone(),
+            expires_at,
+        });
+        PairingInfo {
+            code,
+            expires_at: unix_secs(expires_at),
+        }
     }
 
-    pub fn consume_pairing(&mut self, code: &str, device_name: &str) -> std::result::Result<(DeviceRecord, String), AuthFailure> {
+    pub fn consume_pairing(
+        &mut self,
+        code: &str,
+        device_name: &str,
+    ) -> std::result::Result<(DeviceRecord, String), AuthFailure> {
         self.check_lockout()?;
         let Some(pairing) = self.pairing.clone() else {
             return Err(self.record_failure(AuthFailure::PairExpired));
@@ -123,10 +145,18 @@ impl DeviceStore {
         Ok((record, token))
     }
 
-    pub fn verify_token(&mut self, device_id: &str, token: &str) -> std::result::Result<bool, AuthFailure> {
+    pub fn verify_token(
+        &mut self,
+        device_id: &str,
+        token: &str,
+    ) -> std::result::Result<bool, AuthFailure> {
         self.check_lockout()?;
         let candidate = token_hash(token);
-        let Some(record) = self.records.iter_mut().find(|record| record.id == device_id) else {
+        let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|record| record.id == device_id)
+        else {
             return Err(self.record_failure(AuthFailure::Failed));
         };
         if !constant_time_eq(record.token_hash.as_bytes(), candidate.as_bytes()) {
@@ -185,7 +215,6 @@ impl DeviceStore {
     }
 }
 
-
 fn token_hash(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
@@ -194,12 +223,19 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    left.iter().zip(right).fold(0_u8, |diff, (a, b)| diff | (a ^ b)) == 0
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
 }
 
 fn sanitize_device_name(value: &str) -> String {
     let trimmed = value.trim();
-    if trimmed.is_empty() { "Android device".to_string() } else { trimmed.chars().take(80).collect() }
+    if trimmed.is_empty() {
+        "Android device".to_string()
+    } else {
+        trimmed.chars().take(80).collect()
+    }
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -209,7 +245,10 @@ fn temporary_path(path: &Path) -> PathBuf {
 }
 
 fn unix_secs(value: SystemTime) -> i64 {
-    value.duration_since(UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(0)
+    value
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -217,7 +256,10 @@ mod tests {
     use super::*;
 
     fn store() -> DeviceStore {
-        DeviceStore::load(std::env::temp_dir().join(format!("vibelink-remote-devices-{}.json", Uuid::new_v4()))).unwrap()
+        DeviceStore::load(
+            std::env::temp_dir().join(format!("vibelink-remote-devices-{}.json", Uuid::new_v4())),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -226,7 +268,10 @@ mod tests {
         let pairing = store.create_pairing_code();
         let (record, token) = store.consume_pairing(&pairing.code, "Phone").unwrap();
         assert!(store.verify_token(&record.id, &token).unwrap());
-        assert!(matches!(store.consume_pairing(&pairing.code, "Other"), Err(AuthFailure::PairExpired)));
+        assert!(matches!(
+            store.consume_pairing(&pairing.code, "Other"),
+            Err(AuthFailure::PairExpired)
+        ));
     }
 
     #[test]
@@ -234,9 +279,18 @@ mod tests {
         let mut store = store();
         let pairing = store.create_pairing_code();
         for _ in 0..4 {
-            assert!(matches!(store.consume_pairing("00000000", "Phone"), Err(AuthFailure::Failed)));
+            assert!(matches!(
+                store.consume_pairing("00000000", "Phone"),
+                Err(AuthFailure::Failed)
+            ));
         }
-        assert!(matches!(store.consume_pairing("00000000", "Phone"), Err(AuthFailure::RateLimited)));
-        assert!(matches!(store.consume_pairing(&pairing.code, "Phone"), Err(AuthFailure::RateLimited)));
+        assert!(matches!(
+            store.consume_pairing("00000000", "Phone"),
+            Err(AuthFailure::RateLimited)
+        ));
+        assert!(matches!(
+            store.consume_pairing(&pairing.code, "Phone"),
+            Err(AuthFailure::RateLimited)
+        ));
     }
 }

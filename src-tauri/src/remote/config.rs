@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub const DEFAULT_REMOTE_PORT: u16 = 42_811;
 
@@ -13,7 +16,10 @@ pub struct RemoteConfig {
 
 impl Default for RemoteConfig {
     fn default() -> Self {
-        Self { enabled: false, port: DEFAULT_REMOTE_PORT }
+        Self {
+            enabled: false,
+            port: DEFAULT_REMOTE_PORT,
+        }
     }
 }
 
@@ -23,8 +29,8 @@ impl RemoteConfig {
             return Ok(Self::default());
         }
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let config: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let config: Self =
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
         Ok(config)
     }
 
@@ -52,9 +58,13 @@ mod tests {
 
     #[test]
     fn config_defaults_and_round_trips() {
-        let path = std::env::temp_dir().join(format!("vibelink-remote-config-{}.json", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("vibelink-remote-config-{}.json", Uuid::new_v4()));
         assert_eq!(RemoteConfig::load(&path).unwrap(), RemoteConfig::default());
-        let config = RemoteConfig { enabled: true, port: 45_000 };
+        let config = RemoteConfig {
+            enabled: true,
+            port: 45_000,
+        };
         config.save(&path).unwrap();
         assert_eq!(RemoteConfig::load(&path).unwrap(), config);
         let _ = fs::remove_file(path);

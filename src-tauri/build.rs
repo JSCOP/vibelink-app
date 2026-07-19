@@ -30,6 +30,9 @@ fn main() {
         panic!("VIBELINK_LICENSE_API_URL must use HTTP(S)");
     }
     println!("cargo:rerun-if-env-changed=VIBELINK_LICENSE_API_URL");
-    println!("cargo:rustc-env=VIBELINK_LICENSE_API_URL={}", url.origin().ascii_serialization());
+    println!(
+        "cargo:rustc-env=VIBELINK_LICENSE_API_URL={}",
+        url.origin().ascii_serialization()
+    );
     tauri_build::build()
 }

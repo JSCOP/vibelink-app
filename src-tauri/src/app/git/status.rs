@@ -1,9 +1,12 @@
-use super::exec::{git_read, git_read_output};
+use super::exec::{git_command, git_read, git_read_output};
+use super::paths::validate_repo_relative_path;
 use super::{change_type_from_status, to_string, ChangeType};
 use crate::app::license::LicenseService;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::Serialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use tauri::State;
 
@@ -81,6 +84,52 @@ pub async fn git_working_status(
         .await
         .map_err(to_string)?
         .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn git_check_ignored(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    rel_paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || check_ignored_native(&workspace_folder, &rel_paths))
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
+}
+
+fn check_ignored_native(repo: &str, rel_paths: &[String]) -> Result<Vec<String>> {
+    if rel_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    for path in rel_paths {
+        validate_repo_relative_path(path)?;
+    }
+    let mut child = git_command(repo, ["check-ignore", "--stdin", "-z"], true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        for path in rel_paths {
+            stdin.write_all(path.as_bytes())?;
+            stdin.write_all(&[0])?;
+        }
+    }
+    let output = child.wait_with_output()?;
+    if output.status.success() {
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).to_string())
+            .collect())
+    } else if output.status.code() == Some(1) {
+        Ok(Vec::new())
+    } else {
+        Err(anyhow!(super::exec::stderr_or_status(&output)))
+    }
 }
 
 pub(crate) fn git_repo_info_native(workspace_folder: &str) -> Result<RepoInfo> {
@@ -288,5 +337,20 @@ mod tests {
         assert_eq!(status.staged[0].old_path.as_deref(), Some("old name.txt"));
         assert!(matches!(status.staged[0].change_type, ChangeType::Renamed));
         assert_eq!(status.untracked[0].path, "loose file.txt");
+    }
+
+    #[test]
+    fn returns_only_ignored_paths() {
+        let repo = crate::app::git::test_support::test_repo();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+        std::fs::write(repo.join("ignored.txt"), "ignored").expect("write ignored");
+        std::fs::write(repo.join("visible.txt"), "visible").expect("write visible");
+        let ignored = check_ignored_native(
+            repo.to_str().expect("utf8 repo"),
+            &["ignored.txt".to_string(), "visible.txt".to_string()],
+        )
+        .expect("check ignored");
+        assert_eq!(ignored, vec!["ignored.txt"]);
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
     }
 }

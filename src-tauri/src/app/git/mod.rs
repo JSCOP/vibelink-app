@@ -70,7 +70,10 @@ pub struct WorktreeInfo {
 }
 
 #[tauri::command]
-pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<bool, String> {
+pub async fn git_is_available(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+) -> Result<bool, String> {
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         git_exit_status(&workspace_folder, ["rev-parse", "--is-inside-work-tree"])
@@ -82,7 +85,10 @@ pub async fn git_is_available(license: State<'_, Arc<LicenseService>>, workspace
 }
 
 #[tauri::command]
-pub async fn git_snapshot_baseline(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<String, String> {
+pub async fn git_snapshot_baseline(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+) -> Result<String, String> {
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || snapshot_baseline_native(&workspace_folder))
         .await
