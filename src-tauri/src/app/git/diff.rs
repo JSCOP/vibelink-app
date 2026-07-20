@@ -58,6 +58,39 @@ pub async fn git_diff_refs_file(
 }
 
 #[tauri::command]
+pub async fn git_compare_refs(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    base_ref: String,
+    head_ref: String,
+) -> Result<Vec<ChangedFile>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        compare_refs_native(&workspace_folder, &base_ref, &head_ref)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn git_compare_refs_file(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    base_ref: String,
+    head_ref: String,
+    path: String,
+) -> Result<FileContents, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        compare_refs_file_native(&workspace_folder, &base_ref, &head_ref, &path)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
 pub async fn git_working_file_contents(
     license: State<'_, Arc<LicenseService>>,
     workspace_folder: String,
@@ -107,6 +140,32 @@ pub(crate) fn diff_refs_file_native(
     let merge_base = git_read(repo, ["merge-base", base_ref, head_ref])?;
     let merge_base = String::from_utf8_lossy(&merge_base).trim().to_string();
     let old = git_read_allow_fail(repo, ["show", &format!("{merge_base}:{path}")])?.unwrap_or_default();
+    let new = git_read_allow_fail(repo, ["show", &format!("{head_ref}:{path}")])?.unwrap_or_default();
+    file_contents_from_bytes(old, new)
+}
+
+pub(crate) fn compare_refs_native(repo: &str, base_ref: &str, head_ref: &str) -> Result<Vec<ChangedFile>> {
+    validate_base_ref(base_ref)?;
+    validate_base_ref(head_ref)?;
+    let mut files = parse_name_status(&git_read(
+        repo,
+        ["diff", "-M", "-C", "-z", "--name-status", base_ref, head_ref, "--"],
+    )?);
+    let numstat = git_read(repo, ["diff", "-M", "--numstat", "-z", base_ref, head_ref, "--"])?;
+    merge_numstat(&mut files, &numstat);
+    Ok(files)
+}
+
+pub(crate) fn compare_refs_file_native(
+    repo: &str,
+    base_ref: &str,
+    head_ref: &str,
+    path: &str,
+) -> Result<FileContents> {
+    validate_base_ref(base_ref)?;
+    validate_base_ref(head_ref)?;
+    validate_repo_relative_path(path)?;
+    let old = git_read_allow_fail(repo, ["show", &format!("{base_ref}:{path}")])?.unwrap_or_default();
     let new = git_read_allow_fail(repo, ["show", &format!("{head_ref}:{path}")])?.unwrap_or_default();
     file_contents_from_bytes(old, new)
 }

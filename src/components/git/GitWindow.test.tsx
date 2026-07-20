@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { RepoInfo, WorkingStatus } from '../../ipc/types'
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
+const { invoke, openWindow } = vi.hoisted(() => ({ invoke: vi.fn(), openWindow: vi.fn(async () => {}) }))
 vi.mock('@tauri-apps/api/core', () => ({
   invoke,
   Channel: class MockChannel<T> {
@@ -12,9 +12,11 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
+vi.mock('../../layout/windowActions', () => ({ useWorkspaceWindowActions: () => ({ openWindow }) }))
 vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
 
 import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../../state/git'
+import { useExplorerStore } from '../../state/explorer'
 import { useWorkspaceStore } from '../../state/store'
 import { GitWindow } from './GitWindow'
 
@@ -48,10 +50,16 @@ beforeEach(() => {
     if (command === 'git_repo_info') return repoInfo
     if (command === 'git_working_status') return status
     if (command === 'git_working_file_contents') return { old: 'old', new: 'new', binary: false }
+    if (command === 'fs_list_dir') return [
+      { name: 'conflict.txt', isDir: false, isSymlink: false, size: 8, modifiedAt: null },
+      { name: 'file.txt', isDir: false, isSymlink: false, size: 8, modifiedAt: null },
+    ]
+    if (command === 'git_dir_entries') return []
     return null
   })
   vi.spyOn(window, 'confirm').mockReturnValue(true)
   useGitStore.setState({ sessions: {} })
+  useExplorerStore.setState({ sessions: {} })
   useWorkspaceStore.setState({
     activeSessionId: 'session-1',
     sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
@@ -59,14 +67,43 @@ beforeEach(() => {
 })
 
 describe('GitWindow Changes tab', () => {
-  test('keeps repository actions and delegates file navigation to Explorer', async () => {
+  test('lists changed files and reveals the selected path in Explorer', async () => {
     render(<GitWindow />)
     expect(await screen.findByText('Repository is merging.')).toBeTruthy()
-    expect(screen.getByText('Select a changed file in Explorer to view its diff.')).toBeTruthy()
-    expect(screen.queryByTitle('file.txt')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Changes: file.txt' })).toBeTruthy()
     expect(screen.getByText('Merge Conflicts')).toBeTruthy()
     expect((screen.getByRole('button', { name: /Commit/ }) as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Changes: file.txt' }))
+    await waitFor(() => expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('file.txt'))
   })
+})
+
+test('fetches and compares the exact upstream tree with local HEAD', async () => {
+  const remoteFile = { path: 'remote.txt', oldPath: undefined, changeType: 'modified' as const, additions: 1, deletions: 1, binary: false }
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return { ...repoInfo, state: 'clean', ahead: 0, behind: 1 }
+    if (command === 'git_working_status') return { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+    if (command === 'git_compare_refs') return [remoteFile]
+    if (command === 'git_compare_refs_file') return { old: 'local\n', new: 'remote\n', binary: false }
+    if (command === 'fs_list_dir') return [{ name: 'remote.txt', isDir: false, isSymlink: false, size: 7, modifiedAt: null }]
+    if (command === 'git_dir_entries') return []
+    return null
+  })
+
+  render(<GitWindow />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Fetch and compare remote origin/main' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_fetch', { workspaceFolder: 'C:/repo', remote: null, prune: false, refspec: null }))
+  expect(await screen.findByRole('button', { name: 'Remote changes: remote.txt' })).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: 'Remote changes: remote.txt' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_compare_refs_file', {
+    workspaceFolder: 'C:/repo',
+    baseRef: 'HEAD',
+    headRef: 'origin/main',
+    path: 'remote.txt',
+  }))
+  expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('remote.txt')
 })
 
 

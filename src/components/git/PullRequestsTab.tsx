@@ -11,9 +11,10 @@ export type PullRequestsTabProps = {
   hostingError: string | null
   onHostingChanged: () => Promise<void>
   onRepositoryChanged: () => Promise<void>
+  onRevealFile?: (path: string) => void
 }
 
-export function PullRequestsTab({ workspaceFolder, repoInfo, hostingInfo, hostingError, onHostingChanged, onRepositoryChanged }: PullRequestsTabProps) {
+export function PullRequestsTab({ workspaceFolder, repoInfo, hostingInfo, hostingError, onHostingChanged, onRepositoryChanged, onRevealFile }: PullRequestsTabProps) {
   const [prs, setPrs] = useState<PrInfo[]>([])
   const [ciByNumber, setCiByNumber] = useState<Record<number, CiStatus>>({})
   const [selectedNumber, setSelectedNumber] = useState<number | null>(null)
@@ -171,7 +172,7 @@ export function PullRequestsTab({ workspaceFolder, repoInfo, hostingInfo, hostin
   const deviceView = useMemo(() => deviceCode ? { userCode: deviceCode.userCode, verificationUri: deviceCode.verificationUri } : null, [deviceCode])
   const visibleError = error ?? hostingError
 
-  return <PullRequestsTabView provider={hostingInfo.provider} host={hostingInfo.host} tokenPresent={hostingInfo.tokenPresent} loading={loading} error={visibleError} prs={prs} ciByNumber={ciByNumber} selectedNumber={selectedNumber} detail={detail} files={files} selectedPath={selectedPath} contents={contents} diffLoading={diffLoading} mode={mode} token={token} deviceCode={deviceView} created={created} createTitle={createTitle} createBody={createBody} createTarget={createTarget} createTargets={createTargets} createDraft={createDraft} sourceBranch={sourceBranch} needsPush={!repoInfo.upstream} onRefresh={() => { void loadPrs() }} onTokenChange={setToken} onSaveToken={() => { void saveToken() }} onDeviceSignIn={() => { void startDeviceSignIn() }} onOpenUrl={openUrl} onCopyUrl={copyUrl} onSelectPr={(number) => { void selectPr(number) }} onSelectFile={setSelectedPath} onModeChange={setMode} onCreateTitleChange={setCreateTitle} onCreateBodyChange={setCreateBody} onCreateTargetChange={setCreateTarget} onCreateDraftChange={setCreateDraft} onPushBranch={() => { void pushBranch() }} onCreate={() => { void createPr() }} />
+  return <PullRequestsTabView provider={hostingInfo.provider} host={hostingInfo.host} tokenPresent={hostingInfo.tokenPresent} loading={loading} error={visibleError} prs={prs} ciByNumber={ciByNumber} selectedNumber={selectedNumber} detail={detail} files={files} selectedPath={selectedPath} contents={contents} diffLoading={diffLoading} mode={mode} token={token} deviceCode={deviceView} created={created} createTitle={createTitle} createBody={createBody} createTarget={createTarget} createTargets={createTargets} createDraft={createDraft} sourceBranch={sourceBranch} needsPush={!repoInfo.upstream} onRefresh={() => { void loadPrs() }} onTokenChange={setToken} onSaveToken={() => { void saveToken() }} onDeviceSignIn={() => { void startDeviceSignIn() }} onOpenUrl={openUrl} onCopyUrl={copyUrl} onSelectPr={(number) => { void selectPr(number) }} onSelectFile={(path) => { setSelectedPath(path); onRevealFile?.(path) }} onModeChange={setMode} onCreateTitleChange={setCreateTitle} onCreateBodyChange={setCreateBody} onCreateTargetChange={setCreateTarget} onCreateDraftChange={setCreateDraft} onPushBranch={() => { void pushBranch() }} onCreate={() => { void createPr() }} />
 }
 
 function branchTargets(branches: BranchInfo[]): string[] {

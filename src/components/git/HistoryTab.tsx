@@ -10,9 +10,10 @@ export type HistoryTabProps = {
   workspaceFolder: string
   pathFilter: string | null
   onRunMutation: (operation: () => Promise<unknown>) => Promise<void>
+  onRevealFile?: (path: string) => void
 }
 
-export function HistoryTab({ sessionId, workspaceFolder, pathFilter, onRunMutation }: HistoryTabProps) {
+export function HistoryTab({ sessionId, workspaceFolder, pathFilter, onRunMutation, onRevealFile }: HistoryTabProps) {
   const [commits, setCommits] = useState<CommitInfo[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -174,7 +175,7 @@ export function HistoryTab({ sessionId, workspaceFolder, pathFilter, onRunMutati
       onClearPathFilter={() => setActiveTab(sessionId, 'history', null)}
       onSelectCommit={selectCommit}
       onLoadMore={() => { if (!loading && hasMore) void loadPage(false) }}
-      onSelectFile={setSelectedPath}
+      onSelectFile={(path) => { setSelectedPath(path); onRevealFile?.(path) }}
       onCopySha={() => { if (selectedSha) void navigator.clipboard.writeText(selectedSha) }}
       onCompareHead={compareHead}
       onCreateBranch={createBranch}

@@ -1,8 +1,8 @@
-import { AlertTriangle, Check, ChevronDown, ChevronRight, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, CloudDownload, CloudUpload, FileDiff, FolderGit2, GitBranch, GitCommit, GitCompare, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
 import type { ComponentType, ReactNode } from 'react'
-import type { CiStatus, FileContents, RepoInfo, WorkingStatus } from '../../ipc/types'
-import type { GitTab } from '../../state/git'
+import type { ChangeType, CiStatus, FileContents, RepoInfo, WorkingStatus } from '../../ipc/types'
+import type { GitDiffArea, GitTab } from '../../state/git'
 import { DiffPane } from './DiffPane'
 
 export type GitRowAction = {
@@ -13,17 +13,37 @@ export type GitRowAction = {
 }
 
 
+export type GitChangeListArea = GitDiffArea | 'remote'
+
+export type GitChangeItem = {
+  path: string
+  oldPath: string | null
+  changeType: ChangeType
+  area: GitChangeListArea
+}
+
 export type GitChangeGroup = {
-  id: 'conflicted' | 'staged' | 'unstaged' | 'untracked'
+  id: 'conflicted' | 'staged' | 'unstaged' | 'untracked' | 'remote'
   title: string
   count: number
   actions: GitRowAction[]
+  items: GitChangeItem[]
 }
 
 const ACTION_ICONS: Record<string, ComponentType<LucideProps>> = {
   'stage-all': Plus,
   'unstage-all': Minus,
   'discard-all': Undo2,
+}
+
+const CHANGE_LABEL_BY_TYPE: Record<ChangeType, string> = {
+  added: 'A',
+  modified: 'M',
+  deleted: 'D',
+  renamed: 'R',
+  copied: 'C',
+  typeChanged: 'T',
+  untracked: 'U',
 }
 
 export type GitCloneViewState = {
@@ -66,6 +86,13 @@ export type GitWindowViewProps = {
   onFetch: () => void
   onPull: () => void
   onPush: () => void
+  selectedArea: GitChangeListArea
+  remoteUpstream: string | null
+  remoteComparisonActive: boolean
+  remoteCompareLoading: boolean
+  onCompareRemote: () => void
+  onShowWorkingChanges: () => void
+  onSelectChange: (item: GitChangeItem) => void
   onContinueState: (() => void) | null
   onAbortState: (() => void) | null
   onTabChange: (tab: GitTab) => void
@@ -88,7 +115,7 @@ function GitActionButton({ action, subject }: { action: GitRowAction; subject?: 
   )
 }
 
-export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onOpenWorkspaceRepository, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
+export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, selectedArea, contents, diffLoading, diffError, clone, remoteUpstream, remoteComparisonActive, remoteCompareLoading, onOpenWorkspaceRepository, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onCompareRemote, onShowWorkingChanges, onSelectChange, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
   if (!workspaceFolder) {
     return (
       <div ref={setRootElement} className="git-window git-window-empty" data-git-window="true">
@@ -207,12 +234,33 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
                 <button type="button" className="git-window-commit-button" title={`Commit staged changes to ${repositoryDescription}`} onClick={onCommit} disabled={!canCommit}><GitCommit size={14} strokeWidth={1.9} aria-hidden="true" /> Commit · {repositoryLabel}</button>
               </div>
             </div>
+            <div className="git-window-remote-compare" data-active={remoteComparisonActive || undefined}>
+              {remoteComparisonActive ? (
+                <>
+                  <div>
+                    <strong>Remote comparison</strong>
+                    <span>Exact local HEAD → {remoteUpstream}</span>
+                  </div>
+                  <button type="button" onClick={onShowWorkingChanges}><ArrowLeft size={13} aria-hidden="true" /> Working changes</button>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <strong>Remote changes</strong>
+                    <span>{remoteUpstream ? `Fetch and compare ${remoteUpstream}` : 'Set an upstream branch to compare'}</span>
+                  </div>
+                  <button type="button" aria-label={remoteUpstream ? `Fetch and compare remote ${remoteUpstream}` : 'No upstream branch to compare'} disabled={!remoteUpstream || remoteCompareLoading} onClick={onCompareRemote}>
+                    {remoteCompareLoading ? <LoaderCircle className="spin" size={13} aria-hidden="true" /> : <GitCompare size={13} aria-hidden="true" />} Compare
+                  </button>
+                </>
+              )}
+            </div>
             <div className="git-window-explorer-handoff">
               <FolderGit2 size={18} strokeWidth={1.7} aria-hidden="true" />
-              <div><strong>Explorer is the file tree</strong><span>Select a changed file in Explorer to view its diff.</span></div>
+              <div><strong>Changed file list</strong><span>Selecting a file also reveals its location in Explorer.</span></div>
             </div>
             {visibleGroups.length === 0 ? (
-              <div className="git-window-no-changes"><Check size={15} strokeWidth={1.9} aria-hidden="true" /> No changes</div>
+              <div className="git-window-no-changes"><Check size={15} strokeWidth={1.9} aria-hidden="true" /> {remoteComparisonActive ? 'No remote changes' : 'No changes'}</div>
             ) : visibleGroups.map((group) => (
               <section key={group.id} className="git-window-change-group" data-change-group={group.id}>
                 <header>
@@ -223,7 +271,22 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
                     </div>
                   ) : null}
                 </header>
-                <div className="git-window-change-group-summary">{group.count} changed path{group.count === 1 ? '' : 's'}</div>
+                <div className="git-window-change-items">
+                  {group.items.map((item) => (
+                    <button
+                      key={`${item.area}:${item.path}`}
+                      type="button"
+                      aria-label={`${group.title}: ${item.path}`}
+                      data-selected={selectedPath === item.path && selectedArea === item.area || undefined}
+                      title={item.oldPath ? `${item.path} (from ${item.oldPath})` : item.path}
+                      onClick={() => onSelectChange(item)}
+                    >
+                      <span className="git-window-change-type" data-change-type={item.changeType}>{CHANGE_LABEL_BY_TYPE[item.changeType]}</span>
+                      <FileDiff size={13} aria-hidden="true" />
+                      <span className="git-window-change-path">{item.path}</span>
+                    </button>
+                  ))}
+                </div>
               </section>
             ))}
           </aside>

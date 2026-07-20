@@ -2,17 +2,26 @@ import { Channel, invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GitBranch as GitBranchIcon } from 'lucide-react'
-import type { BranchInfo, CloneProgress, FileContents, WorkingStatus } from '../../ipc/types'
+import type { BranchInfo, ChangedFile, CloneProgress, FileContents, WorkingStatus } from '../../ipc/types'
+import { useExplorerStore } from '../../state/explorer'
 import { emptyGitSessionState, repositoryFolder, repositoryStateFor, useGitStore, type GitDiffArea, type GitTab } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
+import { useWorkspaceWindowActions } from '../../layout/windowActions'
 import { QuickPick } from '../QuickPick'
 import type { PickerEntry } from '../pickerModel'
 import { BranchesTab } from './BranchesTab'
 import { HistoryTab } from './HistoryTab'
 import { PullRequestsTab } from './PullRequestsTab'
-import { GitWindowView, type GitChangeGroup, type GitCloneViewState, type GitRowAction } from './GitWindowView'
+import { GitWindowView, type GitChangeGroup, type GitChangeItem, type GitCloneViewState, type GitRowAction } from './GitWindowView'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+
+type RemoteComparison = {
+  repoRoot: string
+  upstream: string
+  files: ChangedFile[]
+  selectedPath: string | null
+}
 
 
 export function GitWindow() {
@@ -33,6 +42,7 @@ export function GitWindow() {
   const setActiveRepository = useGitStore((state) => state.setActiveRepository)
   const setSelectedPath = useGitStore((state) => state.setSelectedPath)
   const setActiveTab = useGitStore((state) => state.setActiveTab)
+  const windowActions = useWorkspaceWindowActions()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [commitMessage, setCommitMessage] = useState('')
   const [amend, setAmend] = useState(false)
@@ -41,6 +51,9 @@ export function GitWindow() {
   const [diffLoading, setDiffLoading] = useState(false)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [diffRefreshRevision, setDiffRefreshRevision] = useState(0)
+  const [remoteComparison, setRemoteComparison] = useState<RemoteComparison | null>(null)
+  const activeRemoteComparison = remoteComparison?.repoRoot === activeRepoRoot ? remoteComparison : null
+  const [remoteCompareLoading, setRemoteCompareLoading] = useState(false)
   const diffRequestGeneration = useRef(0)
   const [branchPickerOpen, setBranchPickerOpen] = useState(false)
   const [branches, setBranches] = useState<BranchInfo[]>([])
@@ -49,6 +62,7 @@ export function GitWindow() {
   const [cloneTargetDir, setCloneTargetDir] = useState('')
   const [cloneProgress, setCloneProgress] = useState<string[]>([])
   const [cloneRunning, setCloneRunning] = useState(false)
+
 
   useEffect(() => {
     if (!sessionId) return
@@ -90,11 +104,14 @@ export function GitWindow() {
     return () => window.clearTimeout(timer)
   }, [activeRepoRoot, activeRepository.status, orderedEntries, selectedRelativePath, sessionId, setSelectedPath, status.conflicted, status.staged, status.unstaged, status.untracked])
 
+  const diffSelectedPath = activeRemoteComparison?.selectedPath ?? selectedRelativePath
+  const diffSelectedArea = activeRemoteComparison ? 'remote' : selectedArea
+
   useEffect(() => {
     const generation = diffRequestGeneration.current + 1
     diffRequestGeneration.current = generation
     const timer = window.setTimeout(() => {
-      if (!activeWorkspaceFolder || !selectedRelativePath) {
+      if (!activeWorkspaceFolder || !diffSelectedPath) {
         setContents(null)
         setDiffError(null)
         setDiffLoading(false)
@@ -103,7 +120,11 @@ export function GitWindow() {
       setContents(null)
       setDiffLoading(true)
       setDiffError(null)
-      void invoke<FileContents>('git_working_file_contents', { workspaceFolder: activeWorkspaceFolder, path: selectedRelativePath, area: selectedArea })
+      const command = activeRemoteComparison ? 'git_compare_refs_file' : 'git_working_file_contents'
+      const args = activeRemoteComparison
+        ? { workspaceFolder: activeWorkspaceFolder, baseRef: 'HEAD', headRef: activeRemoteComparison.upstream, path: diffSelectedPath }
+        : { workspaceFolder: activeWorkspaceFolder, path: diffSelectedPath, area: selectedArea }
+      void invoke<FileContents>(command, args)
         .then((next) => { if (diffRequestGeneration.current === generation) setContents(next) })
         .catch((reason) => {
           if (diffRequestGeneration.current === generation) { setContents(null); setDiffError(String(reason)) }
@@ -111,7 +132,7 @@ export function GitWindow() {
         .finally(() => { if (diffRequestGeneration.current === generation) setDiffLoading(false) })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [activeWorkspaceFolder, diffRefreshRevision, selectedArea, selectedRelativePath])
+  }, [activeRemoteComparison, activeWorkspaceFolder, diffRefreshRevision, diffSelectedPath, selectedArea])
 
   const runActiveMutation = useCallback(async (operation: () => Promise<unknown>) => {
     if (!sessionId || !workspaceFolder) return
@@ -132,41 +153,79 @@ export function GitWindow() {
     mutate(() => invoke('git_discard', { workspaceFolder: activeWorkspaceFolder, paths }))
   }, [activeWorkspaceFolder, mutate])
 
+  const revealExplorerFile = useCallback((path: string) => {
+    if (!sessionId || !workspaceFolder) return
+    const fullPath = activeRepoRoot ? `${activeRepoRoot}/${path}` : path
+    void windowActions.openWindow('explorer')
+      .then(() => useExplorerStore.getState().revealPath(sessionId, workspaceFolder, fullPath))
+  }, [activeRepoRoot, sessionId, windowActions, workspaceFolder])
+
+  const selectChange = useCallback((item: GitChangeItem) => {
+    if (!sessionId) return
+    if (item.area === 'remote') {
+      setRemoteComparison((current) => current ? { ...current, selectedPath: item.path } : current)
+    } else {
+      const fullPath = activeRepoRoot ? `${activeRepoRoot}/${item.path}` : item.path
+      setRemoteComparison(null)
+      setSelectedArea(item.area)
+      setSelectedPath(sessionId, fullPath, activeRepoRoot, item.area)
+    }
+    revealExplorerFile(item.path)
+  }, [activeRepoRoot, revealExplorerFile, sessionId, setSelectedPath])
+
   const rowAction = useCallback((id: string, label: string, action: () => void, danger = false): GitRowAction => ({ id, label, danger, onClick: action }), [])
   const groups = useMemo<GitChangeGroup[]>(() => {
+    const items = (entries: typeof status.staged, area: GitDiffArea): GitChangeItem[] => entries
+      .filter((entry) => !entry.repoKind && !entry.path.endsWith('/'))
+      .map((entry) => ({ path: entry.path, oldPath: entry.oldPath, changeType: entry.changeType, area }))
+    const conflictedItems = items(status.conflicted, 'unstaged')
+    const stagedItems = items(status.staged, 'staged')
+    const unstagedItems = items(status.unstaged, 'unstaged')
+    const untrackedItems = items(status.untracked, 'unstaged')
     const stageableUnstaged = status.unstaged
       .filter((entry) => !entry.repoKind || (entry.repoKind === 'submodule' && entry.submoduleState?.commitChanged))
       .map((entry) => entry.path)
     const discardableUnstaged = status.unstaged.filter((entry) => !entry.repoKind).map((entry) => entry.path)
     const stageableUntracked = status.untracked.filter((entry) => !entry.repoKind).map((entry) => entry.path)
     return [
-      { id: 'conflicted', title: 'Merge Conflicts', count: status.conflicted.length, actions: [] },
+      { id: 'conflicted', title: 'Merge Conflicts', count: conflictedItems.length, actions: [], items: conflictedItems },
       {
         id: 'staged',
         title: 'Staged',
-        count: status.staged.length,
+        count: stagedItems.length,
         actions: status.staged.length > 0 ? [rowAction('unstage-all', 'Unstage All', () => mutate(() => invoke('git_unstage_all', { workspaceFolder: activeWorkspaceFolder })))] : [],
+        items: stagedItems,
       },
       {
         id: 'unstaged',
         title: 'Changes',
-        count: status.unstaged.length,
+        count: unstagedItems.length,
         actions: [
           ...(stageableUnstaged.length > 0 ? [rowAction('stage-all', 'Stage All', () => mutate(() => invoke('git_stage', { workspaceFolder: activeWorkspaceFolder, paths: stageableUnstaged })))] : []),
           ...(discardableUnstaged.length > 0 ? [rowAction('discard-all', 'Discard All', () => discard(discardableUnstaged, false), true)] : []),
         ],
+        items: unstagedItems,
       },
       {
         id: 'untracked',
         title: 'Untracked',
-        count: status.untracked.length,
+        count: untrackedItems.length,
         actions: stageableUntracked.length > 0 ? [
           rowAction('stage-all', 'Stage All', () => mutate(() => invoke('git_stage', { workspaceFolder: activeWorkspaceFolder, paths: stageableUntracked }))),
           rowAction('discard-all', 'Discard All', () => discard(stageableUntracked, true), true),
         ] : [],
+        items: untrackedItems,
       },
     ]
   }, [activeWorkspaceFolder, discard, mutate, rowAction, status])
+
+  const visibleGroups = useMemo<GitChangeGroup[]>(() => activeRemoteComparison ? [{
+    id: 'remote',
+    title: 'Remote changes',
+    count: activeRemoteComparison.files.length,
+    actions: [],
+    items: activeRemoteComparison.files.map((file) => ({ path: file.path, oldPath: file.oldPath ?? null, changeType: file.changeType, area: 'remote' })),
+  }] : groups, [activeRemoteComparison, groups])
 
   const openBranchPicker = useCallback(() => {
     if (!activeWorkspaceFolder) return
@@ -214,6 +273,7 @@ export function GitWindow() {
   }
 
   const repoInfo = activeRepository.repoInfo
+  const upstream = repoInfo?.upstream ?? null
   const continueState = repoInfo?.state === 'rebasing' && activeWorkspaceFolder
     ? () => mutate(() => invoke('git_rebase_continue', { workspaceFolder: activeWorkspaceFolder }))
     : null
@@ -222,6 +282,31 @@ export function GitWindow() {
     : repoInfo?.state === 'merging' && activeWorkspaceFolder
       ? () => mutate(() => invoke('git_merge_abort', { workspaceFolder: activeWorkspaceFolder }))
       : null
+
+  const compareRemote = useCallback(async () => {
+    if (!sessionId || !workspaceFolder || !activeWorkspaceFolder || !upstream) return
+    setRemoteCompareLoading(true)
+    setDiffError(null)
+    try {
+      await runGitMutation(
+        sessionId,
+        workspaceFolder,
+        () => invoke('git_fetch', { workspaceFolder: activeWorkspaceFolder, remote: null, prune: false, refspec: null }),
+        activeRepoRoot,
+      )
+      const files = await invoke<ChangedFile[]>('git_compare_refs', {
+        workspaceFolder: activeWorkspaceFolder,
+        baseRef: 'HEAD',
+        headRef: upstream,
+      })
+      setRemoteComparison({ repoRoot: activeRepoRoot, upstream, files, selectedPath: files[0]?.path ?? null })
+      setContents(null)
+    } catch (reason) {
+      setDiffError(String(reason))
+    } finally {
+      setRemoteCompareLoading(false)
+    }
+  }, [activeRepoRoot, activeWorkspaceFolder, runGitMutation, sessionId, upstream, workspaceFolder])
 
   return (
     <>
@@ -239,11 +324,15 @@ export function GitWindow() {
         commitMessage={commitMessage}
         amend={amend}
         canCommit={Boolean(commitMessage.trim()) && (amend || status.staged.length > 0)}
-        groups={groups}
-        selectedPath={selectedRelativePath}
+        groups={visibleGroups}
+        selectedPath={diffSelectedPath}
+        selectedArea={diffSelectedArea}
         contents={contents}
         diffLoading={diffLoading}
         diffError={diffError}
+        remoteUpstream={upstream}
+        remoteComparisonActive={activeRemoteComparison !== null}
+        remoteCompareLoading={remoteCompareLoading}
         clone={clone}
         onOpenWorkspaceRepository={activeRepoRoot && sessionId ? () => {
           setActiveRepository(sessionId, '')
@@ -261,6 +350,9 @@ export function GitWindow() {
         onFetch={() => mutate(() => invoke('git_fetch', { workspaceFolder: activeWorkspaceFolder, remote: null, prune: false, refspec: null }))}
         onPull={() => mutate(() => invoke('git_pull', { workspaceFolder: activeWorkspaceFolder, rebase: false }))}
         onPush={() => mutate(() => invoke('git_push', { workspaceFolder: activeWorkspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false }))}
+        onCompareRemote={() => { void compareRemote() }}
+        onShowWorkingChanges={() => { setRemoteComparison(null); setDiffError(null) }}
+        onSelectChange={selectChange}
         onContinueState={continueState}
         onAbortState={abortState}
         onTabChange={(tab: GitTab) => { if (sessionId) setActiveTab(sessionId, tab) }}
@@ -270,9 +362,9 @@ export function GitWindow() {
           () => invoke<string>('git_commit', { workspaceFolder: activeWorkspaceFolder, message: commitMessage, amend, signoff: false }),
           () => setCommitMessage(''),
         )}
-        historyContent={sessionId && activeWorkspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} pathFilter={gitState.pathFilter} onRunMutation={runActiveMutation} /> : null}
-        branchesContent={sessionId && activeWorkspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} status={status} onRunMutation={runActiveMutation} /> : null}
-        pullRequestsContent={sessionId && activeWorkspaceFolder && repoInfo && activeRepository.hostingInfo ? <PullRequestsTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} hostingInfo={activeRepository.hostingInfo} hostingError={activeRepository.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true, activeRepoRoot)} onRepositoryChanged={() => refreshRepository(sessionId, workspaceFolder, activeRepoRoot)} /> : null}
+        historyContent={sessionId && activeWorkspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} pathFilter={gitState.pathFilter} onRunMutation={runActiveMutation} onRevealFile={revealExplorerFile} /> : null}
+        branchesContent={sessionId && activeWorkspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} status={status} onRunMutation={runActiveMutation} onRevealFile={revealExplorerFile} /> : null}
+        pullRequestsContent={sessionId && activeWorkspaceFolder && repoInfo && activeRepository.hostingInfo ? <PullRequestsTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} hostingInfo={activeRepository.hostingInfo} hostingError={activeRepository.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true, activeRepoRoot)} onRepositoryChanged={() => refreshRepository(sessionId, workspaceFolder, activeRepoRoot)} onRevealFile={revealExplorerFile} /> : null}
       />
       {branchPickerOpen && branches.length > 0 ? (
         <QuickPick

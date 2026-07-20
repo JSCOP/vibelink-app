@@ -420,6 +420,35 @@ mod tests {
     }
 
     #[test]
+    fn direct_ref_compare_uses_exact_local_and_remote_trees() {
+        let repo = test_repo();
+        std::fs::write(repo.join("tracked.txt"), "base\n").expect("write base");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+        run_git(&repo, &["checkout", "-b", "remote"]);
+        std::fs::write(repo.join("tracked.txt"), "remote\n").expect("write remote");
+        run_git(&repo, &["commit", "-am", "remote"]);
+        run_git(&repo, &["checkout", "-b", "local", "HEAD~1"]);
+        std::fs::write(repo.join("tracked.txt"), "local\n").expect("write local");
+        run_git(&repo, &["commit", "-am", "local"]);
+
+        let files = diff::compare_refs_native(repo.to_str().expect("utf8 path"), "local", "remote")
+            .expect("compare refs");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "tracked.txt");
+        let contents = diff::compare_refs_file_native(
+            repo.to_str().expect("utf8 path"),
+            "local",
+            "remote",
+            "tracked.txt",
+        )
+        .expect("compare contents");
+        assert_eq!(contents.old, "local\n");
+        assert_eq!(contents.new, "remote\n");
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
     fn file_contents_rejects_paths_outside_workspace() {
         let repo = test_repo();
         let repo_str = repo.to_str().expect("utf8 path");

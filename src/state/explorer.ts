@@ -51,6 +51,7 @@ export type ExplorerNode = {
 type ExplorerStore = {
   sessions: Record<string, ExplorerSessionState>
   loadChildren: (sessionId: string, workspaceFolder: string, relPath: string) => Promise<void>
+  revealPath: (sessionId: string, workspaceFolder: string, path: string) => Promise<void>
   setExpanded: (sessionId: string, path: string, expanded: boolean) => void
   setSelectedPath: (sessionId: string, path: string | null) => void
   invalidatePath: (sessionId: string, path: string) => void
@@ -66,7 +67,7 @@ export const emptyExplorerSessionState: ExplorerSessionState = {
   error: null,
 }
 
-export const useExplorerStore = create<ExplorerStore>((set) => ({
+export const useExplorerStore = create<ExplorerStore>((set, get) => ({
   sessions: {},
   loadChildren: async (sessionId, workspaceFolder, relPath) => {
     set((state) => {
@@ -124,6 +125,19 @@ export const useExplorerStore = create<ExplorerStore>((set) => ({
         return { sessions: { ...state.sessions, [sessionId]: { ...current, loadingPaths, error: String(reason) } } }
       })
     }
+  },
+  revealPath: async (sessionId, workspaceFolder, path) => {
+    const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+|\/+$/g, '')
+    if (!normalized) return
+    const parts = normalized.split('/').filter(Boolean)
+    await get().loadChildren(sessionId, workspaceFolder, '')
+    let current = ''
+    for (const part of parts.slice(0, -1)) {
+      current = joinPath(current, part)
+      get().setExpanded(sessionId, current, true)
+      await get().loadChildren(sessionId, workspaceFolder, current)
+    }
+    get().setSelectedPath(sessionId, normalized)
   },
   setExpanded: (sessionId, path, expanded) => set((state) => {
     const current = state.sessions[sessionId] ?? emptyExplorerSessionState

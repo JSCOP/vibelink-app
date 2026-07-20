@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tauri::State;
 
 const TEXT_LIMIT: usize = 2 * 1024 * 1024;
-const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
+const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,7 +144,7 @@ fn read_text_native(root: &str, rel_path: &str) -> Result<TextFile> {
 fn read_base64_native(root: &str, rel_path: &str) -> Result<String> {
     let path = contain_path(Path::new(root), rel_path)?;
     if std::fs::metadata(&path)?.len() > IMAGE_LIMIT {
-        bail!("file too large");
+        bail!("image preview is limited to 64 MiB");
     }
     Ok(base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path)?))
 }
@@ -264,6 +264,17 @@ mod tests {
         let text = read_text_native(root.to_str().expect("utf8 root"), "binary.bin").expect("read");
         assert!(text.binary);
         assert!(text.content.is_empty());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn previews_images_larger_than_twenty_mebibytes() {
+        let root = temp_root();
+        let image = vec![0_u8; 21 * 1024 * 1024];
+        std::fs::write(root.join("large.png"), &image).expect("write image");
+        let encoded = read_base64_native(root.to_str().expect("utf8 root"), "large.png")
+            .expect("preview image");
+        assert!(encoded.len() > image.len());
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

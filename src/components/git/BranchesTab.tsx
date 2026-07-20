@@ -12,11 +12,12 @@ export type BranchesTabProps = {
   repoInfo: RepoInfo
   status: WorkingStatus
   onRunMutation: (operation: () => Promise<unknown>) => Promise<void>
+  onRevealFile?: (path: string) => void
 }
 
 type RefPicker = 'base' | 'head' | null
 
-export function BranchesTab({ workspaceFolder, repoInfo, status, onRunMutation }: BranchesTabProps) {
+export function BranchesTab({ workspaceFolder, repoInfo, status, onRunMutation, onRevealFile }: BranchesTabProps) {
   const [branches, setBranches] = useState<BranchInfo[]>([])
   const [stashes, setStashes] = useState<StashInfo[]>([])
   const [tags, setTags] = useState<TagInfo[]>([])
@@ -165,7 +166,7 @@ export function BranchesTab({ workspaceFolder, repoInfo, status, onRunMutation }
         onOpenBasePicker={() => setPicker('base')}
         onOpenHeadPicker={() => setPicker('head')}
         onCompare={compare}
-        onSelectFile={setSelectedPath}
+        onSelectFile={(path) => { setSelectedPath(path); onRevealFile?.(path) }}
         onOpenStash={() => setStashOpen(true)}
       />
       {picker && refNames.length > 0 ? (

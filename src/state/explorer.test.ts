@@ -1,9 +1,18 @@
-import { describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { DirEntryInfo, WorkingStatus } from '../ipc/types'
-import { deriveGitDecorations, emptyExplorerSessionState, flattenExplorerTree } from './explorer'
+
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
+
+import { deriveGitDecorations, emptyExplorerSessionState, flattenExplorerTree, useExplorerStore } from './explorer'
 
 const directory: DirEntryInfo = { name: 'src', isDir: true, isSymlink: false, size: 0, modifiedAt: null }
 const file: DirEntryInfo = { name: 'file.ts', isDir: false, isSymlink: false, size: 10, modifiedAt: null }
+
+beforeEach(() => {
+  invoke.mockReset()
+  useExplorerStore.setState({ sessions: {} })
+})
 
 describe('Explorer tree helpers', () => {
   test('flattens expanded children with stable depth', () => {
@@ -73,5 +82,22 @@ describe('Explorer tree helpers', () => {
       unstaged: 'modified',
       repoRoot: 'vendor/tool',
     })
+  })
+
+  test('loads and expands deep ancestors when another view reveals a file', async () => {
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'git_dir_entries') return []
+      if (command !== 'fs_list_dir') return []
+      if (args?.relPath === '') return [{ ...directory }]
+      if (args?.relPath === 'src') return [{ ...directory, name: 'deep' }]
+      if (args?.relPath === 'src/deep') return [{ ...file }]
+      return []
+    })
+
+    await useExplorerStore.getState().revealPath('session-1', 'C:/repo', 'src/deep/file.ts')
+    const session = useExplorerStore.getState().sessions['session-1']
+    expect(session.selectedPath).toBe('src/deep/file.ts')
+    expect(session.expandedPaths).toEqual(new Set(['src', 'src/deep']))
+    expect(session.childrenByPath.has('src/deep')).toBe(true)
   })
 })

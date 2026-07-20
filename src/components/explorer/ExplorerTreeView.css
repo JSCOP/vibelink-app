@@ -148,7 +148,7 @@
   color: var(--vibelink-text);
   cursor: default;
   display: flex;
-  font: 12.5px/1 var(--vibelink-sans);
+  font: 12.5px/16px var(--vibelink-sans);
   gap: 5px;
   left: 0;
   padding-left: calc(var(--explorer-depth, 0) * 14px + 6px);

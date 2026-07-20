@@ -42,3 +42,30 @@ test('renders commits and loads the next page with the current skip', async () =
     options: { refName: null, path: null, skip: 1, limit: 200, search: null, author: null },
   }))
 })
+
+test('reveals a selected committed file in Explorer', async () => {
+  const onRevealFile = vi.fn()
+  const changedFile = { path: 'src/committed.ts', changeType: 'modified' as const, additions: 2, deletions: 1, binary: false }
+  invoke.mockReset()
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_log') return { commits: [commit], hasMore: false }
+    if (command === 'git_commit_detail') return {
+      sha: commit.sha,
+      parents: [],
+      authorName: commit.authorName,
+      authorEmail: commit.authorEmail,
+      authorDate: commit.authorDate,
+      committerName: commit.authorName,
+      committerDate: commit.authorDate,
+      body: '',
+      files: [changedFile],
+    }
+    if (command === 'git_commit_file_contents') return { old: 'before', new: 'after', binary: false }
+    return null
+  })
+
+  render(<HistoryTab sessionId="session-1" workspaceFolder="C:/repo" pathFilter={null} onRunMutation={async (operation) => { await operation() }} onRevealFile={onRevealFile} />)
+  fireEvent.click(await screen.findByText('Initial commit'))
+  fireEvent.click(await screen.findByText('src/committed.ts'))
+  expect(onRevealFile).toHaveBeenCalledWith('src/committed.ts')
+})

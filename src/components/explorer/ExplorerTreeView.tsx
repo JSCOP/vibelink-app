@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, File, FileMinus2, FilePlus2, Folder, FolderGit2, FolderOpen, GitCommit, GitFork, Link2, LoaderCircle, PanelRightClose, PanelRightOpen, Pencil, RefreshCw } from 'lucide-react'
@@ -46,6 +46,12 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
   const rows = virtualItems.length > 0 ? virtualItems : nodes.map((_, index) => ({ index, key: index, start: index * 24, size: 24, end: (index + 1) * 24, lane: 0 }))
   const contextPosition = contextMenu ? clampMenuPosition(contextMenu.x, contextMenu.y, contextMenu.actions.length) : null
 
+  useEffect(() => {
+    if (!selectedPath) return
+    const index = nodes.findIndex((node) => node.path === selectedPath)
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' })
+  }, [nodes, selectedPath, virtualizer])
+
   return (
     <aside className="explorer-tree-pane" data-explorer-tree="true">
       <header>
@@ -72,6 +78,7 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
                 aria-expanded={node.entry.isDir ? node.expanded : undefined}
                 aria-selected={selectedPath === node.path}
                 data-selected={selectedPath === node.path || undefined}
+                data-explorer-path={node.path}
                 data-ignored={node.ignored || undefined}
                 data-drag-over={dragOverPath === node.path || undefined}
                 data-git-state={node.decoration?.conflicted ? 'conflicted' : node.decoration?.unstaged ? 'unstaged' : node.decoration?.untracked ? 'untracked' : node.decoration?.staged ? 'staged' : undefined}

@@ -159,6 +159,8 @@ pub fn run() {
             git::remote::git_clone,
             git::stage::git_commit,
             git::log::git_commit_detail,
+            git::diff::git_compare_refs,
+            git::diff::git_compare_refs_file,
             git::diff::git_commit_file_contents,
             git::branch::git_conflict_take,
             git::diff::git_diff_refs,
