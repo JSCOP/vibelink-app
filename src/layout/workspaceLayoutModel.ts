@@ -2,6 +2,20 @@ import { shouldRestoreDockviewLayout } from './layoutRestore'
 
 export type WorkspaceWindowKind = 'terminal' | 'agent' | 'kanban' | 'diff' | 'todo' | 'git' | 'explorer'
 
+export type TerminalWindowOpenMode = 'existing' | 'new'
+
+export const detachedTerminalWindowComponent = 'detachedTerminalWindow'
+export const detachedTerminalWindowPanelPrefix = 'terminal-window-pane:'
+
+export function detachedTerminalWindowPanelId(paneId: string): string {
+  return `${detachedTerminalWindowPanelPrefix}${paneId}`
+}
+
+export function detachedTerminalPaneId(panel: { id: string; params?: unknown } | null | undefined): string | null {
+  if (!panel || !panel.id.startsWith(detachedTerminalWindowPanelPrefix) || !isRecord(panel.params)) return null
+  return typeof panel.params.paneId === 'string' && panel.params.paneId ? panel.params.paneId : null
+}
+
 export type WorkspaceLayoutPage = {
   id: string
   name: string

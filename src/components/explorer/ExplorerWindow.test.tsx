@@ -34,6 +34,7 @@ const status: WorkingStatus = {
 
 beforeEach(() => {
   cleanup()
+  window.localStorage.clear()
   invoke.mockReset()
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === 'fs_list_dir') {
@@ -73,6 +74,20 @@ describe('ExplorerWindow Git integration', () => {
     fireEvent.contextMenu(screen.getByText('src').closest('.explorer-tree-row') as HTMLElement, { clientX: 80, clientY: 90 })
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Stage Folder Changes' }))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stage', { workspaceFolder: 'C:/repo', paths: ['src'] }))
+  })
+
+  test('persists the Explorer preview visibility toggle', async () => {
+    render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Hide file preview' }))
+
+    expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('false')
+    expect(document.querySelector('.explorer-viewer')).toBeNull()
+    expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBe('false')
+
+    cleanup()
+    render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
+    expect(await screen.findByRole('button', { name: 'Show file preview' })).toBeTruthy()
+    expect(document.querySelector('.explorer-viewer')).toBeNull()
   })
 })
 

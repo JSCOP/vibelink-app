@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, File, FileMinus2, FilePlus2, Folder, FolderGit2, FolderOpen, GitCommit, GitFork, Link2, LoaderCircle, Pencil, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, File, FileMinus2, FilePlus2, Folder, FolderGit2, FolderOpen, GitCommit, GitFork, Link2, LoaderCircle, PanelRightClose, PanelRightOpen, Pencil, RefreshCw } from 'lucide-react'
 import type { ChangeType } from '../../ipc/types'
 import type { ExplorerChangeSummary, ExplorerGitDecoration, ExplorerNode } from '../../state/explorer'
 import type { GitStatusPresentation } from '../../state/profiles'
@@ -17,6 +17,8 @@ export type ExplorerTreeViewProps = {
   error: string | null
   statusSummary: ExplorerChangeSummary | null
   statusPresentation: GitStatusPresentation
+  previewVisible: boolean
+  onTogglePreview: () => void
   renamingPath: string | null
   renameValue: string
   contextMenu: ExplorerContextMenu
@@ -35,7 +37,7 @@ export type ExplorerTreeViewProps = {
   onDrop: (event: React.DragEvent, node: ExplorerNode) => void
 }
 
-export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
+export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, previewVisible, onTogglePreview, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -46,7 +48,15 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
 
   return (
     <aside className="explorer-tree-pane" data-explorer-tree="true">
-      <header><strong>EXPLORER</strong><span className="explorer-tree-header-spacer" />{statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}{loading ? <LoaderCircle className="spin" size={13} /> : null}</header>
+      <header>
+        <strong>EXPLORER</strong>
+        <span className="explorer-tree-header-spacer" />
+        {statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}
+        {loading ? <LoaderCircle className="spin" size={13} /> : null}
+        <button type="button" className="explorer-preview-toggle" title={previewVisible ? 'Hide file preview' : 'Show file preview'} aria-pressed={previewVisible} onClick={onTogglePreview}>
+          {previewVisible ? <PanelRightClose size={13} aria-hidden="true" /> : <PanelRightOpen size={13} aria-hidden="true" />}
+        </button>
+      </header>
       {error ? <div className="explorer-error">{error}</div> : null}
       <div ref={scrollRef} className="explorer-tree-scroll" role="tree" tabIndex={0} onKeyDown={onKeyDown}>
         <div className="explorer-tree-virtual" style={{ height: `${virtualizer.getTotalSize() || nodes.length * 24}px` }}>

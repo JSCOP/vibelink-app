@@ -38,6 +38,11 @@
   position: relative;
 }
 
+.explorer-window[data-preview-visible="false"] .explorer-tree-pane {
+  border-right: 0;
+  flex: 1 1 auto;
+}
+
 .explorer-tree-pane > header {
   align-items: center;
   color: var(--vibelink-muted);
@@ -58,6 +63,36 @@
 
 .explorer-tree-header-spacer {
   flex: 1 1 auto;
+}
+
+.explorer-preview-toggle {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  width: 22px;
+}
+
+.explorer-preview-toggle:hover {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.explorer-preview-toggle:focus-visible {
+  border-color: var(--vibelink-focus);
+  outline: none;
+}
+
+.explorer-window[data-preview-visible='false'] .explorer-tree-pane {
+  border-right: 0;
+  flex: 1 1 auto;
+  width: 100%;
 }
 
 .explorer-error {

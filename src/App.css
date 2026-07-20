@@ -413,6 +413,12 @@ button {
   z-index: var(--z-popover);
 }
 
+.window-menu-separator {
+  background: var(--vibelink-border-soft);
+  height: 1px;
+  margin: 3px 4px;
+}
+
 .window-menu-popover button {
   align-items: center;
   color: var(--vibelink-text);

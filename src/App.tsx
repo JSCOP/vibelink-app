@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Bug, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, LayoutGrid, ListTodo, Minus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Bug, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, LayoutGrid, ListTodo, Minus, Plus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
@@ -30,7 +30,7 @@ import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
-import { planningWorkspaceLayoutPageId, workspaceWindowDescriptors, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
+import { planningWorkspaceLayoutPageId, workspaceWindowDescriptors, type TerminalWindowOpenMode, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
 import { isAppLocked, requiresProWindow } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
@@ -74,7 +74,7 @@ function App() {
 
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
   const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
-  const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null>(null)
+  const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null; terminalMode?: TerminalWindowOpenMode } | null>(null)
   const [proUpsellFeature, setProUpsellFeature] = useState<string | null>(null)
   const [ffmpegNotice, setFfmpegNotice] = useState<string | null>(null)
   const [ffmpegDownload, setFfmpegDownload] = useState<FfmpegDownloadProgress | null>(null)
@@ -379,14 +379,14 @@ function App() {
     }
   }, [openImageCapture, openQuickImageCapture, openVideoCapture])
 
-  const openWorkspaceWindow = (kind: WorkspaceWindowKind) => {
+  const openWorkspaceWindow = (kind: WorkspaceWindowKind, terminalMode?: TerminalWindowOpenMode) => {
     if (!activeSessionId) return
     if (requiresProWindow(kind) && !license.status?.entitled) {
       setProUpsellFeature(workspaceWindowDescriptors[kind].title)
       setIsWindowMenuOpen(false)
       return
     }
-    setWorkspaceWindowRequest({ kind, profileId: kind === 'terminal' ? activeProfile.id : null, requestId: Date.now() })
+    setWorkspaceWindowRequest({ kind, terminalMode, profileId: kind === 'terminal' ? activeProfile.id : null, requestId: Date.now() })
     setIsWindowMenuOpen(false)
   }
 
@@ -520,9 +520,13 @@ function App() {
             </button>
             {isWindowMenuOpen ? (
               <div className="window-menu-popover" role="menu">
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('terminal')}>
-                  <TerminalSquare size={14} /> Terminal
+                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('terminal', 'existing')}>
+                  <TerminalSquare size={14} /> Show terminal workspace
                 </button>
+                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('terminal', 'new')}>
+                  <Plus size={14} /> New terminal below active
+                </button>
+                <div className="window-menu-separator" role="separator" />
                 <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('agent')}>
                   <Bot size={14} /> {workspaceWindowDescriptors.agent.title}
                 </button>
@@ -574,7 +578,7 @@ function App() {
             ) : null}
           </div>
           <div className="topbar-spacer" data-tauri-drag-region />
-          {chromeState?.activeWindowKind === 'terminal' ? <TerminalTopbarActions actions={windowActions} /> : null}
+          {chromeState?.activeWindowKind === 'terminal' && chromeState.activeTerminalMode === 'workspace' ? <TerminalTopbarActions actions={windowActions} /> : null}
           <button type="button" className="topbar-icon-button" title="Capture image" onClick={openImageCapture}>
             <Camera size={16} />
           </button>

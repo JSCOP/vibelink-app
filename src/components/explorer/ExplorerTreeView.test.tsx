@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react'
-import { describe, expect, test, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { ExplorerTreeView } from './ExplorerTreeView'
 import type { ExplorerNode } from '../../state/explorer'
@@ -38,6 +38,8 @@ const changedNode: ExplorerNode = {
 
 const noop = vi.fn()
 
+afterEach(cleanup)
+
 describe('ExplorerTreeView', () => {
   test('portals the context menu to the viewport instead of a transformed Dockview panel', () => {
     render(
@@ -48,6 +50,8 @@ describe('ExplorerTreeView', () => {
           loading={false}
           statusSummary={null}
           statusPresentation="letters"
+          previewVisible
+          onTogglePreview={noop}
           error={null}
           renamingPath={null}
           renameValue=""
@@ -82,6 +86,8 @@ describe('ExplorerTreeView', () => {
       loading: false,
       statusSummary: null,
       error: null,
+      previewVisible: true,
+      onTogglePreview: noop,
       renamingPath: null,
       renameValue: '',
       contextMenu: null,
@@ -108,5 +114,39 @@ describe('ExplorerTreeView', () => {
 
     rerender(<ExplorerTreeView {...props} statusPresentation="words" />)
     expect(screen.getByLabelText(explanation).textContent).toBe('Modified')
+  })
+
+  test('exposes a pressed preview toggle in the tree header', () => {
+    const onTogglePreview = vi.fn()
+    render(<ExplorerTreeView
+      nodes={[node]}
+      selectedPath="src"
+      loading={false}
+      statusSummary={null}
+      statusPresentation="letters"
+      previewVisible
+      onTogglePreview={onTogglePreview}
+      error={null}
+      renamingPath={null}
+      renameValue=""
+      contextMenu={null}
+      dragOverPath={null}
+      onSelect={noop}
+      onToggle={noop}
+      onKeyDown={noop}
+      onRenameValueChange={noop}
+      onCommitRename={noop}
+      onCancelRename={noop}
+      onContextMenu={noop}
+      onCloseContextMenu={noop}
+      onDragStart={noop}
+      onDragOver={noop}
+      onDragLeave={noop}
+      onDrop={noop}
+    />)
+    const toggle = screen.getByRole('button', { name: 'Hide file preview' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(toggle)
+    expect(onTogglePreview).toHaveBeenCalledTimes(1)
   })
 })

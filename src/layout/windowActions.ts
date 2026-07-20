@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { WindowDropPosition } from './windowDrag'
-import type { WorkspaceWindowKind } from './workspaceLayoutModel'
+import type { TerminalWindowOpenMode, WorkspaceWindowKind } from './workspaceLayoutModel'
 import type { SplitDirection } from './actions'
 import type { GridSize } from './templatePlan'
 
@@ -11,9 +11,10 @@ export type TerminalGridLaunchRequest = {
   profileId?: string | null
 }
 
+export type OpenWorkspaceWindowOptions = { terminalMode?: TerminalWindowOpenMode }
 export type WorkspaceWindowActions = {
   activateWindow: (panelId: string) => void
-  openWindow: (kind: WorkspaceWindowKind) => Promise<void>
+  openWindow: (kind: WorkspaceWindowKind, options?: OpenWorkspaceWindowOptions) => Promise<void>
   splitTerminal: (paneId: string, direction: SplitDirection) => Promise<void>
   closeWindow: (panelId: string) => Promise<void>
   toggleMaximize: (panelId: string) => void
@@ -24,11 +25,13 @@ export type WorkspaceWindowActions = {
   arrangeTerminals: (grid?: GridSize | null) => void
   launchTerminalGrid: (request: TerminalGridLaunchRequest) => void
   getTerminalLayoutSnapshot: () => unknown | null
+  getManagedTerminalPaneIds: () => string[]
 }
 
 export type WorkspaceChromeState = {
   windowCount: number
   activeWindowKind: WorkspaceWindowKind | null
+  activeTerminalMode: 'workspace' | 'detached' | null
 }
 
 export const WorkspaceWindowActionsContext = createContext<WorkspaceWindowActions | null>(null)

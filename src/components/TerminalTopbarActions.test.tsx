@@ -19,6 +19,7 @@ const actions: WorkspaceWindowActions = {
   arrangeTerminals: vi.fn(),
   launchTerminalGrid: vi.fn(),
   getTerminalLayoutSnapshot: vi.fn(() => null),
+  getManagedTerminalPaneIds: vi.fn(() => ['pane-test']),
 }
 
 beforeEach(() => {

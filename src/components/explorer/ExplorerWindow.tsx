@@ -11,6 +11,7 @@ import { ExplorerViewerView } from './ExplorerViewerView'
 export type ExplorerWindowProps = { sessionId: string; workspaceFolder: string }
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'])
+const EXPLORER_PREVIEW_VISIBLE_KEY = 'vibelink:explorerPreviewVisible'
 
 export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowProps) {
   const session = useExplorerStore((state) => state.sessions[sessionId] ?? emptyExplorerSessionState)
@@ -40,6 +41,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const [renameValue, setRenameValue] = useState('')
   const [contextMenu, setContextMenu] = useState<ExplorerContextMenu>(null)
   const [dragOverPath, setDragOverPath] = useState<string | null>(null)
+  const [previewVisible, setPreviewVisible] = useState(loadExplorerPreviewVisible)
   const draggedPathRef = useRef<string | null>(null)
 
   const repositoryInfoByRoot = useMemo(() => new Map(
@@ -110,13 +112,21 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     return () => window.removeEventListener('focus', refreshVisibleTree)
   }, [loadChildren, refreshGit, refreshRepository, sessionId, workspaceFolder])
 
+
+  const togglePreview = useCallback(() => {
+    setPreviewVisible((visible) => {
+      const next = !visible
+      try { window.localStorage.setItem(EXPLORER_PREVIEW_VISIBLE_KEY, next ? 'true' : 'false') } catch { /* ignore unavailable storage */ }
+      return next
+    })
+  }, [])
   useEffect(() => {
     let cancelled = false
     const timer = window.setTimeout(() => {
       setTextFile(null)
       setImageSrc(null)
       setViewerError(null)
-      if (!selectedNode || selectedNode.entry.isDir || selectedNode.gitOnly) { setViewerLoading(false); return }
+      if (!previewVisible || !selectedNode || selectedNode.entry.isDir || selectedNode.gitOnly) { setViewerLoading(false); return }
       setViewerLoading(true)
       const extension = selectedNode.name.split('.').pop()?.toLowerCase() ?? ''
       const request = IMAGE_EXTENSIONS.has(extension)
@@ -129,7 +139,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       }).catch((reason) => { if (!cancelled) setViewerError(String(reason)) }).finally(() => { if (!cancelled) setViewerLoading(false) })
     }, 0)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [selectedNode, workspaceFolder])
+  }, [previewVisible, selectedNode, workspaceFolder])
 
   const reloadPaths = useCallback(async (...paths: string[]) => {
     const unique = new Set(paths.map(parentPath).concat(paths).filter((path) => session.childrenByPath.has(path) || path === ''))
@@ -375,7 +385,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   }, [beginRename, deleteNode, nodes, selectNode, session.selectedPath, toggleNode])
 
   return (
-    <div className="explorer-window" data-explorer-window="true">
+    <div className="explorer-window" data-explorer-window="true" data-preview-visible={previewVisible ? 'true' : 'false'}>
       <ExplorerTreeView
         nodes={nodes}
         selectedPath={session.selectedPath}
@@ -383,6 +393,8 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         error={session.error}
         statusSummary={statusSummary}
         statusPresentation={gitStatusPresentation}
+        previewVisible={previewVisible}
+        onTogglePreview={togglePreview}
         renamingPath={renamingPath}
         renameValue={renameValue}
         contextMenu={contextMenu}
@@ -400,26 +412,32 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         onDragLeave={() => setDragOverPath(null)}
         onDrop={(event, node) => { event.preventDefault(); setDragOverPath(null); const source = draggedPathRef.current; draggedPathRef.current = null; if (source) void moveNode(source, node) }}
       />
-      <ExplorerViewerView
-        path={session.selectedPath}
-        entry={selectedNode?.entry ?? null}
-        textFile={textFile}
-        imageSrc={imageSrc}
-        loading={viewerLoading}
-        error={viewerError}
-        imageFit={imageFit}
-        canOpenEditor={Boolean(editorCommand)}
-        canOpenDiff={selectedHasDiff}
-        workingTreePresent={!selectedNode?.gitOnly}
-        onToggleImageFit={() => setImageFit((value) => !value)}
-        onOpenEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
-        onOpenDiff={() => { if (selectedNode && selectedHasDiff) void openGit(selectedNode, false) }}
-        onOpenTerminal={() => { if (selectedNode) void openTerminal(selectedNode) }}
-        onReveal={() => { if (selectedNode) void invoke('reveal_path', { path: absolutePath(selectedNode.path) }) }}
-        onCopyPath={() => { if (selectedNode) void navigator.clipboard.writeText(absolutePath(selectedNode.path)) }}
-      />
+      {previewVisible ? (
+        <ExplorerViewerView
+          path={session.selectedPath}
+          entry={selectedNode?.entry ?? null}
+          textFile={textFile}
+          imageSrc={imageSrc}
+          loading={viewerLoading}
+          error={viewerError}
+          imageFit={imageFit}
+          canOpenEditor={Boolean(editorCommand)}
+          canOpenDiff={selectedHasDiff}
+          workingTreePresent={!selectedNode?.gitOnly}
+          onToggleImageFit={() => setImageFit((value) => !value)}
+          onOpenEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
+          onOpenDiff={() => { if (selectedNode && selectedHasDiff) void openGit(selectedNode, false) }}
+          onOpenTerminal={() => { if (selectedNode) void openTerminal(selectedNode) }}
+          onReveal={() => { if (selectedNode) void invoke('reveal_path', { path: absolutePath(selectedNode.path) }) }}
+          onCopyPath={() => { if (selectedNode) void navigator.clipboard.writeText(absolutePath(selectedNode.path)) }}
+        />
+      ) : null}
     </div>
   )
+}
+
+function loadExplorerPreviewVisible(): boolean {
+  try { return window.localStorage.getItem(EXPLORER_PREVIEW_VISIBLE_KEY) !== 'false' } catch { return true }
 }
 
 function imageMime(extension: string): string {

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   createDefaultWorkspaceDockviewLayout,
+  detachedTerminalPaneId,
+  detachedTerminalWindowComponent,
+  detachedTerminalWindowPanelId,
   gitWorkspaceLayoutPageId,
   normalizeWorkspaceLayoutState,
   planningWorkspaceLayoutPageId,
@@ -139,6 +142,22 @@ describe('normalizeWorkspaceLayoutState', () => {
       component: 'todo',
       singleton: true,
     })
+  })
+
+  it('preserves detached terminal windows with stable pane ownership', () => {
+    const paneId = 'pane-detached'
+    const panelId = detachedTerminalWindowPanelId(paneId)
+    const layout = JSON.parse(fixedWorkspaceDockLayout(panelId, detachedTerminalWindowComponent))
+    layout.panels[panelId].params = { kind: 'terminal', paneId, terminalMode: 'detached' }
+    const state = normalizeWorkspaceLayoutState(JSON.stringify({
+      version: 2,
+      activePageId: terminalWorkspaceLayoutPageId,
+      pages: [{ id: terminalWorkspaceLayoutPageId, name: 'Terminal', layoutJson: JSON.stringify(layout), createdAt: 1, updatedAt: 2 }],
+    }), { terminalPaneIds: [paneId], now: 3 })
+    const restored = JSON.parse(state.pages[0].layoutJson ?? '{}')
+
+    expect(restored.panels[panelId]).toMatchObject({ contentComponent: detachedTerminalWindowComponent, params: { paneId } })
+    expect(detachedTerminalPaneId({ id: panelId, params: restored.panels[panelId].params })).toBe(paneId)
   })
 })
 

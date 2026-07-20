@@ -22,7 +22,7 @@ import { createResizePreviewStore, useResizePreview, type ResizePreviewState as 
 import { createDockviewGridLayout, type GridPaneDescriptor } from './gridLayout'
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
-import { activeWorkspaceLayoutPage, createDefaultWorkspaceDockviewLayout, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type WorkspaceWindowKind } from './workspaceLayoutModel'
+import { activeWorkspaceLayoutPage, createDefaultWorkspaceDockviewLayout, detachedTerminalPaneId, detachedTerminalWindowComponent, detachedTerminalWindowPanelId, workspaceWindowDescriptors, workspaceWindowKindByPanelId, type TerminalWindowOpenMode, type WorkspaceWindowKind } from './workspaceLayoutModel'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { settleDockviewOverlayLayout, settleNestedDockviewLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
@@ -45,7 +45,7 @@ type WorkspaceViewProps = {
   onChromeStateChange?: (state: WorkspaceChromeState) => void
   arrangeRequestId?: number
   resizeSnapTolerance?: number
-  windowRequest?: { kind: WorkspaceWindowKind; requestId: number; profileId?: string | null } | null
+  windowRequest?: { kind: WorkspaceWindowKind; requestId: number; profileId?: string | null; terminalMode?: TerminalWindowOpenMode } | null
   saveLayoutRequestId?: number
 }
 
@@ -71,6 +71,7 @@ let interactiveResizeActive = false
 
 const components = {
   terminalWindow: TerminalWindowPanel,
+  [detachedTerminalWindowComponent]: DetachedTerminalWindowPanel,
   agent: AgentWindowPanel,
   kanban: KanbanWindowPanel,
   diff: DiffWindowPanel,
@@ -146,6 +147,14 @@ function TerminalWindowPanel(props: IDockviewPanelProps) {
   )
 }
 
+function DetachedTerminalWindowPanel(props: IDockviewPanelProps) {
+  return (
+    <WindowPanelShell panelId={props.api.id} className="workspace-window-terminal workspace-window-terminal-detached">
+      <TerminalPaneBoundary {...props} />
+    </WindowPanelShell>
+  )
+}
+
 function KanbanWindowPanel(props: IDockviewPanelProps) {
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban">
@@ -216,8 +225,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const workspaceLayoutMutationRef = useRef(0)
   const workspaceLayoutMutationActiveRef = useRef(false)
   const remotePaneVisibilityRef = useRef<RemotePaneVisibilityState[]>([])
+  const remoteDetachedPaneVisibilityRef = useRef<Array<{ paneId: string; state: RemotePaneVisibilityState }>>([])
   const remoteLeaseActiveRef = useRef(false)
   const remoteUnleasedTerminalLayoutRef = useRef<{ sessionId: string; layout: unknown } | null>(null)
+  const remoteUnleasedWorkspaceLayoutRef = useRef<{ sessionId: string; layout: unknown } | null>(null)
   const [resizeHandles, setResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
   // Preview state lives outside React state: a drag writes it per frame and
   // routing that through useState would reconcile both dockview trees per
@@ -225,6 +236,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const [workspacePreviewStore] = useState(createResizePreviewStore)
   const [terminalPreviewStore] = useState(createResizePreviewStore)
   const [terminalResizeHandles, setTerminalResizeHandles] = useState<ResizeHandleSets>({ connected: [], single: [] })
+  const [chromeActiveTerminalMode, setChromeActiveTerminalMode] = useState<'workspace' | 'detached' | null>(null)
   const [terminalGridPreference, setTerminalGridPreference] = useState<GridSize | null>(null)
   const [chromeWindowCount, setChromeWindowCount] = useState(0)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
@@ -252,7 +264,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const serializeCurrentWorkspaceDockLayout = useCallback(() => {
     const windowApi = apiRef.current
     if (!windowApi) return null
-    const layout = windowApi.toJSON() as unknown as Record<string, unknown>
+    const workspaceLeaseSnapshot = remoteUnleasedWorkspaceLayoutRef.current
+    const layout = (remoteLeaseActiveRef.current && workspaceLeaseSnapshot?.sessionId === loadedSessionRef.current
+      ? structuredClone(workspaceLeaseSnapshot.layout)
+      : windowApi.toJSON()) as unknown as Record<string, unknown>
     const terminalApi = terminalApiRef.current
     if (terminalApi && terminalApi.totalPanels > 0 && isDockElementMeasurable(terminalDockRef.current)) {
       const leaseSnapshot = remoteUnleasedTerminalLayoutRef.current
@@ -452,24 +467,51 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   }, [layoutDockview, layoutTerminalDockview])
 
   const syncRemoteLeasedPanes = useCallback(() => {
-    const api = terminalApiRef.current
-    if (!api) return
+    const terminalApi = terminalApiRef.current
+    const outerApi = apiRef.current
+    if (!terminalApi && !outerApi) return
     void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      for (const state of [...remotePaneVisibilityRef.current].reverse()) restoreRemoteLeasedPane(api, state)
+      if (terminalApi) {
+        for (const state of [...remotePaneVisibilityRef.current].reverse()) restoreRemoteLeasedPane(terminalApi, state)
+      }
       remotePaneVisibilityRef.current = []
-      if (remoteLeasedPaneIds.length > 0 && activeSessionId && remoteUnleasedTerminalLayoutRef.current?.sessionId !== activeSessionId) {
-        remoteUnleasedTerminalLayoutRef.current = { sessionId: activeSessionId, layout: api.toJSON() }
+      if (outerApi) {
+        for (const entry of [...remoteDetachedPaneVisibilityRef.current].reverse()) restoreRemoteLeasedPane(outerApi, entry.state)
       }
+      remoteDetachedPaneVisibilityRef.current = []
+
+      if (remoteLeasedPaneIds.length > 0 && activeSessionId) {
+        if (terminalApi && remoteUnleasedTerminalLayoutRef.current?.sessionId !== activeSessionId) {
+          remoteUnleasedTerminalLayoutRef.current = { sessionId: activeSessionId, layout: terminalApi.toJSON() }
+        }
+        if (outerApi && remoteUnleasedWorkspaceLayoutRef.current?.sessionId !== activeSessionId) {
+          remoteUnleasedWorkspaceLayoutRef.current = { sessionId: activeSessionId, layout: outerApi.toJSON() }
+        }
+      }
+
       for (const paneId of remoteLeasedPaneIds) {
-        const state = hideRemoteLeasedPane(api, paneId)
-        if (state) remotePaneVisibilityRef.current.push(state)
+        const detachedPanel = detachedTerminalPanelForPane(outerApi, paneId)
+        if (outerApi && detachedPanel) {
+          const state = hideRemoteLeasedPane(outerApi, detachedPanel.id)
+          if (state) remoteDetachedPaneVisibilityRef.current.push({ paneId, state })
+          continue
+        }
+        if (terminalApi) {
+          const state = hideRemoteLeasedPane(terminalApi, paneId)
+          if (state) remotePaneVisibilityRef.current.push(state)
+        }
       }
-      if (remoteLeasedPaneIds.length === 0) remoteUnleasedTerminalLayoutRef.current = null
-      layoutTerminalDockview(api)
+
+      if (remoteLeasedPaneIds.length === 0) {
+        remoteUnleasedTerminalLayoutRef.current = null
+        remoteUnleasedWorkspaceLayoutRef.current = null
+      }
+      if (terminalApi) layoutTerminalDockview(terminalApi)
+      if (outerApi) layoutDockview(outerApi)
     }).then(() => {
       if (remoteLeasedPaneIds.length === 0) persistLayoutSoon()
     }).catch(() => undefined)
-  }, [activeSessionId, layoutTerminalDockview, persistLayoutSoon, remoteLeasedPaneIds])
+  }, [activeSessionId, layoutDockview, layoutTerminalDockview, persistLayoutSoon, remoteLeasedPaneIds])
 
   const addTerminalPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection | 'within'; inactive?: boolean }) => {
     api.addPanel({
@@ -500,6 +542,20 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
   }, [])
 
+  const addDetachedTerminalWindowPanel = useCallback((api: DockviewApi, pane: PaneMeta, options?: { referencePanel?: string; direction?: SplitDirection; inactive?: boolean }) => {
+    api.addPanel({
+      id: detachedTerminalWindowPanelId(pane.id),
+      component: detachedTerminalWindowComponent,
+      title: pane.config.title ?? 'Shell',
+      params: { kind: 'terminal', paneId: pane.id, title: pane.config.title ?? 'Shell', icon: pane.config.icon ?? undefined, terminalMode: 'detached' },
+      renderer: 'always',
+      inactive: options?.inactive,
+      position: options?.referencePanel
+        ? { referencePanel: options.referencePanel, direction: options.direction ?? 'below' }
+        : undefined,
+    })
+  }, [])
+
   const buildFallbackLayout = useCallback((api: DockviewApi, pageId: string) => {
     api.fromJSON(createDefaultWorkspaceDockviewLayout(pageId) as unknown as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
   }, [])
@@ -520,7 +576,10 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   }, [addWorkspaceWindowPanel, layoutDockview])
 
   const panelApiForId = useCallback((panelId: string): DockviewApi | null => {
-    return useWorkspaceStore.getState().panes[panelId] ? terminalApiRef.current : apiRef.current
+    const outerApi = apiRef.current
+    if (outerApi?.getPanel(panelId)) return outerApi
+    if (!useWorkspaceStore.getState().panes[panelId]) return outerApi
+    return detachedTerminalPanelForPane(outerApi, panelId) ? outerApi : terminalApiRef.current
   }, [])
 
   const applyGridLayout = useCallback((api: DockviewApi, grid: GridSize, gridPanes: PaneMeta[], overflowPanes: PaneMeta[] = [], options?: { sparseMode?: 'columns' | 'rows' }) => {
@@ -544,7 +603,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const sessionId = useWorkspaceStore.getState().activeSessionId
     const pageId = sessionId ? useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId : null
     if (!api || !sessionId || !pageId || loadedTerminalPageRef.current === `${sessionId}:${pageId}` || !isDockElementMeasurable(terminalDockRef.current)) return
-    const currentPanes = Object.values(useWorkspaceStore.getState().panes)
+    const currentPanes = managedTerminalPaneList(apiRef.current, useWorkspaceStore.getState().panes)
     const paneIds = currentPanes.map((pane) => pane.id)
     suppressPanelRemovalRef.current = true
     try {
@@ -626,16 +685,32 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
   }, [activeSessionId, buildFallbackLayout, layoutDockview, loadTerminalPaneLayout, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout])
 
-  const activatePane = useCallback((paneId: string) => {
-    if (useWorkspaceStore.getState().panes[paneId]) {
-      apiRef.current?.getPanel(workspaceWindowDescriptors.terminal.panelId)?.api.setActive()
-      const panel = terminalApiRef.current?.getPanel(paneId)
-      panel?.api.setActive()
-      useWorkspaceStore.getState().setActivePaneId(paneId)
-      if (panel) TerminalManager.focus(paneId)
+  const activatePane = useCallback((paneOrPanelId: string) => {
+    const outerApi = apiRef.current
+    const directOuterPanel = outerApi?.getPanel(paneOrPanelId)
+    const directDetachedPaneId = detachedTerminalPaneId(directOuterPanel)
+    if (directOuterPanel && directDetachedPaneId) {
+      directOuterPanel.api.setActive()
+      useWorkspaceStore.getState().setActivePaneId(directDetachedPaneId)
+      TerminalManager.focus(directDetachedPaneId)
       return
     }
-    apiRef.current?.getPanel(paneId)?.api.setActive()
+    if (useWorkspaceStore.getState().panes[paneOrPanelId]) {
+      const detachedPanel = detachedTerminalPanelForPane(outerApi, paneOrPanelId)
+      if (detachedPanel) {
+        detachedPanel.api.setActive()
+        useWorkspaceStore.getState().setActivePaneId(paneOrPanelId)
+        TerminalManager.focus(paneOrPanelId)
+        return
+      }
+      outerApi?.getPanel(workspaceWindowDescriptors.terminal.panelId)?.api.setActive()
+      const panel = terminalApiRef.current?.getPanel(paneOrPanelId)
+      panel?.api.setActive()
+      useWorkspaceStore.getState().setActivePaneId(paneOrPanelId)
+      if (panel) TerminalManager.focus(paneOrPanelId)
+      return
+    }
+    directOuterPanel?.api.setActive()
   }, [])
 
   const activatePaneFromTarget = useCallback((event: { target: EventTarget | null }) => {
@@ -648,11 +723,56 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     activatePane(paneId)
   }, [activatePane])
 
+  const spawnDetachedTerminalWindow = useCallback(async (options: { profileId?: string | null; referencePanel?: string; direction?: SplitDirection } = {}) => {
+    const windowApi = apiRef.current
+    const sessionId = useWorkspaceStore.getState().activeSessionId
+    if (!windowApi || !sessionId) return
+    const profile = profileById(useWorkspaceStore.getState().settings, options.profileId)
+    const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
+    const referencePanel = options.referencePanel ?? windowApi.activePanel?.id
+    addDetachedTerminalWindowPanel(windowApi, pending, referencePanel ? { referencePanel, direction: options.direction ?? 'below' } : undefined)
+    const outerPanelId = detachedTerminalWindowPanelId(pending.id)
+    windowApi.getPanel(outerPanelId)?.api.setActive()
+    layoutDockview(windowApi)
+    await waitForDockviewOverlayLayout()
+    if (apiRef.current !== windowApi || !windowApi.getPanel(outerPanelId)) return
+    layoutDockview(windowApi)
+    forceOverlayReposition(windowApi)
+    await waitForDockviewOverlayLayout()
+    const size = await measuredSpawnSize(pending.id)
+    try {
+      await spawnPane(sessionId, { paneId: pending.id, profileId: options.profileId, title: pending.config.title ?? undefined, cols: size?.cols, rows: size?.rows })
+    } catch (error) {
+      await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { windowApi.getPanel(outerPanelId)?.api.close() })
+      TerminalManager.dispose(pending.id)
+      layoutDockview(windowApi)
+      useWorkspaceStore.getState().setError(String(error))
+      return
+    }
+    useWorkspaceStore.getState().setActivePaneId(pending.id)
+    TerminalManager.focus(pending.id)
+    reflowTerminalsAfterLayout({ syncPty: true, recover: true, paneIds: [pending.id] })
+    loadedSessionRef.current = sessionId
+    loadedPageRef.current = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId ?? loadedPageRef.current
+    const pageId = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId
+    const layoutJson = serializeCurrentWorkspaceDockLayout()
+    if (pageId && layoutJson) {
+      loadedPageLayoutJsonRef.current = layoutJson
+      await saveWorkspaceLayoutPage(sessionId, pageId, layoutJson)
+    }
+  }, [addDetachedTerminalWindowPanel, layoutDockview, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout, spawnPane])
+
   const splitPane = useCallback(async (paneId: string, direction: SplitDirection) => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
+    if (!sessionId) return
+    const detachedPanel = detachedTerminalPanelForPane(apiRef.current, paneId)
+    if (detachedPanel) {
+      await spawnDetachedTerminalWindow({ referencePanel: detachedPanel.id, direction })
+      return
+    }
     ensureTerminalWindowPanel()
     const api = terminalApiRef.current ?? await waitForDockviewApi(terminalApiRef)
-    if (!api || !sessionId) return
+    if (!api) return
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       activatePane(paneId)
       // Panel first, process second: the split resizes the sibling and sizes
@@ -663,10 +783,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       addTerminalPanel(api, pending, { referencePanel: paneId, direction })
       layoutTerminalDockview(api)
       // Dockview commits the new split's group bounds before its always-rendered
-      // overlay positions. The first layout pass can therefore leave the source
-      // pane's overlay at its pre-split width, painting across the new pane.
-      // Wait for both Dockview frames, then lay out/reposition again before the
-      // new PTY is measured or either terminal is resized.
+      // overlay positions. Wait for both Dockview frames before measuring.
       await waitForDockviewOverlayLayout()
       if (terminalApiRef.current !== api) return
       layoutTerminalDockview(api)
@@ -679,14 +796,18 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         useWorkspaceStore.getState().setError(String(error))
         return
       }
-      // Splitting halves the sibling pane; recover it alongside the new one.
       reflowTerminalsAfterLayout({ syncPty: true, recover: true, paneIds: [paneId, pending.id] })
       persistLayoutSoon()
     })
-  }, [activatePane, addTerminalPanel, ensureTerminalWindowPanel, layoutTerminalDockview, persistLayoutSoon, spawnPane])
+  }, [activatePane, addTerminalPanel, ensureTerminalWindowPanel, layoutTerminalDockview, persistLayoutSoon, spawnDetachedTerminalWindow, spawnPane])
 
 
   const closePane = useCallback(async (paneId: string) => {
+    const detachedPanel = detachedTerminalPanelForPane(apiRef.current, paneId)
+    if (detachedPanel) {
+      detachedPanel.api.close()
+      return
+    }
     const api = terminalApiRef.current
     const panel = api?.getPanel(paneId)
     if (!api || !panel) return
@@ -714,25 +835,25 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     persistLayoutSoon()
   }, [closePane, persistLayoutSoon])
 
-  const toggleMaximize = useCallback((paneId: string) => {
-    const api = panelApiForId(paneId)
-    const panel = api?.getPanel(paneId)
-    activatePane(paneId)
+  const toggleMaximize = useCallback((panelOrPaneId: string) => {
+    const outerPanel = apiRef.current?.getPanel(panelOrPaneId)
+    const terminalPaneId = detachedTerminalPaneId(outerPanel) ?? (useWorkspaceStore.getState().panes[panelOrPaneId] ? panelOrPaneId : null)
+    const detachedPanel = terminalPaneId ? detachedTerminalPanelForPane(apiRef.current, terminalPaneId) : null
+    const actualPanelId = detachedPanel?.id ?? panelOrPaneId
+    const api = panelApiForId(actualPanelId)
+    const panel = api?.getPanel(actualPanelId)
+    activatePane(actualPanelId)
     if (!panel) return
     const syncActivePane = () => {
-      if (useWorkspaceStore.getState().panes[paneId]) TerminalManager.focus(paneId)
+      if (terminalPaneId) TerminalManager.focus(terminalPaneId)
     }
     if (panel.api.isMaximized()) {
       panel.api.exitMaximized()
-      // Restoring changes every sibling's host geometry. The dirty scheduler
-      // skips unchanged panes and repairs only entries flagged by real context loss.
       reflowTerminalsAfterLayout({ syncPty: true })
       requestAnimationFrame(() => requestAnimationFrame(syncActivePane))
     } else {
       panel.api.maximize()
-      // Only the maximized pane changes size here; hidden siblings are handled
-      // by their visibility/context-loss state when the layout is restored.
-      reflowTerminalsAfterLayout({ syncPty: true, recover: true, paneIds: [paneId] })
+      reflowTerminalsAfterLayout({ syncPty: true, recover: true, paneIds: terminalPaneId ? [terminalPaneId] : undefined })
       requestAnimationFrame(syncActivePane)
     }
   }, [activatePane, panelApiForId])
@@ -740,6 +861,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const renamePaneTitle = useCallback(async (paneId: string, title: string) => {
     await renamePaneTitleInStore(paneId, title, 'manual')
     terminalApiRef.current?.getPanel(paneId)?.api.setTitle(title)
+    detachedTerminalPanelForPane(apiRef.current, paneId)?.api.setTitle(title)
   }, [renamePaneTitleInStore])
   const swapPaneLocations = useCallback(async (sourcePaneId: string, targetPaneId: string) => {
     const api = panelApiForId(sourcePaneId)
@@ -1121,19 +1243,24 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     }
   }, [saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout])
 
-  const openWorkspaceWindow = useCallback(async (kind: WorkspaceWindowKind, profileId?: string | null) => {
+  const openWorkspaceWindow = useCallback(async (kind: WorkspaceWindowKind, profileId?: string | null, terminalMode: TerminalWindowOpenMode = 'existing') => {
     const windowApi = apiRef.current
     const sessionId = useWorkspaceStore.getState().activeSessionId
     if (!windowApi || !sessionId) return
     const license = useWorkspaceStore.getState().license
     if (requiresProWindow(kind) && (!license.ready || !license.status?.entitled)) return
+    if (kind === 'terminal' && terminalMode === 'new') {
+      await spawnDetachedTerminalWindow({ profileId })
+      return
+    }
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       if (kind === 'terminal') {
         ensureTerminalWindowPanel()
         const terminalApi = terminalApiRef.current ?? await waitForDockviewApi(terminalApiRef)
         if (!terminalApi) return
-        const livePaneCount = Object.keys(useWorkspaceStore.getState().panes).length
-        if (livePaneCount === 0) {
+        const allPanes = useWorkspaceStore.getState().panes
+        const managedPanes = managedTerminalPaneList(windowApi, allPanes)
+        if (Object.keys(allPanes).length === 0) {
           const profile = profileById(useWorkspaceStore.getState().settings, profileId)
           const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
           addTerminalPanel(terminalApi, pending)
@@ -1148,7 +1275,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
             return
           }
           TerminalManager.focus(pending.id)
-        } else if (terminalApi.totalPanels === 0) {
+        } else if (managedPanes.length > 0 && terminalApi.totalPanels === 0) {
           loadedTerminalPageRef.current = null
           loadTerminalPaneLayout()
         }
@@ -1171,7 +1298,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       loadedPageRef.current = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId ?? loadedPageRef.current
       await saveCurrentPageLayout()
     })
-  }, [addTerminalPanel, addWorkspaceWindowPanel, ensureTerminalWindowPanel, layoutTerminalDockview, loadTerminalPaneLayout, saveCurrentPageLayout, settleWorkspaceWindowMutation, spawnPane])
+  }, [addTerminalPanel, addWorkspaceWindowPanel, ensureTerminalWindowPanel, layoutTerminalDockview, loadTerminalPaneLayout, saveCurrentPageLayout, settleWorkspaceWindowMutation, spawnDetachedTerminalWindow, spawnPane])
 
   const focusPane = useCallback((direction: PaneDirection) => {
     const topActivePanelId = apiRef.current?.activePanel?.id
@@ -1188,6 +1315,13 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     TerminalManager.focus(target.id)
   }, [])
 
+  const focusWindowPane = useCallback((activePanelId: string, direction: PaneDirection) => {
+    const api = apiRef.current
+    if (!api) return
+    const targetId = nearestPaneIdInDirection(activePanelId, api.panels.map((panel) => panel.id), direction, getPaneRect)
+    if (targetId) activatePane(targetId)
+  }, [activatePane])
+
   const movePaneInDirection = useCallback((paneId: string, direction: PaneDirection) => {
     const api = panelApiForId(paneId)
     if (!api || api !== terminalApiRef.current) return
@@ -1201,7 +1335,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     ensureTerminalWindowPanel()
     const api = terminalApiRef.current ?? await waitForDockviewApi(terminalApiRef)
     if (!api || !sessionId) return
-    const currentPanes = Object.values(useWorkspaceStore.getState().panes)
+    const currentPanes = managedTerminalPaneList(apiRef.current, useWorkspaceStore.getState().panes)
     if (currentPanes.length === 0) return
     const panesById = new Map(currentPanes.map((pane) => [pane.id, pane]))
     const orderedPanes = paneIdsInReadingOrder(currentPanes.map((pane) => pane.id), getPaneRect)
@@ -1231,15 +1365,21 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   const runKeybindingAction = useCallback((action: KeybindingActionId, activePanelId: string) => {
     const api = panelApiForId(activePanelId)
     if (!api) return
+    const detachedPaneId = detachedTerminalPaneId(apiRef.current?.getPanel(activePanelId))
+    const terminalPaneId = detachedPaneId ?? (useWorkspaceStore.getState().panes[activePanelId] ? activePanelId : null)
+    const focusDirectional = (direction: PaneDirection) => {
+      if (detachedPaneId) focusWindowPane(activePanelId, direction)
+      else focusPane(direction)
+    }
     switch (action) {
       case 'splitRight':
-        void splitPane(activePanelId, 'right')
+        if (terminalPaneId) void splitPane(terminalPaneId, 'right')
         break
       case 'splitDown':
-        void splitPane(activePanelId, 'below')
+        if (terminalPaneId) void splitPane(terminalPaneId, 'below')
         break
       case 'closePane':
-        void closePane(activePanelId)
+        if (terminalPaneId) void closePane(terminalPaneId)
         break
       case 'closeWorkspace':
         void closeWorkspace()
@@ -1248,40 +1388,30 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         toggleMaximize(activePanelId)
         break
       case 'togglePaneReviewed':
-        if (useWorkspaceStore.getState().panes[activePanelId]) useWorkspaceStore.getState().togglePaneReviewed(activePanelId)
+        if (terminalPaneId) useWorkspaceStore.getState().togglePaneReviewed(terminalPaneId)
         break
       case 'arrangePanes':
         void arrangePanes()
         break
-      case 'nextTab': {
-        api.moveToNext()
-        const nextPanelId = api.activePanel?.id
-        if (nextPanelId) {
-          if (useWorkspaceStore.getState().panes[nextPanelId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(nextPanelId)
-          TerminalManager.focus(nextPanelId)
-        }
-        break
-      }
+      case 'nextTab':
       case 'previousTab': {
-        api.moveToPrevious()
-        const previousPanelId = api.activePanel?.id
-        if (previousPanelId) {
-          if (useWorkspaceStore.getState().panes[previousPanelId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(previousPanelId)
-          TerminalManager.focus(previousPanelId)
-        }
+        if (action === 'nextTab') api.moveToNext()
+        else api.moveToPrevious()
+        const nextPanel = api.activePanel
+        if (nextPanel) activatePane(nextPanel.id)
         break
       }
       case 'focusLeft':
-        focusPane('left')
+        focusDirectional('left')
         break
       case 'focusRight':
-        focusPane('right')
+        focusDirectional('right')
         break
       case 'focusUp':
-        focusPane('up')
+        focusDirectional('up')
         break
       case 'focusDown':
-        focusPane('down')
+        focusDirectional('down')
         break
       case 'moveLeft':
         movePaneInDirection(activePanelId, 'left')
@@ -1296,16 +1426,16 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         movePaneInDirection(activePanelId, 'down')
         break
       case 'copyTerminalContents':
-        if (useWorkspaceStore.getState().panes[activePanelId]) TerminalManager.copyContentsToClipboard(activePanelId)
+        if (terminalPaneId) TerminalManager.copyContentsToClipboard(terminalPaneId)
         break
       case 'copyTerminalSelection':
-        if (useWorkspaceStore.getState().panes[activePanelId]) TerminalManager.copySelectionToClipboard(activePanelId)
+        if (terminalPaneId) TerminalManager.copySelectionToClipboard(terminalPaneId)
         break
       case 'toggleTerminalTabs':
         useWorkspaceStore.getState().toggleTerminalTabsVisible()
         break
     }
-  }, [arrangePanes, closePane, closeWorkspace, focusPane, movePaneInDirection, panelApiForId, splitPane, toggleMaximize])
+  }, [activatePane, arrangePanes, closePane, closeWorkspace, focusPane, focusWindowPane, movePaneInDirection, panelApiForId, splitPane, toggleMaximize])
 
   const applyTemplate = useCallback(async (template: GridTemplate, profileId?: string | null, occupiedGrid?: GridSize | null) => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -1315,7 +1445,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       const profile = profileById(useWorkspaceStore.getState().settings, profileId)
       const targetPaneCount = template.cols * template.rows
-      const existingPanes = Object.values(useWorkspaceStore.getState().panes)
+      const existingPanes = managedTerminalPaneList(apiRef.current, useWorkspaceStore.getState().panes)
       const existingPaneIds = existingPanes.map((pane) => pane.id)
       const missingPaneCount = Math.max(0, targetPaneCount - existingPanes.length)
       // Panels first, processes second: lay out placeholder panels for the new
@@ -1376,25 +1506,38 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     setTerminalGridPreference(null)
     pendingTerminalLayoutRef.current = null
     loadedTerminalPageRef.current = null
-    const api = terminalApiRef.current
-    if (api) {
-      void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-        for (const panel of [...api.panels]) {
+    remotePaneVisibilityRef.current = []
+    remoteDetachedPaneVisibilityRef.current = []
+    remoteUnleasedTerminalLayoutRef.current = null
+    remoteUnleasedWorkspaceLayoutRef.current = null
+    const terminalApi = terminalApiRef.current
+    const outerApi = apiRef.current
+    void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+      if (outerApi) {
+        for (const panel of [...outerApi.panels]) {
+          const paneId = detachedTerminalPaneId(panel)
+          if (!paneId) continue
+          TerminalManager.dispose(paneId)
+          panel.api.close()
+        }
+        layoutDockview(outerApi)
+      }
+      if (terminalApi) {
+        for (const panel of [...terminalApi.panels]) {
           TerminalManager.dispose(panel.id)
           panel.api.close()
         }
-        layoutTerminalDockview(api)
-      })
-    }
-    void clearSession(sessionId).then(() => {
+        layoutTerminalDockview(terminalApi)
+      }
+    }).then(() => clearSession(sessionId)).then(() => {
       const layoutJson = serializeCurrentWorkspaceDockLayout()
       const pageId = useWorkspaceStore.getState().workspaceLayouts[sessionId]?.activePageId
       if (pageId && layoutJson) {
         loadedPageLayoutJsonRef.current = layoutJson
         void saveWorkspaceLayoutPage(sessionId, pageId, layoutJson)
       }
-    })
-  }, [clearSession, layoutTerminalDockview, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout])
+    }).catch(() => undefined)
+  }, [clearSession, layoutDockview, layoutTerminalDockview, saveWorkspaceLayoutPage, serializeCurrentWorkspaceDockLayout])
 
   const launchTerminalGrid = useCallback((request: TerminalLaunchRequest) => {
     setTerminalGridPreference({ cols: request.cols, rows: request.rows })
@@ -1417,7 +1560,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
 
   const windowActions = useMemo<WorkspaceWindowActions>(() => ({
     activateWindow: activatePane,
-    openWindow: (kind) => openWorkspaceWindow(kind),
+    openWindow: (kind, options) => openWorkspaceWindow(kind, undefined, options?.terminalMode),
     splitTerminal: splitPane,
     closeWindow,
     toggleMaximize,
@@ -1428,6 +1571,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     arrangeTerminals: (grid) => { void arrangePanes(grid) },
     launchTerminalGrid,
     getTerminalLayoutSnapshot: () => terminalApiRef.current?.toJSON() ?? null,
+    getManagedTerminalPaneIds: () => managedTerminalPaneList(apiRef.current, useWorkspaceStore.getState().panes).map((pane) => pane.id),
   }), [activatePane, arrangePanes, clearTerminalPanes, closeWindow, launchTerminalGrid, movePaneToPosition, openWorkspaceWindow, renamePaneTitle, splitPane, swapPaneLocations, toggleMaximize])
 
   useEffect(() => {
@@ -1443,21 +1587,32 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     const api = apiRef.current
     if (!api) return
     const windowCount = api.panels.length
+    const activePanel = api.activePanel
+    const activeDetachedPaneId = detachedTerminalPaneId(activePanel)
+    const activeWindowKind = activeDetachedPaneId ? 'terminal' : workspaceWindowKindByPanelId[activePanel?.id ?? ''] ?? null
     setChromeWindowCount(windowCount)
+    setChromeActiveTerminalMode(activeWindowKind === 'terminal' ? (activeDetachedPaneId ? 'detached' : 'workspace') : null)
     onChromeStateChangeRef.current?.({
       windowCount,
-      activeWindowKind: workspaceWindowKindByPanelId[api.activePanel?.id ?? ''] ?? null,
+      activeWindowKind,
+      activeTerminalMode: activeWindowKind === 'terminal' ? (activeDetachedPaneId ? 'detached' : 'workspace') : null,
     })
   }, [])
 
-  const isSingleWindow = chromeWindowCount === 1
+  const isSingleWindow = chromeWindowCount === 1 && chromeActiveTerminalMode !== 'detached'
   useEffect(() => {
     // data-single-window toggles outer group header visibility; re-fit terminals.
     reflowTerminalsAfterLayout({ syncPty: true })
   }, [isSingleWindow])
 
   const setActivePaneFromApis = useCallback(() => {
-    const terminalWindowIsActive = apiRef.current?.activePanel?.id === workspaceWindowDescriptors.terminal.panelId
+    const activeOuterPanel = apiRef.current?.activePanel
+    const detachedPaneId = detachedTerminalPaneId(activeOuterPanel)
+    if (detachedPaneId && useWorkspaceStore.getState().panes[detachedPaneId]) {
+      useWorkspaceStore.getState().setActivePaneId(detachedPaneId)
+      return
+    }
+    const terminalWindowIsActive = activeOuterPanel?.id === workspaceWindowDescriptors.terminal.panelId
     const activeTerminalPanelId = terminalApiRef.current?.activePanel?.id
     const activePaneId = terminalWindowIsActive && activeTerminalPanelId && useWorkspaceStore.getState().panes[activeTerminalPanelId]
       ? activeTerminalPanelId
@@ -1615,11 +1770,18 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     })
     event.api.onDidRemovePanel((panel: IDockviewPanel) => {
       if (suppressPanelRemovalRef.current) return
+      const detachedPaneId = detachedTerminalPaneId(panel)
+      if (detachedPaneId) {
+        remoteDetachedPaneVisibilityRef.current = remoteDetachedPaneVisibilityRef.current.filter((entry) => entry.paneId !== detachedPaneId)
+        TerminalManager.dispose(detachedPaneId)
+        void closePaneInStore(detachedPaneId)
+        void settleWorkspaceWindowMutation({ restoreTerminalFocus: true })
+        persistLayoutSoon()
+        return
+      }
       if (!useWorkspaceStore.getState().panes[panel.id]) {
         // Top-level window removal mutates the outer Dockview first, while the
         // nested terminal Dockview still holds the previous host geometry.
-        // Settle both overlays in order, then recover xterm and restore input
-        // focus only if the Terminal window became active.
         void settleWorkspaceWindowMutation({ restoreTerminalFocus: true })
         persistLayoutSoon()
         return
@@ -1669,7 +1831,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       requestAnimationFrame(() => loadTerminalPaneLayout())
       return
     }
-    const missingPanes = paneList.filter((pane) => !api.getPanel(pane.id))
+    const missingPanes = managedTerminalPaneList(apiRef.current, useWorkspaceStore.getState().panes).filter((pane) => !api.getPanel(pane.id))
     if (missingPanes.length === 0) return
     void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       let referencePanel = api.activePanel?.id
@@ -1704,6 +1866,22 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       persistLayoutSoon()
     })
   }, [layoutTerminalDockview, persistLayoutSoon, paneList])
+
+  useEffect(() => {
+    const api = apiRef.current
+    if (!api || suppressPanelRemovalRef.current) return
+    const livePaneIds = new Set(paneList.map((pane) => pane.id))
+    const orphanPanels = api.panels.filter((panel) => {
+      const paneId = detachedTerminalPaneId(panel)
+      return paneId !== null && !livePaneIds.has(paneId)
+    })
+    if (orphanPanels.length === 0) return
+    void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+      for (const panel of orphanPanels) panel.api.close()
+      layoutDockview(api)
+      persistLayoutSoon()
+    })
+  }, [layoutDockview, paneList, persistLayoutSoon])
 
   useEffect(() => {
     // Skip the mount run: only react to an actual toggle, not initial layout.
@@ -1763,7 +1941,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   useEffect(() => {
     if (!windowRequest || applyingWindowRequestRef.current === windowRequest.requestId) return
     applyingWindowRequestRef.current = windowRequest.requestId
-    void openWorkspaceWindow(windowRequest.kind, windowRequest.profileId).finally(() => {
+    void openWorkspaceWindow(windowRequest.kind, windowRequest.profileId, windowRequest.terminalMode).finally(() => {
       applyingWindowRequestRef.current = null
     })
   }, [openWorkspaceWindow, windowRequest])
@@ -1831,11 +2009,12 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
         resizeActivePaneByKeyboard(activePanelId, resizeDirection)
         return
       }
+      const activeTerminalPaneId = detachedTerminalPaneId(apiRef.current?.getPanel(activePanelId)) ?? activePanelId
       handleCapturedKeybindingEvent(
         settings.keybindings,
         event,
         (action) => runKeybindingAction(action, activePanelId),
-        (action) => isWorkspaceKeybindingAction(action) && (!isTerminalCopyAction(action) || TerminalManager.containsEventTarget(activePanelId, event.target)),
+        (action) => isWorkspaceKeybindingAction(action) && (!isTerminalCopyAction(action) || TerminalManager.containsEventTarget(activeTerminalPaneId, event.target)),
       )
     }
     window.addEventListener('keydown', onKeyDown, { capture: true })
@@ -1843,12 +2022,14 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
   }, [resizeActivePaneByKeyboard, runKeybindingAction, settings.keybindings])
 
   useEffect(() => {
-    const api = terminalApiRef.current
-    if (!api) return
+    const terminalApi = terminalApiRef.current
+    const outerApi = apiRef.current
     for (const pane of Object.values(panes)) {
       const title = pane.config.title ?? 'Shell'
-      const panel = api.getPanel(pane.id)
-      if (panel && panel.api.title !== title) panel.api.setTitle(title)
+      const terminalPanel = terminalApi?.getPanel(pane.id)
+      if (terminalPanel && terminalPanel.api.title !== title) terminalPanel.api.setTitle(title)
+      const detachedPanel = detachedTerminalPanelForPane(outerApi, pane.id)
+      if (detachedPanel && detachedPanel.api.title !== title) detachedPanel.api.setTitle(title)
     }
   }, [panes])
 
@@ -1894,6 +2075,15 @@ async function waitForDockviewApi(ref: { current: DockviewApi | null }, attempts
 /** Placeholder metadata for a pane whose panel is created before its process.
  *  Only the id, title, and icon reach the dockview panel params; the real
  *  PaneMeta replaces it in the store once spawn_pane returns. */
+function detachedTerminalPanelForPane(api: DockviewApi | null, paneId: string): IDockviewPanel | null {
+  const panel = api?.getPanel(detachedTerminalWindowPanelId(paneId)) ?? null
+  return detachedTerminalPaneId(panel) === paneId ? panel : null
+}
+
+function managedTerminalPaneList(api: DockviewApi | null, panes: Record<string, PaneMeta>): PaneMeta[] {
+  return Object.values(panes).filter((pane) => !detachedTerminalPanelForPane(api, pane.id))
+}
+
 function pendingPaneMeta(paneId: string, title: string | null, icon?: string | null): PaneMeta {
   return {
     id: paneId,
@@ -2266,6 +2456,11 @@ function shouldRestoreWorkspaceDockviewLayout(layoutJson: string, livePaneIds: s
     const panel = layout.panels[viewId]
     if (!isRecord(panel)) return false
     const contentComponent = typeof panel.contentComponent === 'string' ? panel.contentComponent : ''
+    if (contentComponent === detachedTerminalWindowComponent) {
+      const paneId = detachedTerminalPaneId({ id: viewId, params: panel.params })
+      if (!paneId || !livePaneIdSet.has(paneId) || viewId !== detachedTerminalWindowPanelId(paneId)) return false
+      continue
+    }
     if (contentComponent === 'terminal' || livePaneIdSet.has(viewId)) {
       if (!livePaneIdSet.has(viewId)) return false
     } else if (!singletonIds.has(viewId)) {

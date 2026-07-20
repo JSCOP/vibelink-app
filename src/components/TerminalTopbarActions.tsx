@@ -21,12 +21,11 @@ export function TerminalTopbarActions({ actions }: TerminalTopbarActionsProps) {
   const [preferredGrid, setPreferredGrid] = useState<GridSize | null>(null)
   const [occupancyMatrix, setOccupancyMatrix] = useState<TerminalOccupancyGrid | null>(null)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
-  const paneCount = Object.values(panes).filter((pane) => pane.alive).length
-  const alignGrid = terminalAlignGridForNewPaneBasis(paneCount, preferredGrid)
   const TerminalTabsIcon = settings.terminalTabsVisible ? PanelTopClose : PanelTopOpen
 
   if (!actions) return null
-
+  const paneCount = actions.getManagedTerminalPaneIds().filter((paneId) => Boolean(panes[paneId]?.alive)).length
+  const alignGrid = terminalAlignGridForNewPaneBasis(paneCount, preferredGrid)
   const toggleLauncher = () => {
     setLauncherOpen((open) => {
       if (!open) setOccupancyMatrix(occupancyFromDockLayout(actions.getTerminalLayoutSnapshot()))
