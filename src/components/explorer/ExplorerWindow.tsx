@@ -1,11 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { TextFile } from '../../ipc/types'
+import type { TextFile, WorkingStatus } from '../../ipc/types'
 import { emptyExplorerSessionState, deriveGitDecorations, flattenExplorerTree, joinPath, parentPath, useExplorerStore, type ExplorerNode } from '../../state/explorer'
 import { emptyGitSessionState, useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { useWorkspaceWindowActions } from '../../layout/windowActions'
-import { ExplorerTreeView, type ExplorerContextMenu } from './ExplorerTreeView'
+import { ExplorerTreeView, type ExplorerContextAction, type ExplorerContextMenu } from './ExplorerTreeView'
 import { ExplorerViewerView } from './ExplorerViewerView'
 
 export type ExplorerWindowProps = { sessionId: string; workspaceFolder: string }
@@ -37,11 +37,29 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const [contextMenu, setContextMenu] = useState<ExplorerContextMenu>(null)
   const [dragOverPath, setDragOverPath] = useState<string | null>(null)
   const draggedPathRef = useRef<string | null>(null)
+  const [nestedStatuses, setNestedStatuses] = useState<Map<string, WorkingStatus>>(() => new Map())
 
-  const decorations = useMemo(() => deriveGitDecorations(gitSession.status), [gitSession.status])
+  const decorations = useMemo(() => {
+    const combined = deriveGitDecorations(gitSession.status)
+    for (const [repoRoot, status] of nestedStatuses) {
+      for (const [path, decoration] of deriveGitDecorations(status, repoRoot, repoRoot)) combined.set(path, decoration)
+    }
+    return combined
+  }, [gitSession.status, nestedStatuses])
   const nodes = useMemo(() => flattenExplorerTree(session, decorations), [decorations, session])
+  const statusSummary = useMemo(() => {
+    if (decorations.size === 0) return null
+    const summary = { total: decorations.size, conflicted: 0, staged: 0, unstaged: 0, untracked: 0 }
+    for (const decoration of decorations.values()) {
+      if (decoration.conflicted) summary.conflicted += 1
+      if (decoration.staged) summary.staged += 1
+      if (decoration.unstaged) summary.unstaged += 1
+      if (decoration.untracked) summary.untracked += 1
+    }
+    return summary
+  }, [decorations])
   const selectedNode = nodes.find((node) => node.path === session.selectedPath) ?? null
-  const selectedHasDiff = Boolean(selectedNode && !selectedNode.entry.isDir && decorations.has(selectedNode.path))
+  const selectedHasDiff = Boolean(selectedNode && !selectedNode.entry.isDir && selectedNode.decoration)
 
   useEffect(() => { void loadChildren(sessionId, workspaceFolder, '') }, [loadChildren, sessionId, workspaceFolder])
   useEffect(() => {
@@ -65,7 +83,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       setTextFile(null)
       setImageSrc(null)
       setViewerError(null)
-      if (!selectedNode || selectedNode.entry.isDir) { setViewerLoading(false); return }
+      if (!selectedNode || selectedNode.entry.isDir || selectedNode.gitOnly) { setViewerLoading(false); return }
       setViewerLoading(true)
       const extension = selectedNode.name.split('.').pop()?.toLowerCase() ?? ''
       const request = IMAGE_EXTENSIONS.has(extension)
@@ -90,8 +108,25 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     if (!node.entry.isDir || node.entry.isSymlink) return
     const expanded = !node.expanded
     setExpanded(sessionId, node.path, expanded)
-    if (expanded && !session.childrenByPath.has(node.path)) await loadChildren(sessionId, workspaceFolder, node.path)
-  }, [loadChildren, session.childrenByPath, sessionId, setExpanded, workspaceFolder])
+    if (!expanded) return
+    const requests: Promise<unknown>[] = []
+    if (!node.gitOnly && !session.childrenByPath.has(node.path)) requests.push(loadChildren(sessionId, workspaceFolder, node.path))
+    if (node.decoration?.repoKind && !nestedStatuses.has(node.path)) {
+      const nestedWorkspaceFolder = `${workspaceFolder.replace(/[\\/]+$/, '')}/${node.path}`
+      requests.push(invoke<WorkingStatus>('git_working_status', { workspaceFolder: nestedWorkspaceFolder }).then((status) => {
+        setNestedStatuses((current) => new Map(current).set(node.path, status))
+      }).catch((reason) => setExplorerError(sessionId, `Could not inspect ${node.path}: ${String(reason)}`)))
+    }
+    await Promise.all(requests)
+  }, [loadChildren, nestedStatuses, session.childrenByPath, sessionId, setExpanded, setExplorerError, workspaceFolder])
+
+  const selectNode = useCallback((node: ExplorerNode) => {
+    setSelectedPath(sessionId, node.path)
+    if (node.entry.isDir || !node.decoration) return
+    const area = node.decoration.conflicted || node.decoration.unstaged || node.decoration.untracked ? 'unstaged' : 'staged'
+    setGitSelectedPath(sessionId, node.path, node.decoration.repoRoot, area)
+    setGitActiveTab(sessionId, 'changes')
+  }, [sessionId, setGitActiveTab, setGitSelectedPath, setSelectedPath])
 
   const beginRename = useCallback((node: ExplorerNode) => {
     setContextMenu(null)
@@ -151,17 +186,57 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     } catch (reason) { setExplorerError(sessionId, String(reason)) }
   }, [invalidatePath, reloadPaths, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
 
+  const gitTargetForNode = useCallback((node: ExplorerNode) => {
+    let repoRoot = node.decoration?.repoRoot ?? null
+    if (!repoRoot) {
+      const matchingRoots = [...nestedStatuses.keys()].filter((root) => node.path === root || node.path.startsWith(`${root}/`))
+      matchingRoots.sort((left, right) => right.length - left.length)
+      repoRoot = matchingRoots[0] ?? null
+    }
+    const relativePath = repoRoot ? node.path.slice(repoRoot.length).replace(/^\/+/, '') : node.path
+    return {
+      repoRoot,
+      workspaceFolder: repoRoot ? `${workspaceFolder.replace(/[\\/]+$/, '')}/${repoRoot}` : workspaceFolder,
+      path: relativePath || '.',
+    }
+  }, [nestedStatuses, workspaceFolder])
+
+  const refreshNestedRepo = useCallback(async (repoRoot: string | null) => {
+    if (!repoRoot) return
+    const nestedWorkspaceFolder = `${workspaceFolder.replace(/[\\/]+$/, '')}/${repoRoot}`
+    const status = await invoke<WorkingStatus>('git_working_status', { workspaceFolder: nestedWorkspaceFolder })
+    setNestedStatuses((current) => new Map(current).set(repoRoot, status))
+  }, [workspaceFolder])
+
   const openGit = useCallback(async (node: ExplorerNode, history: boolean) => {
     setContextMenu(null)
-    setGitSelectedPath(sessionId, node.path)
-    setGitActiveTab(sessionId, history ? 'history' : 'changes', history ? node.path : null)
+    const target = gitTargetForNode(node)
+    const area = node.decoration?.conflicted || node.decoration?.unstaged || node.decoration?.untracked ? 'unstaged' : 'staged'
+    setGitSelectedPath(sessionId, node.path, target.repoRoot, area)
+    setGitActiveTab(sessionId, history ? 'history' : 'changes', history ? target.path : null)
     await windowActions.openWindow('git')
-  }, [sessionId, setGitActiveTab, setGitSelectedPath, windowActions])
+  }, [gitTargetForNode, sessionId, setGitActiveTab, setGitSelectedPath, windowActions])
 
-  const mutateGit = useCallback(async (node: ExplorerNode, stage: boolean) => {
+  const mutateGit = useCallback(async (command: 'git_stage' | 'git_unstage' | 'git_conflict_take', node: ExplorerNode, extra: Record<string, unknown> = {}) => {
     setContextMenu(null)
-    await runGitMutation(sessionId, workspaceFolder, () => invoke(stage ? 'git_stage' : 'git_unstage', { workspaceFolder, paths: [node.path] }))
-  }, [runGitMutation, sessionId, workspaceFolder])
+    const target = gitTargetForNode(node)
+    await runGitMutation(sessionId, workspaceFolder, () => invoke(command, { workspaceFolder: target.workspaceFolder, paths: [target.path], ...extra }))
+    await refreshNestedRepo(target.repoRoot)
+  }, [gitTargetForNode, refreshNestedRepo, runGitMutation, sessionId, workspaceFolder])
+
+  const discardGit = useCallback(async (node: ExplorerNode) => {
+    setContextMenu(null)
+    const targetName = node.entry.isDir ? `${node.name} and its changed descendants` : node.name
+    const untracked = Boolean(node.decoration?.untracked || node.changeSummary?.untracked)
+    const message = untracked
+      ? `Discard ${targetName}? Untracked paths will be moved to the Recycle Bin.`
+      : `Discard changes in ${targetName}? This cannot be undone.`
+    if (!window.confirm(message)) return
+    const target = gitTargetForNode(node)
+    await runGitMutation(sessionId, workspaceFolder, () => invoke('git_discard', { workspaceFolder: target.workspaceFolder, paths: [target.path] }))
+    await refreshNestedRepo(target.repoRoot)
+    await reloadPaths(node.path)
+  }, [gitTargetForNode, refreshNestedRepo, reloadPaths, runGitMutation, sessionId, workspaceFolder])
 
   const absolutePath = useCallback((path: string) => `${workspaceFolder.replace(/[\\/]+$/, '')}\\${path.replace(/\//g, '\\')}`, [workspaceFolder])
   const openTerminal = useCallback(async (node: ExplorerNode) => {
@@ -170,24 +245,34 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   }, [absolutePath, sessionId, spawnPane])
 
   const actionsFor = useCallback((node: ExplorerNode) => {
-    const staged = gitSession.status?.staged.some((entry) => entry.path === node.path) ?? false
-    const changed = decorations.has(node.path)
+    const staged = Boolean(node.decoration?.staged || node.changeSummary?.staged)
+    const unstaged = Boolean(node.decoration?.unstaged || node.decoration?.untracked || node.changeSummary?.unstaged || node.changeSummary?.untracked)
+    const conflicted = Boolean(node.decoration?.conflicted || node.changeSummary?.conflicted)
+    const changed = staged || unstaged || conflicted
+    const present = !node.gitOnly
     const wrap = (action: () => void | Promise<void>) => () => { setContextMenu(null); void action() }
-    return [
-      { id: 'new-file', label: 'New File', onClick: wrap(() => createEntry(node, false)) },
-      { id: 'new-folder', label: 'New Folder', onClick: wrap(() => createEntry(node, true)) },
-      { id: 'rename', label: 'Rename', onClick: wrap(() => beginRename(node)) },
-      { id: 'delete', label: 'Delete', danger: true, onClick: wrap(() => deleteNode(node)) },
-      { id: 'editor', label: 'Open in Editor', disabled: !editorCommand, onClick: wrap(() => invoke('open_in_editor', { workspaceFolder, relPath: node.path, editorCommand })) },
-      { id: 'terminal', label: 'Open in Terminal', onClick: wrap(() => openTerminal(node)) },
-      { id: 'reveal', label: 'Reveal in File Explorer', onClick: wrap(() => invoke('reveal_path', { path: absolutePath(node.path) })) },
+    const actions: ExplorerContextAction[] = [
+      { id: 'new-file', label: 'New File', disabled: !present, onClick: wrap(() => createEntry(node, false)) },
+      { id: 'new-folder', label: 'New Folder', disabled: !present, onClick: wrap(() => createEntry(node, true)) },
+      { id: 'rename', label: 'Rename', disabled: !present, onClick: wrap(() => beginRename(node)) },
+      { id: 'delete', label: 'Delete', disabled: !present, danger: true, onClick: wrap(() => deleteNode(node)) },
+      { id: 'editor', label: 'Open in Editor', disabled: !present || !editorCommand, onClick: wrap(() => invoke('open_in_editor', { workspaceFolder, relPath: node.path, editorCommand })) },
+      { id: 'terminal', label: 'Open in Terminal', disabled: !present, onClick: wrap(() => openTerminal(node)) },
+      { id: 'reveal', label: 'Reveal in File Explorer', disabled: !present, onClick: wrap(() => invoke('reveal_path', { path: absolutePath(node.path) })) },
       { id: 'copy-rel', label: 'Copy Relative Path', onClick: wrap(() => navigator.clipboard.writeText(node.path)) },
       { id: 'copy-abs', label: 'Copy Absolute Path', onClick: wrap(() => navigator.clipboard.writeText(absolutePath(node.path))) },
-      { id: staged ? 'unstage' : 'stage', label: staged ? 'Unstage' : 'Stage', disabled: !changed, onClick: wrap(() => mutateGit(node, !staged)) },
-      { id: 'diff', label: 'Diff vs HEAD', disabled: !changed, onClick: wrap(() => openGit(node, false)) },
-      { id: 'history', label: 'File History', onClick: wrap(() => openGit(node, true)) },
     ]
-  }, [absolutePath, beginRename, createEntry, decorations, deleteNode, editorCommand, gitSession.status, mutateGit, openGit, openTerminal, workspaceFolder])
+    if (unstaged) actions.push({ id: 'stage', label: node.entry.isDir ? 'Stage Folder Changes' : 'Stage Changes', onClick: wrap(() => mutateGit('git_stage', node)) })
+    if (staged) actions.push({ id: 'unstage', label: node.entry.isDir ? 'Unstage Folder Changes' : 'Unstage Changes', onClick: wrap(() => mutateGit('git_unstage', node)) })
+    if (unstaged) actions.push({ id: 'discard', label: node.entry.isDir ? 'Discard Folder Changes' : 'Discard Changes', danger: true, onClick: wrap(() => discardGit(node)) })
+    if (node.decoration?.conflicted && !node.entry.isDir) {
+      actions.push({ id: 'ours', label: 'Accept Ours', onClick: wrap(() => mutateGit('git_conflict_take', node, { side: 'ours' })) })
+      actions.push({ id: 'theirs', label: 'Accept Theirs', onClick: wrap(() => mutateGit('git_conflict_take', node, { side: 'theirs' })) })
+    }
+    if (!node.entry.isDir && changed) actions.push({ id: 'diff', label: 'Diff vs HEAD', onClick: wrap(() => openGit(node, false)) })
+    actions.push({ id: 'history', label: node.entry.isDir ? 'Folder History' : 'File History', onClick: wrap(() => openGit(node, true)) })
+    return actions
+  }, [absolutePath, beginRename, createEntry, deleteNode, discardGit, editorCommand, mutateGit, openGit, openTerminal, workspaceFolder])
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (nodes.length === 0) return
@@ -196,16 +281,19 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       const next = nodes[Math.min(nodes.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))]
-      setSelectedPath(sessionId, next.path)
+      selectNode(next)
     } else if (event.key === 'ArrowRight') { event.preventDefault(); void toggleNode(node) }
     else if (event.key === 'ArrowLeft') {
       event.preventDefault()
       if (node.expanded) void toggleNode(node)
-      else if (node.parentPath) setSelectedPath(sessionId, node.parentPath)
+      else if (node.parentPath) {
+        const parent = nodes.find((candidate) => candidate.path === node.parentPath)
+        if (parent) selectNode(parent)
+      }
     } else if (event.key === 'Enter' && node.entry.isDir) { event.preventDefault(); void toggleNode(node) }
-    else if (event.key === 'F2') { event.preventDefault(); beginRename(node) }
-    else if (event.key === 'Delete') { event.preventDefault(); void deleteNode(node) }
-  }, [beginRename, deleteNode, nodes, session.selectedPath, sessionId, setSelectedPath, toggleNode])
+    else if (event.key === 'F2' && !node.gitOnly) { event.preventDefault(); beginRename(node) }
+    else if (event.key === 'Delete' && !node.gitOnly) { event.preventDefault(); void deleteNode(node) }
+  }, [beginRename, deleteNode, nodes, selectNode, session.selectedPath, toggleNode])
 
   return (
     <div className="explorer-window" data-explorer-window="true">
@@ -214,17 +302,18 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         selectedPath={session.selectedPath}
         loading={session.loadingPaths.size > 0}
         error={session.error}
+        statusSummary={statusSummary}
         renamingPath={renamingPath}
         renameValue={renameValue}
         contextMenu={contextMenu}
         dragOverPath={dragOverPath}
-        onSelect={(node) => setSelectedPath(sessionId, node.path)}
+        onSelect={selectNode}
         onToggle={(node) => { void toggleNode(node) }}
         onKeyDown={handleKeyDown}
         onRenameValueChange={setRenameValue}
         onCommitRename={() => { void commitRename() }}
         onCancelRename={() => setRenamingPath(null)}
-        onContextMenu={(event, node) => { event.preventDefault(); setSelectedPath(sessionId, node.path); setContextMenu({ x: event.clientX, y: event.clientY, path: node.path, actions: actionsFor(node) }) }}
+        onContextMenu={(event, node) => { event.preventDefault(); selectNode(node); setContextMenu({ x: event.clientX, y: event.clientY, path: node.path, actions: actionsFor(node) }) }}
         onCloseContextMenu={() => setContextMenu(null)}
         onDragStart={(node) => { draggedPathRef.current = node.path }}
         onDragOver={(event, node) => { event.preventDefault(); setDragOverPath(node.path) }}
@@ -241,6 +330,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         imageFit={imageFit}
         canOpenEditor={Boolean(editorCommand)}
         canOpenDiff={selectedHasDiff}
+        workingTreePresent={!selectedNode?.gitOnly}
         onToggleImageFit={() => setImageFit((value) => !value)}
         onOpenEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
         onOpenDiff={() => { if (selectedNode && selectedHasDiff) void openGit(selectedNode, false) }}

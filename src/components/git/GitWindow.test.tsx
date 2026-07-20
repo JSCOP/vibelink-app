@@ -14,7 +14,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
 vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
 
-import { useGitStore } from '../../state/git'
+import { emptyGitSessionState, useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { GitWindow } from './GitWindow'
 
@@ -59,50 +59,16 @@ beforeEach(() => {
 })
 
 describe('GitWindow Changes tab', () => {
-  test('renders grouped changes and repository state', async () => {
+  test('keeps repository actions and delegates file navigation to Explorer', async () => {
     render(<GitWindow />)
-    expect(await screen.findByText('Merge Conflicts')).toBeTruthy()
-    expect(screen.getAllByText('Changes').length).toBeGreaterThan(0)
-    expect(screen.getByText('Repository is merging.')).toBeTruthy()
+    expect(await screen.findByText('Repository is merging.')).toBeTruthy()
+    expect(screen.getByText('Select a changed file in Explorer to view its diff.')).toBeTruthy()
+    expect(screen.queryByTitle('file.txt')).toBeNull()
+    expect(screen.getByText('Merge Conflicts')).toBeTruthy()
     expect((screen.getByRole('button', { name: /Commit/ }) as HTMLButtonElement).disabled).toBe(true)
   })
-
-  test('stages a file through the native command', async () => {
-    render(<GitWindow />)
-    const stage = await screen.findByTitle('Stage file.txt')
-    fireEvent.click(stage)
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stage', {
-      workspaceFolder: 'C:/repo',
-      paths: ['file.txt'],
-    }))
-  })
-  test('expands an untracked directory and diffs a selected child file', async () => {
-    const untrackedDirectoryStatus: WorkingStatus = {
-      staged: [],
-      unstaged: [],
-      conflicted: [],
-      untracked: [{ path: 'vendor/assets/', oldPath: null, changeType: 'untracked', repoKind: null }],
-      truncated: false,
-    }
-    invoke.mockImplementation(async (command: string) => {
-      if (command === 'git_repo_info') return repoInfo
-      if (command === 'git_working_status') return untrackedDirectoryStatus
-      if (command === 'git_dir_entries') return [{ name: 'README.md', isDir: false, repoKind: null, ignored: false }]
-      if (command === 'git_working_file_contents') return { old: '', new: '# Asset notes', binary: false }
-      return null
-    })
-
-    render(<GitWindow />)
-    fireEvent.click(await screen.findByTitle('vendor/assets'))
-    expect(await screen.findByText('README.md')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: /README\.md/ }))
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', {
-      workspaceFolder: 'C:/repo',
-      path: 'vendor/assets/README.md',
-      area: 'unstaged',
-    }))
-  })
 })
+
 
 test('clears diff loading when refresh removes the selected file', async () => {
   const deferred = withResolvers<unknown>()
@@ -123,35 +89,21 @@ test('clears diff loading when refresh removes the selected file', async () => {
   deferred.resolve({ old: 'old', new: 'new', binary: false })
 })
 
-test('loads actual nested repository changes instead of every filesystem entry', async () => {
-  const outerStatus: WorkingStatus = {
-    staged: [],
-    unstaged: [{ path: 'vendor/tool', oldPath: null, changeType: 'modified', repoKind: 'submodule' }],
-    conflicted: [],
-    untracked: [],
-    truncated: false,
-  }
-  const nestedStatus: WorkingStatus = {
-    staged: [],
-    unstaged: [{ path: 'src/changed.ts', oldPath: null, changeType: 'modified' }],
-    conflicted: [],
-    untracked: [],
-    truncated: false,
-  }
-  invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-    if (command === 'git_repo_info') return repoInfo
-    if (command === 'git_working_status') return args?.workspaceFolder === 'C:/repo/vendor/tool' ? nestedStatus : outerStatus
-    if (command === 'git_dir_entries') return [{ name: 'README.md', isDir: false, repoKind: null, ignored: false }]
-    if (command === 'git_working_file_contents') return { old: 'old', new: 'new', binary: false }
-    return null
+test('reroots diffs selected from a nested repository in Explorer', async () => {
+  useGitStore.setState({
+    sessions: {
+      'session-1': {
+        ...emptyGitSessionState,
+        repoInfo,
+        status,
+        selectedPath: 'vendor/tool/src/changed.ts',
+        selectedRepoRoot: 'vendor/tool',
+        selectedArea: 'unstaged',
+      },
+    },
   })
 
   render(<GitWindow />)
-  fireEvent.click(await screen.findByTitle('vendor/tool'))
-  expect(await screen.findByText('src/')).toBeTruthy()
-  expect(screen.queryByText('README.md')).toBeNull()
-  fireEvent.click(screen.getByTitle('vendor/tool/src'))
-  fireEvent.click(await screen.findByRole('button', { name: /changed\.ts/ }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', {
     workspaceFolder: 'C:/repo/vendor/tool',
     path: 'src/changed.ts',
@@ -159,25 +111,3 @@ test('loads actual nested repository changes instead of every filesystem entry',
   }))
 })
 
-test('does not request a file diff for a repository directory row', async () => {
-  const repoDirectoryStatus: WorkingStatus = {
-    staged: [],
-    unstaged: [{ path: 'vendor/tool', oldPath: null, changeType: 'modified', repoKind: 'submodule' }],
-    conflicted: [],
-    untracked: [],
-    truncated: false,
-  }
-  invoke.mockImplementation(async (command: string) => {
-    if (command === 'git_repo_info') return repoInfo
-    if (command === 'git_working_status') return repoDirectoryStatus
-    if (command === 'git_working_file_contents') return { old: '', new: '', binary: false }
-    return null
-  })
-
-  render(<GitWindow />)
-  expect(await screen.findByText('Select a file to view its diff.')).toBeTruthy()
-  const settled = withResolvers<void>()
-  window.setTimeout(settled.resolve, 25)
-  await settled.promise
-  expect(invoke).not.toHaveBeenCalledWith('git_working_file_contents', expect.objectContaining({ path: 'vendor/tool' }))
-})

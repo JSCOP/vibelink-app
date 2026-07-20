@@ -1,7 +1,23 @@
 import { invoke } from '@tauri-apps/api/core'
 import { create } from 'zustand'
-import type { ChangeType, DirEntryInfo, WorkingStatus } from '../ipc/types'
-export type ExplorerDecoration = ChangeType | 'conflicted'
+import type { ChangeType, DirEntryInfo, RepoKind, WorkingStatus } from '../ipc/types'
+export type ExplorerGitDecoration = {
+  staged: ChangeType | null
+  unstaged: ChangeType | null
+  untracked: boolean
+  conflicted: boolean
+  directory: boolean
+  repoKind: RepoKind | null
+  repoRoot: string | null
+}
+
+export type ExplorerChangeSummary = {
+  total: number
+  conflicted: number
+  staged: number
+  unstaged: number
+  untracked: number
+}
 
 export type ExplorerSessionState = {
   expandedPaths: Set<string>
@@ -20,8 +36,9 @@ export type ExplorerNode = {
   entry: DirEntryInfo
   expanded: boolean
   ignored: boolean
-  decoration: ExplorerDecoration | null
-  ancestorChanged: boolean
+  decoration: ExplorerGitDecoration | null
+  changeSummary: ExplorerChangeSummary | null
+  gitOnly: boolean
 }
 
 type ExplorerStore = {
@@ -98,11 +115,20 @@ export const useExplorerStore = create<ExplorerStore>((set) => ({
   }),
 }))
 
-export function flattenExplorerTree(session: ExplorerSessionState, decorations: Map<string, ExplorerDecoration>): ExplorerNode[] {
+export function flattenExplorerTree(session: ExplorerSessionState, decorations: Map<string, ExplorerGitDecoration>): ExplorerNode[] {
   const nodes: ExplorerNode[] = []
-  const changedAncestors = changedAncestorPaths(decorations.keys())
+  const summaries = changeSummaries(decorations)
+  const gitEntries = gitTreeEntries(decorations)
   const visit = (path: string, depth: number) => {
-    for (const entry of session.childrenByPath.get(path) ?? []) {
+    const filesystemEntries = session.childrenByPath.get(path) ?? []
+    const filesystemNames = new Set(filesystemEntries.map((entry) => entry.name))
+    const entries = [...filesystemEntries]
+    for (const entry of gitEntries.get(path) ?? []) {
+      if (!filesystemNames.has(entry.name)) entries.push(entry)
+    }
+    entries.sort((left, right) => Number(right.isDir) - Number(left.isDir) || left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }))
+
+    for (const entry of entries) {
       const childPath = joinPath(path, entry.name)
       const expanded = entry.isDir && session.expandedPaths.has(childPath)
       nodes.push({
@@ -114,7 +140,8 @@ export function flattenExplorerTree(session: ExplorerSessionState, decorations: 
         expanded,
         ignored: session.ignoredPaths.has(childPath),
         decoration: decorations.get(childPath) ?? null,
-        ancestorChanged: changedAncestors.has(childPath),
+        changeSummary: entry.isDir ? summaries.get(childPath) ?? null : null,
+        gitOnly: !filesystemNames.has(entry.name),
       })
       if (expanded) visit(childPath, depth + 1)
     }
@@ -123,13 +150,31 @@ export function flattenExplorerTree(session: ExplorerSessionState, decorations: 
   return nodes
 }
 
-export function deriveGitDecorations(status: WorkingStatus | null): Map<string, ExplorerDecoration> {
-  const decorations = new Map<string, ExplorerDecoration>()
+export function deriveGitDecorations(status: WorkingStatus | null, prefix = '', repoRoot: string | null = null): Map<string, ExplorerGitDecoration> {
+  const decorations = new Map<string, ExplorerGitDecoration>()
   if (!status) return decorations
-  for (const entry of status.untracked) decorations.set(entry.path, entry.changeType)
-  for (const entry of status.unstaged) decorations.set(entry.path, entry.changeType)
-  for (const entry of status.staged) decorations.set(entry.path, entry.changeType)
-  for (const entry of status.conflicted) decorations.set(entry.path, 'conflicted')
+  const apply = (entry: WorkingStatus['staged'][number], area: 'staged' | 'unstaged' | 'untracked' | 'conflicted') => {
+    const relativePath = entry.path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+    const path = joinPath(prefix, relativePath)
+    if (!path) return
+    const current = decorations.get(path) ?? { staged: null, unstaged: null, untracked: false, conflicted: false, directory: false, repoKind: null, repoRoot }
+    const entryRepoRoot = repoRoot ?? current.repoRoot
+    const next = {
+      ...current,
+      directory: current.directory || entry.path.endsWith('/') || Boolean(entry.repoKind),
+      repoKind: entry.repoKind ?? current.repoKind,
+      repoRoot: entryRepoRoot,
+    }
+    if (area === 'staged') next.staged = entry.changeType
+    else if (area === 'unstaged') next.unstaged = entry.changeType
+    else if (area === 'untracked') next.untracked = true
+    else next.conflicted = true
+    decorations.set(path, next)
+  }
+  for (const entry of status.staged) apply(entry, 'staged')
+  for (const entry of status.unstaged) apply(entry, 'unstaged')
+  for (const entry of status.untracked) apply(entry, 'untracked')
+  for (const entry of status.conflicted) apply(entry, 'conflicted')
   return decorations
 }
 
@@ -142,14 +187,43 @@ export function parentPath(path: string): string {
   return index < 0 ? '' : path.slice(0, index)
 }
 
-function changedAncestorPaths(paths: Iterable<string>): Set<string> {
-  const ancestors = new Set<string>()
-  for (const path of paths) {
+
+function changeSummaries(decorations: Map<string, ExplorerGitDecoration>): Map<string, ExplorerChangeSummary> {
+  const summaries = new Map<string, ExplorerChangeSummary>()
+  for (const [path, decoration] of decorations) {
+    const folders: string[] = []
+    if (decoration.directory) folders.push(path)
     let parent = parentPath(path)
     while (parent) {
-      ancestors.add(parent)
+      folders.push(parent)
       parent = parentPath(parent)
     }
+    for (const folder of folders) {
+      const summary = summaries.get(folder) ?? { total: 0, conflicted: 0, staged: 0, unstaged: 0, untracked: 0 }
+      summary.total += 1
+      if (decoration.conflicted) summary.conflicted += 1
+      if (decoration.staged) summary.staged += 1
+      if (decoration.unstaged) summary.unstaged += 1
+      if (decoration.untracked) summary.untracked += 1
+      summaries.set(folder, summary)
+    }
   }
-  return ancestors
+  return summaries
+}
+
+function gitTreeEntries(decorations: Map<string, ExplorerGitDecoration>): Map<string, DirEntryInfo[]> {
+  const entriesByParent = new Map<string, Map<string, DirEntryInfo>>()
+  for (const [path, decoration] of decorations) {
+    const parts = path.split('/').filter(Boolean)
+    for (let index = 0; index < parts.length; index += 1) {
+      const parent = parts.slice(0, index).join('/')
+      const name = parts[index]
+      const isDir = index < parts.length - 1 || decoration.directory
+      const entries = entriesByParent.get(parent) ?? new Map<string, DirEntryInfo>()
+      const existing = entries.get(name)
+      if (!existing || isDir) entries.set(name, { name, isDir, isSymlink: false, size: 0, modifiedAt: null })
+      entriesByParent.set(parent, entries)
+    }
+  }
+  return new Map([...entriesByParent].map(([parent, entries]) => [parent, [...entries.values()]]))
 }

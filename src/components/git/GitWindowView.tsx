@@ -1,7 +1,7 @@
-import { AlertTriangle, Check, ChevronDown, ChevronRight, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
-import type { ComponentType, CSSProperties, ReactNode } from 'react'
-import type { ChangeType, CiStatus, FileContents, RepoInfo, RepoKind, WorkingStatus } from '../../ipc/types'
+import type { ComponentType, ReactNode } from 'react'
+import type { CiStatus, FileContents, RepoInfo, WorkingStatus } from '../../ipc/types'
 import type { GitTab } from '../../state/git'
 import { DiffPane } from './DiffPane'
 
@@ -12,31 +12,18 @@ export type GitRowAction = {
   onClick: () => void
 }
 
-export type GitChangeRow = {
-  id: string
-  kind: 'dir' | 'file'
-  path: string
-  name: string
-  depth: number
-  changeType: ChangeType | null
-  oldPath: string | null
-  repoKind: RepoKind | null
-  ignored: boolean
-  expanded?: boolean
-  loading?: boolean
-  count?: number
-  selected: boolean
-  actions: GitRowAction[]
-  onSelect: () => void
-  onToggle?: () => void
-}
 
 export type GitChangeGroup = {
   id: 'conflicted' | 'staged' | 'unstaged' | 'untracked'
   title: string
   count: number
-  rows: GitChangeRow[]
   actions: GitRowAction[]
+}
+
+const ACTION_ICONS: Record<string, ComponentType<LucideProps>> = {
+  'stage-all': Plus,
+  'unstage-all': Minus,
+  'discard-all': Undo2,
 }
 
 export type GitCloneViewState = {
@@ -88,95 +75,13 @@ export type GitWindowViewProps = {
   pullRequestsContent: ReactNode
 }
 
-const CHANGE_BADGES: Record<ChangeType, string> = {
-  added: 'A',
-  modified: 'M',
-  deleted: 'D',
-  renamed: 'R',
-  copied: 'C',
-  typeChanged: 'T',
-  untracked: 'U',
-}
-
-const ACTION_ICONS: Record<string, ComponentType<LucideProps>> = {
-  stage: Plus,
-  'stage-all': Plus,
-  unstage: Minus,
-  'unstage-all': Minus,
-  discard: Undo2,
-  'discard-all': Undo2,
-}
-
-const ACTION_SHORT_LABELS: Record<string, string> = {
-  ours: 'Ours',
-  theirs: 'Theirs',
-}
-
-const REPO_KIND_LABELS: Record<RepoKind, string> = {
-  submodule: 'submodule',
-  nestedRepo: 'git repo',
-}
-
-function splitEntryPath(path: string): { dir: string; name: string } {
-  const index = path.lastIndexOf('/')
-  return index < 0 ? { dir: '', name: path } : { dir: path.slice(0, index + 1), name: path.slice(index + 1) }
-}
-
-function GitChangeRowView({ row }: { row: GitChangeRow }) {
-  const indent = { '--git-tree-depth': row.depth } as CSSProperties
-  if (row.kind === 'dir') {
-    return (
-      <div className="git-window-change-row git-window-tree-dir" style={indent} data-selected={row.selected || undefined} data-ignored={row.ignored || undefined}>
-        <button
-          type="button"
-          className="git-window-change-file"
-          title={row.path}
-          aria-expanded={row.expanded ?? false}
-          onClick={row.onToggle ?? row.onSelect}
-        >
-          {row.loading
-            ? <LoaderCircle size={12} strokeWidth={2} className="spin git-window-tree-chevron" aria-hidden="true" />
-            : row.expanded
-              ? <ChevronDown size={12} strokeWidth={2} className="git-window-tree-chevron" aria-hidden="true" />
-              : <ChevronRight size={12} strokeWidth={2} className="git-window-tree-chevron" aria-hidden="true" />}
-          {row.changeType ? <span className="git-window-change-badge" data-change-type={row.changeType} aria-label={row.changeType}>{CHANGE_BADGES[row.changeType]}</span> : null}
-          <span className="git-window-change-name">{row.name}/</span>
-          {row.repoKind ? <span className="git-window-repo-kind-badge" data-repo-kind={row.repoKind}>{REPO_KIND_LABELS[row.repoKind]}</span> : null}
-          {row.count ? <span className="git-window-tree-count">{row.count}</span> : null}
-        </button>
-        <div className="git-window-row-actions">
-          {row.actions.map((action) => <GitActionButton key={action.id} action={action} subject={row.path} />)}
-        </div>
-      </div>
-    )
-  }
-  const { dir, name } = splitEntryPath(row.path)
-  return (
-    <div className="git-window-change-row" style={indent} data-selected={row.selected || undefined} data-ignored={row.ignored || undefined}>
-      <button
-        type="button"
-        className="git-window-change-file"
-        title={row.oldPath ? `${row.path} (from ${row.oldPath})` : row.path}
-        onClick={row.onSelect}
-      >
-        {row.changeType ? <span className="git-window-change-badge" data-change-type={row.changeType} aria-label={row.changeType}>{CHANGE_BADGES[row.changeType]}</span> : null}
-        <span className="git-window-change-name">{name}</span>
-        {row.depth === 0 && dir ? <span className="git-window-change-dir">{dir}</span> : null}
-        {row.oldPath ? <small className="git-window-change-from">from {row.oldPath}</small> : null}
-      </button>
-      <div className="git-window-row-actions">
-        {row.actions.map((action) => <GitActionButton key={action.id} action={action} subject={row.path} />)}
-      </div>
-    </div>
-  )
-}
 
 function GitActionButton({ action, subject }: { action: GitRowAction; subject?: string }) {
   const Icon = ACTION_ICONS[action.id]
   const title = subject ? `${action.label} ${subject}` : action.label
   return (
     <button type="button" title={title} aria-label={title} data-danger={action.danger || undefined} onClick={action.onClick}>
-      {Icon ? <Icon size={13} strokeWidth={1.9} aria-hidden="true" /> : ACTION_SHORT_LABELS[action.id] ?? action.label}
+      {Icon ? <Icon size={13} strokeWidth={1.9} aria-hidden="true" /> : action.label}
     </button>
   )
 }
@@ -230,7 +135,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, statu
     { id: 'branches', label: 'Branches', visible: true },
     { id: 'pullRequests', label: 'Pull Requests', visible: pullRequestsVisible },
   ]
-  const visibleGroups = groups.filter((group) => group.rows.length > 0)
+  const visibleGroups = groups.filter((group) => group.count > 0)
 
   return (
     <div ref={setRootElement} className="git-window" data-git-window="true">
@@ -290,6 +195,10 @@ export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, statu
                 <button type="button" className="git-window-commit-button" onClick={onCommit} disabled={!canCommit}><GitCommit size={14} strokeWidth={1.9} aria-hidden="true" /> Commit</button>
               </div>
             </div>
+            <div className="git-window-explorer-handoff">
+              <FolderGit2 size={18} strokeWidth={1.7} aria-hidden="true" />
+              <div><strong>Explorer is the file tree</strong><span>Select a changed file in Explorer to view its diff.</span></div>
+            </div>
             {visibleGroups.length === 0 ? (
               <div className="git-window-no-changes"><Check size={15} strokeWidth={1.9} aria-hidden="true" /> No changes</div>
             ) : visibleGroups.map((group) => (
@@ -302,7 +211,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, statu
                     </div>
                   ) : null}
                 </header>
-                {group.rows.map((row) => <GitChangeRowView key={row.id} row={row} />)}
+                <div className="git-window-change-group-summary">{group.count} changed path{group.count === 1 ? '' : 's'}</div>
               </section>
             ))}
           </aside>

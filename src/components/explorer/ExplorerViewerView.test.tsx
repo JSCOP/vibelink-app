@@ -20,6 +20,7 @@ describe('ExplorerViewerView', () => {
         imageFit
         canOpenEditor={false}
         canOpenDiff
+        workingTreePresent
         onToggleImageFit={vi.fn()}
         onOpenEditor={vi.fn()}
         onOpenDiff={onOpenDiff}

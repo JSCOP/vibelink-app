@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import type { CiStatus, HostingInfo, RepoInfo, WorkingStatus } from '../ipc/types'
 
 export type GitTab = 'changes' | 'history' | 'branches' | 'pullRequests'
+export type GitDiffArea = 'staged' | 'unstaged'
 
 export type GitSessionState = {
   repoInfo: RepoInfo | null
@@ -11,6 +12,8 @@ export type GitSessionState = {
   error: string | null
   lastRefreshAt: number
   selectedPath: string | null
+  selectedRepoRoot: string | null
+  selectedArea: GitDiffArea | null
   activeTab: GitTab
   pathFilter: string | null
   hostingInfo: HostingInfo | null
@@ -26,7 +29,7 @@ type GitStore = {
   refreshGit: (sessionId: string, workspaceFolder: string | null | undefined) => Promise<void>
   runGitMutation: (sessionId: string, workspaceFolder: string, mutation: GitMutation) => Promise<void>
   refreshHosting: (sessionId: string, workspaceFolder: string | null | undefined, refName?: string, force?: boolean) => Promise<void>
-  setSelectedPath: (sessionId: string, selectedPath: string | null) => void
+  setSelectedPath: (sessionId: string, selectedPath: string | null, selectedRepoRoot?: string | null, selectedArea?: GitDiffArea | null) => void
   setActiveTab: (sessionId: string, activeTab: GitTab, pathFilter?: string | null) => void
   clearError: (sessionId: string) => void
 }
@@ -40,6 +43,8 @@ export const emptyGitSessionState: GitSessionState = {
   error: null,
   lastRefreshAt: 0,
   selectedPath: null,
+  selectedRepoRoot: null,
+  selectedArea: null,
   activeTab: 'changes',
   pathFilter: null,
   hostingInfo: null,
@@ -140,10 +145,10 @@ export const useGitStore = create<GitStore>((set, get) => ({
       throw reason
     }
   },
-  setSelectedPath: (sessionId, selectedPath) => set((state) => ({
+  setSelectedPath: (sessionId, selectedPath, selectedRepoRoot = null, selectedArea = null) => set((state) => ({
     sessions: {
       ...state.sessions,
-      [sessionId]: { ...(state.sessions[sessionId] ?? emptyGitSessionState), selectedPath },
+      [sessionId]: { ...(state.sessions[sessionId] ?? emptyGitSessionState), selectedPath, selectedRepoRoot, selectedArea },
     },
   })),
   setActiveTab: (sessionId, activeTab, pathFilter = null) => set((state) => ({

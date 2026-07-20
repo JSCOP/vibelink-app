@@ -1,15 +1,29 @@
 /* Explorer tree pane — VS Code-style dense file tree.
    Owns: .explorer-window (container), .explorer-tree-*, .explorer-error,
-   .explorer-empty, .explorer-change-dot, .explorer-context-menu.
+   .explorer-empty, Git decorations, and .explorer-context-menu.
    Viewer-side styles live in ExplorerViewerView. */
 
 .explorer-window {
+  container: explorer-window / inline-size;
   display: flex;
   flex-direction: row;
   height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+}
+
+
+@container explorer-window (max-width: 520px) {
+  .explorer-tree-pane {
+    border-right: 0;
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .explorer-viewer {
+    display: none;
+  }
 }
 
 .explorer-tree-pane {
@@ -29,8 +43,7 @@
   color: var(--vibelink-muted);
   display: flex;
   flex: 0 0 auto;
-  gap: 6px;
-  justify-content: space-between;
+  gap: 5px;
   padding: 8px 10px 6px;
 }
 
@@ -41,6 +54,10 @@
 
 .explorer-tree-pane > header .spin {
   color: var(--vibelink-accent);
+}
+
+.explorer-tree-header-spacer {
+  flex: 1 1 auto;
 }
 
 .explorer-error {
@@ -193,73 +210,95 @@
 
 /* ---- Git decorations ---- */
 
-.explorer-tree-row[data-decoration='modified'] .explorer-tree-name,
-.explorer-tree-row[data-decoration='renamed'] .explorer-tree-name,
-.explorer-tree-row[data-decoration='copied'] .explorer-tree-name,
-.explorer-tree-row[data-decoration='typeChanged'] .explorer-tree-name {
+.explorer-tree-row[data-git-state='unstaged'] .explorer-tree-name {
   color: var(--vibelink-warning);
 }
 
-.explorer-tree-row[data-decoration='added'] .explorer-tree-name,
-.explorer-tree-row[data-decoration='untracked'] .explorer-tree-name {
+.explorer-tree-row[data-git-state='staged'] .explorer-tree-name,
+.explorer-tree-row[data-git-state='untracked'] .explorer-tree-name {
   color: var(--vibelink-accent);
 }
 
-.explorer-tree-row[data-decoration='deleted'] .explorer-tree-name {
+.explorer-tree-row[data-git-state='conflicted'] .explorer-tree-name {
   color: var(--vibelink-danger);
+}
+
+.explorer-tree-row[data-git-only] .explorer-tree-icon {
+  opacity: 0.72;
+}
+
+.explorer-tree-row:has(.explorer-tree-badge[data-change-type='deleted']) .explorer-tree-name {
   text-decoration: line-through;
 }
 
-.explorer-tree-row[data-decoration='conflicted'] .explorer-tree-name {
-  color: var(--vibelink-danger);
-}
-
-.explorer-tree-badge {
-  color: var(--vibelink-muted);
+.explorer-git-badges,
+.explorer-change-summary {
+  align-items: center;
+  display: inline-flex;
   flex: 0 0 auto;
-  font: 700 10px/1 var(--vibelink-mono);
-  font-style: normal;
+  gap: 3px;
 }
 
-.explorer-tree-row[data-decoration='modified'] .explorer-tree-badge,
-.explorer-tree-row[data-decoration='renamed'] .explorer-tree-badge,
-.explorer-tree-row[data-decoration='copied'] .explorer-tree-badge,
-.explorer-tree-row[data-decoration='typeChanged'] .explorer-tree-badge {
+.explorer-tree-badge,
+.explorer-change-summary em {
+  border-radius: 3px;
+  flex: 0 0 auto;
+  font: 700 9px/1 var(--vibelink-mono);
+  font-style: normal;
+  min-width: 14px;
+  padding: 2px 3px;
+  text-align: center;
+}
+
+.explorer-tree-badge[data-area='staged'] {
+  background: color-mix(in srgb, var(--vibelink-blue) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-blue) 38%, transparent);
+  color: var(--vibelink-blue);
+  padding-block: 1px;
+}
+
+.explorer-tree-badge[data-area='unstaged'],
+.explorer-change-summary em[data-area='unstaged'] {
   color: var(--vibelink-warning);
 }
 
-.explorer-tree-row[data-decoration='added'] .explorer-tree-badge,
-.explorer-tree-row[data-decoration='untracked'] .explorer-tree-badge {
+.explorer-tree-badge[data-area='untracked'],
+.explorer-change-summary em[data-area='untracked'] {
   color: var(--vibelink-accent);
 }
 
-.explorer-tree-row[data-decoration='deleted'] .explorer-tree-badge {
-  color: var(--vibelink-danger);
-}
-
-.explorer-tree-row[data-decoration='conflicted'] .explorer-tree-badge {
-  align-items: center;
+.explorer-tree-badge[data-area='conflicted'],
+.explorer-change-summary em[data-area='conflicted'] {
   background: var(--vibelink-danger-soft);
   border: 1px solid var(--vibelink-danger-border);
-  border-radius: 999px;
   color: var(--vibelink-danger);
-  display: inline-flex;
-  height: 13px;
-  justify-content: center;
-  width: 13px;
+  padding-block: 1px;
 }
 
-.explorer-change-dot {
-  background: var(--vibelink-warning);
-  border-radius: 999px;
-  flex: 0 0 auto;
-  height: 5px;
-  width: 5px;
+.explorer-change-summary em[data-area='staged'] {
+  color: var(--vibelink-blue);
 }
 
-/* Direct decorations outrank the ancestor dot: hide it when a badge shows. */
-.explorer-tree-row[data-decoration] .explorer-change-dot {
-  display: none;
+.explorer-change-summary {
+  background: color-mix(in srgb, var(--vibelink-input) 72%, transparent);
+  border-radius: 4px;
+  gap: 1px;
+  padding: 1px 2px;
+}
+
+.explorer-change-summary em {
+  background: transparent;
+  min-width: auto;
+  padding-inline: 2px;
+}
+
+.explorer-change-summary[data-compact] {
+  max-width: 122px;
+  overflow: hidden;
+}
+
+.explorer-change-summary[data-compact] em {
+  font-size: 8px;
 }
 
 .explorer-tree-row[data-ignored] .explorer-tree-name,

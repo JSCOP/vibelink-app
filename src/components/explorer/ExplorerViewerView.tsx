@@ -13,6 +13,7 @@ export type ExplorerViewerViewProps = {
   imageFit: boolean
   canOpenEditor: boolean
   canOpenDiff: boolean
+  workingTreePresent: boolean
   onToggleImageFit: () => void
   onOpenEditor: () => void
   onOpenDiff: () => void
@@ -21,7 +22,7 @@ export type ExplorerViewerViewProps = {
   onCopyPath: () => void
 }
 
-export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenEditor, canOpenDiff, onToggleImageFit, onOpenEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
+export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenEditor, canOpenDiff, workingTreePresent, onToggleImageFit, onOpenEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
   const lineCount = useMemo(() => (textFile && !textFile.binary ? countLines(textFile.content) : null), [textFile])
   const [imageProbe, setImageProbe] = useState<{ src: string; width: number; height: number } | null>(null)
   const imageDims = imageSrc && imageProbe && imageProbe.src === imageSrc ? imageProbe : null
@@ -53,9 +54,9 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
         <div className="explorer-viewer-actions">
           {canOpenDiff ? <button type="button" title="View diff in Git" onClick={onOpenDiff}><GitCompare size={13} /></button> : null}
           <button type="button" title="Copy path" onClick={onCopyPath}><Copy size={13} /></button>
-          <button type="button" title="Reveal in File Explorer" onClick={onReveal}><ExternalLink size={13} /></button>
-          <button type="button" title="Open terminal here" onClick={onOpenTerminal}><Terminal size={13} /></button>
-          {canOpenEditor ? <button type="button" title="Open in external editor" onClick={onOpenEditor}><FileCode2 size={13} /></button> : null}
+          {workingTreePresent ? <button type="button" title="Reveal in File Explorer" onClick={onReveal}><ExternalLink size={13} /></button> : null}
+          {workingTreePresent ? <button type="button" title="Open terminal here" onClick={onOpenTerminal}><Terminal size={13} /></button> : null}
+          {workingTreePresent && canOpenEditor ? <button type="button" title="Open in external editor" onClick={onOpenEditor}><FileCode2 size={13} /></button> : null}
         </div>
       </header>
       <div className="explorer-viewer-meta">
@@ -76,7 +77,17 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           <span>{error}</span>
         </div>
       ) : null}
-      {showContent && entry.isDir ? (
+      {showContent && !workingTreePresent ? (
+        <div className="explorer-viewer-card-zone">
+          <div className="explorer-binary-card">
+            <span className="explorer-binary-icon"><GitCompare size={20} /></span>
+            <strong>Not in the working tree</strong>
+            <span>This tracked path was deleted or moved.</span>
+            <span className="explorer-binary-hint">Use the Git diff to inspect the previous content.</span>
+          </div>
+        </div>
+      ) : null}
+      {showContent && workingTreePresent && entry.isDir ? (
         <div className="explorer-viewer-card-zone">
           <div className="explorer-binary-card">
             <span className="explorer-binary-icon"><Folder size={20} /></span>
@@ -86,7 +97,7 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           </div>
         </div>
       ) : null}
-      {showContent && imageSrc ? (
+      {showContent && workingTreePresent && imageSrc ? (
         <section className="explorer-image-viewer">
           <div className="explorer-image-toolbar">
             <span><ImageIcon size={13} aria-hidden="true" />{imageDims ? `${imageDims.width} × ${imageDims.height} px` : 'Image'}</span>
@@ -107,7 +118,7 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           </div>
         </section>
       ) : null}
-      {showContent && !imageSrc && textFile?.binary ? (
+      {showContent && workingTreePresent && !imageSrc && textFile?.binary ? (
         <div className="explorer-viewer-card-zone">
           <div className="explorer-binary-card">
             <span className="explorer-binary-icon"><FileCode2 size={20} /></span>
@@ -122,7 +133,7 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           </div>
         </div>
       ) : null}
-      {showContent && !imageSrc && textFile && !textFile.binary ? (
+      {showContent && workingTreePresent && !imageSrc && textFile && !textFile.binary ? (
         <section className="explorer-text-viewer">
           {textFile.truncated ? (
             <div className="explorer-truncated-banner">
