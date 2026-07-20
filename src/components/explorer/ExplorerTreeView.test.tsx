@@ -3,8 +3,9 @@ import { render, screen } from '@testing-library/react'
 import { describe, expect, test, vi } from 'vitest'
 
 import { ExplorerTreeView } from './ExplorerTreeView'
+import type { ExplorerNode } from '../../state/explorer'
 
-const node = {
+const node: ExplorerNode = {
   path: 'src',
   parentPath: '',
   name: 'src',
@@ -18,6 +19,23 @@ const node = {
   repositoryRef: null,
 }
 
+const changedNode: ExplorerNode = {
+  ...node,
+  path: 'file.ts',
+  name: 'file.ts',
+  entry: { ...node.entry, name: 'file.ts', isDir: false },
+  decoration: {
+    staged: null,
+    unstaged: 'modified',
+    untracked: false,
+    conflicted: false,
+    directory: false,
+    repoKind: null,
+    repoRoot: '',
+    submoduleState: null,
+  },
+}
+
 const noop = vi.fn()
 
 describe('ExplorerTreeView', () => {
@@ -29,6 +47,7 @@ describe('ExplorerTreeView', () => {
           selectedPath="src"
           loading={false}
           statusSummary={null}
+          statusPresentation="letters"
           error={null}
           renamingPath={null}
           renameValue=""
@@ -54,5 +73,40 @@ describe('ExplorerTreeView', () => {
     expect(menu.parentElement).toBe(document.body)
     expect(menu.style.left).toBe('120px')
     expect(menu.style.top).toBe('140px')
+  })
+
+  test('renders Git states as icons, letters, or plain words', () => {
+    const props = {
+      nodes: [changedNode],
+      selectedPath: 'file.ts',
+      loading: false,
+      statusSummary: null,
+      error: null,
+      renamingPath: null,
+      renameValue: '',
+      contextMenu: null,
+      dragOverPath: null,
+      onSelect: noop,
+      onToggle: noop,
+      onKeyDown: noop,
+      onRenameValueChange: noop,
+      onCommitRename: noop,
+      onCancelRename: noop,
+      onContextMenu: noop,
+      onCloseContextMenu: noop,
+      onDragStart: noop,
+      onDragOver: noop,
+      onDragLeave: noop,
+      onDrop: noop,
+    }
+    const { rerender } = render(<ExplorerTreeView {...props} statusPresentation="letters" />)
+    const explanation = 'Modified — tracked file content changed; not staged for the next commit.'
+    expect(screen.getByLabelText(explanation).textContent).toBe('M')
+
+    rerender(<ExplorerTreeView {...props} statusPresentation="icons" />)
+    expect(screen.getByLabelText(explanation).querySelector('svg')).toBeTruthy()
+
+    rerender(<ExplorerTreeView {...props} statusPresentation="words" />)
+    expect(screen.getByLabelText(explanation).textContent).toBe('Modified')
   })
 })

@@ -1,9 +1,10 @@
 import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ChevronDown, ChevronRight, File, Folder, FolderGit2, FolderOpen, Link2, LoaderCircle } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, File, FileMinus2, FilePlus2, Folder, FolderGit2, FolderOpen, GitCommit, GitFork, Link2, LoaderCircle, Pencil, RefreshCw } from 'lucide-react'
 import type { ChangeType } from '../../ipc/types'
 import type { ExplorerChangeSummary, ExplorerGitDecoration, ExplorerNode } from '../../state/explorer'
+import type { GitStatusPresentation } from '../../state/profiles'
 import './ExplorerTreeView.css'
 
 export type ExplorerContextAction = { id: string; label: string; disabled?: boolean; danger?: boolean; onClick: () => void }
@@ -15,6 +16,7 @@ export type ExplorerTreeViewProps = {
   loading: boolean
   error: string | null
   statusSummary: ExplorerChangeSummary | null
+  statusPresentation: GitStatusPresentation
   renamingPath: string | null
   renameValue: string
   contextMenu: ExplorerContextMenu
@@ -33,7 +35,7 @@ export type ExplorerTreeViewProps = {
   onDrop: (event: React.DragEvent, node: ExplorerNode) => void
 }
 
-export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
+export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -44,7 +46,7 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
 
   return (
     <aside className="explorer-tree-pane" data-explorer-tree="true">
-      <header><strong>EXPLORER</strong><span className="explorer-tree-header-spacer" />{statusSummary ? <ChangeSummaryBadges summary={statusSummary} compact /> : null}{loading ? <LoaderCircle className="spin" size={13} /> : null}</header>
+      <header><strong>EXPLORER</strong><span className="explorer-tree-header-spacer" />{statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}{loading ? <LoaderCircle className="spin" size={13} /> : null}</header>
       {error ? <div className="explorer-error">{error}</div> : null}
       <div ref={scrollRef} className="explorer-tree-scroll" role="tree" tabIndex={0} onKeyDown={onKeyDown}>
         <div className="explorer-tree-virtual" style={{ height: `${virtualizer.getTotalSize() || nodes.length * 24}px` }}>
@@ -82,9 +84,9 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
                   <input className="explorer-tree-rename" autoFocus value={renameValue} onChange={(event) => onRenameValueChange(event.target.value)} onBlur={onCommitRename} onKeyDown={(event) => { if (event.key === 'Enter') onCommitRename(); if (event.key === 'Escape') onCancelRename() }} />
                 ) : <span className="explorer-tree-name">{node.name}</span>}
                 {node.repositoryRef ? <span className="explorer-repository-ref" title={`Checked out ${node.repositoryRef}`}>{node.repositoryRef}</span> : null}
-                {node.entry.repoKind ? <RepositoryBadges node={node} /> : null}
-                {node.changeSummary ? <ChangeSummaryBadges summary={node.changeSummary} /> : null}
-                {node.decoration ? <DecorationBadges decoration={node.decoration} /> : null}
+                {node.entry.repoKind ? <RepositoryBadges node={node} presentation={statusPresentation} /> : null}
+                {node.changeSummary ? <ChangeSummaryBadges summary={node.changeSummary} presentation={statusPresentation} /> : null}
+                {node.decoration ? <DecorationBadges decoration={node.decoration} presentation={statusPresentation} /> : null}
               </div>
             )
           })}
@@ -104,61 +106,111 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
   )
 }
 
-const CHANGE_BADGE_BY_TYPE: Record<ChangeType, string> = {
-  added: 'A',
-  modified: 'M',
-  deleted: 'D',
-  renamed: 'R',
-  copied: 'C',
-  typeChanged: 'T',
-  untracked: 'U',
+type ChangeBadgeMeta = {
+  letter: string
+  word: string
+  explanation: string
+  icon: typeof Check
 }
 
-const CHANGE_TITLE_BY_TYPE: Record<ChangeType, string> = {
-  added: 'Added',
-  modified: 'Modified',
-  deleted: 'Deleted',
-  renamed: 'Renamed',
-  copied: 'Copied',
-  typeChanged: 'Type changed',
-  untracked: 'Untracked',
+type StatusBadgeSpec = {
+  area: string
+  letter: string
+  word: string
+  title: string
+  icon: typeof Check
+  changeType?: ChangeType
 }
 
-function DecorationBadges({ decoration }: { decoration: ExplorerGitDecoration }) {
-  if (decoration.conflicted) return <span className="explorer-git-badges"><em className="explorer-tree-badge" data-area="conflicted" title="Merge conflict">!</em></span>
+const CHANGE_META_BY_TYPE: Record<ChangeType, ChangeBadgeMeta> = {
+  added: { letter: 'A', word: 'Added', explanation: 'new tracked file', icon: FilePlus2 },
+  modified: { letter: 'M', word: 'Modified', explanation: 'tracked file content changed', icon: Pencil },
+  deleted: { letter: 'D', word: 'Deleted', explanation: 'tracked file removed', icon: FileMinus2 },
+  renamed: { letter: 'R', word: 'Renamed', explanation: 'tracked file moved or renamed', icon: ArrowRight },
+  copied: { letter: 'C', word: 'Copied', explanation: 'tracked file copied', icon: Copy },
+  typeChanged: { letter: 'T', word: 'Type changed', explanation: 'file type or mode changed', icon: RefreshCw },
+  untracked: { letter: 'U', word: 'Untracked', explanation: 'new file Git is not tracking yet', icon: FilePlus2 },
+}
+
+const CONFLICT_SPEC: StatusBadgeSpec = { area: 'conflicted', letter: '!', word: 'Conflict', title: 'Conflict — Git needs you to choose or combine competing changes.', icon: AlertTriangle }
+const POINTER_SPEC: StatusBadgeSpec = { area: 'submodule-pointer', letter: 'P', word: 'Pointer', title: 'Pointer changed — the parent repository now points to a different submodule commit.', icon: GitCommit }
+const SUBMODULE_MODIFIED_SPEC: StatusBadgeSpec = { area: 'submodule-modified', letter: 'M', word: 'Modified', title: 'Modified inside submodule — tracked files changed in the child repository.', icon: Pencil }
+const SUBMODULE_UNTRACKED_SPEC: StatusBadgeSpec = { area: 'submodule-untracked', letter: 'U', word: 'Untracked', title: 'Untracked inside submodule — the child repository contains files Git is not tracking.', icon: FilePlus2 }
+const UNTRACKED_SPEC: StatusBadgeSpec = { area: 'untracked', letter: 'U', word: 'Untracked', title: 'Untracked — new file Git is not tracking yet.', icon: FilePlus2, changeType: 'untracked' }
+
+function DecorationBadges({ decoration, presentation }: { decoration: ExplorerGitDecoration; presentation: GitStatusPresentation }) {
+  if (decoration.conflicted) return <span className="explorer-git-badges"><StatusBadge spec={CONFLICT_SPEC} presentation={presentation} /></span>
   const submodule = decoration.repoKind === 'submodule' ? decoration.submoduleState : null
+  const stagedSpec = decoration.staged ? changeSpec(decoration.staged, true) : null
+  const unstagedSpec = decoration.unstaged ? changeSpec(decoration.unstaged, false) : null
   return (
     <span className="explorer-git-badges">
-      {decoration.staged ? <em className="explorer-tree-badge" data-area="staged" data-change-type={decoration.staged} title={`Staged: ${CHANGE_TITLE_BY_TYPE[decoration.staged]}`}>{CHANGE_BADGE_BY_TYPE[decoration.staged]}</em> : null}
-      {submodule?.commitChanged ? <em className="explorer-tree-badge" data-area="submodule-pointer" title="Submodule commit differs from the parent repository">P</em> : null}
-      {submodule?.modified ? <em className="explorer-tree-badge" data-area="submodule-modified" title="Submodule contains modified tracked files">M</em> : null}
-      {submodule?.untracked ? <em className="explorer-tree-badge" data-area="submodule-untracked" title="Submodule contains untracked files">U</em> : null}
-      {!submodule && decoration.unstaged ? <em className="explorer-tree-badge" data-area="unstaged" data-change-type={decoration.unstaged} title={`Working tree: ${CHANGE_TITLE_BY_TYPE[decoration.unstaged]}`}>{CHANGE_BADGE_BY_TYPE[decoration.unstaged]}</em> : null}
-      {decoration.untracked ? <em className="explorer-tree-badge" data-area="untracked" data-change-type="untracked" title="Untracked">U</em> : null}
+      {stagedSpec ? <StatusBadge spec={stagedSpec} presentation={presentation} /> : null}
+      {submodule?.commitChanged ? <StatusBadge spec={POINTER_SPEC} presentation={presentation} /> : null}
+      {submodule?.modified ? <StatusBadge spec={SUBMODULE_MODIFIED_SPEC} presentation={presentation} /> : null}
+      {submodule?.untracked ? <StatusBadge spec={SUBMODULE_UNTRACKED_SPEC} presentation={presentation} /> : null}
+      {!submodule && unstagedSpec ? <StatusBadge spec={unstagedSpec} presentation={presentation} /> : null}
+      {decoration.untracked ? <StatusBadge spec={UNTRACKED_SPEC} presentation={presentation} /> : null}
     </span>
   )
 }
 
-function RepositoryBadges({ node }: { node: ExplorerNode }) {
-  const kind = node.entry.repoKind === 'submodule' ? 'SUB' : 'REPO'
+function RepositoryBadges({ node, presentation }: { node: ExplorerNode; presentation: GitStatusPresentation }) {
+  const isSubmodule = node.entry.repoKind === 'submodule'
+  const Icon = isSubmodule ? GitFork : FolderGit2
+  const title = isSubmodule ? 'Submodule — a separate Git repository recorded by the parent repository.' : 'Repository — a separate nested Git repository.'
   return (
     <span className="explorer-repository-badges">
-      <em data-kind={node.entry.repoKind} title={node.entry.repoKind === 'submodule' ? 'Git submodule repository boundary' : 'Nested Git repository boundary'}>{kind}</em>
-      {node.entry.repositoryInitialized === false ? <em data-state="uninitialized" title="Submodule is not initialized">INIT</em> : null}
+      <em data-kind={node.entry.repoKind} data-presentation={presentation} title={title} aria-label={title}>
+        {presentation === 'icons' ? <Icon size={11} aria-hidden="true" /> : presentation === 'letters' ? (isSubmodule ? 'SUB' : 'REPO') : (isSubmodule ? 'Submodule' : 'Repository')}
+      </em>
+      {node.entry.repositoryInitialized === false ? (
+        <em data-state="uninitialized" data-presentation={presentation} title="Not initialized — download and check out the submodule before opening it." aria-label="Submodule is not initialized">
+          {presentation === 'icons' ? <AlertTriangle size={11} aria-hidden="true" /> : presentation === 'letters' ? 'INIT' : 'Not initialized'}
+        </em>
+      ) : null}
     </span>
   )
 }
 
-function ChangeSummaryBadges({ summary, compact = false }: { summary: ExplorerChangeSummary; compact?: boolean }) {
+function ChangeSummaryBadges({ summary, presentation, compact = false }: { summary: ExplorerChangeSummary; presentation: GitStatusPresentation; compact?: boolean }) {
   const title = `${summary.total} changed path${summary.total === 1 ? '' : 's'}: ${summary.conflicted} conflicted, ${summary.staged} staged, ${summary.unstaged} modified, ${summary.untracked} untracked`
+  if (compact && presentation === 'words') {
+    return <span className="explorer-change-summary" title={title} aria-label={title} data-compact="true"><em data-area="dirty" data-presentation="words">Dirty {summary.total}</em></span>
+  }
   return (
     <span className="explorer-change-summary" title={title} aria-label={title} data-compact={compact || undefined}>
-      {summary.conflicted ? <em data-area="conflicted">!{summary.conflicted}</em> : null}
-      {summary.staged ? <em data-area="staged">S{summary.staged}</em> : null}
-      {summary.unstaged ? <em data-area="unstaged">M{summary.unstaged}</em> : null}
-      {summary.untracked ? <em data-area="untracked">U{summary.untracked}</em> : null}
+      {summary.conflicted ? <StatusBadge spec={{ ...CONFLICT_SPEC, word: 'Conflicts', title }} presentation={presentation} count={summary.conflicted} /> : null}
+      {summary.staged ? <StatusBadge spec={{ area: 'staged', letter: 'S', word: 'Staged', title, icon: Check }} presentation={presentation} count={summary.staged} /> : null}
+      {summary.unstaged ? <StatusBadge spec={{ area: 'unstaged', letter: 'M', word: 'Modified', title, icon: Pencil }} presentation={presentation} count={summary.unstaged} /> : null}
+      {summary.untracked ? <StatusBadge spec={{ ...UNTRACKED_SPEC, title }} presentation={presentation} count={summary.untracked} /> : null}
     </span>
   )
+}
+
+function StatusBadge({ spec, presentation, count }: { spec: StatusBadgeSpec; presentation: GitStatusPresentation; count?: number }) {
+  const Icon = spec.icon
+  const word = count === undefined ? spec.word : `${spec.word} ${count}`
+  const ariaLabel = count === undefined ? spec.title : `${word}. ${spec.title}`
+  return (
+    <em className="explorer-tree-badge" data-area={spec.area} data-change-type={spec.changeType} data-presentation={presentation} title={spec.title} aria-label={ariaLabel}>
+      {presentation === 'icons' ? <><Icon size={11} aria-hidden="true" />{count}</> : presentation === 'letters' ? `${spec.letter}${count ?? ''}` : word}
+    </em>
+  )
+}
+
+function changeSpec(changeType: ChangeType, staged: boolean): StatusBadgeSpec {
+  const meta = CHANGE_META_BY_TYPE[changeType]
+  return {
+    area: staged ? 'staged' : 'unstaged',
+    letter: meta.letter,
+    word: staged ? `Staged ${meta.word}` : meta.word,
+    title: staged
+      ? `Staged ${meta.word.toLowerCase()} — ${meta.explanation}; included in the next commit.`
+      : `${meta.word} — ${meta.explanation}; not staged for the next commit.`,
+    icon: meta.icon,
+    changeType,
+  }
 }
 
 function clampMenuPosition(x: number, y: number, actionCount: number): { x: number; y: number } {

@@ -233,11 +233,24 @@
   font: 700 8px/1 var(--vibelink-mono);
   font-style: normal;
   padding: 2px 3px;
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  white-space: nowrap;
 }
 
 .explorer-repository-badges em[data-state='uninitialized'] {
   border-color: color-mix(in srgb, var(--vibelink-warning) 40%, transparent);
   color: var(--vibelink-warning);
+}
+
+.explorer-repository-badges em[data-presentation='words'] {
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.explorer-repository-badges svg {
+  flex: 0 0 auto;
 }
 
 .explorer-tree-name {
@@ -287,6 +300,11 @@
   min-width: 14px;
   padding: 2px 3px;
   text-align: center;
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  justify-content: center;
+  white-space: nowrap;
 }
 
 .explorer-tree-badge[data-area='staged'] {
@@ -312,6 +330,21 @@
   border: 1px solid var(--vibelink-danger-border);
   color: var(--vibelink-danger);
   padding-block: 1px;
+}
+
+.explorer-tree-badge[data-presentation='words'],
+.explorer-change-summary em[data-presentation='words'] {
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.explorer-tree-badge[data-presentation='icons'] svg,
+.explorer-change-summary em[data-presentation='icons'] svg {
+  flex: 0 0 auto;
+}
+
+.explorer-change-summary em[data-area='dirty'] {
+  color: var(--vibelink-warning);
 }
 
 .explorer-tree-badge[data-area='submodule-pointer'] {

@@ -29,6 +29,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const setGitActiveTab = useGitStore((state) => state.setActiveTab)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const editorCommand = useWorkspaceStore((state) => state.settings.externalEditorCommand).trim()
+  const gitStatusPresentation = useWorkspaceStore((state) => state.settings.gitStatusPresentation)
   const windowActions = useWorkspaceWindowActions()
   const [textFile, setTextFile] = useState<TextFile | null>(null)
   const [imageSrc, setImageSrc] = useState<string | null>(null)
@@ -381,6 +382,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         loading={session.loadingPaths.size > 0}
         error={session.error}
         statusSummary={statusSummary}
+        statusPresentation={gitStatusPresentation}
         renamingPath={renamingPath}
         renameValue={renameValue}
         contextMenu={contextMenu}

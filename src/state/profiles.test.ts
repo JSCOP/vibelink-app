@@ -199,6 +199,13 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ externalEditorCommand: 'cursor --reuse-window' }).externalEditorCommand).toBe('cursor --reuse-window')
   })
 
+  test('normalizes Git status presentation', () => {
+    expect(defaultSettings.gitStatusPresentation).toBe('words')
+    expect(normalizeSettings({ gitStatusPresentation: 'icons' }).gitStatusPresentation).toBe('icons')
+    expect(normalizeSettings({ gitStatusPresentation: 'letters' }).gitStatusPresentation).toBe('letters')
+    expect(normalizeSettings({ gitStatusPresentation: 'missing' }).gitStatusPresentation).toBe('words')
+  })
+
   test('normalizes configurable pane highlight colors', () => {
     expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')

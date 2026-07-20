@@ -7,7 +7,7 @@ import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
-import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type Profile, type ProfileKind, type Settings } from '../state/profiles'
+import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type GitStatusPresentation, type Profile, type ProfileKind, type Settings } from '../state/profiles'
 import { profileIconNames } from '../state/profileIcons'
 import { terminalThemeDefinitionById, terminalThemeGroups, type TerminalThemeId } from '../state/terminalThemes'
 import { applyThemeToDocument } from '../state/themePreview'
@@ -82,6 +82,11 @@ const cursorStyleOptions: { value: Settings['cursorStyle']; label: string }[] = 
   { value: 'bar', label: 'Bar' },
   { value: 'block', label: 'Block' },
   { value: 'underline', label: 'Underline' },
+]
+const gitStatusPresentationOptions: { value: GitStatusPresentation; label: string }[] = [
+  { value: 'icons', label: 'Icons — symbols with explanations on hover' },
+  { value: 'letters', label: 'Letters — S, M, U, P' },
+  { value: 'words', label: 'Words — Staged, Modified, Untracked, Pointer' },
 ]
 
 const profileKindLabels: Record<ProfileKind, string> = {
@@ -491,6 +496,10 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                       />
                     </label>
                   </div>
+                </SettingsGroup>
+                <SettingsGroup title="Git status labels" description="Choose how Explorer explains file, folder, repository, and submodule states.">
+                  <SettingsSelect label="Presentation" value={draft.gitStatusPresentation} options={gitStatusPresentationOptions} onChange={(value) => patchDraft({ gitStatusPresentation: value as GitStatusPresentation })} />
+                  <div className="vibelink-settings-note"><span>Every mode keeps a plain-language hover explanation. Words is the clearest; letters is the most compact.</span></div>
                 </SettingsGroup>
               </>
             ) : null}

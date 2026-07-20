@@ -39,6 +39,8 @@ const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
 const agentNamePhrasePattern = /\b(?:claude code|oh my pi|oh-my-pi|ohmypi)\b/
 const sixDigitHexColorPattern = /^#[0-9a-f]{6}$/i
 
+export type GitStatusPresentation = 'icons' | 'letters' | 'words'
+
 export type Settings = {
   fontFamily: string
   fontSize: number
@@ -56,6 +58,7 @@ export type Settings = {
   keepTerminalsAliveOnClose: boolean
   resizeSnapTolerance: number
   paneHeaderHeight: number
+  gitStatusPresentation: GitStatusPresentation
   profiles: Profile[]
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
@@ -224,6 +227,7 @@ export const defaultSettings: Settings = {
   keepTerminalsAliveOnClose: false,
   resizeSnapTolerance: 32,
   paneHeaderHeight: 28,
+  gitStatusPresentation: 'words',
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
@@ -272,6 +276,7 @@ export function normalizeSettings(value: unknown): Settings {
     keepTerminalsAliveOnClose: readBoolean(record?.keepTerminalsAliveOnClose, defaultSettings.keepTerminalsAliveOnClose),
     resizeSnapTolerance: readNumberInRange(record?.resizeSnapTolerance, defaultSettings.resizeSnapTolerance, 0, 128),
     paneHeaderHeight: readNumberInRange(record?.paneHeaderHeight, defaultSettings.paneHeaderHeight, 24, 56),
+    gitStatusPresentation: readGitStatusPresentation(record?.gitStatusPresentation),
     profiles,
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
@@ -711,6 +716,12 @@ function readTerminalThemeId(value: unknown): TerminalThemeId {
 
 function readTerminalCursorStyle(value: unknown): TerminalCursorStyle {
   return value === 'bar' || value === 'block' || value === 'underline' ? value : defaultSettings.cursorStyle
+}
+
+function readGitStatusPresentation(value: unknown): GitStatusPresentation {
+  return value === 'icons' || value === 'letters' || value === 'words'
+    ? value
+    : defaultSettings.gitStatusPresentation
 }
 
 function readChatPersonality(value: unknown): ChatPersonality {

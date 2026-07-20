@@ -131,6 +131,8 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
 
   const branchLabel = repoInfo.branch ?? repoInfo.detachedSha?.slice(0, 8) ?? 'Detached'
   const stateActive = repoInfo.state !== 'clean'
+  const repositoryLabel = repositoryPath.split('/').filter(Boolean).pop() ?? 'Workspace repo'
+  const repositoryDescription = repositoryPath ? `nested repository ${repositoryPath}` : 'workspace repository'
   const tabs: Array<{ id: GitTab; label: string; visible: boolean }> = [
     { id: 'changes', label: 'Changes', visible: true },
     { id: 'history', label: 'History', visible: true },
@@ -142,10 +144,11 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
   return (
     <div ref={setRootElement} className="git-window" data-git-window="true">
       <header className="git-window-statusbar">
-        <div className="git-window-repository-context" title={repositoryPath ? `Repository: ${repositoryPath}` : 'Workspace repository'}>
+        <div className="git-window-repository-context" title={`Git target: ${repositoryDescription}. Workspace, terminals, and AI scope stay unchanged.`}>
+          <span className="git-window-repository-label">Git target</span>
           <button type="button" onClick={onOpenWorkspaceRepository ?? undefined} disabled={!onOpenWorkspaceRepository} aria-label={repositoryPath ? 'Open workspace repository' : 'Workspace repository'}>
             <FolderGit2 size={13} strokeWidth={1.9} aria-hidden="true" />
-            <span>Workspace</span>
+            <span>Workspace repo</span>
           </button>
           {repositoryPath ? <><ChevronRight size={11} aria-hidden="true" /><code>{repositoryPath}</code></> : null}
         </div>
@@ -153,7 +156,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
           type="button"
           className="git-window-branch-pill"
           onClick={onOpenBranchPicker}
-          title={repoInfo.upstream ? `Switch branch — tracking ${repoInfo.upstream}` : 'Switch branch'}
+          title={repoInfo.upstream ? `Switch branch in ${repositoryDescription} — tracking ${repoInfo.upstream}` : `Switch branch in ${repositoryDescription}`}
         >
           <GitBranch size={13} strokeWidth={1.9} aria-hidden="true" />
           <span className="git-window-branch-name">{branchLabel}</span>
@@ -164,9 +167,9 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
         <span className="git-window-sync-count" title="Behind" data-zero={repoInfo.behind === 0 || undefined}>↓{repoInfo.behind}</span>
         <span className="git-window-status-spacer" />
         <button type="button" title="Refresh" aria-label="Refresh" onClick={onRefresh} disabled={refreshing}><RefreshCw size={14} strokeWidth={1.9} className={refreshing ? 'spin' : undefined} aria-hidden="true" /></button>
-        <button type="button" title="Fetch" aria-label="Fetch" onClick={onFetch}><CloudDownload size={14} strokeWidth={1.9} aria-hidden="true" /></button>
-        <button type="button" title="Pull" aria-label="Pull" onClick={onPull}><RotateCcw size={14} strokeWidth={1.9} aria-hidden="true" /></button>
-        <button type="button" title="Push" aria-label="Push" onClick={onPush}><CloudUpload size={14} strokeWidth={1.9} aria-hidden="true" /></button>
+        <button type="button" title={`Fetch ${repositoryDescription}`} aria-label={`Fetch ${repositoryDescription}`} onClick={onFetch}><CloudDownload size={14} strokeWidth={1.9} aria-hidden="true" /></button>
+        <button type="button" title={`Pull ${repositoryDescription}`} aria-label={`Pull ${repositoryDescription}`} onClick={onPull}><RotateCcw size={14} strokeWidth={1.9} aria-hidden="true" /></button>
+        <button type="button" title={`Push ${repositoryDescription}`} aria-label={`Push ${repositoryDescription}`} onClick={onPush}><CloudUpload size={14} strokeWidth={1.9} aria-hidden="true" /></button>
       </header>
 
       {stateActive ? (
@@ -201,7 +204,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
               />
               <div className="git-window-commit-controls">
                 <label><input type="checkbox" checked={amend} onChange={(event) => onAmendChange(event.target.checked)} /> Amend</label>
-                <button type="button" className="git-window-commit-button" onClick={onCommit} disabled={!canCommit}><GitCommit size={14} strokeWidth={1.9} aria-hidden="true" /> Commit</button>
+                <button type="button" className="git-window-commit-button" title={`Commit staged changes to ${repositoryDescription}`} onClick={onCommit} disabled={!canCommit}><GitCommit size={14} strokeWidth={1.9} aria-hidden="true" /> Commit · {repositoryLabel}</button>
               </div>
             </div>
             <div className="git-window-explorer-handoff">

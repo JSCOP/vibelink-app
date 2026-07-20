@@ -62,7 +62,7 @@ describe('ExplorerWindow Git integration', () => {
     expect((await screen.findAllByLabelText(/1 changed path.*1 modified/)).length).toBeGreaterThanOrEqual(2)
     fireEvent.click(screen.getByLabelText('Expand src'))
     const changed = await screen.findByText('changed.ts')
-    expect(screen.getByTitle('Working tree: Modified')).toBeTruthy()
+    expect(screen.getByTitle('Modified — tracked file content changed; not staged for the next commit.')).toBeTruthy()
 
     fireEvent.click(changed)
     await waitFor(() => expect(useGitStore.getState().sessions['session-1']).toMatchObject({
@@ -95,8 +95,8 @@ test('discovers an uninitialized submodule and separates repository from pointer
 
   render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
   fireEvent.click(await screen.findByLabelText('Expand modules'))
-  expect(await screen.findByText('SUB')).toBeTruthy()
-  expect(screen.getByText('INIT')).toBeTruthy()
+  expect(await screen.findByText('Submodule')).toBeTruthy()
+  expect(screen.getByText('Not initialized')).toBeTruthy()
 
   const childRow = screen.getByText('child').closest('.explorer-tree-row') as HTMLElement
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })

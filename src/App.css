@@ -4075,6 +4075,14 @@ button.git-window-primary-action,
   min-width: 0;
 }
 
+.git-window-repository-label {
+  color: var(--vibelink-muted);
+  flex: 0 0 auto;
+  font: 700 8px/1 var(--vibelink-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .git-window-repository-context > button {
   align-items: center;
   border: 0;
