@@ -14,7 +14,7 @@ import { TEMPLATES, type GridTemplate } from './templates'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { withSuppressedPanelRemoval } from './suppression'
 import { paneIdFromEventTarget } from './paneActivation'
-import { nearestPaneIdInDirection, swapPanelIdsInDockviewLayout, type PaneDirection } from './paneSwap'
+import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelIdsInDockviewLayout, type PaneDirection } from './paneSwap'
 import type { PaneDropPosition } from './paneDrag'
 import { connectedResizeHandles, createConnectedResizeDragSession, createSingleResizeDragSession, resizeConnectedBoundaryForPane, resizeLiveTargetSizes, singleResizeHandleAt, singleResizeHandles, type ConnectedResizeHandle, type ResizeDirection, type ResizeDragSession } from './connectedResize'
 import { shouldShowResizeGuide } from './resizePreviewPolicy'
@@ -1180,21 +1180,12 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (!api || !activePanel) return
 
     const targetId = nearestPaneIdInDirection(activePanel.id, api.panels.map((panel) => panel.id), direction, getPaneRect)
-    const target = targetId ? api.getPanel(targetId) : undefined
-    if (target) {
-      target.api.setActive()
-      if (useWorkspaceStore.getState().panes[target.id]) useWorkspaceStore.getState().clearPaneCompletionHighlight(target.id)
-      TerminalManager.focus(target.id)
-      return
-    }
-
-    if (direction === 'left' || direction === 'up') api.moveToPrevious()
-    else api.moveToNext()
-    const focusedPanelId = api.activePanel?.id
-    if (focusedPanelId) {
-      if (useWorkspaceStore.getState().panes[focusedPanelId]) useWorkspaceStore.getState().clearPaneCompletionHighlight(focusedPanelId)
-      TerminalManager.focus(focusedPanelId)
-    }
+    if (!targetId) return
+    const target = api.getPanel(targetId)
+    if (!target) return
+    target.api.setActive()
+    if (useWorkspaceStore.getState().panes[target.id]) useWorkspaceStore.getState().clearPaneCompletionHighlight(target.id)
+    TerminalManager.focus(target.id)
   }, [])
 
   const movePaneInDirection = useCallback((paneId: string, direction: PaneDirection) => {
@@ -1212,14 +1203,18 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
     if (!api || !sessionId) return
     const currentPanes = Object.values(useWorkspaceStore.getState().panes)
     if (currentPanes.length === 0) return
+    const panesById = new Map(currentPanes.map((pane) => [pane.id, pane]))
+    const orderedPanes = paneIdsInReadingOrder(currentPanes.map((pane) => pane.id), getPaneRect)
+      .map((paneId) => panesById.get(paneId))
+      .filter((pane): pane is PaneMeta => pane !== undefined)
     const rect = terminalDockRef.current?.getBoundingClientRect()
     const aspectRatio = rect && rect.width > 0 && rect.height > 0 ? rect.width / rect.height : 1
     const requestedGrid = requestedGridOverride ?? terminalGridPreference
-    const preferredGrid = requestedGrid ? expandGridRowsForPaneCount(requestedGrid, currentPanes.length) : null
+    const preferredGrid = requestedGrid ? expandGridRowsForPaneCount(requestedGrid, orderedPanes.length) : null
     if (requestedGridOverride) setTerminalGridPreference({ cols: requestedGridOverride.cols, rows: requestedGridOverride.rows })
-    const grid = preferredGrid ?? exactTemplateGridForPaneCount(currentPanes.length, aspectRatio) ?? balancedGridForPaneCount(currentPanes.length, aspectRatio)
+    const grid = preferredGrid ?? exactTemplateGridForPaneCount(orderedPanes.length, aspectRatio) ?? balancedGridForPaneCount(orderedPanes.length, aspectRatio)
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      applyGridLayout(api, grid, currentPanes, [], preferredGrid ? { sparseMode: 'rows' } : undefined)
+      applyGridLayout(api, grid, orderedPanes, [], preferredGrid ? { sparseMode: 'rows' } : undefined)
       layoutTerminalDockview(api)
       reflowTerminalsAfterLayout({ syncPty: true, recover: true })
       loadedSessionRef.current = sessionId

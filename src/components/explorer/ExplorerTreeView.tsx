@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ChevronDown, ChevronRight, File, Folder, FolderOpen, Link2, LoaderCircle } from 'lucide-react'
+import { ChevronDown, ChevronRight, File, Folder, FolderGit2, FolderOpen, Link2, LoaderCircle } from 'lucide-react'
 import type { ChangeType } from '../../ipc/types'
 import type { ExplorerChangeSummary, ExplorerGitDecoration, ExplorerNode } from '../../state/explorer'
 import './ExplorerTreeView.css'
@@ -51,7 +51,7 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
           {rows.map((virtualRow) => {
             const node = nodes[virtualRow.index]
             if (!node) return null
-            const Icon = node.entry.isSymlink ? Link2 : node.entry.isDir ? (node.expanded ? FolderOpen : Folder) : File
+            const Icon = node.entry.isSymlink ? Link2 : node.entry.repoKind ? FolderGit2 : node.entry.isDir ? (node.expanded ? FolderOpen : Folder) : File
             return (
               <div
                 key={node.path}
@@ -64,7 +64,9 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
                 data-drag-over={dragOverPath === node.path || undefined}
                 data-git-state={node.decoration?.conflicted ? 'conflicted' : node.decoration?.unstaged ? 'unstaged' : node.decoration?.untracked ? 'untracked' : node.decoration?.staged ? 'staged' : undefined}
                 data-git-only={node.gitOnly || undefined}
-                draggable={!node.gitOnly}
+                data-repository-kind={node.entry.repoKind ?? undefined}
+                data-repository-initialized={node.entry.repositoryInitialized === false ? 'false' : undefined}
+                draggable={!node.gitOnly && !node.entry.repoKind}
                 style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)`, '--explorer-depth': node.depth } as React.CSSProperties}
                 onClick={() => onSelect(node)}
                 onDoubleClick={() => onToggle(node)}
@@ -79,6 +81,8 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
                 {renamingPath === node.path ? (
                   <input className="explorer-tree-rename" autoFocus value={renameValue} onChange={(event) => onRenameValueChange(event.target.value)} onBlur={onCommitRename} onKeyDown={(event) => { if (event.key === 'Enter') onCommitRename(); if (event.key === 'Escape') onCancelRename() }} />
                 ) : <span className="explorer-tree-name">{node.name}</span>}
+                {node.repositoryRef ? <span className="explorer-repository-ref" title={`Checked out ${node.repositoryRef}`}>{node.repositoryRef}</span> : null}
+                {node.entry.repoKind ? <RepositoryBadges node={node} /> : null}
                 {node.changeSummary ? <ChangeSummaryBadges summary={node.changeSummary} /> : null}
                 {node.decoration ? <DecorationBadges decoration={node.decoration} /> : null}
               </div>
@@ -122,11 +126,25 @@ const CHANGE_TITLE_BY_TYPE: Record<ChangeType, string> = {
 
 function DecorationBadges({ decoration }: { decoration: ExplorerGitDecoration }) {
   if (decoration.conflicted) return <span className="explorer-git-badges"><em className="explorer-tree-badge" data-area="conflicted" title="Merge conflict">!</em></span>
+  const submodule = decoration.repoKind === 'submodule' ? decoration.submoduleState : null
   return (
     <span className="explorer-git-badges">
       {decoration.staged ? <em className="explorer-tree-badge" data-area="staged" data-change-type={decoration.staged} title={`Staged: ${CHANGE_TITLE_BY_TYPE[decoration.staged]}`}>{CHANGE_BADGE_BY_TYPE[decoration.staged]}</em> : null}
-      {decoration.unstaged ? <em className="explorer-tree-badge" data-area="unstaged" data-change-type={decoration.unstaged} title={`Working tree: ${CHANGE_TITLE_BY_TYPE[decoration.unstaged]}`}>{CHANGE_BADGE_BY_TYPE[decoration.unstaged]}</em> : null}
+      {submodule?.commitChanged ? <em className="explorer-tree-badge" data-area="submodule-pointer" title="Submodule commit differs from the parent repository">P</em> : null}
+      {submodule?.modified ? <em className="explorer-tree-badge" data-area="submodule-modified" title="Submodule contains modified tracked files">M</em> : null}
+      {submodule?.untracked ? <em className="explorer-tree-badge" data-area="submodule-untracked" title="Submodule contains untracked files">U</em> : null}
+      {!submodule && decoration.unstaged ? <em className="explorer-tree-badge" data-area="unstaged" data-change-type={decoration.unstaged} title={`Working tree: ${CHANGE_TITLE_BY_TYPE[decoration.unstaged]}`}>{CHANGE_BADGE_BY_TYPE[decoration.unstaged]}</em> : null}
       {decoration.untracked ? <em className="explorer-tree-badge" data-area="untracked" data-change-type="untracked" title="Untracked">U</em> : null}
+    </span>
+  )
+}
+
+function RepositoryBadges({ node }: { node: ExplorerNode }) {
+  const kind = node.entry.repoKind === 'submodule' ? 'SUB' : 'REPO'
+  return (
+    <span className="explorer-repository-badges">
+      <em data-kind={node.entry.repoKind} title={node.entry.repoKind === 'submodule' ? 'Git submodule repository boundary' : 'Nested Git repository boundary'}>{kind}</em>
+      {node.entry.repositoryInitialized === false ? <em data-state="uninitialized" title="Submodule is not initialized">INIT</em> : null}
     </span>
   )
 }

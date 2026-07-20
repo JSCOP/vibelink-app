@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, ChevronRight, CloudDownload, CloudUpload, FolderGit2, GitBranch, GitCommit, LoaderCircle, Minus, Plus, RefreshCw, RotateCcw, Undo2, X } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
 import type { ComponentType, ReactNode } from 'react'
 import type { CiStatus, FileContents, RepoInfo, WorkingStatus } from '../../ipc/types'
@@ -41,6 +41,7 @@ export type GitCloneViewState = {
 export type GitWindowViewProps = {
   setRootElement: (element: HTMLDivElement | null) => void
   workspaceFolder: string | null
+  repositoryPath: string
   repoInfo: RepoInfo | null
   status: WorkingStatus | null
   refreshing: boolean
@@ -57,6 +58,7 @@ export type GitWindowViewProps = {
   diffLoading: boolean
   diffError: string | null
   clone: GitCloneViewState
+  onOpenWorkspaceRepository: (() => void) | null
   onRefresh: () => void
   onInitialize: () => void
   onOpenClone: () => void
@@ -86,7 +88,7 @@ function GitActionButton({ action, subject }: { action: GitRowAction; subject?: 
   )
 }
 
-export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
+export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, contents, diffLoading, diffError, clone, onOpenWorkspaceRepository, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
   if (!workspaceFolder) {
     return (
       <div ref={setRootElement} className="git-window git-window-empty" data-git-window="true">
@@ -140,6 +142,13 @@ export function GitWindowView({ setRootElement, workspaceFolder, repoInfo, statu
   return (
     <div ref={setRootElement} className="git-window" data-git-window="true">
       <header className="git-window-statusbar">
+        <div className="git-window-repository-context" title={repositoryPath ? `Repository: ${repositoryPath}` : 'Workspace repository'}>
+          <button type="button" onClick={onOpenWorkspaceRepository ?? undefined} disabled={!onOpenWorkspaceRepository} aria-label={repositoryPath ? 'Open workspace repository' : 'Workspace repository'}>
+            <FolderGit2 size={13} strokeWidth={1.9} aria-hidden="true" />
+            <span>Workspace</span>
+          </button>
+          {repositoryPath ? <><ChevronRight size={11} aria-hidden="true" /><code>{repositoryPath}</code></> : null}
+        </div>
         <button
           type="button"
           className="git-window-branch-pill"

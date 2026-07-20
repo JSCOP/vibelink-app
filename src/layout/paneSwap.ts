@@ -9,6 +9,50 @@ export type PaneRect = {
   height: number
 }
 
+type PositionedPane = {
+  id: string
+  index: number
+  rect: PaneRect
+}
+
+export function paneIdsInReadingOrder(
+  paneIds: string[],
+  rectForPane: (paneId: string) => PaneRect | null,
+): string[] {
+  const unresolved: string[] = []
+  const positioned: PositionedPane[] = []
+  for (const [index, id] of paneIds.entries()) {
+    const rect = rectForPane(id)
+    if (!rect || rect.width <= 0 || rect.height <= 0) unresolved.push(id)
+    else positioned.push({ id, index, rect })
+  }
+
+  positioned.sort((left, right) => (left.rect.top + left.rect.height / 2) - (right.rect.top + right.rect.height / 2)
+    || left.rect.left - right.rect.left
+    || left.index - right.index)
+
+  const rows: Array<{ top: number; bottom: number; panes: PositionedPane[] }> = []
+  for (const pane of positioned) {
+    const row = rows.find((candidate) => Math.max(0, Math.min(candidate.bottom, pane.rect.bottom) - Math.max(candidate.top, pane.rect.top)) > Math.min(candidate.bottom - candidate.top, pane.rect.height) / 2)
+    if (!row) {
+      rows.push({ top: pane.rect.top, bottom: pane.rect.bottom, panes: [pane] })
+      continue
+    }
+    row.top = Math.min(row.top, pane.rect.top)
+    row.bottom = Math.max(row.bottom, pane.rect.bottom)
+    row.panes.push(pane)
+  }
+
+  rows.sort((left, right) => (left.top + (left.bottom - left.top) / 2) - (right.top + (right.bottom - right.top) / 2))
+  return [
+    ...rows.flatMap((row) => row.panes
+      .sort((left, right) => left.rect.left - right.rect.left || left.rect.top - right.rect.top || left.index - right.index)
+      .map((pane) => pane.id)),
+    ...unresolved,
+  ]
+}
+
+
 export function nearestPaneIdInDirection(
   activePaneId: string,
   paneIds: string[],
@@ -31,10 +75,20 @@ export function nearestPaneIdInDirection(
 
 function isInDirection(active: PaneRect, candidate: PaneRect, direction: PaneDirection): boolean {
   const tolerance = 2
-  if (direction === 'left') return candidate.right <= active.left + tolerance
-  if (direction === 'right') return candidate.left >= active.right - tolerance
-  if (direction === 'up') return candidate.bottom <= active.top + tolerance
-  return candidate.top >= active.bottom - tolerance
+  if (direction === 'left' || direction === 'right') {
+    if (axisOverlap(active.top, active.bottom, candidate.top, candidate.bottom) <= tolerance) return false
+    return direction === 'left'
+      ? candidate.right <= active.left + tolerance
+      : candidate.left >= active.right - tolerance
+  }
+  if (axisOverlap(active.left, active.right, candidate.left, candidate.right) <= tolerance) return false
+  return direction === 'up'
+    ? candidate.bottom <= active.top + tolerance
+    : candidate.top >= active.bottom - tolerance
+}
+
+function axisOverlap(firstStart: number, firstEnd: number, secondStart: number, secondEnd: number): number {
+  return Math.max(0, Math.min(firstEnd, secondEnd) - Math.max(firstStart, secondStart))
 }
 
 function directionalDistance(active: PaneRect, candidate: PaneRect, direction: PaneDirection): number {

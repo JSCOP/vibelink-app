@@ -3,7 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GitBranch as GitBranchIcon } from 'lucide-react'
 import type { BranchInfo, CloneProgress, FileContents, WorkingStatus } from '../../ipc/types'
-import { emptyGitSessionState, useGitStore, type GitDiffArea, type GitTab } from '../../state/git'
+import { emptyGitSessionState, repositoryFolder, repositoryStateFor, useGitStore, type GitDiffArea, type GitTab } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { QuickPick } from '../QuickPick'
 import type { PickerEntry } from '../pickerModel'
@@ -20,18 +20,17 @@ export function GitWindow() {
   const sessions = useWorkspaceStore((state) => state.sessions)
   const workspaceFolder = useMemo(() => sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null, [sessionId, sessions])
   const gitState = useGitStore((state) => sessionId ? state.sessions[sessionId] : undefined) ?? emptyGitSessionState
-  const selectedGitTarget = useMemo(() => {
-    const selectedWorkspaceFolder = gitState.selectedRepoRoot && workspaceFolder
-      ? `${workspaceFolder.replace(/[\\/]+$/, '')}/${gitState.selectedRepoRoot}`
-      : workspaceFolder
-    const selectedPath = gitState.selectedRepoRoot && gitState.selectedPath
-      ? gitState.selectedPath.slice(gitState.selectedRepoRoot.length).replace(/^\/+/, '')
-      : gitState.selectedPath
-    return { workspaceFolder: selectedWorkspaceFolder, path: selectedPath }
-  }, [gitState.selectedPath, gitState.selectedRepoRoot, workspaceFolder])
-  const refreshGit = useGitStore((state) => state.refreshGit)
+  const activeRepoRoot = gitState.activeRepoRoot
+  const activeRepository = repositoryStateFor(gitState, activeRepoRoot)
+  const activeWorkspaceFolder = workspaceFolder ? repositoryFolder(workspaceFolder, activeRepoRoot) : null
+  const selectedRelativePath = useMemo(() => {
+    if (!gitState.selectedPath || gitState.selectedRepoRoot !== activeRepoRoot) return null
+    return activeRepoRoot ? gitState.selectedPath.slice(activeRepoRoot.length).replace(/^\/+/, '') : gitState.selectedPath
+  }, [activeRepoRoot, gitState.selectedPath, gitState.selectedRepoRoot])
+  const refreshRepository = useGitStore((state) => state.refreshRepository)
   const refreshHosting = useGitStore((state) => state.refreshHosting)
   const runGitMutation = useGitStore((state) => state.runGitMutation)
+  const setActiveRepository = useGitStore((state) => state.setActiveRepository)
   const setSelectedPath = useGitStore((state) => state.setSelectedPath)
   const setActiveTab = useGitStore((state) => state.setActiveTab)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -51,59 +50,51 @@ export function GitWindow() {
   const [cloneProgress, setCloneProgress] = useState<string[]>([])
   const [cloneRunning, setCloneRunning] = useState(false)
 
-
   useEffect(() => {
     if (!sessionId) return
-    void refreshGit(sessionId, workspaceFolder)
-    void refreshHosting(sessionId, workspaceFolder)
+    void refreshRepository(sessionId, workspaceFolder, activeRepoRoot)
+    void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, activeRepoRoot)
     const timer = window.setInterval(() => {
       if (rootRef.current?.offsetParent !== null) {
-        void refreshGit(sessionId, workspaceFolder)
-        void refreshHosting(sessionId, workspaceFolder)
+        void refreshRepository(sessionId, workspaceFolder, activeRepoRoot)
+        void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, activeRepoRoot)
       }
     }, 3_000)
     return () => window.clearInterval(timer)
-  }, [refreshGit, refreshHosting, sessionId, workspaceFolder])
+  }, [activeRepoRoot, refreshHosting, refreshRepository, sessionId, workspaceFolder])
 
-  const status = gitState.status ?? EMPTY_STATUS
+  const status = activeRepository.status ?? EMPTY_STATUS
   const orderedEntries = useMemo(
     () => [...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked],
     [status.conflicted, status.staged, status.unstaged, status.untracked],
   )
 
-
   useEffect(() => {
-    if (!gitState.status || !sessionId) return
+    if (!activeRepository.status || !sessionId) return
     const timer = window.setTimeout(() => {
-      const selectedPath = gitState.selectedPath
-      if (selectedPath && gitState.selectedRepoRoot) {
-        setSelectedArea(gitState.selectedArea ?? 'unstaged')
-        return
-      }
-      const selectedEntry = selectedPath ? orderedEntries.find((entry) => entry.path === selectedPath) : null
+      const selectedEntry = selectedRelativePath ? orderedEntries.find((entry) => entry.path === selectedRelativePath) : null
       const selectedExists = Boolean(selectedEntry && !selectedEntry.repoKind && !selectedEntry.path.endsWith('/'))
-      if (selectedExists && selectedPath) {
-        const hasWorkingTreeChange = status.conflicted.some((entry) => entry.path === selectedPath)
-          || status.unstaged.some((entry) => entry.path === selectedPath)
-          || status.untracked.some((entry) => entry.path === selectedPath)
+      if (selectedExists && selectedRelativePath) {
+        const hasWorkingTreeChange = status.conflicted.some((entry) => entry.path === selectedRelativePath)
+          || status.unstaged.some((entry) => entry.path === selectedRelativePath)
+          || status.untracked.some((entry) => entry.path === selectedRelativePath)
         setSelectedArea(hasWorkingTreeChange ? 'unstaged' : 'staged')
         return
       }
       const first = orderedEntries.find((entry) => !entry.repoKind && !entry.path.endsWith('/')) ?? null
       const area: GitDiffArea = first && status.staged.some((entry) => entry.path === first.path) ? 'staged' : 'unstaged'
-      setSelectedPath(sessionId, first?.path ?? null, null, area)
+      const fullPath = first ? (activeRepoRoot ? `${activeRepoRoot}/${first.path}` : first.path) : null
+      setSelectedPath(sessionId, fullPath, activeRepoRoot, area)
       setSelectedArea(area)
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [gitState.selectedArea, gitState.selectedPath, gitState.selectedRepoRoot, gitState.status, orderedEntries, sessionId, setSelectedPath, status.conflicted, status.staged, status.unstaged, status.untracked])
+  }, [activeRepoRoot, activeRepository.status, orderedEntries, selectedRelativePath, sessionId, setSelectedPath, status.conflicted, status.staged, status.unstaged, status.untracked])
 
   useEffect(() => {
     const generation = diffRequestGeneration.current + 1
     diffRequestGeneration.current = generation
     const timer = window.setTimeout(() => {
-      const diffWorkspaceFolder = selectedGitTarget.workspaceFolder
-      const diffPath = selectedGitTarget.path
-      if (!diffWorkspaceFolder || !diffPath) {
+      if (!activeWorkspaceFolder || !selectedRelativePath) {
         setContents(null)
         setDiffError(null)
         setDiffLoading(false)
@@ -112,7 +103,7 @@ export function GitWindow() {
       setContents(null)
       setDiffLoading(true)
       setDiffError(null)
-      void invoke<FileContents>('git_working_file_contents', { workspaceFolder: diffWorkspaceFolder, path: diffPath, area: selectedArea })
+      void invoke<FileContents>('git_working_file_contents', { workspaceFolder: activeWorkspaceFolder, path: selectedRelativePath, area: selectedArea })
         .then((next) => { if (diffRequestGeneration.current === generation) setContents(next) })
         .catch((reason) => {
           if (diffRequestGeneration.current === generation) { setContents(null); setDiffError(String(reason)) }
@@ -120,71 +111,72 @@ export function GitWindow() {
         .finally(() => { if (diffRequestGeneration.current === generation) setDiffLoading(false) })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [diffRefreshRevision, selectedArea, selectedGitTarget])
+  }, [activeWorkspaceFolder, diffRefreshRevision, selectedArea, selectedRelativePath])
+
+  const runActiveMutation = useCallback(async (operation: () => Promise<unknown>) => {
+    if (!sessionId || !workspaceFolder) return
+    await runGitMutation(sessionId, workspaceFolder, operation, activeRepoRoot)
+    setDiffRefreshRevision((current) => current + 1)
+  }, [activeRepoRoot, runGitMutation, sessionId, workspaceFolder])
 
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
-    if (!sessionId || !workspaceFolder) return
-    void runGitMutation(sessionId, workspaceFolder, operation).then(() => {
-      setDiffRefreshRevision((current) => current + 1)
-      after?.()
-    }).catch(() => {})
-  }, [runGitMutation, sessionId, workspaceFolder])
-
+    void runActiveMutation(operation).then(after).catch(() => {})
+  }, [runActiveMutation])
 
   const discard = useCallback((paths: string[], untracked: boolean) => {
-    if (!workspaceFolder || paths.length === 0) return
+    if (!activeWorkspaceFolder || paths.length === 0) return
     const message = untracked
       ? `Discard ${paths.length === 1 ? paths[0] : `${paths.length} untracked files`}? (moves to Recycle Bin)`
       : `Discard changes in ${paths.length === 1 ? paths[0] : `${paths.length} files`}? This cannot be undone.`
     if (!window.confirm(message)) return
-    mutate(() => invoke('git_discard', { workspaceFolder, paths }))
-  }, [mutate, workspaceFolder])
+    mutate(() => invoke('git_discard', { workspaceFolder: activeWorkspaceFolder, paths }))
+  }, [activeWorkspaceFolder, mutate])
 
   const rowAction = useCallback((id: string, label: string, action: () => void, danger = false): GitRowAction => ({ id, label, danger, onClick: action }), [])
-
-
-  const groups = useMemo<GitChangeGroup[]>(() => [
-    {
-      id: 'conflicted',
-      title: 'Merge Conflicts',
-      count: status.conflicted.length,
-      actions: [],
-    },
-    {
-      id: 'staged',
-      title: 'Staged',
-      count: status.staged.length,
-      actions: status.staged.length > 0 ? [rowAction('unstage-all', 'Unstage All', () => mutate(() => invoke('git_unstage_all', { workspaceFolder })))] : [],
-    },
-    {
-      id: 'unstaged',
-      title: 'Changes',
-      count: status.unstaged.length,
-      actions: status.unstaged.length > 0 ? [
-        rowAction('stage-all', 'Stage All', () => mutate(() => invoke('git_stage_all', { workspaceFolder }))),
-        rowAction('discard-all', 'Discard All', () => discard(status.unstaged.map((entry) => entry.path), false), true),
-      ] : [],
-    },
-    {
-      id: 'untracked',
-      title: 'Untracked',
-      count: status.untracked.length,
-      actions: status.untracked.length > 0 ? [
-        rowAction('stage-all', 'Stage All', () => mutate(() => invoke('git_stage_all', { workspaceFolder }))),
-        rowAction('discard-all', 'Discard All', () => discard(status.untracked.map((entry) => entry.path), true), true),
-      ] : [],
-    },
-  ], [discard, mutate, rowAction, status, workspaceFolder])
+  const groups = useMemo<GitChangeGroup[]>(() => {
+    const stageableUnstaged = status.unstaged
+      .filter((entry) => !entry.repoKind || (entry.repoKind === 'submodule' && entry.submoduleState?.commitChanged))
+      .map((entry) => entry.path)
+    const discardableUnstaged = status.unstaged.filter((entry) => !entry.repoKind).map((entry) => entry.path)
+    const stageableUntracked = status.untracked.filter((entry) => !entry.repoKind).map((entry) => entry.path)
+    return [
+      { id: 'conflicted', title: 'Merge Conflicts', count: status.conflicted.length, actions: [] },
+      {
+        id: 'staged',
+        title: 'Staged',
+        count: status.staged.length,
+        actions: status.staged.length > 0 ? [rowAction('unstage-all', 'Unstage All', () => mutate(() => invoke('git_unstage_all', { workspaceFolder: activeWorkspaceFolder })))] : [],
+      },
+      {
+        id: 'unstaged',
+        title: 'Changes',
+        count: status.unstaged.length,
+        actions: [
+          ...(stageableUnstaged.length > 0 ? [rowAction('stage-all', 'Stage All', () => mutate(() => invoke('git_stage', { workspaceFolder: activeWorkspaceFolder, paths: stageableUnstaged })))] : []),
+          ...(discardableUnstaged.length > 0 ? [rowAction('discard-all', 'Discard All', () => discard(discardableUnstaged, false), true)] : []),
+        ],
+      },
+      {
+        id: 'untracked',
+        title: 'Untracked',
+        count: status.untracked.length,
+        actions: stageableUntracked.length > 0 ? [
+          rowAction('stage-all', 'Stage All', () => mutate(() => invoke('git_stage', { workspaceFolder: activeWorkspaceFolder, paths: stageableUntracked }))),
+          rowAction('discard-all', 'Discard All', () => discard(stageableUntracked, true), true),
+        ] : [],
+      },
+    ]
+  }, [activeWorkspaceFolder, discard, mutate, rowAction, status])
 
   const openBranchPicker = useCallback(() => {
-    if (!workspaceFolder) return
-    void invoke<BranchInfo[]>('git_branches', { workspaceFolder })
+    if (!activeWorkspaceFolder) return
+    void invoke<BranchInfo[]>('git_branches', { workspaceFolder: activeWorkspaceFolder })
       .then((items) => {
         setBranches(items.filter((branch) => !branch.isRemote))
         setBranchPickerOpen(true)
       })
       .catch(() => {})
-  }, [workspaceFolder])
+  }, [activeWorkspaceFolder])
 
   const branchEntries = useCallback((filter: string): PickerEntry<string>[] => branches
     .filter((branch) => branch.name.toLowerCase().includes(filter.toLowerCase()))
@@ -221,59 +213,66 @@ export function GitWindow() {
     onClose: () => { if (!cloneRunning) setCloneOpen(false) },
   }
 
-  const repoInfo = gitState.repoInfo
-  const continueState = repoInfo?.state === 'rebasing' && workspaceFolder
-    ? () => mutate(() => invoke('git_rebase_continue', { workspaceFolder }))
+  const repoInfo = activeRepository.repoInfo
+  const continueState = repoInfo?.state === 'rebasing' && activeWorkspaceFolder
+    ? () => mutate(() => invoke('git_rebase_continue', { workspaceFolder: activeWorkspaceFolder }))
     : null
-  const abortState = repoInfo?.state === 'rebasing' && workspaceFolder
-    ? () => mutate(() => invoke('git_rebase_abort', { workspaceFolder }))
-    : repoInfo?.state === 'merging' && workspaceFolder
-      ? () => mutate(() => invoke('git_merge_abort', { workspaceFolder }))
+  const abortState = repoInfo?.state === 'rebasing' && activeWorkspaceFolder
+    ? () => mutate(() => invoke('git_rebase_abort', { workspaceFolder: activeWorkspaceFolder }))
+    : repoInfo?.state === 'merging' && activeWorkspaceFolder
+      ? () => mutate(() => invoke('git_merge_abort', { workspaceFolder: activeWorkspaceFolder }))
       : null
 
   return (
     <>
       <GitWindowView
         setRootElement={(element) => { rootRef.current = element }}
-        workspaceFolder={workspaceFolder}
+        workspaceFolder={activeWorkspaceFolder}
+        repositoryPath={activeRepoRoot}
         repoInfo={repoInfo}
-        status={gitState.status}
-        refreshing={gitState.refreshing}
-        error={gitState.error}
+        status={activeRepository.status}
+        refreshing={activeRepository.refreshing}
+        error={activeRepository.error}
         activeTab={gitState.activeTab}
-        pullRequestsVisible={Boolean(gitState.hostingInfo?.provider)}
-        ciStatus={gitState.ciStatus}
+        pullRequestsVisible={Boolean(activeRepository.hostingInfo?.provider)}
+        ciStatus={activeRepository.ciStatus}
         commitMessage={commitMessage}
         amend={amend}
         canCommit={Boolean(commitMessage.trim()) && (amend || status.staged.length > 0)}
         groups={groups}
-        selectedPath={gitState.selectedPath}
+        selectedPath={selectedRelativePath}
         contents={contents}
         diffLoading={diffLoading}
         diffError={diffError}
         clone={clone}
+        onOpenWorkspaceRepository={activeRepoRoot && sessionId ? () => {
+          setActiveRepository(sessionId, '')
+          setSelectedPath(sessionId, null, '', null)
+          void refreshRepository(sessionId, workspaceFolder, '')
+          void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, '')
+        } : null}
         onRefresh={() => {
           if (!sessionId) return
-          void refreshGit(sessionId, workspaceFolder).then(() => setDiffRefreshRevision((current) => current + 1))
+          void refreshRepository(sessionId, workspaceFolder, activeRepoRoot).then(() => setDiffRefreshRevision((current) => current + 1))
         }}
-        onInitialize={() => mutate(() => invoke('git_init', { workspaceFolder }))}
+        onInitialize={() => mutate(() => invoke('git_init', { workspaceFolder: activeWorkspaceFolder }))}
         onOpenClone={() => setCloneOpen(true)}
         onOpenBranchPicker={openBranchPicker}
-        onFetch={() => mutate(() => invoke('git_fetch', { workspaceFolder, remote: null, prune: false, refspec: null }))}
-        onPull={() => mutate(() => invoke('git_pull', { workspaceFolder, rebase: false }))}
-        onPush={() => mutate(() => invoke('git_push', { workspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false }))}
+        onFetch={() => mutate(() => invoke('git_fetch', { workspaceFolder: activeWorkspaceFolder, remote: null, prune: false, refspec: null }))}
+        onPull={() => mutate(() => invoke('git_pull', { workspaceFolder: activeWorkspaceFolder, rebase: false }))}
+        onPush={() => mutate(() => invoke('git_push', { workspaceFolder: activeWorkspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false }))}
         onContinueState={continueState}
         onAbortState={abortState}
         onTabChange={(tab: GitTab) => { if (sessionId) setActiveTab(sessionId, tab) }}
         onCommitMessageChange={setCommitMessage}
         onAmendChange={setAmend}
         onCommit={() => mutate(
-          () => invoke<string>('git_commit', { workspaceFolder, message: commitMessage, amend, signoff: false }),
+          () => invoke<string>('git_commit', { workspaceFolder: activeWorkspaceFolder, message: commitMessage, amend, signoff: false }),
           () => setCommitMessage(''),
         )}
-        historyContent={sessionId && selectedGitTarget.workspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={selectedGitTarget.workspaceFolder} pathFilter={gitState.pathFilter} /> : null}
-        branchesContent={sessionId && workspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={workspaceFolder} repoInfo={repoInfo} status={status} /> : null}
-        pullRequestsContent={sessionId && workspaceFolder && repoInfo && gitState.hostingInfo ? <PullRequestsTab sessionId={sessionId} workspaceFolder={workspaceFolder} repoInfo={repoInfo} hostingInfo={gitState.hostingInfo} hostingError={gitState.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true)} /> : null}
+        historyContent={sessionId && activeWorkspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} pathFilter={gitState.pathFilter} onRunMutation={runActiveMutation} /> : null}
+        branchesContent={sessionId && activeWorkspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} status={status} onRunMutation={runActiveMutation} /> : null}
+        pullRequestsContent={sessionId && activeWorkspaceFolder && repoInfo && activeRepository.hostingInfo ? <PullRequestsTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} hostingInfo={activeRepository.hostingInfo} hostingError={activeRepository.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true, activeRepoRoot)} onRepositoryChanged={() => refreshRepository(sessionId, workspaceFolder, activeRepoRoot)} /> : null}
       />
       {branchPickerOpen && branches.length > 0 ? (
         <QuickPick
@@ -287,7 +286,7 @@ export function GitWindow() {
           onPreview={() => {}}
           onSelect={(branch) => {
             setBranchPickerOpen(false)
-            mutate(() => invoke('git_checkout', { workspaceFolder, refName: branch }))
+            mutate(() => invoke('git_checkout', { workspaceFolder: activeWorkspaceFolder, refName: branch }))
           }}
           onCancel={() => setBranchPickerOpen(false)}
         />

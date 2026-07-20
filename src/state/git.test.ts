@@ -4,7 +4,7 @@ import type { HostingInfo, RepoInfo, WorkingStatus } from '../ipc/types'
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 
-import { emptyGitSessionState, useGitStore } from './git'
+import { emptyGitRepositoryState, emptyGitSessionState, repositoryStateFor, useGitStore } from './git'
 
 const repoInfo: RepoInfo = {
   isRepo: true,
@@ -31,7 +31,18 @@ describe('git store', () => {
     await useGitStore.getState().refreshGit('session-1', 'C:/repo')
     expect(invoke).toHaveBeenCalledWith('git_repo_info', { workspaceFolder: 'C:/repo' })
     expect(invoke).toHaveBeenCalledWith('git_working_status', { workspaceFolder: 'C:/repo' })
-    expect(useGitStore.getState().sessions['session-1']).toMatchObject({ repoInfo, status, refreshing: false, error: null })
+    expect(repositoryStateFor(useGitStore.getState().sessions['session-1'], '')).toMatchObject({ repoInfo, status, refreshing: false, error: null })
+  })
+
+  test('stores nested repository state independently from the workspace repository', async () => {
+    invoke.mockImplementation(async (command: string) => command === 'git_repo_info' ? { ...repoInfo, root: 'C:/repo/vendor/tool', branch: null, detachedSha: 'a'.repeat(40) } : status)
+    await useGitStore.getState().refreshRepository('session-1', 'C:/repo', 'vendor/tool')
+    expect(invoke).toHaveBeenCalledWith('git_repo_info', { workspaceFolder: 'C:/repo/vendor/tool' })
+    expect(repositoryStateFor(useGitStore.getState().sessions['session-1'], 'vendor/tool')).toMatchObject({
+      repoInfo: { root: 'C:/repo/vendor/tool', branch: null, detachedSha: 'a'.repeat(40) },
+      status,
+    })
+    expect(repositoryStateFor(useGitStore.getState().sessions['session-1'], '').repoInfo).toBeNull()
   })
 
   test('refreshes after a successful mutation', async () => {
@@ -53,16 +64,16 @@ describe('git store', () => {
     await useGitStore.getState().refreshHosting('session-1', 'C:/repo', 'HEAD', true)
     expect(invoke).toHaveBeenCalledWith('hosting_detect', { workspaceFolder: 'C:/repo' })
     expect(invoke).toHaveBeenCalledWith('hosting_ci_status', { workspaceFolder: 'C:/repo', refName: 'HEAD' })
-    expect(useGitStore.getState().sessions['session-1']).toMatchObject({ hostingInfo, ciStatus: { state: 'success', checks: [] }, hostingError: null })
+    expect(repositoryStateFor(useGitStore.getState().sessions['session-1'], '')).toMatchObject({ hostingInfo, ciStatus: { state: 'success', checks: [] }, hostingError: null })
   })
 
   test('authentication failures keep the detected provider visible without changing local Git state', async () => {
-    useGitStore.setState({ sessions: { 'session-1': { ...emptyGitSessionState, repoInfo, status } } })
+    useGitStore.setState({ sessions: { 'session-1': { ...emptyGitSessionState, repositories: { '': { ...emptyGitRepositoryState, repoInfo, status } } } } })
     invoke.mockImplementation(async (command: string) => {
       if (command === 'hosting_detect') return hostingInfo
       throw 'AUTH: token rejected'
     })
     await useGitStore.getState().refreshHosting('session-1', 'C:/repo', 'HEAD', true)
-    expect(useGitStore.getState().sessions['session-1']).toMatchObject({ repoInfo, status, hostingInfo: { provider: 'github', tokenPresent: false }, ciStatus: null, hostingError: 'AUTH: token rejected' })
+    expect(repositoryStateFor(useGitStore.getState().sessions['session-1'], '')).toMatchObject({ repoInfo, status, hostingInfo: { provider: 'github', tokenPresent: false }, ciStatus: null, hostingError: 'AUTH: token rejected' })
   })
 })

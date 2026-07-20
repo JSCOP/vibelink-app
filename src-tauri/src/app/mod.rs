@@ -178,6 +178,8 @@ pub fn run() {
             git::branch::git_rebase_abort,
             git::branch::git_rebase_continue,
             git::status::git_repo_info,
+            git::submodule::git_submodule_sync,
+            git::submodule::git_submodule_update,
             git::git_snapshot_baseline,
             git::stage::git_stage,
             git::stage::git_stage_all,

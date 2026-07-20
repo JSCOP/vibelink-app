@@ -95,9 +95,11 @@ export type RepoInfo = {
 
 export type RepoKind = 'submodule' | 'nestedRepo'
 
-export type StatusEntry = { path: string; oldPath: string | null; changeType: ChangeType; repoKind?: RepoKind | null }
+export type SubmoduleState = { commitChanged: boolean; modified: boolean; untracked: boolean }
 
-export type GitDirEntry = { name: string; isDir: boolean; repoKind: RepoKind | null; ignored: boolean; changeType?: ChangeType | null; oldPath?: string | null; diffArea?: 'staged' | 'unstaged' | null }
+export type StatusEntry = { path: string; oldPath: string | null; changeType: ChangeType; repoKind?: RepoKind | null; submoduleState?: SubmoduleState | null }
+
+export type GitDirEntry = { name: string; isDir: boolean; repoKind: RepoKind | null; repositoryInitialized: boolean | null; ignored: boolean; changeType?: ChangeType | null; oldPath?: string | null; diffArea?: 'staged' | 'unstaged' | null }
 
 export type WorkingStatus = {
   staged: StatusEntry[]

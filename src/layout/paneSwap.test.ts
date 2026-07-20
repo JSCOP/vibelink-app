@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nearestPaneIdInDirection, swapPanelIdsInDockviewLayout, type PaneRect } from './paneSwap'
+import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelIdsInDockviewLayout, type PaneRect } from './paneSwap'
 
 describe('swapPanelIdsInDockviewLayout', () => {
   it('swaps pane ids between grid groups without changing panel state', () => {
@@ -81,6 +81,36 @@ describe('nearestPaneIdInDirection', () => {
 
   it('returns null instead of wrapping when no pane exists in that direction', () => {
     expect(nearestPaneIdInDirection('left', Object.keys(rects), 'left', (paneId) => rects[paneId] ?? null)).toBeNull()
+  })
+
+  it('does not jump diagonally into another row at a horizontal edge', () => {
+    const edgeRects: Record<string, PaneRect> = {
+      active: rect(300, 0, 100, 98),
+      'next-row': rect(402, 102, 100, 98),
+    }
+
+    expect(nearestPaneIdInDirection('active', Object.keys(edgeRects), 'right', (paneId) => edgeRects[paneId] ?? null)).toBeNull()
+  })
+})
+
+describe('paneIdsInReadingOrder', () => {
+  it('preserves visual positions when aligning a slightly uneven 4x2 grid', () => {
+    const rects: Record<string, PaneRect> = {
+      'top-1': rect(0, 0, 98, 98),
+      'top-2': rect(102, 2, 101, 96),
+      'top-3': rect(207, 1, 99, 100),
+      'top-4': rect(310, 0, 100, 97),
+      'bottom-1': rect(0, 103, 100, 97),
+      'bottom-2': rect(104, 101, 98, 99),
+      'bottom-3': rect(206, 105, 101, 95),
+      'bottom-4': rect(311, 102, 99, 98),
+    }
+    const storedOrder = ['bottom-3', 'top-1', 'bottom-1', 'top-4', 'top-2', 'bottom-4', 'top-3', 'bottom-2']
+
+    expect(paneIdsInReadingOrder(storedOrder, (paneId) => rects[paneId] ?? null)).toEqual([
+      'top-1', 'top-2', 'top-3', 'top-4',
+      'bottom-1', 'bottom-2', 'bottom-3', 'bottom-4',
+    ])
   })
 })
 

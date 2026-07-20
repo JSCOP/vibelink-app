@@ -7,6 +7,7 @@ pub(crate) mod paths;
 pub(crate) mod remote;
 pub(crate) mod stage;
 pub(crate) mod status;
+pub(crate) mod submodule;
 #[cfg(test)]
 mod test_support;
 

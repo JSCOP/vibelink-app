@@ -14,7 +14,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
 vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
 
-import { emptyGitSessionState, useGitStore } from '../../state/git'
+import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { GitWindow } from './GitWindow'
 
@@ -90,12 +90,27 @@ test('clears diff loading when refresh removes the selected file', async () => {
 })
 
 test('reroots diffs selected from a nested repository in Explorer', async () => {
+  const nestedStatus: WorkingStatus = {
+    staged: [],
+    unstaged: [{ path: 'src/changed.ts', oldPath: null, changeType: 'modified' }],
+    untracked: [],
+    conflicted: [],
+    truncated: false,
+  }
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return { ...repoInfo, root: 'C:/repo/vendor/tool', state: 'clean' }
+    if (command === 'git_working_status') return nestedStatus
+    if (command === 'git_working_file_contents') return { old: 'old', new: 'new', binary: false }
+    return null
+  })
   useGitStore.setState({
     sessions: {
       'session-1': {
         ...emptyGitSessionState,
-        repoInfo,
-        status,
+        repositories: {
+          'vendor/tool': { ...emptyGitRepositoryState, repoInfo: { ...repoInfo, root: 'C:/repo/vendor/tool', state: 'clean' }, status: nestedStatus },
+        },
+        activeRepoRoot: 'vendor/tool',
         selectedPath: 'vendor/tool/src/changed.ts',
         selectedRepoRoot: 'vendor/tool',
         selectedArea: 'unstaged',
@@ -109,5 +124,33 @@ test('reroots diffs selected from a nested repository in Explorer', async () => 
     path: 'src/changed.ts',
     area: 'unstaged',
   }))
+})
+
+test('shows the active nested repository breadcrumb and returns to the workspace repository', async () => {
+  const nestedRepoInfo = { ...repoInfo, root: 'C:/repo/vendor/tool', branch: null, detachedSha: 'b'.repeat(40), state: 'clean' as const }
+  const cleanStatus: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+  invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'git_repo_info') return args?.workspaceFolder === 'C:/repo/vendor/tool' ? nestedRepoInfo : repoInfo
+    if (command === 'git_working_status') return args?.workspaceFolder === 'C:/repo/vendor/tool' ? cleanStatus : status
+    return null
+  })
+  useGitStore.setState({
+    sessions: {
+      'session-1': {
+        ...emptyGitSessionState,
+        repositories: {
+          '': { ...emptyGitRepositoryState, repoInfo, status },
+          'vendor/tool': { ...emptyGitRepositoryState, repoInfo: nestedRepoInfo, status: cleanStatus },
+        },
+        activeRepoRoot: 'vendor/tool',
+      },
+    },
+  })
+
+  render(<GitWindow />)
+  expect(await screen.findByText('vendor/tool')).toBeTruthy()
+  expect(screen.getByText('bbbbbbbb')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Open workspace repository' }))
+  await waitFor(() => expect(useGitStore.getState().sessions['session-1'].activeRepoRoot).toBe(''))
 })
 

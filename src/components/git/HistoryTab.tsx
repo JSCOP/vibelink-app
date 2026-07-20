@@ -9,9 +9,10 @@ export type HistoryTabProps = {
   sessionId: string
   workspaceFolder: string
   pathFilter: string | null
+  onRunMutation: (operation: () => Promise<unknown>) => Promise<void>
 }
 
-export function HistoryTab({ sessionId, workspaceFolder, pathFilter }: HistoryTabProps) {
+export function HistoryTab({ sessionId, workspaceFolder, pathFilter, onRunMutation }: HistoryTabProps) {
   const [commits, setCommits] = useState<CommitInfo[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -31,7 +32,6 @@ export function HistoryTab({ sessionId, workspaceFolder, pathFilter }: HistoryTa
   const [contentsError, setContentsError] = useState<string | null>(null)
   const requestGeneration = useRef(0)
   const loadPageRef = useRef<(reset: boolean) => Promise<void>>(async () => {})
-  const runGitMutation = useGitStore((state) => state.runGitMutation)
   const setActiveTab = useGitStore((state) => state.setActiveTab)
 
   useEffect(() => {
@@ -137,16 +137,16 @@ export function HistoryTab({ sessionId, workspaceFolder, pathFilter }: HistoryTa
     if (!selectedSha) return
     const name = window.prompt('Branch name')?.trim()
     if (!name) return
-    void runGitMutation(sessionId, workspaceFolder, () => invoke('git_branch_create', { workspaceFolder, name, fromRef: selectedSha, checkout: false })).catch(() => {})
-  }, [runGitMutation, selectedSha, sessionId, workspaceFolder])
+    void onRunMutation(() => invoke('git_branch_create', { workspaceFolder, name, fromRef: selectedSha, checkout: false })).catch(() => {})
+  }, [onRunMutation, selectedSha, workspaceFolder])
 
   const createTag = useCallback(() => {
     if (!selectedSha) return
     const name = window.prompt('Tag name')?.trim()
     if (!name) return
     const message = window.prompt('Annotation message (leave empty for lightweight tag)')?.trim() ?? ''
-    void runGitMutation(sessionId, workspaceFolder, () => invoke('git_tag_create', { workspaceFolder, name, refName: selectedSha, message: message || null })).catch(() => {})
-  }, [runGitMutation, selectedSha, sessionId, workspaceFolder])
+    void onRunMutation(() => invoke('git_tag_create', { workspaceFolder, name, refName: selectedSha, message: message || null })).catch(() => {})
+  }, [onRunMutation, selectedSha, workspaceFolder])
 
   const graph = useMemo(() => computeGraphLanes(commits), [commits])
 

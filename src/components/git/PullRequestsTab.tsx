@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BranchInfo, ChangedFile, CiStatus, DeviceCodeInfo, FileContents, HostingInfo, LogPage, PrCreated, PrDetail, PrInfo, RepoInfo } from '../../ipc/types'
-import { useGitStore } from '../../state/git'
 import { PullRequestsTabView } from './PullRequestsTabView'
 
 export type PullRequestsTabProps = {
@@ -11,10 +10,10 @@ export type PullRequestsTabProps = {
   hostingInfo: HostingInfo
   hostingError: string | null
   onHostingChanged: () => Promise<void>
+  onRepositoryChanged: () => Promise<void>
 }
 
-export function PullRequestsTab({ sessionId, workspaceFolder, repoInfo, hostingInfo, hostingError, onHostingChanged }: PullRequestsTabProps) {
-  const refreshGit = useGitStore((state) => state.refreshGit)
+export function PullRequestsTab({ workspaceFolder, repoInfo, hostingInfo, hostingError, onHostingChanged, onRepositoryChanged }: PullRequestsTabProps) {
   const [prs, setPrs] = useState<PrInfo[]>([])
   const [ciByNumber, setCiByNumber] = useState<Record<number, CiStatus>>({})
   const [selectedNumber, setSelectedNumber] = useState<number | null>(null)
@@ -148,9 +147,9 @@ export function PullRequestsTab({ sessionId, workspaceFolder, repoInfo, hostingI
     try {
       await invoke('git_push', { workspaceFolder, remote: 'origin', branch: sourceBranch, setUpstream: true, forceWithLease: false })
       await onHostingChanged()
-      await refreshGit(sessionId, workspaceFolder)
+      await onRepositoryChanged()
     } catch (reason) { setError(String(reason)) } finally { setLoading(false) }
-  }, [onHostingChanged, refreshGit, sessionId, sourceBranch, workspaceFolder])
+  }, [onHostingChanged, onRepositoryChanged, sourceBranch, workspaceFolder])
 
   const createPr = useCallback(async () => {
     if (!sourceBranch) return

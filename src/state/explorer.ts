@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { create } from 'zustand'
-import type { ChangeType, DirEntryInfo, RepoKind, WorkingStatus } from '../ipc/types'
+import type { ChangeType, DirEntryInfo, GitDirEntry, RepoInfo, RepoKind, SubmoduleState, WorkingStatus } from '../ipc/types'
 export type ExplorerGitDecoration = {
   staged: ChangeType | null
   unstaged: ChangeType | null
@@ -9,6 +9,7 @@ export type ExplorerGitDecoration = {
   directory: boolean
   repoKind: RepoKind | null
   repoRoot: string | null
+  submoduleState: SubmoduleState | null
 }
 
 export type ExplorerChangeSummary = {
@@ -19,9 +20,14 @@ export type ExplorerChangeSummary = {
   untracked: number
 }
 
+export type ExplorerEntry = DirEntryInfo & {
+  repoKind?: RepoKind | null
+  repositoryInitialized?: boolean | null
+}
+
 export type ExplorerSessionState = {
   expandedPaths: Set<string>
-  childrenByPath: Map<string, DirEntryInfo[]>
+  childrenByPath: Map<string, ExplorerEntry[]>
   ignoredPaths: Set<string>
   selectedPath: string | null
   loadingPaths: Set<string>
@@ -33,12 +39,13 @@ export type ExplorerNode = {
   parentPath: string
   name: string
   depth: number
-  entry: DirEntryInfo
+  entry: ExplorerEntry
   expanded: boolean
   ignored: boolean
   decoration: ExplorerGitDecoration | null
   changeSummary: ExplorerChangeSummary | null
   gitOnly: boolean
+  repositoryRef: string | null
 }
 
 type ExplorerStore = {
@@ -67,10 +74,37 @@ export const useExplorerStore = create<ExplorerStore>((set) => ({
       return { sessions: { ...state.sessions, [sessionId]: { ...current, loadingPaths: new Set(current.loadingPaths).add(relPath), error: null } } }
     })
     try {
-      const entries = await invoke<DirEntryInfo[]>('fs_list_dir', { workspaceFolder, relPath })
+      const [filesystemEntries, gitEntries] = await Promise.all([
+        invoke<DirEntryInfo[]>('fs_list_dir', { workspaceFolder, relPath }),
+        invoke<GitDirEntry[]>('git_dir_entries', { workspaceFolder, relPath }).catch(() => null),
+      ])
+      const gitEntryByName = new Map((gitEntries ?? []).map((entry) => [entry.name, entry]))
+      const entries: ExplorerEntry[] = filesystemEntries.map((entry) => {
+        const gitEntry = gitEntryByName.get(entry.name)
+        return {
+          ...entry,
+          repoKind: gitEntry?.repoKind ?? null,
+          repositoryInitialized: gitEntry?.repositoryInitialized ?? null,
+        }
+      })
+      const filesystemNames = new Set(filesystemEntries.map((entry) => entry.name))
+      for (const gitEntry of gitEntries ?? []) {
+        if (filesystemNames.has(gitEntry.name)) continue
+        entries.push({
+          name: gitEntry.name,
+          isDir: gitEntry.isDir,
+          isSymlink: false,
+          size: 0,
+          modifiedAt: null,
+          repoKind: gitEntry.repoKind,
+          repositoryInitialized: gitEntry.repositoryInitialized,
+        })
+      }
       entries.sort((left, right) => Number(right.isDir) - Number(left.isDir) || left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }))
       const paths = entries.map((entry) => joinPath(relPath, entry.name))
-      const ignored = await invoke<string[]>('git_check_ignored', { workspaceFolder, relPaths: paths }).catch(() => [])
+      const ignored = gitEntries
+        ? gitEntries.filter((entry) => entry.ignored).map((entry) => joinPath(relPath, entry.name))
+        : await invoke<string[]>('git_check_ignored', { workspaceFolder, relPaths: paths }).catch(() => [])
       set((state) => {
         const current = state.sessions[sessionId] ?? emptyExplorerSessionState
         const childrenByPath = new Map(current.childrenByPath)
@@ -115,7 +149,11 @@ export const useExplorerStore = create<ExplorerStore>((set) => ({
   }),
 }))
 
-export function flattenExplorerTree(session: ExplorerSessionState, decorations: Map<string, ExplorerGitDecoration>): ExplorerNode[] {
+export function flattenExplorerTree(
+  session: ExplorerSessionState,
+  decorations: Map<string, ExplorerGitDecoration>,
+  repositoryInfoByRoot: Map<string, RepoInfo | null> = new Map(),
+): ExplorerNode[] {
   const nodes: ExplorerNode[] = []
   const summaries = changeSummaries(decorations)
   const gitEntries = gitTreeEntries(decorations)
@@ -131,6 +169,7 @@ export function flattenExplorerTree(session: ExplorerSessionState, decorations: 
     for (const entry of entries) {
       const childPath = joinPath(path, entry.name)
       const expanded = entry.isDir && session.expandedPaths.has(childPath)
+      const repoInfo = entry.repoKind ? repositoryInfoByRoot.get(childPath) ?? null : null
       nodes.push({
         path: childPath,
         parentPath: path,
@@ -142,6 +181,7 @@ export function flattenExplorerTree(session: ExplorerSessionState, decorations: 
         decoration: decorations.get(childPath) ?? null,
         changeSummary: entry.isDir ? summaries.get(childPath) ?? null : null,
         gitOnly: !filesystemNames.has(entry.name),
+        repositoryRef: repoInfo?.branch ?? repoInfo?.detachedSha?.slice(0, 8) ?? null,
       })
       if (expanded) visit(childPath, depth + 1)
     }
@@ -157,13 +197,14 @@ export function deriveGitDecorations(status: WorkingStatus | null, prefix = '', 
     const relativePath = entry.path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
     const path = joinPath(prefix, relativePath)
     if (!path) return
-    const current = decorations.get(path) ?? { staged: null, unstaged: null, untracked: false, conflicted: false, directory: false, repoKind: null, repoRoot }
+    const current = decorations.get(path) ?? { staged: null, unstaged: null, untracked: false, conflicted: false, directory: false, repoKind: null, repoRoot, submoduleState: null }
     const entryRepoRoot = repoRoot ?? current.repoRoot
     const next = {
       ...current,
       directory: current.directory || entry.path.endsWith('/') || Boolean(entry.repoKind),
       repoKind: entry.repoKind ?? current.repoKind,
       repoRoot: entryRepoRoot,
+      submoduleState: entry.submoduleState ?? current.submoduleState,
     }
     if (area === 'staged') next.staged = entry.changeType
     else if (area === 'unstaged') next.unstaged = entry.changeType
@@ -211,17 +252,17 @@ function changeSummaries(decorations: Map<string, ExplorerGitDecoration>): Map<s
   return summaries
 }
 
-function gitTreeEntries(decorations: Map<string, ExplorerGitDecoration>): Map<string, DirEntryInfo[]> {
-  const entriesByParent = new Map<string, Map<string, DirEntryInfo>>()
+function gitTreeEntries(decorations: Map<string, ExplorerGitDecoration>): Map<string, ExplorerEntry[]> {
+  const entriesByParent = new Map<string, Map<string, ExplorerEntry>>()
   for (const [path, decoration] of decorations) {
     const parts = path.split('/').filter(Boolean)
     for (let index = 0; index < parts.length; index += 1) {
       const parent = parts.slice(0, index).join('/')
       const name = parts[index]
       const isDir = index < parts.length - 1 || decoration.directory
-      const entries = entriesByParent.get(parent) ?? new Map<string, DirEntryInfo>()
+      const entries = entriesByParent.get(parent) ?? new Map<string, ExplorerEntry>()
       const existing = entries.get(name)
-      if (!existing || isDir) entries.set(name, { name, isDir, isSymlink: false, size: 0, modifiedAt: null })
+      if (!existing || isDir) entries.set(name, { name, isDir, isSymlink: false, size: 0, modifiedAt: null, repoKind: null, repositoryInitialized: null })
       entriesByParent.set(parent, entries)
     }
   }

@@ -28,7 +28,7 @@ beforeEach(() => {
 })
 
 test('wires branch merge action to the native command', async () => {
-  render(<BranchesTab sessionId="session-1" workspaceFolder="C:/repo" repoInfo={repoInfo} status={status} />)
+  render(<BranchesTab sessionId="session-1" workspaceFolder="C:/repo" repoInfo={repoInfo} status={status} onRunMutation={async (operation) => { await operation() }} />)
   fireEvent.click(await screen.findByTitle('Merge feature'))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_merge', { workspaceFolder: 'C:/repo', refName: 'feature' }))
 })

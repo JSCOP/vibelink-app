@@ -15,6 +15,7 @@ const node = {
   decoration: null,
   changeSummary: null,
   gitOnly: false,
+  repositoryRef: null,
 }
 
 const noop = vi.fn()

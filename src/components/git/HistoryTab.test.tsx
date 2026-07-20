@@ -34,7 +34,7 @@ beforeEach(() => {
 })
 
 test('renders commits and loads the next page with the current skip', async () => {
-  render(<HistoryTab sessionId="session-1" workspaceFolder="C:/repo" pathFilter={null} />)
+  render(<HistoryTab sessionId="session-1" workspaceFolder="C:/repo" pathFilter={null} onRunMutation={async (operation) => { await operation() }} />)
   expect(await screen.findByText('Initial commit')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
   await waitFor(() => expect(invoke).toHaveBeenLastCalledWith('git_log', {

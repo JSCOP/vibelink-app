@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { GitBranch as GitBranchIcon } from 'lucide-react'
 import type { BranchInfo, ChangedFile, FileContents, RepoInfo, StashInfo, TagInfo, WorkingStatus } from '../../ipc/types'
-import { useGitStore } from '../../state/git'
 import { QuickPick } from '../QuickPick'
 import type { PickerEntry } from '../pickerModel'
 import { BranchesTabView, type BranchRowAction, type BranchRowView, type StashDialogState } from './BranchesTabView'
@@ -12,11 +11,12 @@ export type BranchesTabProps = {
   workspaceFolder: string
   repoInfo: RepoInfo
   status: WorkingStatus
+  onRunMutation: (operation: () => Promise<unknown>) => Promise<void>
 }
 
 type RefPicker = 'base' | 'head' | null
 
-export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: BranchesTabProps) {
+export function BranchesTab({ workspaceFolder, repoInfo, status, onRunMutation }: BranchesTabProps) {
   const [branches, setBranches] = useState<BranchInfo[]>([])
   const [stashes, setStashes] = useState<StashInfo[]>([])
   const [tags, setTags] = useState<TagInfo[]>([])
@@ -31,7 +31,6 @@ export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: Br
   const [stashOpen, setStashOpen] = useState(false)
   const [stashMessage, setStashMessage] = useState('')
   const [includeUntracked, setIncludeUntracked] = useState(false)
-  const runGitMutation = useGitStore((state) => state.runGitMutation)
 
   const reload = useCallback(async () => {
     try {
@@ -52,11 +51,11 @@ export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: Br
   useEffect(() => { const timer = window.setTimeout(() => { void reload() }, 0); return () => window.clearTimeout(timer) }, [reload])
 
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
-    void runGitMutation(sessionId, workspaceFolder, operation)
+    void onRunMutation(operation)
       .then(() => reload())
       .then(after)
       .catch((reason) => setError(String(reason)))
-  }, [reload, runGitMutation, sessionId, workspaceFolder])
+  }, [onRunMutation, reload])
 
   const branchActions = useCallback((branch: BranchInfo): BranchRowAction[] => {
     const actions: BranchRowAction[] = [
@@ -77,7 +76,7 @@ export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: Br
         } },
         { id: 'delete', label: 'Delete', danger: true, onClick: () => {
           if (!window.confirm(`Delete branch ${branch.name}?`)) return
-          void runGitMutation(sessionId, workspaceFolder, () => invoke('git_branch_delete', { workspaceFolder, name: branch.name, force: false }))
+          void onRunMutation(() => invoke('git_branch_delete', { workspaceFolder, name: branch.name, force: false }))
             .then(() => reload())
             .catch((reason) => {
               const message = String(reason)
@@ -89,7 +88,7 @@ export function BranchesTab({ sessionId, workspaceFolder, repoInfo, status }: Br
       )
     }
     return actions
-  }, [mutate, reload, runGitMutation, sessionId, workspaceFolder])
+  }, [mutate, onRunMutation, reload, workspaceFolder])
 
   const localRows = useMemo<BranchRowView[]>(() => branches.filter((branch) => !branch.isRemote).map((branch) => ({ branch, actions: branchActions(branch) })), [branchActions, branches])
   const remoteRows = useMemo<BranchRowView[]>(() => branches.filter((branch) => branch.isRemote).map((branch) => ({ branch, actions: branchActions(branch) })), [branchActions, branches])

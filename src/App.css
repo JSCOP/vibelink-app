@@ -4066,6 +4066,45 @@ button.git-window-primary-action,
   padding: 6px 8px;
 }
 
+.git-window-repository-context {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  flex: 0 1 auto;
+  gap: 3px;
+  min-width: 0;
+}
+
+.git-window-repository-context > button {
+  align-items: center;
+  border: 0;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font: 600 11px/1 var(--vibelink-sans);
+  gap: 4px;
+  padding: 4px 5px;
+}
+
+.git-window-repository-context > button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.git-window-repository-context > button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.git-window-repository-context > code {
+  color: var(--vibelink-text);
+  font: 10px/1 var(--vibelink-mono);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .git-window-branch-pill {
   align-items: center;
   background: color-mix(in srgb, var(--vibelink-panel) 85%, var(--vibelink-bg));

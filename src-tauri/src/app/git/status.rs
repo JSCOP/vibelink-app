@@ -55,11 +55,19 @@ pub struct WorkingStatus {
     pub truncated: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RepoKind {
     Submodule,
     NestedRepo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleState {
+    pub commit_changed: bool,
+    pub modified: bool,
+    pub untracked: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +77,7 @@ pub struct StatusEntry {
     pub old_path: Option<String>,
     pub change_type: ChangeType,
     pub repo_kind: Option<RepoKind>,
+    pub submodule_state: Option<SubmoduleState>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -77,6 +86,7 @@ pub struct GitDirEntry {
     pub name: String,
     pub is_dir: bool,
     pub repo_kind: Option<RepoKind>,
+    pub repository_initialized: Option<bool>,
     pub ignored: bool,
 }
 
@@ -161,11 +171,32 @@ fn dir_entries_native(repo: &str, rel_path: &str) -> Result<Vec<GitDirEntry>> {
         } else {
             None
         };
+        let repository_initialized = repo_kind.map(|kind| match kind {
+            RepoKind::Submodule => entry.path().join(".git").exists(),
+            RepoKind::NestedRepo => true,
+        });
         rel_paths.push(child_rel);
         entries.push(GitDirEntry {
             name,
             is_dir,
             repo_kind,
+            repository_initialized,
+            ignored: false,
+        });
+    }
+    for gitlink in &gitlinks {
+        let Some(name) = direct_child_name(rel, gitlink) else {
+            continue;
+        };
+        if entries.iter().any(|entry| entry.name == name) {
+            continue;
+        }
+        rel_paths.push(gitlink.clone());
+        entries.push(GitDirEntry {
+            name,
+            is_dir: true,
+            repo_kind: Some(RepoKind::Submodule),
+            repository_initialized: Some(false),
             ignored: false,
         });
     }
@@ -181,6 +212,15 @@ fn dir_entries_native(repo: &str, rel_path: &str) -> Result<Vec<GitDirEntry>> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+fn direct_child_name(parent: &str, child: &str) -> Option<String> {
+    let remainder = if parent.is_empty() {
+        child
+    } else {
+        child.strip_prefix(&format!("{parent}/"))?
+    };
+    (!remainder.is_empty() && !remainder.contains('/')).then(|| remainder.to_string())
 }
 
 fn gitlink_paths(repo: &str, rel: &str) -> Result<HashSet<String>> {
@@ -308,7 +348,13 @@ pub(crate) fn git_repo_info_native(workspace_folder: &str) -> Result<RepoInfo> {
 pub(crate) fn git_working_status_native(workspace_folder: &str) -> Result<WorkingStatus> {
     let output = git_read_output(
         workspace_folder,
-        ["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+        [
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
     )?;
     if !output.status.success()
         && String::from_utf8_lossy(&output.stderr).contains("not a git repository")
@@ -410,16 +456,19 @@ pub(crate) fn parse_working_status(bytes: &[u8]) -> WorkingStatus {
                     old_path: None,
                     change_type: ChangeType::Untracked,
                     repo_kind: None,
+                    submodule_state: None,
                 });
                 total += 1;
             }
             'u' => {
                 if let Some((xy, sub, path)) = status_fields(record, 11) {
+                    let submodule_state = submodule_state_from_sub(&sub);
                     result.conflicted.push(StatusEntry {
                         path,
                         old_path: None,
                         change_type: change_type_for_xy(&xy),
-                        repo_kind: repo_kind_from_sub(&sub),
+                        repo_kind: submodule_state.map(|_| RepoKind::Submodule),
+                        submodule_state,
                     });
                     total += 1;
                 }
@@ -436,7 +485,8 @@ pub(crate) fn parse_working_status(bytes: &[u8]) -> WorkingStatus {
                 } else {
                     None
                 };
-                let repo_kind = repo_kind_from_sub(&sub);
+                let submodule_state = submodule_state_from_sub(&sub);
+                let repo_kind = submodule_state.map(|_| RepoKind::Submodule);
                 let x = xy.chars().next().unwrap_or('.');
                 let y = xy.chars().nth(1).unwrap_or('.');
                 if x != '.' {
@@ -445,6 +495,7 @@ pub(crate) fn parse_working_status(bytes: &[u8]) -> WorkingStatus {
                         old_path: old_path.clone(),
                         change_type: change_type_from_status(x),
                         repo_kind,
+                        submodule_state,
                     });
                     total += 1;
                 }
@@ -454,6 +505,7 @@ pub(crate) fn parse_working_status(bytes: &[u8]) -> WorkingStatus {
                         old_path,
                         change_type: change_type_from_status(y),
                         repo_kind,
+                        submodule_state,
                     });
                     total += 1;
                 }
@@ -479,8 +531,13 @@ fn status_fields(record: &str, field_count: usize) -> Option<(String, String, St
     ))
 }
 
-fn repo_kind_from_sub(sub: &str) -> Option<RepoKind> {
-    sub.starts_with('S').then_some(RepoKind::Submodule)
+fn submodule_state_from_sub(sub: &str) -> Option<SubmoduleState> {
+    let mut chars = sub.chars();
+    (chars.next()? == 'S').then(|| SubmoduleState {
+        commit_changed: chars.next() == Some('C'),
+        modified: chars.next() == Some('M'),
+        untracked: chars.next() == Some('U'),
+    })
 }
 
 fn change_type_for_xy(xy: &str) -> ChangeType {
@@ -505,11 +562,19 @@ mod tests {
         assert_eq!(status.untracked[0].path, "loose file.txt");
     }
     #[test]
-    fn marks_submodule_entries_from_porcelain_sub_field() {
-        let bytes = b"1 .M S... 160000 160000 160000 aaaaaaa bbbbbbb vendor/lib\0? plain.txt\0";
+    fn preserves_porcelain_v2_submodule_state() {
+        let bytes = b"1 .M SCMU 160000 160000 160000 aaaaaaa bbbbbbb vendor/lib\0? plain.txt\0";
         let status = parse_working_status(bytes);
         assert_eq!(status.unstaged.len(), 1);
         assert_eq!(status.unstaged[0].repo_kind, Some(RepoKind::Submodule));
+        assert_eq!(
+            status.unstaged[0].submodule_state,
+            Some(SubmoduleState {
+                commit_changed: true,
+                modified: true,
+                untracked: true,
+            })
+        );
         assert_eq!(status.untracked[0].repo_kind, None);
     }
 
@@ -545,6 +610,35 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].name, "main.rs");
         assert!(!children[0].is_dir);
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn lists_missing_registered_submodule_as_uninitialized() {
+        use crate::app::git::test_support::run_git;
+
+        let repo = crate::app::git::test_support::test_repo();
+        std::fs::write(repo.join("README.md"), "root\n").expect("write root file");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+        let sha = String::from_utf8(run_git(&repo, &["rev-parse", "HEAD"]))
+            .expect("utf8 sha")
+            .trim()
+            .to_string();
+        let cache_info = format!("160000,{sha},module");
+        run_git(
+            &repo,
+            &["update-index", "--add", "--cacheinfo", &cache_info],
+        );
+
+        let entries = dir_entries_native(repo.to_str().expect("utf8 repo"), "").expect("list");
+        let submodule = entries
+            .iter()
+            .find(|entry| entry.name == "module")
+            .expect("submodule");
+        assert_eq!(submodule.repo_kind, Some(RepoKind::Submodule));
+        assert_eq!(submodule.repository_initialized, Some(false));
+        assert!(submodule.is_dir);
         std::fs::remove_dir_all(repo).expect("cleanup repo");
     }
 

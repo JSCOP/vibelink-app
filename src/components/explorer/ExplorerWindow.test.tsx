@@ -75,3 +75,36 @@ describe('ExplorerWindow Git integration', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stage', { workspaceFolder: 'C:/repo', paths: ['src'] }))
   })
 })
+
+test('discovers an uninitialized submodule and separates repository from pointer history actions', async () => {
+  invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'fs_list_dir') {
+      if (args?.relPath === 'modules') return [{ name: 'child', isDir: true, isSymlink: false, size: 0, modifiedAt: null }]
+      if (args?.relPath === 'modules/child') return []
+      return [{ name: 'modules', isDir: true, isSymlink: false, size: 0, modifiedAt: null }]
+    }
+    if (command === 'git_dir_entries') {
+      if (args?.relPath === 'modules') return [{ name: 'child', isDir: true, repoKind: 'submodule', repositoryInitialized: false, ignored: false }]
+      return [{ name: 'modules', isDir: true, repoKind: null, repositoryInitialized: null, ignored: false }]
+    }
+    if (command === 'git_check_ignored') return []
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+    return null
+  })
+
+  render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
+  fireEvent.click(await screen.findByLabelText('Expand modules'))
+  expect(await screen.findByText('SUB')).toBeTruthy()
+  expect(screen.getByText('INIT')).toBeTruthy()
+
+  const childRow = screen.getByText('child').closest('.explorer-tree-row') as HTMLElement
+  fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Pointer History in Parent' }))
+  await waitFor(() => expect(useGitStore.getState().sessions['session-1']).toMatchObject({ activeRepoRoot: '', activeTab: 'history', pathFilter: 'modules/child' }))
+  expect(openWindow).toHaveBeenCalledWith('git')
+
+  fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
+  fireEvent.click(await screen.findByRole('menuitem', { name: 'Initialize Submodule' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_submodule_update', { workspaceFolder: 'C:/repo', path: 'modules/child' }))
+})
