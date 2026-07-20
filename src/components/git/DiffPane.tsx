@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import ReactDiffViewer from 'react-diff-viewer-continued'
 import type { ChangedFile, FileContents } from '../../ipc/types'
 
@@ -15,8 +15,12 @@ export type DiffPaneProps = {
   hideFileList?: boolean
 }
 
+const MIN_SPLIT_DIFF_WIDTH = 900
+
 export function DiffPane({ files, selectedPath, onSelect, contents, loading, splitView, title, error = null, onOpenInEditor = null, hideFileList = false }: DiffPaneProps) {
   const [listWidth, setListWidth] = useState(260)
+  const [contentWidth, setContentWidth] = useState<number | null>(null)
+  const contentRef = useRef<HTMLElement | null>(null)
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -31,13 +35,29 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
     window.addEventListener('pointerup', up)
   }
 
+  useEffect(() => {
+    const content = contentRef.current
+    if (!content) return
+    const measure = () => {
+      const width = Math.round(content.getBoundingClientRect().width)
+      setContentWidth((current) => current === width ? current : width)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [])
+
+  const effectiveSplitView = splitView && (contentWidth === null || contentWidth >= MIN_SPLIT_DIFF_WIDTH)
+
   const showSelectHint = hideFileList && !selectedPath
   const noDifferences = Boolean(contents && !contents.binary && contents.old === contents.new)
   const noFiles = !hideFileList && files.length === 0 && !selectedPath
   const noContents = !loading && !error && !contents && !showSelectHint && !noFiles
 
   return (
-    <div className="task-diff-view git-diff-pane" style={{ '--file-list-width': `${listWidth}px` } as CSSProperties}>
+    <div className="task-diff-view git-diff-pane" data-file-list-hidden={hideFileList || undefined} style={{ '--file-list-width': `${listWidth}px` } as CSSProperties}>
       {!hideFileList ? (
         <>
           <aside className="task-diff-files git-diff-files">
@@ -59,7 +79,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
           <div className="task-diff-resizer git-diff-resizer" role="separator" aria-orientation="vertical" onPointerDown={startResize} />
         </>
       ) : null}
-      <main className="task-diff-content git-diff-content">
+      <main ref={contentRef} className="task-diff-content git-diff-content" data-diff-layout={effectiveSplitView ? 'split' : 'unified'}>
         {loading ? <div className="task-diff-empty git-diff-empty">Loading diff…</div> : null}
         {!loading && contents?.binary ? <div className="task-diff-empty git-diff-empty">binary — not shown</div> : null}
         {!loading && error && !contents ? (
@@ -75,7 +95,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
         ) : null}
         {noContents ? <div className="task-diff-empty git-diff-empty">No diff available for this file.</div> : null}
         {!loading && contents && !contents.binary && !noDifferences ? (
-          <ReactDiffViewer oldValue={contents.old} newValue={contents.new} splitView={splitView} useDarkTheme styles={diffStyles} />
+          <ReactDiffViewer oldValue={contents.old} newValue={contents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} />
         ) : null}
       </main>
     </div>
@@ -102,5 +122,11 @@ const diffStyles = {
       removedGutterBackground: 'rgba(248, 81, 73, 0.18)',
       codeFoldContentColor: 'var(--vibelink-muted)',
     },
+  },
+  diffContainer: {
+    minWidth: '100%',
+  },
+  contentText: {
+    overflowWrap: 'anywhere' as const,
   },
 }

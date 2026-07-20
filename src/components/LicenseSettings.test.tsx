@@ -2,6 +2,7 @@
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { LicenseStatus } from '../ipc/types'
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -25,7 +26,7 @@ const mocks = vi.hoisted(() => ({
         trialEndsAt: '2026-07-19T01:00:00.000Z',
         purchaseUrl: 'https://vibelink.moobang.net/checkout',
         message: 'Your VibeLink trial is active.',
-      },
+      } as LicenseStatus,
     },
     deactivateLicenseDevice: vi.fn(),
     revalidateLicense: vi.fn(),
@@ -44,6 +45,14 @@ describe('LicenseSettings', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-18T00:00:00.000Z'))
+    Object.assign(mocks.state.license.status, {
+      state: 'trial',
+      entitled: true,
+      provider: 'vibelink',
+      plan: 'trial',
+      email: 'trial@example.com',
+      message: 'Your VibeLink trial is active.',
+    })
   })
 
   afterEach(() => {
@@ -59,5 +68,21 @@ describe('LicenseSettings', () => {
 
     await act(async () => { vi.advanceTimersByTime(2 * 60 * 60 * 1_000) })
     expect(screen.getByText(/Trial ends .*\(1 day left\)/)).toBeInTheDocument()
+  })
+
+  it('shows the debug entitlement without asking for Moobang sign-in', () => {
+    Object.assign(mocks.state.license.status, {
+      state: 'development',
+      entitled: true,
+      provider: null,
+      plan: null,
+      email: null,
+      message: 'Development build: entitlement checks are disabled.',
+    })
+
+    render(<LicenseSettings />)
+    expect(screen.getByText('Development build')).toBeInTheDocument()
+    expect(screen.getByText(/VIBELINK_ENFORCE_LICENSE=1/)).toBeInTheDocument()
+    expect(screen.queryByText('Sign in with Moobang account')).not.toBeInTheDocument()
   })
 })

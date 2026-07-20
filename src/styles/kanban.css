@@ -457,7 +457,12 @@
 
 .task-diff-view {
   display: grid;
-  grid-template-columns: var(--file-list-width) 6px 1fr;
+  grid-template-columns: minmax(0, var(--file-list-width)) 6px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.task-diff-view[data-file-list-hidden] {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .task-diff-files {
@@ -501,6 +506,7 @@
 }
 
 .task-diff-content {
+  min-width: 0;
   overflow: auto;
 }
 

@@ -71,5 +71,8 @@ describe('VibeLink Pro gates', () => {
     expect(isProEntitled(trial)).toBe(true)
     const pro: LicenseStatus = { ...unlicensed, state: 'validOnline', entitled: true, plan: 'pro', provider: 'vibelink' }
     expect(isAppLocked(pro)).toBe(false)
+    const development: LicenseStatus = { ...unlicensed, state: 'development', entitled: true, message: 'Development build' }
+    expect(isAppLocked(development)).toBe(false)
+    expect(isProEntitled(development)).toBe(true)
   })
 })

@@ -1,12 +1,30 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
 
 import { DiffPane } from './DiffPane'
 
+beforeEach(cleanup)
+
 describe('DiffPane', () => {
+  it('uses a one-column grid when Explorer owns the file list', () => {
+    const { container } = render(
+      <DiffPane
+        files={[]}
+        selectedPath="changed.txt"
+        onSelect={vi.fn()}
+        contents={{ old: 'before', new: 'after', binary: false }}
+        loading={false}
+        splitView
+        hideFileList
+      />,
+    )
+
+    expect(container.querySelector('.git-diff-pane')?.getAttribute('data-file-list-hidden')).toBe('true')
+  })
+
   it('hides the diff renderer when both sides are identical and empty', () => {
     render(
       <DiffPane

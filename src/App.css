@@ -3597,7 +3597,7 @@ main[data-terminal-tabs='hidden'] .terminal-window-dock .dv-tabs-and-actions-con
 .settings-section-heading p { margin: 6px 0 0; color: var(--vibelink-muted); }
 .license-state { border: 1px solid var(--vibelink-border); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; }
 .license-state-validOnline, .license-state-validOffline, .license-state-pro { color: var(--vibelink-alarm-highlight); }
-.license-state-core { color: var(--vibelink-accent); }
+.license-state-core, .license-state-development { color: var(--vibelink-accent); }
 .license-summary, .license-device-list { display: grid; gap: 8px; }
 .license-summary span, .license-device-row span { display: block; color: var(--vibelink-muted); font-size: 12px; }
 .account-sign-in { display: grid; gap: 10px; align-items: start; }

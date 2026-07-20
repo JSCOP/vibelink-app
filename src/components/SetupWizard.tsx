@@ -36,6 +36,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   const [mcpReport, setMcpReport] = useState<McpCheckReport | null>(null)
   const [agentBusy, setAgentBusy] = useState(false)
   const entitled = Boolean(license.status?.entitled)
+  const developmentMode = license.status?.state === 'development'
   const step = setupStepIds[stepIndex]
   const models = activeSessionId ? hermesModels[activeSessionId] : undefined
   const autoPass = useMemo(() => setupStepAutoPass({
@@ -205,8 +206,17 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
           {step === 'license' ? (
             <div className="setup-wizard-panel">
-              <AccountSignIn onActivated={next} />
-              <p>Sign in with your Moobang account to start your 7-day free trial. Every feature is unlocked during the trial.</p>
+              {developmentMode ? (
+                <>
+                  <h3>Development entitlement is active.</h3>
+                  <p>Account and trial checks are skipped only in this debug build. Release builds still require a Moobang account entitlement.</p>
+                </>
+              ) : (
+                <>
+                  <AccountSignIn onActivated={next} />
+                  <p>Sign in with your Moobang account to start your 7-day free trial. Every feature is unlocked during the trial.</p>
+                </>
+              )}
               <div className="setup-wizard-actions">
                 <button type="button" className="primary-action" disabled={!entitled} onClick={next}>Continue</button>
               </div>
@@ -293,7 +303,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             <div className="setup-wizard-panel">
               <h3>VibeLink is ready.</h3>
               <ul>
-                <li>{license.status?.plan === 'pro' ? 'Pro account connected' : license.status?.plan === 'trial' ? '7-day trial active' : 'Account connected'}</li>
+                <li>{developmentMode ? 'Development entitlement active' : license.status?.plan === 'pro' ? 'Pro account connected' : license.status?.plan === 'trial' ? '7-day trial active' : 'Account connected'}</li>
                 <li>{agentClis.filter((status) => status.installed).length} agent CLI(s) detected</li>
                 <li>Hermes Agent {runtime?.detected ? 'detected' : 'not detected'}</li>
                 <li>MCP {mcpReport?.initializeOk ? `verified with ${mcpReport.toolCount} tools` : 'not verified'}</li>

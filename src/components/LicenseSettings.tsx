@@ -11,7 +11,8 @@ export function LicenseSettings() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const status = license.status
-  const signedIn = Boolean(status?.email)
+  const development = status?.state === 'development'
+  const signedIn = !development && Boolean(status?.email)
   const plan = status?.plan ?? (status?.entitled ? 'pro' : 'none')
   const trialEndsAt = status?.trialEndsAt
   const [nowMs, setNowMs] = useState<number | null>(null)
@@ -50,10 +51,16 @@ export function LicenseSettings() {
           <h2>Moobang account</h2>
           <p>Account actions run immediately and are not affected by Settings Apply or Cancel.</p>
         </div>
-        <span className={`license-state license-state-${status?.state ?? 'loading'}`}>{signedIn ? plan : status?.state ?? 'loading'}</span>
+        <span className={`license-state license-state-${status?.state ?? 'loading'}`}>{development ? 'development' : signedIn ? plan : status?.state ?? 'loading'}</span>
       </div>
 
-      {!signedIn ? <AccountSignIn /> : (
+      {development ? (
+        <div className="license-summary">
+          <strong>Development build</strong>
+          <span>{status?.message}</span>
+          <span>Set VIBELINK_ENFORCE_LICENSE=1 before launch to test the real sign-in and trial lock.</span>
+        </div>
+      ) : !signedIn ? <AccountSignIn /> : (
         <div className="license-summary">
           <strong>{status?.email}</strong>
           <span>{status?.message}</span>

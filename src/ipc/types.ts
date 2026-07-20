@@ -227,7 +227,7 @@ export type SkillApplyInput = {
   enabled?: boolean
 }
 
-export type LicenseState = 'unlicensed' | 'core' | 'trial' | 'trialExpired' | 'validOnline' | 'validOffline' | 'activationLimit' | 'reviewRequired' | 'invalid' | 'revoked' | 'configurationError'
+export type LicenseState = 'development' | 'unlicensed' | 'core' | 'trial' | 'trialExpired' | 'validOnline' | 'validOffline' | 'activationLimit' | 'reviewRequired' | 'invalid' | 'revoked' | 'configurationError'
 
 export type LicenseDevice = {
   activationId: string

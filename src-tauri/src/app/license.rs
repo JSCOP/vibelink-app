@@ -20,6 +20,7 @@ const ACCOUNT_PROVIDER: &str = "moobang";
 const PRO_REQUIRED_ERROR: &str = "VibeLink Pro license required.";
 const TRIAL_LOCK_ERROR: &str =
     "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.";
+const ENFORCE_LICENSE_ENV: &str = "VIBELINK_ENFORCE_LICENSE";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,15 +177,21 @@ pub struct LicenseService {
     device: DeviceIdentity,
     credential: Entry,
     cache: RwLock<Option<StoredAccount>>,
+    development_entitlement: bool,
 }
 
 impl LicenseService {
     pub fn new() -> Result<Self> {
+        let development_entitlement = development_entitlement_enabled();
         let service = credential_service();
-        remove_legacy_credential(service)?;
         let credential = Entry::new(service, CREDENTIAL_ACCOUNT)
             .context("open Windows Credential Manager account entry")?;
-        let cache = read_credential(&credential)?;
+        let cache = if development_entitlement {
+            None
+        } else {
+            remove_legacy_credential(service)?;
+            read_credential(&credential)?
+        };
         Ok(Self {
             agent: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(5))
@@ -195,10 +202,14 @@ impl LicenseService {
             device: load_or_create_device_identity()?,
             credential,
             cache: RwLock::new(cache),
+            development_entitlement,
         })
     }
 
     pub fn status(&self) -> Result<LicenseStatusDto> {
+        if self.development_entitlement {
+            return Ok(development_status(&self.device));
+        }
         let cache = self
             .cache
             .read()
@@ -319,6 +330,9 @@ impl LicenseService {
     }
 
     pub fn revalidate(&self) -> Result<LicenseStatusDto> {
+        if self.development_entitlement {
+            return Ok(development_status(&self.device));
+        }
         let stored = self
             .cache
             .read()
@@ -624,20 +638,32 @@ impl LicenseService {
 
 pub struct HeadlessLicenseCache {
     stored: Option<StoredAccount>,
+    development_entitlement: bool,
 }
 
 impl HeadlessLicenseCache {
     pub fn load() -> Result<Self> {
+        let development_entitlement = development_entitlement_enabled();
+        if development_entitlement {
+            return Ok(Self {
+                stored: None,
+                development_entitlement,
+            });
+        }
         let service = credential_service();
         remove_legacy_credential(service)?;
         let entry = Entry::new(service, CREDENTIAL_ACCOUNT)
             .context("open Windows Credential Manager account entry")?;
         Ok(Self {
             stored: read_credential(&entry)?,
+            development_entitlement,
         })
     }
 
     pub fn require_entitled(&self) -> Result<()> {
+        if self.development_entitlement {
+            return Ok(());
+        }
         let Some(stored) = self
             .stored
             .as_ref()
@@ -671,6 +697,26 @@ enum HttpOutcome {
     Business(ApiErrorDto),
     Unavailable,
     Malformed(String),
+}
+
+fn development_entitlement_enabled() -> bool {
+    development_entitlement_policy(
+        cfg!(debug_assertions),
+        std::env::var(ENFORCE_LICENSE_ENV).ok().as_deref(),
+    )
+}
+
+fn development_entitlement_policy(debug_build: bool, enforce_license: Option<&str>) -> bool {
+    if !debug_build {
+        return false;
+    }
+    !enforce_license.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 fn credential_service() -> &'static str {
@@ -902,6 +948,27 @@ fn status_from_online_store(stored: &StoredAccount, device: &DeviceIdentity) -> 
         },
         Some("none") => trial_expired_status(stored, device),
         _ => configuration_error_status(device, "Moobang account entitlement is unavailable."),
+    }
+}
+
+fn development_status(device: &DeviceIdentity) -> LicenseStatusDto {
+    LicenseStatusDto {
+        state: "development".to_string(),
+        entitled: true,
+        plan: None,
+        provider: None,
+        email: None,
+        masked_key: None,
+        activation_id: None,
+        device_id: device.device_id.clone(),
+        device_name: device.device_name.clone(),
+        max_devices: 3,
+        devices: Vec::new(),
+        validated_at: None,
+        offline_grace_until: None,
+        trial_ends_at: None,
+        purchase_url: purchase_url(),
+        message: "Development build: entitlement checks are disabled. Release builds still require a Moobang account entitlement.".to_string(),
     }
 }
 
@@ -1384,6 +1451,28 @@ mod tests {
     }
 
     #[test]
+    fn development_entitlement_is_debug_only_and_can_be_forced_off() {
+        assert!(development_entitlement_policy(true, None));
+        assert!(development_entitlement_policy(true, Some("0")));
+        assert!(!development_entitlement_policy(true, Some("1")));
+        assert!(!development_entitlement_policy(true, Some("true")));
+        assert!(!development_entitlement_policy(false, None));
+        assert!(!development_entitlement_policy(false, Some("0")));
+
+        let status = development_status(&device());
+        assert_eq!(status.state, "development");
+        assert!(status.entitled);
+        assert!(status.plan.is_none());
+        assert!(status.email.is_none());
+
+        let headless = HeadlessLicenseCache {
+            stored: None,
+            development_entitlement: true,
+        };
+        assert!(headless.require_entitled().is_ok());
+    }
+
+    #[test]
     fn headless_require_entitled_accepts_active_trial_and_rejects_expired() {
         let now = Utc::now();
         let active = HeadlessLicenseCache {
@@ -1393,6 +1482,7 @@ mod tests {
                 now - ChronoDuration::minutes(1),
                 now + ChronoDuration::days(6),
             )),
+            development_entitlement: false,
         };
         assert!(active.require_entitled().is_ok());
         assert!(active.is_entitled());
@@ -1404,6 +1494,7 @@ mod tests {
                 now - ChronoDuration::days(1),
                 now - ChronoDuration::days(1),
             )),
+            development_entitlement: false,
         };
         assert!(expired.require_entitled().is_err());
         assert!(!expired.is_entitled());
