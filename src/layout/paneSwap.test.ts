@@ -91,6 +91,15 @@ describe('nearestPaneIdInDirection', () => {
 
     expect(nearestPaneIdInDirection('active', Object.keys(edgeRects), 'right', (paneId) => edgeRects[paneId] ?? null)).toBeNull()
   })
+
+  it('does not jump diagonally into another column at a vertical edge', () => {
+    const edgeRects: Record<string, PaneRect> = {
+      active: rect(0, 300, 98, 100),
+      'next-column': rect(102, 402, 98, 100),
+    }
+
+    expect(nearestPaneIdInDirection('active', Object.keys(edgeRects), 'down', (paneId) => edgeRects[paneId] ?? null)).toBeNull()
+  })
 })
 
 describe('paneIdsInReadingOrder', () => {
