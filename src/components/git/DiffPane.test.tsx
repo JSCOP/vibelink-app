@@ -2,7 +2,11 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
+vi.mock('react-diff-viewer-continued', () => ({
+  default: ({ oldValue, newValue }: { oldValue: string; newValue: string }) => (
+    <div data-testid="diff-viewer" data-old-value={oldValue} data-new-value={newValue} />
+  ),
+}))
 
 import { DiffPane } from './DiffPane'
 
@@ -32,6 +36,41 @@ describe('DiffPane', () => {
         selectedPath="clean.txt"
         onSelect={vi.fn()}
         contents={{ old: '', new: '', binary: false }}
+        loading={false}
+        splitView
+        hideFileList
+      />,
+    )
+
+    expect(screen.getByText('No differences to show.')).toBeTruthy()
+    expect(screen.queryByTestId('diff-viewer')).toBeNull()
+  })
+
+  it('normalizes checkout line endings before rendering changed lines', () => {
+    render(
+      <DiffPane
+        files={[]}
+        selectedPath="changed.txt"
+        onSelect={vi.fn()}
+        contents={{ old: 'same\nbefore\nend\n', new: 'same\r\nafter\r\nend\r\n', binary: false }}
+        loading={false}
+        splitView
+        hideFileList
+      />,
+    )
+
+    const viewer = screen.getByTestId('diff-viewer')
+    expect(viewer.getAttribute('data-old-value')).toBe('same\nbefore\nend\n')
+    expect(viewer.getAttribute('data-new-value')).toBe('same\nafter\nend\n')
+  })
+
+  it('does not render every line as changed when only checkout line endings differ', () => {
+    render(
+      <DiffPane
+        files={[]}
+        selectedPath="line-endings.txt"
+        onSelect={vi.fn()}
+        contents={{ old: 'one\ntwo\n', new: 'one\r\ntwo\r\n', binary: false }}
         loading={false}
         splitView
         hideFileList

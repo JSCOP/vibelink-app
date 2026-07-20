@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import ReactDiffViewer from 'react-diff-viewer-continued'
 import type { ChangedFile, FileContents } from '../../ipc/types'
 
@@ -49,10 +49,19 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
     return () => observer.disconnect()
   }, [])
 
+  const normalizedContents = useMemo(() => {
+    if (!contents || contents.binary) return contents
+    return {
+      ...contents,
+      old: contents.old.includes('\r') ? contents.old.replace(/\r\n?/g, '\n') : contents.old,
+      new: contents.new.includes('\r') ? contents.new.replace(/\r\n?/g, '\n') : contents.new,
+    }
+  }, [contents])
+
   const effectiveSplitView = splitView && (contentWidth === null || contentWidth >= MIN_SPLIT_DIFF_WIDTH)
 
   const showSelectHint = hideFileList && !selectedPath
-  const noDifferences = Boolean(contents && !contents.binary && contents.old === contents.new)
+  const noDifferences = Boolean(normalizedContents && !normalizedContents.binary && normalizedContents.old === normalizedContents.new)
   const noFiles = !hideFileList && files.length === 0 && !selectedPath
   const noContents = !loading && !error && !contents && !showSelectHint && !noFiles
 
@@ -81,7 +90,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
       ) : null}
       <main ref={contentRef} className="task-diff-content git-diff-content" data-diff-layout={effectiveSplitView ? 'split' : 'unified'}>
         {loading ? <div className="task-diff-empty git-diff-empty">Loading diff…</div> : null}
-        {!loading && contents?.binary ? <div className="task-diff-empty git-diff-empty">binary — not shown</div> : null}
+        {!loading && normalizedContents?.binary ? <div className="task-diff-empty git-diff-empty">binary — not shown</div> : null}
         {!loading && error && !contents ? (
           <div className="task-diff-empty git-diff-empty">
             {error}
@@ -94,8 +103,8 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
           <div className="task-diff-empty git-diff-empty">Select a file to view its diff.</div>
         ) : null}
         {noContents ? <div className="task-diff-empty git-diff-empty">No diff available for this file.</div> : null}
-        {!loading && contents && !contents.binary && !noDifferences ? (
-          <ReactDiffViewer oldValue={contents.old} newValue={contents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} />
+        {!loading && normalizedContents && !normalizedContents.binary && !noDifferences ? (
+          <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} />
         ) : null}
       </main>
     </div>
