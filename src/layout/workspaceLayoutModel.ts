@@ -4,6 +4,7 @@ import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import {
   freshWorkspaceLayoutEnvelope,
   normalizeWorkspaceLayoutEnvelope,
+  normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
   serializeWorkspaceLayoutEnvelope,
   workspaceContentPanelId,
@@ -25,13 +26,37 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   terminal: { kind: 'terminal', component: 'terminal', title: 'Terminal', icon: 'terminal' },
   browser: { kind: 'browser', component: 'browser', title: 'Browser', icon: 'globe' },
   editor: { kind: 'editor', component: 'editor', title: 'Editor', icon: 'file-code' },
+  preview: { kind: 'preview', component: 'preview', title: 'Preview', icon: 'file-search' },
   explorer: { kind: 'explorer', component: 'explorer', title: 'Explorer', icon: 'folder-tree' },
+  sourceControl: { kind: 'sourceControl', component: 'sourceControl', title: 'Source Control', icon: 'git-compare-arrows' },
+  gitHistory: { kind: 'gitHistory', component: 'gitHistory', title: 'Git History', icon: 'history' },
+  gitBranches: { kind: 'gitBranches', component: 'gitBranches', title: 'Branches', icon: 'git-branch' },
   workbench: { kind: 'workbench', component: 'workbench', title: 'Workbench', icon: 'git-branch' },
   agent: { kind: 'agent', component: 'agent', title: 'VibeLink Agent', icon: 'bot' },
   orchestration: { kind: 'orchestration', component: 'orchestration', title: 'Orchestration', icon: 'monitor-cog' },
   kanban: { kind: 'kanban', component: 'kanban', title: 'Kanban', icon: 'layout-grid' },
   todo: { kind: 'todo', component: 'todo', title: 'Todo List', icon: 'list-todo' },
   diff: { kind: 'diff', component: 'diff', title: 'Diff', icon: 'git-compare' },
+  agentSessions: { kind: 'agentSessions', component: 'agentSessions', title: 'Agent Sessions', icon: 'messages-square' },
+}
+
+export const workspaceLeftEdgeGroupId = 'workspace-left-tools'
+export const workspaceRightEdgeGroupId = 'workspace-right-tools'
+export const workspaceEdgeCollapsedSize = 38
+export const workspaceMinimumCenterWidth = 640
+
+export const workspaceLeftStructuralKinds = ['explorer', 'sourceControl', 'gitHistory', 'gitBranches'] as const
+export const workspaceRightStructuralKinds = ['agentSessions'] as const
+
+export const workspaceEdgeGroupOptions = {
+  left: { id: workspaceLeftEdgeGroupId, initialSize: 300, minimumSize: 240, maximumSize: 440, collapsedSize: workspaceEdgeCollapsedSize },
+  right: { id: workspaceRightEdgeGroupId, initialSize: 340, minimumSize: 280, maximumSize: 520, collapsedSize: workspaceEdgeCollapsedSize },
+} as const
+
+export function workspaceDefaultEdgeCollapse(rootWidth: number): { left: boolean; right: boolean } {
+  if (rootWidth < 900) return { left: true, right: true }
+  if (rootWidth < 1280) return { left: false, right: true }
+  return { left: false, right: false }
 }
 
 export function normalizeWorkspaceLayoutState(raw: string | null | undefined): WorkspaceLayoutState {
@@ -53,9 +78,14 @@ export function createTerminalContentParams(pane: Pick<PaneMeta, 'id' | 'config'
   }
 }
 
-export function createSingletonContentParams(kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor'>): WorkspaceContentParams {
+export function createSingletonContentParams(kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor' | 'preview'>): WorkspaceContentParams {
   const descriptor = workspaceContentDescriptors[kind]
   return { schema: 1, kind, instanceId: kind, title: descriptor.title, icon: descriptor.icon }
+}
+
+export function createPreviewContentParams(relPathValue: string): Extract<WorkspaceContentParams, { kind: 'preview' }> {
+  const relPath = normalizePreviewPath(relPathValue)
+  return { schema: 1, kind: 'preview', instanceId: 'preview', title: relPath.split('/').at(-1) ?? 'Preview', icon: 'file-search', relPath }
 }
 
 export function createWorkspaceContentPanel(params: WorkspaceContentParams): SerializedDockview['panels'][string] {
@@ -69,12 +99,12 @@ export function createWorkspaceContentPanel(params: WorkspaceContentParams): Ser
   }
 }
 
-export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta, 'id' | 'config'>>): SerializedDockview {
+export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta, 'id' | 'config'>>, rootWidth = 1280): SerializedDockview {
   const terminalParams = panes.map(createTerminalContentParams)
   const terminalGrid = terminalParams.length > 0
     ? balancedGridForPaneCount(terminalParams.length, 16 / 9)
     : { cols: 0, rows: 0 }
-  return createNavigatorTerminalDockview(terminalParams, terminalGrid)
+  return createWorkspaceDockview(terminalParams, terminalGrid, rootWidth)
 }
 
 export function workspaceLayoutHasExactLiveTerminals(envelope: WorkspaceLayoutEnvelope, livePaneIds: readonly string[]): boolean {
@@ -87,7 +117,7 @@ export function workspaceLayoutHasExactLiveTerminals(envelope: WorkspaceLayoutEn
   if (!isPositiveNumber(grid.width) || !isPositiveNumber(grid.height)) return false
 
   const viewIds: string[] = []
-  if (!collectViewIds(grid.root, viewIds) || viewIds.length === 0) return false
+  if (!collectGridViewIds(grid.root, viewIds, true) || !collectAdditionalViewIds(layout, viewIds)) return false
   const viewIdSet = new Set(viewIds)
   if (viewIdSet.size !== viewIds.length) return false
 
@@ -109,7 +139,7 @@ export function workspaceLayoutHasExactLiveTerminals(envelope: WorkspaceLayoutEn
     if (!live.has(params.paneId) || layoutPanes.has(params.paneId)) return false
     layoutPanes.add(params.paneId)
   }
-  if (viewIds.some((panelId) => !(panelId in panels))) return false
+  if (viewIds.some((panelId) => !(panelId in panels)) || viewIds.length !== Object.keys(panels).length) return false
   if (layoutPanes.size !== live.size) return false
   return [...live].every((paneId) => layoutPanes.has(paneId))
 }
@@ -146,28 +176,27 @@ export function freshWorkspaceLayoutState(): WorkspaceLayoutState {
   return freshWorkspaceLayoutEnvelope()
 }
 
-function createNavigatorTerminalDockview(terminalParams: WorkspaceContentParams[], grid: GridSize): SerializedDockview {
-  const explorerParams = createSingletonContentParams('explorer')
-  const explorerPanelId = workspaceContentPanelId(explorerParams)
+function createWorkspaceDockview(terminalParams: WorkspaceContentParams[], grid: GridSize, rootWidth: number): SerializedDockview {
+  const leftParams = workspaceLeftStructuralKinds.map(createSingletonContentParams)
+  const rightParams = workspaceRightStructuralKinds.map(createSingletonContentParams)
+  const structuralParams = [...leftParams, ...rightParams]
   const terminalIds = terminalParams.map((entry) => workspaceContentPanelId(entry))
   const requestedColumns = Number.isFinite(grid.cols) ? Math.floor(grid.cols) : 1
   const requestedRows = Number.isFinite(grid.rows) ? Math.floor(grid.rows) : 1
   const terminalColumns = terminalIds.length > 0 ? Math.max(1, Math.min(requestedColumns, terminalIds.length)) : 0
   const terminalRows = terminalIds.length > 0 ? Math.max(Math.ceil(terminalIds.length / terminalColumns), requestedRows, 1) : 0
-  const explorerWidth = 280
   const terminalColumnWidth = 500
-  const width = explorerWidth + terminalColumns * terminalColumnWidth
+  const centerWidth = Math.max(workspaceMinimumCenterWidth, terminalColumns * terminalColumnWidth)
   const height = Math.max(1, terminalRows) * 320
-  const panels: SerializedDockview['panels'] = {
-    [explorerPanelId]: createWorkspaceContentPanel(explorerParams),
-  }
+  const panels: SerializedDockview['panels'] = {}
+  for (const entry of structuralParams) panels[workspaceContentPanelId(entry)] = createWorkspaceContentPanel(entry)
   for (const entry of terminalParams) panels[workspaceContentPanelId(entry)] = createWorkspaceContentPanel(entry)
 
   let groupIndex = 0
   let firstTerminalGroupId: string | null = null
   const leaf = (panelId: string, size: number): SerializedDockview['grid']['root'] => {
     const groupId = `content-group-${groupIndex++}`
-    if (panelId !== explorerPanelId && firstTerminalGroupId === null) firstTerminalGroupId = groupId
+    if (firstTerminalGroupId === null) firstTerminalGroupId = groupId
     return {
       type: 'leaf',
       data: { views: [panelId], activeView: panelId, id: groupId },
@@ -175,7 +204,7 @@ function createNavigatorTerminalDockview(terminalParams: WorkspaceContentParams[
     }
   }
 
-  const columns: SerializedDockview['grid']['root'][] = [leaf(explorerPanelId, explorerWidth)]
+  const columns: SerializedDockview['grid']['root'][] = []
   for (let col = 0; col < terminalColumns; col += 1) {
     const columnIds: string[] = []
     for (let row = 0; row < terminalRows; row += 1) {
@@ -193,19 +222,44 @@ function createNavigatorTerminalDockview(terminalParams: WorkspaceContentParams[
     }
   }
 
+  const collapsed = workspaceDefaultEdgeCollapse(rootWidth)
+  const explorerId = workspaceContentPanelId(leftParams[0])
+  const agentSessionsId = workspaceContentPanelId(rightParams[0])
   return {
     panels,
     grid: {
-      root: { type: 'branch', data: columns, size: width },
-      width,
+      root: { type: 'branch', data: columns, size: centerWidth },
+      width: centerWidth,
       height,
       orientation: Orientation.HORIZONTAL,
     },
-    activeGroup: firstTerminalGroupId ?? 'content-group-0',
+    ...(firstTerminalGroupId ? { activeGroup: firstTerminalGroupId } : {}),
+    edgeGroups: {
+      left: {
+        size: workspaceEdgeGroupOptions.left.initialSize,
+        visible: true,
+        collapsed: collapsed.left || undefined,
+        group: {
+          id: workspaceLeftEdgeGroupId,
+          views: leftParams.map(workspaceContentPanelId),
+          activeView: explorerId,
+        },
+      },
+      right: {
+        size: workspaceEdgeGroupOptions.right.initialSize,
+        visible: true,
+        collapsed: collapsed.right || undefined,
+        group: {
+          id: workspaceRightEdgeGroupId,
+          views: rightParams.map(workspaceContentPanelId),
+          activeView: agentSessionsId,
+        },
+      },
+    },
   }
 }
 
-function collectViewIds(node: unknown, output: string[]): boolean {
+function collectGridViewIds(node: unknown, output: string[], allowEmptyRoot = false): boolean {
   if (!isRecord(node) || !isPositiveNumber(node.size)) return false
   if (node.type === 'leaf') {
     if (!isRecord(node.data) || !Array.isArray(node.data.views) || node.data.views.length === 0) return false
@@ -215,8 +269,44 @@ function collectViewIds(node: unknown, output: string[]): boolean {
     }
     return true
   }
-  if (node.type !== 'branch' || !Array.isArray(node.data) || node.data.length === 0) return false
-  return node.data.every((child) => collectViewIds(child, output))
+  if (node.type !== 'branch' || !Array.isArray(node.data)) return false
+  if (node.data.length === 0) return allowEmptyRoot
+  return node.data.every((child) => collectGridViewIds(child, output, false))
+}
+
+function collectAdditionalViewIds(layout: Record<string, unknown>, output: string[]): boolean {
+  for (const key of ['floatingGroups', 'popoutGroups'] as const) {
+    const groups = layout[key]
+    if (groups === undefined) continue
+    if (!Array.isArray(groups)) return false
+    for (const entry of groups) {
+      if (!isRecord(entry) || !collectGroupViews(entry.data, output)) return false
+    }
+  }
+  if (layout.edgeGroups !== undefined) {
+    if (!isRecord(layout.edgeGroups)) return false
+    for (const position of ['top', 'bottom', 'left', 'right']) {
+      const entry = layout.edgeGroups[position]
+      if (entry === undefined) continue
+      if (!isRecord(entry) || (entry.group !== undefined && !collectGroupViews(entry.group, output))) return false
+    }
+  }
+  return true
+}
+
+function collectGroupViews(group: unknown, output: string[]): boolean {
+  if (!isRecord(group) || !Array.isArray(group.views) || group.views.length === 0) return false
+  for (const view of group.views) {
+    if (typeof view !== 'string' || !view) return false
+    output.push(view)
+  }
+  return true
+}
+
+function normalizePreviewPath(value: string): string {
+  const normalized = normalizeWorkspaceRelativePath(value)
+  if (!normalized) throw new Error('Preview paths must be workspace-relative and cannot contain parent segments.')
+  return normalized
 }
 
 function isPositiveNumber(value: unknown): value is number {

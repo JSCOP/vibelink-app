@@ -58,6 +58,8 @@ export type Settings = {
   resizeSnapTolerance: number
   paneHeaderHeight: number
   gitStatusPresentation: GitStatusPresentation
+  editorWordWrap: boolean
+  editorMinimap: boolean
   profiles: Profile[]
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
@@ -226,6 +228,8 @@ export const defaultSettings: Settings = {
   resizeSnapTolerance: 32,
   paneHeaderHeight: 28,
   gitStatusPresentation: 'words',
+  editorWordWrap: true,
+  editorMinimap: false,
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
@@ -274,6 +278,8 @@ export function normalizeSettings(value: unknown): Settings {
     resizeSnapTolerance: readNumberInRange(record?.resizeSnapTolerance, defaultSettings.resizeSnapTolerance, 0, 128),
     paneHeaderHeight: readNumberInRange(record?.paneHeaderHeight, defaultSettings.paneHeaderHeight, 24, 56),
     gitStatusPresentation: readGitStatusPresentation(record?.gitStatusPresentation),
+    editorWordWrap: readBoolean(record?.editorWordWrap, defaultSettings.editorWordWrap),
+    editorMinimap: readBoolean(record?.editorMinimap, defaultSettings.editorMinimap),
     profiles,
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,

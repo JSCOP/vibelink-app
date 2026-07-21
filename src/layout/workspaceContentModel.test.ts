@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest'
 import type { WorkspaceContentParams } from './workspaceContentModel'
 import {
   freshWorkspaceLayoutEnvelope,
+  isCentralWorkspaceContentKind,
+  isLeftStructuralWorkspaceContentKind,
+  isRightStructuralWorkspaceContentKind,
+  isStructuralWorkspaceContentKind,
   normalizeWorkspaceLayoutEnvelope,
   normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
   workspaceContentPanelId,
+  workspaceContentResourceKey,
 } from './workspaceContentModel'
 
 const dockview = (panels: Record<string, unknown>) => ({
@@ -74,6 +79,27 @@ describe('workspace content model', () => {
     expect(parseWorkspaceContentParams({ schema: 1, kind: 'workbench', instanceId: 'other', title: 'Workbench', icon: 'git-branch' })).toBeNull()
   })
 
+  it('rejects duplicate structural singleton references across grid and edge groups', () => {
+    const explorer: WorkspaceContentParams = { schema: 1, kind: 'explorer', instanceId: 'explorer', title: 'Explorer', icon: 'folder-tree' }
+    const explorerId = workspaceContentPanelId(explorer)
+    const candidate = {
+      ...dockview({ [explorerId]: panel(explorer) }),
+      edgeGroups: {
+        left: { size: 300, visible: true, group: { id: 'workspace-left-tools', views: [explorerId], activeView: explorerId } },
+      },
+    }
+    expect(normalizeWorkspaceLayoutEnvelope(JSON.stringify({ version: 3, dockview: candidate }))).toEqual(freshWorkspaceLayoutEnvelope())
+  })
+  it('classifies structural edge and central content kinds', () => {
+    expect(isLeftStructuralWorkspaceContentKind('explorer')).toBe(true)
+    expect(isLeftStructuralWorkspaceContentKind('gitBranches')).toBe(true)
+    expect(isRightStructuralWorkspaceContentKind('agentSessions')).toBe(true)
+    expect(isStructuralWorkspaceContentKind('sourceControl')).toBe(true)
+    expect(isStructuralWorkspaceContentKind('preview')).toBe(false)
+    expect(isCentralWorkspaceContentKind('preview')).toBe(true)
+    expect(isCentralWorkspaceContentKind('terminal')).toBe(true)
+  })
+
   it('rejects zero geometry, dangling panels, duplicate views or groups, and invalid active or maximized references', () => {
     const terminal: WorkspaceContentParams = { schema: 1, kind: 'terminal', instanceId: 'pane-1', title: 'Shell', icon: 'terminal', paneId: 'pane-1' }
     const editor: WorkspaceContentParams = { schema: 1, kind: 'editor', instanceId: 'src/App.tsx', title: 'App.tsx', icon: 'file-code', relPath: 'src/App.tsx' }
@@ -132,5 +158,28 @@ describe('workspace content model', () => {
       icon: 'file-code',
       relPath: 'src/App.tsx',
     })
+  })
+
+  it('normalizes Preview paths while preserving singleton panel/resource identity', () => {
+    const preview = parseWorkspaceContentParams({
+      schema: 1,
+      kind: 'preview',
+      instanceId: 'preview',
+      title: 'changed.ts',
+      icon: 'file-search',
+      relPath: 'src\\changed.ts',
+    })
+    expect(preview).toEqual({
+      schema: 1,
+      kind: 'preview',
+      instanceId: 'preview',
+      title: 'changed.ts',
+      icon: 'file-search',
+      relPath: 'src/changed.ts',
+    })
+    expect(preview && workspaceContentPanelId(preview)).toBe('content:preview:preview')
+    expect(preview && workspaceContentResourceKey(preview)).toBe('preview')
+    expect(parseWorkspaceContentParams({ ...preview, instanceId: 'src/changed.ts' })).toBeNull()
+    expect(parseWorkspaceContentParams({ ...preview, icon: 'file-code' })).toBeNull()
   })
 })

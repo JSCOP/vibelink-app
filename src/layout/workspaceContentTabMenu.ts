@@ -3,13 +3,14 @@ import type {
   ReactContextMenuItemConfig,
 } from 'dockview-react'
 import type { WorkspaceContentActions } from './contentActions'
-import { parseWorkspaceContentParams } from './workspaceContentModel'
+import { isStructuralWorkspaceContentKind, parseWorkspaceContentParams } from './workspaceContentModel'
 
 export function buildWorkspaceContentTabContextMenu(
   params: GetTabContextMenuItemsParams,
   actions: WorkspaceContentActions,
 ): ReactContextMenuItemConfig[] {
   const content = parseWorkspaceContentParams(params.panel.params)
+  if (content && isStructuralWorkspaceContentKind(content.kind)) return []
   const groupId = params.group.id
   const items: ReactContextMenuItemConfig[] = [
     { label: 'New terminal in this group', action: () => { void actions.openContent({ kind: 'terminal', targetGroupId: groupId }) } },

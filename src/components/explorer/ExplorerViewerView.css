@@ -1,7 +1,6 @@
-/* ExplorerViewerView — presentational styles only.
+/* Central Preview presentation styles.
    Scope: .explorer-viewer*, .explorer-image-*, .explorer-text-*,
-   .explorer-binary-*, .explorer-truncated-*.
-   The shared .explorer-window container rule lives in ExplorerTreeView.css. */
+   .explorer-binary-*, and .explorer-truncated-*. */
 
 .explorer-viewer {
   background: var(--vibelink-panel);

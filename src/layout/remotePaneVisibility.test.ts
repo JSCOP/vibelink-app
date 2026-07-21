@@ -6,6 +6,7 @@ type FakeGroup = {
   id: string
   panels: FakePanel[]
   api: {
+    location: { type: 'grid' | 'edge'; position?: 'left' | 'right' }
     isVisible: boolean
     setVisible(visible: boolean): void
   }
@@ -20,7 +21,7 @@ type FakePanel = {
   }
 }
 
-function fakeDock(groupsWithPanelIds: string[][], activePanelId: string) {
+function fakeDock(groupsWithPanelIds: string[][], activePanelId: string, edgeGroupIndexes: number[] = []) {
   const groups: FakeGroup[] = []
   const panels: FakePanel[] = []
   const api = {
@@ -30,7 +31,7 @@ function fakeDock(groupsWithPanelIds: string[][], activePanelId: string) {
     getPanel: (id: string) => panels.find((panel) => panel.id === id),
     getGroup: (id: string) => groups.find((group) => group.id === id),
     addGroup: ({ id }: { id: string }) => {
-      const group = makeGroup(id)
+      const group = makeGroup(id, false)
       groups.push(group)
       return group
     },
@@ -40,11 +41,12 @@ function fakeDock(groupsWithPanelIds: string[][], activePanelId: string) {
     }),
   }
 
-  function makeGroup(id: string): FakeGroup {
+  function makeGroup(id: string, edge: boolean): FakeGroup {
     const group: FakeGroup = {
       id,
       panels: [],
       api: {
+        location: edge ? { type: 'edge', position: 'left' } : { type: 'grid' },
         isVisible: true,
         setVisible(visible) { group.api.isVisible = visible },
       },
@@ -70,7 +72,7 @@ function fakeDock(groupsWithPanelIds: string[][], activePanelId: string) {
   }
 
   groupsWithPanelIds.forEach((ids, groupIndex) => {
-    const group = makeGroup(`group-${groupIndex + 1}`)
+    const group = makeGroup(`group-${groupIndex + 1}`, edgeGroupIndexes.includes(groupIndex))
     groups.push(group)
     for (const id of ids) {
       const panel = makePanel(id, group)
@@ -108,5 +110,13 @@ describe('remote pane visibility', () => {
     expect(restoreRemoteLeasedPane(api, state!)).toBe(true)
     expect(groups[0].panels.map((panel) => panel.id)).toEqual(['pane-a', 'pane-b'])
     expect(removeGroup).toHaveBeenCalledOnce()
+  })
+
+  it('ignores visible edge panels when activating after a lease hide', () => {
+    const { api } = fakeDock([['pane-a'], ['content:explorer:explorer'], ['pane-b']], 'pane-a', [1])
+    const state = hideRemoteLeasedPane(api, 'pane-a')
+
+    expect(state?.kind).toBe('group')
+    expect(api.activePanel?.id).toBe('pane-b')
   })
 })

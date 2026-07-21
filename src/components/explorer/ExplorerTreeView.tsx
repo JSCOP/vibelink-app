@@ -17,8 +17,13 @@ export type ExplorerTreeViewProps = {
   error: string | null
   statusSummary: ExplorerChangeSummary | null
   statusPresentation: GitStatusPresentation
-  previewVisible: boolean
-  onTogglePreview: () => void
+  canOpenPreview: boolean
+  onRefresh: () => void
+  onNewFile: () => void
+  onNewFolder: () => void
+  onOpenPreview: () => void
+  onCollapse?: () => void
+  showHeader?: boolean
   treeId?: string
   workspaceLabel?: string
   workspacePath?: string
@@ -42,7 +47,7 @@ export type ExplorerTreeViewProps = {
   onDrop: (event: React.DragEvent, node: ExplorerNode) => void
 }
 
-export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, previewVisible, onTogglePreview, treeId = 'explorer-tree', workspaceLabel = 'Workspace', workspacePath, repositoryLabel = 'Workspace root', renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onOpen, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
+export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, canOpenPreview, onRefresh, onNewFile, onNewFolder, onOpenPreview, onCollapse, showHeader = true, treeId = 'explorer-tree', workspaceLabel = 'Workspace', workspacePath, repositoryLabel = 'Workspace root', renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onOpen, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const domTreeId = useMemo(() => stableDomId(treeId), [treeId])
   const rowIds = useMemo(() => new Map(nodes.map((node) => [node.path, `${domTreeId}-row-${stableDomId(node.path)}`])), [domTreeId, nodes])
@@ -76,21 +81,25 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
 
   return (
     <aside className="explorer-tree-pane" data-explorer-tree="true">
-      <header>
-        <div className="explorer-tree-titlebar">
-          <strong>EXPLORER</strong>
-          <span className="explorer-tree-header-spacer" />
-          {statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}
-          {loading ? <LoaderCircle className="spin" size={13} /> : null}
-          <button type="button" className="explorer-preview-toggle" title={previewVisible ? 'Hide file preview' : 'Show file preview'} aria-label={previewVisible ? 'Hide file preview' : 'Show file preview'} aria-pressed={previewVisible} onClick={onTogglePreview}>
-            {previewVisible ? <PanelRightClose size={13} aria-hidden="true" /> : <PanelRightOpen size={13} aria-hidden="true" />}
-          </button>
-        </div>
-        <div className="explorer-tree-context" aria-label={`Workspace ${workspaceLabel}; Git repository ${repositoryLabel}`}>
-          <span title={workspacePath ?? workspaceLabel}><b>Workspace</b><span>{workspaceLabel}</span></span>
-          <span title={`Git repository: ${repositoryLabel}`}><b>Git</b><span>{repositoryLabel}</span></span>
-        </div>
-      </header>
+      {showHeader ? (
+        <header>
+          <div className="explorer-tree-titlebar">
+            <strong>EXPLORER</strong>
+            <span className="explorer-tree-header-spacer" />
+            {statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}
+            {loading ? <LoaderCircle className="spin" size={13} /> : null}
+            <button type="button" className="explorer-preview-toggle" title="Refresh Explorer" aria-label="Refresh Explorer" onClick={onRefresh}><RefreshCw size={13} aria-hidden="true" /></button>
+            <button type="button" className="explorer-preview-toggle" title="New File" aria-label="New File" onClick={onNewFile}><FilePlus2 size={13} aria-hidden="true" /></button>
+            <button type="button" className="explorer-preview-toggle" title="New Folder" aria-label="New Folder" onClick={onNewFolder}><Folder size={13} aria-hidden="true" /></button>
+            <button type="button" className="explorer-preview-toggle" title="Open Preview" aria-label="Open Preview" disabled={!canOpenPreview} onClick={onOpenPreview}><PanelRightOpen size={13} aria-hidden="true" /></button>
+            {onCollapse ? <button type="button" className="explorer-preview-toggle" title="Collapse Explorer" aria-label="Collapse Explorer" onClick={onCollapse}><PanelRightClose size={13} aria-hidden="true" /></button> : null}
+          </div>
+          <div className="explorer-tree-context" aria-label={`Workspace ${workspaceLabel}; Git repository ${repositoryLabel}`}>
+            <span title={workspacePath ?? workspaceLabel}><b>Workspace</b><span>{workspaceLabel}</span></span>
+            <span title={`Git repository: ${repositoryLabel}`}><b>Git</b><span>{repositoryLabel}</span></span>
+          </div>
+        </header>
+      ) : null}
       {error ? <div className="explorer-error" role="alert">{error}</div> : null}
       <div
         id={domTreeId}
@@ -237,7 +246,7 @@ function RepositoryBadges({ node, presentation }: { node: ExplorerNode; presenta
   )
 }
 
-function ChangeSummaryBadges({ summary, presentation, compact = false }: { summary: ExplorerChangeSummary; presentation: GitStatusPresentation; compact?: boolean }) {
+export function ChangeSummaryBadges({ summary, presentation, compact = false }: { summary: ExplorerChangeSummary; presentation: GitStatusPresentation; compact?: boolean }) {
   const title = `${summary.total} changed path${summary.total === 1 ? '' : 's'}: ${summary.conflicted} conflicted, ${summary.staged} staged, ${summary.unstaged} modified, ${summary.untracked} untracked`
   if (compact && presentation === 'words') {
     return <span className="explorer-change-summary" title={title} aria-label={title} data-compact="true"><em data-area="dirty" data-presentation="words">Dirty {summary.total}</em></span>

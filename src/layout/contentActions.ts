@@ -19,7 +19,8 @@ export type OpenContentRequest = WorkspaceContentOwnership & (
   | { kind: 'terminal-grid'; targetGroupId?: string; grid: TerminalGridLaunchRequest }
   | { kind: 'browser'; targetGroupId?: string; profileId?: string | null; private?: boolean }
   | { kind: 'editor'; targetGroupId?: string; relPath: string }
-  | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor'>; targetGroupId?: string }
+  | { kind: 'preview'; targetGroupId?: string; relPath: string; activate?: boolean }
+  | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor' | 'preview'>; targetGroupId?: string }
 )
 
 export type WorkspaceContentActions = {

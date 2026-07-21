@@ -22,3 +22,5 @@ const workerEnvironment: MonacoWorkerEnvironment = {
 
 ;(globalThis as typeof globalThis & { MonacoEnvironment: MonacoWorkerEnvironment }).MonacoEnvironment = workerEnvironment
 loader.config({ monaco })
+
+export { monaco }

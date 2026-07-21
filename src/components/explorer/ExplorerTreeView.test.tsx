@@ -50,8 +50,11 @@ describe('ExplorerTreeView', () => {
           loading={false}
           statusSummary={null}
           statusPresentation="letters"
-          previewVisible
-          onTogglePreview={noop}
+          canOpenPreview={false}
+          onRefresh={noop}
+          onNewFile={noop}
+          onNewFolder={noop}
+          onOpenPreview={noop}
           error={null}
           renamingPath={null}
           renameValue=""
@@ -87,8 +90,11 @@ describe('ExplorerTreeView', () => {
       loading: false,
       statusSummary: null,
       error: null,
-      previewVisible: true,
-      onTogglePreview: noop,
+      canOpenPreview: true,
+      onRefresh: noop,
+      onNewFile: noop,
+      onNewFolder: noop,
+      onOpenPreview: noop,
       renamingPath: null,
       renameValue: '',
       contextMenu: null,
@@ -118,42 +124,43 @@ describe('ExplorerTreeView', () => {
     expect(screen.getByLabelText(explanation).textContent).toBe('Modified')
   })
 
-  test('exposes navigator-first and visible preview toggle states in the tree header', () => {
-    const onTogglePreview = vi.fn()
-    const props = {
-      nodes: [node],
-      selectedPath: 'src',
-      loading: false,
-      statusSummary: null,
-      statusPresentation: 'letters' as const,
-      onTogglePreview,
-      error: null,
-      renamingPath: null,
-      renameValue: '',
-      contextMenu: null,
-      dragOverPath: null,
-      onSelect: noop,
-      onOpen: noop,
-      onToggle: noop,
-      onKeyDown: noop,
-      onRenameValueChange: noop,
-      onCommitRename: noop,
-      onCancelRename: noop,
-      onContextMenu: noop,
-      onCloseContextMenu: noop,
-      onDragStart: noop,
-      onDragOver: noop,
-      onDragLeave: noop,
-      onDrop: noop,
-    }
-    const { rerender } = render(<ExplorerTreeView {...props} previewVisible={false} />)
+  test('exposes navigator actions without embedding a preview', () => {
+    const onOpenPreview = vi.fn()
+    render(
+      <ExplorerTreeView
+        nodes={[changedNode]}
+        selectedPath="file.ts"
+        loading={false}
+        statusSummary={null}
+        statusPresentation="letters"
+        canOpenPreview
+        onRefresh={noop}
+        onNewFile={noop}
+        onNewFolder={noop}
+        onOpenPreview={onOpenPreview}
+        error={null}
+        renamingPath={null}
+        renameValue=""
+        contextMenu={null}
+        dragOverPath={null}
+        onSelect={noop}
+        onOpen={noop}
+        onToggle={noop}
+        onKeyDown={noop}
+        onRenameValueChange={noop}
+        onCommitRename={noop}
+        onCancelRename={noop}
+        onContextMenu={noop}
+        onCloseContextMenu={noop}
+        onDragStart={noop}
+        onDragOver={noop}
+        onDragLeave={noop}
+        onDrop={noop}
+      />,
+    )
 
-    const showPreview = screen.getByRole('button', { name: 'Show file preview' })
-    expect(showPreview.getAttribute('aria-pressed')).toBe('false')
-    fireEvent.click(showPreview)
-    expect(onTogglePreview).toHaveBeenCalledTimes(1)
-
-    rerender(<ExplorerTreeView {...props} previewVisible />)
-    expect(screen.getByRole('button', { name: 'Hide file preview' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'Open Preview' }))
+    expect(onOpenPreview).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.explorer-viewer')).toBeNull()
   })
 })

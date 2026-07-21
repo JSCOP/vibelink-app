@@ -1,0 +1,58 @@
+import { describe, expect, it, vi } from 'vitest'
+import { workspaceAgentTabStatus } from './workspaceContentTabModel'
+import { buildWorkspaceContentTabContextMenu } from '../layout/workspaceContentTabMenu'
+import { createSingletonContentParams, createTerminalContentParams } from '../layout/workspaceLayoutModel'
+import type { WorkspaceContentActions } from '../layout/contentActions'
+
+const actions = {
+  openContent: vi.fn(async () => ''),
+  activateContent: vi.fn(),
+  requestCloseContent: vi.fn(async () => 'closed' as const),
+  splitTerminal: vi.fn(async () => undefined),
+  arrangeTerminals: vi.fn(async () => undefined),
+  clearTerminals: vi.fn(async () => undefined),
+  toggleMaximizeContent: vi.fn(),
+  renameTerminal: vi.fn(async () => undefined),
+  resetLayout: vi.fn(async () => undefined),
+  getContentParams: vi.fn(() => null),
+} satisfies WorkspaceContentActions
+
+describe('WorkspaceContentTab rail state', () => {
+  it('maps authoritative Hermes state with pending permission precedence', () => {
+    expect(workspaceAgentTabStatus('busy', 1)).toEqual({ label: 'Waiting for input', tone: 'waiting', pulsing: false })
+    expect(workspaceAgentTabStatus('starting', 0)).toEqual({ label: 'Working', tone: 'working', pulsing: true })
+    expect(workspaceAgentTabStatus('busy', 0)).toEqual({ label: 'Working', tone: 'working', pulsing: true })
+    expect(workspaceAgentTabStatus('running', 0)).toEqual({ label: 'Idle', tone: 'idle', pulsing: false })
+    expect(workspaceAgentTabStatus('error', 0)).toEqual({ label: 'Error', tone: 'error', pulsing: false })
+    expect(workspaceAgentTabStatus('idle', 0)).toEqual({ label: 'Stopped', tone: 'stopped', pulsing: false })
+  })
+
+  it('omits close, maximize, float, popout, and creation actions for structural tabs', () => {
+    const params = createSingletonContentParams('sourceControl')
+    const items = buildWorkspaceContentTabContextMenu({
+      panel: { id: 'content:sourceControl:sourceControl', params },
+      group: { id: 'workspace-left-tools' },
+    } as never, actions)
+
+    expect(items).toEqual([])
+  })
+
+  it('keeps central terminal actions targeted at the owning grid group', () => {
+    const params = createTerminalContentParams({ id: 'pane-a', config: { paneId: 'pane-a', args: [], env: [], title: 'Shell', icon: 'terminal', cols: 80, rows: 24 } })
+    const items = buildWorkspaceContentTabContextMenu({
+      panel: { id: 'content:terminal:pane-a', params },
+      group: { id: 'grid-main' },
+    } as never, actions)
+
+    items[0]?.action?.()
+    expect(actions.openContent).toHaveBeenCalledWith({ kind: 'terminal', targetGroupId: 'grid-main' })
+    expect(items.map((item) => item.label)).toEqual([
+      'New terminal in this group',
+      'Split terminal right',
+      'Split terminal below',
+      'Arrange Terminals',
+      'Maximize / restore content',
+      'Close terminal',
+    ])
+  })
+})

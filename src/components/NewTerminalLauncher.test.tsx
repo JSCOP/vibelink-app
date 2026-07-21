@@ -1,5 +1,7 @@
-import { renderToString } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+import { cleanup, render } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { ReactElement } from 'react'
 import type { Profile } from '../state/profiles'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
 
@@ -24,9 +26,16 @@ const profile: Profile = {
   icon: 'terminal',
 }
 
+afterEach(cleanup)
+
+function renderHtml(element: ReactElement): string {
+  render(element)
+  return document.body.innerHTML
+}
+
 describe('NewTerminalLauncher', () => {
   it('reopens with the committed grid preference instead of rebalancing pane count', () => {
-    const html = renderToString(
+    const html = renderHtml(
       <NewTerminalLauncher
         isOpen
         existingPaneCount={12}
@@ -47,7 +56,7 @@ describe('NewTerminalLauncher', () => {
   })
 
   it('renders supplied occupancy matrices with holes available and matrix dimensions committed', () => {
-    const html = renderToString(
+    const html = renderHtml(
       <NewTerminalLauncher
         isOpen
         existingPaneCount={6}
@@ -69,7 +78,7 @@ describe('NewTerminalLauncher', () => {
       />,
     )
 
-    expect(html).toContain('<strong>4<!-- -->×<!-- -->3</strong>')
+    expect(html).toContain('<strong>4×3</strong>')
     expect(html).toContain('value="4"')
     expect(html).toContain('value="3"')
     expect(html).toContain('aria-label="1×1 occupied"')
@@ -84,7 +93,7 @@ describe('NewTerminalLauncher', () => {
   })
 
   it('falls back to count-based occupancy when no matrix is available', () => {
-    const html = renderToString(
+    const html = renderHtml(
       <NewTerminalLauncher
         isOpen
         existingPaneCount={8}
@@ -98,7 +107,7 @@ describe('NewTerminalLauncher', () => {
       />,
     )
 
-    expect(html).toContain('8<!-- --> occupied · <!-- -->0<!-- --> new panes')
+    expect(html).toContain('8 occupied · 0 new panes')
     expect(html).toContain('aria-label="4×2 occupied"')
     expect(html).toContain('aria-label="5×1 available"')
     expect(html).toContain('value="4"')
@@ -107,7 +116,7 @@ describe('NewTerminalLauncher', () => {
   })
 
   it('keeps the preferred 5x2 preview while a rightmost-column pane still exists', () => {
-    const html = renderToString(
+    const html = renderHtml(
       <NewTerminalLauncher
         isOpen
         existingPaneCount={9}
@@ -120,7 +129,7 @@ describe('NewTerminalLauncher', () => {
       />,
     )
 
-    expect(html).toContain('9<!-- --> occupied · <!-- -->1<!-- --> new panes')
+    expect(html).toContain('9 occupied · 1 new panes')
     expect(html).toContain('aria-label="5×1 occupied"')
     expect(html).toContain('aria-label="5×2 selected"')
     expect(html).toContain('value="5"')
@@ -128,7 +137,7 @@ describe('NewTerminalLauncher', () => {
   })
 
   it('does not lock an empty workspace to a stale preferred grid', () => {
-    const html = renderToString(
+    const html = renderHtml(
       <NewTerminalLauncher
         isOpen
         existingPaneCount={0}
@@ -141,7 +150,7 @@ describe('NewTerminalLauncher', () => {
       />,
     )
 
-    expect(html).toContain('0<!-- --> occupied · <!-- -->4<!-- --> new panes')
+    expect(html).toContain('0 occupied · 4 new panes')
     expect(html).toContain('value="2"')
     expect(html).not.toContain('value="6"')
     expect(html).not.toContain('value="4"')

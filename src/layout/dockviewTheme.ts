@@ -12,4 +12,5 @@ export const vibelinkDockviewTheme: DockviewTheme = {
   className: 'dockview-theme-vibelink',
   // Matches the previous themeAbyss fallback: flat bar, no Chrome-style wrap.
   tabGroupIndicator: 'none',
+  edgeGroupCollapsedSize: 38,
 }

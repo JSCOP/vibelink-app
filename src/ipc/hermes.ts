@@ -28,6 +28,7 @@ export function isHermesSetupRequired(message: string): boolean {
 
 let registration: Promise<void> | undefined
 const startPromises = new Map<string, Promise<void>>()
+const sessionRefreshPromises = new Map<string, Promise<void>>()
 const DEFAULT_START_TIMEOUT_MS = 60_000
 
 export type StartHermesAgentInput = {
@@ -47,9 +48,7 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
     if (event.kind === 'started') {
       store.setHermesStatus(event.sessionId, 'running')
       store.setHermesCurrentSession(event.sessionId, event.acpSessionId)
-      void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: event.sessionId })
-        .then((list) => store.setHermesSessions(event.sessionId, list))
-        .catch(() => undefined)
+      void hermesRefreshSessions(event.sessionId).catch(() => undefined)
     } else if (event.kind === 'sessionReplay') {
       store.resetHermesTranscript(event.sessionId)
       store.setHermesCurrentSession(event.sessionId, event.acpSessionId)
@@ -137,10 +136,8 @@ export async function hermesNewSession(input: StartHermesAgentInput): Promise<st
   const acpId = await invoke<string>('hermes_new_session', { sessionId: input.sessionId })
   const store = useWorkspaceStore.getState()
   store.setHermesCurrentSession(input.sessionId, acpId)
-  store.setHermesTranscript(input.sessionId, [])
-  void invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId: input.sessionId })
-    .then((list) => store.setHermesSessions(input.sessionId, list))
-    .catch(() => undefined)
+  store.resetHermesTranscript(input.sessionId)
+  void hermesRefreshSessions(input.sessionId).catch(() => undefined)
   return acpId
 }
 
@@ -150,9 +147,16 @@ export async function hermesResumeSession(input: StartHermesAgentInput, acpSessi
   useWorkspaceStore.getState().setHermesCurrentSession(input.sessionId, acpSessionId)
 }
 
-export async function hermesRefreshSessions(sessionId: string): Promise<void> {
-  const list = await invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId })
-  useWorkspaceStore.getState().setHermesSessions(sessionId, list)
+export function hermesRefreshSessions(sessionId: string): Promise<void> {
+  const existing = sessionRefreshPromises.get(sessionId)
+  if (existing) return existing
+  const task = invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId })
+    .then((list) => useWorkspaceStore.getState().setHermesSessions(sessionId, list))
+    .finally(() => {
+      if (sessionRefreshPromises.get(sessionId) === task) sessionRefreshPromises.delete(sessionId)
+    })
+  sessionRefreshPromises.set(sessionId, task)
+  return task
 }
 
 async function startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs }: Required<Pick<StartHermesAgentInput, 'sessionId' | 'timeoutMs'>> & Pick<StartHermesAgentInput, 'commandOverride' | 'workspaceFolder'>): Promise<void> {

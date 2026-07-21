@@ -52,7 +52,9 @@ export function restoreRemoteLeasedPane(api: DockviewApi, state: RemotePaneVisib
 }
 
 function activateFirstVisibleSibling(api: DockviewApi, hiddenPaneId: string): void {
-  const sibling = api.panels.find((panel) => panel.id !== hiddenPaneId && panel.group.api.isVisible)
+  const sibling = api.panels.find((panel) => panel.id !== hiddenPaneId
+    && panel.group.api.location.type === 'grid'
+    && panel.group.api.isVisible)
   sibling?.api.setActive()
 }
 

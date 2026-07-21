@@ -22,14 +22,21 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react'
 import { getGridLocation, type AddPanelOptions } from 'dockview-core'
-import { Bot, FileCode2, FolderTree, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, MoreHorizontal, Plus, SquareTerminal, Workflow } from 'lucide-react'
+import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, MoreHorizontal, SquareTerminal, Workflow } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
+import { NewTerminalLauncher } from '../components/NewTerminalLauncher'
 import { QuickPick } from '../components/QuickPick'
 import type { PickerEntry } from '../components/pickerModel'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { WorkbenchContentPanel as WorkbenchPanel } from '../components/git/GitWindow'
-import { ExplorerWindow } from '../components/explorer/ExplorerWindow'
+import { ExplorerSidebarPanel } from '../components/explorer/ExplorerWindow'
+import { PreviewContentPanel } from '../components/explorer/PreviewContentPanel'
+import { SourceControlSidebar } from '../components/git/SourceControlSidebar'
+import { GitHistorySidebar } from '../components/git/GitHistorySidebar'
+import { GitBranchesSidebar } from '../components/git/GitBranchesSidebar'
+import { GitWorkspaceProvider } from '../components/git/GitWorkspaceProvider'
+import { AgentSessionsSidebar } from '../components/agent/AgentSessionsSidebar'
 import { OrchestratorChat } from '../components/OrchestratorChat'
 import { OrchestrationWorkspacePanel } from '../components/OrchestrationWorkspacePanel'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
@@ -50,7 +57,7 @@ import type { DirEntryInfo, PaneMeta } from '../ipc/types'
 import type { WorkspaceCreationInput } from '../ipc/providerIntegrations'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
-import { profileById } from '../state/profiles'
+import { profileById, selectedProfileForWorkspace } from '../state/profiles'
 import {
   getWorkspaceSessionEpoch,
   getWorkspaceSessionReadyEpoch,
@@ -76,6 +83,7 @@ import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { withSuppressedPanelRemoval } from './suppression'
 import { hideRemoteLeasedPane, paneIdsForSession, restoreRemoteLeasedPane, type RemotePaneVisibilityState } from './remotePaneVisibility'
 import {
+  isStructuralWorkspaceContentKind,
   normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
   serializeWorkspaceLayoutEnvelope,
@@ -87,11 +95,26 @@ import {
 } from './workspaceContentModel'
 import {
   createDefaultWorkspaceDockviewLayout,
+  createPreviewContentParams,
   createSingletonContentParams,
   createTerminalContentParams,
   normalizeWorkspaceLayoutState,
   planTerminalArrangement,
 } from './workspaceLayoutModel'
+import {
+  centralGridIsEmpty,
+  createWorkspaceResizeCoordinator,
+  collapseStructuralWorkspacePanel,
+  collapseWorkspaceEdgesForCenterWidth,
+  ensureWorkspaceEdgeShell,
+  registerWorkspaceEdgeGroups,
+  resetWorkspaceEdgeDefaults,
+  resolveWorkspaceContentGroup,
+  updateOpenPreviewPanel,
+  workspaceGroupShowsCreationControls,
+  workspaceChromeStatesEqual,
+  type WorkspaceResizeCoordinator,
+} from './workspaceShellModel'
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
 import { finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 
@@ -160,6 +183,42 @@ function ProPanelBoundary({ feature, children }: { feature: string; children: Re
   return entitled ? children : <ProLockedPanel feature={feature} />
 }
 
+function useEdgePanelState(api: WorkspaceContentPanelProps['api']) {
+  const [state, setState] = useState(() => ({ active: api.isActive, collapsed: api.group.api.isCollapsed() }))
+  useEffect(() => {
+    const syncActive = () => setState((current) => ({ ...current, active: api.isActive }))
+    const syncCollapsed = () => setState((current) => ({ ...current, collapsed: api.group.api.isCollapsed() }))
+    const active = api.onDidActiveChange(syncActive)
+    const collapsed = api.group.api.onDidCollapsedChange(syncCollapsed)
+    syncActive()
+    syncCollapsed()
+    return () => {
+      active.dispose()
+      collapsed.dispose()
+    }
+  }, [api])
+  return state
+}
+
+function SourceControlContentPanel(props: WorkspaceContentPanelProps) {
+  const state = useEdgePanelState(props.api)
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-source-control"><ProPanelBoundary feature="Source Control"><ErrorBoundary label="Source Control panel"><SourceControlSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
+function GitHistoryContentPanel(props: WorkspaceContentPanelProps) {
+  const state = useEdgePanelState(props.api)
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-history"><ProPanelBoundary feature="Git History"><ErrorBoundary label="Git History panel"><GitHistorySidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
+function GitBranchesContentPanel(props: WorkspaceContentPanelProps) {
+  const state = useEdgePanelState(props.api)
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-branches"><ProPanelBoundary feature="Git Branches"><ErrorBoundary label="Git Branches panel"><GitBranchesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
+function AgentSessionsContentPanel(props: WorkspaceContentPanelProps) {
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
 function AgentContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent"><ProPanelBoundary feature="VibeLink Agent"><ErrorBoundary label="VibeLink Agent panel"><OrchestratorChat /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
@@ -186,6 +245,7 @@ type WorkspaceIntegrationContextValue = {
   nativeSurfacesSuspended?: boolean
   layoutOwner?: WorkspaceLayoutIdentity | null
   setWorkspaceOverlayOpen?: (overlayId: string, open: boolean) => void
+  currentMainGroupId?: string | null
 }
 
 const WorkspaceIntegrationContext = createContext<WorkspaceIntegrationContextValue>({})
@@ -295,20 +355,29 @@ function ExplorerContentPanel(props: WorkspaceContentPanelProps) {
   const ownedLayout = layoutOwner?.sessionId === activeSessionId ? layoutOwner : null
   const sessionId = ownedLayout?.sessionId ?? null
   const workspaceFolder = useWorkspaceStore((state) => state.sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null)
-  const targetGroupId = props.api.group.id
   const ownership = useMemo<WorkspaceContentOwnership | null>(() => ownedLayout
     ? { workspaceId: ownedLayout.sessionId, workspaceEpoch: ownedLayout.sessionEpoch }
     : null, [ownedLayout])
   const scopedActions = useMemo<WorkspaceContentActions | null>(() => actions && ownership ? {
     ...actions,
-    openContent: (request) => actions.openContent({ ...request, ...ownership, targetGroupId: request.targetGroupId ?? targetGroupId }),
+    openContent: (request) => actions.openContent({ ...request, ...ownership }),
     requestCloseContent: (panelId) => actions.requestCloseContent(panelId, ownership),
-  } : null, [actions, ownership, targetGroupId])
+  } : null, [actions, ownership])
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-explorer">
-      <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><ExplorerWindow sessionId={sessionId} workspaceFolder={workspaceFolder} /></WorkspaceContentActionsContext.Provider> : <div className="placeholder-panel">Select a local workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
+      <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><ExplorerSidebarPanel sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : <div className="placeholder-panel">Select a local workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
+}
+
+function PreviewWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
+  const params = parseWorkspaceContentParams(props.params)
+  const sessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const workspaceFolder = useWorkspaceStore((state) => state.sessions.find((session) => session.id === state.activeSessionId)?.workspaceFolder ?? null)
+  if (!sessionId || !workspaceFolder || params?.kind !== 'preview') {
+    return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Preview content metadata is missing.</div></WindowPanelShell>
+  }
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-preview"><ProPanelBoundary feature="Preview"><ErrorBoundary label="Preview panel"><PreviewContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
@@ -325,13 +394,18 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   terminal: TerminalContentPanel,
   browser: BrowserWorkspaceContentPanel,
   editor: EditorWorkspaceContentPanel,
+  preview: PreviewWorkspaceContentPanel,
   explorer: ExplorerContentPanel,
+  sourceControl: SourceControlContentPanel,
+  gitHistory: GitHistoryContentPanel,
+  gitBranches: GitBranchesContentPanel,
   workbench: WorkbenchContentPanel,
   agent: AgentContentPanel,
   orchestration: OrchestrationContentPanel,
   kanban: KanbanContentPanel,
   todo: TodoContentPanel,
   diff: DiffContentPanel,
+  agentSessions: AgentSessionsContentPanel,
 }
 
 /** Group-local creation controls. The group is the placement authority, while
@@ -340,31 +414,67 @@ export function WorkspaceGroupActions(props: IDockviewHeaderActionsProps) {
   return <WorkspaceGroupActionsWithContext {...props} />
 }
 
+
 function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & { fallbackActions?: WorkspaceContentActions | null }) {
   const actions = useContext(WorkspaceContentActionsContext) ?? props.fallbackActions ?? null
   const integration = useContext(WorkspaceIntegrationContext)
+  const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const settings = useWorkspaceStore((state) => state.settings)
+  const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [launcherOpen, setLauncherOpen] = useState(false)
   const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null)
   const groupId = props.group.id
-  const overlayId = `group-menu:${groupId}`
+  const menuOverlayId = `group-menu:${groupId}`
+  const launcherOverlayId = `group-new:${groupId}`
   const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
   const open = (request: OpenContentRequest) => {
     setMenuOpen(false)
     void actions?.openContent({ ...request, targetGroupId: groupId })
   }
+  const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
+  const terminalCount = props.containerApi.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').length
+  const isCurrentMainGroup = workspaceGroupShowsCreationControls(props.group.api.location.type, groupId, integration.currentMainGroupId)
+
   useEffect(() => {
-    integration.setWorkspaceOverlayOpen?.(overlayId, menuOpen)
-    if (!menuOpen) return () => integration.setWorkspaceOverlayOpen?.(overlayId, false)
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false) }
+    integration.setWorkspaceOverlayOpen?.(menuOverlayId, menuOpen)
+    integration.setWorkspaceOverlayOpen?.(launcherOverlayId, launcherOpen)
+    if (!menuOpen && !launcherOpen) return () => {
+      integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
+      integration.setWorkspaceOverlayOpen?.(launcherOverlayId, false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setMenuOpen(false)
+      setLauncherOpen(false)
+    }
     window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
-      integration.setWorkspaceOverlayOpen?.(overlayId, false)
+      integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
+      integration.setWorkspaceOverlayOpen?.(launcherOverlayId, false)
     }
-  }, [integration, menuOpen, overlayId])
+  }, [integration, launcherOpen, launcherOverlayId, menuOpen, menuOverlayId])
+
+  if (!isCurrentMainGroup) return null
+
   return (
     <div className="workspace-group-actions" onMouseDown={stop} onPointerDown={stop}>
-      <button type="button" title="New terminal in this group" aria-label="New terminal in this group" onClick={() => open({ kind: 'terminal' })}><Plus size={13} aria-hidden="true" /></button>
+      <NewTerminalLauncher
+        isOpen={launcherOpen}
+        disabled={!actions || !activeSessionId}
+        existingPaneCount={terminalCount}
+        profiles={settings.profiles}
+        activeProfileId={activeProfile.id}
+        onToggle={() => { setMenuOpen(false); setLauncherOpen((openState) => !openState) }}
+        onClose={() => setLauncherOpen(false)}
+        onLaunch={(grid) => {
+          setLauncherOpen(false)
+          const profileId = grid.profileId?.trim()
+          if (profileId) setDefaultProfile(profileId)
+          void actions?.openContent({ kind: 'terminal-grid', targetGroupId: groupId, grid })
+        }}
+      />
       <button
         type="button"
         title="Add workspace content"
@@ -375,6 +485,7 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
             const rect = event.currentTarget.getBoundingClientRect()
             setMenuAnchor({ right: rect.right, bottom: rect.bottom })
           }
+          setLauncherOpen(false)
           setMenuOpen((value) => !value)
         }}
       ><MoreHorizontal size={14} aria-hidden="true" /></button>
@@ -387,11 +498,10 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
             <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); integration.openFilePicker?.(groupId) }}><FileCode2 size={13} aria-hidden="true" /> Editor</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'agent' })}><Bot size={13} aria-hidden="true" /> VibeLink Agent</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'orchestration' })}><Workflow size={13} aria-hidden="true" /> Orchestration</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'explorer' })}><FolderTree size={13} aria-hidden="true" /> Explorer</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'workbench' })}><GitBranch size={13} aria-hidden="true" /> Workbench</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'kanban' })}><LayoutGrid size={13} aria-hidden="true" /> Kanban</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'todo' })}><ListTodo size={13} aria-hidden="true" /> Todo List</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'diff' })}><GitCompare size={13} aria-hidden="true" /> Diff</button>
+            <button type="button" role="menuitem" onClick={() => open({ kind: 'diff' })}><GitCompare size={13} aria-hidden="true" /> Task Diff</button>
             <div className="workspace-group-menu-separator" role="separator" />
             <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void actions?.arrangeTerminals() }}>Arrange Terminals</button>
           </div>
@@ -401,6 +511,7 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
     </div>
   )
 }
+
 
 export function WorkspaceView({
   onApiReady,
@@ -425,6 +536,11 @@ export function WorkspaceView({
   const suppressPanelRemovalRef = useRef(false)
   const saveTimerRef = useRef<number | undefined>()
   const apiDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
+  const resizeCoordinatorRef = useRef<WorkspaceResizeCoordinator | null>(null)
+  const lastChromeStateRef = useRef<WorkspaceContentChromeState | null>(null)
+  const resizeEpochRef = useRef(0)
+  const resizeSettlingRef = useRef(false)
+  const resizeSettlePendingRef = useRef(false)
   const layoutLoadQueueRef = useRef<Promise<void>>(Promise.resolve())
   const layoutEpochRef = useRef(0)
   const layoutOwnerRef = useRef<WorkspaceLayoutOwner | null>(null)
@@ -434,6 +550,8 @@ export function WorkspaceView({
   const remotePaneVisibilityRef = useRef<RemotePaneVisibilityState[]>([])
   const remoteUnleasedLayoutRef = useRef<SerializedDockview | null>(null)
   const pendingTerminalPaneIdsRef = useRef(new Set<string>())
+  const lastMainGroupIdRef = useRef<string | null>(null)
+  const [currentMainGroupId, setCurrentMainGroupId] = useState<string | null>(null)
   const [apiVersion, setApiVersion] = useState(0)
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null)
   const [loadedLayoutOwner, setLoadedLayoutOwner] = useState<WorkspaceLayoutIdentity | null>(null)
@@ -540,7 +658,8 @@ export function WorkspaceView({
     nativeSurfacesSuspended: effectiveNativeSurfacesSuspended,
     layoutOwner: loadedLayoutOwner,
     setWorkspaceOverlayOpen,
-  }), [effectiveNativeSurfacesSuspended, loadedLayoutOwner, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
+    currentMainGroupId,
+  }), [currentMainGroupId, effectiveNativeSurfacesSuspended, loadedLayoutOwner, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
 
   const layoutDockview = useCallback((api: DockviewApi) => {
     const root = dockRef.current
@@ -601,8 +720,9 @@ export function WorkspaceView({
   const activateContent = useCallback((panelId: string) => {
     const panel = apiRef.current?.getPanel(panelId)
     if (!panel) return
-    panel.api.setActive()
     const content = parseWorkspaceContentParams(panel.params)
+    if (content && isStructuralWorkspaceContentKind(content.kind) && panel.group.api.location.type === 'edge') panel.group.api.expand()
+    panel.api.setActive()
     if (content?.kind === 'terminal') {
       useWorkspaceStore.getState().setActivePaneId(content.paneId)
       useWorkspaceStore.getState().clearPaneCompletionHighlight(content.paneId)
@@ -619,8 +739,10 @@ export function WorkspaceView({
       if (!options.inactive) activateContent(existing.id)
       return existing
     }
-    const targetGroup = options.targetGroupId ? api.groups.find((group) => group.id === options.targetGroupId) : undefined
-    const referencePanel = options.referencePanelId ? api.getPanel(options.referencePanelId) : undefined
+    const structural = isStructuralWorkspaceContentKind(params.kind)
+    const targetGroup = resolveWorkspaceContentGroup(api, params.kind, options.targetGroupId, lastMainGroupIdRef.current)
+    if (!targetGroup) return null
+    const referencePanel = !structural && options.referencePanelId ? api.getPanel(options.referencePanelId) : undefined
     const localSplit = referencePanel && options.direction && referencePanel.group.api.location.type === 'grid'
       ? {
           initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), options.direction),
@@ -637,11 +759,7 @@ export function WorkspaceView({
       inactive: options.inactive,
       position: referencePanel
         ? { referencePanel, direction: options.direction ?? 'right' }
-        : targetGroup
-          ? { referenceGroup: targetGroup, direction: options.direction }
-          : api.activeGroup
-            ? { referenceGroup: api.activeGroup }
-            : undefined,
+        : { referenceGroup: targetGroup, ...(structural ? {} : { direction: options.direction }) },
       ...(localSplit?.initialSize ?? {}),
     }
     // Dockview 6.6.1 accepts its public Sizing.Split value at this boundary,
@@ -650,6 +768,10 @@ export function WorkspaceView({
     const panel = api.addPanel(panelOptions as AddPanelOptions<WorkspaceContentParams>)
     if (referencePanel && options.direction && localSplit) {
       finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+    }
+    if (panel.group.api.location.type === 'grid' && (!options.inactive || !lastMainGroupIdRef.current)) {
+      lastMainGroupIdRef.current = panel.group.id
+      setCurrentMainGroupId(panel.group.id)
     }
     if (!options.inactive) activateContent(panel.id)
     return panel
@@ -772,7 +894,9 @@ export function WorkspaceView({
       for (const pane of pending) pendingTerminalPaneIdsRef.current.add(pane.id)
       const pendingPanelIds: string[] = []
       const spawnedPaneIds: string[] = []
-      let lastPanelId = api.activePanel?.id ?? ''
+      let lastPanelId = parseWorkspaceContentParams(api.activePanel?.params)?.kind === 'terminal'
+        ? api.activePanel?.id ?? ''
+        : api.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')?.id ?? ''
       let committed = false
       try {
         for (const pane of pending) {
@@ -903,6 +1027,23 @@ export function WorkspaceView({
       }
     }
 
+    if (request.kind === 'preview') {
+      const params = createPreviewContentParams(request.relPath)
+      const existing = findContentByResource(params, owner.api)
+      if (existing) {
+        const panelId = updateOpenPreviewPanel(existing, params, request.activate !== false)
+        persistLayoutSoon()
+        return panelId
+      }
+      if (request.activate === false) return ''
+      const panel = addContentPanel(params, { targetGroupId: request.targetGroupId }, owner.api)
+      if (!panel || !ownsLayout(owner)) return ''
+      await settleLayout({}, owner)
+      if (!ownsLayout(owner)) return ''
+      persistLayoutSoon()
+      return panel.id
+    }
+
     let params: WorkspaceContentParams
     if (request.kind === 'editor') {
       const relPath = normalizeWorkspaceRelativePath(request.relPath)
@@ -938,6 +1079,10 @@ export function WorkspaceView({
     const panel = api?.getPanel(panelId)
     const content = parseWorkspaceContentParams(panel?.params)
     if (!owner || !api || !panel || !content) return 'cancelled'
+    if (collapseStructuralWorkspacePanel(panel, content)) {
+      persistLayoutSoon()
+      return 'closed'
+    }
     const nextPanelId = nextContentAfterClose(api, panelId)
     if (content.kind === 'editor') {
       const state = useWorkspaceStore.getState()
@@ -1020,21 +1165,23 @@ export function WorkspaceView({
     const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
     const preservedContent = api.panels.flatMap((panel) => {
       const params = parseWorkspaceContentParams(panel.params)
-      return params && params.kind !== 'terminal' ? [params] : []
+      return params && params.kind !== 'terminal' && !isStructuralWorkspaceContentKind(params.kind) ? [params] : []
     })
+    const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       api.clear()
-      const fallback = createDefaultWorkspaceDockviewLayout(livePanes)
-      api.fromJSON(fallback as Parameters<DockviewApi['fromJSON']>[0])
-      const explorerPanelId = workspaceContentPanelId(createSingletonContentParams('explorer'))
-      let rightGroupId = api.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')?.group.id
+      api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes, rootWidth) as Parameters<DockviewApi['fromJSON']>[0])
+      ensureWorkspaceEdgeShell(api)
+      resetWorkspaceEdgeDefaults(api, rootWidth)
+      let mainGroupId = api.activeGroup?.api.location.type === 'grid'
+        ? api.activeGroup.id
+        : api.groups.find((group) => group.api.location.type === 'grid' && group.api.isVisible)?.id
       for (const params of preservedContent) {
-        if (params.kind === 'explorer') continue
-        const panel = rightGroupId
-          ? addContentPanel(params, { targetGroupId: rightGroupId, inactive: true }, api)
-          : addContentPanel(params, { referencePanelId: explorerPanelId, direction: 'right', inactive: true }, api)
-        if (panel && !rightGroupId) rightGroupId = panel.group.id
+        const panel = addContentPanel(params, { targetGroupId: mainGroupId, inactive: true }, api)
+        if (panel?.group.api.location.type === 'grid' && !mainGroupId) mainGroupId = panel.group.id
       }
+      lastMainGroupIdRef.current = mainGroupId ?? null
+      setCurrentMainGroupId(mainGroupId ?? null)
     })
     if (apiRef.current !== api
       || getWorkspaceSessionEpoch() !== owner.sessionEpoch
@@ -1070,9 +1217,7 @@ export function WorkspaceView({
       const sessionEpoch = getWorkspaceSessionEpoch()
       const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
       const envelope = normalizeWorkspaceLayoutState(raw)
-      const requiresFirstTerminalLayout = livePanes.length > 0
-        && api.panels.length === 1
-        && parseWorkspaceContentParams(api.panels[0]?.params)?.kind === 'explorer'
+      const requiresFirstTerminalLayout = livePanes.length > 0 && centralGridIsEmpty(api)
       if (!envelope.dockview && livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) return
       if (loadedSessionRef.current === sessionId
         && loadedLayoutJsonRef.current === raw
@@ -1097,21 +1242,22 @@ export function WorkspaceView({
       // set changed while the app was closed. Resource reconciliation below
       // removes stale UI owners and adds only resources proven live.
       const restore = envelope.dockview
+      const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
+      const restoreHasEdgeGroups = Boolean(restore?.edgeGroups)
+      let applyEdgeDefaults = !restore || !restoreHasEdgeGroups
       await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
         api.clear()
-        const dockview = restore ?? createDefaultWorkspaceDockviewLayout(livePanes)
+        const dockview = restore ?? createDefaultWorkspaceDockviewLayout(livePanes, rootWidth)
         try {
           api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0])
         } catch {
           api.clear()
-          api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes) as Parameters<DockviewApi['fromJSON']>[0])
+          api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes, rootWidth) as Parameters<DockviewApi['fromJSON']>[0])
+          applyEdgeDefaults = true
         }
-        if (livePanes.length > 0
-          && api.panels.length === 1
-          && parseWorkspaceContentParams(api.panels[0]?.params)?.kind === 'explorer') {
-          api.clear()
-          api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes) as Parameters<DockviewApi['fromJSON']>[0])
-        }
+        ensureWorkspaceEdgeShell(api)
+        if (applyEdgeDefaults) resetWorkspaceEdgeDefaults(api, rootWidth)
+        else collapseWorkspaceEdgesForCenterWidth(api, rootWidth)
       })
       if (!transactionIsCurrent()) return
       loadedSessionRef.current = sessionId
@@ -1120,6 +1266,11 @@ export function WorkspaceView({
       loadedSessionEpochRef.current = owner.sessionEpoch
       layoutOwnerRef.current = owner
       setLoadedLayoutOwner({ sessionId: owner.sessionId, sessionEpoch: owner.sessionEpoch })
+      const mainGroup = api.activeGroup?.api.location.type === 'grid'
+        ? api.activeGroup
+        : api.groups.find((group) => group.api.location.type === 'grid' && group.api.isVisible)
+      lastMainGroupIdRef.current = mainGroup?.id ?? null
+      setCurrentMainGroupId(mainGroup?.id ?? null)
       remotePaneVisibilityRef.current = []
       remoteUnleasedLayoutRef.current = null
       await reconcileTerminalPanels(api, suppressPanelRemovalRef, addContentPanel, () => undefined)
@@ -1141,13 +1292,79 @@ export function WorkspaceView({
     const api = apiRef.current
     const active = api?.activePanel
     const content = parseWorkspaceContentParams(active?.params)
-    onChromeStateChange?.({
+    const next: WorkspaceContentChromeState = {
       contentCount: api?.totalPanels ?? 0,
       activeContentKind: content?.kind ?? null,
       activePanelId: active?.id ?? null,
       activeGroupId: active?.group.id ?? null,
-    })
+    }
+    if (workspaceChromeStatesEqual(lastChromeStateRef.current, next)) return
+    lastChromeStateRef.current = next
+    onChromeStateChange?.(next)
   }, [onChromeStateChange])
+
+  const runLiveWorkspaceResize = useCallback((rootWidth: number, shouldLayoutDockview: boolean) => {
+    const api = apiRef.current
+    if (!api || !isDockElementMeasurable(dockRef.current)) return
+    collapseWorkspaceEdgesForCenterWidth(api, rootWidth)
+    if (shouldLayoutDockview) layoutDockview(api)
+    forceOverlayReposition(api)
+    TerminalManager.scheduleLayoutPass()
+  }, [layoutDockview])
+
+  const finishLiveWorkspaceResize = useCallback(() => {
+    const api = apiRef.current
+    const root = dockRef.current
+    const sessionId = useWorkspaceStore.getState().activeSessionId
+    const sessionEpoch = getWorkspaceSessionEpoch()
+    if (!api || !sessionId || !isDockElementMeasurable(root)) return
+    const hasLoadedSessionLayout = loadedSessionRef.current === sessionId
+      && loadedApiRef.current === api
+      && loadedSessionEpochRef.current === sessionEpoch
+    if (!hasLoadedSessionLayout) {
+      void loadActiveSessionLayout()
+      return
+    }
+    if (resizeSettlingRef.current) {
+      resizeSettlePendingRef.current = true
+      return
+    }
+    const resizeEpoch = resizeEpochRef.current
+    resizeSettlingRef.current = true
+    void settleLayout({ syncPty: true }).then(() => {
+      if (resizeEpoch !== resizeEpochRef.current || apiRef.current !== api) return
+      syncChromeState()
+      persistLayoutSoon()
+    }).catch((error) => useWorkspaceStore.getState().setError(String(error))).finally(() => {
+      resizeSettlingRef.current = false
+      if (!resizeSettlePendingRef.current) return
+      resizeSettlePendingRef.current = false
+      const currentRoot = dockRef.current
+      if (isDockElementMeasurable(currentRoot)) resizeCoordinatorRef.current?.request(currentRoot.getBoundingClientRect().width, false)
+    })
+  }, [loadActiveSessionLayout, persistLayoutSoon, settleLayout, syncChromeState])
+
+  const requestLiveWorkspaceResize = useCallback((shouldLayoutDockview: boolean) => {
+    const root = dockRef.current
+    if (!isDockElementMeasurable(root)) return
+    const width = root.getBoundingClientRect().width
+    resizeEpochRef.current += 1
+    const coordinator = resizeCoordinatorRef.current
+    if (coordinator) coordinator.request(width, shouldLayoutDockview)
+    else runLiveWorkspaceResize(width, shouldLayoutDockview)
+  }, [runLiveWorkspaceResize])
+
+  useEffect(() => {
+    const coordinator = createWorkspaceResizeCoordinator({
+      onLive: runLiveWorkspaceResize,
+      onSettled: finishLiveWorkspaceResize,
+    })
+    resizeCoordinatorRef.current = coordinator
+    return () => {
+      coordinator.dispose()
+      if (resizeCoordinatorRef.current === coordinator) resizeCoordinatorRef.current = null
+    }
+  }, [finishLiveWorkspaceResize, runLiveWorkspaceResize])
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     for (const disposable of apiDisposablesRef.current) disposable.dispose()
@@ -1155,18 +1372,25 @@ export function WorkspaceView({
     layoutOwnerRef.current = null
     setLoadedLayoutOwner(null)
     apiRef.current = event.api
+    lastChromeStateRef.current = null
+    const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
+    registerWorkspaceEdgeGroups(event.api, rootWidth)
     setApiVersion((value) => value + 1)
     onApiReady?.(event.api)
     apiDisposablesRef.current = [
       event.api.onDidLayoutChange(() => {
-        if (!suppressPanelRemovalRef.current) persistLayoutSoon()
-        reflowTerminalsAfterLayout()
-        syncChromeState()
+        if (suppressPanelRemovalRef.current || resizeSettlingRef.current) return
+        requestLiveWorkspaceResize(false)
       }),
       event.api.onDidMovePanel(() => {
         if (suppressPanelRemovalRef.current) return
         void settleLayout({ syncPty: true })
         persistLayoutSoon()
+      }),
+      event.api.onDidActiveGroupChange((group) => {
+        if (group?.api.location.type !== 'grid') return
+        lastMainGroupIdRef.current = group.id
+        setCurrentMainGroupId(group.id)
       }),
       event.api.onDidActivePanelChange((panel) => {
         const content = parseWorkspaceContentParams(panel?.params)
@@ -1199,7 +1423,7 @@ export function WorkspaceView({
       }),
     ]
     requestAnimationFrame(() => { void loadActiveSessionLayout() })
-  }, [addContentPanel, loadActiveSessionLayout, onApiReady, ownsLayout, persistLayoutSoon, settleLayout, syncChromeState])
+  }, [addContentPanel, loadActiveSessionLayout, onApiReady, ownsLayout, persistLayoutSoon, requestLiveWorkspaceResize, settleLayout, syncChromeState])
 
   useEffect(() => {
     onActionsReady?.(actions)
@@ -1213,6 +1437,9 @@ export function WorkspaceView({
       layoutEpochRef.current += 1
       layoutOwnerRef.current = null
       setLoadedLayoutOwner(null)
+      lastChromeStateRef.current = null
+      lastMainGroupIdRef.current = null
+      setCurrentMainGroupId(null)
       setWorkspaceOverlayIds(new Set())
       setFilePicker(null)
     }
@@ -1226,15 +1453,10 @@ export function WorkspaceView({
   useEffect(() => {
     const root = dockRef.current
     if (!root) return
-    const observer = new ResizeObserver(() => {
-      const api = apiRef.current
-      if (!api || !isDockElementMeasurable(root)) return
-      void settleLayout()
-      void loadActiveSessionLayout()
-    })
+    const observer = new ResizeObserver(() => requestLiveWorkspaceResize(true))
     observer.observe(root)
     return () => observer.disconnect()
-  }, [apiVersion, loadActiveSessionLayout, settleLayout])
+  }, [apiVersion, requestLiveWorkspaceResize])
 
   useEffect(() => {
     const api = apiRef.current
@@ -1262,15 +1484,7 @@ export function WorkspaceView({
     if (!api || loadedSessionRef.current !== activeSessionId || suppressPanelRemovalRef.current) return
     const livePanes = Object.values(panes).filter((pane) => pane.alive)
     const livePaneIds = new Set(livePanes.map((pane) => pane.id))
-    const explorerOnlyFallback = livePanes.length > 0
-      && api.panels.length === 1
-      && parseWorkspaceContentParams(api.panels[0]?.params)?.kind === 'explorer'
     void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      if (explorerOnlyFallback) {
-        api.clear()
-        api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes) as Parameters<DockviewApi['fromJSON']>[0])
-        return
-      }
       for (const pane of livePanes) {
         const id = workspaceContentPanelId({ kind: 'terminal', instanceId: pane.id })
         const panel = api.getPanel(id)
@@ -1287,6 +1501,7 @@ export function WorkspaceView({
         TerminalManager.dispose(params.paneId)
         panel.api.close()
       }
+      ensureWorkspaceEdgeShell(api)
     }).then(() => {
       void settleLayout({ syncPty: true })
       persistLayoutSoon()
@@ -1322,13 +1537,13 @@ export function WorkspaceView({
         if (key === 'n' && !event.shiftKey) {
           event.preventDefault()
           event.stopPropagation()
-          void actions.openContent({ kind: 'terminal', targetGroupId: api.activeGroup?.id })
+          void actions.openContent({ kind: 'terminal', targetGroupId: lastMainGroupIdRef.current ?? undefined })
           return
         }
         if (key === 'p' && !event.shiftKey) {
           event.preventDefault()
           event.stopPropagation()
-          openFilePicker(api.activeGroup?.id)
+          openFilePicker(lastMainGroupIdRef.current ?? undefined)
           return
         }
         if (key === 's') {
@@ -1377,6 +1592,7 @@ export function WorkspaceView({
   return (
     <WorkspaceIntegrationContext.Provider value={integration}>
       <WorkspaceContentActionsContext.Provider value={actions}>
+        <GitWorkspaceProvider>
         <div
         ref={dockRef}
         className="workspace-dock dockview-theme-vibelink"
@@ -1424,6 +1640,7 @@ export function WorkspaceView({
             />
           ) : null}
         </div>
+        </GitWorkspaceProvider>
       </WorkspaceContentActionsContext.Provider>
     </WorkspaceIntegrationContext.Provider>
   )

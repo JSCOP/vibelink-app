@@ -1,5 +1,6 @@
 import { Grid3X3, Plus } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { Profile } from '../state/profiles'
 import { agentStatusLabel } from '../ipc/agents'
 import { useWorkspaceStore } from '../state/store'
@@ -41,6 +42,7 @@ function selectionStateKey(paneCount: number, preferred?: GridSize | null, occup
 export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, preferredGrid = null, occupancyMatrix = null, profiles, activeProfileId, onToggle, onClose, onLaunch, onSelectionCommit }: NewTerminalLauncherProps) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const agentClis = useWorkspaceStore((state) => state.agentClis)
+  const popoverRef = useRef<HTMLElement | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
   const [occupiedPreference, setOccupiedPreference] = useState<GridSize | null>(() => preferredGrid)
   const [selectionState, setSelectionState] = useState<SelectionState>(() => ({
@@ -50,7 +52,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   const [previewSelection, setPreviewSelection] = useState<GridSize | null>(null)
   const [isPointerSelecting, setIsPointerSelecting] = useState(false)
   const [selectedProfileId, setSelectedProfileId] = useState(activeProfileId)
-  const [popoverPosition, setPopoverPosition] = useState({ top: 42, right: 12 })
+  const [popoverPosition, setPopoverPosition] = useState({ top: 42, left: 12 })
   const occupied = useMemo(
     () => occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : occupiedGridForPaneCount(existingPaneCount, occupiedPreference),
     [existingPaneCount, occupancyMatrix, occupiedPreference],
@@ -78,7 +80,8 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   useEffect(() => {
     if (!isOpen) return
     const onPointerDown = (event: PointerEvent) => {
-      if (rootRef.current?.contains(event.target as Node | null)) return
+      const target = event.target as Node | null
+      if (rootRef.current?.contains(target) || popoverRef.current?.contains(target)) return
       closeLauncher()
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -114,15 +117,22 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
     const updatePosition = () => {
       const rect = buttonRef.current?.getBoundingClientRect()
       if (!rect) return
+      const popoverWidth = popoverRef.current?.getBoundingClientRect().width || 320
+      const popoverHeight = popoverRef.current?.getBoundingClientRect().height || 420
+      const preferredLeft = rect.left + (rect.width - popoverWidth) / 2
       setPopoverPosition({
-        top: Math.round(rect.bottom + 5),
-        right: Math.max(8, Math.round(window.innerWidth - rect.right)),
+        top: Math.max(8, Math.min(Math.round(rect.bottom + 5), window.innerHeight - popoverHeight - 8)),
+        left: Math.max(8, Math.min(Math.round(preferredLeft), window.innerWidth - popoverWidth - 8)),
       })
     }
 
     updatePosition()
+    const frame = window.requestAnimationFrame(updatePosition)
     window.addEventListener('resize', updatePosition)
-    return () => window.removeEventListener('resize', updatePosition)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('resize', updatePosition)
+    }
   }, [isOpen])
 
 
@@ -177,8 +187,8 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
       <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Add terminals by dragging over free grid cells" aria-label="Add terminals" aria-haspopup="dialog" aria-expanded={isOpen} aria-controls={isOpen ? 'new-terminal-popover' : undefined} onClick={toggleLauncher}>
         <Plus size={14} aria-hidden="true" /> <span>New</span>
       </button>
-      {isOpen ? (
-        <section id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes">
+      {isOpen && typeof document !== 'undefined' ? createPortal(
+        <section ref={popoverRef} id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
           <header className="new-terminal-popover-header">
             <Grid3X3 size={14} />
             <span>Add panes</span>
@@ -250,7 +260,8 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
             </label>
             <button type="button" className="primary-action" disabled={newPaneCount <= 0 || selectedProfileUnavailable} onClick={launchSelection}>Create</button>
           </div>
-        </section>
+        </section>,
+        document.body,
       ) : null}
     </div>
   )

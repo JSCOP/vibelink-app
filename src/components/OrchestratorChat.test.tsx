@@ -28,6 +28,13 @@ describe('OrchestratorChat', () => {
     expect(() => renderToString(<OrchestratorChat />)).not.toThrow()
   })
 
+  test('has no duplicate session navigator', () => {
+    const html = renderToString(<OrchestratorChat />)
+    expect(html).not.toContain('Search sessions')
+    expect(html).not.toContain('vibelink-agent-sidebar')
+    expect(html).not.toMatch(/Sessions\s+\d+\/\d+/)
+  })
+
   test('renders assistant parts in chronological stream order', () => {
     const html = renderToString(<HermesMessage turn={{
       role: 'assistant',

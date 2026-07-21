@@ -206,6 +206,14 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ gitStatusPresentation: 'missing' }).gitStatusPresentation).toBe('words')
   })
 
+  test('normalizes Monaco word wrap and minimap defaults', () => {
+    expect(defaultSettings.editorWordWrap).toBe(true)
+    expect(defaultSettings.editorMinimap).toBe(false)
+    expect(normalizeSettings({})).toMatchObject({ editorWordWrap: true, editorMinimap: false })
+    expect(normalizeSettings({ editorWordWrap: false, editorMinimap: true })).toMatchObject({ editorWordWrap: false, editorMinimap: true })
+    expect(normalizeSettings({ editorWordWrap: 'off', editorMinimap: 'on' })).toMatchObject({ editorWordWrap: true, editorMinimap: false })
+  })
+
   test('normalizes configurable pane highlight colors', () => {
     expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')

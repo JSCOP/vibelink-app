@@ -10,8 +10,6 @@ import { Activity, AlertTriangle, Bug, Camera, Eraser, Minus, Settings2, Square,
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
-import { NewTerminalLauncher } from './components/NewTerminalLauncher'
-import { WorkspaceViewLauncher, type WorkspaceLauncherKind } from './components/WorkspaceViewLauncher'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
@@ -21,7 +19,7 @@ import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
-import type { TerminalGridLaunchRequest, WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
+import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
 import { isControlCharacterCode } from './layout/workspaceContentModel'
 import { getEditorDocumentStore, type EditorDocumentStore } from './editor/documentStore'
 import { startTerminalOutputStream } from './ipc/output'
@@ -82,8 +80,6 @@ function App() {
   const [dirtyEditorPrompt, setDirtyEditorPrompt] = useState<DirtyEditorPrompt | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isSidebarPinned, setIsSidebarPinned] = useState(loadSidebarPinned)
-  const [isViewMenuOpen, setIsViewMenuOpen] = useState(false)
-  const [isNewTerminalOpen, setIsNewTerminalOpen] = useState(false)
   const [workspaceLocalInteractionSuspended, setWorkspaceLocalInteractionSuspended] = useState(false)
 
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
@@ -102,7 +98,6 @@ function App() {
   const globalShortcutOperationRef = useRef<Promise<void>>(Promise.resolve())
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
-  const panes = useWorkspaceStore((state) => state.panes)
   const paneCompletionHighlights = useWorkspaceStore((state) => state.paneCompletionHighlights)
   const status = useWorkspaceStore((state) => state.status)
   const error = useWorkspaceStore((state) => state.error)
@@ -118,20 +113,16 @@ function App() {
   const prepareSetupWizardRun = useWorkspaceStore((state) => state.prepareSetupWizardRun)
   const settings = useWorkspaceStore((state) => state.settings)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
-  const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
   const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
-  const activePaneCount = Object.keys(panes).length
   const appLocked = status === 'ready' && license.ready && isAppLocked(license.status)
   const setupWizardVisible = !appLocked && (isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null))
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
   const startupDialogVisible = status === 'ready' && !setupWizardVisible && !activeSessionId && !isCreateOpen
-  const appWorkspaceInteractionSuspended = isViewMenuOpen
-    || isNewTerminalOpen
-    || isSettingsOpen
+  const appWorkspaceInteractionSuspended = isSettingsOpen
     || isBugReportOpen
     || isCreateOpen
     || setupWizardVisible
@@ -499,23 +490,6 @@ function App() {
     await contentActionsRef.current?.clearTerminals()
   }
 
-  const openWorkspaceSurface = useCallback((kind: WorkspaceLauncherKind) => {
-    setIsViewMenuOpen(false)
-    const actions = contentActionsRef.current
-    if (!actions) return
-    void actions.openContent({ kind }).then((panelId) => {
-      if (panelId) contentActionsRef.current?.activateContent(panelId)
-    }).catch((caught) => useWorkspaceStore.getState().setError(String(caught)))
-  }, [])
-
-  const launchTerminalGrid = useCallback((grid: TerminalGridLaunchRequest) => {
-    setIsNewTerminalOpen(false)
-    const profileId = grid.profileId?.trim()
-    if (profileId) setDefaultProfile(profileId)
-    void contentActionsRef.current?.openContent({ kind: 'terminal-grid', grid }).catch((caught) => {
-      useWorkspaceStore.getState().setError(String(caught))
-    })
-  }, [setDefaultProfile])
 
   const reloadAfterRestart = async () => {
     const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -686,24 +660,6 @@ function App() {
           <div className="workspace-crumb-box" data-tauri-drag-region>
             <div className="crumb" data-tauri-drag-region>{activeSession?.name ?? 'Loading'}</div>
           </div>
-          <WorkspaceViewLauncher
-            isOpen={isViewMenuOpen}
-            disabled={!activeSessionId || !contentActions}
-            activeKind={chromeState?.activeContentKind ?? null}
-            onToggle={() => { setIsNewTerminalOpen(false); setIsViewMenuOpen((open) => !open) }}
-            onClose={() => setIsViewMenuOpen(false)}
-            onOpen={openWorkspaceSurface}
-          />
-          <NewTerminalLauncher
-            isOpen={isNewTerminalOpen}
-            disabled={!activeSessionId || !contentActions}
-            existingPaneCount={activePaneCount}
-            profiles={settings.profiles}
-            activeProfileId={activeProfile.id}
-            onToggle={() => { setIsViewMenuOpen(false); setIsNewTerminalOpen((open) => !open) }}
-            onClose={() => setIsNewTerminalOpen(false)}
-            onLaunch={launchTerminalGrid}
-          />
           <div className="topbar-spacer" data-tauri-drag-region />
           <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !contentActions} title="Reset layout" aria-label="Reset workspace layout" onClick={() => {
             if (window.confirm('Reset the workspace layout?')) void contentActions?.resetLayout()

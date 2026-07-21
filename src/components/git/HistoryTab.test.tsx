@@ -1,71 +1,88 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, test, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { CommitInfo } from '../../ipc/types'
+import type { CommitInfo, RepoInfo, WorkingStatus } from '../../ipc/types'
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-vi.mock('@tanstack/react-virtual', () => ({
-  useVirtualizer: ({ count }: { count: number }) => ({
-    getVirtualItems: () => [],
-    getTotalSize: () => count * 42,
-  }),
-}))
-vi.mock('react-diff-viewer-continued', () => ({ default: () => <div /> }))
+const { invoke, openContent } = vi.hoisted(() => ({ invoke: vi.fn(), openContent: vi.fn(async () => 'content:workbench:workbench') }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel: class MockChannel<T> { onmessage: ((event: T) => void) | null; constructor(callback?: (event: T) => void) { this.onmessage = callback ?? null } } }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
+vi.mock('@tanstack/react-virtual', () => ({ useVirtualizer: ({ count }: { count: number }) => ({ getVirtualItems: () => [], getTotalSize: () => count * 42 }) }))
+vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="history-diff" /> }))
 
+import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
 import { useGitStore } from '../../state/git'
+import { useExplorerStore } from '../../state/explorer'
+import { useWorkspaceStore } from '../../state/store'
+import { GitHistorySidebar } from './GitHistorySidebar'
+import { GitWorkspaceProvider } from './GitWorkspaceProvider'
 import { HistoryTab } from './HistoryTab'
 
-const commit: CommitInfo = {
-  sha: 'a'.repeat(40),
-  parents: [],
-  refs: ['HEAD -> main'],
-  authorName: 'VibeLink',
-  authorEmail: 'test@example.com',
-  authorDate: '2026-07-18T00:00:00Z',
-  subject: 'Initial commit',
+const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
+const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
+const status: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+const commit: CommitInfo = { sha: 'a'.repeat(40), parents: [], refs: ['HEAD -> main'], authorName: 'VibeLink', authorEmail: 'test@example.com', authorDate: '2026-07-18T00:00:00Z', subject: 'Initial commit' }
+const changedFile = { path: 'src/committed.ts', changeType: 'modified' as const, additions: 2, deletions: 1, binary: false }
+
+function renderHistory() {
+  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitHistorySidebar active /><HistoryTab /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
 }
 
 beforeEach(() => {
   cleanup()
   invoke.mockReset()
-  invoke.mockResolvedValueOnce({ commits: [commit], hasMore: true }).mockResolvedValueOnce({ commits: [], hasMore: false })
-  useGitStore.setState({ sessions: {} })
-})
-
-test('renders commits and loads the next page with the current skip', async () => {
-  render(<HistoryTab sessionId="session-1" workspaceFolder="C:/repo" pathFilter={null} onRunMutation={async (operation) => { await operation() }} />)
-  expect(await screen.findByText('Initial commit')).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-  await waitFor(() => expect(invoke).toHaveBeenLastCalledWith('git_log', {
-    workspaceFolder: 'C:/repo',
-    options: { refName: null, path: null, skip: 1, limit: 200, search: null, author: null },
-  }))
-})
-
-test('reveals a selected committed file in Explorer', async () => {
-  const onRevealFile = vi.fn()
-  const changedFile = { path: 'src/committed.ts', changeType: 'modified' as const, additions: 2, deletions: 1, binary: false }
-  invoke.mockReset()
+  openContent.mockClear()
   invoke.mockImplementation(async (command: string) => {
-    if (command === 'git_log') return { commits: [commit], hasMore: false }
-    if (command === 'git_commit_detail') return {
-      sha: commit.sha,
-      parents: [],
-      authorName: commit.authorName,
-      authorEmail: commit.authorEmail,
-      authorDate: commit.authorDate,
-      committerName: commit.authorName,
-      committerDate: commit.authorDate,
-      body: '',
-      files: [changedFile],
-    }
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_log') return { commits: [commit], hasMore: true }
+    if (command === 'git_commit_detail') return { sha: commit.sha, parents: [], authorName: commit.authorName, authorEmail: commit.authorEmail, authorDate: commit.authorDate, committerName: commit.authorName, committerDate: commit.authorDate, body: 'Body', files: [changedFile] }
     if (command === 'git_commit_file_contents') return { old: 'before', new: 'after', binary: false }
+    if (command === 'git_diff_refs') return [changedFile]
+    if (command === 'fs_list_dir' || command === 'git_dir_entries') return []
     return null
   })
+  useGitStore.setState({ sessions: {} })
+  useExplorerStore.setState({ sessions: {} })
+  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], license: { ready: true, status: { state: 'development', entitled: true } as never } })
+})
 
-  render(<HistoryTab sessionId="session-1" workspaceFolder="C:/repo" pathFilter={null} onRunMutation={async (operation) => { await operation() }} onRevealFile={onRevealFile} />)
+test('loads history lazily on sidebar activation and paginates with the current skip', async () => {
+  let page = 0
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_log') return page++ === 0 ? { commits: [commit], hasMore: true } : { commits: [], hasMore: false }
+    return null
+  })
+  renderHistory()
+  expect(await screen.findByText('Initial commit')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+  await waitFor(() => expect(invoke).toHaveBeenLastCalledWith('git_log', { workspaceFolder: 'C:/repo', options: { refName: null, path: null, skip: 1, limit: 200, search: null, author: null } }))
+})
+
+test('shares commit selection and detail with central Workbench and loads detail only once', async () => {
+  renderHistory()
   fireEvent.click(await screen.findByText('Initial commit'))
+  await waitFor(() => expect(openContent).toHaveBeenCalledWith({ kind: 'workbench' }))
+  expect(await screen.findByText('Body')).toBeTruthy()
+  expect(invoke.mock.calls.filter(([command]) => command === 'git_commit_detail')).toHaveLength(1)
+  fireEvent.click(screen.getByText('Initial commit'))
+  expect(invoke.mock.calls.filter(([command]) => command === 'git_commit_detail')).toHaveLength(1)
   fireEvent.click(await screen.findByText('src/committed.ts'))
-  expect(onRevealFile).toHaveBeenCalledWith('src/committed.ts')
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_commit_file_contents', { workspaceFolder: 'C:/repo', sha: commit.sha, path: 'src/committed.ts' }))
+  await waitFor(() => expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('src/committed.ts'))
+})
+
+test('keeps compare, branch, and tag actions on the active repository', async () => {
+  vi.spyOn(window, 'prompt').mockReturnValueOnce('from-history').mockReturnValueOnce('v1').mockReturnValueOnce('release')
+  renderHistory()
+  fireEvent.click(await screen.findByText('Initial commit'))
+  fireEvent.click(await screen.findByRole('button', { name: 'Compare with HEAD' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_diff_refs', { workspaceFolder: 'C:/repo', baseRef: commit.sha, headRef: 'HEAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create branch here' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_branch_create', { workspaceFolder: 'C:/repo', name: 'from-history', fromRef: commit.sha, checkout: false }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create tag here' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_tag_create', { workspaceFolder: 'C:/repo', name: 'v1', refName: commit.sha, message: 'release' }))
 })

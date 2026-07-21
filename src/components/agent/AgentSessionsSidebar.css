@@ -1,0 +1,213 @@
+.agent-sessions-sidebar {
+  min-height: 0;
+}
+
+.agent-sessions-count {
+  color: var(--vibelink-muted);
+  font: 11px/1 var(--vibelink-mono);
+  padding: 0 2px;
+}
+
+.agent-sessions-search {
+  align-items: center;
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  display: grid;
+  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0 7px;
+}
+
+.agent-sessions-search input {
+  background: transparent;
+  border: 0;
+  color: var(--vibelink-text);
+  font: 12px/1.2 var(--vibelink-sans);
+  height: 28px;
+  min-width: 0;
+  outline: 0;
+  padding: 0;
+}
+
+.agent-sessions-search:focus-within {
+  border-color: var(--vibelink-focus);
+}
+
+.agent-session-list {
+  display: grid;
+  gap: 2px;
+}
+
+.agent-session-row {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  display: grid;
+  gap: 4px;
+  min-height: 36px;
+  padding: 5px 7px;
+  text-align: left;
+  width: 100%;
+}
+
+.agent-session-row:hover {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.agent-session-row.selected {
+  background: var(--vibelink-active);
+  border-color: var(--vibelink-accent-border);
+  color: var(--vibelink-text);
+}
+
+.agent-session-row:focus-visible {
+  outline: 1px solid var(--vibelink-focus);
+  outline-offset: -1px;
+}
+
+.agent-session-row-title,
+.agent-session-row-meta {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-session-row-title strong,
+.agent-session-row-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-row-title strong {
+  font: 500 12px/1.2 var(--vibelink-sans);
+}
+
+.agent-session-row.unread .agent-session-row-title strong {
+  color: var(--vibelink-text);
+  font-weight: 750;
+}
+
+.agent-session-row-title small {
+  background: var(--vibelink-accent-soft);
+  border: 1px solid var(--vibelink-accent-border);
+  border-radius: 999px;
+  color: var(--vibelink-accent);
+  font: 9px/1 var(--vibelink-sans);
+  margin-left: auto;
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+
+.agent-session-row-meta {
+  font: 10px/1.2 var(--vibelink-sans);
+  justify-content: space-between;
+}
+
+.agent-session-row-meta time {
+  flex: 0 0 auto;
+}
+
+.agent-session-status {
+  background: var(--vibelink-muted);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 7px;
+  width: 7px;
+}
+
+.agent-session-status-waiting {
+  background: var(--vibelink-warning);
+}
+
+.agent-session-status-working {
+  background: var(--vibelink-accent);
+}
+
+.agent-session-status-error {
+  background: var(--vibelink-danger);
+}
+
+.agent-session-status.pulsing {
+  animation: agent-session-status-pulse 1.3s ease-in-out infinite;
+}
+
+.agent-session-detail {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-session-detail-heading {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.agent-session-detail-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-detail-heading span {
+  color: var(--vibelink-accent);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.agent-session-detail dl {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.agent-session-detail dl > div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 50px minmax(0, 1fr);
+}
+
+.agent-session-detail dt,
+.agent-session-detail dd {
+  font: 10px/1.35 var(--vibelink-sans);
+  margin: 0;
+}
+
+.agent-session-detail dt {
+  color: var(--vibelink-muted);
+}
+
+.agent-session-detail dd {
+  color: var(--vibelink-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-detail code {
+  font: inherit;
+}
+
+.agent-session-primary-action {
+  min-height: 28px;
+  width: 100%;
+}
+
+@keyframes agent-session-status-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-session-status.pulsing {
+    animation: none;
+  }
+}

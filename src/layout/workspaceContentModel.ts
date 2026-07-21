@@ -8,19 +8,25 @@ export type WorkspaceContentKind =
   | 'terminal'
   | 'browser'
   | 'editor'
+  | 'preview'
   | 'explorer'
+  | 'sourceControl'
+  | 'gitHistory'
+  | 'gitBranches'
   | 'workbench'
   | 'agent'
   | 'orchestration'
   | 'kanban'
   | 'todo'
   | 'diff'
+  | 'agentSessions'
 
 export type WorkspaceContentParams =
   | { schema: 1; kind: 'terminal'; instanceId: string; title: string; icon: string; paneId: string }
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
-  | { schema: 1; kind: 'explorer' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff'; instanceId: string; title: string; icon: string }
+  | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
+  | { schema: 1; kind: 'explorer' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
 
 export type WorkspaceLayoutEnvelope = {
   version: 3
@@ -33,35 +39,76 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
   terminal: 'one-per-resource',
   browser: 'one-per-resource',
   editor: 'one-per-resource',
+  preview: 'singleton',
   explorer: 'singleton',
+  sourceControl: 'singleton',
+  gitHistory: 'singleton',
+  gitBranches: 'singleton',
   workbench: 'singleton',
   agent: 'singleton',
   orchestration: 'singleton',
   kanban: 'singleton',
   todo: 'singleton',
   diff: 'singleton',
+  agentSessions: 'singleton',
 }
 
 const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
   explorer: true,
+  sourceControl: true,
+  gitHistory: true,
+  gitBranches: true,
   workbench: true,
   agent: true,
   orchestration: true,
   kanban: true,
   todo: true,
   diff: true,
+  agentSessions: true,
 }
 const contentKinds: Record<WorkspaceContentKind, true> = {
   terminal: true,
   browser: true,
   editor: true,
+  preview: true,
   explorer: true,
+  sourceControl: true,
+  gitHistory: true,
+  gitBranches: true,
   workbench: true,
   agent: true,
   orchestration: true,
   kanban: true,
   todo: true,
   diff: true,
+  agentSessions: true,
+}
+
+const leftStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {
+  explorer: true,
+  sourceControl: true,
+  gitHistory: true,
+  gitBranches: true,
+}
+
+const rightStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {
+  agentSessions: true,
+}
+
+export function isLeftStructuralWorkspaceContentKind(kind: WorkspaceContentKind): boolean {
+  return Boolean(leftStructuralKinds[kind])
+}
+
+export function isRightStructuralWorkspaceContentKind(kind: WorkspaceContentKind): boolean {
+  return Boolean(rightStructuralKinds[kind])
+}
+
+export function isStructuralWorkspaceContentKind(kind: WorkspaceContentKind): boolean {
+  return isLeftStructuralWorkspaceContentKind(kind) || isRightStructuralWorkspaceContentKind(kind)
+}
+
+export function isCentralWorkspaceContentKind(kind: WorkspaceContentKind): boolean {
+  return !isStructuralWorkspaceContentKind(kind)
 }
 
 export function workspaceContentPanelId(params: Pick<WorkspaceContentParams, 'kind' | 'instanceId'>): string {
@@ -72,6 +119,7 @@ export function workspaceContentResourceKey(params: WorkspaceContentParams): str
   if (params.kind === 'terminal') return `terminal:${params.paneId}`
   if (params.kind === 'browser') return `browser:${params.pageId}`
   if (params.kind === 'editor') return `editor:${params.relPath}`
+  if (params.kind === 'preview') return 'preview'
   return params.kind
 }
 
@@ -107,6 +155,13 @@ export function parseWorkspaceContentParams(value: unknown): WorkspaceContentPar
     const relPath = typeof value.relPath === 'string' ? normalizeWorkspaceRelativePath(value.relPath) : null
     return relPath && instanceId === relPath ? { schema: 1, kind, instanceId, title, icon, relPath } : null
   }
+  if (kind === 'preview') {
+    if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon', 'relPath'])) return null
+    const relPath = typeof value.relPath === 'string' ? normalizeWorkspaceRelativePath(value.relPath) : null
+    return relPath && instanceId === 'preview' && icon === 'file-search'
+      ? { schema: 1, kind, instanceId: 'preview', title, icon: 'file-search', relPath }
+      : null
+  }
   if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon'])) return null
   if (!singletonKinds[kind] || instanceId !== kind) return null
   return { schema: 1, kind, instanceId, title, icon }
@@ -121,6 +176,7 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
   const grid = parsed.dockview.grid
   if (!isRecord(panels) || !isRecord(grid) || !isRecord(grid.root)) return freshWorkspaceLayoutEnvelope()
 
+  const rootIsEmpty = grid.root.type === 'branch' && Array.isArray(grid.root.data) && grid.root.data.length === 0
   const panelIds = new Set(Object.keys(panels))
   const resources = new Set<string>()
   for (const [panelId, panel] of Object.entries(panels)) {
@@ -142,11 +198,11 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
   if (!isPositiveNumber(grid.width) || !isPositiveNumber(grid.height) || !isOrientation(grid.orientation)) return freshWorkspaceLayoutEnvelope()
   const referencedPanels = new Set<string>()
   const groupIds = new Set<string>()
-  if (!validateGridNode(grid.root, panelIds, referencedPanels, groupIds)) return freshWorkspaceLayoutEnvelope()
+  if (!validateGridNode(grid.root, panelIds, referencedPanels, groupIds, true)) return freshWorkspaceLayoutEnvelope()
   if (!validateAdditionalGroups(parsed.dockview, panelIds, referencedPanels, groupIds)) return freshWorkspaceLayoutEnvelope()
   if (referencedPanels.size !== panelIds.size || [...panelIds].some((panelId) => !referencedPanels.has(panelId))) return freshWorkspaceLayoutEnvelope()
-  if (grid.maximizedNode !== undefined && !validateMaximizedNode(grid.root, grid.maximizedNode)) return freshWorkspaceLayoutEnvelope()
-  if (parsed.dockview.activeGroup !== undefined && (typeof parsed.dockview.activeGroup !== 'string' || !groupIds.has(parsed.dockview.activeGroup))) return freshWorkspaceLayoutEnvelope()
+  if (grid.maximizedNode !== undefined && (rootIsEmpty || !validateMaximizedNode(grid.root, grid.maximizedNode))) return freshWorkspaceLayoutEnvelope()
+  if (parsed.dockview.activeGroup !== undefined && (rootIsEmpty || typeof parsed.dockview.activeGroup !== 'string' || !groupIds.has(parsed.dockview.activeGroup))) return freshWorkspaceLayoutEnvelope()
 
   return { version: 3, dockview: parsed.dockview as unknown as SerializedDockview }
 }
@@ -183,12 +239,14 @@ function validateGridNode(
   panelIds: Set<string>,
   referencedPanels: Set<string>,
   groupIds: Set<string>,
+  allowEmptyRoot = false,
 ): boolean {
   if (!isRecord(node) || !isPositiveNumber(node.size)) return false
   if (node.visible !== undefined && typeof node.visible !== 'boolean') return false
   if (node.type === 'leaf') return validateGroupState(node.data, panelIds, referencedPanels, groupIds)
-  if (node.type !== 'branch' || !Array.isArray(node.data) || node.data.length === 0) return false
-  return node.data.every((child) => validateGridNode(child, panelIds, referencedPanels, groupIds))
+  if (node.type !== 'branch' || !Array.isArray(node.data)) return false
+  if (node.data.length === 0) return allowEmptyRoot
+  return node.data.every((child) => validateGridNode(child, panelIds, referencedPanels, groupIds, false))
 }
 
 function validateGroupState(
@@ -241,6 +299,7 @@ function validateAdditionalGroups(
   }
   return true
 }
+
 
 function validateMaximizedNode(root: unknown, value: unknown): boolean {
   if (!isRecord(value) || !Array.isArray(value.location) || value.location.length === 0) return false

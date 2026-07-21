@@ -13,23 +13,21 @@
   overflow: hidden;
 }
 
-
+.explorer-window > .workspace-sidebar-panel-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
 
 .explorer-tree-pane {
   background: var(--vibelink-panel-3);
-  border-right: 1px solid var(--vibelink-border-soft);
   display: flex;
-  flex: 0 0 260px;
+  flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
   position: relative;
-}
-
-.explorer-window[data-preview-visible="false"] .explorer-tree-pane {
-  border-right: 0;
-  flex: 1 1 auto;
 }
 
 .explorer-tree-pane > header {

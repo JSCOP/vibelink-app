@@ -11,12 +11,38 @@
 
 .editor-toolbar {
   align-items: center;
+  background: var(--vibelink-panel);
   border-bottom: 1px solid var(--vibelink-border-soft);
-  display: flex;
+  display: grid;
   flex: none;
-  gap: 10px;
-  min-height: 32px;
-  padding: 3px 7px 3px 10px;
+  gap: 3px 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 48px;
+  padding: 4px 7px 5px 10px;
+}
+
+.editor-breadcrumbs {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: flex;
+  font-size: 10px;
+  gap: 1px;
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.editor-breadcrumbs > span {
+  align-items: center;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.editor-breadcrumbs > span > span {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .editor-file-identity {
@@ -33,19 +59,25 @@
   white-space: nowrap;
 }
 
+.editor-language-chip,
+.editor-conflict-chip {
+  background: var(--vibelink-panel-2);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 999px;
+  color: var(--vibelink-muted);
+  font-size: 9.5px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.editor-conflict-chip {
+  background: var(--vibelink-warning-soft);
+  color: var(--vibelink-warning);
+}
+
 .editor-dirty-mark {
   color: var(--vibelink-warning);
   font-size: 9px;
-}
-
-.editor-toolbar-status {
-  color: var(--vibelink-muted);
-  flex: 1 1 auto;
-  font-size: 10.5px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .editor-toolbar-actions,
@@ -53,7 +85,7 @@
   align-items: center;
   display: flex;
   flex: none;
-  gap: 4px;
+  gap: 3px;
 }
 
 .editor-toolbar button,
@@ -73,13 +105,45 @@
 }
 
 .editor-toolbar button:hover:not(:disabled),
-.editor-conflict-banner button:hover:not(:disabled) {
+.editor-conflict-banner button:hover:not(:disabled),
+.editor-toolbar button[aria-pressed='true'] {
   background: var(--vibelink-hover);
+  border-color: var(--vibelink-accent-border);
 }
 
-.editor-toolbar button:disabled {
+.editor-toolbar button:disabled,
+.editor-conflict-banner button:disabled {
   cursor: default;
   opacity: 0.45;
+}
+
+.editor-overflow {
+  position: relative;
+}
+
+.editor-overflow > button {
+  padding-inline: 5px;
+}
+
+.editor-overflow-menu {
+  background: var(--vibelink-dialog);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 5px;
+  box-shadow: var(--vibelink-shadow);
+  display: flex;
+  flex-direction: column;
+  min-width: 170px;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 50;
+}
+
+.editor-overflow-menu button {
+  border-color: transparent;
+  justify-content: flex-start;
+  width: 100%;
 }
 
 .editor-conflict-banner {
@@ -124,23 +188,6 @@
   padding: 20px;
 }
 
-.editor-textarea-fallback {
-  background: var(--vibelink-panel);
-  border: 0;
-  box-sizing: border-box;
-  color: var(--vibelink-text);
-  font-family: var(--vibelink-mono);
-  font-size: 13px;
-  height: 100%;
-  line-height: 1.5;
-  outline: none;
-  padding: 8px 12px;
-  resize: none;
-  tab-size: 4;
-  white-space: pre;
-  width: 100%;
-}
-
 .editor-conflict-comparison {
   display: grid;
   flex: 1 1 auto;
@@ -181,9 +228,49 @@
   white-space: pre;
 }
 
+.editor-statusbar {
+  align-items: center;
+  background: var(--vibelink-panel-2);
+  border-top: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-muted);
+  display: flex;
+  flex: none;
+  font-size: 10px;
+  gap: 12px;
+  min-height: 21px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.editor-statusbar-state {
+  align-items: center;
+  display: inline-flex;
+  gap: 3px;
+  margin-left: auto;
+}
+
+@media (max-width: 920px) {
+  .editor-toolbar-actions button {
+    font-size: 0;
+    gap: 0;
+    padding-inline: 5px;
+  }
+
+  .editor-toolbar-actions button svg {
+    width: 13px;
+  }
+
+  .editor-overflow-menu button {
+    font-size: 10.5px;
+    gap: 4px;
+    padding-inline: 7px;
+  }
+}
+
 @media (max-width: 720px) {
-  .editor-toolbar-status,
-  .editor-toolbar-actions button:not(:first-child) {
+  .editor-language-chip,
+  .editor-statusbar span:nth-child(2),
+  .editor-statusbar span:nth-child(3) {
     display: none;
   }
 

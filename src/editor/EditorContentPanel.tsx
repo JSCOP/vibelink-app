@@ -1,14 +1,35 @@
-import { useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ComponentType } from 'react'
-import { AlertTriangle, Columns2, CopyPlus, FileCode2, RefreshCw, RotateCcw, Save, SaveAll } from 'lucide-react'
+import MonacoEditorComponent from '@monaco-editor/react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
+import { AlertTriangle, Check, ChevronRight, Columns2, CopyPlus, FileCode2, FolderOpen, GitCompareArrows, History, Map, MoreHorizontal, RefreshCw, RotateCcw, Save, SaveAll, WrapText } from 'lucide-react'
 import { WorkspaceContentActionsContext } from '../layout/contentActions'
-import { parentPath, useExplorerStore } from '../state/explorer'
-import { useGitStore } from '../state/git'
+import { deriveGitDecorations, parentPath, useExplorerStore } from '../state/explorer'
+import { emptyGitSessionState, repositoryStateFor, useGitStore } from '../state/git'
+import { getWorkspaceSessionEpoch, getWorkspaceSessionReadyEpoch, getWorkspaceSessionTargetId, useWorkspaceStore } from '../state/store'
 import {
   getEditorDocumentStore,
   type EditorDocument,
   type EditorTextModel,
 } from './documentStore'
+import { languageForPath, languageLabel } from './languageForPath'
+import { monaco } from './monaco'
+import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './monacoTheme'
 import './EditorContentPanel.css'
+
+type Disposable = { dispose(): void }
+type MonacoModelOptions = { tabSize: number; insertSpaces: boolean }
+type MonacoEditorTextModel = EditorTextModel & {
+  getOptions?(): MonacoModelOptions
+  getLanguageId?(): string
+}
+
+export type MonacoEditorHandle = {
+  getModel(): MonacoEditorTextModel | null
+  getPosition(): { lineNumber: number; column: number } | null
+  focus(): void
+  updateOptions(options: Record<string, unknown>): void
+  onDidChangeCursorPosition(listener: (event: { position: { lineNumber: number; column: number } }) => void): Disposable
+  onDidChangeModelOptions(listener: () => void): Disposable
+}
 
 export type MonacoEditorSurfaceProps = {
   path: string
@@ -18,7 +39,7 @@ export type MonacoEditorSurfaceProps = {
   keepCurrentModel?: boolean
   options?: Record<string, unknown>
   onChange?: (value: string | undefined) => void
-  onMount?: (editor: { getModel(): EditorTextModel | null; focus(): void }) => void
+  onMount?: (editor: MonacoEditorHandle) => void
 }
 
 export type EditorContentPanelProps = {
@@ -29,18 +50,33 @@ export type EditorContentPanelProps = {
   onSavedAs?: (relPath: string) => void | Promise<void>
 }
 
-export function EditorContentPanel({ sessionId, workspaceFolder, relPath, MonacoEditor, onSavedAs }: EditorContentPanelProps) {
+const DefaultMonacoEditor = MonacoEditorComponent as ComponentType<MonacoEditorSurfaceProps>
+
+export function EditorContentPanel({ sessionId, workspaceFolder, relPath, MonacoEditor = DefaultMonacoEditor, onSavedAs }: EditorContentPanelProps) {
   const store = useMemo(() => getEditorDocumentStore(sessionId, workspaceFolder), [sessionId, workspaceFolder])
   const contentActions = useContext(WorkspaceContentActionsContext)
   const document = useSyncExternalStore(store.subscribe, () => store.getDocument(relPath), () => store.getDocument(relPath))
+  const terminalThemeId = useWorkspaceStore((state) => state.settings.terminalThemeId)
+  const editorWordWrap = useWorkspaceStore((state) => state.settings.editorWordWrap)
+  const editorMinimap = useWorkspaceStore((state) => state.settings.editorMinimap)
+  const updateSettings = useWorkspaceStore((state) => state.updateSettings)
+  const gitSession = useGitStore((state) => state.sessions[sessionId] ?? emptyGitSessionState)
+  const setActiveRepository = useGitStore((state) => state.setActiveRepository)
+  const setGitSelectedPath = useGitStore((state) => state.setSelectedPath)
+  const setGitActiveTab = useGitStore((state) => state.setActiveTab)
   const [compareVisible, setCompareVisible] = useState(false)
+  const [overflowOpen, setOverflowOpen] = useState(false)
+  const [cursor, setCursor] = useState({ lineNumber: 1, column: 1 })
+  const [indentation, setIndentation] = useState('Spaces: 4')
+  const editorRef = useRef<MonacoEditorHandle | null>(null)
+  const editorListenersRef = useRef<Disposable[]>([])
 
   useEffect(() => {
     store.setRefreshHooks({
       afterSave: async (savedPath) => {
         const gitStore = useGitStore.getState()
-        const gitSession = gitStore.sessions[sessionId]
-        const repositoryRoot = Object.keys(gitSession?.repositories ?? {})
+        const currentGit = gitStore.sessions[sessionId]
+        const repositoryRoot = Object.keys(currentGit?.repositories ?? {})
           .filter((root) => root && (savedPath === root || savedPath.startsWith(`${root}/`)))
           .sort((left, right) => right.length - left.length)[0] ?? ''
         await Promise.all([
@@ -68,30 +104,125 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
     }
   }, [relPath, store])
 
-  const save = async () => {
-    if (!document?.dirty || document.saving || document.conflict) return
+  useEffect(() => {
+    const themeName = registerVibeLinkMonacoThemes(monaco, terminalThemeId)
+    monaco.editor.setTheme(themeName)
+  }, [terminalThemeId])
+
+  useEffect(() => () => {
+    for (const listener of editorListenersRef.current) listener.dispose()
+    editorListenersRef.current = []
+    editorRef.current = null
+  }, [])
+
+  useEffect(() => {
+    if (!overflowOpen) return
+    const close = () => setOverflowOpen(false)
+    window.addEventListener('pointerdown', close)
+    return () => window.removeEventListener('pointerdown', close)
+  }, [overflowOpen])
+
+  const languageId = languageForPath(document?.relPath ?? relPath)
+  const themeName = vibeLinkMonacoThemeName(terminalThemeId)
+  const monacoPath = editorModelUri(sessionId, document?.relPath ?? relPath)
+  const breadcrumbs = (document?.relPath ?? relPath).split('/').filter(Boolean)
+
+  const captureOwnership = useCallback(() => {
+    const state = useWorkspaceStore.getState()
+    const workspaceEpoch = getWorkspaceSessionEpoch()
+    if (state.activeSessionId !== sessionId
+      || getWorkspaceSessionReadyEpoch() !== workspaceEpoch
+      || getWorkspaceSessionTargetId() !== sessionId
+      || state.sessions.find((candidate) => candidate.id === sessionId)?.workspaceFolder !== workspaceFolder) return null
+    return { workspaceId: sessionId, workspaceEpoch }
+  }, [sessionId, workspaceFolder])
+
+  const repositoryRoot = useMemo(() => Object.keys(gitSession.repositories)
+    .filter((root) => root && (relPath === root || relPath.startsWith(`${root}/`)))
+    .sort((left, right) => right.length - left.length)[0] ?? '', [gitSession.repositories, relPath])
+  const repositoryPath = repositoryRoot ? relPath.slice(repositoryRoot.length).replace(/^\/+/, '') || '.' : relPath
+  const decoration = useMemo(() => {
+    const rootDecoration = deriveGitDecorations(repositoryStateFor(gitSession, '').status).get(relPath)
+    if (rootDecoration) return rootDecoration
+    const repository = gitSession.repositories[repositoryRoot]
+    return repository?.status ? deriveGitDecorations(repository.status, repositoryRoot, repositoryRoot).get(relPath) ?? null : null
+  }, [gitSession, relPath, repositoryRoot])
+
+  const save = useCallback(async () => {
+    const current = store.getDocument(relPath)
+    if (!current?.dirty || current.saving || current.conflict) return
     await store.save(relPath).catch(() => undefined)
-  }
+  }, [relPath, store])
 
   const saveAs = useCallback(async () => {
-    if (!document || document.saving) return
-    const target = window.prompt('Save As (workspace-relative path)', document.relPath)?.trim()
+    const current = store.getDocument(relPath)
+    if (!current || current.saving) return
+    const target = window.prompt('Save As (workspace-relative path)', current.relPath)?.trim()
     if (!target) return
     const result = await store.saveAs(relPath, target).catch(() => null)
     if (result?.status !== 'saved') return
     if (onSavedAs) await onSavedAs(target)
-    else if (contentActions) await contentActions.openContent({ kind: 'editor', relPath: target })
-  }, [contentActions, document, onSavedAs, relPath, store])
+    else if (contentActions) {
+      const ownership = captureOwnership()
+      await contentActions.openContent({ kind: 'editor', relPath: target, ...(ownership ?? {}) })
+    }
+  }, [captureOwnership, contentActions, onSavedAs, relPath, store])
 
   const saveAll = useCallback(async () => {
     await store.saveAll()
   }, [store])
 
+  const revealInExplorer = useCallback(async () => {
+    const ownership = captureOwnership()
+    if (!contentActions || !ownership) return
+    await contentActions.openContent({ kind: 'explorer', ...ownership })
+    await useExplorerStore.getState().revealPath(sessionId, workspaceFolder, relPath)
+  }, [captureOwnership, contentActions, relPath, sessionId, workspaceFolder])
+
+  const openFileHistory = useCallback(async () => {
+    const ownership = captureOwnership()
+    if (!contentActions || !ownership) return
+    setActiveRepository(sessionId, repositoryRoot)
+    setGitSelectedPath(sessionId, relPath, repositoryRoot, null)
+    setGitActiveTab(sessionId, 'history', repositoryPath)
+    await contentActions.openContent({ kind: 'gitHistory', ...ownership })
+  }, [captureOwnership, contentActions, relPath, repositoryPath, repositoryRoot, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath])
+
+  const openChanges = useCallback(async () => {
+    const ownership = captureOwnership()
+    if (!contentActions || !ownership || !decoration) return
+    const area = decoration.conflicted || decoration.unstaged || decoration.untracked ? 'unstaged' : 'staged'
+    setActiveRepository(sessionId, repositoryRoot)
+    setGitSelectedPath(sessionId, relPath, repositoryRoot, area)
+    setGitActiveTab(sessionId, 'changes')
+    await contentActions.openContent({ kind: 'sourceControl', ...ownership })
+    await contentActions.openContent({ kind: 'workbench', ...ownership })
+  }, [captureOwnership, contentActions, decoration, relPath, repositoryRoot, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath])
+
+  const handleMount = useCallback((editor: MonacoEditorHandle) => {
+    for (const listener of editorListenersRef.current) listener.dispose()
+    editorListenersRef.current = []
+    editorRef.current = editor
+    const model = editor.getModel()
+    if (model) store.attachModel(relPath, model)
+    const updateStatus = () => {
+      const position = editor.getPosition()
+      if (position) setCursor(position)
+      const options = editor.getModel()?.getOptions?.()
+      if (options) setIndentation(options.insertSpaces ? `Spaces: ${options.tabSize}` : `Tab Size: ${options.tabSize}`)
+    }
+    updateStatus()
+    editorListenersRef.current = [
+      editor.onDidChangeCursorPosition((event) => setCursor(event.position)),
+      editor.onDidChangeModelOptions(updateStatus),
+    ]
+    editor.focus()
+  }, [relPath, store])
+
   if (!document) return <div className="editor-content-panel editor-loading">Opening {relPath}…</div>
 
-  const MonacoSurface = MonacoEditor
-  const monacoPath = editorModelUri(sessionId, document.relPath)
   const canSave = document.dirty && !document.saving && !document.conflict && Boolean(document.revision)
+  const hasDirtyDocuments = store.listDocuments().some((candidate) => candidate.dirty)
 
   return (
     <section
@@ -106,20 +237,32 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
       }}
     >
       <header className="editor-toolbar">
+        <nav className="editor-breadcrumbs" aria-label="File path">
+          {breadcrumbs.map((segment, index) => <span key={`${segment}-${index}`}><span title={breadcrumbs.slice(0, index + 1).join('/')}>{segment}</span>{index < breadcrumbs.length - 1 ? <ChevronRight size={11} aria-hidden="true" /> : null}</span>)}
+        </nav>
         <span className="editor-file-identity" title={document.relPath}>
           <FileCode2 size={14} aria-hidden="true" />
           <strong>{fileName(document.relPath)}</strong>
+          <span className="editor-language-chip">{languageLabel(languageId)}</span>
           {document.dirty ? <span className="editor-dirty-mark" title="Unsaved changes">●</span> : null}
-        </span>
-        <span className="editor-toolbar-status">
-          {document.saving ? 'Saving…' : document.conflict ? 'Conflict' : document.dirty ? 'Modified' : 'Saved'}
-          {' · '}{document.encoding === 'utf8Bom' ? 'UTF-8 BOM' : 'UTF-8'}
-          {' · '}{document.lineEnding.toUpperCase()}
+          {document.conflict ? <span className="editor-conflict-chip">Conflict</span> : null}
         </span>
         <div className="editor-toolbar-actions">
           <button type="button" disabled={!canSave} onClick={() => { void save() }} title="Save (Ctrl+S)"><Save size={13} />Save</button>
           <button type="button" disabled={document.saving} onClick={() => { void saveAs() }} title="Save As (Ctrl+Shift+S)"><CopyPlus size={13} />Save As</button>
-          <button type="button" disabled={document.saving} onClick={() => { void saveAll() }} title="Save all dirty files"><SaveAll size={13} />Save All</button>
+          <button type="button" disabled={document.saving || !hasDirtyDocuments} onClick={() => { void saveAll() }} title="Save all dirty files"><SaveAll size={13} />Save All</button>
+          <button type="button" aria-pressed={editorWordWrap} onClick={() => updateSettings({ editorWordWrap: !editorWordWrap })} title="Toggle word wrap"><WrapText size={13} />Wrap</button>
+          <button type="button" aria-pressed={editorMinimap} onClick={() => updateSettings({ editorMinimap: !editorMinimap })} title="Toggle minimap"><Map size={13} />Minimap</button>
+          <div className="editor-overflow">
+            <button type="button" aria-expanded={overflowOpen} aria-haspopup="menu" aria-label="More editor actions" title="More editor actions" onPointerDown={(event) => event.stopPropagation()} onClick={() => setOverflowOpen((open) => !open)}><MoreHorizontal size={14} /></button>
+            {overflowOpen ? (
+              <div className="editor-overflow-menu" role="menu" onPointerDown={(event) => event.stopPropagation()}>
+                <button type="button" role="menuitem" onClick={() => { setOverflowOpen(false); void revealInExplorer() }}><FolderOpen size={13} />Reveal in Explorer</button>
+                <button type="button" role="menuitem" onClick={() => { setOverflowOpen(false); void openFileHistory() }}><History size={13} />File History</button>
+                <button type="button" role="menuitem" disabled={!decoration} onClick={() => { setOverflowOpen(false); void openChanges() }}><GitCompareArrows size={13} />Open Changes</button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -142,39 +285,39 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
         <ConflictComparison document={document} />
       ) : (
         <div className="editor-surface">
-          {document.loading ? <div className="editor-loading">Loading document…</div> : MonacoSurface ? (
-            <MonacoSurface
+          {document.loading ? <div className="editor-loading">Loading document…</div> : (
+            <MonacoEditor
               path={monacoPath}
               value={document.current}
-              language={languageForPath(document.relPath)}
-              theme="vs-dark"
+              language={languageId}
+              theme={themeName}
               keepCurrentModel
               options={{
                 automaticLayout: true,
-                minimap: { enabled: false },
+                minimap: { enabled: editorMinimap },
                 scrollBeyondLastLine: false,
-                wordWrap: 'off',
+                wordWrap: editorWordWrap ? 'on' : 'off',
                 renderWhitespace: 'selection',
                 bracketPairColorization: { enabled: true },
+                find: { addExtraSpaceOnTop: false },
+                multiCursorModifier: 'alt',
+                padding: { top: 6 },
               }}
               onChange={(value) => store.updateCurrent(relPath, value ?? '')}
-              onMount={(editor) => {
-                const model = editor.getModel()
-                if (model) store.attachModel(relPath, model)
-                editor.focus()
-              }}
-            />
-          ) : (
-            <textarea
-              className="editor-textarea-fallback"
-              aria-label={`Editor for ${document.relPath}`}
-              spellCheck={false}
-              value={document.current}
-              onChange={(event) => store.updateCurrent(relPath, event.target.value)}
+              onMount={handleMount}
             />
           )}
         </div>
       )}
+
+      <footer className="editor-statusbar">
+        <span>Ln {cursor.lineNumber}, Col {cursor.column}</span>
+        <span>{indentation}</span>
+        <span>{document.encoding === 'utf8Bom' ? 'UTF-8 with BOM' : 'UTF-8'}</span>
+        <span>{document.lineEnding === 'crlf' ? 'CRLF' : 'LF'}</span>
+        <span>{languageLabel(languageId)}</span>
+        <span className="editor-statusbar-state">{document.saving ? 'Saving…' : document.conflict ? 'Conflict' : document.dirty ? 'Modified' : <><Check size={11} />Saved</>}</span>
+      </footer>
     </section>
   )
 }
@@ -200,13 +343,4 @@ function editorModelUri(sessionId: string, relPath: string): string {
 
 function fileName(relPath: string): string {
   return relPath.split('/').pop() ?? relPath
-}
-
-function languageForPath(relPath: string): string | undefined {
-  const extension = relPath.split('.').pop()?.toLowerCase()
-  return ({
-    c: 'c', cpp: 'cpp', cs: 'csharp', css: 'css', go: 'go', html: 'html', java: 'java', js: 'javascript', jsx: 'javascript', json: 'json',
-    md: 'markdown', py: 'python', rb: 'ruby', rs: 'rust', sh: 'shell', sql: 'sql', toml: 'toml', ts: 'typescript', tsx: 'typescript',
-    xml: 'xml', yaml: 'yaml', yml: 'yaml',
-  } as Record<string, string>)[extension ?? '']
 }

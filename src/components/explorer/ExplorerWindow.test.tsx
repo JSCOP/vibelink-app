@@ -84,26 +84,30 @@ beforeEach(async () => {
     sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
   })
   await useWorkspaceStore.getState().attachSession('session-1')
+  await useGitStore.getState().refreshGit('session-1', 'C:/repo')
 })
 
 describe('ExplorerWindow Git integration', () => {
-  test('previews on single-click and opens files through content actions on double-click', async () => {
-    const openContent = vi.fn(async () => 'content:editor:src/changed.ts')
+  test('keeps Explorer mounted, follows selection in Preview, and opens editors centrally', async () => {
+    const openContent = vi.fn(async (request: Parameters<WorkspaceContentActions['openContent']>[0]) => request.kind === 'preview' ? 'content:preview:preview' : 'content:editor:src/changed.ts')
     const actions = workspaceContentActions(openContent)
     render(
       <WorkspaceContentActionsContext.Provider value={actions}>
         <ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />
       </WorkspaceContentActionsContext.Provider>,
     )
-    fireEvent.click(await screen.findByRole('button', { name: 'Show file preview' }))
     fireEvent.click(await screen.findByLabelText('Expand src'))
     const file = await screen.findByText('changed.ts')
 
     fireEvent.click(file)
-    expect(openContent).not.toHaveBeenCalled()
-    expect(await screen.findByText('changed')).toBeTruthy()
-    fireEvent.doubleClick(file)
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'preview', relPath: 'src/changed.ts', activate: false })))
+    expect(document.querySelector('[data-explorer-window="true"]')).toBeTruthy()
+    expect(document.querySelector('.explorer-viewer')).toBeNull()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Open Preview' }))
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'preview', relPath: 'src/changed.ts', activate: true })))
+
+    fireEvent.doubleClick(file)
     await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'editor', relPath: 'src/changed.ts' })))
   })
 
@@ -126,36 +130,11 @@ describe('ExplorerWindow Git integration', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stage', { workspaceFolder: 'C:/repo', paths: ['src'] }))
   })
 
-  test('defaults to navigator-only and persists explicit preview enablement and disablement', async () => {
+  test('is permanently tree-and-action-only', async () => {
     render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
 
-    const showPreview = await screen.findByRole('button', { name: 'Show file preview' })
-    expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('false')
-    expect(document.querySelector('.explorer-viewer')).toBeNull()
-    expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBeNull()
-
-    fireEvent.click(showPreview)
-    expect(await screen.findByRole('button', { name: 'Hide file preview' })).toBeTruthy()
-    expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('true')
-    expect(document.querySelector('.explorer-viewer')).toBeTruthy()
-    expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBe('true')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Hide file preview' }))
-    expect(await screen.findByRole('button', { name: 'Show file preview' })).toBeTruthy()
-    expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('false')
-    expect(document.querySelector('.explorer-viewer')).toBeNull()
-    expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBe('false')
-
-    cleanup()
-    window.localStorage.setItem('vibelink:explorerPreviewVisible', 'true')
-    render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
-    expect(await screen.findByRole('button', { name: 'Hide file preview' })).toBeTruthy()
-    expect(document.querySelector('.explorer-viewer')).toBeTruthy()
-
-    cleanup()
-    window.localStorage.setItem('vibelink:explorerPreviewVisible', 'false')
-    render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
-    expect(await screen.findByRole('button', { name: 'Show file preview' })).toBeTruthy()
+    expect((await screen.findByRole('button', { name: 'Open Preview' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(document.querySelector('[data-explorer-window="true"]')).toBeTruthy()
     expect(document.querySelector('.explorer-viewer')).toBeNull()
   })
 })
@@ -186,7 +165,7 @@ test('discovers an uninitialized submodule and separates repository from pointer
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Pointer History in Parent' }))
   await waitFor(() => expect(useGitStore.getState().sessions['session-1']).toMatchObject({ activeRepoRoot: '', activeTab: 'history', pathFilter: 'modules/child' }))
-  expect(openWorkspaceContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'workbench' }))
+  expect(openWorkspaceContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'gitHistory' }))
 
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Initialize Submodule' }))

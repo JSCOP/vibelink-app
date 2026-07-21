@@ -95,6 +95,46 @@ describe('Hermes ACP startup', () => {
     ])
   })
 
+  test('successful new session clears prior transcript, permissions, and usage', async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'hermes_new_session') return 'acp-new'
+      if (command === 'hermes_list_sessions') return [{ id: 'acp-new', title: 'New', updatedAt: null, cwd: 'E:/repo' }]
+      return null
+    })
+    useWorkspaceStore.setState({
+      hermesStatus: { 'session-a': 'running' },
+      hermesTranscript: { 'session-a': [{ role: 'user', text: 'old', thoughts: '', toolCalls: [] }] },
+      hermesPermissions: { 'session-a': [{ requestId: 7, title: 'Old permission', toolKind: 'edit', options: [] }] },
+      hermesUsage: { 'session-a': { size: 100, used: 90 } },
+    })
+    const { hermesNewSession } = await import('./hermes')
+
+    await expect(hermesNewSession({ sessionId: 'session-a' })).resolves.toBe('acp-new')
+
+    const state = useWorkspaceStore.getState()
+    expect(state.hermesCurrentSession['session-a']).toBe('acp-new')
+    expect(state.hermesTranscript['session-a']).toBeUndefined()
+    expect(state.hermesPermissions['session-a']).toBeUndefined()
+    expect(state.hermesUsage['session-a']).toBeUndefined()
+  })
+
+  test('dedupes concurrent session-list refreshes for one workspace', async () => {
+    let releaseList: (() => void) | undefined
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'hermes_list_sessions') await new Promise<void>((resolve) => { releaseList = resolve })
+      return []
+    })
+    const { hermesRefreshSessions } = await import('./hermes')
+
+    const first = hermesRefreshSessions('session-a')
+    const second = hermesRefreshSessions('session-a')
+    await waitUntil(() => Boolean(releaseList))
+    releaseList?.()
+    await Promise.all([first, second])
+
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'hermes_list_sessions')).toHaveLength(1)
+  })
+
   test('dedupes concurrent startup requests for one workspace', async () => {
     let releaseStart: (() => void) | undefined
     vi.mocked(invoke).mockImplementation(async (command: string) => {

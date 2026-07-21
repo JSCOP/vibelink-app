@@ -499,6 +499,10 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                     </label>
                   </div>
                 </SettingsGroup>
+                <SettingsGroup title="Editor" description="Configure Monaco defaults. Editor toolbar controls update these same workspace-wide preferences.">
+                  <SettingsToggle label="Word wrap" checked={draft.editorWordWrap} onChange={(checked) => patchDraft({ editorWordWrap: checked })} />
+                  <SettingsToggle label="Minimap" checked={draft.editorMinimap} onChange={(checked) => patchDraft({ editorMinimap: checked })} />
+                </SettingsGroup>
                 <SettingsGroup title="Git status labels" description="Choose how Explorer explains file, folder, repository, and submodule states.">
                   <SettingsSelect label="Presentation" value={draft.gitStatusPresentation} options={gitStatusPresentationOptions} onChange={(value) => patchDraft({ gitStatusPresentation: value as GitStatusPresentation })} />
                   <div className="vibelink-settings-note"><span>Every mode keeps a plain-language hover explanation. Words is the clearest; letters is the most compact.</span></div>
