@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { ExternalLink, KeyRound, LoaderCircle, MessageSquare, Search, Trash2 } from 'lucide-react'
 import {
   providerAccounts,
+  providerCredentialCapture,
   providerCredentialDelete,
   providerCredentialStatus,
-  providerCredentialStore,
   providerDiscover,
   providerReviewComment,
   providerScopes,
@@ -27,7 +27,6 @@ const labels: Record<ProviderKind, string> = { github: 'GitHub', gitlab: 'GitLab
 export function ProviderIntegrationsPanel({ onWorkspaceInput }: ProviderIntegrationsPanelProps) {
   const [provider, setProvider] = useState<ProviderKind>('github')
   const [account, setAccount] = useState(providerAccounts.github)
-  const [token, setToken] = useState('')
   const [allowedScopes, setAllowedScopes] = useState<ProviderScope[]>([])
   const [selectedScopes, setSelectedScopes] = useState<ProviderScope[]>([])
   const [credential, setCredential] = useState<CredentialReference | null>(null)
@@ -52,12 +51,16 @@ export function ProviderIntegrationsPanel({ onWorkspaceInput }: ProviderIntegrat
   }, [provider])
 
   useEffect(() => {
+    let cancelled = false
     const timer = window.setTimeout(() => {
       void providerCredentialStatus(provider, account)
-        .then(setCredential)
-        .catch((error) => setMessage(errorMessage(error)))
+        .then((next) => { if (!cancelled) setCredential(next) })
+        .catch((error) => { if (!cancelled) setMessage(errorMessage(error)) })
     }, 200)
-    return () => window.clearTimeout(timer)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
   }, [account, provider])
 
   const canComment = useMemo(() => {
@@ -83,10 +86,10 @@ export function ProviderIntegrationsPanel({ onWorkspaceInput }: ProviderIntegrat
   }
 
   const saveCredential = () => run(async () => {
-    const next = await providerCredentialStore(provider, account, token, selectedScopes)
+    const credentialId = credential?.credentialId ?? crypto.randomUUID()
+    const next = await providerCredentialCapture(provider, account, selectedScopes, credentialId)
     setCredential(next)
-    setToken('')
-    setMessage(`${labels[provider]} credential saved in OS secure storage.`)
+    setMessage(`${labels[provider]} credential captured and saved by Windows.`)
   })
 
   const clearCredential = () => run(async () => {
@@ -132,7 +135,7 @@ export function ProviderIntegrationsPanel({ onWorkspaceInput }: ProviderIntegrat
 
       <div className="provider-integrations-grid">
         <label>Provider<select value={provider} onChange={(event) => changeProvider(event.target.value as ProviderKind)}><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="linear">Linear</option></select></label>
-        <label>Account / host<input value={account} disabled={provider === 'linear'} onChange={(event) => setAccount(event.target.value)} autoComplete="off" spellCheck={false} /></label>
+        <label>Account / host<input value={account} disabled={provider === 'linear'} onChange={(event) => { setAccount(event.target.value); setCredential(null); setItems([]); setSelected(null) }} autoComplete="off" spellCheck={false} /></label>
       </div>
 
       <fieldset className="provider-scopes">
@@ -145,9 +148,8 @@ export function ProviderIntegrationsPanel({ onWorkspaceInput }: ProviderIntegrat
         ))}
       </fieldset>
 
-      <label>Access token<input type="password" value={token} placeholder="Stored securely and never displayed again" onChange={(event) => setToken(event.target.value)} autoComplete="off" spellCheck={false} /></label>
       <div className="provider-integrations-actions">
-        <button type="button" disabled={busy || !token.trim() || selectedScopes.length === 0} onClick={() => void saveCredential()}><KeyRound size={14} /> Save scoped credential</button>
+        <button type="button" disabled={busy || selectedScopes.length === 0} onClick={() => void saveCredential()}><KeyRound size={14} /> Open Windows credential prompt</button>
         <button type="button" disabled={busy || !credential} onClick={() => void clearCredential()}><Trash2 size={14} /> Remove credential</button>
         <span role="status">{credential ? `${credential.scopes.length} scopes active for ${credential.account}` : 'No credential reference loaded'}</span>
       </div>

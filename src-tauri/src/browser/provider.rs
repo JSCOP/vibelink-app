@@ -3,7 +3,8 @@ use super::{
     types::{
         BrowserDeviceMetrics, BrowserDialogKind, BrowserFrame, BrowserLifecycleEvent,
         BrowserLifecycleEventKind, CertificateDecision, ChildWebViewCreate, ChildWebViewState,
-        PermissionDecision, PhysicalBounds,
+        PermissionDecision, PhysicalBounds, BrowserCookieImportInput, BrowserCookieImportResult,
+        BrowserCookieImportSource,
     },
 };
 
@@ -12,8 +13,24 @@ pub trait BrowserProvider: Send + Sync + 'static {
     fn set_bounds(&self, page_id: &str, bounds: PhysicalBounds) -> BrowserResult<()>;
     fn set_visible(&self, page_id: &str, visible: bool) -> BrowserResult<()>;
     fn set_focus(&self, page_id: &str, focused: bool) -> BrowserResult<()>;
+    fn set_surface(
+        &self,
+        page_id: &str,
+        bounds: Option<PhysicalBounds>,
+        visible: bool,
+        focused: bool,
+    ) -> BrowserResult<()> {
+        if let Some(bounds) = bounds {
+            self.set_bounds(page_id, bounds)?;
+        }
+        self.set_visible(page_id, visible)?;
+        self.set_focus(page_id, visible && focused)
+    }
     fn navigate(&self, page_id: &str, url: &str, navigation_generation: u64) -> BrowserResult<()>;
     fn set_navigation_generation(&self, _page_id: &str, _generation: u64) -> BrowserResult<()> {
+        Ok(())
+    }
+    fn clear_pending_navigation(&self, _page_id: &str) -> BrowserResult<()> {
         Ok(())
     }
     fn go_back(&self, _page_id: &str) -> BrowserResult<()> {
@@ -51,6 +68,12 @@ pub trait BrowserProvider: Send + Sync + 'static {
     }
     fn capture_crop(&self, _page_id: &str, _bounds: PhysicalBounds) -> BrowserResult<Vec<u8>> {
         Err(BrowserError::unsupported("capture_crop"))
+    }
+    fn detect_cookie_import_source(&self, _endpoint: &str) -> BrowserResult<BrowserCookieImportSource> {
+        Err(BrowserError::unsupported("detect_cookie_import_source"))
+    }
+    fn import_cookies(&self, _input: &BrowserCookieImportInput) -> BrowserResult<BrowserCookieImportResult> {
+        Err(BrowserError::unsupported("import_cookies"))
     }
     fn resolve_permission(
         &self,
@@ -115,12 +138,17 @@ impl BrowserProvider for UnsupportedBrowserProvider {
 }
 
 #[cfg(windows)]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use serde_json::{json, Value};
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs,
+    io::Read,
     net::TcpListener,
     path::PathBuf,
     sync::{
@@ -129,6 +157,10 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(windows)]
+use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
+#[cfg(windows)]
+use std::net::TcpStream;
 #[cfg(windows)]
 use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent},
@@ -208,6 +240,7 @@ pub struct NativeBrowserProvider {
     pages: Mutex<HashMap<String, NativePage>>,
     profile_ports: Mutex<HashMap<String, u16>>,
     navigation_generations: Arc<Mutex<HashMap<String, u64>>>,
+    managed_navigation_starts: Arc<Mutex<HashSet<String>>>,
     events: Arc<Mutex<VecDeque<BrowserLifecycleEvent>>>,
     event_sequence: Arc<AtomicU64>,
     pending_permissions: Arc<Mutex<HashMap<String, String>>>,
@@ -236,6 +269,7 @@ impl NativeBrowserProvider {
             pages: Mutex::new(HashMap::new()),
             profile_ports: Mutex::new(HashMap::new()),
             navigation_generations: Arc::new(Mutex::new(HashMap::new())),
+            managed_navigation_starts: Arc::new(Mutex::new(HashSet::new())),
             events: Arc::new(Mutex::new(VecDeque::new())),
             event_sequence: Arc::new(AtomicU64::new(0)),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
@@ -256,6 +290,34 @@ impl NativeBrowserProvider {
                 "native browser state lock is poisoned",
             )
         })
+    }
+
+    fn validate_user_data_dir(&self, user_data_dir: &std::path::Path) -> BrowserResult<()> {
+        let owned_root = self
+            .registry_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("profiles");
+        let contains_parent = user_data_dir
+            .components()
+            .any(|component| component == std::path::Component::ParentDir);
+        let normalized = user_data_dir
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if contains_parent
+            || user_data_dir == owned_root
+            || !user_data_dir.starts_with(&owned_root)
+            || normalized.contains("/google/chrome/user data")
+            || normalized.contains("/microsoft/edge/user data")
+            || normalized.contains("/chromium/user data")
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser user-data directories must be isolated under the VibeLink profile root",
+            ));
+        }
+        Ok(())
     }
 
     fn complete_on_page<F>(&self, page_id: &str, operation: F) -> BrowserResult<()>
@@ -382,6 +444,9 @@ impl BrowserProvider for NativeBrowserProvider {
                 "external browser pages must not receive app IPC or initialization",
             ));
         }
+        if let Some(user_data_dir) = request.user_data_dir.as_deref() {
+            self.validate_user_data_dir(user_data_dir)?;
+        }
         let url = url::Url::parse(&request.initial_url)
             .map_err(|error| BrowserError::invalid(format!("invalid browser URL: {error}")))?;
         if !matches!(url.scheme(), "http" | "https" | "about") {
@@ -407,6 +472,13 @@ impl BrowserProvider for NativeBrowserProvider {
             .map_err(registry_error)?;
         let design_app = self.app.clone();
         let design_page_id = request.page_id.clone();
+        let design_generations = self.navigation_generations.clone();
+        let navigation_app = self.app.clone();
+        let navigation_events = self.events.clone();
+        let navigation_sequence = self.event_sequence.clone();
+        let navigation_page_id = request.page_id.clone();
+        let navigation_generations = self.navigation_generations.clone();
+        let managed_navigation_starts = self.managed_navigation_starts.clone();
         let popup_app = self.app.clone();
         let popup_events = self.events.clone();
         let popup_sequence = self.event_sequence.clone();
@@ -417,6 +489,7 @@ impl BrowserProvider for NativeBrowserProvider {
         let load_sequence = self.event_sequence.clone();
         let load_page_id = request.page_id.clone();
         let load_generations = self.navigation_generations.clone();
+        let load_managed_navigation_starts = self.managed_navigation_starts.clone();
         let title_app = self.app.clone();
         let title_events = self.events.clone();
         let title_sequence = self.event_sequence.clone();
@@ -436,13 +509,37 @@ impl BrowserProvider for NativeBrowserProvider {
                         if let Ok(selection) = serde_json::from_str::<serde_json::Value>(&payload) {
                             let _ = design_app.emit(
                                 "browser-design-grab",
-                                serde_json::json!({ "pageId": design_page_id, "selection": selection }),
+                                serde_json::json!({
+                                    "pageId": design_page_id,
+                                    "navigationGeneration": generation_for(&design_generations, &design_page_id),
+                                    "selection": selection,
+                                }),
                             );
                         }
                     }
                     return false;
                 }
-                matches!(url.scheme(), "http" | "https" | "about")
+                let allowed = matches!(url.scheme(), "http" | "https" | "about");
+                if allowed {
+                    let (generation, native_start) = begin_native_navigation(
+                        &navigation_generations,
+                        &managed_navigation_starts,
+                        &navigation_page_id,
+                    );
+                    if native_start {
+                        emit_native_event(
+                            &navigation_app,
+                            &navigation_events,
+                            &navigation_sequence,
+                            &navigation_page_id,
+                            generation,
+                            BrowserLifecycleEventKind::NavigationStarted,
+                            Some(url.to_string()),
+                            None,
+                        );
+                    }
+                }
+                allowed
             })
             .on_new_window(move |url, _features| {
                 let generation = generation_for(&popup_generations, &popup_page_id);
@@ -460,6 +557,9 @@ impl BrowserProvider for NativeBrowserProvider {
             })
             .on_page_load(move |_webview, payload| {
                 let generation = generation_for(&load_generations, &load_page_id);
+                if let Ok(mut starts) = load_managed_navigation_starts.lock() {
+                    starts.remove(&load_page_id);
+                }
                 let url = payload.url().to_string();
                 let (kind, detail) = if url.starts_with("edge-error://") {
                     (
@@ -704,6 +804,65 @@ impl BrowserProvider for NativeBrowserProvider {
         Ok(())
     }
 
+    fn set_surface(
+        &self,
+        page_id: &str,
+        bounds: Option<PhysicalBounds>,
+        visible: bool,
+        focused: bool,
+    ) -> BrowserResult<()> {
+        if bounds.is_some_and(|value| !value.validate()) {
+            return Err(BrowserError::invalid(
+                "browser bounds must be positive physical pixels",
+            ));
+        }
+        let mut pages = self.pages()?;
+        let page = pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        let previous = page.state.clone();
+        let apply = (|| {
+            if let Some(bounds) = bounds {
+                page.webview
+                    .set_bounds(Rect {
+                        position: PhysicalPosition::new(bounds.x, bounds.y).into(),
+                        size: PhysicalSize::new(bounds.width, bounds.height).into(),
+                    })
+                    .map_err(native_error)?;
+            }
+            if visible {
+                page.webview.show().map_err(native_error)?;
+            } else {
+                page.webview.hide().map_err(native_error)?;
+            }
+            if visible && focused {
+                page.webview.set_focus().map_err(native_error)?;
+            }
+            Ok::<(), BrowserError>(())
+        })();
+        if let Err(error) = apply {
+            let _ = page.webview.set_bounds(Rect {
+                position: PhysicalPosition::new(previous.bounds.x, previous.bounds.y).into(),
+                size: PhysicalSize::new(previous.bounds.width, previous.bounds.height).into(),
+            });
+            let _ = if previous.visible {
+                page.webview.show()
+            } else {
+                page.webview.hide()
+            };
+            if previous.visible && previous.focused {
+                let _ = page.webview.set_focus();
+            }
+            return Err(error);
+        }
+        if let Some(bounds) = bounds {
+            page.state.bounds = bounds;
+        }
+        page.state.visible = visible;
+        page.state.focused = visible && focused;
+        Ok(())
+    }
+
     fn navigate(&self, page_id: &str, url: &str, navigation_generation: u64) -> BrowserResult<()> {
         let parsed = url::Url::parse(url)
             .map_err(|error| BrowserError::invalid(format!("invalid browser URL: {error}")))?;
@@ -713,20 +872,23 @@ impl BrowserProvider for NativeBrowserProvider {
                 "unsafe browser URL scheme",
             ));
         }
-        self.navigation_generations
-            .lock()
-            .map_err(|_| {
-                BrowserError::new(
-                    BrowserErrorCode::Internal,
-                    "browser generation lock is poisoned",
-                )
-            })?
-            .insert(page_id.to_string(), navigation_generation);
         let pages = self.pages()?;
         let page = pages
             .get(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
-        page.webview.navigate(parsed).map_err(|error| {
+        prepare_managed_navigation(
+            &self.navigation_generations,
+            &self.managed_navigation_starts,
+            page_id,
+            navigation_generation,
+        )?;
+        if let Err(error) = page.webview.navigate(parsed) {
+            let _ = restore_navigation_generation(
+                &self.navigation_generations,
+                &self.managed_navigation_starts,
+                page_id,
+                navigation_generation,
+            );
             self.emit_event(
                 page_id,
                 navigation_generation,
@@ -734,20 +896,40 @@ impl BrowserProvider for NativeBrowserProvider {
                 Some(url.to_string()),
                 Some(error.to_string()),
             );
-            native_error(error)
-        })
+            return Err(native_error(error));
+        }
+        Ok(())
     }
 
     fn set_navigation_generation(&self, page_id: &str, generation: u64) -> BrowserResult<()> {
-        self.navigation_generations
+        let current = generation_for(&self.navigation_generations, page_id);
+        if generation > current {
+            prepare_managed_navigation(
+                &self.navigation_generations,
+                &self.managed_navigation_starts,
+                page_id,
+                generation,
+            )
+        } else {
+            restore_navigation_generation(
+                &self.navigation_generations,
+                &self.managed_navigation_starts,
+                page_id,
+                generation,
+            )
+        }
+    }
+
+    fn clear_pending_navigation(&self, page_id: &str) -> BrowserResult<()> {
+        self.managed_navigation_starts
             .lock()
             .map_err(|_| {
                 BrowserError::new(
                     BrowserErrorCode::Internal,
-                    "browser generation lock is poisoned",
+                    "browser navigation start lock is poisoned",
                 )
             })?
-            .insert(page_id.to_string(), generation);
+            .remove(page_id);
         Ok(())
     }
 
@@ -828,6 +1010,9 @@ impl BrowserProvider for NativeBrowserProvider {
             .ok()
             .and_then(|mut generations| generations.remove(page_id))
             .unwrap_or_default();
+        if let Ok(mut starts) = self.managed_navigation_starts.lock() {
+            starts.remove(page_id);
+        }
         page.webview.close().map_err(native_error)?;
         self.emit_event(
             page_id,
@@ -913,6 +1098,96 @@ impl BrowserProvider for NativeBrowserProvider {
             bounds,
         )
         .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
+    }
+
+    fn detect_cookie_import_source(&self, endpoint: &str) -> BrowserResult<BrowserCookieImportSource> {
+        let detected = detect_loopback_cookie_source(endpoint)?;
+        reject_owned_cookie_source_port(self, &detected.endpoint)?;
+        Ok(detected)
+    }
+
+    fn import_cookies(&self, input: &BrowserCookieImportInput) -> BrowserResult<BrowserCookieImportResult> {
+        if !input.consent {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "cookie import requires explicit consent",
+            ));
+        }
+        let detected = detect_loopback_cookie_source(&input.endpoint)?;
+        let requested = normalize_cookie_origins(&input.origins)?;
+        let detected_origins = detected.origins.into_iter().collect::<HashSet<_>>();
+        if requested.iter().any(|origin| !detected_origins.contains(origin)) {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "cookie import origin was not present in the explicit source detection result",
+            ));
+        }
+        let destination_port = self.profile_port(&input.profile_id)?;
+        reject_owned_cookie_source_port(self, &detected.endpoint)?;
+        let mut source = connect_browser_cdp(&input.endpoint)?;
+        let source_payload = get_all_cookie_payload(&mut source)?;
+        let source_cookies = filter_cookie_payload(&source_payload, &requested)?;
+        if source_cookies.len() > 4_096 {
+            return Err(BrowserError::invalid("cookie import exceeds the bounded cookie count"));
+        }
+        let mut destination = connect_page_cdp(destination_port, &input.page_id)?;
+        destination
+            .command("Network.enable", json!({}))
+            .map_err(safe_cdp_error)?;
+        let before_payload = get_all_cookie_payload(&mut destination)?;
+        let before = filter_cookie_payload(&before_payload, &requested)?;
+        let transaction_identities = source_cookies
+            .iter()
+            .map(CookieMaterial::identity)
+            .collect::<HashSet<_>>();
+        let before_transaction = before
+            .iter()
+            .filter(|cookie| transaction_identities.contains(&cookie.identity()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let before_hash = cookie_hash(&before_transaction)?;
+        let expected_hash = cookie_hash(&source_cookies)?;
+        let set_result = destination.command(
+            "Network.setCookies",
+            json!({ "cookies": source_cookies.iter().map(CookieMaterial::set_value).collect::<Vec<_>>() }),
+        );
+        let set_succeeded = matches!(&set_result, Ok(value) if value.get("success").and_then(Value::as_bool).unwrap_or(true));
+        if set_succeeded {
+            let verified = get_all_cookie_payload(&mut destination)
+                .ok()
+                .and_then(|payload| filter_cookie_payload(&payload, &requested).ok())
+                .map(|cookies| {
+                    cookies
+                        .into_iter()
+                        .filter(|cookie| transaction_identities.contains(&cookie.identity()))
+                        .collect::<Vec<_>>()
+                })
+                .and_then(|cookies| cookie_hash(&cookies).ok())
+                .is_some_and(|hash| hash == expected_hash);
+            if verified {
+                return Ok(BrowserCookieImportResult {
+                    imported_count: source_cookies.len(),
+                    origin_count: requested.len(),
+                    verified: true,
+                    rolled_back: false,
+                    quarantined: false,
+                });
+            }
+        }
+        let rollback_proven = rollback_cookie_transaction(
+            &mut destination,
+            &transaction_identities,
+            &before_transaction,
+            &requested,
+            before_hash,
+        );
+        Ok(BrowserCookieImportResult {
+            imported_count: 0,
+            origin_count: requested.len(),
+            verified: false,
+            rolled_back: rollback_proven,
+            quarantined: !rollback_proven,
+        })
     }
 
     fn resolve_permission(
@@ -1014,6 +1289,82 @@ fn generation_for(generations: &Mutex<HashMap<String, u64>>, page_id: &str) -> u
         .ok()
         .and_then(|values| values.get(page_id).copied())
         .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn begin_native_navigation(
+    generations: &Mutex<HashMap<String, u64>>,
+    managed_starts: &Mutex<HashSet<String>>,
+    page_id: &str,
+) -> (u64, bool) {
+    let managed_start = managed_starts
+        .lock()
+        .ok()
+        .is_some_and(|mut starts| starts.remove(page_id));
+    let Ok(mut values) = generations.lock() else {
+        return (0, false);
+    };
+    if managed_start {
+        return (values.get(page_id).copied().unwrap_or_default(), false);
+    }
+    match values.get_mut(page_id) {
+        Some(generation) => {
+            *generation = generation.saturating_add(1);
+            (*generation, true)
+        }
+        None => {
+            values.insert(page_id.to_string(), 0);
+            (0, false)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn prepare_managed_navigation(
+    generations: &Mutex<HashMap<String, u64>>,
+    managed_starts: &Mutex<HashSet<String>>,
+    page_id: &str,
+    generation: u64,
+) -> BrowserResult<()> {
+    let mut starts = managed_starts.lock().map_err(|_| {
+        BrowserError::new(
+            BrowserErrorCode::Internal,
+            "browser navigation start lock is poisoned",
+        )
+    })?;
+    let mut values = generations.lock().map_err(|_| {
+        BrowserError::new(
+            BrowserErrorCode::Internal,
+            "browser generation lock is poisoned",
+        )
+    })?;
+    values.insert(page_id.to_string(), generation);
+    starts.insert(page_id.to_string());
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_navigation_generation(
+    generations: &Mutex<HashMap<String, u64>>,
+    managed_starts: &Mutex<HashSet<String>>,
+    page_id: &str,
+    generation: u64,
+) -> BrowserResult<()> {
+    let mut starts = managed_starts.lock().map_err(|_| {
+        BrowserError::new(
+            BrowserErrorCode::Internal,
+            "browser navigation start lock is poisoned",
+        )
+    })?;
+    let mut values = generations.lock().map_err(|_| {
+        BrowserError::new(
+            BrowserErrorCode::Internal,
+            "browser generation lock is poisoned",
+        )
+    })?;
+    values.insert(page_id.to_string(), generation);
+    starts.remove(page_id);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1367,6 +1718,479 @@ fn reserve_native_download(root: &std::path::Path, suggested: &str) -> BrowserRe
         BrowserErrorCode::Conflict,
         "could not reserve a unique native download path",
     ))
+}
+
+#[cfg(windows)]
+const MAX_CDP_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+
+#[cfg(windows)]
+struct LoopbackCdp {
+    socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    next_id: u64,
+}
+
+#[cfg(windows)]
+enum CdpCommandError {
+    Protocol,
+    Transport,
+}
+
+#[cfg(windows)]
+impl LoopbackCdp {
+    fn connect(websocket_url: &str, expected_port: u16) -> BrowserResult<Self> {
+        let parsed = url::Url::parse(websocket_url).map_err(|_| {
+            BrowserError::new(BrowserErrorCode::DeniedCapability, "invalid loopback CDP websocket")
+        })?;
+        if parsed.scheme() != "ws"
+            || !is_loopback_websocket_host(&parsed)
+            || parsed.port_or_known_default() != Some(expected_port)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "CDP websocket must remain on the detected loopback endpoint",
+            ));
+        }
+        let (mut socket, _) = connect(parsed.as_str()).map_err(|_| {
+            BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP websocket is unavailable")
+        })?;
+        let MaybeTlsStream::Plain(stream) = socket.get_mut() else {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "CDP websocket must use a plain local loopback transport",
+            ));
+        };
+        if !stream
+            .peer_addr()
+            .map(|address| address.ip().is_loopback())
+            .unwrap_or(false)
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "CDP websocket resolved outside the local loopback interface",
+            ));
+        }
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(5))))
+            .map_err(|_| {
+                BrowserError::new(
+                    BrowserErrorCode::RuntimeUnavailable,
+                    "loopback CDP websocket timeout configuration failed",
+                )
+            })?;
+        Ok(Self { socket, next_id: 0 })
+    }
+
+    fn command(&mut self, method: &str, params: Value) -> Result<Value, CdpCommandError> {
+        self.next_id = self.next_id.saturating_add(1);
+        let id = self.next_id;
+        let message = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))
+            .map_err(|_| CdpCommandError::Transport)?;
+        self.socket
+            .send(Message::Text(message.into()))
+            .map_err(|_| CdpCommandError::Transport)?;
+        loop {
+            let message = self.socket.read().map_err(|_| CdpCommandError::Transport)?;
+            let Message::Text(text) = message else { continue };
+            if text.len() as u64 > MAX_CDP_METADATA_BYTES {
+                return Err(CdpCommandError::Transport);
+            }
+            let value: Value = serde_json::from_str(text.as_str()).map_err(|_| CdpCommandError::Transport)?;
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if value.get("error").is_some() {
+                return Err(CdpCommandError::Protocol);
+            }
+            return value.get("result").cloned().ok_or(CdpCommandError::Protocol);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdpMetadata {
+    #[serde(default, rename = "Browser")]
+    browser: String,
+    #[serde(default)]
+    web_socket_debugger_url: String,
+}
+
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdpTargetMetadata {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    web_socket_debugger_url: String,
+}
+
+#[cfg(windows)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CookieIdentity {
+    name: String,
+    domain: String,
+    path: String,
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct CookieMaterial {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    same_site: Option<String>,
+    expires: Option<f64>,
+    priority: Option<String>,
+    same_party: Option<bool>,
+    source_scheme: Option<String>,
+    source_port: Option<i64>,
+}
+
+#[cfg(windows)]
+impl CookieMaterial {
+    fn from_value(value: &Value) -> BrowserResult<Self> {
+        let name = value.get("name").and_then(Value::as_str).ok_or_else(cookie_payload_error)?;
+        let cookie_value = value.get("value").and_then(Value::as_str).ok_or_else(cookie_payload_error)?;
+        let domain = value.get("domain").and_then(Value::as_str).ok_or_else(cookie_payload_error)?;
+        let path = value.get("path").and_then(Value::as_str).unwrap_or("/");
+        if name.len() > 4_096 || cookie_value.len() > 64 * 1024 || domain.len() > 4_096 || path.len() > 16 * 1024 {
+            return Err(BrowserError::invalid("cookie import contains an oversized field"));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            value: cookie_value.to_string(),
+            domain: domain.to_ascii_lowercase(),
+            path: path.to_string(),
+            secure: value.get("secure").and_then(Value::as_bool).unwrap_or(false),
+            http_only: value.get("httpOnly").and_then(Value::as_bool).unwrap_or(false),
+            same_site: value.get("sameSite").and_then(Value::as_str).map(str::to_string),
+            expires: value.get("expires").and_then(Value::as_f64).filter(|value| value.is_finite() && *value > 0.0),
+            priority: value.get("priority").and_then(Value::as_str).map(str::to_string),
+            same_party: value.get("sameParty").and_then(Value::as_bool),
+            source_scheme: value.get("sourceScheme").and_then(Value::as_str).map(str::to_string),
+            source_port: value.get("sourcePort").and_then(Value::as_i64),
+        })
+    }
+
+    fn identity(&self) -> CookieIdentity {
+        CookieIdentity { name: self.name.clone(), domain: self.domain.clone(), path: self.path.clone() }
+    }
+
+    fn matches_origin(&self, origins: &[String]) -> bool {
+        let domain = self.domain.trim_start_matches('.');
+        origins.iter().any(|origin| {
+            let Ok(url) = url::Url::parse(origin) else { return false };
+            if self.secure && url.scheme() != "https" { return false; }
+            url.host_str()
+                .map(str::to_ascii_lowercase)
+                .is_some_and(|host| host == domain || host.ends_with(&format!(".{domain}")))
+        })
+    }
+
+    fn set_value(&self) -> Value {
+        let mut value = serde_json::Map::new();
+        value.insert("name".to_string(), Value::String(self.name.clone()));
+        value.insert("value".to_string(), Value::String(self.value.clone()));
+        value.insert("domain".to_string(), Value::String(self.domain.clone()));
+        value.insert("path".to_string(), Value::String(self.path.clone()));
+        value.insert("secure".to_string(), Value::Bool(self.secure));
+        value.insert("httpOnly".to_string(), Value::Bool(self.http_only));
+        if let Some(same_site) = &self.same_site { value.insert("sameSite".to_string(), Value::String(same_site.clone())); }
+        if let Some(expires) = self.expires { if let Some(number) = serde_json::Number::from_f64(expires) { value.insert("expires".to_string(), Value::Number(number)); } }
+        if let Some(priority) = &self.priority { value.insert("priority".to_string(), Value::String(priority.clone())); }
+        if let Some(same_party) = self.same_party { value.insert("sameParty".to_string(), Value::Bool(same_party)); }
+        if let Some(source_scheme) = &self.source_scheme { value.insert("sourceScheme".to_string(), Value::String(source_scheme.clone())); }
+        if let Some(source_port) = self.source_port { value.insert("sourcePort".to_string(), Value::Number(source_port.into())); }
+        Value::Object(value)
+    }
+
+    fn hash_value(&self) -> Value {
+        json!({
+            "name": self.name.clone(),
+            "value": self.value.clone(),
+            "domain": self.domain.clone(),
+            "path": self.path.clone(),
+            "secure": self.secure,
+            "httpOnly": self.http_only,
+            "sameSite": self.same_site.clone(),
+            "expires": self.expires,
+            "priority": self.priority.clone(),
+            "sameParty": self.same_party,
+            "sourceScheme": self.source_scheme.clone(),
+            "sourcePort": self.source_port,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn detect_loopback_cookie_source(endpoint: &str) -> BrowserResult<BrowserCookieImportSource> {
+    let endpoint = normalize_loopback_endpoint(endpoint)?;
+    let version: CdpMetadata = read_loopback_json(&format!("{endpoint}/json/version"))?;
+    let targets: Vec<CdpTargetMetadata> = read_loopback_json(&format!("{endpoint}/json"))?;
+    if targets.len() > 512 {
+        return Err(BrowserError::invalid("loopback CDP exposed too many targets"));
+    }
+    let mut origins = BTreeSet::new();
+    for target in targets {
+        if let Ok(url) = url::Url::parse(&target.url) {
+            if matches!(url.scheme(), "http" | "https") {
+                origins.insert(url.origin().ascii_serialization());
+            }
+        }
+    }
+    let label = version.browser.to_ascii_lowercase();
+    let browser = if label.contains("edge") {
+        "edge"
+    } else if label.contains("chrome") {
+        "chrome"
+    } else if label.contains("chromium") {
+        "chromium"
+    } else {
+        "unknown"
+    };
+    if browser == "unknown" {
+        return Err(BrowserError::new(
+            BrowserErrorCode::DeniedCapability,
+            "cookie import source is not a detected Chrome, Edge, or Chromium CDP browser",
+        ));
+    }
+    if origins.len() > 256 {
+        return Err(BrowserError::invalid("loopback CDP exposed too many distinct origins"));
+    }
+    Ok(BrowserCookieImportSource { endpoint, browser: browser.to_string(), origins: origins.into_iter().collect() })
+}
+
+#[cfg(windows)]
+fn reject_owned_cookie_source_port(provider: &NativeBrowserProvider, endpoint: &str) -> BrowserResult<()> {
+    let source_port = url::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.port())
+        .ok_or_else(|| BrowserError::invalid("cookie import source requires an explicit port"))?;
+    let owned_ports = provider.profile_ports.lock().map_err(|_| {
+        BrowserError::new(BrowserErrorCode::Internal, "native browser profile lock is poisoned")
+    })?;
+    if source_port == provider.main_cdp_port || owned_ports.values().any(|port| *port == source_port) {
+        return Err(BrowserError::new(
+            BrowserErrorCode::DeniedCapability,
+            "cookie import source must be an external local Chrome CDP browser",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn connect_browser_cdp(endpoint: &str) -> BrowserResult<LoopbackCdp> {
+    let endpoint = normalize_loopback_endpoint(endpoint)?;
+    let parsed = url::Url::parse(&endpoint).map_err(|_| BrowserError::invalid("invalid loopback CDP endpoint"))?;
+    let port = parsed.port_or_known_default().ok_or_else(|| BrowserError::invalid("loopback CDP endpoint requires an explicit port"))?;
+    let version: CdpMetadata = read_loopback_json(&format!("{endpoint}/json/version"))?;
+    if version.web_socket_debugger_url.is_empty() {
+        return Err(BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP browser websocket is unavailable"));
+    }
+    LoopbackCdp::connect(&version.web_socket_debugger_url, port)
+}
+
+#[cfg(windows)]
+fn connect_page_cdp(port: u16, page_id: &str) -> BrowserResult<LoopbackCdp> {
+    let targets: Vec<CdpTargetMetadata> = read_loopback_json(&format!("http://127.0.0.1:{port}/json"))?;
+    if targets.len() > 512 {
+        return Err(BrowserError::invalid("destination CDP exposed too many targets"));
+    }
+    let expected_name = format!("vibelink-page:{page_id}");
+    for target in targets.into_iter().filter(|target| target.kind.is_empty() || target.kind == "page") {
+        if target.web_socket_debugger_url.is_empty() { continue; }
+        let Ok(mut connection) = LoopbackCdp::connect(&target.web_socket_debugger_url, port) else { continue };
+        let Ok(result) = connection.command("Runtime.evaluate", json!({ "expression": "window.name", "returnByValue": true })) else { continue };
+        let name = result
+            .get("result")
+            .and_then(|value| value.get("value"))
+            .and_then(Value::as_str);
+        if name == Some(expected_name.as_str()) {
+            return Ok(connection);
+        }
+    }
+    Err(BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "destination browser page CDP target is unavailable"))
+}
+
+#[cfg(windows)]
+fn normalize_loopback_endpoint(endpoint: &str) -> BrowserResult<String> {
+    let parsed = url::Url::parse(endpoint.trim()).map_err(|_| BrowserError::invalid("invalid loopback CDP endpoint"))?;
+    if parsed.scheme() != "http"
+        || !is_loopback_host(&parsed)
+        || parsed.port().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return Err(BrowserError::new(
+            BrowserErrorCode::DeniedCapability,
+            "cookie import requires an explicit local loopback HTTP CDP endpoint",
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+#[cfg(windows)]
+fn is_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn is_loopback_websocket_host(url: &url::Url) -> bool {
+    is_loopback_host(url)
+        || matches!(url.host(), Some(url::Host::Domain(host)) if host.eq_ignore_ascii_case("localhost"))
+}
+
+#[cfg(windows)]
+fn read_loopback_json<T: for<'de> Deserialize<'de>>(url: &str) -> BrowserResult<T> {
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let response = agent.get(url).timeout(Duration::from_secs(3)).call().map_err(|_| {
+        BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP metadata is unavailable")
+    })?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_CDP_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP metadata could not be read"))?;
+    if bytes.len() as u64 > MAX_CDP_METADATA_BYTES {
+        return Err(BrowserError::invalid("loopback CDP metadata exceeds the bounded size"));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP metadata is invalid"))
+}
+
+#[cfg(windows)]
+fn normalize_cookie_origins(origins: &[String]) -> BrowserResult<Vec<String>> {
+    if origins.is_empty() || origins.len() > 64 {
+        return Err(BrowserError::invalid("cookie import requires a bounded origin allowlist"));
+    }
+    let mut normalized = BTreeSet::new();
+    for origin in origins {
+        let parsed = url::Url::parse(origin).map_err(|_| BrowserError::invalid("invalid cookie import origin"))?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || !matches!(parsed.path(), "" | "/")
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(BrowserError::invalid("cookie import entries must be exact HTTP(S) origins"));
+        }
+        normalized.insert(parsed.origin().ascii_serialization());
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+#[cfg(windows)]
+fn filter_cookie_payload(payload: &Value, origins: &[String]) -> BrowserResult<Vec<CookieMaterial>> {
+    let values = payload.get("cookies").and_then(Value::as_array).ok_or_else(cookie_payload_error)?;
+    let mut cookies = Vec::new();
+    for value in values {
+        let cookie = CookieMaterial::from_value(value)?;
+        if !cookie.matches_origin(origins) { continue; }
+        if value.get("partitionKey").is_some_and(|key| !key.is_null())
+            || value.get("partitionKeyOpaque").and_then(Value::as_bool).unwrap_or(false)
+            || value.get("partitioned").and_then(Value::as_bool).unwrap_or(false)
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Unsupported,
+                "partitioned cookies cannot be imported without preserving partition identity",
+            ));
+        }
+        cookies.push(cookie);
+    }
+    Ok(cookies)
+}
+
+#[cfg(windows)]
+fn get_all_cookie_payload(connection: &mut LoopbackCdp) -> BrowserResult<Value> {
+    match connection.command("Storage.getCookies", json!({})) {
+        Ok(value) => Ok(value),
+        Err(CdpCommandError::Protocol) => connection
+            .command("Network.getAllCookies", json!({}))
+            .map_err(safe_cdp_error),
+        Err(error) => Err(safe_cdp_error(error)),
+    }
+}
+
+#[cfg(windows)]
+fn cookie_hash(cookies: &[CookieMaterial]) -> BrowserResult<[u8; 32]> {
+    let mut entries = cookies
+        .iter()
+        .map(|cookie| serde_json::to_vec(&cookie.hash_value()).map_err(|_| cookie_payload_error()))
+        .collect::<BrowserResult<Vec<_>>>()?;
+    entries.sort();
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update((entry.len() as u64).to_be_bytes());
+        hasher.update(entry);
+    }
+    Ok(hasher.finalize().into())
+}
+
+#[cfg(windows)]
+fn rollback_cookie_transaction(
+    destination: &mut LoopbackCdp,
+    identities: &HashSet<CookieIdentity>,
+    before: &[CookieMaterial],
+    origins: &[String],
+    before_hash: [u8; 32],
+) -> bool {
+    for identity in identities {
+        if destination.command("Network.deleteCookies", json!({
+            "name": identity.name.clone(),
+            "domain": identity.domain.clone(),
+            "path": identity.path.clone(),
+        })).is_err() {
+            return false;
+        }
+    }
+    if !before.is_empty() {
+        let restored = destination.command(
+            "Network.setCookies",
+            json!({ "cookies": before.iter().map(CookieMaterial::set_value).collect::<Vec<_>>() }),
+        );
+        if !matches!(restored, Ok(value) if value.get("success").and_then(Value::as_bool).unwrap_or(true)) {
+            return false;
+        }
+    }
+    let Ok(payload) = get_all_cookie_payload(destination) else { return false };
+    let Ok(cookies) = filter_cookie_payload(&payload, origins) else { return false };
+    let transaction = cookies
+        .into_iter()
+        .filter(|cookie| identities.contains(&cookie.identity()))
+        .collect::<Vec<_>>();
+    cookie_hash(&transaction).is_ok_and(|hash| hash == before_hash)
+}
+
+#[cfg(windows)]
+fn safe_cdp_error(error: CdpCommandError) -> BrowserError {
+    match error {
+        CdpCommandError::Protocol => BrowserError::new(BrowserErrorCode::Unsupported, "required cookie-only CDP command is unavailable"),
+        CdpCommandError::Transport => BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP command failed"),
+    }
+}
+
+#[cfg(windows)]
+fn cookie_payload_error() -> BrowserError {
+    BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "CDP returned an invalid cookie payload")
 }
 
 #[cfg(windows)]

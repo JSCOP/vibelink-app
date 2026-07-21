@@ -24,6 +24,7 @@ export type ExplorerTreeViewProps = {
   contextMenu: ExplorerContextMenu
   dragOverPath: string | null
   onSelect: (node: ExplorerNode) => void
+  onOpen: (node: ExplorerNode) => void
   onToggle: (node: ExplorerNode) => void
   onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void
   onRenameValueChange: (value: string) => void
@@ -37,7 +38,7 @@ export type ExplorerTreeViewProps = {
   onDrop: (event: React.DragEvent, node: ExplorerNode) => void
 }
 
-export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, previewVisible, onTogglePreview, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
+export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, previewVisible, onTogglePreview, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onOpen, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -88,7 +89,7 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
                 draggable={!node.gitOnly && !node.entry.repoKind}
                 style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)`, '--explorer-depth': node.depth } as React.CSSProperties}
                 onClick={() => onSelect(node)}
-                onDoubleClick={() => onToggle(node)}
+                onDoubleClick={() => { if (node.entry.isDir) onToggle(node); else onOpen(node) }}
                 onContextMenu={(event) => onContextMenu(event, node)}
                 onDragStart={() => onDragStart(node)}
                 onDragOver={(event) => onDragOver(event, node)}

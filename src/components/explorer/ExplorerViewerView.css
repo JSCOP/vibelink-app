@@ -144,6 +144,17 @@
   background: var(--vibelink-active);
 }
 
+.explorer-viewer-actions > .explorer-viewer-primary-action {
+  border-color: var(--vibelink-border);
+  gap: 4px;
+  padding: 0 7px;
+  width: auto;
+}
+
+.explorer-viewer-actions > .explorer-viewer-primary-action > span {
+  font-size: 10.5px;
+}
+
 /* Metadata strip */
 
 .explorer-viewer-meta {
@@ -502,5 +513,14 @@
 
   .explorer-image-toolbar {
     justify-content: flex-end;
+  }
+
+  .explorer-viewer-actions > .explorer-viewer-primary-action > span {
+    display: none;
+  }
+
+  .explorer-viewer-actions > .explorer-viewer-primary-action {
+    padding: 0;
+    width: 22px;
   }
 }

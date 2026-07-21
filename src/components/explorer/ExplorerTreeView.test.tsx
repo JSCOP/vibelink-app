@@ -58,6 +58,7 @@ describe('ExplorerTreeView', () => {
           contextMenu={{ x: 120, y: 140, path: 'src', actions: [{ id: 'open', label: 'Open', onClick: noop }] }}
           dragOverPath={null}
           onSelect={noop}
+          onOpen={noop}
           onToggle={noop}
           onKeyDown={noop}
           onRenameValueChange={noop}
@@ -93,6 +94,7 @@ describe('ExplorerTreeView', () => {
       contextMenu: null,
       dragOverPath: null,
       onSelect: noop,
+      onOpen: noop,
       onToggle: noop,
       onKeyDown: noop,
       onRenameValueChange: noop,
@@ -132,6 +134,7 @@ describe('ExplorerTreeView', () => {
       contextMenu={null}
       dragOverPath={null}
       onSelect={noop}
+      onOpen={noop}
       onToggle={noop}
       onKeyDown={noop}
       onRenameValueChange={noop}

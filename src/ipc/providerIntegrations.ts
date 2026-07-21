@@ -5,7 +5,7 @@ export type ProviderScope = 'repositories:read' | 'issues:read' | 'reviews:read'
 export type DiscoveryResource = 'repositories' | 'issues' | 'reviews'
 
 export type CredentialReference = {
-  id: string
+  credentialId: string
   provider: ProviderKind
   account: string
   scopes: ProviderScope[]
@@ -27,6 +27,40 @@ export type WorkspaceCreationInput = {
   sourceTitle: string | null
 }
 
+export type AssignedProviderSource =
+  | 'githubAssignedIssue'
+  | 'githubAuthoredReview'
+  | 'githubReviewRequested'
+  | 'gitlabAssignedIssue'
+  | 'gitlabAssignedReview'
+  | 'linearAssignedIssue'
+
+export type AssignedProviderItem = {
+  providerId: string
+  provider: ProviderKind
+  source: AssignedProviderSource
+  kind: 'issue' | 'review'
+  identifier: string
+  title: string
+  state: string
+  repository: string | null
+  project: string | null
+  webUrl: string
+  updatedAt: string | null
+  workspaceInputCapable: boolean
+  workspaceItem: ProviderItem | null
+}
+
+export type AssignedProviderFailure = {
+  source: string
+  failure: { code: string; message: string; retryable: boolean }
+}
+
+export type AssignedProviderResult = {
+  items: AssignedProviderItem[]
+  failures: AssignedProviderFailure[]
+}
+
 export type ReviewCommentResult = { id: string; webUrl: string | null }
 
 export const providerAccounts: Record<ProviderKind, string> = {
@@ -43,8 +77,8 @@ export async function providerCredentialStatus(provider: ProviderKind, account: 
   return invoke<CredentialReference | null>('provider_credential_status', { provider, account })
 }
 
-export async function providerCredentialStore(provider: ProviderKind, account: string, token: string, scopes: ProviderScope[]): Promise<CredentialReference> {
-  return invoke<CredentialReference>('provider_credential_store', { request: { provider, account, token, scopes } })
+export async function providerCredentialCapture(provider: ProviderKind, account: string, scopes: ProviderScope[], credentialId: string): Promise<CredentialReference> {
+  return invoke<CredentialReference>('provider_credential_capture', { request: { credentialId, provider, account, scopes } })
 }
 
 export async function providerCredentialDelete(reference: CredentialReference): Promise<void> {
@@ -53,6 +87,10 @@ export async function providerCredentialDelete(reference: CredentialReference): 
 
 export async function providerDiscover(credential: CredentialReference, resource: DiscoveryResource, query: string, limit = 30): Promise<ProviderItem[]> {
   return invoke<ProviderItem[]>('provider_discover', { request: { credential, resource, query, limit } })
+}
+
+export async function providerAssignedItems(credential: CredentialReference, limit = 50): Promise<AssignedProviderResult> {
+  return invoke<AssignedProviderResult>('provider_assigned_items', { request: { credential, limit } })
 }
 
 export async function providerWorkspaceInput(provider: ProviderKind, item: ProviderItem): Promise<WorkspaceCreationInput> {

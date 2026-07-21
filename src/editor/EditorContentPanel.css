@@ -1,0 +1,199 @@
+.editor-content-panel {
+  background: var(--vibelink-panel);
+  color: var(--vibelink-text);
+  display: flex;
+  flex-direction: column;
+  font-family: var(--vibelink-sans);
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.editor-toolbar {
+  align-items: center;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  display: flex;
+  flex: none;
+  gap: 10px;
+  min-height: 32px;
+  padding: 3px 7px 3px 10px;
+}
+
+.editor-file-identity {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.editor-file-identity > strong {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-dirty-mark {
+  color: var(--vibelink-warning);
+  font-size: 9px;
+}
+
+.editor-toolbar-status {
+  color: var(--vibelink-muted);
+  flex: 1 1 auto;
+  font-size: 10.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-toolbar-actions,
+.editor-conflict-banner > div {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.editor-toolbar button,
+.editor-conflict-banner button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 4px;
+  color: var(--vibelink-text);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 10.5px;
+  gap: 4px;
+  min-height: 23px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.editor-toolbar button:hover:not(:disabled),
+.editor-conflict-banner button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+}
+
+.editor-toolbar button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.editor-conflict-banner {
+  align-items: center;
+  background: var(--vibelink-warning-soft);
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-warning);
+  display: flex;
+  flex: none;
+  font-size: 11px;
+  gap: 7px;
+  padding: 5px 8px;
+}
+
+.editor-conflict-banner > span {
+  flex: 1 1 auto;
+}
+
+.editor-error {
+  background: var(--vibelink-danger-soft);
+  border-bottom: 1px solid var(--vibelink-danger-border);
+  color: var(--vibelink-danger-text);
+  flex: none;
+  font-size: 11px;
+  padding: 5px 10px;
+}
+
+.editor-surface,
+.editor-surface > section,
+.editor-surface > div {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.editor-loading {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: flex;
+  font-size: 12px;
+  justify-content: center;
+  padding: 20px;
+}
+
+.editor-textarea-fallback {
+  background: var(--vibelink-panel);
+  border: 0;
+  box-sizing: border-box;
+  color: var(--vibelink-text);
+  font-family: var(--vibelink-mono);
+  font-size: 13px;
+  height: 100%;
+  line-height: 1.5;
+  outline: none;
+  padding: 8px 12px;
+  resize: none;
+  tab-size: 4;
+  white-space: pre;
+  width: 100%;
+}
+
+.editor-conflict-comparison {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0;
+  min-width: 0;
+}
+
+.editor-conflict-comparison > section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.editor-conflict-comparison > section + section {
+  border-left: 1px solid var(--vibelink-border-soft);
+}
+
+.editor-conflict-comparison header {
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-muted);
+  flex: none;
+  font-size: 10.5px;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+
+.editor-conflict-comparison pre {
+  flex: 1 1 auto;
+  font-family: var(--vibelink-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 12px;
+  white-space: pre;
+}
+
+@media (max-width: 720px) {
+  .editor-toolbar-status,
+  .editor-toolbar-actions button:not(:first-child) {
+    display: none;
+  }
+
+  .editor-conflict-comparison {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+
+  .editor-conflict-comparison > section + section {
+    border-left: 0;
+    border-top: 1px solid var(--vibelink-border-soft);
+  }
+}

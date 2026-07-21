@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { create } from 'zustand'
 import type { CiStatus, HostingInfo, RepoInfo, WorkingStatus } from '../ipc/types'
 
-export type GitTab = 'changes' | 'history' | 'branches' | 'pullRequests'
+export type GitTab = 'changes' | 'history' | 'branches' | 'assigned'
 export type GitDiffArea = 'staged' | 'unstaged'
 
 export type GitRepositoryState = {

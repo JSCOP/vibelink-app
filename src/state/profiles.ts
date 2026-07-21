@@ -52,7 +52,6 @@ export type Settings = {
   alarmHighlightColor: string
   reviewedPaneHighlightColor: string
   terminalScrollbarVisible: boolean
-  terminalTabsVisible: boolean
   cursorStyle: TerminalCursorStyle
   cursorWidth: number
   keepTerminalsAliveOnClose: boolean
@@ -221,7 +220,6 @@ export const defaultSettings: Settings = {
   alarmHighlightColor: '#7ee787',
   reviewedPaneHighlightColor: '#58a6ff',
   terminalScrollbarVisible: false,
-  terminalTabsVisible: true,
   cursorStyle: 'bar',
   cursorWidth: 1,
   keepTerminalsAliveOnClose: false,
@@ -270,7 +268,6 @@ export function normalizeSettings(value: unknown): Settings {
     alarmHighlightColor: readHexColor(record?.alarmHighlightColor, defaultSettings.alarmHighlightColor),
     reviewedPaneHighlightColor: readHexColor(record?.reviewedPaneHighlightColor, defaultSettings.reviewedPaneHighlightColor),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
-    terminalTabsVisible: readBoolean(record?.terminalTabsVisible, defaultSettings.terminalTabsVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
     cursorWidth: readNumberInRange(record?.cursorWidth, defaultSettings.cursorWidth, 1, 10),
     keepTerminalsAliveOnClose: readBoolean(record?.keepTerminalsAliveOnClose, defaultSettings.keepTerminalsAliveOnClose),

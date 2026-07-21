@@ -1,398 +1,210 @@
-import { shouldRestoreDockviewLayout } from './layoutRestore'
+import { Orientation, type SerializedDockview } from 'dockview-core'
+import type { PaneMeta } from '../ipc/types'
+import { balancedGridForPaneCount, type GridSize } from './templatePlan'
+import {
+  freshWorkspaceLayoutEnvelope,
+  normalizeWorkspaceLayoutEnvelope,
+  parseWorkspaceContentParams,
+  serializeWorkspaceLayoutEnvelope,
+  workspaceContentPanelId,
+  type WorkspaceContentKind,
+  type WorkspaceContentParams,
+  type WorkspaceLayoutEnvelope,
+} from './workspaceContentModel'
 
-export type WorkspaceWindowKind = 'terminal' | 'agent' | 'kanban' | 'diff' | 'todo' | 'git' | 'explorer' | 'browser' | 'computer'
+export type WorkspaceLayoutState = WorkspaceLayoutEnvelope
 
-export type TerminalWindowOpenMode = 'existing' | 'new'
-
-export const detachedTerminalWindowComponent = 'detachedTerminalWindow'
-export const detachedTerminalWindowPanelPrefix = 'terminal-window-pane:'
-
-export function detachedTerminalWindowPanelId(paneId: string): string {
-  return `${detachedTerminalWindowPanelPrefix}${paneId}`
-}
-
-export function detachedTerminalPaneId(panel: { id: string; params?: unknown } | null | undefined): string | null {
-  if (!panel || !panel.id.startsWith(detachedTerminalWindowPanelPrefix) || !isRecord(panel.params)) return null
-  return typeof panel.params.paneId === 'string' && panel.params.paneId ? panel.params.paneId : null
-}
-
-export type WorkspaceLayoutPage = {
-  id: string
-  name: string
-  layoutJson: string | null
-  createdAt: number
-  updatedAt: number
-}
-
-export type WorkspaceLayoutState = {
-  version: 2
-  activePageId: string
-  pages: WorkspaceLayoutPage[]
-}
-
-export type WorkspaceWindowDescriptor = {
-  kind: WorkspaceWindowKind
-  panelId: string
-  component: string
+export type WorkspaceContentDescriptor = {
+  kind: WorkspaceContentKind
+  component: WorkspaceContentKind
   title: string
   icon: string
-  singleton: boolean
 }
 
-type WorkspaceLayoutBlob = Partial<WorkspaceLayoutState> & {
-  version?: unknown
-  activePageId?: unknown
-  pages?: unknown
+export const workspaceContentDescriptors: Record<WorkspaceContentKind, WorkspaceContentDescriptor> = {
+  terminal: { kind: 'terminal', component: 'terminal', title: 'Terminal', icon: 'terminal' },
+  browser: { kind: 'browser', component: 'browser', title: 'Browser', icon: 'globe' },
+  editor: { kind: 'editor', component: 'editor', title: 'Editor', icon: 'file-code' },
+  explorer: { kind: 'explorer', component: 'explorer', title: 'Explorer', icon: 'folder-tree' },
+  workbench: { kind: 'workbench', component: 'workbench', title: 'Workbench', icon: 'git-branch' },
+  agent: { kind: 'agent', component: 'agent', title: 'VibeLink Agent', icon: 'bot' },
+  kanban: { kind: 'kanban', component: 'kanban', title: 'Kanban', icon: 'layout-grid' },
+  todo: { kind: 'todo', component: 'todo', title: 'Todo List', icon: 'list-todo' },
+  diff: { kind: 'diff', component: 'diff', title: 'Diff', icon: 'git-compare' },
 }
 
-type NormalizeOptions = {
-  now?: number
-  terminalPaneIds?: string[]
-  legacyKanbanLayoutJson?: string | null
-}
-export const terminalWorkspaceLayoutPageId = 'terminal'
-export const planningWorkspaceLayoutPageId = 'planning'
-export const gitWorkspaceLayoutPageId = 'git-page'
-
-const fixedWorkspaceLayoutPages = [
-  { id: terminalWorkspaceLayoutPageId, name: 'Terminal' },
-  { id: planningWorkspaceLayoutPageId, name: 'Kanban + Agent' },
-  { id: gitWorkspaceLayoutPageId, name: 'Git' },
-] as const
-
-
-export const workspaceWindowDescriptors: Record<WorkspaceWindowKind, WorkspaceWindowDescriptor> = {
-  terminal: {
-    kind: 'terminal',
-    panelId: 'terminal-window',
-    component: 'terminalWindow',
-    title: 'Terminal',
-    icon: 'terminal',
-    singleton: true,
-  },
-  agent: {
-    kind: 'agent',
-    panelId: 'vibelink-agent',
-    component: 'agent',
-    title: 'VibeLink Agent',
-    icon: 'bot',
-    singleton: true,
-  },
-  kanban: {
-    kind: 'kanban',
-    panelId: 'kanban',
-    component: 'kanban',
-    title: 'Kanban',
-    icon: 'layout-grid',
-    singleton: true,
-  },
-  diff: {
-    kind: 'diff',
-    panelId: 'diff',
-    component: 'diff',
-    title: 'Diff',
-    icon: 'git-compare',
-    singleton: true,
-  },
-  git: {
-    kind: 'git',
-    panelId: 'git',
-    component: 'gitWindow',
-    title: 'Git',
-    icon: 'git-branch',
-    singleton: true,
-  },
-  explorer: {
-    kind: 'explorer',
-    panelId: 'explorer',
-    component: 'explorerWindow',
-    title: 'Explorer',
-    icon: 'folder-tree',
-    singleton: true,
-  },
-  todo: {
-    kind: 'todo',
-    panelId: 'todo-list',
-    component: 'todo',
-    title: 'Todo List',
-    icon: 'list-todo',
-    singleton: true,
-  },
-  browser: {
-    kind: 'browser',
-    panelId: 'browser',
-    component: 'browserWindow',
-    title: 'Browser',
-    icon: 'globe',
-    singleton: true,
-  },
-  computer: {
-    kind: 'computer',
-    panelId: 'computer',
-    component: 'computerWindow',
-    title: 'Computer',
-    icon: 'monitor-cog',
-    singleton: true,
-  },
-}
-
-export const workspaceWindowKindByPanelId: Record<string, WorkspaceWindowKind> = Object.fromEntries(
-  Object.values(workspaceWindowDescriptors).map((descriptor) => [descriptor.panelId, descriptor.kind]),
-)
-
-export function normalizeWorkspaceLayoutState(raw: string | null | undefined, options: NormalizeOptions = {}): WorkspaceLayoutState {
-  const now = options.now ?? Date.now()
-  const terminalPaneIds = options.terminalPaneIds ?? []
-  const parsed = parseJson(raw)
-  if (isWorkspaceLayoutBlob(parsed)) {
-    const pages = normalizeFixedPages(parsed.pages, now, terminalPaneIds)
-    const requested = typeof parsed.activePageId === 'string' ? parsed.activePageId : ''
-    const activePageId = fixedWorkspaceLayoutPages.some((page) => page.id === requested)
-      ? requested
-      : terminalWorkspaceLayoutPageId
-    return { version: 2, activePageId, pages }
-  }
-
-  const terminalLayout = raw && isLegacyDockviewLayout(parsed, terminalPaneIds)
-    ? wrapTerminalLayout(raw) ?? normalizeWorkspaceDockLayoutJson(raw, terminalPaneIds)
-    : null
-  const planningLayout = migrateKanbanDockLayout(options.legacyKanbanLayoutJson)
-
-  return {
-    version: 2,
-    activePageId: terminalWorkspaceLayoutPageId,
-    pages: [
-      createPage(terminalWorkspaceLayoutPageId, 'Terminal', terminalLayout, now),
-      createPage(planningWorkspaceLayoutPageId, 'Kanban + Agent', planningLayout, now),
-      createPage(gitWorkspaceLayoutPageId, 'Git', null, now),
-    ],
-  }
-}
-
-export function createDefaultWorkspaceDockviewLayout(pageId: string): Record<string, unknown> {
-  const descriptors = pageId === planningWorkspaceLayoutPageId
-    ? [workspaceWindowDescriptors.kanban, workspaceWindowDescriptors.agent]
-    : pageId === gitWorkspaceLayoutPageId
-      ? [workspaceWindowDescriptors.explorer, workspaceWindowDescriptors.git]
-      : [workspaceWindowDescriptors.terminal]
-  const panels: Record<string, unknown> = {}
-  const layout: Record<string, unknown> = { panels }
-  for (const descriptor of descriptors) rewritePanel(layout, descriptor)
-  const sizes = pageId === planningWorkspaceLayoutPageId ? [700, 300] : pageId === gitWorkspaceLayoutPageId ? [300, 700] : [1000]
-  layout.grid = {
-    root: {
-      type: 'branch',
-      data: descriptors.map((descriptor, index) => makeWindowLeaf(descriptor.panelId, sizes[index])),
-      size: 1000,
-    },
-    width: 1000,
-    height: 600,
-    orientation: 'HORIZONTAL',
-  }
-  const activeDescriptor = pageId === gitWorkspaceLayoutPageId ? workspaceWindowDescriptors.git : descriptors[0]
-  layout.activeGroup = `window-${activeDescriptor.panelId}`
-  return layout
+export function normalizeWorkspaceLayoutState(raw: string | null | undefined): WorkspaceLayoutState {
+  return normalizeWorkspaceLayoutEnvelope(raw)
 }
 
 export function serializeWorkspaceLayoutState(state: WorkspaceLayoutState): string {
-  return JSON.stringify(normalizeWorkspaceLayoutState(JSON.stringify(state)))
+  return serializeWorkspaceLayoutEnvelope(state)
 }
 
-export function activeWorkspaceLayoutPage(state: WorkspaceLayoutState): WorkspaceLayoutPage {
-  return state.pages.find((page) => page.id === state.activePageId) ?? state.pages[0]
-}
-
-
-export function replaceWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string, layoutJson: string | null): WorkspaceLayoutState {
-  const now = Date.now()
+export function createTerminalContentParams(pane: Pick<PaneMeta, 'id' | 'config'>): WorkspaceContentParams {
   return {
-    ...existing,
-    pages: existing.pages.map((page) => page.id === pageId ? { ...page, layoutJson, updatedAt: now } : page),
+    schema: 1,
+    kind: 'terminal',
+    instanceId: pane.id,
+    title: pane.config.title?.trim() || 'Shell',
+    icon: pane.config.icon?.trim() || 'terminal',
+    paneId: pane.id,
   }
 }
 
-
-export function setActiveWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string): WorkspaceLayoutState {
-  if (!existing.pages.some((page) => page.id === pageId)) return existing
-  return { ...existing, activePageId: pageId }
+export function createSingletonContentParams(kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor'>): WorkspaceContentParams {
+  const descriptor = workspaceContentDescriptors[kind]
+  return { schema: 1, kind, instanceId: kind, title: descriptor.title, icon: descriptor.icon }
 }
 
-export function resetWorkspaceLayoutPage(existing: WorkspaceLayoutState, pageId: string): WorkspaceLayoutState {
-  return replaceWorkspaceLayoutPage(existing, pageId, null)
-}
-
-function normalizeFixedPages(value: unknown, now: number, terminalPaneIds: string[]): WorkspaceLayoutPage[] {
-  const source = Array.isArray(value) ? value : []
-  return fixedWorkspaceLayoutPages.map(({ id, name }) => {
-    const item = source.find((candidate) => isRecord(candidate) && candidate.id === id)
-    if (!isRecord(item)) return createPage(id, name, null, now)
-    const rawLayoutJson = typeof item.layoutJson === 'string' && item.layoutJson.trim() ? item.layoutJson : null
-    return {
-      id,
-      name,
-      layoutJson: normalizeWorkspaceDockLayoutJson(rawLayoutJson, terminalPaneIds),
-      createdAt: readTimestamp(item.createdAt, now),
-      updatedAt: readTimestamp(item.updatedAt, now),
-    }
-  })
-}
-
-function migrateKanbanDockLayout(raw: string | null | undefined): string | null {
-  const layout = parseJson(raw)
-  if (!isRecord(layout) || !isRecord(layout.grid) || !isRecord(layout.panels)) return null
-  const migrated = structuredClone(layout)
-  replacePanelId(migrated, 'orchestrator', workspaceWindowDescriptors.agent.panelId)
-  replacePanelId(migrated, 'board', workspaceWindowDescriptors.kanban.panelId)
-  rewritePanel(migrated, workspaceWindowDescriptors.agent)
-  rewritePanel(migrated, workspaceWindowDescriptors.kanban)
-  rewritePanel(migrated, workspaceWindowDescriptors.diff)
-  return JSON.stringify(migrated)
-}
-
-function normalizeWorkspaceDockLayoutJson(raw: string | null, terminalPaneIds: string[]): string | null {
-  if (!raw) return null
-  const layout = parseJson(raw)
-  if (!isRecord(layout) || !isRecord(layout.grid) || !isRecord(layout.panels)) return null
-  if (layoutHasTopLevelTerminalPanes(layout, terminalPaneIds)) return wrapTerminalLayout(raw) ?? null
-  if (isRecord(layout.vibelinkTerminalLayout) && !isRecord(layout.panels[workspaceWindowDescriptors.terminal.panelId])) {
-    const migrated = structuredClone(layout)
-    rewritePanel(migrated, workspaceWindowDescriptors.terminal)
-    appendPanelToLeft(migrated, workspaceWindowDescriptors.terminal.panelId)
-    return JSON.stringify(migrated)
-  }
-  return raw
-}
-
-function layoutHasTopLevelTerminalPanes(layout: Record<string, unknown>, terminalPaneIds: string[]): boolean {
-  if (!isRecord(layout.panels)) return false
-  const livePaneSet = new Set(terminalPaneIds)
-  for (const [panelId, value] of Object.entries(layout.panels)) {
-    if (!isRecord(value)) continue
-    const component = typeof value.contentComponent === 'string' ? value.contentComponent : ''
-    if (component === 'terminal' || livePaneSet.has(panelId)) return true
-  }
-  return false
-}
-
-function wrapTerminalLayout(raw: string): string | null {
-  const layout = parseJson(raw)
-  if (!isRecord(layout) || !isRecord(layout.grid) || !isRecord(layout.panels)) return null
-  const wrapped: Record<string, unknown> = {
-    vibelinkTerminalLayout: layout,
-    panels: {},
-  }
-  rewritePanel(wrapped, workspaceWindowDescriptors.terminal)
-  wrapped.grid = {
-    root: {
-      type: 'branch',
-      data: [makeWindowLeaf(workspaceWindowDescriptors.terminal.panelId, 1000)],
-      size: 1000,
-    },
-    width: 1000,
-    height: 600,
-    orientation: 'HORIZONTAL',
-  }
-  wrapped.activeGroup = `window-${workspaceWindowDescriptors.terminal.panelId}`
-  return JSON.stringify(wrapped)
-}
-
-function appendPanelToLeft(layout: Record<string, unknown>, panelId: string): void {
-  const grid = layout.grid
-  if (!isRecord(grid) || !isRecord(grid.root)) return
-  const root = grid.root
-  const rootSize = readPositiveNumber(root.size) ?? readPositiveNumber(grid.width) ?? 1000
-  const windowSize = Math.max(240, Math.round(rootSize * 0.62))
-  const primarySize = Math.max(1, rootSize - windowSize)
-  grid.root = {
-    type: 'branch',
-    data: [
-      makeWindowLeaf(panelId, windowSize),
-      { ...root, size: primarySize },
-    ],
-    size: rootSize,
-  }
-  grid.orientation = 'HORIZONTAL'
-  if (!readPositiveNumber(grid.width)) grid.width = rootSize
-}
-
-function makeWindowLeaf(panelId: string, size: number): Record<string, unknown> {
+export function createWorkspaceContentPanel(params: WorkspaceContentParams): SerializedDockview['panels'][string] {
   return {
-    type: 'leaf',
-    data: { views: [panelId], activeView: panelId, id: `window-${panelId}` },
-    size,
-  }
-}
-
-function replacePanelId(value: unknown, from: string, to: string): void {
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      if (value[index] === from) value[index] = to
-      else replacePanelId(value[index], from, to)
-    }
-    return
-  }
-  if (!isRecord(value)) return
-  for (const [key, child] of Object.entries(value)) {
-    if (child === from) value[key] = to
-    else replacePanelId(child, from, to)
-  }
-  if (isRecord(value.panels) && from in value.panels) {
-    value.panels[to] = value.panels[from]
-    delete value.panels[from]
-  }
-}
-
-function rewritePanel(layout: unknown, descriptor: WorkspaceWindowDescriptor): void {
-  if (!isRecord(layout) || !isRecord(layout.panels)) return
-  const panelValue = layout.panels[descriptor.panelId]
-  const current: Record<string, unknown> = isRecord(panelValue) ? panelValue : {}
-  layout.panels[descriptor.panelId] = {
-    ...current,
-    id: descriptor.panelId,
-    contentComponent: descriptor.component,
-    tabComponent: 'props.defaultTabComponent',
-    params: {
-      ...(isRecord(current.params) ? current.params : {}),
-      kind: descriptor.kind,
-      title: descriptor.title,
-      icon: descriptor.icon,
-    },
-    title: descriptor.title,
+    id: workspaceContentPanelId(params),
+    contentComponent: params.kind,
+    tabComponent: 'workspaceContentTab',
+    params,
+    title: params.title,
     renderer: 'always',
   }
 }
 
-function isLegacyDockviewLayout(value: unknown, terminalPaneIds: string[]): boolean {
-  if (!isRecord(value) || !isRecord(value.panels)) return false
-  if (terminalPaneIds.length === 0) return layoutHasTopLevelTerminalPanes(value, [])
-  return shouldRestoreDockviewLayout(JSON.stringify(value), terminalPaneIds)
+export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta, 'id' | 'config'>>): SerializedDockview | null {
+  if (panes.length === 0) return null
+  const params = panes.map(createTerminalContentParams)
+  const aspectRatio = 16 / 9
+  const grid = balancedGridForPaneCount(params.length, aspectRatio)
+  return createTerminalGridDockview(params, grid)
 }
 
-function createPage(id: string, name: string, layoutJson: string | null, now: number): WorkspaceLayoutPage {
-  return { id, name, layoutJson, createdAt: now, updatedAt: now }
+export function workspaceLayoutHasExactLiveTerminals(envelope: WorkspaceLayoutEnvelope, livePaneIds: readonly string[]): boolean {
+  const dockview = envelope.dockview
+  if (!dockview) return livePaneIds.length === 0
+  const layout = dockview as unknown
+  if (!isRecord(layout) || !isRecord(layout.panels) || !isRecord(layout.grid)) return false
+  const panels = layout.panels
+  const grid = layout.grid
+  if (!isPositiveNumber(grid.width) || !isPositiveNumber(grid.height)) return false
+
+  const viewIds: string[] = []
+  if (!collectViewIds(grid.root, viewIds) || viewIds.length === 0) return false
+  const viewIdSet = new Set(viewIds)
+  if (viewIdSet.size !== viewIds.length) return false
+
+  const live = new Set(livePaneIds)
+  if (live.size !== livePaneIds.length) return false
+  const layoutPanes = new Set<string>()
+  for (const [panelId, value] of Object.entries(panels)) {
+    if (!isRecord(value)) return false
+    const params = parseWorkspaceContentParams(value.params)
+    if (
+      !params
+      || workspaceContentPanelId(params) !== panelId
+      || !viewIdSet.has(panelId)
+      || value.contentComponent !== params.kind
+      || value.tabComponent !== 'workspaceContentTab'
+      || value.renderer !== 'always'
+    ) return false
+    if (params.kind !== 'terminal') continue
+    if (!live.has(params.paneId) || layoutPanes.has(params.paneId)) return false
+    layoutPanes.add(params.paneId)
+  }
+  if (viewIds.some((panelId) => !(panelId in panels))) return false
+  if (layoutPanes.size !== live.size) return false
+  return [...live].every((paneId) => layoutPanes.has(paneId))
 }
 
+export type TerminalArrangementStep = {
+  panelId: string
+  referencePanelId: string
+  position: 'right' | 'bottom'
+}
 
-function parseJson(raw: string | null | undefined): unknown {
-  if (!raw) return null
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
+/**
+ * Plans a row-major terminal grid using Dockview's native panel movement.
+ * Moving only terminal panels lets Dockview retain every non-terminal tab
+ * group and its active view while empty terminal-only groups collapse.
+ */
+export function planTerminalArrangement(panelIds: readonly string[], grid: GridSize): TerminalArrangementStep[] {
+  if (grid.cols <= 0 || grid.rows <= 0) return []
+  const steps: TerminalArrangementStep[] = []
+  for (let index = 1; index < panelIds.length; index += 1) {
+    const col = index % grid.cols
+    const referenceIndex = col === 0 ? index - grid.cols : index - 1
+    const referencePanelId = panelIds[referenceIndex]
+    if (!referencePanelId) continue
+    steps.push({
+      panelId: panelIds[index],
+      referencePanelId,
+      position: col === 0 ? 'bottom' : 'right',
+    })
+  }
+  return steps
+}
+
+export function freshWorkspaceLayoutState(): WorkspaceLayoutState {
+  return freshWorkspaceLayoutEnvelope()
+}
+
+function createTerminalGridDockview(params: WorkspaceContentParams[], grid: GridSize): SerializedDockview {
+  const width = Math.max(1, grid.cols) * 500
+  const height = Math.max(1, grid.rows) * 320
+  const panels: SerializedDockview['panels'] = {}
+  const ids = params.map((entry) => {
+    const panelId = workspaceContentPanelId(entry)
+    panels[panelId] = createWorkspaceContentPanel(entry)
+    return panelId
+  })
+  let groupIndex = 0
+  const leaf = (panelId: string, size: number): SerializedDockview['grid']['root'] => ({
+    type: 'leaf',
+    data: { views: [panelId], activeView: panelId, id: `content-group-${groupIndex++}` },
+    size,
+  })
+  const columns: SerializedDockview['grid']['root'][] = []
+  for (let col = 0; col < grid.cols; col += 1) {
+    const columnIds: string[] = []
+    for (let row = 0; row < grid.rows; row += 1) {
+      const panelId = ids[row * grid.cols + col]
+      if (panelId) columnIds.push(panelId)
+    }
+    if (columnIds.length === 0) continue
+    const columnSize = Math.max(1, Math.floor(width / Math.max(1, Math.min(grid.cols, ids.length))))
+    if (columnIds.length === 1) columns.push({ ...leaf(columnIds[0], columnSize), size: columnSize })
+    else {
+      columns.push({
+        type: 'branch',
+        data: columnIds.map((panelId) => leaf(panelId, Math.max(1, Math.floor(height / columnIds.length)))),
+        size: columnSize,
+      })
+    }
+  }
+  const root: SerializedDockview['grid']['root'] = columns.length === 1
+    ? { type: 'branch', data: columns, size: height }
+    : { type: 'branch', data: columns, size: width }
+  const orientation = columns.length === 1 ? Orientation.VERTICAL : Orientation.HORIZONTAL
+  return {
+    panels,
+    grid: { root, width, height, orientation },
+    activeGroup: 'content-group-0',
   }
 }
 
-function isWorkspaceLayoutBlob(value: unknown): value is WorkspaceLayoutBlob {
-  return isRecord(value) && value.version === 2 && Array.isArray(value.pages)
+function collectViewIds(node: unknown, output: string[]): boolean {
+  if (!isRecord(node) || !isPositiveNumber(node.size)) return false
+  if (node.type === 'leaf') {
+    if (!isRecord(node.data) || !Array.isArray(node.data.views) || node.data.views.length === 0) return false
+    for (const view of node.data.views) {
+      if (typeof view !== 'string' || !view) return false
+      output.push(view)
+    }
+    return true
+  }
+  if (node.type !== 'branch' || !Array.isArray(node.data) || node.data.length === 0) return false
+  return node.data.every((child) => collectViewIds(child, output))
 }
 
-
-function readTimestamp(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
-}
-
-function readPositiveNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

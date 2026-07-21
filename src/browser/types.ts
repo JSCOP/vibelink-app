@@ -1,4 +1,4 @@
-export type BrowserProfileKind = 'persistent' | 'workspace' | 'incognito'
+export type BrowserProfileKind = 'persistent' | 'workspace' | 'imported' | 'incognito'
 export type BrowserLoadState = 'idle' | 'loading' | 'loaded' | 'failed'
 
 export type PhysicalBounds = {
@@ -20,6 +20,7 @@ export type BrowserProfile = {
   id: string
   kind: BrowserProfileKind
   workspaceId: string | null
+  cookieImportQuarantined: boolean
 }
 
 export type BrowserProjectTarget = {
@@ -31,8 +32,9 @@ export type BrowserProjectTarget = {
   startCommand: string | null
 }
 
-export type BrowserTab = {
+export type BrowserPage = {
   id: string
+  workspaceId: string
   profileId: string
   title: string
   url: string
@@ -44,8 +46,6 @@ export type BrowserTab = {
   effectiveVisible: boolean
   error: string | null
   deviceMetrics: BrowserDeviceMetrics | null
-  droppedFrameCount: number
-  latestFrameSequence: number | null
 }
 
 export type ArtifactDescriptor = {
@@ -56,20 +56,30 @@ export type ArtifactDescriptor = {
   truncated: boolean
 }
 
-export type DesignGrabSelection = {
+export type BrowserAnnotation = {
+  id: string
+  workspaceId: string
   pageId: string
   navigationGeneration: number
-  snapshotId: string
+  url: string
   browserRef: string
-  screenshotCrop: ArtifactDescriptor | null
-  domAncestry: string[]
   accessibleName: string
+  domAncestry: string[]
   bounds: PhysicalBounds
-  computedStyles: Array<[string, string]>
-  attributes: Array<[string, string]>
   text: string
+  attributes: Array<[string, string]>
+  computedStyles: Array<[string, string]>
   sourceHints: string[]
+  comment: string
+  screenshot: ArtifactDescriptor | null
 }
+
+export type BrowserAnnotationDestination =
+  | { kind: 'agent' }
+  | { kind: 'terminal'; paneId: string; title: string; role: string | null }
+  | { kind: 'copy' }
+
+export type BrowserDesignGrab = Omit<BrowserAnnotation, 'id' | 'workspaceId' | 'url' | 'comment' | 'screenshot'>
 
 export type BrowserPermissionPrompt = {
   id: string
@@ -138,41 +148,55 @@ export type BrowserLifecycleEvent = {
   timestampMs: number
 }
 
-export type BrowserPanelState = {
-  profiles: BrowserProfile[]
-  tabs: BrowserTab[]
-  activePageId: string | null
+export type BrowserCookieImportSource = {
+  endpoint: string
+  browser: 'chrome' | 'edge' | 'chromium' | 'unknown'
+  origins: string[]
+}
+
+export type BrowserCookieImportResult = {
+  importedCount: number
+  originCount: number
+  verified: boolean
+  rolledBack: boolean
+  quarantined: boolean
+}
+
+export type BrowserCloseResult = {
+  closed: boolean
+  persistencePending: boolean
+}
+
+export type BrowserContentState = {
+  profile: BrowserProfile
+  page: BrowserPage
   addressDraft: string
   designMode: boolean
-  designSelection: DesignGrabSelection | null
+  annotation: BrowserAnnotation | null
+  annotationComment: string
   modalDepth: number
   surfaceBounds: PhysicalBounds | null
   permissionQueue: BrowserPermissionPrompt[]
   certificateQueue: BrowserCertificatePrompt[]
   dialogQueue: BrowserDialogPrompt[]
   downloads: BrowserDownloadRecord[]
-  captureState: BrowserCaptureState | null
-  selectedProfileId: string | null
   lastLifecycleEvent: BrowserLifecycleEvent | null
 }
 
-export type BrowserPanelController = {
-  createTab(profileId: string): Promise<BrowserTab>
-  createProfile(kind: BrowserProfileKind): Promise<BrowserProfile>
-  closeTab(pageId: string): Promise<void>
-  selectTab(pageId: string): Promise<void>
+export type BrowserContentController = {
   navigate(pageId: string, input: string): Promise<{ url: string; navigationGeneration: number }>
-  goBack(pageId: string): Promise<void>
-  goForward(pageId: string): Promise<void>
-  reload(pageId: string): Promise<void>
-  setSurfaceState(pageId: string, state: { bounds: PhysicalBounds | null; visible: boolean }): Promise<void>
+  goBack(pageId: string): Promise<BrowserPage | void>
+  goForward(pageId: string): Promise<BrowserPage | void>
+  reload(pageId: string): Promise<BrowserPage | void>
+  setSurfaceState(pageId: string, state: { bounds: PhysicalBounds | null; visible: boolean; focused: boolean }): Promise<void>
   setDesignMode(pageId: string, enabled: boolean): Promise<void>
-  setDeviceMetrics(pageId: string, metrics: BrowserDeviceMetrics | null): Promise<BrowserTab>
-  getCaptureState(pageId: string): Promise<BrowserCaptureState>
-  captureFrame(pageId: string): Promise<BrowserCaptureState>
+  setDeviceMetrics(pageId: string, metrics: BrowserDeviceMetrics | null): Promise<BrowserPage>
   resolvePermission(requestId: string, decision: 'allow_once' | 'allow_for_origin' | 'deny'): Promise<void>
   resolveCertificate(requestId: string, decision: 'allow_for_origin' | 'deny'): Promise<void>
   resolveDialog(requestId: string, accept: boolean): Promise<void>
+  createAnnotation(pageId: string, grab: BrowserDesignGrab, comment: string): Promise<BrowserAnnotation>
+  detectCookieImportSource(endpoint: string): Promise<BrowserCookieImportSource>
+  importCookies(input: { pageId: string; profileId: string; endpoint: string; origins: string[]; consent: boolean }): Promise<BrowserCookieImportResult>
   subscribeLifecycle?(handler: (event: BrowserLifecycleEvent) => void): Promise<() => void>
-  subscribeDesignGrabs?(handler: (selection: DesignGrabSelection) => void): Promise<() => void>
+  subscribeDesignGrabs?(handler: (selection: BrowserDesignGrab) => void): Promise<() => void>
 }

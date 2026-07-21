@@ -79,6 +79,7 @@ impl PhysicalBounds {
 pub enum ProfileKind {
     Persistent,
     Workspace,
+    Imported,
     Incognito,
 }
 
@@ -90,6 +91,8 @@ pub struct BrowserProfile {
     pub workspace_id: Option<String>,
     pub user_data_dir: Option<PathBuf>,
     pub page_ids: Vec<PageId>,
+    #[serde(default)]
+    pub cookie_import_quarantined: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -351,17 +354,66 @@ pub struct CertificateRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct DesignGrabSelection {
+pub struct BrowserAnnotation {
+    pub id: String,
+    pub workspace_id: String,
     pub page_id: PageId,
     pub navigation_generation: u64,
-    pub snapshot_id: SnapshotId,
+    pub url: String,
     pub browser_ref: BrowserRef,
-    pub screenshot_crop: Option<ArtifactDescriptor>,
-    pub dom_ancestry: Vec<String>,
     pub accessible_name: String,
+    pub dom_ancestry: Vec<String>,
     pub bounds: PhysicalBounds,
-    pub computed_styles: Vec<(String, String)>,
-    pub attributes: Vec<(String, String)>,
     pub text: String,
+    pub attributes: Vec<(String, String)>,
+    pub computed_styles: Vec<(String, String)>,
     pub source_hints: Vec<String>,
+    pub comment: String,
+    pub screenshot: Option<ArtifactDescriptor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAnnotationInput {
+    pub workspace_id: String,
+    pub page_id: PageId,
+    pub navigation_generation: u64,
+    pub browser_ref: BrowserRef,
+    pub accessible_name: String,
+    pub dom_ancestry: Vec<String>,
+    pub bounds: PhysicalBounds,
+    pub text: String,
+    pub attributes: Vec<(String, String)>,
+    pub computed_styles: Vec<(String, String)>,
+    pub source_hints: Vec<String>,
+    pub comment: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCookieImportSource {
+    pub endpoint: String,
+    pub browser: String,
+    pub origins: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCookieImportInput {
+    pub workspace_id: String,
+    pub page_id: PageId,
+    pub profile_id: ProfileId,
+    pub endpoint: String,
+    pub origins: Vec<String>,
+    pub consent: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCookieImportResult {
+    pub imported_count: usize,
+    pub origin_count: usize,
+    pub verified: bool,
+    pub rolled_back: bool,
+    pub quarantined: bool,
 }

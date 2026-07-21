@@ -9,12 +9,15 @@ use super::{
         BrowserSnapshot, CertificateDecision, CertificateRequest, ChildWebViewCreate,
         PermissionDecision, PermissionRequest, PhysicalBounds, ProfileKind, RecoveryCandidate,
         ResolvedBrowserRef, SnapshotNodeInput, SnapshotNodeRecord, VisibilityLeaseToken,
+        BrowserAnnotation, BrowserAnnotationInput, BrowserCookieImportInput,
+        BrowserCookieImportResult, BrowserCookieImportSource,
     },
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
@@ -27,6 +30,11 @@ const MAX_BROWSER_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_NODES: usize = 5_000;
 const BROWSER_RESTORE_VERSION: u8 = 1;
 const MAX_BROWSER_RESTORE_BYTES: u64 = 4 * 1024 * 1024;
+const TRANSIENT_CAPTURE_TTL_MS: u64 = 10 * 60 * 1_000;
+const PROMOTED_ANNOTATION_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+const ARTIFACT_SWEEP_INTERVAL_MS: u64 = 60 * 1_000;
+const ARTIFACT_DESCRIPTOR_VERSION: u8 = 1;
+const MAX_ARTIFACT_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug)]
 struct StoredSnapshot {
@@ -37,6 +45,7 @@ struct StoredSnapshot {
 #[derive(Clone, Debug)]
 struct PageState {
     public: BrowserPage,
+    surface_owner_generation: u64,
     visibility_leases: HashMap<VisibilityLeaseToken, String>,
     snapshot_sequence: u64,
     snapshot: Option<StoredSnapshot>,
@@ -62,6 +71,8 @@ struct RestoreProfile {
     id: String,
     kind: ProfileKind,
     workspace_id: Option<String>,
+    #[serde(default)]
+    cookie_import_quarantined: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -74,6 +85,13 @@ struct RestorePage {
     title: String,
     bounds: PhysicalBounds,
     device_metrics: Option<BrowserDeviceMetrics>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactCleanupRecord {
+    version: u8,
+    descriptor: ArtifactDescriptor,
 }
 
 #[derive(Deserialize)]
@@ -218,8 +236,10 @@ pub struct BrowserManager<P: BrowserProvider> {
     restore_path: PathBuf,
     restored_workspaces: Mutex<HashSet<String>>,
     persistence: Mutex<()>,
+    workspace_mutations: Mutex<()>,
     state: Mutex<ManagerState>,
     page_mutations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    last_artifact_sweep_ms: Mutex<u64>,
 }
 
 impl<P: BrowserProvider> BrowserManager<P> {
@@ -228,16 +248,21 @@ impl<P: BrowserProvider> BrowserManager<P> {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("state.json");
-        Self {
+        let manager = Self {
             provider,
             policy,
             profile_root,
             restore_path,
             restored_workspaces: Mutex::new(HashSet::new()),
             persistence: Mutex::new(()),
+            workspace_mutations: Mutex::new(()),
             state: Mutex::new(ManagerState::default()),
             page_mutations: Mutex::new(HashMap::new()),
-        }
+            last_artifact_sweep_ms: Mutex::new(0),
+        };
+        let _ = manager.restore_profile_metadata();
+        let _ = manager.sweep_expired_artifacts(true);
+        manager
     }
 
     pub fn create_profile(
@@ -246,17 +271,33 @@ impl<P: BrowserProvider> BrowserManager<P> {
         kind: ProfileKind,
         workspace_id: Option<String>,
     ) -> BrowserResult<BrowserProfile> {
+        let _workspace_mutation = lock(&self.workspace_mutations)?;
+        self.create_profile_locked(id, kind, workspace_id)
+    }
+
+    fn create_profile_locked(
+        &self,
+        id: impl Into<String>,
+        kind: ProfileKind,
+        workspace_id: Option<String>,
+    ) -> BrowserResult<BrowserProfile> {
         let id = id.into();
         validate_identifier("profile", &id)?;
-        if kind == ProfileKind::Workspace && workspace_id.as_deref().unwrap_or_default().is_empty()
+        if matches!(kind, ProfileKind::Workspace | ProfileKind::Imported)
+            && workspace_id.as_deref().unwrap_or_default().is_empty()
         {
             return Err(BrowserError::invalid(
-                "workspace profiles require a workspace id",
+                "workspace and imported profiles require a workspace id",
             ));
+        }
+        if let Some(workspace_id) = workspace_id.as_deref() {
+            validate_identifier("workspace", workspace_id)?;
         }
         let user_data_dir = match kind {
             ProfileKind::Incognito => None,
-            ProfileKind::Persistent | ProfileKind::Workspace => Some(self.profile_root.join(&id)),
+            ProfileKind::Persistent | ProfileKind::Workspace | ProfileKind::Imported => {
+                Some(vibelink_owned_profile_path(&self.profile_root, &id)?)
+            }
         };
         let profile = BrowserProfile {
             id: id.clone(),
@@ -264,6 +305,7 @@ impl<P: BrowserProvider> BrowserManager<P> {
             workspace_id,
             user_data_dir,
             page_ids: Vec::new(),
+            cookie_import_quarantined: false,
         };
         let mut state = lock(&self.state)?;
         if state.profiles.contains_key(&id) {
@@ -293,6 +335,17 @@ impl<P: BrowserProvider> BrowserManager<P> {
     }
 
     pub fn create_page(
+        &self,
+        page_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        profile_id: &str,
+        bounds: PhysicalBounds,
+    ) -> BrowserResult<BrowserPage> {
+        let _workspace_mutation = lock(&self.workspace_mutations)?;
+        self.create_page_locked(page_id, workspace_id, profile_id, bounds)
+    }
+
+    fn create_page_locked(
         &self,
         page_id: impl Into<String>,
         workspace_id: impl Into<String>,
@@ -341,6 +394,10 @@ impl<P: BrowserProvider> BrowserManager<P> {
             app_initialization_allowed: false,
         };
         self.provider.create_child_webview(&create)?;
+        if let Err(error) = self.provider.set_visible(&page_id, false) {
+            let _ = self.provider.close(&page_id);
+            return Err(error);
+        }
 
         let page = BrowserPage {
             id: page_id.clone(),
@@ -351,8 +408,8 @@ impl<P: BrowserProvider> BrowserManager<P> {
             navigation_generation: 0,
             current_snapshot_id: None,
             bounds,
-            requested_visible: true,
-            effective_visible: true,
+            requested_visible: false,
+            effective_visible: false,
             focused: false,
             visibility_lease_count: 0,
             load_state: BrowserLoadState::Idle,
@@ -367,6 +424,7 @@ impl<P: BrowserProvider> BrowserManager<P> {
             page_id.clone(),
             PageState {
                 public: page.clone(),
+                surface_owner_generation: 0,
                 visibility_leases: HashMap::new(),
                 snapshot_sequence: 0,
                 snapshot: None,
@@ -453,6 +511,7 @@ impl<P: BrowserProvider> BrowserManager<P> {
     }
 
     pub fn navigate(&self, page_id: &str, input: &str) -> BrowserResult<BrowserPage> {
+        self.sync_provider_events()?;
         let mutation = self.mutation_lock(page_id)?;
         let _serial = lock(&mutation)?;
         let url = self.policy.normalize_navigation(input)?;
@@ -581,6 +640,7 @@ impl<P: BrowserProvider> BrowserManager<P> {
         page_id: &str,
         action: impl FnOnce(&P) -> BrowserResult<()>,
     ) -> BrowserResult<BrowserPage> {
+        self.sync_provider_events()?;
         let mutation = self.mutation_lock(page_id)?;
         let _serial = lock(&mutation)?;
         let (current_generation, next_generation) = {
@@ -607,6 +667,7 @@ impl<P: BrowserProvider> BrowserManager<P> {
                 .set_navigation_generation(page_id, current_generation);
             return Err(error);
         }
+        let _ = self.provider.clear_pending_navigation(page_id);
         let mut state = lock(&self.state)?;
         let (generation, url, result) = {
             let page = state
@@ -690,6 +751,64 @@ impl<P: BrowserProvider> BrowserManager<P> {
             .get_mut(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
         page.public.focused = focused;
+        Ok(page.public.clone())
+    }
+
+    pub fn set_surface(
+        &self,
+        page_id: &str,
+        owner_generation: u64,
+        bounds: Option<PhysicalBounds>,
+        visible: bool,
+        focused: bool,
+    ) -> BrowserResult<BrowserPage> {
+        if owner_generation == 0 {
+            return Err(BrowserError::invalid(
+                "browser surface owner generation must be greater than zero",
+            ));
+        }
+        if bounds.is_some_and(|value| !value.validate()) {
+            return Err(BrowserError::invalid(
+                "child WebView bounds must be non-zero physical pixels",
+            ));
+        }
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let (effective_visible, effective_focused) = {
+            let mut state = lock(&self.state)?;
+            let page = state
+                .pages
+                .get_mut(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            if owner_generation < page.surface_owner_generation {
+                return Err(BrowserError::new(
+                    BrowserErrorCode::Conflict,
+                    "stale browser surface owner generation",
+                ));
+            }
+            // Claim the newer owner before touching the provider. Even if the first
+            // application fails, an older unmount may not regain control and hide it.
+            page.surface_owner_generation = owner_generation;
+            let effective_visible = visible || !page.visibility_leases.is_empty();
+            (effective_visible, visible && effective_visible && focused)
+        };
+        self.provider.set_surface(
+            page_id,
+            bounds,
+            effective_visible,
+            effective_focused,
+        )?;
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        if let Some(bounds) = bounds {
+            page.public.bounds = bounds;
+        }
+        page.public.requested_visible = visible;
+        page.public.effective_visible = effective_visible;
+        page.public.focused = effective_focused;
         Ok(page.public.clone())
     }
 
@@ -1147,13 +1266,79 @@ impl<P: BrowserProvider> BrowserManager<P> {
         page_id: &str,
         bounds: PhysicalBounds,
     ) -> BrowserResult<ArtifactDescriptor> {
+        self.sync_provider_events()?;
+        let generation = self.page(page_id)?.navigation_generation;
+        self.capture_crop_for_generation(page_id, generation, bounds, false)
+    }
+
+    pub fn create_annotation(
+        &self,
+        input: BrowserAnnotationInput,
+    ) -> BrowserResult<BrowserAnnotation> {
+        self.sync_provider_events()?;
+        validate_annotation_input(&input)?;
+        let page = self.page(&input.page_id)?;
+        if page.workspace_id != input.workspace_id {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser annotation belongs to another workspace",
+            ));
+        }
+        if page.navigation_generation != input.navigation_generation {
+            return Err(BrowserError::stale_ref(
+                "browser annotation is stale after navigation; pick the element again",
+            ));
+        }
+        let screenshot = self.capture_crop_for_generation(
+            &input.page_id,
+            input.navigation_generation,
+            input.bounds,
+            true,
+        )?;
+        let current = self.page(&input.page_id)?;
+        if current.navigation_generation != input.navigation_generation || current.url != page.url {
+            let _ = self.remove_managed_artifact(&screenshot.path);
+            return Err(BrowserError::stale_ref(
+                "browser annotation became stale while capturing; pick the element again",
+            ));
+        }
+        Ok(BrowserAnnotation {
+            id: format!("browser-annotation-{}", Uuid::new_v4()),
+            workspace_id: input.workspace_id,
+            page_id: input.page_id,
+            navigation_generation: input.navigation_generation,
+            url: current.url,
+            browser_ref: input.browser_ref,
+            accessible_name: input.accessible_name,
+            dom_ancestry: input.dom_ancestry,
+            bounds: input.bounds,
+            text: input.text,
+            attributes: input.attributes,
+            computed_styles: input.computed_styles,
+            source_hints: input.source_hints,
+            comment: input.comment,
+            screenshot: Some(screenshot),
+        })
+    }
+
+    fn capture_crop_for_generation(
+        &self,
+        page_id: &str,
+        navigation_generation: u64,
+        bounds: PhysicalBounds,
+        persisted: bool,
+    ) -> BrowserResult<ArtifactDescriptor> {
+        self.sweep_expired_artifacts(false)?;
         if !bounds.validate() || bounds.width > 10_000 || bounds.height > 10_000 {
             return Err(BrowserError::invalid("invalid browser capture clip"));
         }
         {
             let state = lock(&self.state)?;
-            if !state.pages.contains_key(page_id) {
-                return Err(BrowserError::not_found(page_id));
+            let page = state.pages.get(page_id).ok_or_else(|| BrowserError::not_found(page_id))?;
+            if page.public.navigation_generation != navigation_generation {
+                return Err(BrowserError::stale_ref(
+                    "browser capture belongs to an obsolete navigation generation",
+                ));
             }
         }
         let bytes = self.provider.capture_crop(page_id, bounds)?;
@@ -1163,29 +1348,140 @@ impl<P: BrowserProvider> BrowserManager<P> {
                 "browser capture exceeds the bounded artifact size",
             ));
         }
-        fs::create_dir_all(self.policy.artifact_root()).map_err(|error| {
-            BrowserError::new(
-                BrowserErrorCode::Internal,
-                format!("create browser artifact root: {error}"),
-            )
-        })?;
+        if self.page(page_id)?.navigation_generation != navigation_generation {
+            return Err(BrowserError::stale_ref(
+                "browser capture became stale during navigation",
+            ));
+        }
+        self.ensure_artifact_root()?;
+        let artifact_id = Uuid::new_v4();
         let path = self
             .policy
             .artifact_root()
-            .join(format!("design-crop-{}.png", Uuid::new_v4()));
-        fs::write(&path, bytes).map_err(|error| {
-            BrowserError::new(
+            .join(format!("design-crop-{artifact_id}.png"));
+        let ttl_ms = if persisted {
+            PROMOTED_ANNOTATION_TTL_MS
+        } else {
+            TRANSIENT_CAPTURE_TTL_MS
+        };
+        let expires_at_ms = now_ms().saturating_add(ttl_ms);
+        let descriptor_path = self
+            .policy
+            .artifact_root()
+            .join(format!("design-crop-{artifact_id}.artifact.json"));
+        let pending_descriptor = ArtifactDescriptor {
+            path: path.clone(),
+            content_type: "image/png".to_string(),
+            bytes: bytes.len() as u64,
+            expires_at_ms,
+            truncated: false,
+        };
+        self.write_artifact_cleanup_record(&descriptor_path, &pending_descriptor)?;
+        if let Err(error) = fs::write(&path, bytes) {
+            return Err(BrowserError::new(
                 BrowserErrorCode::Internal,
                 format!("write browser design crop: {error}"),
-            )
-        })?;
-        let expires_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or_default()
-            .saturating_add(10 * 60 * 1_000);
-        self.policy
+            ));
+        }
+        let mut descriptor = match self
+            .policy
             .describe_artifact(&path, "image/png", expires_at_ms)
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                let _ = fs::remove_file(&path);
+                return Err(error);
+            }
+        };
+        // Policy validation canonicalizes both sides before checking containment. Keep that
+        // security boundary while exposing the readable policy-composed path instead of the
+        // Windows verbatim path returned by `canonicalize`.
+        descriptor.path = path;
+        Ok(descriptor)
+    }
+
+    pub fn detect_cookie_import_source(
+        &self,
+        endpoint: &str,
+    ) -> BrowserResult<BrowserCookieImportSource> {
+        self.provider.detect_cookie_import_source(endpoint)
+    }
+
+    pub fn import_cookies(
+        &self,
+        input: BrowserCookieImportInput,
+    ) -> BrowserResult<BrowserCookieImportResult> {
+        if !input.consent {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "cookie import requires explicit consent",
+            ));
+        }
+        if input.origins.is_empty() || input.origins.len() > 64 {
+            return Err(BrowserError::invalid(
+                "cookie import requires between one and 64 explicit origins",
+            ));
+        }
+        let mutation = self.mutation_lock(&input.page_id)?;
+        let _serial = lock(&mutation)?;
+        let (profile_kind, quarantined) = {
+            let state = lock(&self.state)?;
+            let page = state.pages.get(&input.page_id).ok_or_else(|| BrowserError::not_found(&input.page_id))?;
+            if page.public.workspace_id != input.workspace_id || page.public.profile_id != input.profile_id {
+                return Err(BrowserError::new(
+                    BrowserErrorCode::DeniedCapability,
+                    "cookie import page/profile identity does not match the workspace content",
+                ));
+            }
+            let profile = state.profiles.get(&input.profile_id).ok_or_else(|| BrowserError::not_found(&input.profile_id))?;
+            (profile.public.kind, profile.public.cookie_import_quarantined)
+        };
+        if profile_kind != ProfileKind::Imported {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "cookie import is allowed only into an isolated imported profile",
+            ));
+        }
+        if quarantined {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "cookie import is disabled for this quarantined profile",
+            ));
+        }
+        if let Some(profile) = lock(&self.state)?.profiles.get_mut(&input.profile_id) {
+            // This flag doubles as the durable in-progress transaction marker. A crash
+            // after this save therefore restores the profile quarantined by default.
+            profile.public.cookie_import_quarantined = true;
+        }
+        if let Err(error) = self.save_state() {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Internal,
+                format!("persist cookie import quarantine marker: {error}"),
+            ));
+        }
+        let result = self.provider.import_cookies(&input)?;
+        let transaction_proven = (result.verified && !result.rolled_back)
+            || (result.rolled_back && !result.verified);
+        if !transaction_proven || result.quarantined {
+            return Ok(BrowserCookieImportResult {
+                quarantined: true,
+                ..result
+            });
+        }
+        if let Some(profile) = lock(&self.state)?.profiles.get_mut(&input.profile_id) {
+            profile.public.cookie_import_quarantined = false;
+        }
+        if let Err(error) = self.save_state() {
+            if let Some(profile) = lock(&self.state)?.profiles.get_mut(&input.profile_id) {
+                profile.public.cookie_import_quarantined = true;
+            }
+            let _ = self.save_state();
+            return Err(BrowserError::new(
+                BrowserErrorCode::Internal,
+                format!("clear cookie import quarantine marker: {error}"),
+            ));
+        }
+        Ok(result)
     }
 
     pub fn take_latest_frame(&self, page_id: &str) -> BrowserResult<Option<BrowserFrame>> {
@@ -1225,15 +1521,40 @@ impl<P: BrowserProvider> BrowserManager<P> {
             else {
                 continue;
             };
-            if event.navigation_generation != current_generation
-                && !matches!(
+            if event.navigation_generation != current_generation {
+                if matches!(
                     event.kind,
                     BrowserLifecycleEventKind::PageCreated | BrowserLifecycleEventKind::PageClosed
-                )
-            {
-                continue;
+                ) {
+                    // Creation and teardown are page lifecycle boundaries rather than navigation state.
+                } else if event.navigation_generation > current_generation
+                    && matches!(
+                        event.kind,
+                        BrowserLifecycleEventKind::NavigationStarted
+                            | BrowserLifecycleEventKind::NavigationCommitted
+                            | BrowserLifecycleEventKind::NavigationFinished
+                            | BrowserLifecycleEventKind::NavigationFailed
+                    )
+                {
+                    // A page-originated WebView2 navigation is not initiated through the manager,
+                    // so the provider is authoritative for advancing its generation.
+                    let page = state.pages.get_mut(&event.page_id).expect("page checked");
+                    page.public.navigation_generation = event.navigation_generation;
+                    page.public.current_snapshot_id = None;
+                    page.snapshot = None;
+                } else {
+                    continue;
+                }
             }
             match event.kind {
+                BrowserLifecycleEventKind::NavigationStarted => {
+                    let page = state.pages.get_mut(&event.page_id).expect("page checked");
+                    if let Some(url) = &event.url {
+                        page.public.url = url.clone();
+                    }
+                    page.public.load_state = BrowserLoadState::Loading;
+                    page.public.last_error = None;
+                }
                 BrowserLifecycleEventKind::NavigationCommitted => {
                     let page = state.pages.get_mut(&event.page_id).expect("page checked");
                     if let Some(url) = &event.url {
@@ -1383,6 +1704,18 @@ impl<P: BrowserProvider> BrowserManager<P> {
             .collect())
     }
 
+    pub fn lifecycle_events_snapshot(
+        &self,
+        after_sequence: u64,
+    ) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
+        Ok(lock(&self.state)?
+            .events
+            .iter()
+            .filter(|event| event.sequence > after_sequence)
+            .cloned()
+            .collect())
+    }
+
     pub fn downloads(&self) -> BrowserResult<Vec<BrowserDownloadRecord>> {
         Ok(lock(&self.state)?.downloads.iter().cloned().collect())
     }
@@ -1438,71 +1771,175 @@ impl<P: BrowserProvider> BrowserManager<P> {
     }
 
     pub fn cleanup_workspace(&self, workspace_id: &str) -> BrowserResult<()> {
-        let profiles = {
+        validate_identifier("workspace", workspace_id)?;
+        let _workspace_mutation = lock(&self.workspace_mutations)?;
+        let (mut page_ids, profile_ids, profile_directories) = {
             let state = lock(&self.state)?;
-            state
+            let profile_ids = state
                 .profiles
                 .values()
                 .filter(|profile| profile.public.workspace_id.as_deref() == Some(workspace_id))
                 .map(|profile| profile.public.id.clone())
-                .collect::<Vec<_>>()
-        };
-        for profile_id in profiles {
-            self.close_profile(&profile_id)?;
-        }
-        let remaining_pages = {
-            let state = lock(&self.state)?;
-            state
+                .collect::<HashSet<_>>();
+            let profile_directories = state
+                .profiles
+                .values()
+                .filter(|profile| profile_ids.contains(&profile.public.id))
+                .filter_map(|profile| profile.public.user_data_dir.clone())
+                .collect::<Vec<_>>();
+            let page_ids = state
                 .pages
                 .values()
-                .filter(|page| page.public.workspace_id == workspace_id)
+                .filter(|page| {
+                    page.public.workspace_id == workspace_id
+                        || profile_ids.contains(&page.public.profile_id)
+                })
                 .map(|page| page.public.id.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (page_ids, profile_ids, profile_directories)
         };
-        for page_id in remaining_pages {
-            self.close_page(&page_id)?;
+        page_ids.sort();
+
+        // Fence every page before beginning the durable transaction. Acquiring page
+        // locks before persistence preserves the import-cookies lock order and prevents
+        // an in-flight page mutation from racing the workspace tombstone.
+        let page_mutations = page_ids
+            .iter()
+            .filter_map(|page_id| self.mutation_lock(page_id).ok())
+            .collect::<Vec<_>>();
+        let mut page_serials = Vec::with_capacity(page_mutations.len());
+        for mutation in &page_mutations {
+            page_serials.push(lock(mutation)?);
+        }
+
+        // Publish the deletion as one durable state transition before closing native
+        // surfaces. A crash after this point can leave only process-local WebViews; the
+        // deleted workspace can never be reconstructed from disk.
+        let persistence_guard = lock(&self.persistence)?;
+        let document = self.restore_document_excluding(Some(workspace_id))?;
+        self.write_restore_document(&document)?;
+
+        let mut close_error = None;
+        for page_id in &page_ids {
+            if !lock(&self.state)?.pages.contains_key(page_id) {
+                continue;
+            }
+            if let Err(error) = self.provider.close(page_id) {
+                close_error.get_or_insert(error);
+            }
+        }
+
+        {
+            let mut state = lock(&self.state)?;
+            for page_id in &page_ids {
+                let Some(page) = state.pages.remove(page_id) else {
+                    continue;
+                };
+                state
+                    .permissions
+                    .retain(|request| request.page_id != page_id.as_str());
+                state
+                    .certificates
+                    .retain(|request| request.page_id != page_id.as_str());
+                state
+                    .dialogs
+                    .retain(|request| request.page_id != page_id.as_str());
+                state
+                    .downloads
+                    .retain(|download| download.page_id != page_id.as_str());
+                push_event_locked(
+                    &mut state,
+                    page_id,
+                    page.public.navigation_generation,
+                    BrowserLifecycleEventKind::PageClosed,
+                    Some(page.public.url),
+                    Some("workspace cleanup".to_string()),
+                );
+            }
+            for profile in state.profiles.values_mut() {
+                profile
+                    .public
+                    .page_ids
+                    .retain(|page_id| !page_ids.contains(page_id));
+            }
+            state
+                .profiles
+                .retain(|profile_id, _| !profile_ids.contains(profile_id));
+        }
+        drop(persistence_guard);
+        {
+            let mut mutations = lock(&self.page_mutations)?;
+            for page_id in &page_ids {
+                mutations.remove(page_id);
+            }
+        }
+        lock(&self.restored_workspaces)?.remove(workspace_id);
+        for directory in profile_directories {
+            self.remove_owned_profile_directory(&directory)?;
+        }
+        if let Some(error) = close_error {
+            return Err(error);
         }
         Ok(())
     }
 
     pub fn save_state(&self) -> BrowserResult<()> {
         let _persistence = lock(&self.persistence)?;
-        let document = {
-            let state = lock(&self.state)?;
-            let persistent_profiles = state
-                .profiles
-                .values()
-                .filter(|profile| profile.public.kind != ProfileKind::Incognito)
-                .map(|profile| RestoreProfile {
-                    id: profile.public.id.clone(),
-                    kind: profile.public.kind,
-                    workspace_id: profile.public.workspace_id.clone(),
-                })
-                .collect::<Vec<_>>();
-            let persistent_ids = persistent_profiles
-                .iter()
-                .map(|profile| profile.id.as_str())
-                .collect::<HashSet<_>>();
-            let pages = state
-                .pages
-                .values()
-                .filter(|page| persistent_ids.contains(page.public.profile_id.as_str()))
-                .map(|page| RestorePage {
-                    id: page.public.id.clone(),
-                    workspace_id: page.public.workspace_id.clone(),
-                    profile_id: page.public.profile_id.clone(),
-                    url: page.public.url.clone(),
-                    title: page.public.title.clone(),
-                    bounds: page.public.bounds,
-                    device_metrics: page.public.device_metrics,
-                })
-                .collect::<Vec<_>>();
-            BrowserRestoreDocument {
-                version: BROWSER_RESTORE_VERSION,
-                profiles: persistent_profiles,
-                pages,
-            }
-        };
+        let document = self.restore_document_excluding(None)?;
+        self.write_restore_document(&document)
+    }
+
+    fn restore_document_excluding(
+        &self,
+        excluded_workspace_id: Option<&str>,
+    ) -> BrowserResult<BrowserRestoreDocument> {
+        let state = lock(&self.state)?;
+        let persistent_profiles = state
+            .profiles
+            .values()
+            .filter(|profile| {
+                profile.public.kind != ProfileKind::Incognito
+                    && excluded_workspace_id.is_none_or(|workspace_id| {
+                        profile.public.workspace_id.as_deref() != Some(workspace_id)
+                    })
+            })
+            .map(|profile| RestoreProfile {
+                id: profile.public.id.clone(),
+                kind: profile.public.kind,
+                workspace_id: profile.public.workspace_id.clone(),
+                cookie_import_quarantined: profile.public.cookie_import_quarantined,
+            })
+            .collect::<Vec<_>>();
+        let persistent_ids = persistent_profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<HashSet<_>>();
+        let pages = state
+            .pages
+            .values()
+            .filter(|page| {
+                persistent_ids.contains(page.public.profile_id.as_str())
+                    && excluded_workspace_id
+                        .is_none_or(|workspace_id| page.public.workspace_id != workspace_id)
+            })
+            .map(|page| RestorePage {
+                id: page.public.id.clone(),
+                workspace_id: page.public.workspace_id.clone(),
+                profile_id: page.public.profile_id.clone(),
+                url: page.public.url.clone(),
+                title: page.public.title.clone(),
+                bounds: page.public.bounds,
+                device_metrics: page.public.device_metrics,
+            })
+            .collect::<Vec<_>>();
+        Ok(BrowserRestoreDocument {
+            version: BROWSER_RESTORE_VERSION,
+            profiles: persistent_profiles,
+            pages,
+        })
+    }
+
+    fn write_restore_document(&self, document: &BrowserRestoreDocument) -> BrowserResult<()> {
         let bytes = serde_json::to_vec(&document).map_err(internal_error)?;
         if bytes.len() as u64 > MAX_BROWSER_RESTORE_BYTES {
             return Err(BrowserError::new(
@@ -1515,12 +1952,34 @@ impl<P: BrowserProvider> BrowserManager<P> {
         }
         let temporary = self.restore_path.with_extension("json.tmp");
         let backup = self.restore_path.with_extension("json.bak");
-        fs::write(&temporary, bytes).map_err(internal_error)?;
+        let mut temporary_file = fs::File::create(&temporary).map_err(internal_error)?;
+        temporary_file.write_all(&bytes).map_err(internal_error)?;
+        temporary_file.sync_all().map_err(internal_error)?;
+        drop(temporary_file);
         if self.restore_path.exists() {
-            let _ = fs::copy(&self.restore_path, &backup);
-            fs::remove_file(&self.restore_path).map_err(internal_error)?;
+            if backup.exists() {
+                fs::remove_file(&backup).map_err(internal_error)?;
+            }
+            fs::rename(&self.restore_path, &backup).map_err(internal_error)?;
         }
-        fs::rename(&temporary, &self.restore_path).map_err(internal_error)
+        if let Err(error) = fs::rename(&temporary, &self.restore_path) {
+            if backup.exists() && !self.restore_path.exists() {
+                let _ = fs::rename(&backup, &self.restore_path);
+            }
+            return Err(internal_error(error));
+        }
+        if let Err(error) = fs::File::open(&self.restore_path)
+            .and_then(|state_file| state_file.sync_all())
+        {
+            let _ = fs::remove_file(&self.restore_path);
+            if backup.exists() {
+                let _ = fs::rename(&backup, &self.restore_path);
+                let _ = fs::File::open(&self.restore_path)
+                    .and_then(|state_file| state_file.sync_all());
+            }
+            return Err(internal_error(error));
+        }
+        Ok(())
     }
 
     pub fn restore_workspace(
@@ -1563,7 +2022,12 @@ impl<P: BrowserProvider> BrowserManager<P> {
             if needed_profiles.contains(profile.id.as_str())
                 && !existing_profiles.contains(&profile.id)
             {
-                self.create_profile(profile.id, profile.kind, profile.workspace_id)?;
+                let restored = self.create_profile(profile.id, profile.kind, profile.workspace_id)?;
+                if profile.cookie_import_quarantined {
+                    if let Some(state_profile) = lock(&self.state)?.profiles.get_mut(&restored.id) {
+                        state_profile.public.cookie_import_quarantined = true;
+                    }
+                }
             }
         }
         for restored in restored_pages {
@@ -1645,6 +2109,196 @@ impl<P: BrowserProvider> BrowserManager<P> {
         Ok(None)
     }
 
+    fn restore_profile_metadata(&self) -> BrowserResult<()> {
+        let Some(document) = self.load_restore_document()? else {
+            return Ok(());
+        };
+        for profile in document.profiles {
+            if self
+                .profiles()?
+                .iter()
+                .any(|candidate| candidate.id == profile.id)
+            {
+                continue;
+            }
+            let restored = self.create_profile(profile.id, profile.kind, profile.workspace_id)?;
+            if profile.cookie_import_quarantined {
+                if let Some(state_profile) = lock(&self.state)?.profiles.get_mut(&restored.id) {
+                    state_profile.public.cookie_import_quarantined = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn cleanup_expired_artifacts(&self) -> BrowserResult<usize> {
+        self.sweep_expired_artifacts(true)
+    }
+
+    fn sweep_expired_artifacts(&self, force: bool) -> BrowserResult<usize> {
+        let now = now_ms();
+        {
+            let mut last = lock(&self.last_artifact_sweep_ms)?;
+            if !force && now.saturating_sub(*last) < ARTIFACT_SWEEP_INTERVAL_MS {
+                return Ok(0);
+            }
+            *last = now;
+        }
+        let root = self.policy.artifact_root();
+        if !root.exists() {
+            return Ok(0);
+        }
+        self.validate_artifact_root(false)?;
+        let mut removed = 0usize;
+        for entry in fs::read_dir(root).map_err(internal_error)? {
+            let entry = entry.map_err(internal_error)?;
+            let descriptor_path = entry.path();
+            let Some(descriptor_name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(artifact_name) = artifact_name_from_descriptor(&descriptor_name) else {
+                continue;
+            };
+            let metadata = fs::symlink_metadata(&descriptor_path).map_err(internal_error)?;
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > MAX_ARTIFACT_DESCRIPTOR_BYTES
+            {
+                continue;
+            }
+            let Ok(record) = fs::read(&descriptor_path)
+                .map_err(internal_error)
+                .and_then(|bytes| serde_json::from_slice::<ArtifactCleanupRecord>(&bytes).map_err(internal_error))
+            else {
+                continue;
+            };
+            let artifact_path = root.join(&artifact_name);
+            if record.version != ARTIFACT_DESCRIPTOR_VERSION
+                || record.descriptor.expires_at_ms > now
+                || record.descriptor.path != artifact_path
+                || record.descriptor.content_type != "image/png"
+                || record.descriptor.bytes > self.policy.max_artifact_bytes()
+            {
+                continue;
+            }
+            match fs::symlink_metadata(&artifact_path) {
+                Ok(metadata)
+                    if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+                {
+                    fs::remove_file(&artifact_path).map_err(internal_error)?;
+                }
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(internal_error(error)),
+            }
+            fs::remove_file(&descriptor_path).map_err(internal_error)?;
+            removed = removed.saturating_add(1);
+        }
+        Ok(removed)
+    }
+
+    fn ensure_artifact_root(&self) -> BrowserResult<()> {
+        self.validate_artifact_root(true)
+    }
+
+    fn validate_artifact_root(&self, create: bool) -> BrowserResult<()> {
+        let root = self.policy.artifact_root();
+        if root.parent() != self.profile_root.parent() {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser artifact root is outside the VibeLink browser data root",
+            ));
+        }
+        if create && !root.exists() {
+            fs::create_dir_all(root).map_err(internal_error)?;
+        }
+        let metadata = fs::symlink_metadata(root).map_err(internal_error)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser artifact root must be a real directory",
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_artifact_cleanup_record(
+        &self,
+        path: &Path,
+        descriptor: &ArtifactDescriptor,
+    ) -> BrowserResult<()> {
+        let record = ArtifactCleanupRecord {
+            version: ARTIFACT_DESCRIPTOR_VERSION,
+            descriptor: descriptor.clone(),
+        };
+        let bytes = serde_json::to_vec(&record).map_err(internal_error)?;
+        if bytes.len() as u64 > MAX_ARTIFACT_DESCRIPTOR_BYTES {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Internal,
+                "browser artifact descriptor exceeds its bounded size",
+            ));
+        }
+        let mut descriptor_file = fs::File::create(path).map_err(internal_error)?;
+        descriptor_file.write_all(&bytes).map_err(internal_error)?;
+        descriptor_file.sync_all().map_err(internal_error)
+    }
+
+    fn remove_managed_artifact(&self, path: &Path) -> BrowserResult<()> {
+        let root = self.policy.artifact_root();
+        if path.parent() != Some(root) {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser artifact removal escaped the artifact root",
+            ));
+        }
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            return Err(BrowserError::invalid("invalid browser artifact name"));
+        };
+        let Some(id) = file_name
+            .strip_prefix("design-crop-")
+            .and_then(|value| value.strip_suffix(".png"))
+            .filter(|value| Uuid::parse_str(value).is_ok())
+        else {
+            return Err(BrowserError::invalid("invalid browser artifact name"));
+        };
+        if fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        {
+            fs::remove_file(path).map_err(internal_error)?;
+        }
+        let descriptor_path = root.join(format!("design-crop-{id}.artifact.json"));
+        if fs::symlink_metadata(&descriptor_path)
+            .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        {
+            fs::remove_file(descriptor_path).map_err(internal_error)?;
+        }
+        Ok(())
+    }
+
+    fn remove_owned_profile_directory(&self, path: &Path) -> BrowserResult<()> {
+        if path.parent() != Some(self.profile_root.as_path()) || !path.starts_with(&self.profile_root)
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser profile cleanup escaped the VibeLink profile root",
+            ));
+        }
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                fs::remove_file(path).map_err(internal_error)
+            }
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                fs::remove_dir_all(path).map_err(internal_error)
+            }
+            Ok(_) => Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser profile cleanup target is not a directory",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(internal_error(error)),
+        }
+    }
+
     pub fn policy(&self) -> &BrowserPolicy {
         &self.policy
     }
@@ -1655,6 +2309,14 @@ impl<P: BrowserProvider> BrowserManager<P> {
             .cloned()
             .ok_or_else(|| BrowserError::not_found(page_id))
     }
+}
+
+fn artifact_name_from_descriptor(descriptor_name: &str) -> Option<String> {
+    let id = descriptor_name
+        .strip_prefix("design-crop-")?
+        .strip_suffix(".artifact.json")?;
+    Uuid::parse_str(id).ok()?;
+    Some(format!("design-crop-{id}.png"))
 }
 
 fn read_restore_document(path: &Path) -> BrowserResult<BrowserRestoreDocument> {
@@ -1710,6 +2372,57 @@ fn validate_restore_document(document: &BrowserRestoreDocument) -> BrowserResult
         }
     }
     Ok(())
+}
+
+fn validate_annotation_input(input: &BrowserAnnotationInput) -> BrowserResult<()> {
+    validate_identifier("workspace", &input.workspace_id)?;
+    validate_identifier("page", &input.page_id)?;
+    if !input.bounds.validate()
+        || input.bounds.width > 10_000
+        || input.bounds.height > 10_000
+        || input.browser_ref.is_empty()
+        || input.browser_ref.len() > 4_096
+        || input.accessible_name.len() > 16_384
+        || input.text.len() > 64 * 1024
+        || input.comment.len() > 16 * 1024
+        || input.dom_ancestry.len() > 128
+        || input.attributes.len() > 256
+        || input.computed_styles.len() > 256
+        || input.source_hints.len() > 128
+    {
+        return Err(BrowserError::invalid("browser annotation exceeds bounded input limits"));
+    }
+    let strings = input
+        .dom_ancestry
+        .iter()
+        .chain(input.source_hints.iter())
+        .chain(input.attributes.iter().flat_map(|(name, value)| [name, value]))
+        .chain(input.computed_styles.iter().flat_map(|(name, value)| [name, value]));
+    if strings.into_iter().any(|value| value.len() > 16 * 1024 || value.contains('\0')) {
+        return Err(BrowserError::invalid("browser annotation contains an invalid field"));
+    }
+    Ok(())
+}
+
+fn vibelink_owned_profile_path(root: &Path, id: &str) -> BrowserResult<PathBuf> {
+    let path = root.join(id);
+    if !path.starts_with(root) {
+        return Err(BrowserError::new(
+            BrowserErrorCode::DeniedCapability,
+            "browser profile path escaped the VibeLink profile root",
+        ));
+    }
+    let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    if normalized.contains("/google/chrome/user data")
+        || normalized.contains("/microsoft/edge/user data")
+        || normalized.contains("/chromium/user data")
+    {
+        return Err(BrowserError::new(
+            BrowserErrorCode::DeniedCapability,
+            "browser profiles must not reuse Chrome, Edge, or Chromium user-data roots",
+        ));
+    }
+    Ok(path)
 }
 
 fn internal_error(error: impl std::fmt::Display) -> BrowserError {

@@ -2,7 +2,9 @@ use crate::browser::{
     ArtifactDescriptor, BrowserCaptureState, BrowserDeviceMetrics, BrowserDialogRequest,
     BrowserDownloadRecord, BrowserErrorCode, BrowserLifecycleEvent, BrowserManager, BrowserPage,
     BrowserProfile, CertificateDecision, CertificateRequest, NativeBrowserProvider,
-    PermissionDecision, PermissionRequest, PhysicalBounds, ProfileKind,
+    PermissionDecision, PermissionRequest, PhysicalBounds, ProfileKind, BrowserAnnotation,
+    BrowserAnnotationInput, BrowserCookieImportInput, BrowserCookieImportResult,
+    BrowserCookieImportSource,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -37,51 +39,7 @@ pub async fn browser_initialize(
     workspace_id: String,
 ) -> Result<BrowserProjection, String> {
     let manager = manager.inner().clone();
-    off_main(move || {
-        manager
-            .restore_workspace(&workspace_id, hidden_bounds())
-            .map_err(to_string)?;
-        let profile_id = format!("workspace-{workspace_id}");
-        if !manager
-            .profiles()
-            .map_err(to_string)?
-            .iter()
-            .any(|profile| profile.id == profile_id)
-        {
-            match manager.create_profile(
-                profile_id.clone(),
-                ProfileKind::Workspace,
-                Some(workspace_id.clone()),
-            ) {
-                Ok(_) => {}
-                Err(error) if error.code == BrowserErrorCode::Conflict => {}
-                Err(error) => return Err(to_string(error)),
-            }
-        }
-        let existing = manager
-            .pages()
-            .map_err(to_string)?
-            .into_iter()
-            .filter(|page| page.workspace_id == workspace_id)
-            .collect::<Vec<_>>();
-        if existing.is_empty() {
-            let page = match manager.create_page(
-                format!("workspace-home-{workspace_id}"),
-                workspace_id.clone(),
-                &profile_id,
-                hidden_bounds(),
-            ) {
-                Ok(page) => page,
-                Err(error) if error.code == BrowserErrorCode::Conflict => {
-                    return browser_projection(&manager, &workspace_id)
-                }
-                Err(error) => return Err(to_string(error)),
-            };
-            manager.set_visible(&page.id, false).map_err(to_string)?;
-        }
-        browser_projection(&manager, &workspace_id)
-    })
-    .await
+    off_main(move || browser_projection(&manager, &workspace_id)).await
 }
 
 #[tauri::command]
@@ -96,6 +54,10 @@ pub async fn browser_create_profile(
             ProfileKind::Persistent => (format!("profile-{}", Uuid::new_v4()), None),
             ProfileKind::Workspace => (
                 format!("workspace-{workspace_id}"),
+                Some(workspace_id.clone()),
+            ),
+            ProfileKind::Imported => (
+                format!("imported-{}", Uuid::new_v4()),
                 Some(workspace_id.clone()),
             ),
             ProfileKind::Incognito => (
@@ -126,6 +88,26 @@ pub async fn browser_create_tab(
 ) -> Result<BrowserPage, String> {
     let manager = manager.inner().clone();
     off_main(move || {
+        let default_profile_id = format!("workspace-{workspace_id}");
+        if !manager
+            .profiles()
+            .map_err(to_string)?
+            .iter()
+            .any(|profile| profile.id == profile_id)
+        {
+            if profile_id != default_profile_id {
+                return Err(format!("browser profile not found: {profile_id}"));
+            }
+            match manager.create_profile(
+                profile_id.clone(),
+                ProfileKind::Workspace,
+                Some(workspace_id.clone()),
+            ) {
+                Ok(_) => {}
+                Err(error) if error.code == BrowserErrorCode::Conflict => {}
+                Err(error) => return Err(to_string(error)),
+            }
+        }
         let page = manager
             .create_page(
                 Uuid::new_v4().to_string(),
@@ -133,9 +115,6 @@ pub async fn browser_create_tab(
                 &profile_id,
                 hidden_bounds(),
             )
-            .map_err(to_string)?;
-        manager
-            .select_page(&workspace_id, &page.id)
             .map_err(to_string)?;
         let page = manager.page(&page.id).map_err(to_string)?;
         manager.save_state().map_err(to_string)?;
@@ -172,21 +151,6 @@ pub async fn browser_reload(
 }
 
 #[tauri::command]
-pub async fn browser_select_tab(
-    manager: State<'_, ManagedBrowser>,
-    workspace_id: String,
-    page_id: String,
-) -> Result<Vec<BrowserPage>, String> {
-    let manager = manager.inner().clone();
-    off_main(move || {
-        manager
-            .select_page(&workspace_id, &page_id)
-            .map_err(to_string)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn browser_navigate(
     manager: State<'_, ManagedBrowser>,
     page_id: String,
@@ -207,18 +171,20 @@ pub async fn browser_set_surface(
     page_id: String,
     bounds: Option<PhysicalBounds>,
     visible: bool,
+    focused: Option<bool>,
+    owner_generation: u64,
 ) -> Result<BrowserPage, String> {
     let manager = manager.inner().clone();
     off_main(move || {
-        if let Some(bounds) = bounds {
-            manager.set_bounds(&page_id, bounds).map_err(to_string)?;
-        }
-        let page = manager.set_visible(&page_id, visible).map_err(to_string)?;
-        if visible {
-            manager.set_focus(&page_id, true).map_err(to_string)
-        } else {
-            Ok(page)
-        }
+        manager
+            .set_surface(
+                &page_id,
+                owner_generation,
+                bounds,
+                visible,
+                focused.unwrap_or(false),
+            )
+            .map_err(to_string)
     })
     .await
 }
@@ -286,6 +252,33 @@ pub async fn browser_capture_crop(
 }
 
 #[tauri::command]
+pub async fn browser_create_annotation(
+    manager: State<'_, ManagedBrowser>,
+    input: BrowserAnnotationInput,
+) -> Result<BrowserAnnotation, String> {
+    let manager = manager.inner().clone();
+    off_main(move || manager.create_annotation(input).map_err(to_string)).await
+}
+
+#[tauri::command]
+pub async fn browser_detect_cookie_import_source(
+    manager: State<'_, ManagedBrowser>,
+    endpoint: String,
+) -> Result<BrowserCookieImportSource, String> {
+    let manager = manager.inner().clone();
+    off_main(move || manager.detect_cookie_import_source(&endpoint).map_err(to_string)).await
+}
+
+#[tauri::command]
+pub async fn browser_import_cookies(
+    manager: State<'_, ManagedBrowser>,
+    input: BrowserCookieImportInput,
+) -> Result<BrowserCookieImportResult, String> {
+    let manager = manager.inner().clone();
+    off_main(move || manager.import_cookies(input).map_err(to_string)).await
+}
+
+#[tauri::command]
 pub async fn browser_resolve_permission(
     manager: State<'_, ManagedBrowser>,
     request_id: String,
@@ -338,13 +331,41 @@ pub async fn browser_close_tab(
     manager: State<'_, ManagedBrowser>,
     workspace_id: String,
     page_id: String,
-) -> Result<BrowserProjection, String> {
+) -> Result<BrowserCloseResult, String> {
     let manager = manager.inner().clone();
     off_main(move || {
+        let page = manager.page(&page_id).map_err(to_string)?;
+        if page.workspace_id != workspace_id {
+            return Err("browser page belongs to another workspace".to_string());
+        }
         manager.close_page(&page_id).map_err(to_string)?;
-        browser_projection(&manager, &workspace_id)
+        Ok(BrowserCloseResult {
+            closed: true,
+            persistence_pending: manager.save_state().is_err(),
+        })
     })
     .await
+}
+
+#[tauri::command]
+pub async fn browser_cleanup_workspace(
+    manager: State<'_, ManagedBrowser>,
+    workspace_id: String,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    off_main(move || {
+        manager
+            .cleanup_workspace(&workspace_id)
+            .map_err(to_string)
+    })
+    .await
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCloseResult {
+    closed: bool,
+    persistence_pending: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -578,8 +599,6 @@ fn browser_projection(
     manager: &BrowserManager<NativeBrowserProvider>,
     workspace_id: &str,
 ) -> Result<BrowserProjection, String> {
-    manager.sync_provider_events().map_err(to_string)?;
-    manager.save_state().map_err(to_string)?;
     let pages: Vec<BrowserPage> = manager
         .pages()
         .map_err(to_string)?
@@ -618,7 +637,7 @@ fn browser_projection(
             .filter(|download| page_ids.contains(download.page_id.as_str()))
             .collect(),
         events: manager
-            .lifecycle_events_since(0)
+            .lifecycle_events_snapshot(0)
             .map_err(to_string)?
             .into_iter()
             .filter(|event| page_ids.contains(event.page_id.as_str()))

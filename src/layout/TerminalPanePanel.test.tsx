@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { IDockviewPanelProps } from 'dockview-react'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { WorkspaceActionsContext, type WorkspaceActions } from './actions'
+import { WorkspaceContentActionsContext, type WorkspaceContentActions } from './contentActions'
 import { TerminalPanePanel } from './TerminalPanePanel'
 
 const mockStore = vi.hoisted(() => ({
@@ -17,6 +17,10 @@ vi.mock('../state/store', () => ({
     applyTerminalTitle: () => Promise<void>
     paneCompletionHighlights: Record<string, unknown>
     paneReviewMarkers: Record<string, unknown>
+    license: { ready: boolean; status: null }
+    settings: { paneRoles: Record<string, string>; hermesCommand: string }
+    setError: () => void
+    sendAgentPrompt: () => Promise<void>
   }) => unknown) => selector({
     activeSessionId: 'session-1',
     activePaneId: mockStore.activePaneId,
@@ -24,6 +28,10 @@ vi.mock('../state/store', () => ({
     applyTerminalTitle: async () => undefined,
     paneCompletionHighlights: {},
     paneReviewMarkers: mockStore.reviewedPaneId ? { [mockStore.reviewedPaneId]: {} } : {},
+    license: { ready: true, status: null },
+    settings: { paneRoles: {}, hermesCommand: '' },
+    setError: () => undefined,
+    sendAgentPrompt: async () => undefined,
   }),
 }))
 
@@ -31,27 +39,30 @@ vi.mock('../terminal/TerminalManager', () => ({
   TerminalManager: {},
 }))
 
-const actions: WorkspaceActions = {
-  activatePane: vi.fn(),
-  splitPane: vi.fn(async () => undefined),
-  closePane: vi.fn(async () => undefined),
-  toggleMaximize: vi.fn(),
-  renamePaneTitle: vi.fn(async () => undefined),
-  swapPaneLocations: vi.fn(async () => undefined),
-  movePaneToPosition: vi.fn(async () => undefined),
+const actions: WorkspaceContentActions = {
+  openContent: vi.fn(async () => ''),
+  activateContent: vi.fn(),
+  requestCloseContent: vi.fn(async () => 'closed' as const),
+  splitTerminal: vi.fn(async () => undefined),
+  arrangeTerminals: vi.fn(async () => undefined),
+  clearTerminals: vi.fn(async () => undefined),
+  toggleMaximizeContent: vi.fn(),
+  renameTerminal: vi.fn(async () => undefined),
+  resetLayout: vi.fn(async () => undefined),
+  getContentParams: vi.fn(() => null),
 }
 
 function renderTerminalPane(paneId: string) {
   const props = {
     api: {},
     containerApi: {},
-    params: { paneId },
-  } as unknown as IDockviewPanelProps<{ paneId: string }>
+    params: { schema: 1, kind: 'terminal', instanceId: paneId, paneId, title: 'Shell', icon: 'terminal' },
+  } as unknown as IDockviewPanelProps<{ schema: 1; kind: 'terminal'; instanceId: string; paneId: string; title: string; icon: string }>
 
   return renderToStaticMarkup(
-    <WorkspaceActionsContext.Provider value={actions}>
+    <WorkspaceContentActionsContext.Provider value={actions}>
       <TerminalPanePanel {...props} />
-    </WorkspaceActionsContext.Provider>,
+    </WorkspaceContentActionsContext.Provider>,
   )
 }
 

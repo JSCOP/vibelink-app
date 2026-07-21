@@ -105,7 +105,6 @@ describe('workspace store profiles', () => {
       panes: {},
       manualPaneTitles: {},
       layoutJson: null,
-      workspaceLayouts: {},
       status: 'ready',
       error: undefined,
       hermesPendingPrompts: {},
@@ -224,17 +223,10 @@ describe('workspace store profiles', () => {
       cfg: expect.objectContaining({ cwd: 'E:/repo' }),
     })
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'spawn_pane')).toHaveLength(1)
-    expect(useWorkspaceStore.getState().workspaceLayouts[createdSession.id]).toMatchObject({
-      activePageId: 'terminal',
-      pages: [
-        { id: 'terminal', name: 'Terminal', layoutJson: null },
-        { id: 'planning', name: 'Kanban + Agent', layoutJson: null },
-        { id: 'git-page', name: 'Git', layoutJson: null },
-      ],
-    })
+    expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
   })
 
-  test('attachSession normalizes persisted layouts to the fixed pages', async () => {
+  test('attachSession replaces legacy page layouts with a v3 envelope', async () => {
     const persistedLayout = JSON.stringify({
       version: 2,
       activePageId: 'scratch',
@@ -251,15 +243,7 @@ describe('workspace store profiles', () => {
 
     await useWorkspaceStore.getState().attachSession(createdSession.id)
 
-    expect(useWorkspaceStore.getState().workspaceLayouts[createdSession.id]).toMatchObject({
-      activePageId: 'terminal',
-      pages: [
-        { id: 'terminal', name: 'Terminal', layoutJson: null },
-        { id: 'planning', name: 'Kanban + Agent', layoutJson: null, createdAt: 2, updatedAt: 3 },
-        { id: 'git-page', name: 'Git', layoutJson: null },
-      ],
-    })
-    expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}').pages.map((page: { id: string }) => page.id)).toEqual(['terminal', 'planning', 'git-page'])
+    expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
   })
 
   test('attachSession detaches the previously active workspace', async () => {

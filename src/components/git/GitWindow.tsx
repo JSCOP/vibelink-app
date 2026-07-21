@@ -6,13 +6,15 @@ import type { BranchInfo, ChangedFile, CloneProgress, FileContents, WorkingStatu
 import { useExplorerStore } from '../../state/explorer'
 import { emptyGitSessionState, repositoryFolder, repositoryStateFor, useGitStore, type GitDiffArea, type GitTab } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
-import { useWorkspaceWindowActions } from '../../layout/windowActions'
+import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { QuickPick } from '../QuickPick'
 import type { PickerEntry } from '../pickerModel'
 import { BranchesTab } from './BranchesTab'
+import { AssignedTab } from './AssignedTab'
 import { HistoryTab } from './HistoryTab'
 import { PullRequestsTab } from './PullRequestsTab'
 import { GitWindowView, type GitChangeGroup, type GitChangeItem, type GitCloneViewState, type GitRowAction } from './GitWindowView'
+import type { WorkspaceCreationInput } from '../../ipc/providerIntegrations'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
 
@@ -24,7 +26,11 @@ type RemoteComparison = {
 }
 
 
-export function GitWindow() {
+export type WorkbenchContentPanelProps = {
+  onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
+}
+
+export function WorkbenchContentPanel({ onWorkspaceInput }: WorkbenchContentPanelProps = {}) {
   const sessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const workspaceFolder = useMemo(() => sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null, [sessionId, sessions])
@@ -42,7 +48,7 @@ export function GitWindow() {
   const setActiveRepository = useGitStore((state) => state.setActiveRepository)
   const setSelectedPath = useGitStore((state) => state.setSelectedPath)
   const setActiveTab = useGitStore((state) => state.setActiveTab)
-  const windowActions = useWorkspaceWindowActions()
+  const contentActions = useWorkspaceContentActions()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [commitMessage, setCommitMessage] = useState('')
   const [amend, setAmend] = useState(false)
@@ -156,9 +162,9 @@ export function GitWindow() {
   const revealExplorerFile = useCallback((path: string) => {
     if (!sessionId || !workspaceFolder) return
     const fullPath = activeRepoRoot ? `${activeRepoRoot}/${path}` : path
-    void windowActions.openWindow('explorer')
+    void contentActions.openContent({ kind: 'explorer' })
       .then(() => useExplorerStore.getState().revealPath(sessionId, workspaceFolder, fullPath))
-  }, [activeRepoRoot, sessionId, windowActions, workspaceFolder])
+  }, [activeRepoRoot, contentActions, sessionId, workspaceFolder])
 
   const selectChange = useCallback((item: GitChangeItem) => {
     if (!sessionId) return
@@ -319,7 +325,6 @@ export function GitWindow() {
         refreshing={activeRepository.refreshing}
         error={activeRepository.error}
         activeTab={gitState.activeTab}
-        pullRequestsVisible={Boolean(activeRepository.hostingInfo?.provider)}
         ciStatus={activeRepository.ciStatus}
         commitMessage={commitMessage}
         amend={amend}
@@ -364,7 +369,15 @@ export function GitWindow() {
         )}
         historyContent={sessionId && activeWorkspaceFolder ? <HistoryTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} pathFilter={gitState.pathFilter} onRunMutation={runActiveMutation} onRevealFile={revealExplorerFile} /> : null}
         branchesContent={sessionId && activeWorkspaceFolder && repoInfo ? <BranchesTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} status={status} onRunMutation={runActiveMutation} onRevealFile={revealExplorerFile} /> : null}
-        pullRequestsContent={sessionId && activeWorkspaceFolder && repoInfo && activeRepository.hostingInfo ? <PullRequestsTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} hostingInfo={activeRepository.hostingInfo} hostingError={activeRepository.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true, activeRepoRoot)} onRepositoryChanged={() => refreshRepository(sessionId, workspaceFolder, activeRepoRoot)} onRevealFile={revealExplorerFile} /> : null}
+        assignedContent={sessionId ? (
+          <AssignedTab
+            sessionId={sessionId}
+            onWorkspaceInput={onWorkspaceInput}
+            reviewContent={activeWorkspaceFolder && repoInfo && activeRepository.hostingInfo ? (
+              <PullRequestsTab sessionId={sessionId} workspaceFolder={activeWorkspaceFolder} repoInfo={repoInfo} hostingInfo={activeRepository.hostingInfo} hostingError={activeRepository.hostingError} onHostingChanged={() => refreshHosting(sessionId, workspaceFolder, 'HEAD', true, activeRepoRoot)} onRepositoryChanged={() => refreshRepository(sessionId, workspaceFolder, activeRepoRoot)} onRevealFile={revealExplorerFile} />
+            ) : null}
+          />
+        ) : null}
       />
       {branchPickerOpen && branches.length > 0 ? (
         <QuickPick
@@ -386,4 +399,3 @@ export function GitWindow() {
     </>
   )
 }
-

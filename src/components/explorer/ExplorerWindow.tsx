@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { TextFile } from '../../ipc/types'
+import { WorkspaceContentActionsContext } from '../../layout/contentActions'
+import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
+import { browserEditorCloseDecision, getEditorDocumentStore } from '../../editor/documentStore'
 import { emptyExplorerSessionState, deriveGitDecorations, flattenExplorerTree, joinPath, parentPath, useExplorerStore, type ExplorerNode } from '../../state/explorer'
 import { emptyGitSessionState, repositoryFolder, repositoryStateFor, useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
-import { useWorkspaceWindowActions } from '../../layout/windowActions'
 import { ExplorerTreeView, type ExplorerContextAction, type ExplorerContextMenu } from './ExplorerTreeView'
 import { ExplorerViewerView } from './ExplorerViewerView'
 
@@ -31,7 +33,8 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const editorCommand = useWorkspaceStore((state) => state.settings.externalEditorCommand).trim()
   const gitStatusPresentation = useWorkspaceStore((state) => state.settings.gitStatusPresentation)
-  const windowActions = useWorkspaceWindowActions()
+  const contentActions = useContext(WorkspaceContentActionsContext)
+  const editorDocuments = useMemo(() => getEditorDocumentStore(sessionId, workspaceFolder), [sessionId, workspaceFolder])
   const [textFile, setTextFile] = useState<TextFile | null>(null)
   const [imageSrc, setImageSrc] = useState<string | null>(null)
   const [viewerLoading, setViewerLoading] = useState(false)
@@ -181,6 +184,59 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     setGitActiveTab(sessionId, 'changes')
   }, [gitTargetForNode, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, setSelectedPath])
 
+  const openVibeLinkEditor = useCallback(async (node: ExplorerNode) => {
+    if (!isVibeLinkEditorCandidate(node)) return
+    if (!contentActions) {
+      setExplorerError(sessionId, 'VibeLink Editor is not available in this workspace layout.')
+      return
+    }
+    try {
+      await contentActions.openContent({ kind: 'editor', relPath: node.path })
+    } catch (reason) {
+      setExplorerError(sessionId, String(reason))
+    }
+  }, [contentActions, sessionId, setExplorerError])
+
+  const reopenEditors = useCallback(async (paths: string[]) => {
+    if (!contentActions) return
+    for (const path of paths) {
+      try {
+        await contentActions.openContent({ kind: 'editor', relPath: path })
+      } catch (reason) {
+        setExplorerError(sessionId, String(reason))
+      }
+    }
+  }, [contentActions, sessionId, setExplorerError])
+
+  const prepareEditorPathMutation = useCallback(async (path: string): Promise<string[] | null> => {
+    const affected = editorDocuments.documentsUnder(path)
+    if (await editorDocuments.preparePathMutation(path, browserEditorCloseDecision) === 'cancelled') return null
+    const openPaths = affected.filter((document) => document.viewCount > 0).map((document) => document.relPath)
+    if (openPaths.length === 0) return []
+    if (!contentActions) {
+      setExplorerError(sessionId, 'Close the open VibeLink Editor before renaming or deleting this path.')
+      return null
+    }
+    const closed: string[] = []
+    for (const openPath of openPaths) {
+      const panelId = workspaceContentPanelId({ kind: 'editor', instanceId: openPath })
+      let closeResult: 'closed' | 'cancelled'
+      try {
+        closeResult = await contentActions.requestCloseContent(panelId)
+      } catch (reason) {
+        setExplorerError(sessionId, String(reason))
+        await reopenEditors(closed)
+        return null
+      }
+      if (closeResult === 'cancelled') {
+        await reopenEditors(closed)
+        return null
+      }
+      closed.push(openPath)
+    }
+    return openPaths
+  }, [contentActions, editorDocuments, reopenEditors, sessionId, setExplorerError])
+
   const beginRename = useCallback((node: ExplorerNode) => {
     setContextMenu(null)
     setRenamingPath(node.path)
@@ -193,24 +249,43 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     setRenamingPath(null)
     if (!source || !name || name === source.split('/').pop()) return
     const destination = joinPath(parentPath(source), name)
+    if (editorDocuments.documentsUnder(destination).some((document) => document.dirty || document.viewCount > 0)) {
+      setExplorerError(sessionId, `Close or resolve the existing editor document at ${destination} before renaming.`)
+      return
+    }
+    const openPaths = await prepareEditorPathMutation(source)
+    if (!openPaths) return
     try {
       await invoke('fs_rename', { workspaceFolder, fromRel: source, toRel: destination })
+      editorDocuments.applyDelete(destination)
+      editorDocuments.applyRename(source, destination)
       setSelectedPath(sessionId, destination)
       invalidatePath(sessionId, source)
       await reloadPaths(source, destination)
-    } catch (reason) { setExplorerError(sessionId, String(reason)) }
-  }, [invalidatePath, reloadPaths, renameValue, renamingPath, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
+    } catch (reason) {
+      await reopenEditors(openPaths)
+      setExplorerError(sessionId, String(reason))
+      return
+    }
+    await reopenEditors(openPaths.map((path) => path === source ? destination : `${destination}${path.slice(source.length)}`)).catch((reason) => setExplorerError(sessionId, String(reason)))
+  }, [editorDocuments, invalidatePath, prepareEditorPathMutation, reloadPaths, renameValue, renamingPath, reopenEditors, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
 
   const deleteNode = useCallback(async (node: ExplorerNode) => {
     setContextMenu(null)
     if (!window.confirm(`Delete ${node.name}? This cannot be undone.`)) return
+    const openPaths = await prepareEditorPathMutation(node.path)
+    if (!openPaths) return
     try {
       await invoke('fs_delete', { workspaceFolder, relPaths: [node.path] })
+      editorDocuments.applyDelete(node.path)
       if (session.selectedPath === node.path || session.selectedPath?.startsWith(`${node.path}/`)) setSelectedPath(sessionId, null)
       invalidatePath(sessionId, node.path)
       await reloadPaths(node.path)
-    } catch (reason) { setExplorerError(sessionId, String(reason)) }
-  }, [invalidatePath, reloadPaths, session.selectedPath, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
+    } catch (reason) {
+      await reopenEditors(openPaths)
+      setExplorerError(sessionId, String(reason))
+    }
+  }, [editorDocuments, invalidatePath, prepareEditorPathMutation, reloadPaths, reopenEditors, session.selectedPath, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
 
   const createEntry = useCallback(async (node: ExplorerNode, directory: boolean) => {
     setContextMenu(null)
@@ -233,13 +308,26 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     if (sourcePath === targetDir || targetDir.startsWith(`${sourcePath}/`)) return
     const destination = joinPath(targetDir, sourcePath.split('/').pop() ?? '')
     if (destination === sourcePath) return
+    if (editorDocuments.documentsUnder(destination).some((document) => document.dirty || document.viewCount > 0)) {
+      setExplorerError(sessionId, `Close or resolve the existing editor document at ${destination} before moving.`)
+      return
+    }
+    const openPaths = await prepareEditorPathMutation(sourcePath)
+    if (!openPaths) return
     try {
       await invoke('fs_rename', { workspaceFolder, fromRel: sourcePath, toRel: destination })
+      editorDocuments.applyDelete(destination)
+      editorDocuments.applyRename(sourcePath, destination)
       setSelectedPath(sessionId, destination)
       invalidatePath(sessionId, sourcePath)
       await reloadPaths(sourcePath, destination, targetDir)
-    } catch (reason) { setExplorerError(sessionId, String(reason)) }
-  }, [invalidatePath, nodes, reloadPaths, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
+    } catch (reason) {
+      await reopenEditors(openPaths)
+      setExplorerError(sessionId, String(reason))
+      return
+    }
+    await reopenEditors(openPaths.map((path) => path === sourcePath ? destination : `${destination}${path.slice(sourcePath.length)}`)).catch((reason) => setExplorerError(sessionId, String(reason)))
+  }, [editorDocuments, invalidatePath, nodes, prepareEditorPathMutation, reloadPaths, reopenEditors, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
 
   const openGit = useCallback(async (node: ExplorerNode, history: boolean) => {
     setContextMenu(null)
@@ -249,8 +337,8 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     setGitSelectedPath(sessionId, node.path, target.repoRoot, area)
     setGitActiveTab(sessionId, history ? 'history' : 'changes', history ? target.path : null)
     if (target.repoRoot) void refreshRepository(sessionId, workspaceFolder, target.repoRoot)
-    await windowActions.openWindow('git')
-  }, [gitTargetForNode, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, windowActions, workspaceFolder])
+    await contentActions?.openContent({ kind: 'workbench' })
+  }, [contentActions, gitTargetForNode, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, workspaceFolder])
 
   const openRepository = useCallback(async (node: ExplorerNode, tab: 'changes' | 'history') => {
     setContextMenu(null)
@@ -260,8 +348,8 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     setGitActiveTab(sessionId, tab, null)
     void refreshRepository(sessionId, workspaceFolder, node.path)
     void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, node.path)
-    await windowActions.openWindow('git')
-  }, [refreshHosting, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, windowActions, workspaceFolder])
+    await contentActions?.openContent({ kind: 'workbench' })
+  }, [contentActions, refreshHosting, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, workspaceFolder])
 
   const openPointerHistory = useCallback(async (node: ExplorerNode) => {
     setContextMenu(null)
@@ -271,8 +359,8 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     setGitSelectedPath(sessionId, null, repoRoot, null)
     setGitActiveTab(sessionId, 'history', target.path)
     if (repoRoot) void refreshRepository(sessionId, workspaceFolder, repoRoot)
-    await windowActions.openWindow('git')
-  }, [parentRepositoryRoot, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, targetForPath, windowActions, workspaceFolder])
+    await contentActions?.openContent({ kind: 'workbench' })
+  }, [contentActions, parentRepositoryRoot, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, targetForPath, workspaceFolder])
 
   const mutateGit = useCallback(async (command: 'git_stage' | 'git_unstage' | 'git_conflict_take', node: ExplorerNode, extra: Record<string, unknown> = {}) => {
     setContextMenu(null)
@@ -327,6 +415,12 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     const canStage = unstaged && (!isSubmodule || Boolean(node.decoration?.submoduleState?.commitChanged))
     const wrap = (action: () => void | Promise<void>) => () => { setContextMenu(null); void action() }
     const actions: ExplorerContextAction[] = []
+    if (!node.entry.isDir) {
+      actions.push(
+        { id: 'vibelink-editor', label: 'Open in VibeLink Editor', disabled: !present || !isVibeLinkEditorCandidate(node) || !contentActions, onClick: wrap(() => openVibeLinkEditor(node)) },
+        { id: 'external-editor', label: 'Open in External Editor', disabled: !present || !editorCommand, onClick: wrap(() => invoke('open_in_editor', { workspaceFolder, relPath: node.path, editorCommand })) },
+      )
+    }
     if (isRepository) {
       actions.push(
         { id: 'repo-changes', label: 'Open Repository Changes', disabled: !initialized, onClick: wrap(() => openRepository(node, 'changes')) },
@@ -345,7 +439,6 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       { id: 'new-folder', label: 'New Folder', disabled: !present, onClick: wrap(() => createEntry(node, true)) },
       { id: 'rename', label: 'Rename', disabled: !present || isRepository, onClick: wrap(() => beginRename(node)) },
       { id: 'delete', label: 'Delete', disabled: !present || isRepository, danger: true, onClick: wrap(() => deleteNode(node)) },
-      { id: 'editor', label: 'Open in Editor', disabled: !present || !editorCommand, onClick: wrap(() => invoke('open_in_editor', { workspaceFolder, relPath: node.path, editorCommand })) },
       { id: 'terminal', label: 'Open in Terminal', disabled: !present, onClick: wrap(() => openTerminal(node)) },
       { id: 'reveal', label: 'Reveal in File Explorer', disabled: !present, onClick: wrap(() => invoke('reveal_path', { path: absolutePath(node.path) })) },
       { id: 'copy-rel', label: 'Copy Relative Path', onClick: wrap(() => navigator.clipboard.writeText(node.path)) },
@@ -361,7 +454,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     if (!node.entry.isDir && changed) actions.push({ id: 'diff', label: 'Diff vs HEAD', onClick: wrap(() => openGit(node, false)) })
     if (!isRepository) actions.push({ id: 'history', label: node.entry.isDir ? 'Folder History' : 'File History', onClick: wrap(() => openGit(node, true)) })
     return actions
-  }, [absolutePath, beginRename, createEntry, deleteNode, discardGit, editorCommand, mutateGit, mutateSubmodule, openGit, openPointerHistory, openRepository, openTerminal, workspaceFolder])
+  }, [absolutePath, beginRename, contentActions, createEntry, deleteNode, discardGit, editorCommand, mutateGit, mutateSubmodule, openGit, openPointerHistory, openRepository, openTerminal, openVibeLinkEditor, workspaceFolder])
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (nodes.length === 0) return
@@ -379,10 +472,14 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         const parent = nodes.find((candidate) => candidate.path === node.parentPath)
         if (parent) selectNode(parent)
       }
-    } else if (event.key === 'Enter' && node.entry.isDir) { event.preventDefault(); void toggleNode(node) }
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      if (node.entry.isDir) void toggleNode(node)
+      else void openVibeLinkEditor(node)
+    }
     else if (event.key === 'F2' && !node.gitOnly && !node.entry.repoKind) { event.preventDefault(); beginRename(node) }
     else if (event.key === 'Delete' && !node.gitOnly && !node.entry.repoKind) { event.preventDefault(); void deleteNode(node) }
-  }, [beginRename, deleteNode, nodes, selectNode, session.selectedPath, toggleNode])
+  }, [beginRename, deleteNode, nodes, openVibeLinkEditor, selectNode, session.selectedPath, toggleNode])
 
   return (
     <div className="explorer-window" data-explorer-window="true" data-preview-visible={previewVisible ? 'true' : 'false'}>
@@ -400,6 +497,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         contextMenu={contextMenu}
         dragOverPath={dragOverPath}
         onSelect={selectNode}
+        onOpen={(node) => { void openVibeLinkEditor(node) }}
         onToggle={(node) => { void toggleNode(node) }}
         onKeyDown={handleKeyDown}
         onRenameValueChange={setRenameValue}
@@ -421,11 +519,13 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
           loading={viewerLoading}
           error={viewerError}
           imageFit={imageFit}
-          canOpenEditor={Boolean(editorCommand)}
+          canOpenVibeLinkEditor={Boolean(contentActions && selectedNode && !textFile?.binary && isVibeLinkEditorCandidate(selectedNode))}
+          canOpenExternalEditor={Boolean(editorCommand)}
           canOpenDiff={selectedHasDiff}
           workingTreePresent={!selectedNode?.gitOnly}
           onToggleImageFit={() => setImageFit((value) => !value)}
-          onOpenEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
+          onOpenVibeLinkEditor={() => { if (selectedNode) void openVibeLinkEditor(selectedNode) }}
+          onOpenExternalEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
           onOpenDiff={() => { if (selectedNode && selectedHasDiff) void openGit(selectedNode, false) }}
           onOpenTerminal={() => { if (selectedNode) void openTerminal(selectedNode) }}
           onReveal={() => { if (selectedNode) void invoke('reveal_path', { path: absolutePath(selectedNode.path) }) }}
@@ -444,4 +544,10 @@ function imageMime(extension: string): string {
   if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'
   if (extension === 'svg') return 'image/svg+xml'
   return `image/${extension}`
+}
+
+function isVibeLinkEditorCandidate(node: ExplorerNode): boolean {
+  if (node.entry.isDir || node.entry.isSymlink || node.gitOnly) return false
+  const extension = node.name.split('.').pop()?.toLowerCase() ?? ''
+  return !IMAGE_EXTENSIONS.has(extension)
 }

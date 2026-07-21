@@ -18,11 +18,13 @@ describe('ExplorerViewerView', () => {
         loading={false}
         error={null}
         imageFit
-        canOpenEditor={false}
+        canOpenVibeLinkEditor={false}
+        canOpenExternalEditor={false}
         canOpenDiff
         workingTreePresent
         onToggleImageFit={vi.fn()}
-        onOpenEditor={vi.fn()}
+        onOpenVibeLinkEditor={vi.fn()}
+        onOpenExternalEditor={vi.fn()}
         onOpenDiff={onOpenDiff}
         onOpenTerminal={vi.fn()}
         onReveal={vi.fn()}

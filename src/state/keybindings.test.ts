@@ -19,7 +19,6 @@ describe('keybindings', () => {
     expect(defaultKeybindings.captureImage).toBe('alt+shift+s')
     expect(defaultKeybindings.captureQuickImage).toBe('alt+s')
     expect(defaultKeybindings.captureVideo).toBe('alt+shift+r')
-    expect(defaultKeybindings.toggleTerminalTabs).toBe('alt+shift+t')
     expect(defaultKeybindings.togglePaneReviewed).toBe('alt+q')
   })
 
@@ -35,7 +34,6 @@ describe('keybindings', () => {
     expect(normalized.captureImage).toBe(defaultKeybindings.captureImage)
     expect(normalized.captureVideo).toBe(defaultKeybindings.captureVideo)
     expect(normalized.captureQuickImage).toBe(defaultKeybindings.captureQuickImage)
-    expect(normalized.toggleTerminalTabs).toBe(defaultKeybindings.toggleTerminalTabs)
     expect(normalized.togglePaneReviewed).toBe(defaultKeybindings.togglePaneReviewed)
   })
 
@@ -89,7 +87,6 @@ describe('keybindings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true, shiftKey: true }))).toBe('captureImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true }))).toBe('captureQuickImage')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'r', altKey: true, shiftKey: true }))).toBe('captureVideo')
-    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 't', altKey: true, shiftKey: true }))).toBe('toggleTerminalTabs')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'q', altKey: true }))).toBe('togglePaneReviewed')
   })
 

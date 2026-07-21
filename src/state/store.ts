@@ -11,19 +11,31 @@ import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
 import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from './workspaceTodos'
+import { disposeEditorDocumentStore } from '../editor/documentStore'
 import type { HermesModelsState, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn, PendingPermission } from './hermes'
 import {
   normalizeWorkspaceLayoutState,
-  replaceWorkspaceLayoutPage,
-  resetWorkspaceLayoutPage,
   serializeWorkspaceLayoutState,
-  setActiveWorkspaceLayoutPage,
-  type WorkspaceLayoutState,
 } from '../layout/workspaceLayoutModel'
 
 const initialKanban = loadKanban()
 const migratedLegacySessions = new Set<string>()
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
+let workspaceSessionEpoch = 0
+let workspaceSessionReadyEpoch = 0
+let workspaceSessionTargetId: string | null = null
+
+export function getWorkspaceSessionEpoch(): number {
+  return workspaceSessionEpoch
+}
+
+export function getWorkspaceSessionReadyEpoch(): number {
+  return workspaceSessionReadyEpoch
+}
+
+export function getWorkspaceSessionTargetId(): string | null {
+  return workspaceSessionTargetId
+}
 
 
 type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
@@ -36,6 +48,8 @@ export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
 
 type WorkspaceState = {
   sessions: SessionMeta[]
+  workspaceEpoch: number
+  workspaceReadyEpoch: number
   activeSessionId?: string
   panes: Record<string, PaneMeta>
   layoutJson?: string | null
@@ -48,7 +62,6 @@ type WorkspaceState = {
   kanban: KanbanData
   viewModes: Record<string, ViewMode>
   kanbanLayouts: Record<string, string>
-  workspaceLayouts: Record<string, WorkspaceLayoutState>
   orchestratorPaneIds: Record<string, string>
   workspaceTodos: WorkspaceTodoLists
   workspaceTodoNotes: WorkspaceTodoNotes
@@ -81,17 +94,13 @@ type WorkspaceState = {
   refreshAgentClis: () => Promise<AgentCliStatus[]>
   refreshSessions: () => Promise<void>
   openSession: (sessionId: string) => Promise<AttachedSession>
-  attachSession: (sessionId: string) => Promise<AttachedSession>
+  attachSession: (sessionId: string, requestEpoch?: number) => Promise<AttachedSession>
   createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
   renameSession: (sessionId: string, name: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
   spawnPane: (sessionId: string, overrides?: SpawnPaneOptions) => Promise<PaneMeta>
-  closePane: (paneId: string) => Promise<void>
+  closePane: (paneId: string, sessionId?: string) => Promise<void>
   saveLayout: (sessionId: string, layoutJson: string) => Promise<void>
-  saveWorkspaceLayoutPage: (sessionId: string, pageId: string, layoutJson: string | null) => Promise<void>
-  setActiveLayoutPage: (sessionId: string, pageId: string) => void
-  resetLayoutPage: (sessionId: string, pageId: string) => void
-  clearSession: (sessionId: string) => Promise<void>
   renamePaneTitle: (paneId: string, title: string, source: 'manual' | 'auto') => Promise<void>
   applyTerminalTitle: (paneId: string, title: string) => Promise<void>
   setError: (error: string) => void
@@ -99,7 +108,6 @@ type WorkspaceState = {
   dismissError: () => void
   prepareSetupWizardRun: () => void
   updateSettings: (settings: Partial<Settings>) => void
-  toggleTerminalTabsVisible: () => void
   reorderWorkspaces: (orderedIds: string[]) => void
   setDefaultProfile: (profileId: string) => void
   setViewMode: (sessionId: string, mode: ViewMode) => void
@@ -145,6 +153,8 @@ type WorkspaceState = {
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sessions: [],
+  workspaceEpoch: 0,
+  workspaceReadyEpoch: 0,
   panes: {},
   manualPaneTitles: {},
   status: 'booting',
@@ -154,7 +164,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   kanban: initialKanban.data,
   viewModes: initialKanban.viewModes,
   kanbanLayouts: initialKanban.kanbanLayouts,
-  workspaceLayouts: {},
   orchestratorPaneIds: initialKanban.orchestratorPaneIds,
   workspaceTodos: initialKanban.workspaceTodos,
   workspaceTodoNotes: initialKanban.workspaceTodoNotes,
@@ -232,42 +241,63 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   openSession: async (sessionId: string) => {
+    const requestEpoch = ++workspaceSessionEpoch
+    workspaceSessionTargetId = sessionId
+    set({ workspaceEpoch: requestEpoch })
     if (!get().sessions.some((session) => session.id === sessionId)) {
       await get().refreshSessions()
     }
-    const attached = await get().attachSession(sessionId)
+    if (workspaceSessionEpoch !== requestEpoch || workspaceSessionTargetId !== sessionId) return { layoutJson: null, panes: [] }
+    const attached = await get().attachSession(sessionId, requestEpoch)
+    if (workspaceSessionEpoch !== requestEpoch || get().activeSessionId !== sessionId) return attached
     if (attached.panes.length === 0) {
-      await get().spawnPane(sessionId)
+      try {
+        await get().spawnPane(sessionId)
+      } catch (error) {
+        if (workspaceSessionEpoch !== requestEpoch || get().activeSessionId !== sessionId) return attached
+        throw error
+      }
     }
+    if (workspaceSessionEpoch !== requestEpoch || get().activeSessionId !== sessionId) return attached
     await get().refreshSessions()
     return attached
   },
 
-  attachSession: async (sessionId: string) => {
+  attachSession: async (sessionId: string, requestEpoch?: number) => {
+    const epoch = requestEpoch ?? ++workspaceSessionEpoch
+    if (requestEpoch === undefined) {
+      workspaceSessionTargetId = sessionId
+      set({ workspaceEpoch: epoch })
+    }
+    if (workspaceSessionEpoch !== epoch || workspaceSessionTargetId !== sessionId) return { layoutJson: null, panes: [] }
     const previousSessionId = get().activeSessionId
     const attached = await invoke<AttachedSession>('attach_session', { sessionId })
+    if (workspaceSessionEpoch !== epoch || workspaceSessionTargetId !== sessionId) {
+      if (workspaceSessionTargetId !== sessionId && get().activeSessionId !== sessionId) void invoke('detach_session', { sessionId }).catch(() => {})
+      return attached
+    }
     const panes = Object.fromEntries(attached.panes.map((pane) => [pane.id, pane]))
-    const workspaceLayout = normalizeWorkspaceLayoutState(attached.layoutJson, {
-      terminalPaneIds: attached.panes.map((pane) => pane.id),
-      legacyKanbanLayoutJson: get().kanbanLayouts[sessionId],
-    })
+    const workspaceLayout = normalizeWorkspaceLayoutState(attached.layoutJson)
     window.localStorage.setItem('vibelink:lastActiveSessionId', sessionId)
+    workspaceSessionReadyEpoch = epoch
     set((state) => ({
       activeSessionId: sessionId,
+      workspaceReadyEpoch: epoch,
       activePaneId: undefined,
       panes,
       paneCompletionHighlights: reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
       paneReviewMarkers: reconcilePaneReviewMarkers(state.paneReviewMarkers, sessionId, panes),
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: workspaceLayout },
     }))
-    if (get().license.ready && get().license.status?.entitled) {
-      const boardJson = await invoke<string>('board_read', { sessionId })
-      const migratedJson = await migrateLegacyTasks(sessionId, boardJson)
-      get().applyBoardSnapshot(sessionId, migratedJson)
-    }
     if (previousSessionId && previousSessionId !== sessionId) {
       void invoke('detach_session', { sessionId: previousSessionId }).catch(() => {})
+    }
+    if (get().license.ready && get().license.status?.entitled) {
+      const boardJson = await invoke<string>('board_read', { sessionId })
+      if (workspaceSessionEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return attached
+      const migratedJson = await migrateLegacyTasks(sessionId, boardJson)
+      if (workspaceSessionEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return attached
+      get().applyBoardSnapshot(sessionId, migratedJson)
     }
     return attached
   },
@@ -287,7 +317,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       })
     }
     await get().attachSession(created.id)
-    await get().spawnPane(created.id, { profileId })
+    if (get().activeSessionId === created.id) await get().spawnPane(created.id, { profileId })
     persistCurrentKanban(get())
     return created
   },
@@ -298,7 +328,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   deleteSession: async (sessionId: string) => {
-    await invoke('delete_session', { sessionId })
+    const deletedWorkspaceFolder = get().sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
+    const deletingActiveSession = get().activeSessionId === sessionId
+    if (deletingActiveSession) {
+      workspaceSessionEpoch += 1
+      if (workspaceSessionTargetId === sessionId) workspaceSessionTargetId = null
+      set({ workspaceEpoch: workspaceSessionEpoch })
+    }
+    try {
+      await invoke('browser_cleanup_workspace', { workspaceId: sessionId })
+      await invoke('delete_session', { sessionId })
+    } catch (error) {
+      if (deletingActiveSession && get().activeSessionId === sessionId) {
+        await get().attachSession(sessionId).catch(() => undefined)
+      }
+      throw error
+    }
+    if (deletedWorkspaceFolder) disposeEditorDocumentStore(sessionId, deletedWorkspaceFolder)
     await invoke('agent_workspace_cleanup', { sessionId })
     let sessions = await invoke<SessionMeta[]>('list_sessions')
     if (sessions.length === 0) {
@@ -314,7 +360,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete taskOrder[sessionId]
       const viewModes = { ...state.viewModes }
       const kanbanLayouts = { ...state.kanbanLayouts }
-      const workspaceLayouts = { ...state.workspaceLayouts }
       const orchestratorPaneIds = { ...state.orchestratorPaneIds }
       const selectedTaskId = { ...state.selectedTaskId }
       const workspaceTodos = { ...state.workspaceTodos }
@@ -336,7 +381,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const settings = paneRoles === state.settings.paneRoles ? state.settings : { ...state.settings, paneRoles }
       delete viewModes[sessionId]
       delete kanbanLayouts[sessionId]
-      delete workspaceLayouts[sessionId]
       delete orchestratorPaneIds[sessionId]
       delete selectedTaskId[sessionId]
       delete workspaceTodos[sessionId]
@@ -350,18 +394,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       delete hermesPendingPrompts[sessionId]
       delete hermesCurrentSession[sessionId]
       delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, workspaceLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
+      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
     })
     persistSettings(get().settings)
     persistCurrentKanban(get())
-    const next = sessions[0]
-    await get().attachSession(next.id)
-    if (Object.keys(get().panes).length === 0) {
-      await get().spawnPane(next.id)
+    const currentSessionId = get().activeSessionId
+    if (!currentSessionId || currentSessionId === sessionId || !sessions.some((session) => session.id === currentSessionId)) {
+      const next = sessions[0]
+      await get().attachSession(next.id)
+      if (get().activeSessionId === next.id && Object.keys(get().panes).length === 0) {
+        await get().spawnPane(next.id)
+      }
     }
   },
 
   spawnPane: async (sessionId: string, overrides?: SpawnPaneOptions) => {
+    const sessionEpoch = workspaceSessionEpoch
+    if (workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
+      throw new Error('Workspace changed while the terminal was opening.')
+    }
     const paneId = overrides?.paneId ?? crypto.randomUUID()
     const profile = overrides && 'profileId' in overrides
       ? profileById(get().settings, overrides.profileId)
@@ -385,16 +436,33 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       rows: overrides?.rows ?? 32,
     }
     const pane = await invoke<PaneMeta>('spawn_pane', { sessionId, cfg })
-    set((state) => ({ panes: { ...state.panes, [pane.id]: pane } }))
+    if (workspaceSessionEpoch !== sessionEpoch || workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
+      await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
+      throw new Error('Workspace changed while the terminal was opening.')
+    }
+    set((state) => state.activeSessionId === sessionId
+      ? { panes: { ...state.panes, [pane.id]: pane } }
+      : {})
     await get().refreshSessions()
+    if (workspaceSessionEpoch !== sessionEpoch || workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
+      await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
+      set((state) => {
+        if (state.activeSessionId !== sessionId || !state.panes[pane.id]) return {}
+        const panes = { ...state.panes }
+        delete panes[pane.id]
+        return { panes, activePaneId: state.activePaneId === pane.id ? undefined : state.activePaneId }
+      })
+      throw new Error('Workspace changed while the terminal was opening.')
+    }
     return pane
   },
 
-  closePane: async (paneId: string) => {
-    const sessionId = get().activeSessionId
+  closePane: async (paneId: string, requestedSessionId?: string) => {
+    const sessionId = requestedSessionId ?? get().activeSessionId
     if (!sessionId) return
     await invoke('close_pane', { sessionId, paneId })
     set((state) => {
+      if (state.activeSessionId !== sessionId) return {}
       const panes = { ...state.panes }
       delete panes[paneId]
       return {
@@ -407,16 +475,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await get().refreshSessions()
   },
 
-  clearSession: async (sessionId: string) => {
-    await invoke('clear_session', { sessionId })
-    set((state) => ({
-      panes: state.activeSessionId === sessionId ? {} : state.panes,
-      activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
-      paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
-      paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
-    }))
-  },
-
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
     const normalized = normalizePaneTitle(title)
     if (!normalized) return
@@ -425,6 +483,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!sessionId) return
     await invoke('set_pane_title', { sessionId, paneId, title: normalized })
     set((state) => {
+      if (state.activeSessionId !== sessionId) return {}
       const pane = state.panes[paneId]
       if (!pane) return {}
       return {
@@ -448,35 +507,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   saveLayout: async (sessionId: string, layoutJson: string) => {
-    await invoke('save_layout', { sessionId, layoutJson })
-    if (get().activeSessionId === sessionId) {
-      set({ layoutJson })
+    const sessionEpoch = workspaceSessionEpoch
+    const serialized = serializeWorkspaceLayoutState(normalizeWorkspaceLayoutState(layoutJson))
+    await invoke('save_layout', { sessionId, layoutJson: serialized })
+    if (workspaceSessionEpoch === sessionEpoch && workspaceSessionReadyEpoch === sessionEpoch && workspaceSessionTargetId === sessionId && get().activeSessionId === sessionId) {
+      set({ layoutJson: serialized })
     }
-  },
-  saveWorkspaceLayoutPage: async (sessionId: string, pageId: string, layoutJson: string | null) => {
-    const current = workspaceLayoutForSession(get(), sessionId)
-    const next = replaceWorkspaceLayoutPage(current, pageId, layoutJson)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    await persistWorkspaceLayout(sessionId, next)
-  },
-  setActiveLayoutPage: (sessionId: string, pageId: string) => {
-    const next = setActiveWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), pageId)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
-  },
-  resetLayoutPage: (sessionId: string, pageId: string) => {
-    const next = resetWorkspaceLayoutPage(workspaceLayoutForSession(get(), sessionId), pageId)
-    set((state) => ({
-      workspaceLayouts: { ...state.workspaceLayouts, [sessionId]: next },
-      layoutJson: state.activeSessionId === sessionId ? serializeWorkspaceLayoutState(next) : state.layoutJson,
-    }))
-    void persistWorkspaceLayout(sessionId, next).catch((error) => get().setError(String(error)))
   },
 
   setError: (error: string) => set({ error, status: 'error' }),
@@ -538,9 +574,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         setupWizard: { ...state.settings.setupWizard, completedAt: null },
       },
     }))
-  },
-  toggleTerminalTabsVisible: () => {
-    get().updateSettings({ terminalTabsVisible: !get().settings.terminalTabsVisible })
   },
   reorderWorkspaces: (orderedIds: string[]) => {
     get().updateSettings({ workspaceOrder: orderedIds })
@@ -1155,18 +1188,6 @@ function persistCurrentKanban(state: WorkspaceState): void {
     workspaceTodoNotes: state.workspaceTodoNotes,
   })
 }
-
-function workspaceLayoutForSession(state: WorkspaceState, sessionId: string): WorkspaceLayoutState {
-  return state.workspaceLayouts[sessionId] ?? normalizeWorkspaceLayoutState(state.layoutJson, {
-    terminalPaneIds: Object.keys(state.panes),
-    legacyKanbanLayoutJson: state.kanbanLayouts[sessionId],
-  })
-}
-
-async function persistWorkspaceLayout(sessionId: string, layout: WorkspaceLayoutState): Promise<void> {
-  await invoke('save_layout', { sessionId, layoutJson: serializeWorkspaceLayoutState(layout) })
-}
-
 
 function requireProForTaskMutation(state: WorkspaceState): void {
   if (state.license.ready && !state.license.status?.entitled) {

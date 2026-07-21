@@ -12,7 +12,7 @@ vi.mock('../ipc/providerIntegrations', async () => {
     ...actual,
     providerScopes: vi.fn(),
     providerCredentialStatus: vi.fn(),
-    providerCredentialStore: vi.fn(),
+    providerCredentialCapture: vi.fn(),
     providerCredentialDelete: vi.fn(),
     providerDiscover: vi.fn(),
     providerWorkspaceInput: vi.fn(),
@@ -23,28 +23,28 @@ vi.mock('../ipc/providerIntegrations', async () => {
 afterEach(cleanup)
 
 const credential: integrations.CredentialReference = {
-  id: 'credential-1', provider: 'github', account: 'github.com', scopes: ['repositories:read', 'issues:read', 'reviews:read', 'reviews:comment'],
+  credentialId: 'credential-1', provider: 'github', account: 'github.com', scopes: ['repositories:read', 'issues:read', 'reviews:read', 'reviews:comment'],
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(integrations.providerScopes).mockImplementation(async (provider) => provider === 'linear' ? ['issues:read', 'issues:comment'] : ['repositories:read', 'issues:read', 'reviews:read', 'reviews:comment'])
   vi.mocked(integrations.providerCredentialStatus).mockResolvedValue(null)
-  vi.mocked(integrations.providerCredentialStore).mockResolvedValue(credential)
+  vi.mocked(integrations.providerCredentialCapture).mockResolvedValue(credential)
   vi.mocked(integrations.providerDiscover).mockResolvedValue([])
 })
 
 describe('ProviderIntegrationsPanel', () => {
-  test('requires explicit scopes before storing a credential', async () => {
+  test('captures scoped credentials through the native Windows prompt', async () => {
+    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'credential-1') })
     render(<ProviderIntegrationsPanel />)
     expect(await screen.findByText('repositories:read')).toBeTruthy()
-    const save = screen.getByRole('button', { name: /Save scoped credential/ }) as HTMLButtonElement
-    expect(save.disabled).toBe(true)
-    fireEvent.change(screen.getByLabelText('Access token'), { target: { value: 'secret' } })
-    expect(save.disabled).toBe(false)
-    fireEvent.click(save)
-    await waitFor(() => expect(integrations.providerCredentialStore).toHaveBeenCalledWith('github', 'github.com', 'secret', expect.arrayContaining(['repositories:read', 'issues:read', 'reviews:read'])))
-    expect(screen.queryByDisplayValue('secret')).toBeNull()
+    expect(screen.queryByLabelText('Access token')).toBeNull()
+    const capture = screen.getByRole('button', { name: /Open Windows credential prompt/ }) as HTMLButtonElement
+    expect(capture.disabled).toBe(false)
+    fireEvent.click(capture)
+    await waitFor(() => expect(integrations.providerCredentialCapture).toHaveBeenCalledWith('github', 'github.com', expect.arrayContaining(['repositories:read', 'issues:read', 'reviews:read']), 'credential-1'))
+    expect(await screen.findByText(/credential captured and saved by Windows/)).toBeTruthy()
   })
 
   test('limits Linear discovery to issues and exposes issue comment scope', async () => {

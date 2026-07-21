@@ -1,24 +1,51 @@
-import type { DesignGrabSelection } from './types'
+import type { BrowserAnnotation, BrowserAnnotationDestination } from './types'
 
 const AGENT_DRAFT_EVENT = 'vibelink:agent-draft'
 
-export function publishBrowserSelectionDraft(selection: DesignGrabSelection, url: string): void {
-  const attributes = selection.attributes.map(([name, value]) => `${name}=${JSON.stringify(value)}`).join(', ')
-  const styles = selection.computedStyles.map(([name, value]) => `${name}: ${value}`).join('; ')
-  const lines = [
+export type BrowserAnnotationDeliveryPayload = {
+  destination: BrowserAnnotationDestination
+  prompt: string
+  artifactPath: string | null
+  paneId: string | null
+}
+
+export function formatBrowserAnnotation(annotation: BrowserAnnotation): string {
+  const attributes = annotation.attributes.map(([name, value]) => `${name}=${JSON.stringify(value)}`).join(', ')
+  const styles = annotation.computedStyles.map(([name, value]) => `${name}: ${value}`).join('; ')
+  return [
     'Update the selected browser element in this workspace and verify the result in VibeLink Browser.',
-    `URL: ${url}`,
-    `Element: ${selection.browserRef}`,
-    `Accessible name: ${selection.accessibleName || '(none)'}`,
-    `DOM ancestry: ${selection.domAncestry.join(' > ')}`,
-    `Bounds: x=${selection.bounds.x}, y=${selection.bounds.y}, width=${selection.bounds.width}, height=${selection.bounds.height}`,
-    `Screenshot crop: ${selection.screenshotCrop?.path ?? '(unavailable)'}`,
-    `Text: ${selection.text || '(none)'}`,
+    `Annotation: ${annotation.id}`,
+    `Workspace: ${annotation.workspaceId}`,
+    `Page: ${annotation.pageId}`,
+    `Navigation generation: ${annotation.navigationGeneration}`,
+    `URL: ${annotation.url}`,
+    `Element: ${annotation.browserRef}`,
+    `Accessible name: ${annotation.accessibleName || '(none)'}`,
+    `DOM ancestry: ${annotation.domAncestry.join(' > ')}`,
+    `Bounds: x=${annotation.bounds.x}, y=${annotation.bounds.y}, width=${annotation.bounds.width}, height=${annotation.bounds.height}`,
+    `Screenshot crop: ${annotation.screenshot?.path ?? '(unavailable)'}`,
+    `Comment: ${annotation.comment.trim() || '(none)'}`,
+    `Text: ${annotation.text || '(none)'}`,
     `Attributes: ${attributes || '(none)'}`,
     `Computed styles: ${styles || '(none)'}`,
-    `Source hints: ${selection.sourceHints.join(', ') || '(none)'}`,
-  ]
-  window.dispatchEvent(new CustomEvent<string>(AGENT_DRAFT_EVENT, { detail: lines.join('\n') }))
+    `Source hints: ${annotation.sourceHints.join(', ') || '(none)'}`,
+  ].join('\n')
+}
+
+export function browserAnnotationDeliveryPayload(
+  annotation: BrowserAnnotation,
+  destination: BrowserAnnotationDestination,
+): BrowserAnnotationDeliveryPayload {
+  return {
+    destination,
+    prompt: formatBrowserAnnotation(annotation),
+    artifactPath: annotation.screenshot?.path ?? null,
+    paneId: destination.kind === 'terminal' ? destination.paneId : null,
+  }
+}
+
+export function publishBrowserAnnotationDraft(annotation: BrowserAnnotation): void {
+  window.dispatchEvent(new CustomEvent<string>(AGENT_DRAFT_EVENT, { detail: formatBrowserAnnotation(annotation) }))
 }
 
 export function subscribeAgentDraft(listener: (draft: string) => void): () => void {

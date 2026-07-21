@@ -1,35 +1,40 @@
-// @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
-import { publishBrowserSelectionDraft, subscribeAgentDraft } from './agentContext'
-import type { DesignGrabSelection } from './types'
+import { describe, expect, it } from 'vitest'
+import { browserAnnotationDeliveryPayload, formatBrowserAnnotation } from './agentContext'
+import type { BrowserAnnotation } from './types'
 
-const selection: DesignGrabSelection = {
-  pageId: 'page-a',
-  navigationGeneration: 1,
-  snapshotId: 'design-1',
+const annotation: BrowserAnnotation = {
+  id: 'annotation-1',
+  workspaceId: 'workspace-1',
+  pageId: 'page-1',
+  navigationGeneration: 4,
+  url: 'http://localhost:1420',
   browserRef: 'button#save',
-  screenshotCrop: { path: 'C:/artifacts/design-crop.png', contentType: 'image/png', bytes: 321, expiresAtMs: 1234, truncated: false },
-  domAncestry: ['html', 'body', 'button#save'],
   accessibleName: 'Save',
-  bounds: { x: 10, y: 20, width: 80, height: 32, scaleFactorMilli: 1000 },
-  computedStyles: [['color', 'rgb(255, 255, 255)']],
-  attributes: [['id', 'save']],
+  domAncestry: ['html', 'body', 'button#save'],
+  bounds: { x: 10, y: 20, width: 120, height: 32, scaleFactorMilli: 1000 },
   text: 'Save changes',
+  attributes: [['id', 'save']],
+  computedStyles: [['display', 'block']],
   sourceHints: ['src/App.tsx'],
+  comment: 'Use the primary accent.',
+  screenshot: { path: 'C:/artifacts/design-crop.png', contentType: 'image/png', bytes: 321, expiresAtMs: Number.MAX_SAFE_INTEGER, truncated: false },
 }
 
-describe('browser Agent context bridge', () => {
-  it('publishes structured selected-element context without auto-sending it', () => {
-    const listener = vi.fn()
-    const unsubscribe = subscribeAgentDraft(listener)
-    publishBrowserSelectionDraft(selection, 'http://localhost:5173/settings')
-    unsubscribe()
+describe('browser annotation formatting', () => {
+  it('keeps exact page/generation/artifact identity in the structured prompt', () => {
+    const prompt = formatBrowserAnnotation(annotation)
+    expect(prompt).toContain('Annotation: annotation-1')
+    expect(prompt).toContain('Navigation generation: 4')
+    expect(prompt).toContain('Screenshot crop: C:/artifacts/design-crop.png')
+    expect(prompt).toContain('Comment: Use the primary accent.')
+  })
 
-    expect(listener).toHaveBeenCalledTimes(1)
-    const draft = listener.mock.calls[0][0] as string
-    expect(draft).toContain('URL: http://localhost:5173/settings')
-    expect(draft).toContain('Element: button#save')
-    expect(draft).toContain('Source hints: src/App.tsx')
-    expect(draft).toContain('Screenshot crop: C:/artifacts/design-crop.png')
+  it('returns the exact pane transport payload without using clipboard as transport', () => {
+    expect(browserAnnotationDeliveryPayload(annotation, { kind: 'terminal', paneId: 'pane-1', title: 'Codex', role: 'Builder' })).toEqual({
+      destination: { kind: 'terminal', paneId: 'pane-1', title: 'Codex', role: 'Builder' },
+      prompt: formatBrowserAnnotation(annotation),
+      artifactPath: 'C:/artifacts/design-crop.png',
+      paneId: 'pane-1',
+    })
   })
 })

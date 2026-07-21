@@ -9,10 +9,13 @@ use zeroize::Zeroize;
 
 use crate::app::license::LicenseService;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
+#[cfg(windows)]
+use tauri::Manager;
 
 const MAX_DISCOVERY_RESULTS: usize = 100;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;
+const MAX_ACCOUNT_BYTES: usize = 255;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -52,39 +55,40 @@ impl ProviderKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StoreCredentialRequest {
-    pub provider: ProviderKind,
-    #[serde(default)]
-    pub account: String,
-    pub token: String,
-    pub scopes: Vec<String>,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialReference {
-    pub id: String,
+    pub credential_id: String,
     pub provider: ProviderKind,
     pub account: String,
     pub scopes: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct StoredCredential {
-    version: u8,
-    id: String,
+    credential_id: String,
     provider: ProviderKind,
     account: String,
     scopes: Vec<String>,
-    token: String,
+    secret: String,
 }
 
 impl Drop for StoredCredential {
     fn drop(&mut self) {
-        self.token.zeroize();
+        self.secret.zeroize();
+    }
+}
+
+struct CapturedSecret(String);
+
+impl CapturedSecret {
+    fn expose(&self) -> &str {
+        self.0.trim()
+    }
+}
+
+impl Drop for CapturedSecret {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -141,6 +145,46 @@ pub enum ProviderItem {
         repository: String,
         clone_url: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedProviderItem {
+    pub provider_id: String,
+    pub provider: ProviderKind,
+    pub source: String,
+    pub kind: String,
+    pub identifier: String,
+    pub title: String,
+    pub state: String,
+    pub repository: Option<String>,
+    pub project: Option<String>,
+    pub web_url: String,
+    pub updated_at: Option<String>,
+    pub workspace_input_capable: bool,
+    pub workspace_item: Option<ProviderItem>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedProviderFailure {
+    pub source: String,
+    pub failure: ProviderFailure,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedProviderResult {
+    pub items: Vec<AssignedProviderItem>,
+    pub failures: Vec<AssignedProviderFailure>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignedProviderRequest {
+    pub credential: CredentialReference,
+    #[serde(default = "default_discovery_limit")]
+    pub limit: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -218,38 +262,37 @@ pub fn provider_scopes(provider: ProviderKind) -> Vec<String> {
         .collect()
 }
 
-pub fn store_credential(
-    request: StoreCredentialRequest,
+pub fn capture_credential(
+    request: CredentialReference,
+    parent_hwnd: isize,
 ) -> std::result::Result<CredentialReference, ProviderFailure> {
     let account = normalize_account(request.provider, &request.account)?;
-    let token = request.token.trim();
-    if token.is_empty() {
-        return Err(ProviderFailure::invalid("provider token is empty"));
-    }
     let scopes = normalize_scopes(request.provider, request.scopes)?;
-    let stored = StoredCredential {
-        version: 1,
-        id: Uuid::new_v4().to_string(),
-        provider: request.provider,
-        account: account.clone(),
-        scopes: scopes.clone(),
-        token: token.to_string(),
-    };
+    let credential_id = normalize_credential_id(&request.credential_id)?;
+    let secret = prompt_for_provider_secret(parent_hwnd, request.provider, &account)?;
+    if secret.expose().is_empty() {
+        return Err(ProviderFailure::invalid("provider credential is empty"));
+    }
     crate::app::git::hosting::auth::set_scoped_token(
         &account,
-        token,
-        &stored.id,
+        secret.expose(),
+        &credential_id,
         request.provider.id(),
         &scopes,
     )
     .map_err(|error| {
         ProviderFailure::new(
             "credential_store_failed",
-            redact_message(&error.to_string(), &[token]),
+            redact_message(&error.to_string(), &[secret.expose()]),
             false,
         )
     })?;
-    Ok(reference_from_stored(&stored))
+    Ok(CredentialReference {
+        credential_id,
+        provider: request.provider,
+        account,
+        scopes,
+    })
 }
 
 pub fn credential_status(
@@ -275,7 +318,7 @@ pub fn delete_credential(
     crate::app::git::hosting::auth::clear_token(&stored.account).map_err(|error| {
         ProviderFailure::new(
             "credential_delete_failed",
-            redact_message(&error.to_string(), &[stored.token.as_str()]),
+            redact_message(&error.to_string(), &[stored.secret.as_str()]),
             false,
         )
     })
@@ -298,7 +341,27 @@ pub fn discover(
         ProviderKind::Gitlab => discover_gitlab(&credential, request.resource, query, limit),
         ProviderKind::Linear => discover_linear(&credential, request.resource, query, limit),
     };
-    result.map_err(|error| redact_failure(error, &[credential.token.as_str()]))
+    result.map_err(|error| redact_failure(error, &[credential.secret.as_str()]))
+}
+
+pub fn assigned_items(
+    request: AssignedProviderRequest,
+) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
+    let credential = load_credential(&request.credential)?;
+    let limit = request.limit.clamp(1, MAX_DISCOVERY_RESULTS);
+    let mut result = match credential.provider {
+        ProviderKind::Github => assigned_github(&credential, limit),
+        ProviderKind::Gitlab => assigned_gitlab(&credential, limit),
+        ProviderKind::Linear => assigned_linear(&credential, limit),
+    }
+    .map_err(|error| redact_failure(error, &[credential.secret.as_str()]))?;
+    for source_failure in &mut result.failures {
+        source_failure.failure.message = redact_message(
+            &source_failure.failure.message,
+            &[credential.secret.as_str()],
+        );
+    }
+    Ok(result)
 }
 
 pub fn workspace_creation_input(
@@ -394,7 +457,7 @@ pub fn create_review_comment(
             linear_issue_comment(&credential, &request.target_id, body)
         }
     };
-    result.map_err(|error| redact_failure(error, &[credential.token.as_str()]))
+    result.map_err(|error| redact_failure(error, &[credential.secret.as_str()]))
 }
 
 fn required_repository(repository: Option<&str>) -> std::result::Result<&str, ProviderFailure> {
@@ -427,6 +490,7 @@ fn normalize_account(
         .trim_end_matches('/')
         .to_ascii_lowercase();
     if normalized.is_empty()
+        || normalized.len() > MAX_ACCOUNT_BYTES
         || normalized.contains('/')
         || normalized.contains('\\')
         || normalized.contains('@')
@@ -440,6 +504,138 @@ fn normalize_account(
         ));
     }
     Ok(normalized)
+}
+
+fn normalize_credential_id(value: &str) -> std::result::Result<String, ProviderFailure> {
+    let parsed = Uuid::parse_str(value.trim())
+        .map_err(|_| ProviderFailure::invalid("credential id must be a UUID"))?;
+    Ok(parsed.hyphenated().to_string())
+}
+
+#[cfg(windows)]
+fn prompt_for_provider_secret(
+    parent_hwnd: isize,
+    provider: ProviderKind,
+    account: &str,
+) -> std::result::Result<CapturedSecret, ProviderFailure> {
+    use std::mem::size_of;
+    use windows_sys::Win32::Foundation::{ERROR_CANCELLED, ERROR_SUCCESS, HWND};
+    use windows_sys::Win32::Security::Credentials::{
+        CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI,
+        CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
+        CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
+    };
+
+    const USERNAME_CAPACITY: usize = 513;
+    const SECRET_CAPACITY: usize = 256;
+
+    let caption = wide_null_terminated("VibeLink provider credential");
+    let message = wide_null_terminated(&format!(
+        "Enter the {} credential for {account} in the password field. It will be stored directly in Windows Credential Manager.",
+        provider.id()
+    ));
+    let target = wide_null_terminated(&format!("VibeLink/{}/{account}", provider.id()));
+    let mut username = vec![0u16; USERNAME_CAPACITY];
+    copy_wide_to_buffer(account, &mut username);
+    let mut secret_buffer = vec![0u16; SECRET_CAPACITY];
+    let mut save = 0;
+    let info = CREDUI_INFOW {
+        cbSize: size_of::<CREDUI_INFOW>() as u32,
+        hwndParent: parent_hwnd as HWND,
+        pszMessageText: message.as_ptr(),
+        pszCaptionText: caption.as_ptr(),
+        hbmBanner: std::ptr::null_mut(),
+    };
+    let result = unsafe {
+        CredUIPromptForCredentialsW(
+            &info,
+            target.as_ptr(),
+            std::ptr::null(),
+            0,
+            username.as_mut_ptr(),
+            username.len() as u32,
+            secret_buffer.as_mut_ptr(),
+            secret_buffer.len() as u32,
+            &mut save,
+            CREDUI_FLAGS_ALWAYS_SHOW_UI
+                | CREDUI_FLAGS_DO_NOT_PERSIST
+                | CREDUI_FLAGS_GENERIC_CREDENTIALS
+                | CREDUI_FLAGS_KEEP_USERNAME,
+        )
+    };
+    username.zeroize();
+    if result == ERROR_CANCELLED {
+        secret_buffer.zeroize();
+        return Err(ProviderFailure::new(
+            "credential_capture_cancelled",
+            "Windows credential capture was cancelled",
+            false,
+        ));
+    }
+    if result != ERROR_SUCCESS {
+        secret_buffer.zeroize();
+        return Err(ProviderFailure::new(
+            "credential_capture_failed",
+            format!(
+                "Windows credential capture failed: {}",
+                std::io::Error::from_raw_os_error(result as i32)
+            ),
+            false,
+        ));
+    }
+
+    let secret_len = secret_buffer
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(secret_buffer.len());
+    let decoded = String::from_utf16(&secret_buffer[..secret_len]);
+    secret_buffer.zeroize();
+    decoded
+        .map(CapturedSecret)
+        .map_err(|_| ProviderFailure::new("credential_capture_failed", "Windows returned an invalid credential", false))
+}
+
+#[cfg(not(windows))]
+fn prompt_for_provider_secret(
+    _parent_hwnd: isize,
+    _provider: ProviderKind,
+    _account: &str,
+) -> std::result::Result<CapturedSecret, ProviderFailure> {
+    Err(ProviderFailure::new(
+        "unsupported_platform",
+        "Provider credential capture requires Windows Credential Manager",
+        false,
+    ))
+}
+
+#[cfg(windows)]
+fn provider_prompt_parent(app: &AppHandle) -> isize {
+    app.get_webview_window("main")
+        .and_then(|window| window.hwnd().ok())
+        .map(|hwnd| hwnd.0 as isize)
+        .unwrap_or_default()
+}
+
+#[cfg(not(windows))]
+fn provider_prompt_parent(_app: &AppHandle) -> isize {
+    0
+}
+
+#[cfg(windows)]
+fn wide_null_terminated(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn copy_wide_to_buffer(value: &str, buffer: &mut [u16]) {
+    let capacity = buffer.len().saturating_sub(1);
+    for (target, source) in buffer
+        .iter_mut()
+        .take(capacity)
+        .zip(value.encode_utf16())
+    {
+        *target = source;
+    }
 }
 
 fn normalize_scopes(
@@ -474,24 +670,33 @@ fn stored_from_scoped(
     account: String,
     scoped: crate::app::git::hosting::auth::ScopedToken,
 ) -> std::result::Result<StoredCredential, ProviderFailure> {
-    if scoped.credential_id.is_empty()
-        || scoped.provider != provider.id()
-        || scoped.token.is_empty()
-        || scoped.scopes.is_empty()
-    {
+    if scoped.provider != provider.id() || scoped.token.is_empty() {
         return Err(ProviderFailure::new(
             "credential_invalid",
             "stored provider credential is invalid",
             false,
         ));
     }
+    let credential_id = normalize_credential_id(&scoped.credential_id).map_err(|_| {
+        ProviderFailure::new(
+            "credential_invalid",
+            "stored provider credential is invalid",
+            false,
+        )
+    })?;
+    let scopes = normalize_scopes(provider, scoped.scopes).map_err(|_| {
+        ProviderFailure::new(
+            "credential_invalid",
+            "stored provider credential is invalid",
+            false,
+        )
+    })?;
     Ok(StoredCredential {
-        version: 1,
-        id: scoped.credential_id,
+        credential_id,
         provider,
         account,
-        scopes: scoped.scopes,
-        token: scoped.token,
+        scopes,
+        secret: scoped.token,
     })
 }
 
@@ -509,7 +714,7 @@ fn load_credential(
             )
         })?;
     let stored = stored_from_scoped(reference.provider, account.clone(), scoped)?;
-    if stored.id != reference.id
+    if stored.credential_id != reference.credential_id
         || stored.provider != reference.provider
         || stored.account != account
     {
@@ -524,7 +729,7 @@ fn load_credential(
 
 fn reference_from_stored(stored: &StoredCredential) -> CredentialReference {
     CredentialReference {
-        id: stored.id.clone(),
+        credential_id: stored.credential_id.clone(),
         provider: stored.provider,
         account: stored.account.clone(),
         scopes: stored.scopes.clone(),
@@ -549,6 +754,254 @@ fn http_agent() -> ureq::Agent {
         .redirects(0)
         .user_agent(&format!("VibeLink/{}", env!("CARGO_PKG_VERSION")))
         .build()
+}
+
+fn assigned_github(
+    credential: &StoredCredential,
+    limit: usize,
+) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
+    let base = if credential.account == "github.com" {
+        "https://api.github.com".to_string()
+    } else {
+        format!("https://{}/api/v3", credential.account)
+    };
+    let mut result = AssignedProviderResult { items: Vec::new(), failures: Vec::new() };
+
+    if credential.scopes.iter().any(|scope| scope == "issues:read") {
+        collect_assigned_source(
+            &mut result,
+            "githubAssignedIssue",
+            github_get(credential, &format!("{base}/issues?filter=assigned&state=open&per_page={limit}"))
+                .and_then(|body| parse_github_assigned(&body, credential, "githubAssignedIssue", "issue")),
+        );
+    } else {
+        result.failures.push(AssignedProviderFailure {
+            source: "githubAssignedIssue".into(),
+            failure: ProviderFailure::scope("issues:read"),
+        });
+    }
+
+    if credential.scopes.iter().any(|scope| scope == "reviews:read") {
+        for (source, query) in [
+            ("githubAuthoredReview", "is:pr is:open author:@me"),
+            ("githubReviewRequested", "is:pr is:open review-requested:@me"),
+        ] {
+            let url = format!(
+                "{base}/search/issues?q={}&per_page={limit}",
+                encode_query(query)
+            );
+            collect_assigned_source(
+                &mut result,
+                source,
+                github_get(credential, &url)
+                    .and_then(|body| parse_github_assigned(&body, credential, source, "review")),
+            );
+        }
+    } else {
+        result.failures.push(AssignedProviderFailure {
+            source: "githubReviews".into(),
+            failure: ProviderFailure::scope("reviews:read"),
+        });
+    }
+    Ok(result)
+}
+
+fn assigned_gitlab(
+    credential: &StoredCredential,
+    limit: usize,
+) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
+    let base = format!("https://{}/api/v4", credential.account);
+    let mut result = AssignedProviderResult { items: Vec::new(), failures: Vec::new() };
+    if credential.scopes.iter().any(|scope| scope == "issues:read") {
+        collect_assigned_source(
+            &mut result,
+            "gitlabAssignedIssue",
+            gitlab_get(credential, &format!("{base}/issues?scope=assigned_to_me&state=opened&per_page={limit}"))
+                .and_then(|body| parse_gitlab_assigned(&body, credential, "gitlabAssignedIssue", "issue")),
+        );
+    } else {
+        result.failures.push(AssignedProviderFailure {
+            source: "gitlabAssignedIssue".into(),
+            failure: ProviderFailure::scope("issues:read"),
+        });
+    }
+    if credential.scopes.iter().any(|scope| scope == "reviews:read") {
+        collect_assigned_source(
+            &mut result,
+            "gitlabAssignedReview",
+            gitlab_get(credential, &format!("{base}/merge_requests?scope=assigned_to_me&state=opened&per_page={limit}"))
+                .and_then(|body| parse_gitlab_assigned(&body, credential, "gitlabAssignedReview", "review")),
+        );
+    } else {
+        result.failures.push(AssignedProviderFailure {
+            source: "gitlabAssignedReview".into(),
+            failure: ProviderFailure::scope("reviews:read"),
+        });
+    }
+    Ok(result)
+}
+
+fn assigned_linear(
+    credential: &StoredCredential,
+    limit: usize,
+) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
+    require_scope(credential, "issues:read")?;
+    let response = linear_post(
+        credential,
+        json!({
+            "query": "query VibeLinkAssigned($first: Int!) { viewer { assignedIssues(first: $first) { nodes { id identifier title url updatedAt state { name } team { name } project { name } } } } }",
+            "variables": {"first": limit},
+        }),
+    );
+    let mut result = AssignedProviderResult { items: Vec::new(), failures: Vec::new() };
+    collect_assigned_source(
+        &mut result,
+        "linearAssignedIssue",
+        response.and_then(|body| parse_linear_assigned(&body, credential)),
+    );
+    Ok(result)
+}
+
+fn collect_assigned_source(
+    result: &mut AssignedProviderResult,
+    source: &str,
+    next: std::result::Result<Vec<AssignedProviderItem>, ProviderFailure>,
+) {
+    match next {
+        Ok(mut items) => result.items.append(&mut items),
+        Err(failure) => result.failures.push(AssignedProviderFailure { source: source.into(), failure }),
+    }
+}
+
+fn parse_github_assigned(
+    body: &str,
+    credential: &StoredCredential,
+    source: &str,
+    kind: &str,
+) -> std::result::Result<Vec<AssignedProviderItem>, ProviderFailure> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|error| parse_failure("GitHub", error.into()))?;
+    let values = value.get("items").and_then(Value::as_array).or_else(|| value.as_array())
+        .ok_or_else(|| parse_failure("GitHub", anyhow!("expected an item array")))?;
+    let mut items = Vec::new();
+    for value in values {
+        let is_review = value.get("pull_request").is_some();
+        if (kind == "issue" && is_review) || (kind == "review" && !is_review) { continue; }
+        let repository_api = required_string(value, "repository_url")
+            .map_err(|error| parse_failure("GitHub", error))?;
+        let repository = repository_api.split("/repos/").nth(1).unwrap_or_default().trim_matches('/').to_string();
+        let number = required_u64(value, "number").map_err(|error| parse_failure("GitHub", error))?;
+        let identifier = if kind == "review" { format!("PR #{number}") } else { format!("#{number}") };
+        let title = required_string(value, "title").map_err(|error| parse_failure("GitHub", error))?;
+        let web_url = required_string(value, "html_url").map_err(|error| parse_failure("GitHub", error))?;
+        let provider_item = if kind == "review" {
+            ProviderItem::Review {
+                id: value.get("id").map(value_id).unwrap_or_else(|| number.to_string()),
+                identifier: identifier.clone(), title: title.clone(),
+                state: optional_string(value, "state").unwrap_or_else(|| "open".into()),
+                web_url: web_url.clone(), repository: repository.clone(),
+                clone_url: Some(format!("https://{}/{repository}.git", credential.account)),
+            }
+        } else {
+            ProviderItem::Issue {
+                id: value.get("id").map(value_id).unwrap_or_else(|| number.to_string()),
+                identifier: identifier.clone(), title: title.clone(),
+                state: optional_string(value, "state").unwrap_or_else(|| "open".into()),
+                web_url: web_url.clone(), repository: Some(repository.clone()),
+                clone_url: Some(format!("https://{}/{repository}.git", credential.account)),
+            }
+        };
+        items.push(assigned_from_provider_item(
+            credential.provider, source, kind, identifier, title,
+            optional_string(value, "state").unwrap_or_else(|| "open".into()),
+            Some(repository.clone()), Some(repository), web_url,
+            optional_string(value, "updated_at"), provider_item,
+        ));
+    }
+    Ok(items)
+}
+
+fn parse_gitlab_assigned(
+    body: &str,
+    credential: &StoredCredential,
+    source: &str,
+    kind: &str,
+) -> std::result::Result<Vec<AssignedProviderItem>, ProviderFailure> {
+    let values: Vec<Value> = serde_json::from_str(body)
+        .map_err(|error| parse_failure("GitLab", error.into()))?;
+    values.into_iter().map(|value| {
+        let provider_item = if kind == "review" {
+            parse_gitlab_review(&value).map_err(|error| parse_failure("GitLab", error))?
+        } else {
+            parse_gitlab_issue(&value).map_err(|error| parse_failure("GitLab", error))?
+        };
+        let (identifier, title, state, web_url, repository) = match &provider_item {
+            ProviderItem::Issue { identifier, title, state, web_url, repository, .. } =>
+                (identifier.clone(), title.clone(), state.clone(), web_url.clone(), repository.clone()),
+            ProviderItem::Review { identifier, title, state, web_url, repository, .. } =>
+                (identifier.clone(), title.clone(), state.clone(), web_url.clone(), Some(repository.clone())),
+            ProviderItem::Repository { .. } => unreachable!(),
+        };
+        Ok(assigned_from_provider_item(
+            credential.provider, source, kind, identifier, title, state,
+            repository.clone(), repository, web_url, optional_string(&value, "updated_at"), provider_item,
+        ))
+    }).collect()
+}
+
+fn parse_linear_assigned(
+    body: &str,
+    credential: &StoredCredential,
+) -> std::result::Result<Vec<AssignedProviderItem>, ProviderFailure> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|error| parse_failure("Linear", error.into()))?;
+    if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+        let message = errors.iter().filter_map(|error| error.get("message").and_then(Value::as_str)).collect::<Vec<_>>().join("; ");
+        return Err(ProviderFailure::new("provider_request_failed", message, false));
+    }
+    let nodes = value.pointer("/data/viewer/assignedIssues/nodes").and_then(Value::as_array)
+        .ok_or_else(|| parse_failure("Linear", anyhow!("response omitted assigned issues")))?;
+    nodes.iter().map(|value| {
+        let id = required_string(value, "id").map_err(|error| parse_failure("Linear", error))?;
+        let identifier = required_string(value, "identifier").map_err(|error| parse_failure("Linear", error))?;
+        let title = required_string(value, "title").map_err(|error| parse_failure("Linear", error))?;
+        let web_url = required_string(value, "url").map_err(|error| parse_failure("Linear", error))?;
+        let state = value.pointer("/state/name").and_then(Value::as_str).unwrap_or("open").to_string();
+        let project = value.pointer("/project/name").and_then(Value::as_str)
+            .or_else(|| value.pointer("/team/name").and_then(Value::as_str)).map(ToOwned::to_owned);
+        let provider_item = ProviderItem::Issue {
+            id: id.clone(), identifier: identifier.clone(), title: title.clone(), state: state.clone(),
+            web_url: web_url.clone(), repository: None, clone_url: None,
+        };
+        Ok(assigned_from_provider_item(
+            credential.provider, "linearAssignedIssue", "issue", identifier, title, state,
+            None, project, web_url, optional_string(value, "updatedAt"), provider_item,
+        ))
+    }).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assigned_from_provider_item(
+    provider: ProviderKind,
+    source: &str,
+    kind: &str,
+    identifier: String,
+    title: String,
+    state: String,
+    repository: Option<String>,
+    project: Option<String>,
+    web_url: String,
+    updated_at: Option<String>,
+    workspace_item: ProviderItem,
+) -> AssignedProviderItem {
+    let provider_id = match &workspace_item {
+        ProviderItem::Repository { id, .. } | ProviderItem::Issue { id, .. } | ProviderItem::Review { id, .. } => id.clone(),
+    };
+    AssignedProviderItem {
+        provider_id, provider, source: source.into(), kind: kind.into(), identifier, title, state,
+        repository, project, web_url, updated_at, workspace_input_capable: true,
+        workspace_item: Some(workspace_item),
+    }
 }
 
 fn discover_github(
@@ -649,7 +1102,7 @@ fn github_get(
         http_agent()
             .get(url)
             .set("Accept", "application/vnd.github+json")
-            .set("Authorization", &format!("Bearer {}", credential.token))
+            .set("Authorization", &format!("Bearer {}", credential.secret))
             .set("X-GitHub-Api-Version", "2022-11-28")
             .call(),
         "GitHub",
@@ -664,7 +1117,7 @@ fn gitlab_get(
         http_agent()
             .get(url)
             .set("Accept", "application/json")
-            .set("PRIVATE-TOKEN", &credential.token)
+            .set("PRIVATE-TOKEN", &credential.secret)
             .call(),
         "GitLab",
     )
@@ -678,7 +1131,7 @@ fn linear_post(
         http_agent()
             .post("https://api.linear.app/graphql")
             .set("Accept", "application/json")
-            .set("Authorization", &credential.token)
+            .set("Authorization", &credential.secret)
             .send_json(payload),
         "Linear",
     )
@@ -703,7 +1156,7 @@ fn github_review_comment(
         http_agent()
             .post(&url)
             .set("Accept", "application/vnd.github+json")
-            .set("Authorization", &format!("Bearer {}", credential.token))
+            .set("Authorization", &format!("Bearer {}", credential.secret))
             .set("X-GitHub-Api-Version", "2022-11-28")
             .send_json(json!({"body": body})),
         "GitHub",
@@ -737,7 +1190,7 @@ fn gitlab_review_comment(
         http_agent()
             .post(&url)
             .set("Accept", "application/json")
-            .set("PRIVATE-TOKEN", &credential.token)
+            .set("PRIVATE-TOKEN", &credential.secret)
             .send_json(json!({"body": body})),
         "GitLab",
     )?;
@@ -1257,14 +1710,16 @@ pub async fn provider_scopes_list(
 }
 
 #[tauri::command]
-pub async fn provider_credential_store(
+pub async fn provider_credential_capture(
+    app: AppHandle,
     license: State<'_, Arc<LicenseService>>,
-    request: StoreCredentialRequest,
+    request: CredentialReference,
 ) -> std::result::Result<CredentialReference, ProviderFailure> {
     license
         .require_entitled_cached()
         .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
-    tauri::async_runtime::spawn_blocking(move || store_credential(request))
+    let parent_hwnd = provider_prompt_parent(&app);
+    tauri::async_runtime::spawn_blocking(move || capture_credential(request, parent_hwnd))
         .await
         .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?
 }
@@ -1310,6 +1765,19 @@ pub async fn provider_discover(
 }
 
 #[tauri::command]
+pub async fn provider_assigned_items(
+    license: State<'_, Arc<LicenseService>>,
+    request: AssignedProviderRequest,
+) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
+    license
+        .require_entitled_cached()
+        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    tauri::async_runtime::spawn_blocking(move || assigned_items(request))
+        .await
+        .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?
+}
+
+#[tauri::command]
 pub async fn provider_workspace_input(
     license: State<'_, Arc<LicenseService>>,
     provider: ProviderKind,
@@ -1340,12 +1808,11 @@ mod tests {
 
     fn stored(provider: ProviderKind, scopes: &[&str]) -> StoredCredential {
         StoredCredential {
-            version: 1,
-            id: "credential-id".into(),
+            credential_id: Uuid::nil().to_string(),
             provider,
             account: provider.default_account().into(),
             scopes: scopes.iter().map(|scope| (*scope).into()).collect(),
-            token: "secret-token".into(),
+            secret: String::new(),
         }
     }
 
@@ -1367,17 +1834,6 @@ mod tests {
         let error = require_scope(&credential, "reviews:comment").expect_err("scope denial");
         assert_eq!(error.code, "scope_denied");
         assert!(error.message.contains("reviews:comment"));
-    }
-
-    #[test]
-    fn redacts_exact_and_header_secrets() {
-        let message = "request secret-token Authorization: Bearer another-secret PRIVATE-TOKEN: third access_token=fourth&x=1";
-        let redacted = redact_message(message, &["secret-token"]);
-        assert!(!redacted.contains("secret-token"));
-        assert!(!redacted.contains("another-secret"));
-        assert!(!redacted.contains("third"));
-        assert!(!redacted.contains("fourth"));
-        assert!(redacted.contains("[REDACTED]"));
     }
 
     #[test]

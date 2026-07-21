@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { DockviewApi } from 'dockview-react'
-import { invoke } from '@tauri-apps/api/core'
+import { createPortal } from 'react-dom'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
+import { open } from '@tauri-apps/plugin-dialog'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Bug, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, Globe2, LayoutGrid, ListTodo, Minus, Plus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bug, Camera, Eraser, Minus, Settings2, Square, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
@@ -14,24 +15,24 @@ import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
-import { TerminalTopbarActions } from './components/TerminalTopbarActions'
-import { ProUpsellDialog } from './components/ProUpsellDialog'
 import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
 import { WorkspaceView } from './layout/WorkspaceView'
-import type { WorkspaceChromeState, WorkspaceWindowActions } from './layout/windowActions'
+import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
+import { isControlCharacterCode } from './layout/workspaceContentModel'
+import { getEditorDocumentStore, type EditorDocumentStore } from './editor/documentStore'
 import { startTerminalOutputStream } from './ipc/output'
 import { getHermesRuntimeStatus, startHermesAgent, startHermesOutputStream } from './ipc/hermes'
-import type { HermesRuntimeStatus } from './ipc/types'
+import type { CloneProgress, HermesRuntimeStatus } from './ipc/types'
+import type { WorkspaceCreationInput } from './ipc/providerIntegrations'
 import { paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
 import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
-import { planningWorkspaceLayoutPageId, workspaceWindowDescriptors, type TerminalWindowOpenMode, type WorkspaceWindowKind } from './layout/workspaceLayoutModel'
-import { isAppLocked, requiresProWindow } from './state/licenseGate'
+import { isAppLocked } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
 import './styles/theme.css'
@@ -46,6 +47,8 @@ type FfmpegDownloadProgress = { downloaded: number; total?: number | null }
 type CaptureRecordingState = { startedAtMs: number }
 type CaptureRecordingEvent = { startedAtMs: number; path: string }
 type AgentPromptEvent = { sessionId: string; prompt: string }
+type DirtyEditorDecision = 'saveAll' | 'discard' | 'cancel'
+type DirtyEditorPrompt = { title: string; files: string[]; resolve: (decision: DirtyEditorDecision) => void }
 
 
 let hermesWarmupRuntime: { commandOverride: string | null; promise: Promise<HermesRuntimeStatus> } | undefined
@@ -58,24 +61,27 @@ function hermesWarmupStatus(commandOverride: string | null): Promise<HermesRunti
 }
 
 function App() {
-  const apiRef = useRef<DockviewApi | null>(null)
-  const windowMenuRef = useRef<HTMLDivElement | null>(null)
-  const pageMenuRef = useRef<HTMLDivElement | null>(null)
+  const contentActionsRef = useRef<WorkspaceContentActions | null>(null)
+  const allowWindowCloseRef = useRef(false)
+  const windowClosePendingRef = useRef(false)
+  const dirtyPromptActiveRef = useRef(false)
+  const dirtyPromptQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const dirtyPromptDisposedRef = useRef(false)
+  const dirtyPromptResolveRef = useRef<((decision: DirtyEditorDecision) => void) | null>(null)
+  const dirtyPromptDialogRef = useRef<HTMLElement | null>(null)
+  const dirtyPromptCancelRef = useRef<HTMLButtonElement | null>(null)
+  const appShellRef = useRef<HTMLElement | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isBugReportOpen, setIsBugReportOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
   const [isSetupWizardOpen, setIsSetupWizardOpen] = useState(false)
-  const [isWindowMenuOpen, setIsWindowMenuOpen] = useState(false)
-  const [isPageMenuOpen, setIsPageMenuOpen] = useState(false)
-  const [windowActions, setWindowActions] = useState<WorkspaceWindowActions | null>(null)
-  const [chromeState, setChromeState] = useState<WorkspaceChromeState | null>(null)
+  const [contentActions, setContentActions] = useState<WorkspaceContentActions | null>(null)
+  const [chromeState, setChromeState] = useState<WorkspaceContentChromeState | null>(null)
+  const [dirtyEditorPrompt, setDirtyEditorPrompt] = useState<DirtyEditorPrompt | null>(null)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isSidebarPinned, setIsSidebarPinned] = useState(loadSidebarPinned)
 
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
-  const [saveLayoutRequestId, setSaveLayoutRequestId] = useState(0)
-  const [workspaceWindowRequest, setWorkspaceWindowRequest] = useState<{ kind: WorkspaceWindowKind; requestId: number; profileId?: string | null; terminalMode?: TerminalWindowOpenMode } | null>(null)
-  const [proUpsellFeature, setProUpsellFeature] = useState<string | null>(null)
   const [ffmpegNotice, setFfmpegNotice] = useState<string | null>(null)
   const [ffmpegDownload, setFfmpegDownload] = useState<FfmpegDownloadProgress | null>(null)
   const [recordingStartedAtMs, setRecordingStartedAtMs] = useState<number | null>(null)
@@ -104,10 +110,6 @@ function App() {
   const openSession = useWorkspaceStore((state) => state.openSession)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const prepareSetupWizardRun = useWorkspaceStore((state) => state.prepareSetupWizardRun)
-  const clearSession = useWorkspaceStore((state) => state.clearSession)
-  const workspaceLayouts = useWorkspaceStore((state) => state.workspaceLayouts)
-  const setActiveLayoutPage = useWorkspaceStore((state) => state.setActiveLayoutPage)
-  const resetLayoutPage = useWorkspaceStore((state) => state.resetLayoutPage)
   const settings = useWorkspaceStore((state) => state.settings)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
@@ -115,10 +117,8 @@ function App() {
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
-  const activeWorkspaceLayout = activeSessionId ? workspaceLayouts[activeSessionId] : undefined
   const appLocked = status === 'ready' && license.ready && isAppLocked(license.status)
   const setupWizardVisible = !appLocked && (isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null))
-  const activeLayoutPage = activeWorkspaceLayout?.pages.find((page) => page.id === activeWorkspaceLayout.activePageId) ?? activeWorkspaceLayout?.pages[0]
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
 
   useEffect(() => {
@@ -188,9 +188,17 @@ function App() {
         TerminalManager.setRemotePaneLease(event.payload.paneId, lease)
       }),
       listen<AgentPromptEvent>('vibelink://agent-prompt', (event) => {
-        const state = useWorkspaceStore.getState()
-        state.setActiveLayoutPage(event.payload.sessionId, planningWorkspaceLayoutPageId)
-        void state.sendAgentPrompt(event.payload.sessionId, event.payload.prompt)
+        void (async () => {
+          const sessionId = event.payload.sessionId
+          const state = useWorkspaceStore.getState()
+          if (state.activeSessionId !== sessionId) await state.openSession(sessionId)
+          if (useWorkspaceStore.getState().activeSessionId !== sessionId) return
+          const actions = contentActionsRef.current
+          const panelId = await actions?.openContent({ kind: 'agent' })
+          if (useWorkspaceStore.getState().activeSessionId !== sessionId) return
+          if (panelId) contentActionsRef.current?.activateContent(panelId)
+          await useWorkspaceStore.getState().sendAgentPrompt(sessionId, event.payload.prompt)
+        })().catch((caught) => useWorkspaceStore.getState().setError(String(caught)))
       }),
       listen<{ mode: 'image' | 'quick' | 'video'; path: string }>('capture://saved', (event) => {
         const state = useWorkspaceStore.getState()
@@ -230,6 +238,156 @@ function App() {
     }
   }, [])
 
+  const requestDirtyEditorDecision = useCallback((title: string, files: string[]) => {
+    let resolveDecision: (decision: DirtyEditorDecision) => void = () => undefined
+    const decision = new Promise<DirtyEditorDecision>((resolve) => { resolveDecision = resolve })
+    const showPrompt = () => {
+      if (dirtyPromptDisposedRef.current) {
+        resolveDecision('cancel')
+        return Promise.resolve()
+      }
+      return new Promise<void>((complete) => {
+        dirtyPromptActiveRef.current = true
+        const resolve = (value: DirtyEditorDecision) => {
+          if (dirtyPromptResolveRef.current === resolve) dirtyPromptResolveRef.current = null
+          resolveDecision(value)
+          complete()
+        }
+        dirtyPromptResolveRef.current = resolve
+        setDirtyEditorPrompt({ title, files, resolve })
+      })
+    }
+    const turn = dirtyPromptQueueRef.current.then(showPrompt, showPrompt)
+    dirtyPromptQueueRef.current = turn.catch(() => undefined)
+    return decision
+  }, [])
+
+  useEffect(() => {
+    dirtyPromptDisposedRef.current = false
+    return () => {
+      dirtyPromptDisposedRef.current = true
+      const resolve = dirtyPromptResolveRef.current
+      dirtyPromptResolveRef.current = null
+      resolve?.('cancel')
+    }
+  }, [])
+
+  const resolveDirtyEditorPrompt = useCallback((decision: DirtyEditorDecision) => {
+    setDirtyEditorPrompt((prompt) => {
+      if (!prompt) return null
+      prompt.resolve(decision)
+      return null
+    })
+  }, [])
+
+  useEffect(() => {
+    dirtyPromptActiveRef.current = Boolean(dirtyEditorPrompt)
+    if (!dirtyEditorPrompt) return
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusFrame = requestAnimationFrame(() => dirtyPromptCancelRef.current?.focus())
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        resolveDirtyEditorPrompt('cancel')
+        return
+      }
+      if (event.key !== 'Tab') return
+      event.stopImmediatePropagation()
+      const dialog = dirtyPromptDialogRef.current
+      if (!dialog) return
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+      if (focusable.length === 0) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (!(document.activeElement instanceof Node) || !dialog.contains(document.activeElement)) {
+        event.preventDefault()
+        const target = event.shiftKey ? last : first
+        target.focus()
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      cancelAnimationFrame(focusFrame)
+      window.removeEventListener('keydown', onKeyDown, true)
+      if (previouslyFocused?.isConnected) previouslyFocused.focus()
+    }
+  }, [dirtyEditorPrompt, resolveDirtyEditorPrompt])
+
+  useEffect(() => {
+    const appShell = appShellRef.current
+    if (!appShell) return
+    if (dirtyEditorPrompt) appShell.setAttribute('inert', '')
+    else appShell.removeAttribute('inert')
+    return () => appShell.removeAttribute('inert')
+  }, [dirtyEditorPrompt])
+
+  const prepareDirtySessions = useCallback(async (sessionIds: string[], title: string): Promise<boolean> => {
+    const state = useWorkspaceStore.getState()
+    const dirty: Array<{ store: EditorDocumentStore; relPath: string; label: string }> = []
+    for (const sessionId of new Set(sessionIds)) {
+      const session = state.sessions.find((candidate) => candidate.id === sessionId)
+      if (!session?.workspaceFolder) continue
+      const store = getEditorDocumentStore(sessionId, session.workspaceFolder)
+      for (const document of store.listDocuments().filter((candidate) => candidate.dirty)) {
+        dirty.push({ store, relPath: document.relPath, label: `${session.name} — ${document.relPath}` })
+      }
+    }
+    if (dirty.length === 0) return true
+    const decision = await requestDirtyEditorDecision(title, dirty.map((document) => document.label))
+    if (decision === 'cancel') return false
+    if (decision === 'saveAll') {
+      for (const store of new Set(dirty.map((document) => document.store))) {
+        const result = await store.saveAll()
+        if (result.failed.length > 0) {
+          useWorkspaceStore.getState().setError(`Could not save ${result.failed.map((failure) => failure.relPath).join(', ')}. The operation was cancelled.`)
+          return false
+        }
+      }
+      return true
+    }
+    for (const document of dirty) {
+      if (await document.store.requestClose(document.relPath, () => 'discard') === 'cancelled') return false
+    }
+    return true
+  }, [requestDirtyEditorDecision])
+
+  const deleteWorkspace = useCallback(async (sessionId: string) => {
+    if (!await prepareDirtySessions([sessionId], 'Delete workspace?')) return
+    await deleteSession(sessionId)
+  }, [deleteSession, prepareDirtySessions])
+
+  useEffect(() => {
+    const appWindow = getCurrentWindow()
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void appWindow.onCloseRequested((event) => {
+      if (allowWindowCloseRef.current) return
+      event.preventDefault()
+      if (windowClosePendingRef.current) return
+      windowClosePendingRef.current = true
+      void prepareDirtySessions(useWorkspaceStore.getState().sessions.map((session) => session.id), 'Close VibeLink?')
+        .then((ready) => {
+          if (!ready || disposed) return
+          allowWindowCloseRef.current = true
+          return appWindow.close()
+        })
+        .catch((caught) => useWorkspaceStore.getState().setError(String(caught)))
+        .finally(() => { windowClosePendingRef.current = false })
+    }).then((dispose) => { if (disposed) dispose(); else unlisten = dispose })
+    return () => { disposed = true; unlisten?.() }
+  }, [prepareDirtySessions])
+
   useEffect(() => {
     if (recordingStartedAtMs === null) return undefined
     const timer = window.setInterval(() => {
@@ -266,10 +424,6 @@ function App() {
   }, [activeSessionId, activeSession?.workspaceFolder, license.ready, license.status?.entitled, settings.hermesCommand])
 
   useEffect(() => {
-    TerminalManager.scheduleLayoutPass({ force: true, syncPty: true })
-  }, [activeLayoutPage?.id])
-
-  useEffect(() => {
     // Suppress the stock WebView2 context menu (Back/Reload/Print/...) —
     // terminal panes provide their own menu, and the browser one is never
     // useful in the app. Editable fields keep the native menu for spellcheck
@@ -282,18 +436,24 @@ function App() {
     document.addEventListener('contextmenu', onContextMenu)
     return () => document.removeEventListener('contextmenu', onContextMenu)
   }, [])
-  const persistActiveWorkspaceLayout = useCallback(() => {
-    setSaveLayoutRequestId((id) => id + 1)
+  const handleContentActionsReady = useCallback((actions: WorkspaceContentActions | null) => {
+    contentActionsRef.current = actions
+    setContentActions(actions)
   }, [])
 
   const selectSession = useCallback((sessionId: string) => {
-    persistActiveWorkspaceLayout()
     void openSession(sessionId)
-  }, [openSession, persistActiveWorkspaceLayout])
+  }, [openSession])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
+      if (dirtyPromptActiveRef.current) {
+        if (event.key === 'Escape' || event.key === 'Tab') return
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        return
+      }
       const session = workspaceForShortcut(event, orderedSessions)
       if (!session) return
       event.preventDefault()
@@ -310,21 +470,27 @@ function App() {
   }
 
   const clearWorkspace = async () => {
-    const sessionId = useWorkspaceStore.getState().activeSessionId
-    if (!sessionId) return
-    await clearSession(sessionId)
+    await contentActionsRef.current?.clearTerminals()
   }
 
   const reloadAfterRestart = async () => {
-    const api = apiRef.current
-    if (api) {
-      const panels = [...api.panels]
-      for (const panel of panels) panel.api.close()
-    }
     const sessionId = useWorkspaceStore.getState().activeSessionId
     await useWorkspaceStore.getState().refreshSessions()
     if (sessionId) await openSession(sessionId)
   }
+
+  const createWorkspaceFromInput = useCallback(async (input: WorkspaceCreationInput) => {
+    const chosen = await open({ directory: true, multiple: false, title: input.cloneUrl ? 'Choose clone parent directory' : 'Choose workspace directory' })
+    if (typeof chosen !== 'string') return
+    let workspaceFolder = chosen
+    if (input.cloneUrl) {
+      const directoryName = safeWorkspaceDirectoryName(input.suggestedDirectoryName || input.name)
+      workspaceFolder = `${chosen.replace(/[\\/]+$/, '')}\\${directoryName}`
+      const channel = new Channel<CloneProgress>(() => undefined)
+      await invoke('git_clone', { url: input.cloneUrl, targetDir: workspaceFolder, channel })
+    }
+    await createSession(input.name || undefined, workspaceFolder, activeProfile.id)
+  }, [activeProfile.id, createSession])
 
   const openImageCapture = useCallback(() => {
     void invoke('open_capture_overlay', { mode: 'image', dir: settings.captureDir, ffmpegPath: settings.captureFfmpegPath }).catch((caught) => {
@@ -379,30 +545,6 @@ function App() {
     }
   }, [openImageCapture, openQuickImageCapture, openVideoCapture])
 
-  const openWorkspaceWindow = (kind: WorkspaceWindowKind, terminalMode?: TerminalWindowOpenMode) => {
-    if (!activeSessionId) return
-    if (requiresProWindow(kind) && !license.status?.entitled) {
-      setProUpsellFeature(workspaceWindowDescriptors[kind].title)
-      setIsWindowMenuOpen(false)
-      return
-    }
-    setWorkspaceWindowRequest({ kind, terminalMode, profileId: kind === 'terminal' ? activeProfile.id : null, requestId: Date.now() })
-    setIsWindowMenuOpen(false)
-  }
-
-
-  const resetCurrentLayoutPage = () => {
-    if (!activeSessionId || !activeLayoutPage) return
-    if (!window.confirm(`Reset layout page "${activeLayoutPage.name}"?`)) return
-    resetLayoutPage(activeSessionId, activeLayoutPage.id)
-  }
-
-  const switchLayoutPage = (pageId: string) => {
-    if (!activeSessionId || pageId === activeWorkspaceLayout?.activePageId) return
-    persistActiveWorkspaceLayout()
-    setActiveLayoutPage(activeSessionId, pageId)
-  }
-
   useEffect(() => {
     const shortcuts = captureShortcutRegistrations(keybindings.captureImage, keybindings.captureVideo, keybindings.captureQuickImage)
     let disposed = false
@@ -413,7 +555,7 @@ function App() {
         if (disposed) return
         try {
           await register(shortcut.accelerator, (event) => {
-            if (event.state !== 'Pressed') return
+            if (event.state !== 'Pressed' || dirtyPromptActiveRef.current) return
             if (shortcut.action === 'captureImage') captureActionsRef.current.openImage()
             else if (shortcut.action === 'captureQuickImage') captureActionsRef.current.openQuickImage()
             else captureActionsRef.current.openVideo()
@@ -441,28 +583,6 @@ function App() {
       globalShortcutOperationRef.current = unregisterShortcuts.catch(() => {})
     }
   }, [keybindings.captureImage, keybindings.captureQuickImage, keybindings.captureVideo])
-
-  useEffect(() => {
-    if (!isWindowMenuOpen && !isPageMenuOpen) return
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target
-      if (target instanceof Node && (windowMenuRef.current?.contains(target) || pageMenuRef.current?.contains(target))) return
-      setIsWindowMenuOpen(false)
-      setIsPageMenuOpen(false)
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsWindowMenuOpen(false)
-        setIsPageMenuOpen(false)
-      }
-    }
-    window.addEventListener('pointerdown', onPointerDown, { capture: true })
-    window.addEventListener('keydown', onKeyDown, { capture: true })
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown, { capture: true })
-      window.removeEventListener('keydown', onKeyDown, { capture: true })
-    }
-  }, [isWindowMenuOpen, isPageMenuOpen])
 
   const toggleSidebarPin = () => {
     const pinned = !isSidebarPinned
@@ -492,7 +612,15 @@ function App() {
   }
 
   return (
-    <main className="app-shell" data-sidebar-pinned={isSidebarPinned ? 'true' : undefined} data-terminal-tabs={settings.terminalTabsVisible ? 'visible' : 'hidden'} style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}>
+    <>
+    <main
+      ref={appShellRef}
+      className="app-shell"
+      data-sidebar-pinned={isSidebarPinned ? 'true' : undefined}
+      data-active-content={chromeState?.activeContentKind ?? undefined}
+      style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}
+      aria-hidden={dirtyEditorPrompt ? true : undefined}
+    >
       {!isSidebarPinned ? <SidebarRevealEdge onReveal={() => setIsSidebarOpen(true)} /> : null}
       <Sidebar
         isOpen={isSidebarPinned || isSidebarOpen}
@@ -506,7 +634,7 @@ function App() {
         onSelect={selectSession}
         onCreate={() => setIsCreateOpen(true)}
         onRename={(sessionId, name) => void renameSession(sessionId, name)}
-        onDelete={(sessionId) => void deleteSession(sessionId)}
+        onDelete={(sessionId) => { void deleteWorkspace(sessionId).catch((caught) => useWorkspaceStore.getState().setError(String(caught))) }}
         onReorder={reorderWorkspaces}
       />
       <section className="main-surface">
@@ -514,119 +642,56 @@ function App() {
           <div className="workspace-crumb-box" data-tauri-drag-region>
             <div className="crumb" data-tauri-drag-region>{activeSession?.name ?? 'Loading'}</div>
           </div>
-          <div className="window-menu" ref={windowMenuRef}>
-            <button type="button" className="topbar-text-button" disabled={!activeSessionId} aria-haspopup="menu" aria-expanded={isWindowMenuOpen} onClick={() => setIsWindowMenuOpen((open) => !open)}>
-              <LayoutGrid size={14} /> <span>Window</span>
-            </button>
-            {isWindowMenuOpen ? (
-              <div className="window-menu-popover" role="menu">
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('terminal', 'existing')}>
-                  <TerminalSquare size={14} /> Show terminal workspace
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('terminal', 'new')}>
-                  <Plus size={14} /> New terminal below active
-                </button>
-                <div className="window-menu-separator" role="separator" />
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('agent')}>
-                  <Bot size={14} /> {workspaceWindowDescriptors.agent.title}
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('kanban')}>
-                  <LayoutGrid size={14} /> Kanban
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('todo')}>
-                  <ListTodo size={14} /> Todo List
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('git')}>
-                  <GitBranch size={14} /> Git
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('explorer')}>
-                  <FolderTree size={14} /> Explorer
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('diff')}>
-                  <GitCompare size={14} /> Diff
-                </button>
-                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('browser')}>
-                  <Globe2 size={14} /> Browser
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <div className="layout-page-strip" role="tablist" aria-label="Workspace layout pages">
-            {(activeWorkspaceLayout?.pages ?? []).map((page) => (
-              <button
-                key={page.id}
-                type="button"
-                role="tab"
-                aria-selected={page.id === activeWorkspaceLayout?.activePageId}
-                className={page.id === activeWorkspaceLayout?.activePageId ? 'active' : undefined}
-                onClick={() => switchLayoutPage(page.id)}
-              >
-                {page.name}
-              </button>
-            ))}
-          </div>
-          <div className="window-menu" ref={pageMenuRef}>
-            <button type="button" className="topbar-icon-button" disabled={!activeSessionId} title="Layout page actions" aria-haspopup="menu" aria-expanded={isPageMenuOpen} onClick={() => setIsPageMenuOpen((open) => !open)}>
-              <Ellipsis size={15} />
-            </button>
-            {isPageMenuOpen ? (
-              <div className="window-menu-popover" role="menu">
-                <button type="button" role="menuitem" onClick={() => { setSaveLayoutRequestId((id) => id + 1); setIsPageMenuOpen(false) }}>
-                  <Save size={14} /> Save layout
-                </button>
-                <button type="button" role="menuitem" disabled={!activeLayoutPage} onClick={() => { setIsPageMenuOpen(false); resetCurrentLayoutPage() }}>
-                  <Eraser size={14} /> Reset page
-                </button>
-              </div>
-            ) : null}
-          </div>
           <div className="topbar-spacer" data-tauri-drag-region />
-          {chromeState?.activeWindowKind === 'terminal' && chromeState.activeTerminalMode === 'workspace' ? <TerminalTopbarActions actions={windowActions} /> : null}
-          <button type="button" className="topbar-icon-button" title="Capture image" onClick={openImageCapture}>
-            <Camera size={16} />
+          <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !contentActions} title="Reset layout" aria-label="Reset workspace layout" onClick={() => {
+            if (window.confirm('Reset the workspace layout?')) void contentActions?.resetLayout()
+          }}>
+            <Eraser size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="topbar-icon-button" title="Resource monitor" onClick={() => setIsResourceMonitorOpen(true)}>
-            <Activity size={16} />
+          <button type="button" className="topbar-icon-button" title="Capture image" aria-label="Capture image" onClick={openImageCapture}>
+            <Camera size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="topbar-icon-button" title="Capture video" onClick={() => void openVideoCapture()}>
-            <Video size={16} />
+          <button type="button" className="topbar-icon-button" title="Resource monitor" aria-label="Open resource monitor" onClick={() => setIsResourceMonitorOpen(true)}>
+            <Activity size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="topbar-icon-button" title="Report a bug" onClick={() => setIsBugReportOpen(true)}>
-            <Bug size={16} />
+          <button type="button" className="topbar-icon-button" title="Capture video" aria-label="Capture video" onClick={() => void openVideoCapture()}>
+            <Video size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="topbar-icon-button" title="Open settings" onClick={() => setIsSettingsOpen(true)}>
-            <Settings2 size={16} />
+          <button type="button" className="topbar-icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setIsBugReportOpen(true)}>
+            <Bug size={16} aria-hidden="true" />
+          </button>
+          <button type="button" className="topbar-icon-button" title="Open settings" aria-label="Open settings" onClick={() => setIsSettingsOpen(true)}>
+            <Settings2 size={16} aria-hidden="true" />
           </button>
           <div className="window-controls">
-            <button type="button" className="window-control-button" title="Minimize" onClick={() => void getCurrentWindow().minimize()}>
-              <Minus size={14} />
+            <button type="button" className="window-control-button" title="Minimize" aria-label="Minimize window" onClick={() => void getCurrentWindow().minimize()}>
+              <Minus size={14} aria-hidden="true" />
             </button>
-            <button type="button" className="window-control-button" title="Maximize" onClick={() => void getCurrentWindow().toggleMaximize()}>
-              <Square size={12} />
+            <button type="button" className="window-control-button" title="Maximize" aria-label="Maximize or restore window" onClick={() => void getCurrentWindow().toggleMaximize()}>
+              <Square size={12} aria-hidden="true" />
             </button>
-            <button type="button" className="window-control-button window-control-close" title="Close" onClick={() => void getCurrentWindow().close()}>
-              <X size={14} />
+            <button type="button" className="window-control-button window-control-close" title="Close" aria-label="Close VibeLink" onClick={() => void getCurrentWindow().close()}>
+              <X size={14} aria-hidden="true" />
             </button>
           </div>
         </header>
         {error ? (
           <div className="daemon-banner">
-            <AlertTriangle size={16} />
+            <AlertTriangle size={16} aria-hidden="true" />
             <span className="daemon-banner-message">{error}</span>
-            <button type="button" className="daemon-banner-close" title="Dismiss" onClick={dismissError}>
-              <X size={14} />
+            <button type="button" className="daemon-banner-close" title="Dismiss" aria-label="Dismiss error" onClick={dismissError}>
+              <X size={14} aria-hidden="true" />
             </button>
           </div>
         ) : null}
         {status === 'booting' ? <div className="loading-panel">Connecting to daemon…</div> : (
           <div className="workspace-content">
             <WorkspaceView
-              onApiReady={(api) => { apiRef.current = api }}
-              onActionsReady={setWindowActions}
+              onActionsReady={handleContentActionsReady}
               onChromeStateChange={setChromeState}
-              resizeSnapTolerance={settings.resizeSnapTolerance}
-              windowRequest={workspaceWindowRequest}
-              saveLayoutRequestId={saveLayoutRequestId}
+              onDeleteWorkspaceRequested={deleteWorkspace}
+              onWorkspaceInput={createWorkspaceFromInput}
+              keyboardShortcutsDisabled={Boolean(dirtyEditorPrompt)}
             />
           </div>
         )}
@@ -643,7 +708,6 @@ function App() {
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
         {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
-        {proUpsellFeature ? <ProUpsellDialog feature={proUpsellFeature} onClose={() => setProUpsellFeature(null)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
         {ffmpegDownload ? (
           <div className="ffmpeg-download-toast" role="status" aria-live="polite">
@@ -672,8 +736,8 @@ function App() {
                   <p className="settings-eyebrow">Capture video</p>
                   <h2 id="ffmpeg-title">ffmpeg is required</h2>
                 </div>
-                <button type="button" className="settings-close" title="Close" onClick={() => setFfmpegNotice(null)}>
-                  <X size={14} />
+                <button type="button" className="settings-close" title="Close" aria-label="Close ffmpeg notice" onClick={() => setFfmpegNotice(null)}>
+                  <X size={14} aria-hidden="true" />
                 </button>
               </header>
               <div className="settings-dialog-body" style={{ display: 'block', maxHeight: 'none' }}>
@@ -692,6 +756,31 @@ function App() {
         ) : null}
       </section>
     </main>
+    {dirtyEditorPrompt && typeof document !== 'undefined' ? createPortal(
+      <div className="dirty-editor-backdrop" role="presentation" onMouseDown={() => resolveDirtyEditorPrompt('cancel')}>
+        <section
+          ref={dirtyPromptDialogRef}
+          className="dirty-editor-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dirty-editor-title"
+          aria-describedby="dirty-editor-description"
+          tabIndex={-1}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <header><AlertTriangle size={18} aria-hidden="true" /><h2 id="dirty-editor-title">{dirtyEditorPrompt.title}</h2></header>
+          <p id="dirty-editor-description">The following files have unsaved changes:</p>
+          <ul>{dirtyEditorPrompt.files.map((file, index) => <li key={`${index}:${file}`}>{file}</li>)}</ul>
+          <footer>
+            <button type="button" className="primary-action" onClick={() => resolveDirtyEditorPrompt('saveAll')}>Save All</button>
+            <button type="button" onClick={() => resolveDirtyEditorPrompt('discard')}>Discard</button>
+            <button ref={dirtyPromptCancelRef} type="button" onClick={() => resolveDirtyEditorPrompt('cancel')}>Cancel</button>
+          </footer>
+        </section>
+      </div>,
+      document.body,
+    ) : null}
+    </>
   )
 }
 
@@ -702,6 +791,16 @@ function formatElapsed(seconds: number): string {
   const remaining = safeSeconds % 60
   if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`
   return `${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`
+}
+
+function safeWorkspaceDirectoryName(value: string): string {
+  const trimmed = value.trim()
+  let safe = ''
+  for (let index = 0; index < trimmed.length; index += 1) {
+    safe += isControlCharacterCode(trimmed.charCodeAt(index)) ? '-' : trimmed[index]
+  }
+  safe = safe.replace(/[<>:"/\\|?*]/g, '-').replace(/[. ]+$/g, '')
+  return safe || `workspace-${Date.now()}`
 }
 
 function ffmpegProgressPercent(progress: FfmpegDownloadProgress): number | null {

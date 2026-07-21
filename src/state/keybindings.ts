@@ -23,7 +23,6 @@ export const keybindingActionIds = [
   'captureImage',
   'captureQuickImage',
   'captureVideo',
-  'toggleTerminalTabs',
 ] as const
 
 export type KeybindingActionId = (typeof keybindingActionIds)[number]
@@ -58,7 +57,6 @@ export const keybindingDefinitions: KeybindingDefinition[] = [
   { id: 'captureImage', label: 'Capture image', description: 'Open the region selector for a screenshot.' },
   { id: 'captureQuickImage', label: 'Quick capture', description: 'Drag a region and instantly copy the screenshot to the clipboard.' },
   { id: 'captureVideo', label: 'Capture video', description: 'Open the region selector for a screen recording.' },
-  { id: 'toggleTerminalTabs', label: 'Toggle pane tabs', description: 'Show or hide the terminal pane tab bars.' },
 ]
 
 export const defaultKeybindings: KeybindingSettings = {
@@ -84,7 +82,6 @@ export const defaultKeybindings: KeybindingSettings = {
   captureImage: 'alt+shift+s',
   captureQuickImage: 'alt+s',
   captureVideo: 'alt+shift+r',
-  toggleTerminalTabs: 'alt+shift+t',
 }
 
 const shortLivedFocusKeybindings: Partial<KeybindingSettings> = {

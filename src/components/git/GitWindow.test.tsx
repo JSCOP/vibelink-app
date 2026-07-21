@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { RepoInfo, WorkingStatus } from '../../ipc/types'
 
-const { invoke, openWindow } = vi.hoisted(() => ({ invoke: vi.fn(), openWindow: vi.fn(async () => {}) }))
+const { invoke, openContent } = vi.hoisted(() => ({ invoke: vi.fn(), openContent: vi.fn(async () => 'content:explorer:explorer') }))
 vi.mock('@tauri-apps/api/core', () => ({
   invoke,
   Channel: class MockChannel<T> {
@@ -12,13 +12,30 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
-vi.mock('../../layout/windowActions', () => ({ useWorkspaceWindowActions: () => ({ openWindow }) }))
 vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
 
 import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../../state/git'
 import { useExplorerStore } from '../../state/explorer'
 import { useWorkspaceStore } from '../../state/store'
-import { GitWindow } from './GitWindow'
+import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
+import { WorkbenchContentPanel } from './GitWindow'
+
+const workspaceContentActions: WorkspaceContentActions = {
+  openContent,
+  activateContent: vi.fn(),
+  requestCloseContent: vi.fn(async () => 'closed' as const),
+  splitTerminal: vi.fn(async () => undefined),
+  arrangeTerminals: vi.fn(async () => undefined),
+  clearTerminals: vi.fn(async () => undefined),
+  toggleMaximizeContent: vi.fn(),
+  renameTerminal: vi.fn(async () => undefined),
+  resetLayout: vi.fn(async () => undefined),
+  getContentParams: vi.fn(() => null),
+}
+
+function renderWorkbench() {
+  return render(<WorkspaceContentActionsContext.Provider value={workspaceContentActions}><WorkbenchContentPanel /></WorkspaceContentActionsContext.Provider>)
+}
 
 const withResolvers = <T,>() => (Promise as PromiseConstructor & {
   withResolvers: <Value>() => { promise: Promise<Value>; resolve: (value: Value | PromiseLike<Value>) => void; reject: (reason?: unknown) => void }
@@ -46,6 +63,7 @@ const status: WorkingStatus = {
 beforeEach(() => {
   cleanup()
   invoke.mockReset()
+  openContent.mockClear()
   invoke.mockImplementation(async (command: string) => {
     if (command === 'git_repo_info') return repoInfo
     if (command === 'git_working_status') return status
@@ -66,15 +84,16 @@ beforeEach(() => {
   })
 })
 
-describe('GitWindow Changes tab', () => {
+describe('Workbench Changes tab', () => {
   test('lists changed files and reveals the selected path in Explorer', async () => {
-    render(<GitWindow />)
+    renderWorkbench()
     expect(await screen.findByText('Repository is merging.')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Changes: file.txt' })).toBeTruthy()
     expect(screen.getByText('Merge Conflicts')).toBeTruthy()
     expect((screen.getByRole('button', { name: /Commit/ }) as HTMLButtonElement).disabled).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: 'Changes: file.txt' }))
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith({ kind: 'explorer' }))
     await waitFor(() => expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('file.txt'))
   })
 })
@@ -91,7 +110,7 @@ test('fetches and compares the exact upstream tree with local HEAD', async () =>
     return null
   })
 
-  render(<GitWindow />)
+  renderWorkbench()
   fireEvent.click(await screen.findByRole('button', { name: 'Fetch and compare remote origin/main' }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_fetch', { workspaceFolder: 'C:/repo', remote: null, prune: false, refspec: null }))
   expect(await screen.findByRole('button', { name: 'Remote changes: remote.txt' })).toBeTruthy()
@@ -117,7 +136,7 @@ test('clears diff loading when refresh removes the selected file', async () => {
     return null
   })
 
-  render(<GitWindow />)
+  renderWorkbench()
   expect(await screen.findByText('Loading diff…')).toBeTruthy()
   currentStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
   fireEvent.click(screen.getByTitle('Refresh'))
@@ -155,7 +174,7 @@ test('reroots diffs selected from a nested repository in Explorer', async () => 
     },
   })
 
-  render(<GitWindow />)
+  renderWorkbench()
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', {
     workspaceFolder: 'C:/repo/vendor/tool',
     path: 'src/changed.ts',
@@ -184,7 +203,7 @@ test('shows the active nested repository breadcrumb and returns to the workspace
     },
   })
 
-  render(<GitWindow />)
+  renderWorkbench()
   expect(await screen.findByText('vendor/tool')).toBeTruthy()
   expect(screen.getByText('bbbbbbbb')).toBeTruthy()
   expect(screen.getByText('Git target')).toBeTruthy()
@@ -194,4 +213,3 @@ test('shows the active nested repository breadcrumb and returns to the workspace
   fireEvent.click(screen.getByRole('button', { name: 'Open workspace repository' }))
   await waitFor(() => expect(useGitStore.getState().sessions['session-1'].activeRepoRoot).toBe(''))
 })
-

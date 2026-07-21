@@ -67,7 +67,6 @@ export type GitWindowViewProps = {
   refreshing: boolean
   error: string | null
   activeTab: GitTab
-  pullRequestsVisible: boolean
   ciStatus: CiStatus | null
   commitMessage: string
   amend: boolean
@@ -101,7 +100,7 @@ export type GitWindowViewProps = {
   onCommit: () => void
   historyContent: ReactNode
   branchesContent: ReactNode
-  pullRequestsContent: ReactNode
+  assignedContent: ReactNode
 }
 
 
@@ -115,7 +114,7 @@ function GitActionButton({ action, subject }: { action: GitRowAction; subject?: 
   )
 }
 
-export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath, repoInfo, status, refreshing, error, activeTab, pullRequestsVisible, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, selectedArea, contents, diffLoading, diffError, clone, remoteUpstream, remoteComparisonActive, remoteCompareLoading, onOpenWorkspaceRepository, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onCompareRemote, onShowWorkingChanges, onSelectChange, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, pullRequestsContent }: GitWindowViewProps) {
+export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath, repoInfo, status, refreshing, error, activeTab, ciStatus, commitMessage, amend, canCommit, groups, selectedPath, selectedArea, contents, diffLoading, diffError, clone, remoteUpstream, remoteComparisonActive, remoteCompareLoading, onOpenWorkspaceRepository, onRefresh, onInitialize, onOpenClone, onOpenBranchPicker, onFetch, onPull, onPush, onCompareRemote, onShowWorkingChanges, onSelectChange, onContinueState, onAbortState, onTabChange, onCommitMessageChange, onAmendChange, onCommit, historyContent, branchesContent, assignedContent }: GitWindowViewProps) {
   if (!workspaceFolder) {
     return (
       <div ref={setRootElement} className="git-window git-window-empty" data-git-window="true">
@@ -164,13 +163,14 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
     { id: 'changes', label: 'Changes', visible: true },
     { id: 'history', label: 'History', visible: true },
     { id: 'branches', label: 'Branches', visible: true },
-    { id: 'pullRequests', label: 'Pull Requests', visible: pullRequestsVisible },
+    { id: 'assigned', label: 'Assigned', visible: true },
   ]
   const visibleGroups = groups.filter((group) => group.count > 0)
 
   return (
     <div ref={setRootElement} className="git-window" data-git-window="true">
       <header className="git-window-statusbar">
+        <strong className="git-window-title">Workbench</strong>
         <div className="git-window-repository-context" title={`Git target: ${repositoryDescription}. Workspace, terminals, and AI scope stay unchanged.`}>
           <span className="git-window-repository-label">Git target</span>
           <button type="button" onClick={onOpenWorkspaceRepository ?? undefined} disabled={!onOpenWorkspaceRepository} aria-label={repositoryPath ? 'Open workspace repository' : 'Workspace repository'}>
@@ -189,6 +189,9 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
           <span className="git-window-branch-name">{branchLabel}</span>
           <ChevronDown size={12} aria-hidden="true" />
         </button>
+        <span className="git-window-upstream" title={repoInfo.upstream ? `Upstream ${repoInfo.upstream}` : 'No upstream configured'}>
+          {repoInfo.upstream ?? 'No upstream'}
+        </span>
         {ciStatus ? <span className="git-window-ci-dot" data-state={ciStatus.state} title={`CI: ${ciStatus.state}`} /> : null}
         <span className="git-window-sync-count" title="Ahead" data-zero={repoInfo.ahead === 0 || undefined}>↑{repoInfo.ahead}</span>
         <span className="git-window-sync-count" title="Behind" data-zero={repoInfo.behind === 0 || undefined}>↓{repoInfo.behind}</span>
@@ -210,7 +213,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
       {error ? <div className="git-window-error">{error}</div> : null}
       {status?.truncated ? <div className="git-window-warning">Showing the first 5,000 status entries.</div> : null}
 
-      <nav className="git-window-tabs" role="tablist" aria-label="Git views">
+      <nav className="git-window-tabs" role="tablist" aria-label="Workbench views">
         {tabs.filter((tab) => tab.visible).map((tab) => (
           <button key={tab.id} type="button" role="tab" aria-selected={activeTab === tab.id} onClick={() => onTabChange(tab.id)}>{tab.label}</button>
         ))}
@@ -295,7 +298,7 @@ export function GitWindowView({ setRootElement, workspaceFolder, repositoryPath,
         </section>
       ) : activeTab === 'history' ? historyContent
         : activeTab === 'branches' ? branchesContent
-          : pullRequestsContent
+          : assignedContent
       }
       {clone.open ? <CloneDialog clone={clone} /> : null}
     </div>

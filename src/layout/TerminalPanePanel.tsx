@@ -1,19 +1,15 @@
 import { invoke } from '@tauri-apps/api/core'
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, Play, Sparkles, TextSelect } from 'lucide-react'
+import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, TextSelect, X } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { pathFromTerminalSelection } from '../terminal/selectionPath'
-import { useWorkspaceActions } from './actions'
-import { hasPaneDragPayload, paneDragMime, paneDropPositionFromPoint, type PaneDropPosition } from './paneDrag'
-import { planningWorkspaceLayoutPageId } from './workspaceLayoutModel'
+import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
+import type { WorkspaceContentParams } from './workspaceContentModel'
 
-type TerminalPanelParams = {
-  paneId: string
-  title?: string | null
-}
+type TerminalPanelParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
 
 type ContextMenuState = {
   x: number
@@ -23,7 +19,7 @@ type ContextMenuState = {
 }
 
 const CONTEXT_MENU_WIDTH = 232
-const CONTEXT_MENU_HEIGHT = 238
+const CONTEXT_MENU_HEIGHT = 416
 
 export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -41,43 +37,14 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const setError = useWorkspaceStore((state) => state.setError)
   const hermesCommand = useWorkspaceStore((state) => state.settings?.hermesCommand ?? '')
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
-  const setActiveLayoutPage = useWorkspaceStore((state) => state.setActiveLayoutPage)
   const paneTitle = useWorkspaceStore((state) => paneId ? state.panes[paneId]?.config.title : undefined)
-  const actions = useWorkspaceActions()
-  const [dropPosition, setDropPosition] = useState<PaneDropPosition | null>(null)
+  const actions = useWorkspaceContentActions()
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [hermesDetected, setHermesDetected] = useState(false)
   const onTitleChange = useCallback((title: string) => {
     if (!paneId) return
     void applyTerminalTitle(paneId, title)
   }, [applyTerminalTitle, paneId])
-  const onPaneDragOver = (event: DragEvent<HTMLDivElement>) => {
-    if (!paneId) return
-    if (!hasPaneDragPayload(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    event.dataTransfer.dropEffect = 'move'
-    setDropPosition(paneDropPositionFromPoint(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY))
-  }
-
-  const onPaneDragLeave = (event: DragEvent<HTMLDivElement>) => {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-    setDropPosition(null)
-  }
-
-  const onPaneDrop = (event: DragEvent<HTMLDivElement>) => {
-    if (!paneId) return
-    if (!hasPaneDragPayload(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    const position = paneDropPositionFromPoint(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
-    setDropPosition(null)
-    const sourcePaneId = event.dataTransfer.getData(paneDragMime)
-    if (!sourcePaneId || sourcePaneId === paneId) return
-    if (position === 'center') void actions.swapPaneLocations(sourcePaneId, paneId)
-    else void actions.movePaneToPosition(sourcePaneId, paneId, position)
-  }
-
   useEffect(() => {
     let cancelled = false
     void getHermesRuntimeStatus(hermesCommand)
@@ -141,8 +108,29 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     const captured = limitUtf8Tail(selection.trim() ? selection : TerminalManager.getRecentOutput(paneId, 120), 8 * 1024)
     const title = paneTitle?.trim() || props.params?.title?.trim() || paneId
     const prompt = `From VibeLink pane "${title}":\n\`\`\`\n${captured}\n\`\`\`\nExplain what happened and propose the next command or fix.`
-    setActiveLayoutPage(activeSessionId, planningWorkspaceLayoutPageId)
+    await actions.openContent({ kind: 'agent' })
     await sendAgentPrompt(activeSessionId, prompt)
+  }
+
+  const openTerminalInGroup = () => {
+    const targetGroupId = props.containerApi.getPanel(props.api.id)?.group.id
+    closeContextMenu()
+    void actions.openContent({ kind: 'terminal', targetGroupId })
+  }
+
+  const splitTerminal = (direction: 'right' | 'below') => {
+    closeContextMenu()
+    if (paneId) void actions.splitTerminal(paneId, direction)
+  }
+
+  const arrangeTerminals = () => {
+    closeContextMenu()
+    void actions.arrangeTerminals()
+  }
+
+  const closeTerminal = () => {
+    closeContextMenu()
+    void actions.requestCloseContent(props.api.id)
   }
 
   useEffect(() => {
@@ -198,7 +186,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   return (
-    <div className="terminal-panel-shell" data-pane-id={paneId} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-drop-position={dropPosition ?? undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onDragOver={onPaneDragOver} onDragLeave={onPaneDragLeave} onDrop={onPaneDrop} onContextMenu={onContextMenu}>
+    <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onContextMenu={onContextMenu}>
       <div ref={hostRef} className="dock-terminal-host" />
       {contextMenu ? (
         <>
@@ -220,6 +208,19 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             <button type="button" role="menuitem" disabled={!hermesDetected} title={hermesDetected ? 'Ask VibeLink Agent about this pane' : 'Install Hermes Agent to use this'} onClick={() => void askVibeLinkAgent()}>
               <Sparkles size={13} /> Ask VibeLink Agent
             </button>
+            <div className="terminal-context-separator" role="separator" />
+            <button type="button" role="menuitem" onClick={openTerminalInGroup}>
+              <Plus size={13} /> New terminal in this group
+            </button>
+            <button type="button" role="menuitem" onClick={() => splitTerminal('right')}>
+              <SplitSquareVertical size={13} /> Split terminal right
+            </button>
+            <button type="button" role="menuitem" onClick={() => splitTerminal('below')}>
+              <SplitSquareHorizontal size={13} /> Split terminal below
+            </button>
+            <button type="button" role="menuitem" onClick={arrangeTerminals}>
+              <LayoutGrid size={13} /> Arrange Terminals
+            </button>
             <button type="button" role="menuitem" onClick={pasteClipboard}>
               <ClipboardPaste size={13} /> Paste
             </button>
@@ -228,6 +229,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             </button>
             <button type="button" role="menuitem" onClick={copyAll}>
               <ClipboardCopy size={13} /> Copy all output
+            </button>
+            <div className="terminal-context-separator" role="separator" />
+            <button type="button" role="menuitem" onClick={closeTerminal}>
+              <X size={13} /> Close terminal
             </button>
           </div>
         </>

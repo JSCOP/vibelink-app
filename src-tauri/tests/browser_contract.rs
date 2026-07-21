@@ -2,10 +2,12 @@
 mod browser;
 
 use browser::{
-    BrowserDeviceMetrics, BrowserDialogKind, BrowserErrorCode, BrowserFrame, BrowserLifecycleEvent,
-    BrowserLifecycleEventKind, BrowserManager, BrowserPolicy, BrowserProvider, BrowserResult,
-    CertificateDecision, ChildWebViewCreate, ChildWebViewState, PermissionDecision, PhysicalBounds,
-    ProfileKind, RecoveryCandidate, SnapshotNodeInput, SnapshotSource,
+    BrowserAnnotationInput, BrowserCookieImportInput, BrowserCookieImportResult,
+    BrowserDeviceMetrics, BrowserDialogKind, BrowserErrorCode, BrowserFrame,
+    BrowserLifecycleEvent, BrowserLifecycleEventKind, BrowserManager, BrowserPolicy,
+    BrowserProvider, BrowserResult, CertificateDecision, ChildWebViewCreate, ChildWebViewState,
+    PermissionDecision, PhysicalBounds, ProfileKind, RecoveryCandidate, SnapshotNodeInput,
+    SnapshotSource,
 };
 use std::{
     collections::HashMap,
@@ -30,6 +32,7 @@ struct ContractProvider {
     permission_resolutions: Mutex<Vec<(String, PermissionDecision)>>,
     certificate_resolutions: Mutex<Vec<(String, CertificateDecision)>>,
     dialog_resolutions: Mutex<Vec<(String, bool)>>,
+    cookie_import_result: Mutex<Option<BrowserResult<BrowserCookieImportResult>>>,
     active_mutations: AtomicUsize,
     max_active_mutations: AtomicUsize,
 }
@@ -159,6 +162,19 @@ impl BrowserProvider for ContractProvider {
             captured_at_ms: 1,
         })
     }
+    fn capture_crop(&self, _page_id: &str, _bounds: PhysicalBounds) -> BrowserResult<Vec<u8>> {
+        Ok(vec![137, 80, 78, 71])
+    }
+    fn import_cookies(
+        &self,
+        _input: &BrowserCookieImportInput,
+    ) -> BrowserResult<BrowserCookieImportResult> {
+        self.cookie_import_result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| Err(browser::BrowserError::unsupported("import_cookies")))
+    }
     fn resolve_permission(
         &self,
         request_id: &str,
@@ -285,8 +301,20 @@ fn profiles_are_isolated_and_workspace_cleanup_closes_owned_pages() {
             Some("workspace-a".to_string()),
         )
         .unwrap();
+    let imported = manager
+        .create_profile(
+            "imported-a",
+            ProfileKind::Imported,
+            Some("workspace-a".to_string()),
+        )
+        .unwrap();
     assert_ne!(default.user_data_dir, workspace.user_data_dir);
+    assert_ne!(workspace.user_data_dir, imported.user_data_dir);
+    assert!(imported.user_data_dir.as_ref().is_some_and(|path| path.starts_with(&root)));
+    assert!(!imported.cookie_import_quarantined);
     assert!(incognito.user_data_dir.is_none());
+    fs::create_dir_all(workspace.user_data_dir.as_ref().unwrap()).unwrap();
+    fs::create_dir_all(imported.user_data_dir.as_ref().unwrap()).unwrap();
 
     manager
         .create_page("page-default", "workspace-a", "default", bounds())
@@ -302,12 +330,18 @@ fn profiles_are_isolated_and_workspace_cleanup_closes_owned_pages() {
         .unwrap_err();
     assert_eq!(denied.code, BrowserErrorCode::DeniedCapability);
 
+    manager.set_visible("page-default", true).unwrap();
+    manager.set_visible("page-workspace", true).unwrap();
+    assert!(provider.state("page-default").unwrap().visible);
+    assert!(provider.state("page-workspace").unwrap().visible);
+
     manager.select_page("workspace-a", "page-private").unwrap();
     assert!(!provider.state("page-default").unwrap().visible);
     assert!(!provider.state("page-workspace").unwrap().visible);
     assert!(provider.state("page-private").unwrap().visible);
     assert!(provider.state("page-private").unwrap().focused);
 
+    manager.save_state().unwrap();
     manager.cleanup_workspace("workspace-a").unwrap();
     assert!(manager.pages().unwrap().is_empty());
     assert!(!provider.has_page("page-default"));
@@ -322,6 +356,173 @@ fn profiles_are_isolated_and_workspace_cleanup_closes_owned_pages() {
             .collect::<Vec<_>>(),
         vec!["default"]
     );
+    assert!(!workspace.user_data_dir.as_ref().unwrap().exists());
+    assert!(!imported.user_data_dir.as_ref().unwrap().exists());
+    let restarted = BrowserManager::new(
+        Arc::new(ContractProvider::default()),
+        BrowserPolicy::new(
+            false,
+            vec![],
+            root.join("downloads"),
+            root.join("artifacts"),
+            1024,
+        )
+        .unwrap(),
+        root.join("profiles"),
+    );
+    assert_eq!(
+        restarted
+            .profiles()
+            .unwrap()
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["default"]
+    );
+    assert!(restarted
+        .restore_workspace("workspace-a", bounds())
+        .unwrap()
+        .is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn profile_storage_rejects_chrome_and_edge_user_data_roots() {
+    for browser_root in [
+        PathBuf::from("C:/Users/test/AppData/Local/Google/Chrome/User Data/VibeLink"),
+        PathBuf::from("C:/Users/test/AppData/Local/Microsoft/Edge/User Data/VibeLink"),
+    ] {
+        let root = std::env::temp_dir().join(format!("vibelink-browser-path-test-{}", Uuid::new_v4()));
+        let downloads = root.join("downloads");
+        let artifacts = root.join("artifacts");
+        fs::create_dir_all(&downloads).unwrap();
+        fs::create_dir_all(&artifacts).unwrap();
+        let policy = BrowserPolicy::new(false, vec![], downloads, artifacts, 1024).unwrap();
+        let manager = BrowserManager::new(Arc::new(ContractProvider::default()), policy, browser_root);
+        let error = manager
+            .create_profile("rejected", ProfileKind::Persistent, None)
+            .unwrap_err();
+        assert_eq!(error.code, BrowserErrorCode::DeniedCapability);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn cookie_import_crash_marker_restores_the_profile_quarantined() {
+    let (manager, provider, root) = manager();
+    manager
+        .create_profile(
+            "imported-a",
+            ProfileKind::Imported,
+            Some("workspace-a".to_string()),
+        )
+        .unwrap();
+    manager
+        .create_page("page-a", "workspace-a", "imported-a", bounds())
+        .unwrap();
+    *provider.cookie_import_result.lock().unwrap() = Some(Err(browser::BrowserError::new(
+        BrowserErrorCode::RuntimeUnavailable,
+        "simulated crash after mutation began",
+    )));
+    let input = BrowserCookieImportInput {
+        workspace_id: "workspace-a".to_string(),
+        page_id: "page-a".to_string(),
+        profile_id: "imported-a".to_string(),
+        endpoint: "http://127.0.0.1:9222".to_string(),
+        origins: vec!["https://example.test".to_string()],
+        consent: true,
+    };
+    assert_eq!(
+        manager.import_cookies(input).unwrap_err().code,
+        BrowserErrorCode::RuntimeUnavailable
+    );
+    assert!(manager
+        .profiles()
+        .unwrap()
+        .iter()
+        .find(|profile| profile.id == "imported-a")
+        .unwrap()
+        .cookie_import_quarantined);
+
+    let restarted = BrowserManager::new(
+        Arc::new(ContractProvider::default()),
+        BrowserPolicy::new(
+            false,
+            vec![],
+            root.join("downloads"),
+            root.join("artifacts"),
+            1024,
+        )
+        .unwrap(),
+        root.join("profiles"),
+    );
+    assert!(restarted
+        .profiles()
+        .unwrap()
+        .iter()
+        .find(|profile| profile.id == "imported-a")
+        .unwrap()
+        .cookie_import_quarantined);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hash_proven_cookie_rollback_clears_the_durable_marker() {
+    let (manager, provider, root) = manager();
+    manager
+        .create_profile(
+            "imported-a",
+            ProfileKind::Imported,
+            Some("workspace-a".to_string()),
+        )
+        .unwrap();
+    manager
+        .create_page("page-a", "workspace-a", "imported-a", bounds())
+        .unwrap();
+    *provider.cookie_import_result.lock().unwrap() = Some(Ok(BrowserCookieImportResult {
+        imported_count: 0,
+        origin_count: 1,
+        verified: false,
+        rolled_back: true,
+        quarantined: false,
+    }));
+    let result = manager
+        .import_cookies(BrowserCookieImportInput {
+            workspace_id: "workspace-a".to_string(),
+            page_id: "page-a".to_string(),
+            profile_id: "imported-a".to_string(),
+            endpoint: "http://127.0.0.1:9222".to_string(),
+            origins: vec!["https://example.test".to_string()],
+            consent: true,
+        })
+        .unwrap();
+    assert!(result.rolled_back);
+    assert!(!manager
+        .profiles()
+        .unwrap()
+        .iter()
+        .find(|profile| profile.id == "imported-a")
+        .unwrap()
+        .cookie_import_quarantined);
+    let restarted = BrowserManager::new(
+        Arc::new(ContractProvider::default()),
+        BrowserPolicy::new(
+            false,
+            vec![],
+            root.join("downloads"),
+            root.join("artifacts"),
+            1024,
+        )
+        .unwrap(),
+        root.join("profiles"),
+    );
+    assert!(!restarted
+        .profiles()
+        .unwrap()
+        .iter()
+        .find(|profile| profile.id == "imported-a")
+        .unwrap()
+        .cookie_import_quarantined);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -448,6 +649,49 @@ fn visibility_leases_reveal_hidden_pages_and_cleanup_without_stale_visibility() 
         .unwrap();
     manager.cleanup_workspace("workspace-a").unwrap();
     assert!(!provider.has_page("page-a"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn surface_owner_generations_reject_stale_unmount_updates() {
+    let (manager, provider, root) = manager();
+    manager
+        .create_profile(
+            "workspace-a",
+            ProfileKind::Workspace,
+            Some("workspace-a".to_string()),
+        )
+        .unwrap();
+    manager
+        .create_page("page-a", "workspace-a", "workspace-a", bounds())
+        .unwrap();
+
+    manager
+        .set_surface("page-a", 10, Some(bounds()), true, true)
+        .unwrap();
+    manager
+        .set_surface(
+            "page-a",
+            11,
+            Some(PhysicalBounds {
+                width: 900,
+                ..bounds()
+            }),
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        manager
+            .set_surface("page-a", 10, None, false, false)
+            .unwrap_err()
+            .code,
+        BrowserErrorCode::Conflict
+    );
+    let surface = provider.state("page-a").unwrap();
+    assert!(surface.visible);
+    assert!(surface.focused);
+    assert_eq!(surface.bounds.width, 900);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -610,6 +854,37 @@ fn capture_page_requests_a_provider_frame_and_queues_it() {
     assert_eq!(status.latest_sequence, Some(1));
     let frame = manager.take_latest_frame(&page.id).unwrap().unwrap();
     assert_eq!(frame.bytes, vec![137, 80, 78, 71]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn expired_capture_artifacts_are_swept_only_from_the_managed_root() {
+    let (manager, _provider, root) = manager();
+    manager
+        .create_profile("default", ProfileKind::Persistent, None)
+        .unwrap();
+    manager
+        .create_page("page-a", "workspace-a", "default", bounds())
+        .unwrap();
+    let descriptor = manager.capture_crop("page-a", bounds()).unwrap();
+    let artifact_name = descriptor.path.file_name().unwrap().to_string_lossy();
+    let descriptor_path = descriptor.path.with_file_name(
+        artifact_name.replace(".png", ".artifact.json"),
+    );
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+    record["descriptor"]["expiresAtMs"] = serde_json::json!(0);
+    fs::write(&descriptor_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let repository = root.join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    let repository_file = repository.join(artifact_name.as_ref());
+    fs::write(&repository_file, b"repository-owned").unwrap();
+
+    assert_eq!(manager.cleanup_expired_artifacts().unwrap(), 1);
+    assert!(!descriptor.path.exists());
+    assert!(!descriptor_path.exists());
+    assert_eq!(fs::read(repository_file).unwrap(), b"repository-owned");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1000,5 +1275,70 @@ fn provider_lifecycle_events_update_pages_and_ignore_stale_generations() {
     let downloads = manager.downloads().unwrap();
     assert_eq!(downloads.len(), 1);
     assert_eq!(downloads[0].success, Some(true));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn page_originated_navigation_invalidates_exact_persisted_annotations() {
+    let (manager, provider, root) = manager();
+    manager
+        .create_profile("workspace-a", ProfileKind::Workspace, Some("workspace-a".to_string()))
+        .unwrap();
+    let page = manager
+        .create_page("page-a", "workspace-a", "workspace-a", bounds())
+        .unwrap();
+    let input = BrowserAnnotationInput {
+        workspace_id: "workspace-a".to_string(),
+        page_id: page.id.clone(),
+        navigation_generation: page.navigation_generation,
+        browser_ref: "button#submit".to_string(),
+        accessible_name: "Submit".to_string(),
+        dom_ancestry: vec!["html".to_string(), "body".to_string(), "button#submit".to_string()],
+        bounds: bounds(),
+        text: "Submit".to_string(),
+        attributes: vec![("type".to_string(), "submit".to_string())],
+        computed_styles: vec![("display".to_string(), "block".to_string())],
+        source_hints: vec!["main form".to_string()],
+        comment: "Use this action".to_string(),
+    };
+    let annotation = manager.create_annotation(input.clone()).unwrap();
+    let screenshot = annotation.screenshot.expect("persisted crop");
+    let artifact_root = root.join("artifacts");
+    let repository_root = root.join("repository");
+    assert!(screenshot.path.starts_with(&artifact_root));
+    assert!(!screenshot.path.starts_with(&repository_root));
+    assert_eq!(fs::read(&screenshot.path).unwrap(), vec![137, 80, 78, 71]);
+    assert_eq!(screenshot.content_type, "image/png");
+    assert_eq!(screenshot.bytes, 4);
+    assert!(!screenshot.truncated);
+    let checked_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(screenshot.expires_at_ms > checked_at_ms);
+    assert!(
+        screenshot.expires_at_ms.saturating_sub(checked_at_ms) <= 24 * 60 * 60 * 1_000
+    );
+    assert!(screenshot.expires_at_ms <= (1_u64 << 53) - 1);
+
+    provider.events.lock().unwrap().push(BrowserLifecycleEvent {
+        sequence: 1,
+        page_id: page.id.clone(),
+        navigation_generation: page.navigation_generation + 1,
+        kind: BrowserLifecycleEventKind::NavigationStarted,
+        url: Some("https://next.example.test".to_string()),
+        detail: None,
+        timestamp_ms: 1,
+    });
+    let accepted = manager.sync_provider_events().unwrap();
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(
+        manager.page(&page.id).unwrap().navigation_generation,
+        page.navigation_generation + 1
+    );
+    assert_eq!(
+        manager.create_annotation(input).unwrap_err().code,
+        BrowserErrorCode::StaleRef
+    );
     fs::remove_dir_all(root).unwrap();
 }

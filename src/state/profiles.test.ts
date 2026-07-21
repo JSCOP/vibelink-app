@@ -249,13 +249,10 @@ describe('terminal profiles', () => {
     expect(selectedProfileForWorkspace(settings, 'session-b').id).toBe('powershell')
   })
 
-  test('normalizes terminal visibility and workspace order settings', () => {
+  test('normalizes terminal scrollbar visibility and workspace order settings', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
     expect(defaultSettings.terminalScrollbarVisible).toBe(false)
     expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
-    expect(normalizeSettings({ terminalTabsVisible: false }).terminalTabsVisible).toBe(false)
-    expect(defaultSettings.terminalTabsVisible).toBe(true)
-    expect(normalizeSettings({ terminalTabsVisible: 'nope' }).terminalTabsVisible).toBe(defaultSettings.terminalTabsVisible)
     expect(normalizeSettings({ workspaceOrder: ['a', 'a', ' b ', '', 3, 'c'] }).workspaceOrder).toEqual(['a', 'b', 'c'])
     expect(normalizeSettings({ workspaceOrder: 'nope' }).workspaceOrder).toEqual([])
     expect(defaultSettings.workspaceOrder).toEqual([])

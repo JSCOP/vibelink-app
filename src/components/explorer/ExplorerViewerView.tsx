@@ -11,18 +11,20 @@ export type ExplorerViewerViewProps = {
   loading: boolean
   error: string | null
   imageFit: boolean
-  canOpenEditor: boolean
+  canOpenVibeLinkEditor: boolean
+  canOpenExternalEditor: boolean
   canOpenDiff: boolean
   workingTreePresent: boolean
   onToggleImageFit: () => void
-  onOpenEditor: () => void
+  onOpenVibeLinkEditor: () => void
+  onOpenExternalEditor: () => void
   onOpenDiff: () => void
   onOpenTerminal: () => void
   onReveal: () => void
   onCopyPath: () => void
 }
 
-export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenEditor, canOpenDiff, workingTreePresent, onToggleImageFit, onOpenEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
+export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenVibeLinkEditor, canOpenExternalEditor, canOpenDiff, workingTreePresent, onToggleImageFit, onOpenVibeLinkEditor, onOpenExternalEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
   const lineCount = useMemo(() => (textFile && !textFile.binary ? countLines(textFile.content) : null), [textFile])
   const [imageProbe, setImageProbe] = useState<{ src: string; width: number; height: number } | null>(null)
   const imageDims = imageSrc && imageProbe && imageProbe.src === imageSrc ? imageProbe : null
@@ -52,11 +54,12 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           </div>
         </div>
         <div className="explorer-viewer-actions">
+          {workingTreePresent && canOpenVibeLinkEditor ? <button type="button" className="explorer-viewer-primary-action" title="Open in VibeLink Editor" onClick={onOpenVibeLinkEditor}><FileText size={13} /><span>Open</span></button> : null}
           {canOpenDiff ? <button type="button" title="View diff in Git" onClick={onOpenDiff}><GitCompare size={13} /></button> : null}
           <button type="button" title="Copy path" onClick={onCopyPath}><Copy size={13} /></button>
           {workingTreePresent ? <button type="button" title="Reveal in File Explorer" onClick={onReveal}><ExternalLink size={13} /></button> : null}
           {workingTreePresent ? <button type="button" title="Open terminal here" onClick={onOpenTerminal}><Terminal size={13} /></button> : null}
-          {workingTreePresent && canOpenEditor ? <button type="button" title="Open in external editor" onClick={onOpenEditor}><FileCode2 size={13} /></button> : null}
+          {workingTreePresent && canOpenExternalEditor ? <button type="button" title="Open in external editor" onClick={onOpenExternalEditor}><FileCode2 size={13} /></button> : null}
         </div>
       </header>
       <div className="explorer-viewer-meta">
@@ -125,9 +128,9 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
             <strong>Binary file</strong>
             <span>{formatBytes(entry.size)}{entry.modifiedAt ? ` · ${formatWhen(entry.modifiedAt)}` : ''}</span>
             <span className="explorer-binary-hint">Preview is unavailable for this file type.</span>
-            {canOpenEditor ? (
+            {canOpenExternalEditor ? (
               <div className="explorer-binary-card-actions">
-                <button type="button" onClick={onOpenEditor}><FileCode2 size={13} />Open in editor</button>
+                <button type="button" onClick={onOpenExternalEditor}><FileCode2 size={13} />Open in external editor</button>
               </div>
             ) : null}
           </div>

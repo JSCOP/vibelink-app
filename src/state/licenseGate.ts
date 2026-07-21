@@ -1,7 +1,7 @@
-import type { WorkspaceWindowKind } from '../layout/workspaceLayoutModel'
+import type { WorkspaceContentKind } from '../layout/workspaceContentModel'
 import type { LicenseStatus } from '../ipc/types'
 
-export const PRO_WINDOW_KINDS: readonly WorkspaceWindowKind[] = ['agent', 'kanban', 'todo', 'diff', 'git', 'explorer', 'browser', 'computer']
+export const PRO_CONTENT_KINDS: readonly WorkspaceContentKind[] = ['browser', 'editor', 'explorer', 'workbench', 'agent', 'kanban', 'todo', 'diff']
 
 export function isProEntitled(status: LicenseStatus | null | undefined): boolean {
   return Boolean(status?.entitled)
@@ -17,6 +17,6 @@ export function isAppLocked(status: LicenseStatus | null | undefined): boolean {
   return Boolean(status && !status.entitled)
 }
 
-export function requiresProWindow(kind: WorkspaceWindowKind): boolean {
-  return PRO_WINDOW_KINDS.includes(kind)
+export function requiresProContent(kind: WorkspaceContentKind): boolean {
+  return PRO_CONTENT_KINDS.includes(kind)
 }

@@ -3,14 +3,29 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { RepoInfo, WorkingStatus } from '../../ipc/types'
 
-const { invoke, openWindow } = vi.hoisted(() => ({ invoke: vi.fn(), openWindow: vi.fn(async () => {}) }))
+const { invoke, openWorkspaceContent } = vi.hoisted(() => ({ invoke: vi.fn(), openWorkspaceContent: vi.fn(async () => 'content:workbench:workbench') }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-vi.mock('../../layout/windowActions', () => ({ useWorkspaceWindowActions: () => ({ openWindow }) }))
 
 import { useExplorerStore } from '../../state/explorer'
 import { useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
+import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
 import { ExplorerWindow } from './ExplorerWindow'
+
+function workspaceContentActions(openContent: WorkspaceContentActions['openContent'] = openWorkspaceContent): WorkspaceContentActions {
+  return {
+    openContent,
+    activateContent: vi.fn(),
+    requestCloseContent: vi.fn(async () => 'closed' as const),
+    splitTerminal: vi.fn(async () => undefined),
+    arrangeTerminals: vi.fn(async () => undefined),
+    clearTerminals: vi.fn(async () => undefined),
+    toggleMaximizeContent: vi.fn(),
+    renameTerminal: vi.fn(async () => undefined),
+    resetLayout: vi.fn(async () => undefined),
+    getContentParams: vi.fn(() => null),
+  }
+}
 
 const repoInfo: RepoInfo = {
   isRepo: true,
@@ -36,6 +51,7 @@ beforeEach(() => {
   cleanup()
   window.localStorage.clear()
   invoke.mockReset()
+  openWorkspaceContent.mockClear()
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === 'fs_list_dir') {
       return args?.relPath === 'src'
@@ -57,6 +73,24 @@ beforeEach(() => {
 })
 
 describe('ExplorerWindow Git integration', () => {
+  test('keeps single-click as preview and opens files through content actions on double-click', async () => {
+    const openContent = vi.fn(async () => 'content:editor:src/changed.ts')
+    const actions = workspaceContentActions(openContent)
+    render(
+      <WorkspaceContentActionsContext.Provider value={actions}>
+        <ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />
+      </WorkspaceContentActionsContext.Provider>,
+    )
+    fireEvent.click(await screen.findByLabelText('Expand src'))
+    const file = await screen.findByText('changed.ts')
+
+    fireEvent.click(file)
+    expect(openContent).not.toHaveBeenCalled()
+    fireEvent.doubleClick(file)
+
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'src/changed.ts' }))
+  })
+
   test('uses the filesystem tree for Git navigation and folder actions', async () => {
     render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
 
@@ -108,7 +142,7 @@ test('discovers an uninitialized submodule and separates repository from pointer
     return null
   })
 
-  render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
+  render(<WorkspaceContentActionsContext.Provider value={workspaceContentActions()}><ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" /></WorkspaceContentActionsContext.Provider>)
   fireEvent.click(await screen.findByLabelText('Expand modules'))
   expect(await screen.findByText('Submodule')).toBeTruthy()
   expect(screen.getByText('Not initialized')).toBeTruthy()
@@ -117,7 +151,7 @@ test('discovers an uninitialized submodule and separates repository from pointer
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Pointer History in Parent' }))
   await waitFor(() => expect(useGitStore.getState().sessions['session-1']).toMatchObject({ activeRepoRoot: '', activeTab: 'history', pathFilter: 'modules/child' }))
-  expect(openWindow).toHaveBeenCalledWith('git')
+  expect(openWorkspaceContent).toHaveBeenCalledWith({ kind: 'workbench' })
 
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Initialize Submodule' }))

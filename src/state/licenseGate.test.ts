@@ -18,7 +18,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   }),
 }))
 
-import { isAppLocked, isProEntitled, PRO_WINDOW_KINDS, requiresProWindow } from './licenseGate'
+import { isAppLocked, isProEntitled, PRO_CONTENT_KINDS, requiresProContent } from './licenseGate'
 import { useWorkspaceStore } from './store'
 
 const unlicensed: LicenseStatus = {
@@ -46,9 +46,9 @@ beforeEach(() => {
 })
 
 describe('VibeLink Pro gates', () => {
-  test('locks every non-terminal workspace window kind', async () => { expect(PRO_WINDOW_KINDS).toEqual(['agent', 'kanban', 'todo', 'diff', 'git', 'explorer', 'browser', 'computer'])
-  expect(requiresProWindow('terminal')).toBe(false)
-  for (const kind of PRO_WINDOW_KINDS) expect(requiresProWindow(kind)).toBe(true) })
+  test('locks every Pro workspace content kind', async () => { expect(PRO_CONTENT_KINDS).toEqual(['browser', 'editor', 'explorer', 'workbench', 'agent', 'kanban', 'todo', 'diff'])
+  expect(requiresProContent('terminal')).toBe(false)
+  for (const kind of PRO_CONTENT_KINDS) expect(requiresProContent(kind)).toBe(true) })
 
   test('rejects task creation after license bootstrap resolves unlicensed', async () => {
     await expect(useWorkspaceStore.getState().createTask('session-1', { title: 'Locked', description: '' }))
