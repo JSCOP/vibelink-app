@@ -1,13 +1,13 @@
 use sha2::{Digest, Sha256};
 
+pub mod generated;
 pub mod relay;
 pub mod secure;
 pub mod wire;
 
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const SUBPROTOCOL: &str = "vibelink-remote-v2";
-pub const CONTRACT_SHA256: &str =
-    "164255ade8e7025b9d8991cef60de89a4c66545eaac88fc7f94413df41705789";
+pub use generated::GENERATED_CONTRACT_SHA256 as CONTRACT_SHA256;
 pub const CONTRACT_JSON: &str = include_str!("../../../../contracts/remote-v2.json");
 
 pub fn contract_hash() -> String {
@@ -28,7 +28,7 @@ mod tests {
             serde_json::from_str(CONTRACT_JSON).expect("parse remote-v2 contract");
         assert_eq!(contract["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(contract["subprotocol"], SUBPROTOCOL);
-        assert_eq!(contract["contractVersion"], 2);
+        assert_eq!(contract["contractVersion"], generated::GENERATED_CONTRACT_VERSION);
         assert_eq!(contract["envelope"]["required"][6], "revocationEpoch");
         assert_eq!(
             contract["binaryFrame"]["headerBytes"],

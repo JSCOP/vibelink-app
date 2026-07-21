@@ -1,0 +1,695 @@
+{
+  "fixtureVersion": 1,
+  "contractVersion": 3,
+  "protocolVersion": 2,
+  "subprotocol": "vibelink-remote-v2",
+  "generatedAt": "2026-01-02T03:04:05.000Z",
+  "isolation": {
+    "startsDaemon": false,
+    "bindsPorts": false,
+    "mutatesUserState": false,
+    "usesDocumentationEndpointsOnly": true
+  },
+  "scenarioIds": [
+    "workspace-list-two-workspaces",
+    "pane-catalog-eight-ordered",
+    "terminal-snapshot-then-live",
+    "terminal-resize",
+    "lease-same-owner-renew-update",
+    "lease-competing-owner-busy",
+    "lease-explicit-revoke",
+    "terminal-sequence-gap-resync",
+    "endpoint-delayed-success",
+    "endpoint-stale-failure",
+    "identity-mismatch",
+    "certificate-pin-mismatch"
+  ],
+  "methodPayloads": [
+    {
+      "method": "workspace.list",
+      "request": {}
+    },
+    {
+      "method": "workspace.attach",
+      "request": {
+        "workspaceId": "workspace-alpha"
+      }
+    },
+    {
+      "method": "workspace.detach",
+      "request": {
+        "workspaceId": "workspace-alpha"
+      }
+    },
+    {
+      "method": "terminal.subscribe",
+      "request": {
+        "workspaceId": "workspace-alpha",
+        "paneId": "pane-alpha-shell",
+        "viewGeneration": 17
+      },
+      "result": {
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "paneGeneration": 31,
+        "cols": 100,
+        "rows": 30,
+        "alive": true,
+        "firstLiveSequence": 3,
+        "snapshotBytes": 94,
+        "snapshotChunks": 2
+      }
+    },
+    {
+      "method": "terminal.unsubscribe",
+      "request": {
+        "subscriptionId": "subscription-alpha-shell"
+      }
+    },
+    {
+      "method": "terminal.snapshot",
+      "request": {
+        "subscriptionId": "subscription-alpha-shell",
+        "reason": "gap"
+      }
+    },
+    {
+      "method": "terminal.input",
+      "request": {
+        "subscriptionId": "subscription-alpha-shell",
+        "leaseId": "lease-alpha-shell",
+        "dataBase64": "cHdkDQ=="
+      }
+    },
+    {
+      "method": "terminal.ack",
+      "request": {
+        "subscriptionId": "subscription-alpha-shell",
+        "sequence": 5
+      }
+    },
+    {
+      "method": "terminal.lease.claim",
+      "request": {
+        "workspaceId": "workspace-alpha",
+        "paneId": "pane-alpha-shell",
+        "leaseId": "lease-alpha-shell",
+        "cols": 120,
+        "rows": 40,
+        "viewportRevision": 43
+      }
+    },
+    {
+      "method": "terminal.lease.release",
+      "request": {
+        "leaseId": "lease-alpha-shell",
+        "leaseRevision": 4
+      }
+    },
+    {
+      "method": "terminal.lease.status",
+      "request": {
+        "workspaceId": "workspace-alpha",
+        "paneId": "pane-alpha-shell"
+      }
+    },
+    {
+      "method": "appearance.get",
+      "request": {}
+    }
+  ],
+  "eventPayloads": [
+    {
+      "event": "workspace.changed",
+      "payload": {
+        "viewGeneration": 18,
+        "workspaces": [
+          {
+            "id": "workspace-alpha",
+            "name": "Alpha 작업공간",
+            "workspaceFolder": "C:\\fixture\\alpha",
+            "paneCount": 5
+          },
+          {
+            "id": "workspace-beta",
+            "name": "Beta 🚀",
+            "workspaceFolder": "C:\\fixture\\beta",
+            "paneCount": 3
+          }
+        ]
+      }
+    },
+    {
+      "event": "pane.state",
+      "payload": {
+        "viewGeneration": 18,
+        "pane": {
+          "id": "pane-alpha-shell",
+          "workspaceId": "workspace-alpha",
+          "title": "Shell / 셸",
+          "role": "shell",
+          "alive": true,
+          "order": 0,
+          "groupId": "group-alpha-primary",
+          "groupOrder": 0,
+          "tabOrder": 0,
+          "desktopActive": true,
+          "cols": 100,
+          "rows": 30,
+          "paneGeneration": 31,
+          "activity": "running",
+          "unreadCount": 0,
+          "lastOutputAt": 1767323046000,
+          "streamId": 1001
+        }
+      }
+    },
+    {
+      "event": "terminal.resized",
+      "payload": {
+        "workspaceId": "workspace-alpha",
+        "paneId": "pane-alpha-shell",
+        "viewGeneration": 18,
+        "paneGeneration": 32,
+        "cols": 120,
+        "rows": 40
+      }
+    },
+    {
+      "event": "terminal.lease.changed",
+      "payload": {
+        "viewGeneration": 18,
+        "lease": {
+          "leaseId": "lease-alpha-shell",
+          "workspaceId": "workspace-alpha",
+          "paneId": "pane-alpha-shell",
+          "cols": 120,
+          "rows": 40,
+          "viewportRevision": 43,
+          "leaseRevision": 3
+        }
+      }
+    },
+    {
+      "event": "terminal.lease.lost",
+      "payload": {
+        "workspaceId": "workspace-alpha",
+        "paneId": "pane-alpha-shell",
+        "leaseId": "lease-alpha-shell",
+        "leaseRevision": 4,
+        "reason": "explicit_revoke"
+      }
+    },
+    {
+      "event": "appearance.changed",
+      "payload": {
+        "viewGeneration": 18,
+        "appearance": {
+          "themeId": "vibelink-dark",
+          "themeName": "VibeLink Dark",
+          "terminal": {
+            "background": "#0b0f14",
+            "foreground": "#e6edf3",
+            "cursor": "#e6edf3",
+            "cursorAccent": "#0b0f14",
+            "selectionBackground": "#264f78",
+            "black": "#0b0f14",
+            "red": "#ff7b72",
+            "green": "#7ee787",
+            "yellow": "#d29922",
+            "blue": "#58a6ff",
+            "magenta": "#bc8cff",
+            "cyan": "#39c5cf",
+            "white": "#b1bac4",
+            "brightBlack": "#6e7681",
+            "brightRed": "#ffa198",
+            "brightGreen": "#aff5b4",
+            "brightYellow": "#e3b341",
+            "brightBlue": "#79c0ff",
+            "brightMagenta": "#d2a8ff",
+            "brightCyan": "#56d4dd",
+            "brightWhite": "#f0f6fc"
+          },
+          "fontFamily": "D2Coding",
+          "fontSize": 14,
+          "fontWeight": "400",
+          "fontWeightBold": "700",
+          "cursorStyle": "block",
+          "cursorWidth": 1,
+          "scrollback": 10000,
+          "uiVars": {
+            "--vibelink-accent": "#ff9f1a"
+          },
+          "selectedPaneHighlightColor": "#ff9f1a",
+          "alarmHighlightColor": "#7ee787",
+          "reviewedPaneHighlightColor": "#58a6ff"
+        }
+      }
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "workspace-alpha",
+      "name": "Alpha 작업공간",
+      "workspaceFolder": "C:\\fixture\\alpha",
+      "paneCount": 5
+    },
+    {
+      "id": "workspace-beta",
+      "name": "Beta 🚀",
+      "workspaceFolder": "C:\\fixture\\beta",
+      "paneCount": 3
+    }
+  ],
+  "panes": [
+    {
+      "id": "pane-alpha-shell",
+      "workspaceId": "workspace-alpha",
+      "title": "Shell / 셸",
+      "role": "shell",
+      "alive": true,
+      "order": 0,
+      "groupId": "group-alpha-primary",
+      "groupOrder": 0,
+      "tabOrder": 0,
+      "desktopActive": true,
+      "cols": 100,
+      "rows": 30,
+      "paneGeneration": 31,
+      "activity": "running",
+      "unreadCount": 0,
+      "lastOutputAt": 1767323046000,
+      "streamId": 1001
+    },
+    {
+      "id": "pane-alpha-agent",
+      "workspaceId": "workspace-alpha",
+      "title": "Agent 🤖",
+      "role": "agent",
+      "alive": true,
+      "order": 1,
+      "groupId": "group-alpha-primary",
+      "groupOrder": 0,
+      "tabOrder": 1,
+      "desktopActive": false,
+      "cols": 100,
+      "rows": 30,
+      "paneGeneration": 32,
+      "activity": "waiting",
+      "unreadCount": 2,
+      "lastOutputAt": 1767323047000,
+      "streamId": 1002
+    },
+    {
+      "id": "pane-alpha-server",
+      "workspaceId": "workspace-alpha",
+      "title": "Dev Server",
+      "role": "server",
+      "alive": true,
+      "order": 2,
+      "groupId": "group-alpha-secondary",
+      "groupOrder": 1,
+      "tabOrder": 0,
+      "desktopActive": false,
+      "cols": 80,
+      "rows": 24,
+      "paneGeneration": 33,
+      "activity": "running",
+      "unreadCount": 4,
+      "lastOutputAt": 1767323048000,
+      "streamId": 1003
+    },
+    {
+      "id": "pane-alpha-tests",
+      "workspaceId": "workspace-alpha",
+      "title": "테스트 🧪",
+      "role": "test",
+      "alive": false,
+      "order": 3,
+      "groupId": "group-alpha-secondary",
+      "groupOrder": 1,
+      "tabOrder": 1,
+      "desktopActive": false,
+      "cols": 80,
+      "rows": 24,
+      "paneGeneration": 34,
+      "activity": "done",
+      "unreadCount": 1,
+      "lastOutputAt": 1767323049000,
+      "streamId": 1004
+    },
+    {
+      "id": "pane-alpha-git",
+      "workspaceId": "workspace-alpha",
+      "title": "Git Review",
+      "role": "git",
+      "alive": true,
+      "order": 4,
+      "groupId": "group-alpha-tertiary",
+      "groupOrder": 2,
+      "tabOrder": 0,
+      "desktopActive": false,
+      "cols": 72,
+      "rows": 22,
+      "paneGeneration": 35,
+      "activity": "idle",
+      "unreadCount": 0,
+      "lastOutputAt": 1767323050000,
+      "streamId": 1005
+    },
+    {
+      "id": "pane-beta-shell",
+      "workspaceId": "workspace-beta",
+      "title": "PowerShell",
+      "role": "shell",
+      "alive": true,
+      "order": 0,
+      "groupId": "group-beta-primary",
+      "groupOrder": 0,
+      "tabOrder": 0,
+      "desktopActive": true,
+      "cols": 96,
+      "rows": 28,
+      "paneGeneration": 41,
+      "activity": "running",
+      "unreadCount": 0,
+      "lastOutputAt": 1767323051000,
+      "streamId": 2001
+    },
+    {
+      "id": "pane-beta-logs",
+      "workspaceId": "workspace-beta",
+      "title": "로그 📋",
+      "role": "logs",
+      "alive": true,
+      "order": 1,
+      "groupId": "group-beta-primary",
+      "groupOrder": 0,
+      "tabOrder": 1,
+      "desktopActive": false,
+      "cols": 96,
+      "rows": 28,
+      "paneGeneration": 42,
+      "activity": "error",
+      "unreadCount": 7,
+      "lastOutputAt": 1767323052000,
+      "streamId": 2002
+    },
+    {
+      "id": "pane-beta-review",
+      "workspaceId": "workspace-beta",
+      "title": "Review 완료",
+      "role": "review",
+      "alive": true,
+      "order": 2,
+      "groupId": "group-beta-secondary",
+      "groupOrder": 1,
+      "tabOrder": 0,
+      "desktopActive": false,
+      "cols": 88,
+      "rows": 26,
+      "paneGeneration": 43,
+      "activity": "done",
+      "unreadCount": 3,
+      "lastOutputAt": 1767323053000,
+      "streamId": 2003
+    }
+  ],
+  "terminalTranscript": {
+    "scenarioId": "terminal-snapshot-then-live",
+    "workspaceId": "workspace-alpha",
+    "paneId": "pane-alpha-shell",
+    "viewGeneration": 17,
+    "subscription": {
+      "subscriptionId": "subscription-alpha-shell",
+      "streamId": 1001,
+      "paneGeneration": 31,
+      "cols": 100,
+      "rows": 30,
+      "alive": true,
+      "firstLiveSequence": 3,
+      "snapshotBytes": 94,
+      "snapshotChunks": 2
+    },
+    "records": [
+      {
+        "recordId": "frame-snapshot-001",
+        "at": "2026-01-02T03:04:14.000Z",
+        "kind": "binaryFrame",
+        "channel": "terminalSnapshot",
+        "flags": [
+          "keyframe"
+        ],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 1,
+        "dataBase64": "G1szMm1WaWJlTGluayDrjbDsiqTtgazthrEg7KSA67mE65CoIOKchRtbMG0NCg==",
+        "textUtf8": "\u001b[32mVibeLink 데스크톱 준비됨 ✅\u001b[0m\r\n"
+      },
+      {
+        "recordId": "frame-snapshot-002",
+        "at": "2026-01-02T03:04:14.010Z",
+        "kind": "binaryFrame",
+        "channel": "terminalSnapshot",
+        "flags": [
+          "final"
+        ],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 2,
+        "dataBase64": "G1szNm0kIHBucG0gZGV2G1swbQ0K7ISc67KEIOyLnOyekSDspJHigKYg8J+agA0K",
+        "textUtf8": "\u001b[36m$ pnpm dev\u001b[0m\r\n서버 시작 중… 🚀\r\n"
+      },
+      {
+        "recordId": "frame-live-003",
+        "at": "2026-01-02T03:04:14.020Z",
+        "kind": "binaryFrame",
+        "channel": "terminalOutput",
+        "flags": [],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 3,
+        "dataBase64": "G1szM21bd2F0Y2hdG1swbSDsu7TtjIzsnbwg7JmE66OMIOKcqA0K",
+        "textUtf8": "\u001b[33m[watch]\u001b[0m 컴파일 완료 ✨\r\n"
+      },
+      {
+        "recordId": "frame-live-004",
+        "at": "2026-01-02T03:04:14.030Z",
+        "kind": "binaryFrame",
+        "channel": "terminalOutput",
+        "flags": [],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 4,
+        "dataBase64": "G1szMW1lcnJvcjobWzBtIO2FjOyKpO2KuCDqsITqsqkg7KO87J6FIPCfp6oNCg==",
+        "textUtf8": "\u001b[31merror:\u001b[0m 테스트 간격 주입 🧪\r\n"
+      },
+      {
+        "recordId": "event-resize-005",
+        "at": "2026-01-02T03:04:14.040Z",
+        "kind": "event",
+        "event": "terminal.resized",
+        "payload": {
+          "workspaceId": "workspace-alpha",
+          "paneId": "pane-alpha-shell",
+          "viewGeneration": 18,
+          "paneGeneration": 32,
+          "cols": 120,
+          "rows": 40
+        },
+        "scenarioId": "terminal-resize"
+      },
+      {
+        "recordId": "frame-live-005",
+        "at": "2026-01-02T03:04:14.050Z",
+        "kind": "binaryFrame",
+        "channel": "terminalOutput",
+        "flags": [],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 5,
+        "dataBase64": "7YGs6riwIOuzgOqyvTogMTIweDQwIPCfk5ANCg==",
+        "textUtf8": "크기 변경: 120x40 📐\r\n"
+      },
+      {
+        "recordId": "frame-gap-007",
+        "at": "2026-01-02T03:04:14.060Z",
+        "kind": "binaryFrame",
+        "channel": "terminalOutput",
+        "flags": [
+          "resync"
+        ],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 7,
+        "dataBase64": "G1szNW1bZ2FwXRtbMG0gc2VxdWVuY2UgNiBvbWl0dGVkIGludGVudGlvbmFsbHkNCg==",
+        "textUtf8": "\u001b[35m[gap]\u001b[0m sequence 6 omitted intentionally\r\n",
+        "injectedGap": {
+          "expectedSequence": 6,
+          "observedSequence": 7
+        },
+        "scenarioId": "terminal-sequence-gap-resync"
+      },
+      {
+        "recordId": "resync-snapshot-request-001",
+        "at": "2026-01-02T03:04:14.070Z",
+        "kind": "resyncSnapshotDescriptor",
+        "trigger": "FLAG_RESYNC",
+        "method": "terminal.snapshot",
+        "request": {
+          "subscriptionId": "subscription-alpha-shell",
+          "reason": "gap"
+        },
+        "expectedSequence": 6,
+        "observedSequence": 7,
+        "scenarioId": "terminal-sequence-gap-resync"
+      },
+      {
+        "recordId": "frame-resync-snapshot-008",
+        "at": "2026-01-02T03:04:14.080Z",
+        "kind": "binaryFrame",
+        "channel": "terminalSnapshot",
+        "flags": [
+          "keyframe",
+          "final"
+        ],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 8,
+        "dataBase64": "G1szNG1bcmVzeW5jXRtbMG0g7IOB7YOcIOuzteybkCDwn5SEDQo=",
+        "textUtf8": "\u001b[34m[resync]\u001b[0m 상태 복원 🔄\r\n",
+        "scenarioId": "terminal-sequence-gap-resync"
+      },
+      {
+        "recordId": "frame-live-009",
+        "at": "2026-01-02T03:04:14.090Z",
+        "kind": "binaryFrame",
+        "channel": "terminalOutput",
+        "flags": [],
+        "subscriptionId": "subscription-alpha-shell",
+        "streamId": 1001,
+        "sequence": 9,
+        "dataBase64": "bGl2ZSByZXN1bWVkIOKchQ0K",
+        "textUtf8": "live resumed ✅\r\n"
+      }
+    ]
+  },
+  "leaseScenarios": [
+    {
+      "scenarioId": "lease-same-owner-renew-update",
+      "workspaceId": "workspace-alpha",
+      "paneId": "pane-alpha-shell",
+      "ownerDeviceId": "device-owner-a",
+      "transitions": [
+        {
+          "action": "claim",
+          "leaseId": "lease-alpha-shell",
+          "leaseRevision": 1,
+          "cols": 100,
+          "rows": 30,
+          "viewportRevision": 41,
+          "state": "active"
+        },
+        {
+          "action": "renew",
+          "leaseId": "lease-alpha-shell",
+          "leaseRevision": 2,
+          "cols": 100,
+          "rows": 30,
+          "viewportRevision": 42,
+          "state": "active"
+        },
+        {
+          "action": "update",
+          "leaseId": "lease-alpha-shell",
+          "leaseRevision": 3,
+          "cols": 120,
+          "rows": 40,
+          "viewportRevision": 43,
+          "state": "active"
+        }
+      ]
+    },
+    {
+      "scenarioId": "lease-competing-owner-busy",
+      "workspaceId": "workspace-alpha",
+      "paneId": "pane-alpha-shell",
+      "ownerDeviceId": "device-owner-a",
+      "competingDeviceId": "device-owner-b",
+      "leaseId": "lease-alpha-shell",
+      "leaseRevision": 3,
+      "outcome": {
+        "status": "error",
+        "code": "pane_busy"
+      }
+    },
+    {
+      "scenarioId": "lease-explicit-revoke",
+      "workspaceId": "workspace-alpha",
+      "paneId": "pane-alpha-shell",
+      "ownerDeviceId": "device-owner-a",
+      "leaseId": "lease-alpha-shell",
+      "transitions": [
+        {
+          "event": "terminal.lease.lost",
+          "leaseRevision": 4,
+          "reason": "explicit_revoke",
+          "state": "lost"
+        },
+        {
+          "event": "terminal.lease.changed",
+          "leaseRevision": 4,
+          "reason": "explicit_revoke",
+          "state": "released"
+        }
+      ]
+    }
+  ],
+  "endpointScenarios": [
+    {
+      "scenarioId": "endpoint-delayed-success",
+      "endpointId": "endpoint-direct-delayed",
+      "endpoint": "wss://192.0.2.10:42811/remote-v2",
+      "delayMs": 750,
+      "observedAt": "2026-01-02T03:04:15.000Z",
+      "outcome": {
+        "status": "success",
+        "connectedAt": "2026-01-02T03:04:15.750Z"
+      }
+    },
+    {
+      "scenarioId": "endpoint-stale-failure",
+      "endpointId": "endpoint-direct-stale",
+      "endpoint": "wss://198.51.100.20:42811/remote-v2",
+      "publishedAt": "2026-01-02T03:00:00.000Z",
+      "attemptedAt": "2026-01-02T03:05:00.000Z",
+      "staleAfterMs": 60000,
+      "outcome": {
+        "status": "error",
+        "code": "stale_endpoint"
+      }
+    },
+    {
+      "scenarioId": "identity-mismatch",
+      "endpointId": "endpoint-identity-mismatch",
+      "endpoint": "wss://203.0.113.30:42811/remote-v2",
+      "expectedIdentity": "fixture-desktop-alpha",
+      "observedIdentity": "fixture-desktop-other",
+      "outcome": {
+        "status": "error",
+        "code": "identity_mismatch"
+      }
+    },
+    {
+      "scenarioId": "certificate-pin-mismatch",
+      "endpointId": "endpoint-pin-mismatch",
+      "endpoint": "wss://203.0.113.40:42811/remote-v2",
+      "expectedPin": "sha256/fixture-pin-alpha",
+      "observedPin": "sha256/fixture-pin-other",
+      "outcome": {
+        "status": "error",
+        "code": "certificate_pin_mismatch"
+      }
+    }
+  ]
+}

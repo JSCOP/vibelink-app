@@ -1,26 +1,113 @@
 {
-  "contractVersion": 2,
+  "contractVersion": 3,
   "protocolVersion": 2,
   "subprotocol": "vibelink-remote-v2",
   "noiseSuite": "Noise_XX_25519_ChaChaPoly_BLAKE2s",
   "authorization": "paired-device-key",
   "accountAuthorization": false,
   "sessionAuth": {
-    "pairRequired": ["mode", "code", "deviceName"],
-    "resumeRequired": ["mode", "deviceId", "revocationEpoch"],
+    "pairRequired": [
+      "mode",
+      "code",
+      "deviceName"
+    ],
+    "resumeRequired": [
+      "mode",
+      "deviceId",
+      "revocationEpoch"
+    ],
     "peerIdentity": "noise-static-key-fingerprint",
     "tlsIdentity": "sha256-certificate-pin",
     "liveGrantRecheck": true,
-    "liveEpochRecheck": true
+    "liveEpochRecheck": true,
+    "defaultPairingGrants": [
+      "terminal.view",
+      "terminal.input"
+    ]
+  },
+  "canonicalization": {
+    "encoding": "utf-8",
+    "lineEndings": "lf",
+    "finalNewline": true,
+    "objectMemberOrder": "source-order",
+    "arrayOrder": "significant",
+    "hash": "sha256-file-bytes"
+  },
+  "schema": {
+    "dialect": "vibelink-json-schema-subset-v1",
+    "references": "local-types-only",
+    "optionalFieldRule": "property-present-and-not-required",
+    "integerFormats": [
+      "uint16",
+      "uint32",
+      "uint64",
+      "int32",
+      "int64"
+    ],
+    "typedObjectUnknownFields": "reject",
+    "preservedOpaqueDomains": [
+      "system",
+      "notifications",
+      "orchestration",
+      "browser",
+      "files",
+      "git",
+      "account",
+      "dictation"
+    ]
+  },
+  "canonicalKeys": {
+    "workspace": [
+      "workspaceId",
+      "viewGeneration"
+    ],
+    "terminal": [
+      "paneId",
+      "subscriptionId",
+      "streamId",
+      "dataBase64",
+      "sequence",
+      "paneGeneration",
+      "firstLiveSequence",
+      "snapshotBytes",
+      "snapshotChunks"
+    ],
+    "lease": [
+      "leaseId",
+      "leaseRevision",
+      "viewportRevision",
+      "cols",
+      "rows"
+    ]
   },
   "envelope": {
-    "required": ["version", "requestId", "domain", "method", "operationId", "sequence", "revocationEpoch", "payload"],
-    "responseRequired": ["version", "requestId", "domain", "method", "operationId", "sequence", "revocationEpoch", "payload", "error"],
+    "required": [
+      "version",
+      "requestId",
+      "domain",
+      "method",
+      "operationId",
+      "sequence",
+      "revocationEpoch",
+      "payload"
+    ],
+    "responseRequired": [
+      "version",
+      "requestId",
+      "domain",
+      "method",
+      "operationId",
+      "sequence",
+      "revocationEpoch",
+      "payload",
+      "error"
+    ],
     "sequenceScope": "device-session-domain",
     "sequenceStartsAt": 1,
     "operationIdFormat": "uuid",
     "operationReplayWindow": 4096,
     "unknownFields": "ignore",
+    "typedPayloadUnknownFields": "reject",
     "unknownMethods": "typed-error"
   },
   "sequence": {
@@ -29,10 +116,21 @@
     "gapRequiresResync": true,
     "resyncMethod": "system.resync",
     "maxResyncAdvance": 4096,
-    "resyncPayloadRequired": ["domain", "nextSequence"]
+    "resyncPayloadRequired": [
+      "domain",
+      "nextSequence"
+    ]
   },
   "binaryFrame": {
-    "header": ["version:u8", "channel:u8", "flags:u16be", "streamId:u64be", "sequence:u64be", "droppedBefore:u32be", "payloadLength:u32be"],
+    "header": [
+      "version:u8",
+      "channel:u8",
+      "flags:u16be",
+      "streamId:u64be",
+      "sequence:u64be",
+      "droppedBefore:u32be",
+      "payloadLength:u32be"
+    ],
     "headerBytes": 28,
     "maxPayloadBytes": 61440,
     "flags": {
@@ -60,23 +158,1298 @@
       "emulator": "latest-frame-wins-with-drop-count"
     },
     "dropAccounting": {
-      "allowedChannels": ["browserScreencast", "emulator"],
+      "allowedChannels": [
+        "browserScreencast",
+        "emulator"
+      ],
       "field": "droppedBefore",
       "flag": "droppedBefore",
       "losslessChannelsRequireZero": true
+    },
+    "terminalOrdering": {
+      "sequenceScope": "subscription",
+      "sequenceStartsAt": 1,
+      "sequenceIncrement": 1,
+      "snapshotFramesBeforeLiveFrames": true,
+      "snapshotChannel": "terminalSnapshot",
+      "liveChannel": "terminalOutput",
+      "subscribeFirstLiveSequenceField": "firstLiveSequence",
+      "gapOrResyncFlagSnapshotRequests": 1,
+      "gapSnapshotMethod": "terminal.snapshot",
+      "gapSnapshotReason": "gap"
+    },
+    "terminalFlowControl": {
+      "ackMethod": "terminal.ack",
+      "ackAfterBytes": 65536,
+      "ackAfterMs": 50,
+      "maxUnackedBytesPerStream": 524288,
+      "maxUnackedBytesPerConnection": 2097152,
+      "coalesceMaxBytes": 49152,
+      "coalesceMaxMs": 8
+    }
+  },
+  "types": {
+    "Empty": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "OpaqueObject": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Activity": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "running",
+        "waiting",
+        "done",
+        "error"
+      ]
+    },
+    "CursorStyle": {
+      "type": "string",
+      "enum": [
+        "bar",
+        "block",
+        "underline"
+      ]
+    },
+    "RemoteWorkspace": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "workspaceFolder": {
+          "type": "string"
+        },
+        "paneCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "paneCount"
+      ],
+      "additionalProperties": false
+    },
+    "RemotePane": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "workspaceId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "alive": {
+          "type": "boolean"
+        },
+        "order": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "groupId": {
+          "type": "string"
+        },
+        "groupOrder": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tabOrder": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "desktopActive": {
+          "type": "boolean"
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "paneGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "activity": {
+          "$ref": "#/types/Activity"
+        },
+        "unreadCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lastOutputAt": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "streamId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "id",
+        "workspaceId",
+        "title",
+        "role",
+        "alive",
+        "order",
+        "groupId",
+        "groupOrder",
+        "tabOrder",
+        "desktopActive",
+        "cols",
+        "rows",
+        "paneGeneration",
+        "activity",
+        "unreadCount",
+        "lastOutputAt"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceListParams": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "WorkspaceListResult": {
+      "type": "object",
+      "properties": {
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/RemoteWorkspace"
+          }
+        }
+      },
+      "required": [
+        "viewGeneration",
+        "workspaces"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceAttachParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceAttachResult": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "panes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/RemotePane"
+          }
+        }
+      },
+      "required": [
+        "workspaceId",
+        "viewGeneration",
+        "panes"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceDetachParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalSubscribeParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "paneId",
+        "viewGeneration"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalSubscribeResult": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "streamId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "paneGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "alive": {
+          "type": "boolean"
+        },
+        "firstLiveSequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "snapshotBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "snapshotChunks": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "streamId",
+        "paneGeneration",
+        "cols",
+        "rows",
+        "alive",
+        "firstLiveSequence",
+        "snapshotBytes",
+        "snapshotChunks"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalUnsubscribeParams": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscriptionId"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalSnapshotParams": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalSnapshotResult": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "streamId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "paneGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "firstLiveSequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "snapshotBytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "snapshotChunks": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "streamId",
+        "paneGeneration",
+        "firstLiveSequence",
+        "snapshotBytes",
+        "snapshotChunks"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalInputParams": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "leaseId": {
+          "type": "string"
+        },
+        "dataBase64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "dataBase64"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalAckParams": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "sequence"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseClaimParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "leaseId": {
+          "type": "string"
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "viewportRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "paneId",
+        "cols",
+        "rows",
+        "viewportRevision"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseReleaseParams": {
+      "type": "object",
+      "properties": {
+        "leaseId": {
+          "type": "string"
+        },
+        "leaseRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "leaseId",
+        "leaseRevision"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseStatusParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "paneId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "paneId"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseRecord": {
+      "type": "object",
+      "properties": {
+        "leaseId": {
+          "type": "string"
+        },
+        "workspaceId": {
+          "type": "string"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "viewportRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "leaseRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "leaseId",
+        "workspaceId",
+        "paneId",
+        "cols",
+        "rows",
+        "viewportRevision",
+        "leaseRevision"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseStatusResult": {
+      "type": "object",
+      "properties": {
+        "lease": {
+          "$ref": "#/types/TerminalLeaseRecord"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "TerminalTheme": {
+      "type": "object",
+      "properties": {
+        "background": {
+          "type": "string"
+        },
+        "foreground": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "cursorAccent": {
+          "type": "string"
+        },
+        "selectionBackground": {
+          "type": "string"
+        },
+        "black": {
+          "type": "string"
+        },
+        "red": {
+          "type": "string"
+        },
+        "green": {
+          "type": "string"
+        },
+        "yellow": {
+          "type": "string"
+        },
+        "blue": {
+          "type": "string"
+        },
+        "magenta": {
+          "type": "string"
+        },
+        "cyan": {
+          "type": "string"
+        },
+        "white": {
+          "type": "string"
+        },
+        "brightBlack": {
+          "type": "string"
+        },
+        "brightRed": {
+          "type": "string"
+        },
+        "brightGreen": {
+          "type": "string"
+        },
+        "brightYellow": {
+          "type": "string"
+        },
+        "brightBlue": {
+          "type": "string"
+        },
+        "brightMagenta": {
+          "type": "string"
+        },
+        "brightCyan": {
+          "type": "string"
+        },
+        "brightWhite": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "background",
+        "foreground",
+        "cursor",
+        "cursorAccent",
+        "selectionBackground",
+        "black",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "white",
+        "brightBlack",
+        "brightRed",
+        "brightGreen",
+        "brightYellow",
+        "brightBlue",
+        "brightMagenta",
+        "brightCyan",
+        "brightWhite"
+      ],
+      "additionalProperties": false
+    },
+    "StringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "AppearanceProjection": {
+      "type": "object",
+      "properties": {
+        "themeId": {
+          "type": "string"
+        },
+        "themeName": {
+          "type": "string"
+        },
+        "terminal": {
+          "$ref": "#/types/TerminalTheme"
+        },
+        "fontFamily": {
+          "type": "string"
+        },
+        "fontSize": {
+          "type": "number"
+        },
+        "fontWeight": {
+          "type": "string"
+        },
+        "fontWeightBold": {
+          "type": "string"
+        },
+        "cursorStyle": {
+          "$ref": "#/types/CursorStyle"
+        },
+        "cursorWidth": {
+          "type": "number"
+        },
+        "scrollback": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "uiVars": {
+          "$ref": "#/types/StringMap"
+        },
+        "selectedPaneHighlightColor": {
+          "type": "string"
+        },
+        "alarmHighlightColor": {
+          "type": "string"
+        },
+        "reviewedPaneHighlightColor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "themeId",
+        "themeName",
+        "terminal",
+        "fontFamily",
+        "fontSize",
+        "fontWeight",
+        "fontWeightBold",
+        "cursorStyle",
+        "cursorWidth",
+        "scrollback",
+        "uiVars",
+        "selectedPaneHighlightColor",
+        "alarmHighlightColor",
+        "reviewedPaneHighlightColor"
+      ],
+      "additionalProperties": false
+    },
+    "AppearanceGetParams": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "WorkspaceChangedEvent": {
+      "type": "object",
+      "properties": {
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/RemoteWorkspace"
+          }
+        }
+      },
+      "required": [
+        "viewGeneration",
+        "workspaces"
+      ],
+      "additionalProperties": false
+    },
+    "PaneStateEvent": {
+      "type": "object",
+      "properties": {
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "pane": {
+          "$ref": "#/types/RemotePane"
+        }
+      },
+      "required": [
+        "viewGeneration",
+        "pane"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalResizedEvent": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "paneGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cols": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "paneId",
+        "viewGeneration",
+        "paneGeneration",
+        "cols",
+        "rows"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseChangedEvent": {
+      "type": "object",
+      "properties": {
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "lease": {
+          "$ref": "#/types/TerminalLeaseRecord"
+        }
+      },
+      "required": [
+        "viewGeneration",
+        "lease"
+      ],
+      "additionalProperties": false
+    },
+    "TerminalLeaseLostEvent": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "leaseId": {
+          "type": "string"
+        },
+        "leaseRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "paneId",
+        "leaseId",
+        "leaseRevision",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "AppearanceChangedEvent": {
+      "type": "object",
+      "properties": {
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "appearance": {
+          "$ref": "#/types/AppearanceProjection"
+        }
+      },
+      "required": [
+        "viewGeneration",
+        "appearance"
+      ],
+      "additionalProperties": false
     }
   },
   "methods": {
-    "system": ["status", "resync"],
-    "workspace": ["list", "attach"],
-    "terminal": ["snapshot", "input", "lease.claim", "lease.release"],
-    "notifications": ["catchup", "ack", "register"],
-    "orchestration": ["runs.list", "tasks.list", "messages.list", "message.reply", "run.cancel", "task.retry", "gates.list", "gate.resolve"],
-    "browser": ["tabs", "screencast.start", "screencast.stop", "input.pointer", "input.key", "dialog.resolve", "permission.resolve", "viewport.set"],
-    "files": ["list", "read", "diff", "attachment.upload"],
-    "git": ["status", "stage", "unstage", "commit", "worktree.create", "review.comment"],
-    "account": ["summary", "usage"],
-    "dictation": ["transcribe"]
+    "system": {
+      "status": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "resync": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "workspace": {
+      "list": {
+        "params": {
+          "$ref": "#/types/WorkspaceListParams"
+        },
+        "result": {
+          "$ref": "#/types/WorkspaceListResult"
+        }
+      },
+      "attach": {
+        "params": {
+          "$ref": "#/types/WorkspaceAttachParams"
+        },
+        "result": {
+          "$ref": "#/types/WorkspaceAttachResult"
+        }
+      },
+      "detach": {
+        "params": {
+          "$ref": "#/types/WorkspaceDetachParams"
+        },
+        "result": {
+          "$ref": "#/types/Empty"
+        }
+      }
+    },
+    "terminal": {
+      "subscribe": {
+        "params": {
+          "$ref": "#/types/TerminalSubscribeParams"
+        },
+        "result": {
+          "$ref": "#/types/TerminalSubscribeResult"
+        }
+      },
+      "unsubscribe": {
+        "params": {
+          "$ref": "#/types/TerminalUnsubscribeParams"
+        },
+        "result": {
+          "$ref": "#/types/Empty"
+        }
+      },
+      "snapshot": {
+        "params": {
+          "$ref": "#/types/TerminalSnapshotParams"
+        },
+        "result": {
+          "$ref": "#/types/TerminalSnapshotResult"
+        }
+      },
+      "input": {
+        "params": {
+          "$ref": "#/types/TerminalInputParams"
+        },
+        "result": {
+          "$ref": "#/types/Empty"
+        }
+      },
+      "ack": {
+        "params": {
+          "$ref": "#/types/TerminalAckParams"
+        },
+        "result": {
+          "$ref": "#/types/Empty"
+        }
+      },
+      "lease.claim": {
+        "params": {
+          "$ref": "#/types/TerminalLeaseClaimParams"
+        },
+        "result": {
+          "$ref": "#/types/TerminalLeaseRecord"
+        }
+      },
+      "lease.release": {
+        "params": {
+          "$ref": "#/types/TerminalLeaseReleaseParams"
+        },
+        "result": {
+          "$ref": "#/types/Empty"
+        }
+      },
+      "lease.status": {
+        "params": {
+          "$ref": "#/types/TerminalLeaseStatusParams"
+        },
+        "result": {
+          "$ref": "#/types/TerminalLeaseStatusResult"
+        }
+      }
+    },
+    "appearance": {
+      "get": {
+        "params": {
+          "$ref": "#/types/AppearanceGetParams"
+        },
+        "result": {
+          "$ref": "#/types/AppearanceProjection"
+        }
+      }
+    },
+    "notifications": {
+      "catchup": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "ack": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "register": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "orchestration": {
+      "runs.list": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "tasks.list": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "messages.list": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "message.reply": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "run.cancel": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "task.retry": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "gates.list": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "gate.resolve": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "browser": {
+      "tabs": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "screencast.start": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "screencast.stop": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "input.pointer": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "input.key": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "dialog.resolve": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "permission.resolve": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "viewport.set": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "files": {
+      "list": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "read": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "diff": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "attachment.upload": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "git": {
+      "status": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "stage": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "unstage": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "commit": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "worktree.create": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "review.comment": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "account": {
+      "summary": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "usage": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
+    "dictation": {
+      "transcribe": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    }
+  },
+  "events": {
+    "workspace.changed": {
+      "$ref": "#/types/WorkspaceChangedEvent"
+    },
+    "pane.state": {
+      "$ref": "#/types/PaneStateEvent"
+    },
+    "terminal.resized": {
+      "$ref": "#/types/TerminalResizedEvent"
+    },
+    "terminal.lease.changed": {
+      "$ref": "#/types/TerminalLeaseChangedEvent"
+    },
+    "terminal.lease.lost": {
+      "$ref": "#/types/TerminalLeaseLostEvent"
+    },
+    "appearance.changed": {
+      "$ref": "#/types/AppearanceChangedEvent"
+    }
   },
   "capabilities": [
     "terminal.view",
@@ -139,11 +1512,29 @@
     "encryptedTransportRequired": true,
     "deduplicateBy": "notificationId",
     "catchupBy": "globalSequence",
-    "allowedMetadata": ["notificationId", "globalSequence", "kind", "entityId", "metadata"],
-    "forbiddenMetadataKeyFragments": ["prompt", "result", "text", "content", "terminal", "token", "secret", "path"]
+    "allowedMetadata": [
+      "notificationId",
+      "globalSequence",
+      "kind",
+      "entityId",
+      "metadata"
+    ],
+    "forbiddenMetadataKeyFragments": [
+      "prompt",
+      "result",
+      "text",
+      "content",
+      "terminal",
+      "token",
+      "secret",
+      "path"
+    ]
   },
   "compatibility": {
     "v1SubprotocolUnchanged": "vibelink-remote-v1",
-    "v1BinaryFramesUnchanged": true
+    "v1BinaryFramesUnchanged": true,
+    "v2ProtocolVersionUnchanged": 2,
+    "v2BinaryFrameHeaderUnchanged": true,
+    "v2BinaryChannelsUnchanged": true
   }
 }

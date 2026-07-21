@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[package.metadata.remote-v2-harness]
+fixture = "../../../contracts/remote-v2-fixture.json"
+isolated = true
+starts-daemon = false
+binds-ports = false
+mutates-user-state = false
+
 [lib]
 path = "src/lib.rs"
 
