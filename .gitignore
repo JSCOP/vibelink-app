@@ -20,6 +20,7 @@ coverage/
 # Rust/Tauri build output
 target/
 src-tauri/target/
+src-tauri/binaries/*.exe
 
 # Local environment overrides
 .env

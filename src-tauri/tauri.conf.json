@@ -37,10 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/vibelink",
-      "binaries/vibelink-computer-host"
-    ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
