@@ -1081,7 +1081,7 @@ fn windows_handle_final_path(file: &std::fs::File) -> Result<PathBuf> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
     };
 
     let mut buffer = vec![0_u16; 512];
@@ -1090,7 +1090,7 @@ fn windows_handle_final_path(file: &std::fs::File) -> Result<PathBuf> {
             GetFinalPathNameByHandleW(
                 HANDLE(file.as_raw_handle()),
                 &mut buffer,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+                FILE_NAME_NORMALIZED,
             )
         } as usize;
         if length == 0 {
