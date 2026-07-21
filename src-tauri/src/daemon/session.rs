@@ -1,6 +1,13 @@
 use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
-use crate::protocol::{DaemonToClient, PaneMeta, SessionMeta};
+use crate::protocol::{
+    DaemonToClient, PaneCommandOrigin, PaneMeta, RemoteConnectionCleanupRequest, RemotePaneLease,
+    RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseClaimRequest, RemotePaneLeaseEvent,
+    RemotePaneLeaseEventKind, RemotePaneLeaseEventReason, RemotePaneLeaseReleaseOutcome,
+    RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest, RemotePaneLeaseRestoration,
+    RemotePaneLeaseRestorationStatus, RemotePaneLeaseResult, RemotePaneLeaseStaleReason,
+    RemotePaneLeaseStatusRequest, SessionMeta, REMOTE_PANE_LEASE_TTL_MS,
+};
 use crossbeam_channel::Sender;
 use indexmap::IndexMap;
 use std::{
@@ -18,11 +25,36 @@ pub struct Session {
     pub sleeping: bool,
 }
 
+pub struct PaneLeaseResize {
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub cols: u16,
+    pub rows: u16,
+    pub senders: Vec<Sender<DaemonToClient>>,
+}
+
+pub struct PaneLeaseEffect {
+    pub event: Option<RemotePaneLeaseEvent>,
+    pub resize: Option<PaneLeaseResize>,
+}
+
+pub struct PaneLeaseTransition {
+    pub result: RemotePaneLeaseResult,
+    pub effects: Vec<PaneLeaseEffect>,
+}
+
+pub struct PaneExitEffect {
+    pub senders: Vec<Sender<DaemonToClient>>,
+    pub lease: Option<PaneLeaseTransition>,
+}
+
 pub struct DaemonState {
     sessions: HashMap<Uuid, Session>,
     clients: HashMap<Uuid, Sender<DaemonToClient>>,
     pane_clients: HashMap<Uuid, HashSet<Uuid>>,
     session_clients: HashMap<Uuid, HashSet<Uuid>>,
+    pane_leases: HashMap<Uuid, RemotePaneLease>,
+    next_pane_lease_revision: u64,
 }
 
 impl DaemonState {
@@ -32,6 +64,8 @@ impl DaemonState {
             clients: HashMap::new(),
             pane_clients: HashMap::new(),
             session_clients: HashMap::new(),
+            pane_leases: HashMap::new(),
+            next_pane_lease_revision: 1,
         }
     }
 
@@ -241,16 +275,501 @@ impl DaemonState {
         pane
     }
 
-    pub fn pane_writer(
+    pub fn pane_writer_authorized(
         &self,
         session_id: Uuid,
         pane_id: Uuid,
+        origin: &PaneCommandOrigin,
     ) -> anyhow::Result<Arc<Mutex<Box<dyn Write + Send>>>> {
+        self.authorize_pane_command(session_id, pane_id, origin)?;
         let pane = self.pane_in_session(session_id, pane_id)?;
         Ok(Arc::clone(&pane.writer))
     }
 
-    pub fn resize_pane(
+    pub fn resize_pane_authorized(
+        &mut self,
+        session_id: Uuid,
+        pane_id: Uuid,
+        cols: u16,
+        rows: u16,
+        origin: &PaneCommandOrigin,
+    ) -> anyhow::Result<Vec<Sender<DaemonToClient>>> {
+        self.authorize_pane_command(session_id, pane_id, origin)?;
+        if matches!(origin, PaneCommandOrigin::Remote { .. }) {
+            validate_remote_geometry(cols, rows)?;
+            if let Some(lease) = self
+                .pane_leases
+                .get(&pane_id)
+                .filter(|lease| lease.expires_at > now_unix_millis())
+            {
+                if (cols, rows) != (lease.target_cols, lease.target_rows) {
+                    anyhow::bail!("remote pane resize must match the negotiated lease target");
+                }
+            }
+        }
+        self.resize_pane_unchecked(session_id, pane_id, cols, rows)
+    }
+
+    pub fn claim_or_update_remote_pane_lease(
+        &mut self,
+        request: RemotePaneLeaseClaimRequest,
+        now_ms: u64,
+    ) -> anyhow::Result<PaneLeaseTransition> {
+        validate_remote_geometry(request.cols, request.rows)?;
+        self.pane_in_session(request.session_id, request.pane_id)?;
+
+        let mut effects = Vec::new();
+        if self
+            .pane_leases
+            .get(&request.pane_id)
+            .is_some_and(|lease| lease.expires_at <= now_ms)
+        {
+            let expired = self
+                .finish_remote_pane_lease(
+                    request.pane_id,
+                    RemotePaneLeaseEventKind::Lost,
+                    RemotePaneLeaseEventReason::Expired,
+                    true,
+                    false,
+                )
+                .expect("expired pane lease disappeared before transition");
+            effects.extend(expired.effects);
+        }
+
+        let (pane_generation, original_cols, original_rows) = {
+            let pane = self.pane_in_session(request.session_id, request.pane_id)?;
+            let (pane_generation, _) = pane.output_cursor();
+            (pane_generation, pane.config.cols, pane.config.rows)
+        };
+
+        if let Some(current) = self.pane_leases.get(&request.pane_id).cloned() {
+            if current.owner_connection_id != request.owner_connection_id {
+                return Ok(busy_transition(current));
+            }
+            if current.device_id != request.device_id {
+                return Ok(stale_transition(
+                    Some(current),
+                    RemotePaneLeaseStaleReason::Device,
+                ));
+            }
+            if current.session_id != request.session_id {
+                return Ok(stale_transition(
+                    Some(current),
+                    RemotePaneLeaseStaleReason::Session,
+                ));
+            }
+            if current.pane_generation != pane_generation {
+                return Ok(stale_transition(
+                    Some(current),
+                    RemotePaneLeaseStaleReason::PaneGeneration,
+                ));
+            }
+            if request.lease_id != Some(current.lease_id) {
+                return Ok(stale_transition(
+                    Some(current),
+                    RemotePaneLeaseStaleReason::LeaseId,
+                ));
+            }
+            if request.revision != Some(current.revision) {
+                return Ok(stale_transition(
+                    Some(current),
+                    RemotePaneLeaseStaleReason::Revision,
+                ));
+            }
+
+            let mut lease = current;
+            lease.revision = self.take_pane_lease_revision();
+            lease.target_cols = request.cols;
+            lease.target_rows = request.rows;
+            lease.viewport_revision = request.viewport_revision;
+            lease.expires_at = now_ms.saturating_add(REMOTE_PANE_LEASE_TTL_MS);
+            let resize = self.resize_for_lease(&lease, request.cols, request.rows)?;
+            self.pane_leases.insert(request.pane_id, lease.clone());
+            effects.push(PaneLeaseEffect {
+                event: Some(lease_event(
+                    &lease,
+                    RemotePaneLeaseEventKind::Updated,
+                    RemotePaneLeaseEventReason::TargetUpdated,
+                    None,
+                )),
+                resize,
+            });
+            return Ok(PaneLeaseTransition {
+                result: RemotePaneLeaseResult::Updated { lease },
+                effects,
+            });
+        }
+
+        let lease = RemotePaneLease {
+            lease_id: Uuid::new_v4(),
+            owner_connection_id: request.owner_connection_id,
+            device_id: request.device_id,
+            session_id: request.session_id,
+            pane_id: request.pane_id,
+            pane_generation,
+            revision: self.take_pane_lease_revision(),
+            original_cols,
+            original_rows,
+            target_cols: request.cols,
+            target_rows: request.rows,
+            viewport_revision: request.viewport_revision,
+            expires_at: now_ms.saturating_add(REMOTE_PANE_LEASE_TTL_MS),
+        };
+        let resize = self.resize_for_lease(&lease, request.cols, request.rows)?;
+        self.pane_leases.insert(request.pane_id, lease.clone());
+        effects.push(PaneLeaseEffect {
+            event: Some(lease_event(
+                &lease,
+                RemotePaneLeaseEventKind::Claimed,
+                RemotePaneLeaseEventReason::Claimed,
+                None,
+            )),
+            resize,
+        });
+        Ok(PaneLeaseTransition {
+            result: RemotePaneLeaseResult::Claimed { lease },
+            effects,
+        })
+    }
+
+    pub fn renew_remote_pane_lease(
+        &mut self,
+        request: RemotePaneLeaseRenewRequest,
+        now_ms: u64,
+    ) -> anyhow::Result<PaneLeaseTransition> {
+        let Some(current) = self.pane_leases.get(&request.pane_id).cloned() else {
+            return Ok(stale_transition(None, RemotePaneLeaseStaleReason::Missing));
+        };
+        if let Some(reason) = lease_request_stale_reason(
+            &current,
+            request.owner_connection_id,
+            &request.device_id,
+            request.session_id,
+            request.lease_id,
+            request.revision,
+        ) {
+            return Ok(stale_transition(Some(current), reason));
+        }
+        let pane_generation = self
+            .pane_in_session(request.session_id, request.pane_id)?
+            .output_cursor()
+            .0;
+        if current.pane_generation != pane_generation {
+            return Ok(stale_transition(
+                Some(current),
+                RemotePaneLeaseStaleReason::PaneGeneration,
+            ));
+        }
+        let mut lease = current;
+        lease.revision = self.take_pane_lease_revision();
+        lease.viewport_revision = request.viewport_revision;
+        lease.expires_at = now_ms.saturating_add(REMOTE_PANE_LEASE_TTL_MS);
+        self.pane_leases.insert(request.pane_id, lease.clone());
+        Ok(PaneLeaseTransition {
+            result: RemotePaneLeaseResult::Renewed {
+                lease: lease.clone(),
+            },
+            effects: vec![PaneLeaseEffect {
+                event: Some(lease_event(
+                    &lease,
+                    RemotePaneLeaseEventKind::Updated,
+                    RemotePaneLeaseEventReason::Renewed,
+                    None,
+                )),
+                resize: None,
+            }],
+        })
+    }
+
+    pub fn release_remote_pane_lease(
+        &mut self,
+        request: RemotePaneLeaseReleaseRequest,
+    ) -> anyhow::Result<PaneLeaseTransition> {
+        let Some(current) = self.pane_leases.get(&request.pane_id).cloned() else {
+            return Ok(stale_transition(None, RemotePaneLeaseStaleReason::Missing));
+        };
+        if let Some(reason) = lease_request_stale_reason(
+            &current,
+            request.owner_connection_id,
+            &request.device_id,
+            request.session_id,
+            request.lease_id,
+            request.revision,
+        ) {
+            return Ok(stale_transition(Some(current), reason));
+        }
+        self.finish_remote_pane_lease(
+            request.pane_id,
+            RemotePaneLeaseEventKind::Released,
+            RemotePaneLeaseEventReason::Released,
+            true,
+            true,
+        )
+        .ok_or_else(|| anyhow::anyhow!("remote pane lease disappeared"))
+    }
+
+    pub fn remote_pane_lease_status(
+        &self,
+        request: RemotePaneLeaseStatusRequest,
+        now_ms: u64,
+    ) -> RemotePaneLeaseResult {
+        let lease = self
+            .pane_leases
+            .get(&request.pane_id)
+            .filter(|lease| lease.expires_at > now_ms)
+            .cloned();
+        RemotePaneLeaseResult::Status { lease }
+    }
+
+    pub fn admin_reclaim_remote_pane_lease(
+        &mut self,
+        request: RemotePaneLeaseAdminReclaimRequest,
+    ) -> anyhow::Result<PaneLeaseTransition> {
+        if let Some(lease) = self.pane_leases.get(&request.pane_id) {
+            if lease.session_id != request.session_id {
+                anyhow::bail!(
+                    "pane {} does not belong to session {}",
+                    request.pane_id,
+                    request.session_id
+                );
+            }
+        }
+        self.finish_remote_pane_lease(
+            request.pane_id,
+            RemotePaneLeaseEventKind::Lost,
+            RemotePaneLeaseEventReason::AdminReclaimed,
+            true,
+            false,
+        )
+        .ok_or_else(|| anyhow::anyhow!("no active remote lease for pane {}", request.pane_id))
+    }
+
+    pub fn expire_remote_pane_leases(&mut self, now_ms: u64) -> Vec<PaneLeaseTransition> {
+        let pane_ids = self
+            .pane_leases
+            .iter()
+            .filter_map(|(pane_id, lease)| (lease.expires_at <= now_ms).then_some(*pane_id))
+            .collect::<Vec<_>>();
+        pane_ids
+            .into_iter()
+            .filter_map(|pane_id| {
+                self.finish_remote_pane_lease(
+                    pane_id,
+                    RemotePaneLeaseEventKind::Lost,
+                    RemotePaneLeaseEventReason::Expired,
+                    true,
+                    false,
+                )
+            })
+            .collect()
+    }
+
+    pub fn cleanup_remote_connection_leases(
+        &mut self,
+        request: RemoteConnectionCleanupRequest,
+    ) -> Vec<PaneLeaseTransition> {
+        let pane_ids = self
+            .pane_leases
+            .iter()
+            .filter_map(|(pane_id, lease)| {
+                (lease.owner_connection_id == request.owner_connection_id).then_some(*pane_id)
+            })
+            .collect::<Vec<_>>();
+        pane_ids
+            .into_iter()
+            .filter_map(|pane_id| {
+                self.finish_remote_pane_lease(
+                    pane_id,
+                    RemotePaneLeaseEventKind::Lost,
+                    RemotePaneLeaseEventReason::ConnectionClosed,
+                    true,
+                    false,
+                )
+            })
+            .collect()
+    }
+
+    pub fn cleanup_remote_pane_lease_on_exit(
+        &mut self,
+        pane_id: Uuid,
+    ) -> Option<PaneLeaseTransition> {
+        self.finish_remote_pane_lease(
+            pane_id,
+            RemotePaneLeaseEventKind::Lost,
+            RemotePaneLeaseEventReason::PaneExited,
+            false,
+            false,
+        )
+    }
+
+    pub fn cleanup_remote_pane_leases_on_exit<I>(&mut self, pane_ids: I) -> Vec<PaneLeaseTransition>
+    where
+        I: IntoIterator<Item = Uuid>,
+    {
+        pane_ids
+            .into_iter()
+            .filter_map(|pane_id| self.cleanup_remote_pane_lease_on_exit(pane_id))
+            .collect()
+    }
+
+    fn authorize_pane_command(
+        &self,
+        session_id: Uuid,
+        pane_id: Uuid,
+        origin: &PaneCommandOrigin,
+    ) -> anyhow::Result<()> {
+        let pane = self.pane_in_session(session_id, pane_id)?;
+        let pane_generation = pane.output_cursor().0;
+        let active_lease = self
+            .pane_leases
+            .get(&pane_id)
+            .filter(|lease| lease.expires_at > now_unix_millis());
+        match (origin, active_lease) {
+            (PaneCommandOrigin::Desktop, None) => Ok(()),
+            (PaneCommandOrigin::Desktop, Some(_)) => {
+                anyhow::bail!("desktop pane command rejected while remote lease is active")
+            }
+            (
+                PaneCommandOrigin::Remote {
+                    lease_id: None,
+                    revision: None,
+                    ..
+                },
+                None,
+            ) => Ok(()),
+            (PaneCommandOrigin::Remote { .. }, None) => {
+                anyhow::bail!("remote pane lease is stale or missing")
+            }
+            (
+                PaneCommandOrigin::Remote {
+                    owner_connection_id,
+                    device_id,
+                    lease_id,
+                    revision,
+                },
+                Some(lease),
+            ) if lease.owner_connection_id == *owner_connection_id
+                && lease.device_id == *device_id
+                && Some(lease.lease_id) == *lease_id
+                && Some(lease.revision) == *revision
+                && lease.session_id == session_id
+                && lease.pane_id == pane_id
+                && lease.pane_generation == pane_generation =>
+            {
+                Ok(())
+            }
+            (PaneCommandOrigin::Remote { .. }, Some(_)) => {
+                anyhow::bail!("remote pane command does not match the active lease")
+            }
+        }
+    }
+
+    fn take_pane_lease_revision(&mut self) -> u64 {
+        let revision = self.next_pane_lease_revision;
+        self.next_pane_lease_revision = self
+            .next_pane_lease_revision
+            .checked_add(1)
+            .expect("remote pane lease revision exhausted");
+        revision
+    }
+
+    fn resize_for_lease(
+        &mut self,
+        lease: &RemotePaneLease,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<Option<PaneLeaseResize>> {
+        let senders = self.resize_pane_unchecked(lease.session_id, lease.pane_id, cols, rows)?;
+        Ok((!senders.is_empty()).then_some(PaneLeaseResize {
+            session_id: lease.session_id,
+            pane_id: lease.pane_id,
+            cols,
+            rows,
+            senders,
+        }))
+    }
+
+    fn finish_remote_pane_lease(
+        &mut self,
+        pane_id: Uuid,
+        event_kind: RemotePaneLeaseEventKind,
+        reason: RemotePaneLeaseEventReason,
+        restore: bool,
+        explicit_release: bool,
+    ) -> Option<PaneLeaseTransition> {
+        let mut lease = self.pane_leases.remove(&pane_id)?;
+        lease.revision = self.take_pane_lease_revision();
+        let (restoration, resize) = if restore {
+            self.restore_remote_pane_lease(&lease)
+        } else {
+            (
+                RemotePaneLeaseRestoration {
+                    session_id: lease.session_id,
+                    pane_id: lease.pane_id,
+                    pane_generation: lease.pane_generation,
+                    cols: lease.original_cols,
+                    rows: lease.original_rows,
+                    status: RemotePaneLeaseRestorationStatus::PaneMissing,
+                },
+                None,
+            )
+        };
+        let release = RemotePaneLeaseReleaseOutcome {
+            lease: lease.clone(),
+            restoration: restoration.clone(),
+        };
+        let result = if explicit_release {
+            RemotePaneLeaseResult::Released { release }
+        } else if reason == RemotePaneLeaseEventReason::AdminReclaimed {
+            RemotePaneLeaseResult::Reclaimed { release }
+        } else {
+            RemotePaneLeaseResult::Cleanup {
+                releases: vec![release],
+            }
+        };
+        Some(PaneLeaseTransition {
+            result,
+            effects: vec![PaneLeaseEffect {
+                event: Some(lease_event(&lease, event_kind, reason, Some(restoration))),
+                resize,
+            }],
+        })
+    }
+
+    fn restore_remote_pane_lease(
+        &mut self,
+        lease: &RemotePaneLease,
+    ) -> (RemotePaneLeaseRestoration, Option<PaneLeaseResize>) {
+        let current_generation = self
+            .sessions
+            .get(&lease.session_id)
+            .and_then(|session| session.panes.get(&lease.pane_id))
+            .map(|pane| pane.output_cursor().0);
+        let (status, resize) = match current_generation {
+            None => (RemotePaneLeaseRestorationStatus::PaneMissing, None),
+            Some(generation) if generation != lease.pane_generation => {
+                (RemotePaneLeaseRestorationStatus::GenerationMismatch, None)
+            }
+            Some(_) => match self.resize_for_lease(lease, lease.original_cols, lease.original_rows)
+            {
+                Ok(resize) => (RemotePaneLeaseRestorationStatus::Restored, resize),
+                Err(_) => (RemotePaneLeaseRestorationStatus::ResizeFailed, None),
+            },
+        };
+        (
+            RemotePaneLeaseRestoration {
+                session_id: lease.session_id,
+                pane_id: lease.pane_id,
+                pane_generation: lease.pane_generation,
+                cols: lease.original_cols,
+                rows: lease.original_rows,
+                status,
+            },
+            resize,
+        )
+    }
+
+    fn resize_pane_unchecked(
         &mut self,
         session_id: Uuid,
         pane_id: Uuid,
@@ -406,14 +925,15 @@ impl DaemonState {
         self.senders_for_pane(pane_id)
     }
 
-    pub fn mark_exited(&mut self, pane_id: Uuid) -> Vec<Sender<DaemonToClient>> {
+    pub fn mark_exited(&mut self, pane_id: Uuid) -> PaneExitEffect {
         let senders = self.senders_for_pane(pane_id);
+        let lease = self.cleanup_remote_pane_lease_on_exit(pane_id);
         if let Some((session_id, _)) = self.find_pane(pane_id) {
             self.remove_pane(session_id, pane_id);
         } else {
             self.pane_clients.remove(&pane_id);
         }
-        senders
+        PaneExitEffect { senders, lease }
     }
 
     pub fn pane_metas(&self, session_id: Uuid) -> anyhow::Result<Vec<PaneMeta>> {
@@ -533,6 +1053,89 @@ impl DaemonState {
     }
 }
 
+fn validate_remote_geometry(cols: u16, rows: u16) -> anyhow::Result<()> {
+    if !(20..=360).contains(&cols) {
+        anyhow::bail!("remote pane columns must be between 20 and 360");
+    }
+    if !(5..=200).contains(&rows) {
+        anyhow::bail!("remote pane rows must be between 5 and 200");
+    }
+    Ok(())
+}
+
+fn busy_transition(lease: RemotePaneLease) -> PaneLeaseTransition {
+    PaneLeaseTransition {
+        result: RemotePaneLeaseResult::Busy { lease },
+        effects: Vec::new(),
+    }
+}
+
+fn stale_transition(
+    lease: Option<RemotePaneLease>,
+    reason: RemotePaneLeaseStaleReason,
+) -> PaneLeaseTransition {
+    PaneLeaseTransition {
+        result: RemotePaneLeaseResult::Stale { lease, reason },
+        effects: Vec::new(),
+    }
+}
+
+fn lease_request_stale_reason(
+    lease: &RemotePaneLease,
+    owner_connection_id: Uuid,
+    device_id: &str,
+    session_id: Uuid,
+    lease_id: Uuid,
+    revision: u64,
+) -> Option<RemotePaneLeaseStaleReason> {
+    if lease.owner_connection_id != owner_connection_id {
+        Some(RemotePaneLeaseStaleReason::Owner)
+    } else if lease.device_id != device_id {
+        Some(RemotePaneLeaseStaleReason::Device)
+    } else if lease.session_id != session_id {
+        Some(RemotePaneLeaseStaleReason::Session)
+    } else if lease.lease_id != lease_id {
+        Some(RemotePaneLeaseStaleReason::LeaseId)
+    } else if lease.revision != revision {
+        Some(RemotePaneLeaseStaleReason::Revision)
+    } else {
+        None
+    }
+}
+
+fn lease_event(
+    lease: &RemotePaneLease,
+    kind: RemotePaneLeaseEventKind,
+    reason: RemotePaneLeaseEventReason,
+    restoration: Option<RemotePaneLeaseRestoration>,
+) -> RemotePaneLeaseEvent {
+    let leased = matches!(
+        kind,
+        RemotePaneLeaseEventKind::Claimed | RemotePaneLeaseEventKind::Updated
+    );
+    RemotePaneLeaseEvent {
+        kind,
+        reason,
+        session_id: lease.session_id,
+        pane_id: lease.pane_id,
+        leased,
+        cols: leased.then_some(lease.target_cols),
+        rows: leased.then_some(lease.target_rows),
+        lease_id: lease.lease_id,
+        owner_connection_id: lease.owner_connection_id,
+        device_id: lease.device_id.clone(),
+        pane_generation: lease.pane_generation,
+        revision: lease.revision,
+        original_cols: lease.original_cols,
+        original_rows: lease.original_rows,
+        target_cols: lease.target_cols,
+        target_rows: lease.target_rows,
+        viewport_revision: lease.viewport_revision,
+        expires_at: lease.expires_at,
+        restoration,
+    }
+}
+
 impl Default for DaemonState {
     fn default() -> Self {
         Self::new()
@@ -546,6 +1149,12 @@ fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,7 +1390,7 @@ mod tests {
         let writer = {
             let guard = state.lock().expect("state mutex");
             guard
-                .pane_writer(workspace_id.0, workspace_id.1)
+                .pane_writer_authorized(workspace_id.0, workspace_id.1, &PaneCommandOrigin::Desktop)
                 .expect("pane writer")
         };
 
@@ -824,7 +1433,7 @@ mod tests {
         state.attach_client_to_pane(client_id, pane_id);
 
         let senders = state
-            .resize_pane(workspace.id, pane_id, 132, 41)
+            .resize_pane_authorized(workspace.id, pane_id, 132, 41, &PaneCommandOrigin::Desktop)
             .expect("resize pane");
         assert_eq!(senders.len(), 1);
         let panes = state.pane_metas(workspace.id).expect("pane metadata");
@@ -848,7 +1457,7 @@ mod tests {
             }
         );
         assert!(state
-            .resize_pane(workspace.id, pane_id, 132, 41)
+            .resize_pane_authorized(workspace.id, pane_id, 132, 41, &PaneCommandOrigin::Desktop,)
             .expect("same-size resize")
             .is_empty());
     }
@@ -981,6 +1590,589 @@ mod tests {
             .expect_err("cross-session title update should fail");
 
         assert!(err.to_string().contains("belongs to session"));
+    }
+
+    #[test]
+    fn same_owner_claim_updates_target_and_preserves_original_geometry() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let claimed = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let first = result_lease(&claimed.result).clone();
+
+        let updated = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            120,
+            40,
+            2,
+            Some((&first.lease_id, first.revision)),
+            2_000,
+        );
+        let lease = result_lease(&updated.result);
+
+        assert!(matches!(
+            &updated.result,
+            RemotePaneLeaseResult::Updated { .. }
+        ));
+        assert_eq!((lease.original_cols, lease.original_rows), (80, 24));
+        assert_eq!((lease.target_cols, lease.target_rows), (120, 40));
+        assert!(lease.revision > first.revision);
+        assert_eq!(lease.viewport_revision, 2);
+    }
+
+    #[test]
+    fn competing_owner_receives_busy_with_current_lease() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+
+        let competing = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            Uuid::new_v4(),
+            "other-device",
+            90,
+            25,
+            1,
+            None,
+            2_000,
+        );
+
+        assert!(matches!(
+            competing.result,
+            RemotePaneLeaseResult::Busy { .. }
+        ));
+        assert!(competing.effects.is_empty());
+    }
+
+    #[test]
+    fn active_lease_rejects_desktop_and_accepts_only_matching_remote_origin() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let claimed = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            now_unix_millis(),
+        );
+        let lease = result_lease(&claimed.result);
+
+        assert!(state
+            .pane_writer_authorized(session_id, pane_id, &PaneCommandOrigin::Desktop)
+            .is_err());
+        assert!(state
+            .resize_pane_authorized(session_id, pane_id, 110, 35, &PaneCommandOrigin::Desktop,)
+            .is_err());
+        assert!(state
+            .pane_writer_authorized(session_id, pane_id, &remote_origin(lease))
+            .is_ok());
+        assert!(state
+            .resize_pane_authorized(
+                session_id,
+                pane_id,
+                lease.target_cols,
+                lease.target_rows,
+                &remote_origin(lease),
+            )
+            .is_ok());
+
+        let mut wrong = remote_origin(lease);
+        if let PaneCommandOrigin::Remote { revision, .. } = &mut wrong {
+            *revision = Some(lease.revision.saturating_sub(1));
+        }
+        assert!(state
+            .pane_writer_authorized(session_id, pane_id, &wrong)
+            .is_err());
+    }
+
+    #[test]
+    fn remote_input_without_lease_is_shared_with_desktop() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let shared_remote = PaneCommandOrigin::Remote {
+            owner_connection_id,
+            device_id,
+            lease_id: None,
+            revision: None,
+        };
+
+        assert!(state
+            .pane_writer_authorized(session_id, pane_id, &shared_remote)
+            .is_ok());
+        assert!(state
+            .pane_writer_authorized(session_id, pane_id, &PaneCommandOrigin::Desktop)
+            .is_ok());
+        assert!(state
+            .resize_pane_authorized(session_id, pane_id, 90, 25, &shared_remote)
+            .is_ok());
+    }
+
+    #[test]
+    fn release_restores_original_geometry() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let claimed = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let lease = result_lease(&claimed.result).clone();
+
+        let released = state
+            .release_remote_pane_lease(release_request(&lease))
+            .expect("release lease");
+
+        assert_restored(&released, 80, 24);
+        assert_eq!(pane_geometry(&state, session_id, pane_id), (80, 24));
+    }
+
+    #[test]
+    fn claim_immediately_after_expiry_preserves_restoration_and_lost_event_order() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let first = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let first_lease = result_lease(&first.result).clone();
+        let next_owner_connection_id = Uuid::new_v4();
+
+        let claimed = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            next_owner_connection_id,
+            "device-2",
+            120,
+            40,
+            2,
+            None,
+            first_lease.expires_at,
+        );
+
+        let next_lease = result_lease(&claimed.result);
+        assert_eq!(next_lease.owner_connection_id, next_owner_connection_id);
+        assert_eq!(
+            (next_lease.original_cols, next_lease.original_rows),
+            (80, 24)
+        );
+        assert_eq!(claimed.effects.len(), 2);
+
+        let expired = &claimed.effects[0];
+        let restored = expired
+            .resize
+            .as_ref()
+            .expect("expired lease restoration resize");
+        assert_eq!((restored.cols, restored.rows), (80, 24));
+        match expired.event.as_ref().expect("expired lease lost event") {
+            RemotePaneLeaseEvent {
+                kind: RemotePaneLeaseEventKind::Lost,
+                reason: RemotePaneLeaseEventReason::Expired,
+                lease_id,
+                owner_connection_id,
+                restoration: Some(restoration),
+                ..
+            } => {
+                assert_eq!(*lease_id, first_lease.lease_id);
+                assert_eq!(*owner_connection_id, first_lease.owner_connection_id);
+                assert_eq!(
+                    restoration.status,
+                    RemotePaneLeaseRestorationStatus::Restored
+                );
+            }
+            event => panic!("unexpected expired lease event: {event:?}"),
+        }
+
+        let current = &claimed.effects[1];
+        let resized = current.resize.as_ref().expect("new lease target resize");
+        assert_eq!((resized.cols, resized.rows), (120, 40));
+        assert!(matches!(
+            current.event.as_ref(),
+            Some(RemotePaneLeaseEvent {
+                kind: RemotePaneLeaseEventKind::Claimed,
+                reason: RemotePaneLeaseEventReason::Claimed,
+                ..
+            })
+        ));
+        assert_eq!(pane_geometry(&state, session_id, pane_id), (120, 40));
+    }
+
+    #[test]
+    fn claim_after_expired_stale_generation_does_not_restore_replacement_pane() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let first = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let first_lease = result_lease(&first.result).clone();
+        let removed = state
+            .remove_pane(session_id, pane_id)
+            .expect("remove leased pane");
+        drop(removed);
+        let mut replacement_config = test_config(pane_id);
+        replacement_config.cols = 90;
+        replacement_config.rows = 25;
+        state
+            .insert_pane(session_id, Pane::for_test(replacement_config, true))
+            .expect("insert replacement");
+        let replacement_generation = state
+            .pane_in_session(session_id, pane_id)
+            .expect("replacement pane")
+            .output_cursor()
+            .0;
+        state
+            .pane_leases
+            .get_mut(&pane_id)
+            .expect("lease")
+            .pane_generation = replacement_generation.saturating_add(1);
+
+        let claimed = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            Uuid::new_v4(),
+            "device-2",
+            120,
+            40,
+            2,
+            None,
+            first_lease.expires_at,
+        );
+
+        assert_eq!(claimed.effects.len(), 2);
+        assert!(claimed.effects[0].resize.is_none());
+        let restoration = claimed.effects[0]
+            .event
+            .as_ref()
+            .and_then(|event| event.restoration.as_ref())
+            .expect("expired restoration outcome");
+        assert_eq!(
+            restoration.status,
+            RemotePaneLeaseRestorationStatus::GenerationMismatch
+        );
+        let next_lease = result_lease(&claimed.result);
+        assert_eq!(
+            (next_lease.original_cols, next_lease.original_rows),
+            (90, 25)
+        );
+        let new_resize = claimed.effects[1]
+            .resize
+            .as_ref()
+            .expect("new claim resize");
+        assert_eq!((new_resize.cols, new_resize.rows), (120, 40));
+        assert_eq!(pane_geometry(&state, session_id, pane_id), (120, 40));
+    }
+
+    #[test]
+    fn reclaim_expiry_and_disconnect_restore_original_geometry() {
+        let (mut reclaimed_state, session_id, pane_id, owner_connection_id, device_id) =
+            lease_state();
+        claim_lease(
+            &mut reclaimed_state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let reclaimed = reclaimed_state
+            .admin_reclaim_remote_pane_lease(RemotePaneLeaseAdminReclaimRequest {
+                session_id,
+                pane_id,
+            })
+            .expect("admin reclaim");
+        assert_restored(&reclaimed, 80, 24);
+
+        let (mut expired_state, session_id, pane_id, owner_connection_id, device_id) =
+            lease_state();
+        claim_lease(
+            &mut expired_state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let expired = expired_state.expire_remote_pane_leases(16_000);
+        assert_eq!(expired.len(), 1);
+        assert_restored(&expired[0], 80, 24);
+
+        let (mut disconnected_state, session_id, pane_id, owner_connection_id, device_id) =
+            lease_state();
+        claim_lease(
+            &mut disconnected_state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let disconnected =
+            disconnected_state.cleanup_remote_connection_leases(RemoteConnectionCleanupRequest {
+                owner_connection_id,
+            });
+        assert_eq!(disconnected.len(), 1);
+        assert_restored(&disconnected[0], 80, 24);
+    }
+
+    #[test]
+    fn pane_exit_loses_lease_without_resizing_exiting_pane() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+
+        let effect = state.mark_exited(pane_id);
+        let transition = effect.lease.expect("pane exit lease effect");
+
+        assert_eq!(transition.effects.len(), 1);
+        assert!(transition.effects[0].resize.is_none());
+        assert!(matches!(
+            transition.effects[0].event.as_ref(),
+            Some(RemotePaneLeaseEvent {
+                kind: RemotePaneLeaseEventKind::Lost,
+                reason: RemotePaneLeaseEventReason::PaneExited,
+                ..
+            })
+        ));
+        assert!(state.pane_metas(session_id).expect("pane metas").is_empty());
+    }
+
+    #[test]
+    fn stale_generation_never_resizes_replacement_pane() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let claimed = claim_lease(
+            &mut state,
+            session_id,
+            pane_id,
+            owner_connection_id,
+            &device_id,
+            100,
+            30,
+            1,
+            None,
+            1_000,
+        );
+        let lease = result_lease(&claimed.result).clone();
+        let removed = state
+            .remove_pane(session_id, pane_id)
+            .expect("remove leased pane");
+        drop(removed);
+        let mut replacement_config = test_config(pane_id);
+        replacement_config.cols = 90;
+        replacement_config.rows = 25;
+        state
+            .insert_pane(session_id, Pane::for_test(replacement_config, true))
+            .expect("insert replacement");
+        state
+            .pane_leases
+            .get_mut(&pane_id)
+            .expect("lease")
+            .pane_generation = lease.pane_generation.saturating_add(1);
+
+        let released = state
+            .release_remote_pane_lease(release_request(&lease))
+            .expect("release stale lease");
+
+        assert!(released.effects[0].resize.is_none());
+        let restoration = match released.result {
+            RemotePaneLeaseResult::Released { release } => release.restoration,
+            other => panic!("unexpected release result: {other:?}"),
+        };
+        assert_eq!(
+            restoration.status,
+            RemotePaneLeaseRestorationStatus::GenerationMismatch
+        );
+        assert_eq!(pane_geometry(&state, session_id, pane_id), (90, 25));
+    }
+
+    #[test]
+    fn remote_geometry_is_bounded() {
+        let (mut state, session_id, pane_id, owner_connection_id, device_id) = lease_state();
+        let request = RemotePaneLeaseClaimRequest {
+            owner_connection_id,
+            device_id,
+            session_id,
+            pane_id,
+            cols: 19,
+            rows: 24,
+            viewport_revision: 1,
+            lease_id: None,
+            revision: None,
+        };
+        assert!(state
+            .claim_or_update_remote_pane_lease(request, 1_000)
+            .is_err());
+    }
+
+    fn lease_state() -> (DaemonState, Uuid, Uuid, Uuid, String) {
+        let mut state = DaemonState::new();
+        let session_id = state.create_session("Workspace".to_string(), None).id;
+        let pane_id = Uuid::new_v4();
+        state
+            .insert_pane(session_id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        (
+            state,
+            session_id,
+            pane_id,
+            Uuid::new_v4(),
+            "device-1".to_string(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_lease(
+        state: &mut DaemonState,
+        session_id: Uuid,
+        pane_id: Uuid,
+        owner_connection_id: Uuid,
+        device_id: &str,
+        cols: u16,
+        rows: u16,
+        viewport_revision: u64,
+        current: Option<(&Uuid, u64)>,
+        now_ms: u64,
+    ) -> PaneLeaseTransition {
+        state
+            .claim_or_update_remote_pane_lease(
+                RemotePaneLeaseClaimRequest {
+                    owner_connection_id,
+                    device_id: device_id.to_string(),
+                    session_id,
+                    pane_id,
+                    cols,
+                    rows,
+                    viewport_revision,
+                    lease_id: current.map(|(lease_id, _)| *lease_id),
+                    revision: current.map(|(_, revision)| revision),
+                },
+                now_ms,
+            )
+            .expect("claim lease")
+    }
+
+    fn result_lease(result: &RemotePaneLeaseResult) -> &RemotePaneLease {
+        match result {
+            RemotePaneLeaseResult::Claimed { lease }
+            | RemotePaneLeaseResult::Updated { lease }
+            | RemotePaneLeaseResult::Renewed { lease } => lease,
+            other => panic!("unexpected lease result: {other:?}"),
+        }
+    }
+
+    fn release_request(lease: &RemotePaneLease) -> RemotePaneLeaseReleaseRequest {
+        RemotePaneLeaseReleaseRequest {
+            owner_connection_id: lease.owner_connection_id,
+            device_id: lease.device_id.clone(),
+            session_id: lease.session_id,
+            pane_id: lease.pane_id,
+            lease_id: lease.lease_id,
+            revision: lease.revision,
+        }
+    }
+
+    fn remote_origin(lease: &RemotePaneLease) -> PaneCommandOrigin {
+        PaneCommandOrigin::Remote {
+            owner_connection_id: lease.owner_connection_id,
+            device_id: lease.device_id.clone(),
+            lease_id: Some(lease.lease_id),
+            revision: Some(lease.revision),
+        }
+    }
+
+    fn assert_restored(transition: &PaneLeaseTransition, cols: u16, rows: u16) {
+        let restoration = match &transition.result {
+            RemotePaneLeaseResult::Released { release }
+            | RemotePaneLeaseResult::Reclaimed { release } => &release.restoration,
+            RemotePaneLeaseResult::Cleanup { releases } => &releases[0].restoration,
+            other => panic!("unexpected restoration result: {other:?}"),
+        };
+        assert_eq!(
+            restoration.status,
+            RemotePaneLeaseRestorationStatus::Restored
+        );
+        assert_eq!((restoration.cols, restoration.rows), (cols, rows));
+    }
+
+    fn pane_geometry(state: &DaemonState, session_id: Uuid, pane_id: Uuid) -> (u16, u16) {
+        let pane = state
+            .pane_metas(session_id)
+            .expect("pane metas")
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("pane");
+        (pane.config.cols, pane.config.rows)
     }
 
     fn test_config(pane_id: Uuid) -> crate::protocol::PaneConfig {

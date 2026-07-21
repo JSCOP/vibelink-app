@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 
+#[rustfmt::skip]
 pub mod generated;
 pub mod relay;
 pub mod secure;
@@ -28,7 +29,10 @@ mod tests {
             serde_json::from_str(CONTRACT_JSON).expect("parse remote-v2 contract");
         assert_eq!(contract["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(contract["subprotocol"], SUBPROTOCOL);
-        assert_eq!(contract["contractVersion"], generated::GENERATED_CONTRACT_VERSION);
+        assert_eq!(
+            contract["contractVersion"],
+            generated::GENERATED_CONTRACT_VERSION
+        );
         assert_eq!(contract["envelope"]["required"][6], "revocationEpoch");
         assert_eq!(
             contract["binaryFrame"]["headerBytes"],

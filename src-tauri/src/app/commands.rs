@@ -1,6 +1,8 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use super::license::LicenseService;
-use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
+use crate::protocol::{
+    ClientToDaemon, PaneCommandOrigin, PaneConfig, PaneMeta, ReplyResult, SessionMeta,
+};
 use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -393,6 +395,7 @@ pub async fn write_pane(
             session_id,
             pane_id,
             data: data.into_bytes(),
+            origin: PaneCommandOrigin::Desktop,
         })
         .map_err(to_string)
 }
@@ -413,6 +416,7 @@ pub async fn resize_pane(
             pane_id,
             cols,
             rows,
+            origin: PaneCommandOrigin::Desktop,
         })
         .map_err(to_string)
 }

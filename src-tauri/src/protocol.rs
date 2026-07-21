@@ -6,6 +6,221 @@ use uuid::Uuid;
 pub type Req = u64;
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
+pub const REMOTE_PANE_LEASE_TTL_MS: u64 = 15_000;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PaneCommandOrigin {
+    #[default]
+    Desktop,
+    Remote {
+        owner_connection_id: Uuid,
+        device_id: String,
+        lease_id: Option<Uuid>,
+        revision: Option<u64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLease {
+    pub lease_id: Uuid,
+    pub owner_connection_id: Uuid,
+    pub device_id: String,
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub pane_generation: u64,
+    pub revision: u64,
+    pub original_cols: u16,
+    pub original_rows: u16,
+    pub target_cols: u16,
+    pub target_rows: u16,
+    pub viewport_revision: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseClaimRequest {
+    pub owner_connection_id: Uuid,
+    pub device_id: String,
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub cols: u16,
+    pub rows: u16,
+    pub viewport_revision: u64,
+    pub lease_id: Option<Uuid>,
+    pub revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseRenewRequest {
+    pub owner_connection_id: Uuid,
+    pub device_id: String,
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub lease_id: Uuid,
+    pub revision: u64,
+    pub viewport_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseReleaseRequest {
+    pub owner_connection_id: Uuid,
+    pub device_id: String,
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub lease_id: Uuid,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseStatusRequest {
+    pub pane_id: Uuid,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseAdminReclaimRequest {
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteConnectionCleanupRequest {
+    pub owner_connection_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemotePaneLeaseEventReason {
+    Claimed,
+    TargetUpdated,
+    Renewed,
+    Released,
+    AdminReclaimed,
+    Expired,
+    ConnectionClosed,
+    PaneExited,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemotePaneLeaseRestorationStatus {
+    Restored,
+    PaneMissing,
+    GenerationMismatch,
+    ResizeFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseRestoration {
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub pane_generation: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub status: RemotePaneLeaseRestorationStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemotePaneLeaseEventKind {
+    Claimed,
+    Updated,
+    Released,
+    Lost,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseEvent {
+    pub kind: RemotePaneLeaseEventKind,
+    pub reason: RemotePaneLeaseEventReason,
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub leased: bool,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+    pub lease_id: Uuid,
+    pub owner_connection_id: Uuid,
+    pub device_id: String,
+    pub pane_generation: u64,
+    pub revision: u64,
+    pub original_cols: u16,
+    pub original_rows: u16,
+    pub target_cols: u16,
+    pub target_rows: u16,
+    pub viewport_revision: u64,
+    pub expires_at: u64,
+    pub restoration: Option<RemotePaneLeaseRestoration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePaneLeaseReleaseOutcome {
+    pub lease: RemotePaneLease,
+    pub restoration: RemotePaneLeaseRestoration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemotePaneLeaseStaleReason {
+    LeaseId,
+    Revision,
+    Owner,
+    Device,
+    Session,
+    PaneGeneration,
+    Missing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RemotePaneLeaseResult {
+    Claimed {
+        lease: RemotePaneLease,
+    },
+    Updated {
+        lease: RemotePaneLease,
+    },
+    Renewed {
+        lease: RemotePaneLease,
+    },
+    Released {
+        release: RemotePaneLeaseReleaseOutcome,
+    },
+    Reclaimed {
+        release: RemotePaneLeaseReleaseOutcome,
+    },
+    Status {
+        lease: Option<RemotePaneLease>,
+    },
+    Cleanup {
+        releases: Vec<RemotePaneLeaseReleaseOutcome>,
+    },
+    Busy {
+        lease: RemotePaneLease,
+    },
+    Stale {
+        lease: Option<RemotePaneLease>,
+        reason: RemotePaneLeaseStaleReason,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum FrameError {
     #[error("frame io error: {0}")]
@@ -81,12 +296,16 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         pane_id: Uuid,
         data: Vec<u8>,
+        #[serde(default)]
+        origin: PaneCommandOrigin,
     },
     ResizePane {
         session_id: Uuid,
         pane_id: Uuid,
         cols: u16,
         rows: u16,
+        #[serde(default)]
+        origin: PaneCommandOrigin,
     },
     NotifySessionChanged {
         session_id: Uuid,
@@ -150,6 +369,30 @@ pub enum ClientToDaemon {
         req: Req,
         request_json: String,
     },
+    RemotePaneLeaseClaim {
+        req: Req,
+        request: RemotePaneLeaseClaimRequest,
+    },
+    RemotePaneLeaseRenew {
+        req: Req,
+        request: RemotePaneLeaseRenewRequest,
+    },
+    RemotePaneLeaseRelease {
+        req: Req,
+        request: RemotePaneLeaseReleaseRequest,
+    },
+    RemotePaneLeaseStatus {
+        req: Req,
+        request: RemotePaneLeaseStatusRequest,
+    },
+    RemotePaneLeaseAdminReclaim {
+        req: Req,
+        request: RemotePaneLeaseAdminReclaimRequest,
+    },
+    RemoteConnectionCleanup {
+        req: Req,
+        request: RemoteConnectionCleanupRequest,
+    },
     ResourceSnapshot {
         req: Req,
     },
@@ -190,7 +433,7 @@ pub enum DaemonToClient {
         event: TaskSignal,
     },
     RemotePaneLease {
-        event: serde_json::Value,
+        event: RemotePaneLeaseEvent,
     },
 }
 
@@ -242,6 +485,7 @@ pub enum ReplyResult {
     Cli(String),
     Computer(String),
     Remote(String),
+    RemotePaneLease(RemotePaneLeaseResult),
     ResourceSnapshot(ResourceSnapshotData),
 }
 

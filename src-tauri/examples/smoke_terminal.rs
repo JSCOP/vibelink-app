@@ -11,7 +11,10 @@ use anyhow::{bail, Context, Result};
 use interprocess::local_socket::{
     prelude::*, ConnectOptions, GenericNamespaced, SendHalf as LocalSocketSendHalf,
 };
-use protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneConfig, ReplyResult};
+use protocol::{
+    read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneConfig,
+    ReplyResult,
+};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -365,6 +368,7 @@ fn collect_output(
                         session_id,
                         pane_id,
                         data: b"\x1b[1;1R".to_vec(),
+                        origin: PaneCommandOrigin::Desktop,
                     })?;
                 }
                 if expected.matches(&collected) {

@@ -1,4 +1,9 @@
 use super::v2::{
+    generated::{
+        TerminalInputParams, TerminalLeaseClaimParams, TerminalLeaseRecord,
+        TerminalLeaseReleaseParams, TerminalLeaseStatusParams, TerminalSnapshotParams,
+        TerminalSubscribeParams, TerminalUnsubscribeParams,
+    },
     secure::{SecureFrameKind, SecureHandshake, SecureTransport},
     wire::{
         BinaryChannel, BinaryFrame, DomainSequenceValidator, OperationReplayWindow, SequenceError,
@@ -14,13 +19,17 @@ use super::{
         encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage,
         WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL,
     },
-    server::{desktop_name, PaneLease, RemotePaneLeaseEvent, RemoteShared},
+    server::{desktop_name, RemoteShared},
 };
 use crate::dedicated_cli::{parse_args as parse_cli_args, CliControlRequest};
 use crate::{
     app::spawn_daemon,
     protocol::{
-        read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneMeta, ReplyResult, SessionMeta,
+        read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneMeta,
+        RemoteConnectionCleanupRequest, RemotePaneLease, RemotePaneLeaseClaimRequest,
+        RemotePaneLeaseEvent, RemotePaneLeaseEventKind, RemotePaneLeaseEventReason,
+        RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest, RemotePaneLeaseResult,
+        RemotePaneLeaseStatusRequest, ReplyResult, SessionMeta,
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -50,10 +59,38 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_TIMEOUT: Duration = Duration::from_millis(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(60);
+const REMOTE_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_OUTPUT_QUEUE_CAPACITY: usize = 1024;
 const PUSH_QUEUE_CAPACITY: usize = 1024;
 const MAX_OUTPUT_FRAMES_PER_LOOP: usize = 32;
 const MAX_REMOTE_MESSAGE_BYTES: usize = 1024 * 1024;
+#[derive(Clone, Debug)]
+struct V2Subscription {
+    workspace_id: Uuid,
+    pane_id: Uuid,
+}
+
+#[derive(Default)]
+struct RemoteLeaseProjection {
+    by_pane: HashMap<Uuid, RemotePaneLease>,
+}
+
+impl RemoteLeaseProjection {
+    fn record(&mut self, lease: RemotePaneLease) {
+        self.by_pane.insert(lease.pane_id, lease);
+    }
+
+    fn remove_pane(&mut self, pane_id: Uuid) {
+        self.by_pane.remove(&pane_id);
+    }
+
+    fn by_lease_id(&self, lease_id: Uuid) -> Option<&RemotePaneLease> {
+        self.by_pane
+            .values()
+            .find(|lease| lease.lease_id == lease_id)
+    }
+}
+
 const MAX_REMOTE_FRAME_BYTES: usize = 1024 * 1024;
 
 type RemoteSocket = WebSocket<StreamOwned<ServerConnection, TcpStream>>;
@@ -233,7 +270,7 @@ pub fn handle_connection(
         .client_devices
         .lock()
         .expect("remote client devices mutex")
-        .insert(client_key, device_id);
+        .insert(client_key, device_id.clone());
 
     let result = run_authenticated(
         &mut ws,
@@ -242,10 +279,13 @@ pub fn handle_connection(
         &push_rx,
         &shared,
         client_key,
+        &device_id,
         &grants,
     );
-    if let Err(error) = restore_owned_leases(&shared, client_key, &mut daemon_writer, None) {
-        tracing::warn!(?error, %client_key, "failed to restore remote pane leases during disconnect");
+    if let Err(error) =
+        cleanup_remote_connection(&mut daemon_writer, &mut daemon_inbox, client_key, u64::MAX)
+    {
+        tracing::warn!(?error, %client_key, "failed to clean up remote daemon connection");
     }
     shared
         .client_senders
@@ -446,15 +486,24 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
         .expect("remote v2 clients mutex")
         .insert(client_key);
 
+    let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let result = run_v2_authenticated(
         &mut ws,
         &mut transport,
+        &mut daemon_writer,
+        &mut daemon_inbox,
         &shared,
         &push_rx,
+        client_key,
         &device_id,
         &peer_fingerprint,
         revocation_epoch,
     );
+    if let Err(error) =
+        cleanup_remote_connection(&mut daemon_writer, &mut daemon_inbox, client_key, u64::MAX)
+    {
+        tracing::warn!(?error, %client_key, "failed to clean up remote-v2 daemon connection");
+    }
     shared
         .client_senders
         .lock()
@@ -476,16 +525,20 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
 fn run_v2_authenticated(
     ws: &mut RemoteSocket,
     transport: &mut SecureTransport,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
     shared: &RemoteShared,
     push_rx: &Receiver<Message>,
+    owner_connection_id: Uuid,
     device_id: &str,
     peer_fingerprint: &str,
     session_epoch: u64,
 ) -> Result<()> {
-    let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let mut next_req = 1_u64;
     let mut sequences = DomainSequenceValidator::default();
     let mut binary_sequences: HashMap<(BinaryChannel, u64), u64> = HashMap::new();
+    let mut subscriptions: HashMap<String, V2Subscription> = HashMap::new();
+    let mut leases = RemoteLeaseProjection::default();
     loop {
         match push_rx.try_recv() {
             Ok(Message::Close(_)) | Err(TryRecvError::Disconnected) => {
@@ -493,6 +546,15 @@ fn run_v2_authenticated(
                 break;
             }
             Ok(_) | Err(TryRecvError::Empty) => {}
+        }
+
+        while let Some(message) = daemon_inbox.try_control()? {
+            if let DaemonToClient::RemotePaneLease { event } = message {
+                apply_lease_event(&mut leases, &event);
+                if event.owner_connection_id == owner_connection_id {
+                    send_v2_lease_event(ws, transport, session_epoch, &event)?;
+                }
+            }
         }
 
         let authorization = shared
@@ -599,31 +661,54 @@ fn run_v2_authenticated(
                             }
                         }
                         Ok(()) => {
-                            let result =
-                                if request.domain == "terminal" && request.method == "snapshot" {
-                                    require_grant(&authorization.grants, TERMINAL_VIEW_GRANT)
-                                        .and_then(|_| {
-                                            v2_terminal_snapshot(
-                                                &request,
-                                                &mut daemon_writer,
-                                                &mut daemon_inbox,
-                                                &mut next_req,
-                                                &mut binary_sequences,
-                                            )
-                                        })
-                                        .map(|(payload, frames)| {
-                                            binary_after_response = frames;
-                                            payload
-                                        })
-                                } else {
-                                    handle_v2_request(
-                                        &request,
-                                        &authorization.grants,
-                                        &mut daemon_writer,
-                                        &mut daemon_inbox,
-                                        &mut next_req,
-                                    )
-                                };
+                            let result = if request.domain == "terminal"
+                                && request.method == "snapshot"
+                            {
+                                require_grant(&authorization.grants, TERMINAL_VIEW_GRANT)
+                                    .and_then(|_| {
+                                        v2_terminal_snapshot(
+                                            &request,
+                                            daemon_writer,
+                                            daemon_inbox,
+                                            &mut next_req,
+                                            &subscriptions,
+                                            &mut binary_sequences,
+                                        )
+                                    })
+                                    .map(|(payload, frames)| {
+                                        binary_after_response = frames;
+                                        payload
+                                    })
+                            } else if request.domain == "terminal" && request.method == "subscribe"
+                            {
+                                require_grant(&authorization.grants, TERMINAL_VIEW_GRANT)
+                                    .and_then(|_| {
+                                        v2_terminal_subscribe(
+                                            &request,
+                                            daemon_writer,
+                                            daemon_inbox,
+                                            &mut next_req,
+                                            &mut subscriptions,
+                                            &mut binary_sequences,
+                                        )
+                                    })
+                                    .map(|(payload, frames)| {
+                                        binary_after_response = frames;
+                                        payload
+                                    })
+                            } else {
+                                handle_v2_request(
+                                    &request,
+                                    &authorization.grants,
+                                    owner_connection_id,
+                                    device_id,
+                                    daemon_writer,
+                                    daemon_inbox,
+                                    &mut next_req,
+                                    &mut subscriptions,
+                                    &mut leases,
+                                )
+                            };
                             match result {
                                 Ok(payload) => V2Response {
                                     version: V2_PROTOCOL_VERSION,
@@ -671,6 +756,12 @@ fn run_v2_authenticated(
                     break;
                 };
                 if let DaemonToClient::Output { pane_id, data } = message {
+                    if !subscriptions
+                        .values()
+                        .any(|subscription| subscription.pane_id == pane_id)
+                    {
+                        continue;
+                    }
                     let dropped = daemon_inbox.take_output_drops(pane_id);
                     send_v2_terminal_output(
                         ws,
@@ -700,15 +791,105 @@ fn record_v2_operation(shared: &RemoteShared, device_id: &str, operation_id: &st
         .expect("inserted remote v2 replay window")
         .record(operation_id))
 }
+fn v2_terminal_subscribe(
+    request: &V2Envelope,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    subscriptions: &mut HashMap<String, V2Subscription>,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+) -> Result<(Value, Vec<BinaryFrame>)> {
+    let params: TerminalSubscribeParams = serde_json::from_value(request.payload.clone())
+        .context("parse terminal.subscribe payload")?;
+    let workspace_id =
+        Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
+    let pane_id = Uuid::parse_str(&params.pane_id).context("paneId must be a UUID")?;
+    let (_, panes) = attach_session(daemon_writer, daemon_inbox, next_req, workspace_id)?;
+    let pane = panes
+        .into_iter()
+        .find(|pane| pane.id == pane_id)
+        .context("terminal subscription pane not found")?;
+    write_frame(
+        daemon_writer,
+        &ClientToDaemon::AttachPane {
+            session_id: workspace_id,
+            pane_id,
+        },
+    )?;
+    let subscription_id = Uuid::new_v4().to_string();
+    subscriptions.insert(
+        subscription_id.clone(),
+        V2Subscription {
+            workspace_id,
+            pane_id,
+        },
+    );
+    let (data, frames, stream_id, first_live_sequence) = v2_snapshot_data(
+        daemon_writer,
+        daemon_inbox,
+        next_req,
+        workspace_id,
+        pane_id,
+        sequences,
+    )?;
+    Ok((
+        json!({
+            "subscriptionId": subscription_id,
+            "streamId": stream_id,
+            "paneGeneration": 1,
+            "cols": pane.config.cols,
+            "rows": pane.config.rows,
+            "alive": true,
+            "firstLiveSequence": first_live_sequence,
+            "snapshotBytes": data.len(),
+            "snapshotChunks": frames.len(),
+        }),
+        frames,
+    ))
+}
+
 fn v2_terminal_snapshot(
     request: &V2Envelope,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     next_req: &mut u64,
+    subscriptions: &HashMap<String, V2Subscription>,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
 ) -> Result<(Value, Vec<BinaryFrame>)> {
-    let session_id = v2_uuid(&request.payload, "sessionId")?;
-    let pane_id = v2_uuid(&request.payload, "paneId")?;
+    let params: TerminalSnapshotParams = serde_json::from_value(request.payload.clone())
+        .context("parse terminal.snapshot payload")?;
+    let subscription = subscriptions
+        .get(&params.subscription_id)
+        .context("terminal subscription not found")?;
+    let (data, frames, stream_id, first_live_sequence) = v2_snapshot_data(
+        daemon_writer,
+        daemon_inbox,
+        next_req,
+        subscription.workspace_id,
+        subscription.pane_id,
+        sequences,
+    )?;
+    Ok((
+        json!({
+            "subscriptionId": params.subscription_id,
+            "streamId": stream_id,
+            "paneGeneration": 1,
+            "firstLiveSequence": first_live_sequence,
+            "snapshotBytes": data.len(),
+            "snapshotChunks": frames.len(),
+        }),
+        frames,
+    ))
+}
+
+fn v2_snapshot_data(
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    session_id: Uuid,
+    pane_id: Uuid,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+) -> Result<(Vec<u8>, Vec<BinaryFrame>, u64, u64)> {
     let req = take_req(next_req);
     let data = match request_reply(
         daemon_writer,
@@ -724,6 +905,10 @@ fn v2_terminal_snapshot(
         other => bail!("unexpected terminal snapshot reply: {other:?}"),
     };
     let stream_id = v2_stream_id(pane_id);
+    let first_live_sequence = sequences
+        .get(&(BinaryChannel::TerminalOutput, stream_id))
+        .copied()
+        .unwrap_or(1);
     let frames = v2_binary_chunks(
         BinaryChannel::TerminalSnapshot,
         stream_id,
@@ -731,15 +916,7 @@ fn v2_terminal_snapshot(
         0,
         sequences,
     )?;
-    Ok((
-        json!({
-            "paneId": pane_id,
-            "streamId": stream_id,
-            "bytes": data.len(),
-            "chunks": frames.len(),
-        }),
-        frames,
-    ))
+    Ok((data, frames, stream_id, first_live_sequence))
 }
 
 fn send_v2_terminal_output(
@@ -862,12 +1039,188 @@ fn send_v2_session_error(
     Ok(())
 }
 
+fn remote_origin(
+    owner_connection_id: Uuid,
+    device_id: &str,
+    lease_id: Option<Uuid>,
+    revision: Option<u64>,
+) -> PaneCommandOrigin {
+    PaneCommandOrigin::Remote {
+        owner_connection_id,
+        device_id: device_id.to_string(),
+        lease_id,
+        revision,
+    }
+}
+
+fn remote_lease_result(reply: ReplyResult) -> Result<RemotePaneLeaseResult> {
+    let result = match reply {
+        ReplyResult::RemotePaneLease(result) => result,
+        other => bail!("unexpected daemon lease reply: {other:?}"),
+    };
+    match result {
+        RemotePaneLeaseResult::Busy { lease } => bail!(
+            "conflict: pane_busy lease {} revision {} is active",
+            lease.lease_id,
+            lease.revision
+        ),
+        RemotePaneLeaseResult::Stale { reason, .. } => {
+            bail!("stale_ref: terminal lease is stale ({reason:?})")
+        }
+        result => Ok(result),
+    }
+}
+
+fn claimed_lease_result(reply: ReplyResult) -> Result<RemotePaneLease> {
+    match remote_lease_result(reply)? {
+        RemotePaneLeaseResult::Claimed { lease }
+        | RemotePaneLeaseResult::Updated { lease }
+        | RemotePaneLeaseResult::Renewed { lease } => Ok(lease),
+        other => bail!("unexpected terminal lease claim reply: {other:?}"),
+    }
+}
+
+fn v2_lease_record(lease: &RemotePaneLease) -> TerminalLeaseRecord {
+    TerminalLeaseRecord {
+        cols: lease.target_cols,
+        lease_id: lease.lease_id.to_string(),
+        lease_revision: lease.revision,
+        pane_id: lease.pane_id.to_string(),
+        rows: lease.target_rows,
+        viewport_revision: lease.viewport_revision,
+        workspace_id: lease.session_id.to_string(),
+    }
+}
+
+fn lease_from_event(event: &RemotePaneLeaseEvent) -> RemotePaneLease {
+    RemotePaneLease {
+        lease_id: event.lease_id,
+        owner_connection_id: event.owner_connection_id,
+        device_id: event.device_id.clone(),
+        session_id: event.session_id,
+        pane_id: event.pane_id,
+        pane_generation: event.pane_generation,
+        revision: event.revision,
+        original_cols: event.original_cols,
+        original_rows: event.original_rows,
+        target_cols: event.target_cols,
+        target_rows: event.target_rows,
+        viewport_revision: event.viewport_revision,
+        expires_at: event.expires_at,
+    }
+}
+
+fn apply_lease_event(leases: &mut RemoteLeaseProjection, event: &RemotePaneLeaseEvent) {
+    match event.kind {
+        RemotePaneLeaseEventKind::Claimed | RemotePaneLeaseEventKind::Updated => {
+            leases.record(lease_from_event(event));
+        }
+        RemotePaneLeaseEventKind::Released | RemotePaneLeaseEventKind::Lost => {
+            leases.remove_pane(event.pane_id);
+        }
+    }
+}
+
+fn send_v2_lease_event(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    revocation_epoch: u64,
+    event: &RemotePaneLeaseEvent,
+) -> Result<()> {
+    let (method, payload) = match event.kind {
+        RemotePaneLeaseEventKind::Claimed | RemotePaneLeaseEventKind::Updated => (
+            "lease.changed",
+            json!({
+                "viewGeneration": event.pane_generation.max(1),
+                "lease": v2_lease_record(&lease_from_event(event)),
+            }),
+        ),
+        RemotePaneLeaseEventKind::Released | RemotePaneLeaseEventKind::Lost => (
+            "lease.lost",
+            json!({
+                "workspaceId": event.session_id,
+                "paneId": event.pane_id,
+                "leaseId": event.lease_id,
+                "leaseRevision": event.revision,
+                "reason": v2_lease_lost_reason(event.reason),
+            }),
+        ),
+    };
+    let payload = serde_json::to_vec(&json!({
+        "version": V2_PROTOCOL_VERSION,
+        "requestId": "event",
+        "domain": "terminal",
+        "method": method,
+        "operationId": Uuid::new_v4(),
+        "sequence": 0,
+        "revocationEpoch": revocation_epoch,
+        "payload": payload,
+        "error": null,
+    }))?;
+    ws.send(Message::Binary(
+        transport.seal(SecureFrameKind::Control, &payload)?.into(),
+    ))?;
+    Ok(())
+}
+
+fn v2_lease_lost_reason(reason: RemotePaneLeaseEventReason) -> &'static str {
+    match reason {
+        RemotePaneLeaseEventReason::Released => "released",
+        RemotePaneLeaseEventReason::AdminReclaimed => "explicit_revoke",
+        RemotePaneLeaseEventReason::Expired => "expired",
+        RemotePaneLeaseEventReason::ConnectionClosed => "connection_closed",
+        RemotePaneLeaseEventReason::PaneExited => "pane_exited",
+        RemotePaneLeaseEventReason::Claimed => "claimed",
+        RemotePaneLeaseEventReason::TargetUpdated => "target_updated",
+        RemotePaneLeaseEventReason::Renewed => "renewed",
+    }
+}
+
+fn map_v2_terminal_input(
+    params: TerminalInputParams,
+    subscriptions: &HashMap<String, V2Subscription>,
+    leases: &RemoteLeaseProjection,
+    owner_connection_id: Uuid,
+    device_id: &str,
+) -> Result<ClientToDaemon> {
+    let subscription = subscriptions
+        .get(&params.subscription_id)
+        .context("terminal subscription not found")?;
+    let lease_id = params
+        .lease_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .context("leaseId must be a UUID")?;
+    let revision = lease_id
+        .map(|lease_id| {
+            leases
+                .by_lease_id(lease_id)
+                .map(|lease| lease.revision)
+                .context("stale_ref: terminal lease is not active")
+        })
+        .transpose()?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(params.data_base64)
+        .context("decode dataBase64 terminal input")?;
+    Ok(ClientToDaemon::WritePane {
+        session_id: subscription.workspace_id,
+        pane_id: subscription.pane_id,
+        data,
+        origin: remote_origin(owner_connection_id, device_id, lease_id, revision),
+    })
+}
+
 fn handle_v2_request(
     request: &V2Envelope,
     grants: &[String],
+    owner_connection_id: Uuid,
+    device_id: &str,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     next_req: &mut u64,
+    subscriptions: &mut HashMap<String, V2Subscription>,
+    leases: &mut RemoteLeaseProjection,
 ) -> Result<Value> {
     match (request.domain.as_str(), request.method.as_str()) {
         ("system", "status") => Ok(json!({
@@ -885,7 +1238,7 @@ fn handle_v2_request(
         }
         ("workspace", "attach") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
-            let session_id = v2_uuid(&request.payload, "sessionId")?;
+            let session_id = v2_uuid(&request.payload, "workspaceId")?;
             let (layout_json, panes) =
                 attach_session(daemon_writer, daemon_inbox, next_req, session_id)?;
             let panes = panes
@@ -904,27 +1257,176 @@ fn handle_v2_request(
                 .collect::<Result<Vec<_>>>()?;
             Ok(json!({ "layoutJson": layout_json, "panes": panes }))
         }
-        ("terminal", "input") => {
-            require_grant(grants, TERMINAL_INPUT_GRANT)?;
-            let session_id = v2_uuid(&request.payload, "sessionId")?;
-            let pane_id = v2_uuid(&request.payload, "paneId")?;
-            let data = request
-                .payload
-                .get("data")
-                .and_then(Value::as_str)
-                .context("data is required")?;
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .context("decode terminal input")?;
+        ("workspace", "detach") => {
+            require_grant(grants, TERMINAL_VIEW_GRANT)?;
+            let workspace_id = v2_uuid(&request.payload, "workspaceId")?;
+            cleanup_remote_connection(
+                daemon_writer,
+                daemon_inbox,
+                owner_connection_id,
+                take_req(next_req),
+            )?;
+            leases.by_pane.clear();
+            subscriptions.retain(|_, subscription| subscription.workspace_id != workspace_id);
             write_frame(
                 daemon_writer,
-                &ClientToDaemon::WritePane {
-                    session_id,
-                    pane_id,
-                    data,
+                &ClientToDaemon::DetachSession {
+                    session_id: workspace_id,
                 },
             )?;
-            Ok(json!({ "ok": true }))
+            Ok(json!({}))
+        }
+        ("terminal", "unsubscribe") => {
+            require_grant(grants, TERMINAL_VIEW_GRANT)?;
+            let params: TerminalUnsubscribeParams = serde_json::from_value(request.payload.clone())
+                .context("parse terminal.unsubscribe payload")?;
+            subscriptions
+                .remove(&params.subscription_id)
+                .context("terminal subscription not found")?;
+            Ok(json!({}))
+        }
+        ("terminal", "input") => {
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let params: TerminalInputParams = serde_json::from_value(request.payload.clone())
+                .context("parse terminal.input payload")?;
+            let command = map_v2_terminal_input(
+                params,
+                subscriptions,
+                leases,
+                owner_connection_id,
+                device_id,
+            )?;
+            write_frame(daemon_writer, &command)?;
+            Ok(json!({}))
+        }
+        ("terminal", "lease.claim") => {
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let params: TerminalLeaseClaimParams = serde_json::from_value(request.payload.clone())
+                .context("parse terminal.lease.claim payload")?;
+            let session_id =
+                Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
+            let pane_id = Uuid::parse_str(&params.pane_id).context("paneId must be a UUID")?;
+            let lease_id = params
+                .lease_id
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .context("leaseId must be a UUID")?;
+            let current = lease_id
+                .map(|lease_id| {
+                    leases
+                        .by_lease_id(lease_id)
+                        .cloned()
+                        .context("stale_ref: terminal lease is not active")
+                })
+                .transpose()?;
+            let req = take_req(next_req);
+            let message = match current.as_ref() {
+                Some(current)
+                    if current.target_cols == params.cols.clamp(20, 360)
+                        && current.target_rows == params.rows.clamp(5, 200)
+                        && current.viewport_revision == params.viewport_revision =>
+                {
+                    ClientToDaemon::RemotePaneLeaseRenew {
+                        req,
+                        request: RemotePaneLeaseRenewRequest {
+                            owner_connection_id,
+                            device_id: device_id.to_string(),
+                            session_id,
+                            pane_id,
+                            lease_id: current.lease_id,
+                            revision: current.revision,
+                            viewport_revision: params.viewport_revision,
+                        },
+                    }
+                }
+                _ => ClientToDaemon::RemotePaneLeaseClaim {
+                    req,
+                    request: RemotePaneLeaseClaimRequest {
+                        owner_connection_id,
+                        device_id: device_id.to_string(),
+                        session_id,
+                        pane_id,
+                        cols: params.cols.clamp(20, 360),
+                        rows: params.rows.clamp(5, 200),
+                        viewport_revision: params.viewport_revision,
+                        lease_id,
+                        revision: current.as_ref().map(|lease| lease.revision),
+                    },
+                },
+            };
+            let lease =
+                claimed_lease_result(request_reply(daemon_writer, daemon_inbox, req, message)?)?;
+            leases.record(lease.clone());
+            Ok(serde_json::to_value(v2_lease_record(&lease))?)
+        }
+        ("terminal", "lease.release") => {
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let params: TerminalLeaseReleaseParams =
+                serde_json::from_value(request.payload.clone())
+                    .context("parse terminal.lease.release payload")?;
+            let lease_id = Uuid::parse_str(&params.lease_id).context("leaseId must be a UUID")?;
+            let lease = leases
+                .by_lease_id(lease_id)
+                .cloned()
+                .context("stale_ref: terminal lease is not active")?;
+            let req = take_req(next_req);
+            match remote_lease_result(request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::RemotePaneLeaseRelease {
+                    req,
+                    request: RemotePaneLeaseReleaseRequest {
+                        owner_connection_id,
+                        device_id: device_id.to_string(),
+                        session_id: lease.session_id,
+                        pane_id: lease.pane_id,
+                        lease_id,
+                        revision: params.lease_revision,
+                    },
+                },
+            )?)? {
+                RemotePaneLeaseResult::Released { release } => {
+                    leases.remove_pane(release.lease.pane_id);
+                    Ok(json!({}))
+                }
+                other => bail!("unexpected terminal lease release reply: {other:?}"),
+            }
+        }
+        ("terminal", "lease.status") => {
+            require_grant(grants, TERMINAL_VIEW_GRANT)?;
+            let params: TerminalLeaseStatusParams = serde_json::from_value(request.payload.clone())
+                .context("parse terminal.lease.status payload")?;
+            let workspace_id =
+                Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
+            let pane_id = Uuid::parse_str(&params.pane_id).context("paneId must be a UUID")?;
+            let req = take_req(next_req);
+            match remote_lease_result(request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::RemotePaneLeaseStatus {
+                    req,
+                    request: RemotePaneLeaseStatusRequest { pane_id },
+                },
+            )?)? {
+                RemotePaneLeaseResult::Status { lease } => {
+                    if lease
+                        .as_ref()
+                        .is_some_and(|lease| lease.session_id != workspace_id)
+                    {
+                        bail!("stale_target: pane belongs to a different workspace");
+                    }
+                    if let Some(lease) = lease.as_ref() {
+                        leases.record(lease.clone());
+                    } else {
+                        leases.remove_pane(pane_id);
+                    }
+                    Ok(json!({ "lease": lease.as_ref().map(v2_lease_record) }))
+                }
+                other => bail!("unexpected terminal lease status reply: {other:?}"),
+            }
         }
         ("files", method) => {
             require_grant(
@@ -1269,6 +1771,10 @@ fn v2_error_code(error: &anyhow::Error) -> &'static str {
     let message = error.to_string().to_ascii_lowercase();
     if message.contains("capability_denied") {
         "capability_denied"
+    } else if message.contains("stale_target") {
+        "stale_target"
+    } else if message.contains("stale_ref") {
+        "stale_ref"
     } else if message.contains("unsupported") {
         "unsupported"
     } else if message.contains("not found") || message.contains("not_found") {
@@ -1350,6 +1856,7 @@ fn run_authenticated(
     push_rx: &Receiver<Message>,
     shared: &RemoteShared,
     client_key: Uuid,
+    device_id: &str,
     grants: &[String],
 ) -> Result<()> {
     if !has_grant(grants, TERMINAL_VIEW_GRANT) {
@@ -1365,6 +1872,7 @@ fn run_authenticated(
     let mut attached: Option<Uuid> = None;
     let mut attached_panes: Vec<Uuid> = Vec::new();
     let mut pane_geometry: HashMap<Uuid, (u16, u16)> = HashMap::new();
+    let mut leases = RemoteLeaseProjection::default();
     let appearance = shared
         .appearance
         .read()
@@ -1394,6 +1902,7 @@ fn run_authenticated(
     )?;
 
     let mut last_ping = Instant::now();
+    let mut last_lease_renewal = Instant::now();
     let mut last_pong = Instant::now();
     loop {
         while let Some(message) = daemon_inbox.try_control()? {
@@ -1407,6 +1916,7 @@ fn run_authenticated(
                 attached,
                 &mut attached_panes,
                 &mut pane_geometry,
+                &mut leases,
                 message,
             )?;
         }
@@ -1439,10 +1949,12 @@ fn run_authenticated(
                     daemon_inbox,
                     shared,
                     client_key,
+                    device_id,
                     &mut next_req,
                     &mut attached,
                     &mut attached_panes,
                     &mut pane_geometry,
+                    &mut leases,
                     grants,
                     message,
                 )?;
@@ -1463,6 +1975,17 @@ fn run_authenticated(
             }
             Err(error) => return Err(error.into()),
         }
+        if last_lease_renewal.elapsed() >= REMOTE_LEASE_RENEW_INTERVAL {
+            renew_remote_leases(
+                daemon_writer,
+                daemon_inbox,
+                &mut next_req,
+                client_key,
+                device_id,
+                &mut leases,
+            )?;
+            last_lease_renewal = Instant::now();
+        }
 
         if last_ping.elapsed() >= KEEPALIVE_INTERVAL {
             if last_pong.elapsed() >= KEEPALIVE_DEADLINE {
@@ -1481,10 +2004,12 @@ fn handle_client_message(
     daemon_inbox: &mut DaemonInbox,
     shared: &RemoteShared,
     client_key: Uuid,
+    device_id: &str,
     next_req: &mut u64,
     attached: &mut Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
     pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
+    leases: &mut RemoteLeaseProjection,
     grants: &[String],
     message: ClientMessage,
 ) -> Result<()> {
@@ -1523,7 +2048,13 @@ fn handle_client_message(
         ClientMessage::AttachWorkspace { session_id, req_id } => {
             let session_id = parse_uuid(&session_id, ws, req_id)?;
             if let Some(previous) = *attached {
-                restore_owned_leases(shared, client_key, daemon_writer, Some(previous))?;
+                cleanup_remote_connection(
+                    daemon_writer,
+                    daemon_inbox,
+                    client_key,
+                    take_req(next_req),
+                )?;
+                leases.by_pane.clear();
                 write_frame(
                     daemon_writer,
                     &ClientToDaemon::DetachSession {
@@ -1569,7 +2100,8 @@ fn handle_client_message(
         }
         ClientMessage::DetachWorkspace { session_id, req_id } => {
             let session_id = parse_uuid(&session_id, ws, req_id)?;
-            restore_owned_leases(shared, client_key, daemon_writer, Some(session_id))?;
+            cleanup_remote_connection(daemon_writer, daemon_inbox, client_key, take_req(next_req))?;
+            leases.by_pane.clear();
             write_frame(daemon_writer, &ClientToDaemon::DetachSession { session_id })?;
             if *attached == Some(session_id) {
                 *attached = None;
@@ -1593,6 +2125,18 @@ fn handle_client_message(
                     session_id,
                     pane_id,
                     data: data.into_bytes(),
+                    origin: leases
+                        .by_pane
+                        .get(&pane_id)
+                        .map(|lease| {
+                            remote_origin(
+                                client_key,
+                                device_id,
+                                Some(lease.lease_id),
+                                Some(lease.revision),
+                            )
+                        })
+                        .unwrap_or_else(|| remote_origin(client_key, device_id, None, None)),
                 },
             )?;
             Ok(())
@@ -1638,30 +2182,37 @@ fn handle_client_message(
             if !attached_panes.contains(&pane_id) {
                 return send_error(ws, "internal", "pane not attached", req_id);
             }
-            let Some(&(current_cols, current_rows)) = pane_geometry.get(&pane_id) else {
-                return send_error(ws, "internal", "pane geometry unavailable", req_id);
-            };
-            let target = (cols.clamp(20, 360), rows.clamp(5, 200));
-            let claim = claim_pane_lease(
-                &mut shared.pane_leases.lock().expect("remote pane leases mutex"),
-                session_id,
-                pane_id,
-                client_key,
-                (current_cols, current_rows),
-                target,
-            );
-            match claim {
-                ClaimLeaseResult::Busy => send_error(
-                    ws,
-                    "paneBusy",
-                    "pane is already in use by another mobile client",
-                    req_id,
-                ),
-                ClaimLeaseResult::Claimed { lease, resize } => {
-                    shared.notify_pane_lease(claimed_event(pane_id, &lease));
-                    if let Some(resize) = resize {
-                        write_pane_resize(daemon_writer, resize)?;
-                    }
+            let current = leases.by_pane.get(&pane_id).cloned();
+            let req = take_req(next_req);
+            let result = request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::RemotePaneLeaseClaim {
+                    req,
+                    request: RemotePaneLeaseClaimRequest {
+                        owner_connection_id: client_key,
+                        device_id: device_id.to_string(),
+                        session_id,
+                        pane_id,
+                        cols: cols.clamp(20, 360),
+                        rows: rows.clamp(5, 200),
+                        viewport_revision: current
+                            .as_ref()
+                            .map(|lease| lease.viewport_revision.saturating_add(1))
+                            .unwrap_or(1),
+                        lease_id: current.as_ref().map(|lease| lease.lease_id),
+                        revision: current.as_ref().map(|lease| lease.revision),
+                    },
+                },
+            )?;
+            match result {
+                ReplyResult::RemotePaneLease(
+                    RemotePaneLeaseResult::Claimed { lease }
+                    | RemotePaneLeaseResult::Updated { lease }
+                    | RemotePaneLeaseResult::Renewed { lease },
+                ) => {
+                    leases.record(lease.clone());
                     send_json(
                         ws,
                         &ServerMessage::PaneLease {
@@ -1673,18 +2224,44 @@ fn handle_client_message(
                         },
                     )
                 }
+                ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Busy { .. }) => send_error(
+                    ws,
+                    "paneBusy",
+                    "pane is already in use by another mobile client",
+                    req_id,
+                ),
+                ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Stale { .. }) => {
+                    send_error(ws, "paneBusy", "pane lease changed; claim it again", req_id)
+                }
+                other => Err(anyhow!("unexpected pane lease claim reply: {other:?}")),
             }
         }
         ClientMessage::ReleasePane { pane_id, req_id } => {
             let pane_id = parse_uuid(&pane_id, ws, req_id)?;
-            let restore = release_pane_lease(
-                &mut shared.pane_leases.lock().expect("remote pane leases mutex"),
-                pane_id,
-                client_key,
-            );
-            if let Some(restore) = restore {
-                shared.notify_pane_lease(released_event(restore.session_id, pane_id));
-                write_pane_resize(daemon_writer, restore)?;
+            if let Some(lease) = leases.by_pane.get(&pane_id).cloned() {
+                let req = take_req(next_req);
+                match request_reply(
+                    daemon_writer,
+                    daemon_inbox,
+                    req,
+                    ClientToDaemon::RemotePaneLeaseRelease {
+                        req,
+                        request: RemotePaneLeaseReleaseRequest {
+                            owner_connection_id: client_key,
+                            device_id: device_id.to_string(),
+                            session_id: lease.session_id,
+                            pane_id,
+                            lease_id: lease.lease_id,
+                            revision: lease.revision,
+                        },
+                    },
+                )? {
+                    ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Released { .. })
+                    | ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Stale { .. }) => {
+                        leases.remove_pane(pane_id);
+                    }
+                    other => return Err(anyhow!("unexpected pane lease release reply: {other:?}")),
+                }
             }
             send_json(
                 ws,
@@ -1722,24 +2299,19 @@ fn handle_daemon_control(
     ws: &mut RemoteSocket,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
-    shared: &RemoteShared,
+    _shared: &RemoteShared,
     client_key: Uuid,
     next_req: &mut u64,
     attached: Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
     pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
+    leases: &mut RemoteLeaseProjection,
     message: DaemonToClient,
 ) -> Result<()> {
     match message {
         DaemonToClient::PaneExited { pane_id, .. } if attached_panes.contains(&pane_id) => {
             pane_geometry.remove(&pane_id);
-            if let Some(session_id) = drop_owned_lease(
-                &mut shared.pane_leases.lock().expect("remote pane leases mutex"),
-                pane_id,
-                client_key,
-            ) {
-                shared.notify_pane_lease(released_event(session_id, pane_id));
-            }
+            leases.remove_pane(pane_id);
             send_json(
                 ws,
                 &ServerMessage::PaneExited {
@@ -1754,27 +2326,6 @@ fn handle_daemon_control(
             rows,
         } if attached == Some(session_id) => {
             pane_geometry.insert(pane_id, (cols, rows));
-            let target = shared
-                .pane_leases
-                .lock()
-                .expect("remote pane leases mutex")
-                .get(&pane_id)
-                .filter(|lease| lease.owner == client_key)
-                .map(|lease| (lease.target_cols, lease.target_rows));
-            if let Some((target_cols, target_rows)) = target {
-                if (cols, rows) != (target_cols, target_rows) {
-                    write_frame(
-                        daemon_writer,
-                        &ClientToDaemon::ResizePane {
-                            session_id,
-                            pane_id,
-                            cols: target_cols,
-                            rows: target_rows,
-                        },
-                    )?;
-                    return Ok(());
-                }
-            }
             send_json(
                 ws,
                 &ServerMessage::PaneResized {
@@ -1801,14 +2352,6 @@ fn handle_daemon_control(
                     .iter()
                     .map(|pane| (pane.id, (pane.config.cols, pane.config.rows))),
             );
-            for pane_id in drop_missing_owned_leases(
-                &mut shared.pane_leases.lock().expect("remote pane leases mutex"),
-                client_key,
-                session_id,
-                attached_panes,
-            ) {
-                shared.notify_pane_lease(released_event(session_id, pane_id));
-            }
             send_json(
                 ws,
                 &ServerMessage::PanesChanged {
@@ -1817,194 +2360,84 @@ fn handle_daemon_control(
                 },
             )
         }
+        DaemonToClient::RemotePaneLease { event } if event.owner_connection_id == client_key => {
+            apply_lease_event(leases, &event);
+            send_json(
+                ws,
+                &ServerMessage::PaneLease {
+                    pane_id: event.pane_id.to_string(),
+                    leased: event.leased,
+                    cols: event.cols,
+                    rows: event.rows,
+                    req_id: None,
+                },
+            )
+        }
         DaemonToClient::Error { message, .. } => send_error(ws, "internal", &message, None),
         _ => Ok(()),
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PaneResize {
-    session_id: Uuid,
-    pane_id: Uuid,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Clone, Debug)]
-enum ClaimLeaseResult {
-    Busy,
-    Claimed {
-        lease: PaneLease,
-        resize: Option<PaneResize>,
-    },
-}
-
-fn claim_pane_lease(
-    leases: &mut HashMap<Uuid, PaneLease>,
-    session_id: Uuid,
-    pane_id: Uuid,
-    owner: Uuid,
-    current: (u16, u16),
-    target: (u16, u16),
-) -> ClaimLeaseResult {
-    if let Some(lease) = leases.get_mut(&pane_id) {
-        if lease.owner != owner {
-            return ClaimLeaseResult::Busy;
-        }
-        lease.target_cols = target.0;
-        lease.target_rows = target.1;
-        let lease = lease.clone();
-        let resize = (current != target).then_some(PaneResize {
-            session_id,
-            pane_id,
-            cols: target.0,
-            rows: target.1,
-        });
-        return ClaimLeaseResult::Claimed { lease, resize };
-    }
-
-    let lease = PaneLease {
-        session_id,
-        owner,
-        original_cols: current.0,
-        original_rows: current.1,
-        target_cols: target.0,
-        target_rows: target.1,
-    };
-    leases.insert(pane_id, lease.clone());
-    let resize = (current != target).then_some(PaneResize {
-        session_id,
-        pane_id,
-        cols: target.0,
-        rows: target.1,
-    });
-    ClaimLeaseResult::Claimed { lease, resize }
-}
-
-fn release_pane_lease(
-    leases: &mut HashMap<Uuid, PaneLease>,
-    pane_id: Uuid,
-    owner: Uuid,
-) -> Option<PaneResize> {
-    let lease = leases.get(&pane_id)?;
-    if lease.owner != owner {
-        return None;
-    }
-    let lease = leases.remove(&pane_id)?;
-    Some(PaneResize {
-        session_id: lease.session_id,
-        pane_id,
-        cols: lease.original_cols,
-        rows: lease.original_rows,
-    })
-}
-
-fn take_owned_lease_restores(
-    leases: &mut HashMap<Uuid, PaneLease>,
-    owner: Uuid,
-    session_filter: Option<Uuid>,
-) -> Vec<PaneResize> {
-    let mut restores = Vec::new();
-    leases.retain(|pane_id, lease| {
-        if lease.owner == owner
-            && session_filter.is_none_or(|session_id| lease.session_id == session_id)
-        {
-            restores.push(PaneResize {
-                session_id: lease.session_id,
-                pane_id: *pane_id,
-                cols: lease.original_cols,
-                rows: lease.original_rows,
-            });
-            false
-        } else {
-            true
-        }
-    });
-    restores
-}
-
-fn drop_owned_lease(
-    leases: &mut HashMap<Uuid, PaneLease>,
-    pane_id: Uuid,
-    owner: Uuid,
-) -> Option<Uuid> {
-    let lease = leases.get(&pane_id)?;
-    if lease.owner != owner {
-        return None;
-    }
-    leases.remove(&pane_id).map(|lease| lease.session_id)
-}
-
-fn drop_missing_owned_leases(
-    leases: &mut HashMap<Uuid, PaneLease>,
-    owner: Uuid,
-    session_id: Uuid,
-    live_panes: &[Uuid],
-) -> Vec<Uuid> {
-    let mut removed = Vec::new();
-    leases.retain(|pane_id, lease| {
-        if lease.owner == owner && lease.session_id == session_id && !live_panes.contains(pane_id) {
-            removed.push(*pane_id);
-            false
-        } else {
-            true
-        }
-    });
-    removed
-}
-
-fn claimed_event(pane_id: Uuid, lease: &PaneLease) -> RemotePaneLeaseEvent {
-    RemotePaneLeaseEvent {
-        session_id: lease.session_id.to_string(),
-        pane_id: pane_id.to_string(),
-        leased: true,
-        cols: Some(lease.target_cols),
-        rows: Some(lease.target_rows),
-    }
-}
-
-fn released_event(session_id: Uuid, pane_id: Uuid) -> RemotePaneLeaseEvent {
-    RemotePaneLeaseEvent {
-        session_id: session_id.to_string(),
-        pane_id: pane_id.to_string(),
-        leased: false,
-        cols: None,
-        rows: None,
-    }
-}
-
-fn restore_owned_leases(
-    shared: &RemoteShared,
-    owner: Uuid,
+fn renew_remote_leases(
     daemon_writer: &mut interprocess::local_socket::SendHalf,
-    session_filter: Option<Uuid>,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    owner_connection_id: Uuid,
+    device_id: &str,
+    leases: &mut RemoteLeaseProjection,
 ) -> Result<()> {
-    let restores = take_owned_lease_restores(
-        &mut shared.pane_leases.lock().expect("remote pane leases mutex"),
-        owner,
-        session_filter,
-    );
-    for restore in restores {
-        shared.notify_pane_lease(released_event(restore.session_id, restore.pane_id));
-        write_pane_resize(daemon_writer, restore)?;
+    for lease in leases.by_pane.values().cloned().collect::<Vec<_>>() {
+        let req = take_req(next_req);
+        match request_reply(
+            daemon_writer,
+            daemon_inbox,
+            req,
+            ClientToDaemon::RemotePaneLeaseRenew {
+                req,
+                request: RemotePaneLeaseRenewRequest {
+                    owner_connection_id,
+                    device_id: device_id.to_string(),
+                    session_id: lease.session_id,
+                    pane_id: lease.pane_id,
+                    lease_id: lease.lease_id,
+                    revision: lease.revision,
+                    viewport_revision: lease.viewport_revision,
+                },
+            },
+        )? {
+            ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Renewed { lease })
+            | ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Updated { lease }) => {
+                leases.record(lease);
+            }
+            ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Stale { .. }) => {
+                leases.remove_pane(lease.pane_id);
+            }
+            other => bail!("unexpected remote lease renew reply: {other:?}"),
+        }
     }
     Ok(())
 }
 
-fn write_pane_resize(
+fn cleanup_remote_connection(
     daemon_writer: &mut interprocess::local_socket::SendHalf,
-    resize: PaneResize,
+    daemon_inbox: &mut DaemonInbox,
+    owner_connection_id: Uuid,
+    req: u64,
 ) -> Result<()> {
-    write_frame(
+    match request_reply(
         daemon_writer,
-        &ClientToDaemon::ResizePane {
-            session_id: resize.session_id,
-            pane_id: resize.pane_id,
-            cols: resize.cols,
-            rows: resize.rows,
+        daemon_inbox,
+        req,
+        ClientToDaemon::RemoteConnectionCleanup {
+            req,
+            request: RemoteConnectionCleanupRequest {
+                owner_connection_id,
+            },
         },
-    )?;
-    Ok(())
+    )? {
+        ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Cleanup { .. }) => Ok(()),
+        other => bail!("unexpected remote connection cleanup reply: {other:?}"),
+    }
 }
 
 fn list_sessions(
@@ -2290,85 +2723,107 @@ mod tests {
         );
     }
     #[test]
-    fn pane_lease_is_exclusive_and_restores_original_geometry() {
+    fn canonical_v2_terminal_input_maps_subscription_and_remote_lease_origin() {
+        let owner_connection_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
-        let owner = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        let mut leases = HashMap::new();
-
-        let first = claim_pane_lease(&mut leases, session_id, pane_id, owner, (102, 42), (48, 36));
-        let ClaimLeaseResult::Claimed { lease, resize } = first else {
-            panic!("first claim should succeed")
-        };
-        assert_eq!((lease.original_cols, lease.original_rows), (102, 42));
-        assert_eq!(
-            resize,
-            Some(PaneResize {
-                session_id,
+        let lease_id = Uuid::new_v4();
+        let mut subscriptions = HashMap::new();
+        subscriptions.insert(
+            "subscription-1".to_string(),
+            V2Subscription {
+                workspace_id: session_id,
                 pane_id,
-                cols: 48,
-                rows: 36
-            })
+            },
         );
+        let mut leases = RemoteLeaseProjection::default();
+        leases.record(RemotePaneLease {
+            lease_id,
+            owner_connection_id,
+            device_id: "device-1".to_string(),
+            session_id,
+            pane_id,
+            pane_generation: 7,
+            revision: 4,
+            original_cols: 100,
+            original_rows: 30,
+            target_cols: 120,
+            target_rows: 40,
+            viewport_revision: 43,
+            expires_at: 99,
+        });
+        let params: TerminalInputParams = serde_json::from_value(json!({
+            "subscriptionId": "subscription-1",
+            "leaseId": lease_id,
+            "dataBase64": "cHdkDQ==",
+        }))
+        .expect("parse canonical terminal input");
 
+        let command = map_v2_terminal_input(
+            params,
+            &subscriptions,
+            &leases,
+            owner_connection_id,
+            "device-1",
+        )
+        .expect("map terminal input");
         assert!(matches!(
-            claim_pane_lease(&mut leases, session_id, pane_id, other, (48, 36), (60, 30)),
-            ClaimLeaseResult::Busy
+            command,
+            ClientToDaemon::WritePane {
+                session_id: mapped_session,
+                pane_id: mapped_pane,
+                data,
+                origin: PaneCommandOrigin::Remote {
+                    owner_connection_id: mapped_owner,
+                    device_id,
+                    lease_id: Some(mapped_lease),
+                    revision: Some(4),
+                },
+            } if mapped_session == session_id
+                && mapped_pane == pane_id
+                && mapped_owner == owner_connection_id
+                && mapped_lease == lease_id
+                && device_id == "device-1"
+                && data == b"pwd\r"
         ));
-
-        let updated = claim_pane_lease(&mut leases, session_id, pane_id, owner, (48, 36), (56, 32));
-        let ClaimLeaseResult::Claimed { lease, .. } = updated else {
-            panic!("owner update should succeed")
-        };
-        assert_eq!((lease.original_cols, lease.original_rows), (102, 42));
-        assert_eq!((lease.target_cols, lease.target_rows), (56, 32));
-
-        assert_eq!(
-            release_pane_lease(&mut leases, pane_id, owner),
-            Some(PaneResize {
-                session_id,
-                pane_id,
-                cols: 102,
-                rows: 42
-            })
-        );
-        assert!(leases.is_empty());
+        assert!(serde_json::from_value::<TerminalInputParams>(json!({
+            "sessionId": session_id,
+            "paneId": pane_id,
+            "data": "cHdkDQ==",
+        }))
+        .is_err());
     }
 
     #[test]
-    fn disconnect_restores_only_the_owners_matching_session() {
-        let owner = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        let session_a = Uuid::new_v4();
-        let session_b = Uuid::new_v4();
-        let pane_a = Uuid::new_v4();
-        let pane_b = Uuid::new_v4();
-        let pane_other = Uuid::new_v4();
-        let mut leases = HashMap::new();
-
-        let _ = claim_pane_lease(&mut leases, session_a, pane_a, owner, (80, 24), (44, 30));
-        let _ = claim_pane_lease(&mut leases, session_b, pane_b, owner, (90, 30), (50, 34));
-        let _ = claim_pane_lease(
-            &mut leases,
-            session_a,
-            pane_other,
-            other,
-            (100, 32),
-            (52, 36),
-        );
-
-        assert_eq!(
-            take_owned_lease_restores(&mut leases, owner, Some(session_a)),
-            vec![PaneResize {
-                session_id: session_a,
-                pane_id: pane_a,
-                cols: 80,
-                rows: 24
-            }]
-        );
-        assert!(leases.contains_key(&pane_b));
-        assert!(leases.contains_key(&pane_other));
+    fn v1_claim_maps_to_typed_daemon_request_with_generated_revision_handles() {
+        let owner_connection_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let lease_id = Uuid::new_v4();
+        let command = ClientToDaemon::RemotePaneLeaseClaim {
+            req: 9,
+            request: RemotePaneLeaseClaimRequest {
+                owner_connection_id,
+                device_id: "legacy-device".to_string(),
+                session_id,
+                pane_id,
+                cols: 52,
+                rows: 38,
+                viewport_revision: 3,
+                lease_id: Some(lease_id),
+                revision: Some(2),
+            },
+        };
+        assert!(matches!(
+            command,
+            ClientToDaemon::RemotePaneLeaseClaim { req: 9, request }
+                if request.owner_connection_id == owner_connection_id
+                    && request.device_id == "legacy-device"
+                    && request.session_id == session_id
+                    && request.pane_id == pane_id
+                    && request.lease_id == Some(lease_id)
+                    && request.revision == Some(2)
+        ));
     }
 
     #[test]

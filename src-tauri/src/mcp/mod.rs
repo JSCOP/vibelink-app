@@ -13,7 +13,9 @@ use crate::dedicated_cli::{
     command_contracts, parse_args, CommandContract, ControlExecutor, RiskLevel, SocketExecutor,
     ValueKind,
 };
-use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, TaskSignal};
+use crate::protocol::{
+    ClientToDaemon, PaneCommandOrigin, PaneConfig, PaneMeta, ReplyResult, TaskSignal,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::borrow::Cow;
@@ -233,6 +235,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                     session_id,
                     pane_id,
                     data: payload,
+                    origin: PaneCommandOrigin::Desktop,
                 })?;
             }
             Ok(json!({ "ok": true }).to_string())
@@ -355,12 +358,14 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 session_id,
                 pane_id,
                 data: payloads[0].clone(),
+                origin: PaneCommandOrigin::Desktop,
             })?;
             std::thread::sleep(Duration::from_millis(120));
             client.send(ClientToDaemon::WritePane {
                 session_id,
                 pane_id,
                 data: payloads[1].clone(),
+                origin: PaneCommandOrigin::Desktop,
             })?;
             let updated = board_task_update_native(
                 &session_id.to_string(),
@@ -934,6 +939,7 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
                 session_id,
                 pane_id: pane.id,
                 data: payload.clone(),
+                origin: PaneCommandOrigin::Desktop,
             })?;
             command_pane_ids.push(pane.id.to_string());
         }

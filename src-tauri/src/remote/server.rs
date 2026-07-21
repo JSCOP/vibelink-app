@@ -69,27 +69,6 @@ pub struct RemotePaneLeaseEvent {
     pub rows: Option<u16>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PaneLease {
-    pub session_id: Uuid,
-    pub owner: Uuid,
-    pub original_cols: u16,
-    pub original_rows: u16,
-    pub target_cols: u16,
-    pub target_rows: u16,
-}
-
-impl PaneLease {
-    pub fn status(&self, pane_id: Uuid) -> RemotePaneLeaseStatus {
-        RemotePaneLeaseStatus {
-            session_id: self.session_id.to_string(),
-            pane_id: pane_id.to_string(),
-            cols: self.target_cols,
-            rows: self.target_rows,
-        }
-    }
-}
-
 struct Runtime {
     shutdown: Arc<AtomicBool>,
     handle: JoinHandle<()>,
@@ -104,16 +83,8 @@ pub(crate) struct RemoteShared {
     pub client_devices: Mutex<HashMap<Uuid, String>>,
     pub v2_clients: Mutex<HashSet<Uuid>>,
     pub v2_operation_ids: Mutex<HashMap<String, OperationReplayWindow>>,
-    pub pane_leases: Mutex<HashMap<Uuid, PaneLease>>,
-    pane_lease_notifier: Arc<dyn Fn(RemotePaneLeaseEvent) + Send + Sync>,
     pub v2_identity: Arc<DeviceIdentity>,
     pub active_clients: AtomicUsize,
-}
-
-impl RemoteShared {
-    pub fn notify_pane_lease(&self, event: RemotePaneLeaseEvent) {
-        (self.pane_lease_notifier)(event);
-    }
 }
 
 pub struct RemoteServer {
@@ -126,13 +97,6 @@ pub struct RemoteServer {
 
 impl RemoteServer {
     pub fn new(data_dir: PathBuf) -> Result<Self> {
-        Self::new_with_pane_lease_notifier(data_dir, |_| {})
-    }
-
-    pub fn new_with_pane_lease_notifier<F>(data_dir: PathBuf, notifier: F) -> Result<Self>
-    where
-        F: Fn(RemotePaneLeaseEvent) + Send + Sync + 'static,
-    {
         let remote_dir = data_dir.join("remote");
         std::fs::create_dir_all(&remote_dir)?;
         let config_path = remote_dir.join("config.json");
@@ -158,8 +122,6 @@ impl RemoteServer {
                 client_devices: Mutex::new(HashMap::new()),
                 v2_clients: Mutex::new(HashSet::new()),
                 v2_operation_ids: Mutex::new(HashMap::new()),
-                pane_leases: Mutex::new(HashMap::new()),
-                pane_lease_notifier: Arc::new(notifier),
                 v2_identity,
                 active_clients: AtomicUsize::new(0),
             }),
@@ -443,17 +405,6 @@ impl RemoteServer {
             self.start()?;
         }
         Ok(self.status())
-    }
-
-    pub fn pane_lease(&self, pane_id: &str) -> Result<Option<RemotePaneLeaseStatus>> {
-        let pane_id = Uuid::parse_str(pane_id).context("parse pane lease id")?;
-        Ok(self
-            .shared
-            .pane_leases
-            .lock()
-            .expect("remote pane leases mutex")
-            .get(&pane_id)
-            .map(|lease| lease.status(pane_id)))
     }
 
     pub fn set_appearance(
