@@ -6,7 +6,7 @@ import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
 import { browserEditorCloseDecision, getEditorDocumentStore } from '../../editor/documentStore'
 import { emptyExplorerSessionState, deriveGitDecorations, flattenExplorerTree, joinPath, parentPath, useExplorerStore, type ExplorerNode } from '../../state/explorer'
 import { emptyGitSessionState, repositoryFolder, repositoryStateFor, useGitStore } from '../../state/git'
-import { useWorkspaceStore } from '../../state/store'
+import { getWorkspaceSessionEpoch, getWorkspaceSessionReadyEpoch, getWorkspaceSessionTargetId, useWorkspaceStore } from '../../state/store'
 import { ExplorerTreeView, type ExplorerContextAction, type ExplorerContextMenu } from './ExplorerTreeView'
 import { ExplorerViewerView } from './ExplorerViewerView'
 
@@ -14,6 +14,7 @@ export type ExplorerWindowProps = { sessionId: string; workspaceFolder: string }
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'])
 const EXPLORER_PREVIEW_VISIBLE_KEY = 'vibelink:explorerPreviewVisible'
+type ExplorerWorkspaceOwnership = { sessionId: string; sessionEpoch: number; workspaceFolder: string }
 
 export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowProps) {
   const session = useExplorerStore((state) => state.sessions[sessionId] ?? emptyExplorerSessionState)
@@ -30,13 +31,13 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const setActiveRepository = useGitStore((state) => state.setActiveRepository)
   const setGitSelectedPath = useGitStore((state) => state.setSelectedPath)
   const setGitActiveTab = useGitStore((state) => state.setActiveTab)
-  const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const editorCommand = useWorkspaceStore((state) => state.settings.externalEditorCommand).trim()
   const gitStatusPresentation = useWorkspaceStore((state) => state.settings.gitStatusPresentation)
   const contentActions = useContext(WorkspaceContentActionsContext)
   const editorDocuments = useMemo(() => getEditorDocumentStore(sessionId, workspaceFolder), [sessionId, workspaceFolder])
   const [textFile, setTextFile] = useState<TextFile | null>(null)
   const [imageSrc, setImageSrc] = useState<string | null>(null)
+  const [viewerContentPath, setViewerContentPath] = useState<string | null>(null)
   const [viewerLoading, setViewerLoading] = useState(false)
   const [viewerError, setViewerError] = useState<string | null>(null)
   const [imageFit, setImageFit] = useState(true)
@@ -46,6 +47,25 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   const [dragOverPath, setDragOverPath] = useState<string | null>(null)
   const [previewVisible, setPreviewVisible] = useState(loadExplorerPreviewVisible)
   const draggedPathRef = useRef<string | null>(null)
+  const captureWorkspaceOwnership = useCallback((): ExplorerWorkspaceOwnership | null => {
+    const state = useWorkspaceStore.getState()
+    const sessionEpoch = getWorkspaceSessionEpoch()
+    const currentFolder = state.sessions.find((candidate) => candidate.id === sessionId)?.workspaceFolder ?? null
+    if (state.activeSessionId !== sessionId
+      || currentFolder !== workspaceFolder
+      || getWorkspaceSessionReadyEpoch() !== sessionEpoch
+      || getWorkspaceSessionTargetId() !== sessionId) return null
+    return { sessionId, sessionEpoch, workspaceFolder }
+  }, [sessionId, workspaceFolder])
+  const workspaceOwnershipIsCurrent = useCallback((ownership: ExplorerWorkspaceOwnership | null): ownership is ExplorerWorkspaceOwnership => {
+    if (!ownership) return false
+    const state = useWorkspaceStore.getState()
+    return state.activeSessionId === ownership.sessionId
+      && getWorkspaceSessionEpoch() === ownership.sessionEpoch
+      && getWorkspaceSessionReadyEpoch() === ownership.sessionEpoch
+      && getWorkspaceSessionTargetId() === ownership.sessionId
+      && state.sessions.find((candidate) => candidate.id === ownership.sessionId)?.workspaceFolder === ownership.workspaceFolder
+  }, [])
 
   const repositoryInfoByRoot = useMemo(() => new Map(
     Object.entries(gitSession.repositories).map(([root, state]) => [root, state.repoInfo] as const),
@@ -79,6 +99,15 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
   }, [decorations])
   const selectedNode = nodes.find((node) => node.path === session.selectedPath) ?? null
   const selectedHasDiff = Boolean(selectedNode && !selectedNode.entry.isDir && selectedNode.decoration)
+  const workspaceLabel = useMemo(() => {
+    const segments = workspaceFolder.replace(/[\\/]+$/, '').split(/[\\/]/)
+    return segments[segments.length - 1] || workspaceFolder
+  }, [workspaceFolder])
+  const activeRepositoryLabel = gitSession.activeRepoRoot || 'Workspace root'
+  const selectedRepositoryRoot = selectedNode ? knownRepositoryRoots.find((root) => selectedNode.path === root || selectedNode.path.startsWith(`${root}/`)) ?? '' : gitSession.activeRepoRoot
+  const selectedRepositoryLabel = selectedRepositoryRoot || 'Workspace root'
+  const selectedTextFile = viewerContentPath === session.selectedPath ? textFile : null
+  const selectedImageSrc = viewerContentPath === session.selectedPath ? imageSrc : null
 
   useEffect(() => { void loadChildren(sessionId, workspaceFolder, '') }, [loadChildren, sessionId, workspaceFolder])
   useEffect(() => {
@@ -128,30 +157,44 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     const timer = window.setTimeout(() => {
       setTextFile(null)
       setImageSrc(null)
+      setViewerContentPath(null)
       setViewerError(null)
       if (!previewVisible || !selectedNode || selectedNode.entry.isDir || selectedNode.gitOnly) { setViewerLoading(false); return }
+      const ownership = captureWorkspaceOwnership()
+      if (!ownership) { setViewerLoading(false); return }
       setViewerLoading(true)
       const extension = selectedNode.name.split('.').pop()?.toLowerCase() ?? ''
       const request = IMAGE_EXTENSIONS.has(extension)
         ? invoke<string>('fs_read_image', { workspaceFolder, relPath: selectedNode.path }).then((base64) => ({ image: `data:${imageMime(extension)};base64,${base64}` }))
         : invoke<TextFile>('fs_read_text', { workspaceFolder, relPath: selectedNode.path }).then((text) => ({ text }))
       void request.then((result) => {
-        if (cancelled) return
+        if (cancelled || !workspaceOwnershipIsCurrent(ownership)) return
+        setViewerContentPath(selectedNode.path)
         if ('image' in result) setImageSrc(result.image)
         else setTextFile(result.text)
-      }).catch((reason) => { if (!cancelled) setViewerError(String(reason)) }).finally(() => { if (!cancelled) setViewerLoading(false) })
+      }).catch((reason) => {
+        if (!cancelled && workspaceOwnershipIsCurrent(ownership)) setViewerError(String(reason))
+      }).finally(() => {
+        if (!cancelled && workspaceOwnershipIsCurrent(ownership)) setViewerLoading(false)
+      })
     }, 0)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [previewVisible, selectedNode, workspaceFolder])
+  }, [captureWorkspaceOwnership, previewVisible, selectedNode, workspaceFolder, workspaceOwnershipIsCurrent])
 
-  const reloadPaths = useCallback(async (...paths: string[]) => {
+  const reloadPaths = useCallback(async (ownership: ExplorerWorkspaceOwnership, ...paths: string[]): Promise<boolean> => {
+    if (!workspaceOwnershipIsCurrent(ownership)) return false
     const unique = new Set(paths.map(parentPath).concat(paths).filter((path) => session.childrenByPath.has(path) || path === ''))
-    for (const path of unique) await loadChildren(sessionId, workspaceFolder, path)
+    for (const path of unique) {
+      await loadChildren(sessionId, workspaceFolder, path)
+      if (!workspaceOwnershipIsCurrent(ownership)) return false
+    }
     await refreshGit(sessionId, workspaceFolder)
-  }, [loadChildren, refreshGit, session.childrenByPath, sessionId, workspaceFolder])
+    return workspaceOwnershipIsCurrent(ownership)
+  }, [loadChildren, refreshGit, session.childrenByPath, sessionId, workspaceFolder, workspaceOwnershipIsCurrent])
 
   const toggleNode = useCallback(async (node: ExplorerNode) => {
-    if (!node.entry.isDir || node.entry.isSymlink) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership || !node.entry.isDir || node.entry.isSymlink) return
     const expanded = !node.expanded
     setExpanded(sessionId, node.path, expanded)
     if (!expanded) return
@@ -163,7 +206,8 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       requests.push(refreshRepository(sessionId, workspaceFolder, node.path))
     }
     await Promise.all(requests)
-  }, [loadChildren, refreshRepository, session.childrenByPath, sessionId, setExpanded, workspaceFolder])
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+  }, [captureWorkspaceOwnership, loadChildren, refreshRepository, session.childrenByPath, sessionId, setExpanded, workspaceFolder, workspaceOwnershipIsCurrent])
 
   const repositoryRootForPath = useCallback((path: string) => knownRepositoryRoots.find((root) => path === root || path.startsWith(`${root}/`)) ?? '', [knownRepositoryRoots])
   const targetForPath = useCallback((path: string, repoRoot: string) => ({
@@ -184,33 +228,42 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     setGitActiveTab(sessionId, 'changes')
   }, [gitTargetForNode, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, setSelectedPath])
 
-  const openVibeLinkEditor = useCallback(async (node: ExplorerNode) => {
+  const openVibeLinkEditor = useCallback(async (node: ExplorerNode, capturedOwnership?: ExplorerWorkspaceOwnership) => {
     if (!isVibeLinkEditorCandidate(node)) return
+    const ownership = capturedOwnership ?? captureWorkspaceOwnership()
+    if (!workspaceOwnershipIsCurrent(ownership)) return
     if (!contentActions) {
       setExplorerError(sessionId, 'VibeLink Editor is not available in this workspace layout.')
       return
     }
     try {
-      await contentActions.openContent({ kind: 'editor', relPath: node.path })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+      await contentActions.openContent({ kind: 'editor', relPath: node.path, workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
     } catch (reason) {
-      setExplorerError(sessionId, String(reason))
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
     }
-  }, [contentActions, sessionId, setExplorerError])
+  }, [captureWorkspaceOwnership, contentActions, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
 
-  const reopenEditors = useCallback(async (paths: string[]) => {
-    if (!contentActions) return
+  const reopenEditors = useCallback(async (paths: string[], ownership: ExplorerWorkspaceOwnership) => {
+    if (!contentActions || !workspaceOwnershipIsCurrent(ownership)) return
     for (const path of paths) {
       try {
-        await contentActions.openContent({ kind: 'editor', relPath: path })
+        if (!workspaceOwnershipIsCurrent(ownership)) return
+        await contentActions.openContent({ kind: 'editor', relPath: path, workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+        if (!workspaceOwnershipIsCurrent(ownership)) return
       } catch (reason) {
-        setExplorerError(sessionId, String(reason))
+        if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+        return
       }
     }
-  }, [contentActions, sessionId, setExplorerError])
+  }, [contentActions, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
 
-  const prepareEditorPathMutation = useCallback(async (path: string): Promise<string[] | null> => {
+  const prepareEditorPathMutation = useCallback(async (path: string, ownership: ExplorerWorkspaceOwnership): Promise<string[] | null> => {
+    if (!workspaceOwnershipIsCurrent(ownership)) return null
     const affected = editorDocuments.documentsUnder(path)
     if (await editorDocuments.preparePathMutation(path, browserEditorCloseDecision) === 'cancelled') return null
+    if (!workspaceOwnershipIsCurrent(ownership)) return null
     const openPaths = affected.filter((document) => document.viewCount > 0).map((document) => document.relPath)
     if (openPaths.length === 0) return []
     if (!contentActions) {
@@ -219,23 +272,28 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     }
     const closed: string[] = []
     for (const openPath of openPaths) {
+      if (!workspaceOwnershipIsCurrent(ownership)) return null
       const panelId = workspaceContentPanelId({ kind: 'editor', instanceId: openPath })
       let closeResult: 'closed' | 'cancelled'
       try {
-        closeResult = await contentActions.requestCloseContent(panelId)
+        closeResult = await contentActions.requestCloseContent(panelId, { workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+        if (!workspaceOwnershipIsCurrent(ownership)) return null
       } catch (reason) {
-        setExplorerError(sessionId, String(reason))
-        await reopenEditors(closed)
+        if (workspaceOwnershipIsCurrent(ownership)) {
+          setExplorerError(sessionId, String(reason))
+          await reopenEditors(closed, ownership)
+        }
         return null
       }
       if (closeResult === 'cancelled') {
-        await reopenEditors(closed)
+        await reopenEditors(closed, ownership)
+        if (!workspaceOwnershipIsCurrent(ownership)) return null
         return null
       }
       closed.push(openPath)
     }
     return openPaths
-  }, [contentActions, editorDocuments, reopenEditors, sessionId, setExplorerError])
+  }, [contentActions, editorDocuments, reopenEditors, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
 
   const beginRename = useCallback((node: ExplorerNode) => {
     setContextMenu(null)
@@ -248,62 +306,82 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     const name = renameValue.trim()
     setRenamingPath(null)
     if (!source || !name || name === source.split('/').pop()) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const destination = joinPath(parentPath(source), name)
     if (editorDocuments.documentsUnder(destination).some((document) => document.dirty || document.viewCount > 0)) {
       setExplorerError(sessionId, `Close or resolve the existing editor document at ${destination} before renaming.`)
       return
     }
-    const openPaths = await prepareEditorPathMutation(source)
-    if (!openPaths) return
+    const openPaths = await prepareEditorPathMutation(source, ownership)
+    if (!openPaths || !workspaceOwnershipIsCurrent(ownership)) return
     try {
-      await invoke('fs_rename', { workspaceFolder, fromRel: source, toRel: destination })
+      await invoke('fs_rename', { workspaceFolder: ownership.workspaceFolder, fromRel: source, toRel: destination })
       editorDocuments.applyDelete(destination)
       editorDocuments.applyRename(source, destination)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
       setSelectedPath(sessionId, destination)
       invalidatePath(sessionId, source)
-      await reloadPaths(source, destination)
+      if (!await reloadPaths(ownership, source, destination)) return
     } catch (reason) {
-      await reopenEditors(openPaths)
-      setExplorerError(sessionId, String(reason))
+      if (workspaceOwnershipIsCurrent(ownership)) {
+        await reopenEditors(openPaths, ownership)
+        if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+      }
       return
     }
-    await reopenEditors(openPaths.map((path) => path === source ? destination : `${destination}${path.slice(source.length)}`)).catch((reason) => setExplorerError(sessionId, String(reason)))
-  }, [editorDocuments, invalidatePath, prepareEditorPathMutation, reloadPaths, renameValue, renamingPath, reopenEditors, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
+    await reopenEditors(openPaths.map((path) => path === source ? destination : `${destination}${path.slice(source.length)}`), ownership)
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+  }, [captureWorkspaceOwnership, editorDocuments, invalidatePath, prepareEditorPathMutation, reloadPaths, renameValue, renamingPath, reopenEditors, sessionId, setExplorerError, setSelectedPath, workspaceOwnershipIsCurrent])
 
   const deleteNode = useCallback(async (node: ExplorerNode) => {
     setContextMenu(null)
     if (!window.confirm(`Delete ${node.name}? This cannot be undone.`)) return
-    const openPaths = await prepareEditorPathMutation(node.path)
-    if (!openPaths) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
+    const openPaths = await prepareEditorPathMutation(node.path, ownership)
+    if (!openPaths || !workspaceOwnershipIsCurrent(ownership)) return
     try {
-      await invoke('fs_delete', { workspaceFolder, relPaths: [node.path] })
+      await invoke('fs_delete', { workspaceFolder: ownership.workspaceFolder, relPaths: [node.path] })
       editorDocuments.applyDelete(node.path)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
       if (session.selectedPath === node.path || session.selectedPath?.startsWith(`${node.path}/`)) setSelectedPath(sessionId, null)
       invalidatePath(sessionId, node.path)
-      await reloadPaths(node.path)
+      await reloadPaths(ownership, node.path)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
     } catch (reason) {
-      await reopenEditors(openPaths)
-      setExplorerError(sessionId, String(reason))
+      if (workspaceOwnershipIsCurrent(ownership)) {
+        await reopenEditors(openPaths, ownership)
+        if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+      }
     }
-  }, [editorDocuments, invalidatePath, prepareEditorPathMutation, reloadPaths, reopenEditors, session.selectedPath, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
+  }, [captureWorkspaceOwnership, editorDocuments, invalidatePath, prepareEditorPathMutation, reloadPaths, reopenEditors, session.selectedPath, sessionId, setExplorerError, setSelectedPath, workspaceOwnershipIsCurrent])
 
   const createEntry = useCallback(async (node: ExplorerNode, directory: boolean) => {
     setContextMenu(null)
     const name = window.prompt(directory ? 'Folder name' : 'File name')?.trim()
     if (!name) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const targetDir = node.entry.isDir ? node.path : node.parentPath
     const path = joinPath(targetDir, name)
     try {
-      await invoke(directory ? 'fs_create_dir' : 'fs_create_file', { workspaceFolder, relPath: path })
+      await invoke(directory ? 'fs_create_dir' : 'fs_create_file', { workspaceFolder: ownership.workspaceFolder, relPath: path })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
       if (node.entry.isDir) setExpanded(sessionId, node.path, true)
       setSelectedPath(sessionId, path)
-      await reloadPaths(targetDir)
-    } catch (reason) { setExplorerError(sessionId, String(reason)) }
-  }, [reloadPaths, sessionId, setExpanded, setExplorerError, setSelectedPath, workspaceFolder])
+      await reloadPaths(ownership, targetDir)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [captureWorkspaceOwnership, reloadPaths, sessionId, setExpanded, setExplorerError, setSelectedPath, workspaceOwnershipIsCurrent])
 
   const moveNode = useCallback(async (sourcePath: string, target: ExplorerNode) => {
     const source = nodes.find((node) => node.path === sourcePath)
     if (source?.entry.repoKind || target.entry.repoKind) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const targetDir = target.entry.isDir ? target.path : target.parentPath
     if (sourcePath === targetDir || targetDir.startsWith(`${sourcePath}/`)) return
     const destination = joinPath(targetDir, sourcePath.split('/').pop() ?? '')
@@ -312,62 +390,92 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       setExplorerError(sessionId, `Close or resolve the existing editor document at ${destination} before moving.`)
       return
     }
-    const openPaths = await prepareEditorPathMutation(sourcePath)
-    if (!openPaths) return
+    const openPaths = await prepareEditorPathMutation(sourcePath, ownership)
+    if (!openPaths || !workspaceOwnershipIsCurrent(ownership)) return
     try {
-      await invoke('fs_rename', { workspaceFolder, fromRel: sourcePath, toRel: destination })
+      await invoke('fs_rename', { workspaceFolder: ownership.workspaceFolder, fromRel: sourcePath, toRel: destination })
       editorDocuments.applyDelete(destination)
       editorDocuments.applyRename(sourcePath, destination)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
       setSelectedPath(sessionId, destination)
       invalidatePath(sessionId, sourcePath)
-      await reloadPaths(sourcePath, destination, targetDir)
+      if (!await reloadPaths(ownership, sourcePath, destination, targetDir)) return
     } catch (reason) {
-      await reopenEditors(openPaths)
-      setExplorerError(sessionId, String(reason))
+      if (workspaceOwnershipIsCurrent(ownership)) {
+        await reopenEditors(openPaths, ownership)
+        if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+      }
       return
     }
-    await reopenEditors(openPaths.map((path) => path === sourcePath ? destination : `${destination}${path.slice(sourcePath.length)}`)).catch((reason) => setExplorerError(sessionId, String(reason)))
-  }, [editorDocuments, invalidatePath, nodes, prepareEditorPathMutation, reloadPaths, reopenEditors, sessionId, setExplorerError, setSelectedPath, workspaceFolder])
+    await reopenEditors(openPaths.map((path) => path === sourcePath ? destination : `${destination}${path.slice(sourcePath.length)}`), ownership)
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+  }, [captureWorkspaceOwnership, editorDocuments, invalidatePath, nodes, prepareEditorPathMutation, reloadPaths, reopenEditors, sessionId, setExplorerError, setSelectedPath, workspaceOwnershipIsCurrent])
 
-  const openGit = useCallback(async (node: ExplorerNode, history: boolean) => {
+  const openGit = useCallback(async (node: ExplorerNode, history: boolean, capturedOwnership?: ExplorerWorkspaceOwnership) => {
     setContextMenu(null)
+    const ownership = capturedOwnership ?? captureWorkspaceOwnership()
+    if (!workspaceOwnershipIsCurrent(ownership)) return
     const target = gitTargetForNode(node)
     const area = node.decoration?.conflicted || node.decoration?.unstaged || node.decoration?.untracked ? 'unstaged' : 'staged'
     setActiveRepository(sessionId, target.repoRoot)
     setGitSelectedPath(sessionId, node.path, target.repoRoot, area)
     setGitActiveTab(sessionId, history ? 'history' : 'changes', history ? target.path : null)
-    if (target.repoRoot) void refreshRepository(sessionId, workspaceFolder, target.repoRoot)
-    await contentActions?.openContent({ kind: 'workbench' })
-  }, [contentActions, gitTargetForNode, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, workspaceFolder])
+    if (target.repoRoot) void refreshRepository(sessionId, ownership.workspaceFolder, target.repoRoot)
+    if (!contentActions || !workspaceOwnershipIsCurrent(ownership)) return
+    try {
+      await contentActions.openContent({ kind: 'workbench', workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [captureWorkspaceOwnership, contentActions, gitTargetForNode, refreshRepository, sessionId, setActiveRepository, setExplorerError, setGitActiveTab, setGitSelectedPath, workspaceOwnershipIsCurrent])
 
   const openRepository = useCallback(async (node: ExplorerNode, tab: 'changes' | 'history') => {
     setContextMenu(null)
-    if (node.entry.repositoryInitialized === false) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership || node.entry.repositoryInitialized === false) return
     setActiveRepository(sessionId, node.path)
     setGitSelectedPath(sessionId, null, node.path, null)
     setGitActiveTab(sessionId, tab, null)
-    void refreshRepository(sessionId, workspaceFolder, node.path)
-    void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, node.path)
-    await contentActions?.openContent({ kind: 'workbench' })
-  }, [contentActions, refreshHosting, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, workspaceFolder])
+    void refreshRepository(sessionId, ownership.workspaceFolder, node.path)
+    void refreshHosting(sessionId, ownership.workspaceFolder, 'HEAD', false, node.path)
+    if (!contentActions || !workspaceOwnershipIsCurrent(ownership)) return
+    try {
+      await contentActions.openContent({ kind: 'workbench', workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [captureWorkspaceOwnership, contentActions, refreshHosting, refreshRepository, sessionId, setActiveRepository, setExplorerError, setGitActiveTab, setGitSelectedPath, workspaceOwnershipIsCurrent])
 
   const openPointerHistory = useCallback(async (node: ExplorerNode) => {
     setContextMenu(null)
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const repoRoot = parentRepositoryRoot(node)
     const target = targetForPath(node.path, repoRoot)
     setActiveRepository(sessionId, repoRoot)
     setGitSelectedPath(sessionId, null, repoRoot, null)
     setGitActiveTab(sessionId, 'history', target.path)
-    if (repoRoot) void refreshRepository(sessionId, workspaceFolder, repoRoot)
-    await contentActions?.openContent({ kind: 'workbench' })
-  }, [contentActions, parentRepositoryRoot, refreshRepository, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath, targetForPath, workspaceFolder])
+    if (repoRoot) void refreshRepository(sessionId, ownership.workspaceFolder, repoRoot)
+    if (!contentActions || !workspaceOwnershipIsCurrent(ownership)) return
+    try {
+      await contentActions.openContent({ kind: 'workbench', workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [captureWorkspaceOwnership, contentActions, parentRepositoryRoot, refreshRepository, sessionId, setActiveRepository, setExplorerError, setGitActiveTab, setGitSelectedPath, targetForPath, workspaceOwnershipIsCurrent])
 
   const mutateGit = useCallback(async (command: 'git_stage' | 'git_unstage' | 'git_conflict_take', node: ExplorerNode, extra: Record<string, unknown> = {}) => {
     setContextMenu(null)
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const repoRoot = node.entry.repoKind ? parentRepositoryRoot(node) : repositoryRootForPath(node.path)
     const target = targetForPath(node.path, repoRoot)
-    await runGitMutation(sessionId, workspaceFolder, () => invoke(command, { workspaceFolder: target.workspaceFolder, paths: [target.path], ...extra }), repoRoot)
-  }, [parentRepositoryRoot, repositoryRootForPath, runGitMutation, sessionId, targetForPath, workspaceFolder])
+    await runGitMutation(sessionId, ownership.workspaceFolder, () => invoke(command, { workspaceFolder: target.workspaceFolder, paths: [target.path], ...extra }), repoRoot)
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+  }, [captureWorkspaceOwnership, parentRepositoryRoot, repositoryRootForPath, runGitMutation, sessionId, targetForPath, workspaceOwnershipIsCurrent])
 
   const discardGit = useCallback(async (node: ExplorerNode) => {
     setContextMenu(null)
@@ -377,30 +485,129 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       ? `Discard ${targetName}? Untracked paths will be moved to the Recycle Bin.`
       : `Discard changes in ${targetName}? This cannot be undone.`
     if (!window.confirm(message)) return
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const target = gitTargetForNode(node)
-    await runGitMutation(sessionId, workspaceFolder, () => invoke('git_discard', { workspaceFolder: target.workspaceFolder, paths: [target.path] }), target.repoRoot)
-    await reloadPaths(node.path)
-  }, [gitTargetForNode, reloadPaths, runGitMutation, sessionId, workspaceFolder])
+    await runGitMutation(sessionId, ownership.workspaceFolder, () => invoke('git_discard', { workspaceFolder: target.workspaceFolder, paths: [target.path] }), target.repoRoot)
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+    await reloadPaths(ownership, node.path)
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+  }, [captureWorkspaceOwnership, gitTargetForNode, reloadPaths, runGitMutation, sessionId, workspaceOwnershipIsCurrent])
 
   const mutateSubmodule = useCallback(async (command: 'git_submodule_update' | 'git_submodule_sync', node: ExplorerNode) => {
     setContextMenu(null)
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
     const repoRoot = parentRepositoryRoot(node)
     const target = targetForPath(node.path, repoRoot)
     try {
-      await runGitMutation(sessionId, workspaceFolder, () => invoke(command, { workspaceFolder: target.workspaceFolder, path: target.path }), repoRoot)
-      await loadChildren(sessionId, workspaceFolder, node.parentPath)
+      await runGitMutation(sessionId, ownership.workspaceFolder, () => invoke(command, { workspaceFolder: target.workspaceFolder, path: target.path }), repoRoot)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+      await loadChildren(sessionId, ownership.workspaceFolder, node.parentPath)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
       if (command === 'git_submodule_update') {
-        await refreshRepository(sessionId, workspaceFolder, node.path)
-        await loadChildren(sessionId, workspaceFolder, node.path)
+        await refreshRepository(sessionId, ownership.workspaceFolder, node.path)
+        if (!workspaceOwnershipIsCurrent(ownership)) return
+        await loadChildren(sessionId, ownership.workspaceFolder, node.path)
+        if (!workspaceOwnershipIsCurrent(ownership)) return
       }
-    } catch (reason) { setExplorerError(sessionId, String(reason)) }
-  }, [loadChildren, parentRepositoryRoot, refreshRepository, runGitMutation, sessionId, setExplorerError, targetForPath, workspaceFolder])
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [captureWorkspaceOwnership, loadChildren, parentRepositoryRoot, refreshRepository, runGitMutation, sessionId, setExplorerError, targetForPath, workspaceOwnershipIsCurrent])
 
   const absolutePath = useCallback((path: string) => `${workspaceFolder.replace(/[\\/]+$/, '')}\\${path.replace(/\//g, '\\')}`, [workspaceFolder])
   const openTerminal = useCallback(async (node: ExplorerNode) => {
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership || !contentActions) return
     const cwd = absolutePath(node.entry.isDir ? node.path : node.parentPath)
-    await spawnPane(sessionId, { cwd })
-  }, [absolutePath, sessionId, spawnPane])
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+    try {
+      await contentActions.openContent({ kind: 'terminal', cwd, workspaceId: ownership.sessionId, workspaceEpoch: ownership.sessionEpoch })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [absolutePath, captureWorkspaceOwnership, contentActions, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
+
+  const openSystemPath = useCallback(async (node: ExplorerNode, capturedOwnership?: ExplorerWorkspaceOwnership) => {
+    const ownership = capturedOwnership ?? captureWorkspaceOwnership()
+    if (!workspaceOwnershipIsCurrent(ownership) || node.gitOnly || node.entry.isDir) return
+    try {
+      await invoke('open_path', { path: absolutePath(node.path) })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [absolutePath, captureWorkspaceOwnership, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
+
+  const openExternalEditor = useCallback(async (node: ExplorerNode) => {
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership || !editorCommand) return
+    try {
+      await invoke('open_in_editor', { workspaceFolder: ownership.workspaceFolder, relPath: node.path, editorCommand })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [captureWorkspaceOwnership, editorCommand, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
+
+  const revealSystemPath = useCallback(async (node: ExplorerNode) => {
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership) return
+    try {
+      await invoke('reveal_path', { path: absolutePath(node.path) })
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+    } catch (reason) {
+      if (workspaceOwnershipIsCurrent(ownership)) setExplorerError(sessionId, String(reason))
+    }
+  }, [absolutePath, captureWorkspaceOwnership, sessionId, setExplorerError, workspaceOwnershipIsCurrent])
+
+  const openSelectedNode = useCallback(async (node: ExplorerNode) => {
+    const ownership = captureWorkspaceOwnership()
+    if (!ownership || node.entry.isDir) return
+    if (node.gitOnly) {
+      if (node.decoration) await openGit(node, false, ownership)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+      return
+    }
+    const extension = node.name.split('.').pop()?.toLowerCase() ?? ''
+    if (IMAGE_EXTENSIONS.has(extension)) {
+      await openSystemPath(node, ownership)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+      return
+    }
+    if (!isVibeLinkEditorCandidate(node) || !contentActions) {
+      await openSystemPath(node, ownership)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+      return
+    }
+    const previewedText = viewerContentPath === node.path ? textFile : null
+    if (previewedText?.binary) {
+      await openSystemPath(node, ownership)
+      if (!workspaceOwnershipIsCurrent(ownership)) return
+      return
+    }
+    if (!previewedText) {
+      try {
+        const probe = await invoke<TextFile>('fs_read_text', { workspaceFolder: ownership.workspaceFolder, relPath: node.path })
+        if (!workspaceOwnershipIsCurrent(ownership)) return
+        if (probe.binary) {
+          await openSystemPath(node, ownership)
+          if (!workspaceOwnershipIsCurrent(ownership)) return
+          return
+        }
+      } catch {
+        if (!workspaceOwnershipIsCurrent(ownership)) return
+        await openSystemPath(node, ownership)
+        if (!workspaceOwnershipIsCurrent(ownership)) return
+        return
+      }
+    }
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+    await openVibeLinkEditor(node, ownership)
+    if (!workspaceOwnershipIsCurrent(ownership)) return
+  }, [captureWorkspaceOwnership, contentActions, openGit, openSystemPath, openVibeLinkEditor, textFile, viewerContentPath, workspaceOwnershipIsCurrent])
 
   const actionsFor = useCallback((node: ExplorerNode) => {
     const repoKind = node.entry.repoKind ?? node.decoration?.repoKind ?? null
@@ -413,12 +620,18 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     const changed = staged || unstaged || conflicted
     const present = !node.gitOnly && initialized
     const canStage = unstaged && (!isSubmodule || Boolean(node.decoration?.submoduleState?.commitChanged))
-    const wrap = (action: () => void | Promise<void>) => () => { setContextMenu(null); void action() }
+    const wrap = (action: () => void | Promise<void>) => () => {
+      setContextMenu(null)
+      void Promise.resolve().then(action).catch((reason) => {
+        if (captureWorkspaceOwnership()) setExplorerError(sessionId, String(reason))
+      })
+    }
     const actions: ExplorerContextAction[] = []
     if (!node.entry.isDir) {
       actions.push(
+        { id: 'open', label: 'Open', disabled: !present, onClick: wrap(() => openSelectedNode(node)) },
         { id: 'vibelink-editor', label: 'Open in VibeLink Editor', disabled: !present || !isVibeLinkEditorCandidate(node) || !contentActions, onClick: wrap(() => openVibeLinkEditor(node)) },
-        { id: 'external-editor', label: 'Open in External Editor', disabled: !present || !editorCommand, onClick: wrap(() => invoke('open_in_editor', { workspaceFolder, relPath: node.path, editorCommand })) },
+        { id: 'external-editor', label: 'Open in External Editor', disabled: !present || !editorCommand, onClick: wrap(() => openExternalEditor(node)) },
       )
     }
     if (isRepository) {
@@ -440,7 +653,7 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       { id: 'rename', label: 'Rename', disabled: !present || isRepository, onClick: wrap(() => beginRename(node)) },
       { id: 'delete', label: 'Delete', disabled: !present || isRepository, danger: true, onClick: wrap(() => deleteNode(node)) },
       { id: 'terminal', label: 'Open in Terminal', disabled: !present, onClick: wrap(() => openTerminal(node)) },
-      { id: 'reveal', label: 'Reveal in File Explorer', disabled: !present, onClick: wrap(() => invoke('reveal_path', { path: absolutePath(node.path) })) },
+      { id: 'reveal', label: 'Reveal in File Explorer', disabled: !present, onClick: wrap(() => revealSystemPath(node)) },
       { id: 'copy-rel', label: 'Copy Relative Path', onClick: wrap(() => navigator.clipboard.writeText(node.path)) },
       { id: 'copy-abs', label: 'Copy Absolute Path', onClick: wrap(() => navigator.clipboard.writeText(absolutePath(node.path))) },
     )
@@ -454,32 +667,59 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
     if (!node.entry.isDir && changed) actions.push({ id: 'diff', label: 'Diff vs HEAD', onClick: wrap(() => openGit(node, false)) })
     if (!isRepository) actions.push({ id: 'history', label: node.entry.isDir ? 'Folder History' : 'File History', onClick: wrap(() => openGit(node, true)) })
     return actions
-  }, [absolutePath, beginRename, contentActions, createEntry, deleteNode, discardGit, editorCommand, mutateGit, mutateSubmodule, openGit, openPointerHistory, openRepository, openTerminal, openVibeLinkEditor, workspaceFolder])
+  }, [absolutePath, beginRename, captureWorkspaceOwnership, contentActions, createEntry, deleteNode, discardGit, editorCommand, mutateGit, mutateSubmodule, openExternalEditor, openGit, openPointerHistory, openRepository, openSelectedNode, openTerminal, openVibeLinkEditor, revealSystemPath, sessionId, setExplorerError])
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (nodes.length === 0) return
-    const index = Math.max(0, nodes.findIndex((node) => node.path === session.selectedPath))
-    const node = nodes[index]
+    if (nodes.length === 0 || event.altKey || event.ctrlKey || event.metaKey) return
+    const index = nodes.findIndex((node) => node.path === session.selectedPath)
+    const node = index >= 0 ? nodes[index] : null
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      const next = nodes[Math.min(nodes.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))]
-      selectNode(next)
-    } else if (event.key === 'ArrowRight') { event.preventDefault(); void toggleNode(node) }
-    else if (event.key === 'ArrowLeft') {
+      const direction = event.key === 'ArrowDown' ? 1 : -1
+      const nextIndex = index < 0 ? (direction > 0 ? 0 : nodes.length - 1) : index + direction
+      if (nextIndex < 0 || nextIndex >= nodes.length || nextIndex === index) return
+      selectNode(nodes[nextIndex])
+      return
+    }
+    if (event.key === 'Home' || event.key === 'End') {
       event.preventDefault()
-      if (node.expanded) void toggleNode(node)
-      else if (node.parentPath) {
+      const nextIndex = event.key === 'Home' ? 0 : nodes.length - 1
+      if (nextIndex !== index) selectNode(nodes[nextIndex])
+      return
+    }
+    if (!node) return
+    if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      if (!node.entry.isDir || node.entry.isSymlink) return
+      if (!node.expanded) {
+        void toggleNode(node)
+        return
+      }
+      const child = nodes[index + 1]
+      if (child?.parentPath === node.path) selectNode(child)
+      return
+    }
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      if (node.entry.isDir && node.expanded) {
+        void toggleNode(node)
+        return
+      }
+      if (node.parentPath) {
         const parent = nodes.find((candidate) => candidate.path === node.parentPath)
         if (parent) selectNode(parent)
       }
-    } else if (event.key === 'Enter') {
+      return
+    }
+    if (event.key === 'Enter') {
       event.preventDefault()
       if (node.entry.isDir) void toggleNode(node)
-      else void openVibeLinkEditor(node)
+      else void openSelectedNode(node)
+      return
     }
-    else if (event.key === 'F2' && !node.gitOnly && !node.entry.repoKind) { event.preventDefault(); beginRename(node) }
+    if (event.key === 'F2' && !node.gitOnly && !node.entry.repoKind) { event.preventDefault(); beginRename(node) }
     else if (event.key === 'Delete' && !node.gitOnly && !node.entry.repoKind) { event.preventDefault(); void deleteNode(node) }
-  }, [beginRename, deleteNode, nodes, openVibeLinkEditor, selectNode, session.selectedPath, toggleNode])
+  }, [beginRename, deleteNode, nodes, openSelectedNode, selectNode, session.selectedPath, toggleNode])
 
   return (
     <div className="explorer-window" data-explorer-window="true" data-preview-visible={previewVisible ? 'true' : 'false'}>
@@ -491,13 +731,17 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
         statusSummary={statusSummary}
         statusPresentation={gitStatusPresentation}
         previewVisible={previewVisible}
+        treeId={`explorer-tree-${sessionId}`}
+        workspaceLabel={workspaceLabel}
+        workspacePath={workspaceFolder}
+        repositoryLabel={activeRepositoryLabel}
         onTogglePreview={togglePreview}
         renamingPath={renamingPath}
         renameValue={renameValue}
         contextMenu={contextMenu}
         dragOverPath={dragOverPath}
         onSelect={selectNode}
-        onOpen={(node) => { void openVibeLinkEditor(node) }}
+        onOpen={(node) => { void openSelectedNode(node) }}
         onToggle={(node) => { void toggleNode(node) }}
         onKeyDown={handleKeyDown}
         onRenameValueChange={setRenameValue}
@@ -513,23 +757,29 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
       {previewVisible ? (
         <ExplorerViewerView
           path={session.selectedPath}
+          workspaceLabel={workspaceLabel}
+          workspacePath={workspaceFolder}
+          repositoryLabel={selectedRepositoryLabel}
           entry={selectedNode?.entry ?? null}
-          textFile={textFile}
-          imageSrc={imageSrc}
+          textFile={selectedTextFile}
+          imageSrc={selectedImageSrc}
           loading={viewerLoading}
           error={viewerError}
           imageFit={imageFit}
-          canOpenVibeLinkEditor={Boolean(contentActions && selectedNode && !textFile?.binary && isVibeLinkEditorCandidate(selectedNode))}
+          canOpenVibeLinkEditor={Boolean(contentActions && selectedNode && selectedTextFile && !selectedTextFile.binary && isVibeLinkEditorCandidate(selectedNode))}
           canOpenExternalEditor={Boolean(editorCommand)}
           canOpenDiff={selectedHasDiff}
+          canOpenDefault={Boolean(selectedNode && !selectedNode.entry.isDir && !selectedNode.gitOnly && (selectedNode.entry.isSymlink || IMAGE_EXTENSIONS.has(selectedNode.name.split('.').pop()?.toLowerCase() ?? '') || selectedTextFile?.binary))}
           workingTreePresent={!selectedNode?.gitOnly}
           onToggleImageFit={() => setImageFit((value) => !value)}
-          onOpenVibeLinkEditor={() => { if (selectedNode) void openVibeLinkEditor(selectedNode) }}
-          onOpenExternalEditor={() => { if (selectedNode && editorCommand) void invoke('open_in_editor', { workspaceFolder, relPath: selectedNode.path, editorCommand }) }}
+          onOpenVibeLinkEditor={() => { if (selectedNode) void openSelectedNode(selectedNode) }}
+          onOpenDefault={() => { if (selectedNode) void openSystemPath(selectedNode) }}
+          onOpenExternalEditor={() => { if (selectedNode) void openExternalEditor(selectedNode) }}
           onOpenDiff={() => { if (selectedNode && selectedHasDiff) void openGit(selectedNode, false) }}
           onOpenTerminal={() => { if (selectedNode) void openTerminal(selectedNode) }}
-          onReveal={() => { if (selectedNode) void invoke('reveal_path', { path: absolutePath(selectedNode.path) }) }}
+          onReveal={() => { if (selectedNode) void revealSystemPath(selectedNode) }}
           onCopyPath={() => { if (selectedNode) void navigator.clipboard.writeText(absolutePath(selectedNode.path)) }}
+          onClosePreview={togglePreview}
         />
       ) : null}
     </div>
@@ -537,8 +787,9 @@ export function ExplorerWindow({ sessionId, workspaceFolder }: ExplorerWindowPro
 }
 
 function loadExplorerPreviewVisible(): boolean {
-  try { return window.localStorage.getItem(EXPLORER_PREVIEW_VISIBLE_KEY) !== 'false' } catch { return true }
+  try { return window.localStorage.getItem(EXPLORER_PREVIEW_VISIBLE_KEY) === 'true' } catch { return false }
 }
+
 
 function imageMime(extension: string): string {
   if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg'

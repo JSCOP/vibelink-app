@@ -28,6 +28,7 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   explorer: { kind: 'explorer', component: 'explorer', title: 'Explorer', icon: 'folder-tree' },
   workbench: { kind: 'workbench', component: 'workbench', title: 'Workbench', icon: 'git-branch' },
   agent: { kind: 'agent', component: 'agent', title: 'VibeLink Agent', icon: 'bot' },
+  orchestration: { kind: 'orchestration', component: 'orchestration', title: 'Orchestration', icon: 'monitor-cog' },
   kanban: { kind: 'kanban', component: 'kanban', title: 'Kanban', icon: 'layout-grid' },
   todo: { kind: 'todo', component: 'todo', title: 'Todo List', icon: 'list-todo' },
   diff: { kind: 'diff', component: 'diff', title: 'Diff', icon: 'git-compare' },
@@ -68,12 +69,12 @@ export function createWorkspaceContentPanel(params: WorkspaceContentParams): Ser
   }
 }
 
-export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta, 'id' | 'config'>>): SerializedDockview | null {
-  if (panes.length === 0) return null
-  const params = panes.map(createTerminalContentParams)
-  const aspectRatio = 16 / 9
-  const grid = balancedGridForPaneCount(params.length, aspectRatio)
-  return createTerminalGridDockview(params, grid)
+export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta, 'id' | 'config'>>): SerializedDockview {
+  const terminalParams = panes.map(createTerminalContentParams)
+  const terminalGrid = terminalParams.length > 0
+    ? balancedGridForPaneCount(terminalParams.length, 16 / 9)
+    : { cols: 0, rows: 0 }
+  return createNavigatorTerminalDockview(terminalParams, terminalGrid)
 }
 
 export function workspaceLayoutHasExactLiveTerminals(envelope: WorkspaceLayoutEnvelope, livePaneIds: readonly string[]): boolean {
@@ -145,47 +146,62 @@ export function freshWorkspaceLayoutState(): WorkspaceLayoutState {
   return freshWorkspaceLayoutEnvelope()
 }
 
-function createTerminalGridDockview(params: WorkspaceContentParams[], grid: GridSize): SerializedDockview {
-  const width = Math.max(1, grid.cols) * 500
-  const height = Math.max(1, grid.rows) * 320
-  const panels: SerializedDockview['panels'] = {}
-  const ids = params.map((entry) => {
-    const panelId = workspaceContentPanelId(entry)
-    panels[panelId] = createWorkspaceContentPanel(entry)
-    return panelId
-  })
+function createNavigatorTerminalDockview(terminalParams: WorkspaceContentParams[], grid: GridSize): SerializedDockview {
+  const explorerParams = createSingletonContentParams('explorer')
+  const explorerPanelId = workspaceContentPanelId(explorerParams)
+  const terminalIds = terminalParams.map((entry) => workspaceContentPanelId(entry))
+  const requestedColumns = Number.isFinite(grid.cols) ? Math.floor(grid.cols) : 1
+  const requestedRows = Number.isFinite(grid.rows) ? Math.floor(grid.rows) : 1
+  const terminalColumns = terminalIds.length > 0 ? Math.max(1, Math.min(requestedColumns, terminalIds.length)) : 0
+  const terminalRows = terminalIds.length > 0 ? Math.max(Math.ceil(terminalIds.length / terminalColumns), requestedRows, 1) : 0
+  const explorerWidth = 280
+  const terminalColumnWidth = 500
+  const width = explorerWidth + terminalColumns * terminalColumnWidth
+  const height = Math.max(1, terminalRows) * 320
+  const panels: SerializedDockview['panels'] = {
+    [explorerPanelId]: createWorkspaceContentPanel(explorerParams),
+  }
+  for (const entry of terminalParams) panels[workspaceContentPanelId(entry)] = createWorkspaceContentPanel(entry)
+
   let groupIndex = 0
-  const leaf = (panelId: string, size: number): SerializedDockview['grid']['root'] => ({
-    type: 'leaf',
-    data: { views: [panelId], activeView: panelId, id: `content-group-${groupIndex++}` },
-    size,
-  })
-  const columns: SerializedDockview['grid']['root'][] = []
-  for (let col = 0; col < grid.cols; col += 1) {
+  let firstTerminalGroupId: string | null = null
+  const leaf = (panelId: string, size: number): SerializedDockview['grid']['root'] => {
+    const groupId = `content-group-${groupIndex++}`
+    if (panelId !== explorerPanelId && firstTerminalGroupId === null) firstTerminalGroupId = groupId
+    return {
+      type: 'leaf',
+      data: { views: [panelId], activeView: panelId, id: groupId },
+      size,
+    }
+  }
+
+  const columns: SerializedDockview['grid']['root'][] = [leaf(explorerPanelId, explorerWidth)]
+  for (let col = 0; col < terminalColumns; col += 1) {
     const columnIds: string[] = []
-    for (let row = 0; row < grid.rows; row += 1) {
-      const panelId = ids[row * grid.cols + col]
+    for (let row = 0; row < terminalRows; row += 1) {
+      const panelId = terminalIds[row * terminalColumns + col]
       if (panelId) columnIds.push(panelId)
     }
     if (columnIds.length === 0) continue
-    const columnSize = Math.max(1, Math.floor(width / Math.max(1, Math.min(grid.cols, ids.length))))
-    if (columnIds.length === 1) columns.push({ ...leaf(columnIds[0], columnSize), size: columnSize })
+    if (columnIds.length === 1) columns.push(leaf(columnIds[0], terminalColumnWidth))
     else {
       columns.push({
         type: 'branch',
         data: columnIds.map((panelId) => leaf(panelId, Math.max(1, Math.floor(height / columnIds.length)))),
-        size: columnSize,
+        size: terminalColumnWidth,
       })
     }
   }
-  const root: SerializedDockview['grid']['root'] = columns.length === 1
-    ? { type: 'branch', data: columns, size: height }
-    : { type: 'branch', data: columns, size: width }
-  const orientation = columns.length === 1 ? Orientation.VERTICAL : Orientation.HORIZONTAL
+
   return {
     panels,
-    grid: { root, width, height, orientation },
-    activeGroup: 'content-group-0',
+    grid: {
+      root: { type: 'branch', data: columns, size: width },
+      width,
+      height,
+      orientation: Orientation.HORIZONTAL,
+    },
+    activeGroup: firstTerminalGroupId ?? 'content-group-0',
   }
 }
 

@@ -24,24 +24,33 @@ describe('workspaceLayoutModel v3', () => {
     expect(normalizeWorkspaceLayoutState(JSON.stringify({ version: 2, pages: [] }))).toEqual({ version: 3, dockview: null })
   })
 
-  it('creates one outer content panel per live PTY with stable identity and full params', () => {
+  it('creates an Explorer-left fallback plus one content panel per live PTY', () => {
     const panes = [pane('pane-a', 'Alpha'), pane('pane-b', 'Beta')]
     const layout = createDefaultWorkspaceDockviewLayout(panes)
-    const ids = panes.map((entry) => workspaceContentPanelId(createTerminalContentParams(entry)))
+    const explorerId = workspaceContentPanelId(createSingletonContentParams('explorer'))
+    const terminalIds = panes.map((entry) => workspaceContentPanelId(createTerminalContentParams(entry)))
 
-    expect(Object.keys(layout?.panels ?? {})).toEqual(ids)
-    expect(layout?.panels[ids[0]]).toMatchObject({
+    expect(Object.keys(layout.panels)).toEqual([explorerId, ...terminalIds])
+    expect(layout.panels[explorerId]).toMatchObject({
+      contentComponent: 'explorer',
+      params: { schema: 1, kind: 'explorer', instanceId: 'explorer', title: 'Explorer', icon: 'folder-tree' },
+    })
+    expect(layout.panels[terminalIds[0]]).toMatchObject({
       contentComponent: 'terminal',
       tabComponent: 'workspaceContentTab',
       renderer: 'always',
       params: { schema: 1, kind: 'terminal', instanceId: 'pane-a', paneId: 'pane-a', title: 'Alpha', icon: 'terminal' },
     })
+    const root = layout.grid.root as { type: string; data: Array<{ data: { views: string[]; id: string } }> }
+    expect(root.type).toBe('branch')
+    expect(root.data[0].data.views).toEqual([explorerId])
+    expect(layout.activeGroup).not.toBe(root.data[0].data.id)
     expect(JSON.stringify(layout)).not.toContain('vibelinkTerminalLayout')
   })
 
-  it('defines content descriptors without a computer content kind', () => {
+  it('defines all supported content descriptors without a computer content kind', () => {
     expect(Object.keys(workspaceContentDescriptors)).toEqual([
-      'terminal', 'browser', 'editor', 'explorer', 'workbench', 'agent', 'kanban', 'todo', 'diff',
+      'terminal', 'browser', 'editor', 'explorer', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff',
     ])
     expect(createSingletonContentParams('workbench')).toEqual({
       schema: 1,
@@ -50,26 +59,23 @@ describe('workspaceLayoutModel v3', () => {
       title: 'Workbench',
       icon: 'git-branch',
     })
+    expect(createSingletonContentParams('orchestration')).toEqual({
+      schema: 1,
+      kind: 'orchestration',
+      instanceId: 'orchestration',
+      title: 'Orchestration',
+      icon: 'monitor-cog',
+    })
   })
 
-  it('accepts mixed content only when terminal coverage is exact', () => {
+  it('preserves exact live terminal coverage when non-terminal panels are present', () => {
     const panes = [pane('pane-a'), pane('pane-b')]
-    const layout = createDefaultWorkspaceDockviewLayout(panes)!
-    const explorer = createSingletonContentParams('explorer')
-    const explorerId = workspaceContentPanelId(explorer)
-    layout.panels[explorerId] = {
-      id: explorerId,
-      contentComponent: 'explorer',
-      tabComponent: 'workspaceContentTab',
-      params: explorer,
-      title: explorer.title,
-      renderer: 'always',
-    }
-    const firstLeaf = (layout.grid.root as { data: Array<{ data: { views: string[] } }> }).data[0]
-    firstLeaf.data.views.push(explorerId)
+    const layout = createDefaultWorkspaceDockviewLayout(panes)
 
     expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-b'])).toBe(true)
     expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-b', 'pane-c'])).toBe(false)
+    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a'])).toBe(false)
+    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-a'])).toBe(false)
   })
 
   it('plans a row-major native Dockview terminal arrangement', () => {

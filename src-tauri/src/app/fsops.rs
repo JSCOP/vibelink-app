@@ -69,9 +69,15 @@ pub struct TextDocument {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SaveTextDocumentResult {
-    Saved { document: TextDocument },
+    Saved {
+        document: TextDocument,
+    },
     Conflict {
         current_revision: Option<TextDocumentRevision>,
     },
@@ -711,7 +717,8 @@ impl WindowsConditionalSave {
                 return Ok(WindowsSavePreparation::Conflict(None));
             }
             Err(error) => {
-                return Err(error).with_context(|| format!("lock editor target {}", target.display()));
+                return Err(error)
+                    .with_context(|| format!("lock editor target {}", target.display()));
             }
         };
         if expected_revision.is_none() {
@@ -785,8 +792,7 @@ impl WindowsConditionalSave {
         {
             return Ok(ConditionalWriteOutcome::Conflict(None));
         }
-        let (temporary_bytes, saved_revision) =
-            read_revision_bytes_from_file(&mut temporary.file)?;
+        let (temporary_bytes, saved_revision) = read_revision_bytes_from_file(&mut temporary.file)?;
         if temporary_bytes != intended_bytes {
             bail!("editor sibling temporary file changed before replacement");
         }
@@ -821,12 +827,7 @@ impl WindowsConditionalSave {
                 if &current_revision != expected {
                     return Ok(ConditionalWriteOutcome::Conflict(Some(current_revision)));
                 }
-                rename_windows_temp_by_parent_handle(
-                    &temporary.file,
-                    parent_handle,
-                    target_name,
-                    true,
-                )?;
+                rename_windows_temp_by_path(&temporary.file, &self.target, true)?;
             }
             (None, None, None) => {
                 match open_windows_target_exclusive(&self.target) {
@@ -842,12 +843,9 @@ impl WindowsConditionalSave {
                     }
                     Err(error) => return Err(error).context("recheck Save As destination"),
                 }
-                if let Err(error) = rename_windows_temp_by_parent_handle(
-                    &temporary.file,
-                    parent_handle,
-                    target_name,
-                    false,
-                ) {
+                if let Err(error) =
+                    rename_windows_temp_by_path(&temporary.file, &self.target, false)
+                {
                     if windows_error_is_conflict(&error) {
                         return Ok(ConditionalWriteOutcome::Conflict(None));
                     }
@@ -878,11 +876,11 @@ impl WindowsConditionalSave {
     fn revalidate_workspace_containment(&self) -> Result<bool> {
         let current_root = self.workspace_root.canonicalize()?;
         let current_parent = self.parent.canonicalize()?;
-        Ok(windows_paths_equal(
-            &current_root,
-            &self.canonical_workspace_root,
-        ) && windows_paths_equal(&current_parent, &self.parent)
-            && current_parent.starts_with(&current_root))
+        Ok(
+            windows_paths_equal(&current_root, &self.canonical_workspace_root)
+                && windows_paths_equal(&current_parent, &self.parent)
+                && current_parent.starts_with(&current_root),
+        )
     }
 }
 
@@ -1002,14 +1000,15 @@ fn open_windows_target_exclusive(path: &Path) -> std::io::Result<std::fs::File> 
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Foundation::GENERIC_READ;
     use windows::Win32::Storage::FileSystem::{
-        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
     };
 
     std::fs::OpenOptions::new()
-        // Omitting write and delete sharing excludes both an already-open writer/deleter
-        // and any new one for the entire revision-check-to-rename interval.
+        // Deny writers while the byte-range lock, revision, and identity are held.
+        // Delete sharing is required for FileRenameInfoEx to atomically replace this
+        // name while the verified destination handle remains open.
         .access_mode(GENERIC_READ.0 | DELETE.0)
-        .share_mode(FILE_SHARE_READ.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_DELETE.0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
 }
@@ -1056,7 +1055,7 @@ fn windows_file_identity(file: &std::fs::File) -> Result<WindowsFileIdentity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        GetFileInformationByHandleEx, FileIdInfo, FILE_ID_INFO,
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
     };
 
     let mut info = FILE_ID_INFO::default();
@@ -1080,9 +1079,7 @@ fn windows_handle_final_path(file: &std::fs::File) -> Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
-    };
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED};
 
     let mut buffer = vec![0_u16; 512];
     loop {
@@ -1134,8 +1131,7 @@ fn windows_handle_is_directory_non_reparse(file: &std::fs::File) -> Result<bool>
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
     let metadata = file.metadata()?;
-    Ok(metadata.is_dir()
-        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0)
+    Ok(metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0)
 }
 
 #[cfg(windows)]
@@ -1144,8 +1140,7 @@ fn windows_handle_is_regular_non_reparse(file: &std::fs::File) -> Result<bool> {
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
     let metadata = file.metadata()?;
-    Ok(metadata.is_file()
-        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0)
+    Ok(metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0)
 }
 
 #[cfg(windows)]
@@ -1179,33 +1174,45 @@ fn windows_path_still_has_identity(
 }
 
 #[cfg(windows)]
-fn rename_windows_temp_by_parent_handle(
+fn windows_rename_info_buffer_size(file_name_length: usize) -> Option<usize> {
+    use windows::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+    std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+        .checked_add(file_name_length)
+        .and_then(|size| size.checked_add(std::mem::size_of::<u16>()))
+}
+
+#[cfg(windows)]
+fn rename_windows_temp_by_path(
     temporary: &std::fs::File,
-    parent: &std::fs::File,
-    target_name: &std::ffi::OsStr,
+    target: &Path,
     replace_existing: bool,
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        SetFileInformationByHandle, FileRenameInfoEx, FILE_RENAME_INFO,
+        FileRenameInfoEx, SetFileInformationByHandle, FILE_RENAME_INFO,
     };
 
     const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x0000_0001;
     const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x0000_0002;
 
-    let target_wide: Vec<u16> = target_name.encode_wide().collect();
-    if target_wide.is_empty() {
-        bail!("editor replacement target has no file name");
-    }
-    let name_bytes = target_wide
+    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let name_units = target_wide
         .len()
+        .checked_sub(1)
+        .context("editor replacement target has no path")?;
+    let name_bytes = name_units
         .checked_mul(std::mem::size_of::<u16>())
-        .context("editor target name is too long")?;
-    let buffer_size = std::mem::size_of::<FILE_RENAME_INFO>()
-        .checked_add(name_bytes.saturating_sub(std::mem::size_of::<u16>()))
-        .context("editor rename buffer is too large")?;
+        .context("editor target path is too long")?;
+    let file_name_length = u32::try_from(name_bytes).context("editor target path is too long")?;
+    // Match Rust's standard-library FileRenameInfoEx layout: the full path is
+    // NUL-terminated in the buffer while FileNameLength excludes the terminator.
+    let buffer_size =
+        windows_rename_info_buffer_size(name_bytes).context("editor rename buffer is too large")?;
+    let buffer_size_u32 =
+        u32::try_from(buffer_size).context("editor rename buffer is too large")?;
     let word_size = std::mem::size_of::<usize>();
     let mut storage = vec![0_usize; buffer_size.div_ceil(word_size)];
     let info = storage.as_mut_ptr() as *mut FILE_RENAME_INFO;
@@ -1216,8 +1223,8 @@ fn rename_windows_temp_by_parent_handle(
             } else {
                 0
             };
-        (*info).RootDirectory = HANDLE(parent.as_raw_handle());
-        (*info).FileNameLength = name_bytes as u32;
+        (*info).RootDirectory = HANDLE::default();
+        (*info).FileNameLength = file_name_length;
         std::ptr::copy_nonoverlapping(
             target_wide.as_ptr(),
             (*info).FileName.as_mut_ptr(),
@@ -1227,18 +1234,21 @@ fn rename_windows_temp_by_parent_handle(
             HANDLE(temporary.as_raw_handle()),
             FileRenameInfoEx,
             info as *const std::ffi::c_void,
-            buffer_size as u32,
+            buffer_size_u32,
         )
     }
-    // POSIX replacement semantics let the temp handle replace the name while the verified
-    // destination remains open with delete sharing denied. Never fall back to a pathname
-    // ReplaceFileW call: closing the destination first would recreate the TOCTOU window.
+    // Ancestor handles remain locked and identity-fenced across this absolute-path
+    // rename, so resolving the verified target cannot cross a replaced directory.
+    // Never fall back to ReplaceFileW, which would require closing the target first.
     .context("conditionally replace editor document by handle")
 }
 
 #[cfg(windows)]
 fn windows_io_error_is_conflict(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(2 | 3 | 5 | 32 | 33 | 80 | 183 | 303))
+    matches!(
+        error.raw_os_error(),
+        Some(2 | 3 | 5 | 32 | 33 | 80 | 183 | 303)
+    )
 }
 
 #[cfg(windows)]
@@ -1246,8 +1256,8 @@ fn windows_error_is_conflict(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause.downcast_ref::<WindowsIdentityConflict>().is_some()
             || cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(windows_io_error_is_conflict)
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(windows_io_error_is_conflict)
             || cause
                 .downcast_ref::<windows::core::Error>()
                 .is_some_and(|error| {
@@ -1361,6 +1371,22 @@ mod tests {
         let root = std::env::temp_dir().join(format!("vibelink-fsops-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create root");
         root
+    }
+    #[cfg(windows)]
+    #[test]
+    fn file_rename_info_buffer_includes_terminating_wchar() {
+        use windows::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+
+        let name_size = 17 * std::mem::size_of::<u16>();
+        assert_eq!(
+            windows_rename_info_buffer_size(name_size),
+            Some(
+                std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+                    + name_size
+                    + std::mem::size_of::<u16>()
+            )
+        );
+        assert_eq!(windows_rename_info_buffer_size(usize::MAX), None);
     }
 
     #[test]
@@ -1477,7 +1503,10 @@ mod tests {
         )
         .expect("conflict result");
         assert!(matches!(result, SaveTextDocumentResult::Conflict { .. }));
-        assert_eq!(std::fs::read_to_string(&path).expect("read file"), "external\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read file"),
+            "external\n"
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

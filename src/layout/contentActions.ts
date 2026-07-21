@@ -9,17 +9,23 @@ export type TerminalGridLaunchRequest = {
   profileId?: string | null
 }
 
-export type OpenContentRequest =
-  | { kind: 'terminal'; targetGroupId?: string; profileId?: string | null; split?: 'right' | 'below' }
+export type WorkspaceContentOwnership = {
+  workspaceId?: string
+  workspaceEpoch?: number
+}
+
+export type OpenContentRequest = WorkspaceContentOwnership & (
+  | { kind: 'terminal'; targetGroupId?: string; profileId?: string | null; cwd?: string | null; split?: 'right' | 'below' }
   | { kind: 'terminal-grid'; targetGroupId?: string; grid: TerminalGridLaunchRequest }
   | { kind: 'browser'; targetGroupId?: string; profileId?: string | null; private?: boolean }
   | { kind: 'editor'; targetGroupId?: string; relPath: string }
   | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor'>; targetGroupId?: string }
+)
 
 export type WorkspaceContentActions = {
   openContent(request: OpenContentRequest): Promise<string>
   activateContent(panelId: string): void
-  requestCloseContent(panelId: string): Promise<'closed' | 'cancelled'>
+  requestCloseContent(panelId: string, ownership?: WorkspaceContentOwnership): Promise<'closed' | 'cancelled'>
   splitTerminal(paneId: string, direction: 'right' | 'below'): Promise<void>
   arrangeTerminals(grid?: GridSize | null): Promise<void>
   clearTerminals(): Promise<void>

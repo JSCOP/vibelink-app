@@ -1,10 +1,10 @@
 use super::{
     error::{BrowserError, BrowserErrorCode, BrowserResult},
     types::{
+        BrowserCookieImportInput, BrowserCookieImportResult, BrowserCookieImportSource,
         BrowserDeviceMetrics, BrowserDialogKind, BrowserFrame, BrowserLifecycleEvent,
         BrowserLifecycleEventKind, CertificateDecision, ChildWebViewCreate, ChildWebViewState,
-        PermissionDecision, PhysicalBounds, BrowserCookieImportInput, BrowserCookieImportResult,
-        BrowserCookieImportSource,
+        PermissionDecision, PhysicalBounds,
     },
 };
 
@@ -30,9 +30,7 @@ pub trait BrowserProvider: Send + Sync + 'static {
     fn set_navigation_generation(&self, _page_id: &str, _generation: u64) -> BrowserResult<()> {
         Ok(())
     }
-    fn clear_pending_navigation(&self, _page_id: &str) -> BrowserResult<()> {
-        Ok(())
-    }
+    fn publish_lifecycle_event(&self, _event: &BrowserLifecycleEvent) {}
     fn go_back(&self, _page_id: &str) -> BrowserResult<()> {
         Err(BrowserError::unsupported("go_back"))
     }
@@ -58,6 +56,9 @@ pub trait BrowserProvider: Send + Sync + 'static {
     fn drain_events(&self) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
         Ok(Vec::new())
     }
+    fn requeue_events(&self, _events: Vec<BrowserLifecycleEvent>) -> BrowserResult<()> {
+        Ok(())
+    }
     fn capture_frame(
         &self,
         _page_id: &str,
@@ -69,10 +70,16 @@ pub trait BrowserProvider: Send + Sync + 'static {
     fn capture_crop(&self, _page_id: &str, _bounds: PhysicalBounds) -> BrowserResult<Vec<u8>> {
         Err(BrowserError::unsupported("capture_crop"))
     }
-    fn detect_cookie_import_source(&self, _endpoint: &str) -> BrowserResult<BrowserCookieImportSource> {
+    fn detect_cookie_import_source(
+        &self,
+        _endpoint: &str,
+    ) -> BrowserResult<BrowserCookieImportSource> {
         Err(BrowserError::unsupported("detect_cookie_import_source"))
     }
-    fn import_cookies(&self, _input: &BrowserCookieImportInput) -> BrowserResult<BrowserCookieImportResult> {
+    fn import_cookies(
+        &self,
+        _input: &BrowserCookieImportInput,
+    ) -> BrowserResult<BrowserCookieImportResult> {
         Err(BrowserError::unsupported("import_cookies"))
     }
     fn resolve_permission(
@@ -90,6 +97,9 @@ pub trait BrowserProvider: Send + Sync + 'static {
         Ok(())
     }
     fn resolve_dialog(&self, _request_id: &str, _accept: bool) -> BrowserResult<()> {
+        Ok(())
+    }
+    fn release_profile(&self, _profile_id: &str) -> BrowserResult<()> {
         Ok(())
     }
     fn close(&self, page_id: &str) -> BrowserResult<()>;
@@ -144,6 +154,8 @@ use serde_json::{json, Value};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
+use std::net::TcpStream;
+#[cfg(windows)]
 use std::{
     cell::RefCell,
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -158,15 +170,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 #[cfg(windows)]
-use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
-#[cfg(windows)]
-use std::net::TcpStream;
-#[cfg(windows)]
 use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Rect, Webview, WebviewBuilder,
     WebviewUrl, Wry,
 };
+#[cfg(windows)]
+use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
 #[cfg(windows)]
 use webview2_com::{
     take_pwstr,
@@ -194,11 +204,24 @@ struct NativePage {
 }
 
 #[cfg(windows)]
-type PermissionResolver = Box<dyn FnOnce(PermissionDecision) -> BrowserResult<()> + 'static>;
+type PermissionResolver = Box<dyn Fn(PermissionDecision) -> BrowserResult<()> + 'static>;
 #[cfg(windows)]
-type CertificateResolver = Box<dyn FnOnce(CertificateDecision) -> BrowserResult<()> + 'static>;
+type CertificateResolver = Box<dyn Fn(CertificateDecision) -> BrowserResult<()> + 'static>;
 #[cfg(windows)]
-type DialogResolver = Box<dyn FnOnce(bool) -> BrowserResult<()> + 'static>;
+type DialogResolver = Box<dyn Fn(bool) -> BrowserResult<()> + 'static>;
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptResolutionStatus {
+    Queued,
+    InFlight,
+    Completed,
+}
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct PendingPrompt {
+    page_id: String,
+    status: PromptResolutionStatus,
+}
 
 #[cfg(windows)]
 thread_local! {
@@ -234,19 +257,23 @@ struct CdpRegistryPage {
 }
 
 #[cfg(windows)]
+type EventPumpScheduler = Arc<dyn Fn() + Send + Sync + 'static>;
+
+#[cfg(windows)]
 pub struct NativeBrowserProvider {
     app: AppHandle<Wry>,
     parent_window_label: String,
     pages: Mutex<HashMap<String, NativePage>>,
     profile_ports: Mutex<HashMap<String, u16>>,
     navigation_generations: Arc<Mutex<HashMap<String, u64>>>,
-    managed_navigation_starts: Arc<Mutex<HashSet<String>>>,
+    managed_navigation_starts: Arc<Mutex<HashMap<String, u64>>>,
     events: Arc<Mutex<VecDeque<BrowserLifecycleEvent>>>,
     event_sequence: Arc<AtomicU64>,
-    pending_permissions: Arc<Mutex<HashMap<String, String>>>,
-    pending_certificates: Arc<Mutex<HashMap<String, String>>>,
-    pending_dialogs: Arc<Mutex<HashMap<String, String>>>,
+    pending_permissions: Arc<Mutex<HashMap<String, PendingPrompt>>>,
+    pending_certificates: Arc<Mutex<HashMap<String, PendingPrompt>>>,
+    pending_dialogs: Arc<Mutex<HashMap<String, PendingPrompt>>>,
     registry_path: PathBuf,
+    event_pump_scheduler: EventPumpScheduler,
     download_root: PathBuf,
     main_cdp_port: u16,
 }
@@ -258,6 +285,7 @@ impl NativeBrowserProvider {
         parent_window_label: impl Into<String>,
         registry_path: PathBuf,
         main_cdp_port: u16,
+        schedule_event_pump: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let download_root = registry_path
             .parent()
@@ -269,7 +297,7 @@ impl NativeBrowserProvider {
             pages: Mutex::new(HashMap::new()),
             profile_ports: Mutex::new(HashMap::new()),
             navigation_generations: Arc::new(Mutex::new(HashMap::new())),
-            managed_navigation_starts: Arc::new(Mutex::new(HashSet::new())),
+            managed_navigation_starts: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(VecDeque::new())),
             event_sequence: Arc::new(AtomicU64::new(0)),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
@@ -278,6 +306,7 @@ impl NativeBrowserProvider {
             registry_path,
             download_root,
             main_cdp_port,
+            event_pump_scheduler: Arc::new(schedule_event_pump),
         };
         let _ = provider.write_registry();
         provider
@@ -380,7 +409,7 @@ impl NativeBrowserProvider {
         detail: Option<String>,
     ) {
         emit_native_event(
-            &self.app,
+            &self.event_pump_scheduler,
             &self.events,
             &self.event_sequence,
             page_id,
@@ -389,6 +418,29 @@ impl NativeBrowserProvider {
             url,
             detail,
         );
+    }
+
+    fn release_profile_port(&self, profile_id: &str) -> BrowserResult<()> {
+        if self
+            .pages()?
+            .values()
+            .any(|page| page.profile_id == profile_id)
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Conflict,
+                "browser profile still owns native pages",
+            ));
+        }
+        self.profile_ports
+            .lock()
+            .map_err(|_| {
+                BrowserError::new(
+                    BrowserErrorCode::Internal,
+                    "native browser profile lock is poisoned",
+                )
+            })?
+            .remove(profile_id);
+        self.write_registry()
     }
 
     fn write_registry(&self) -> BrowserResult<()> {
@@ -473,29 +525,29 @@ impl BrowserProvider for NativeBrowserProvider {
         let design_app = self.app.clone();
         let design_page_id = request.page_id.clone();
         let design_generations = self.navigation_generations.clone();
-        let navigation_app = self.app.clone();
+        let navigation_event_pump = self.event_pump_scheduler.clone();
         let navigation_events = self.events.clone();
         let navigation_sequence = self.event_sequence.clone();
         let navigation_page_id = request.page_id.clone();
         let navigation_generations = self.navigation_generations.clone();
         let managed_navigation_starts = self.managed_navigation_starts.clone();
-        let popup_app = self.app.clone();
+        let popup_event_pump = self.event_pump_scheduler.clone();
         let popup_events = self.events.clone();
         let popup_sequence = self.event_sequence.clone();
         let popup_page_id = request.page_id.clone();
         let popup_generations = self.navigation_generations.clone();
-        let load_app = self.app.clone();
+        let load_event_pump = self.event_pump_scheduler.clone();
         let load_events = self.events.clone();
         let load_sequence = self.event_sequence.clone();
         let load_page_id = request.page_id.clone();
         let load_generations = self.navigation_generations.clone();
         let load_managed_navigation_starts = self.managed_navigation_starts.clone();
-        let title_app = self.app.clone();
+        let title_event_pump = self.event_pump_scheduler.clone();
         let title_events = self.events.clone();
         let title_sequence = self.event_sequence.clone();
         let title_page_id = request.page_id.clone();
         let title_generations = self.navigation_generations.clone();
-        let download_app = self.app.clone();
+        let download_event_pump = self.event_pump_scheduler.clone();
         let download_events = self.events.clone();
         let download_sequence = self.event_sequence.clone();
         let download_page_id = request.page_id.clone();
@@ -528,7 +580,7 @@ impl BrowserProvider for NativeBrowserProvider {
                     );
                     if native_start {
                         emit_native_event(
-                            &navigation_app,
+                            &navigation_event_pump,
                             &navigation_events,
                             &navigation_sequence,
                             &navigation_page_id,
@@ -544,7 +596,7 @@ impl BrowserProvider for NativeBrowserProvider {
             .on_new_window(move |url, _features| {
                 let generation = generation_for(&popup_generations, &popup_page_id);
                 emit_native_event(
-                    &popup_app,
+                    &popup_event_pump,
                     &popup_events,
                     &popup_sequence,
                     &popup_page_id,
@@ -557,27 +609,29 @@ impl BrowserProvider for NativeBrowserProvider {
             })
             .on_page_load(move |_webview, payload| {
                 let generation = generation_for(&load_generations, &load_page_id);
-                if let Ok(mut starts) = load_managed_navigation_starts.lock() {
-                    starts.remove(&load_page_id);
-                }
                 let url = payload.url().to_string();
-                let (kind, detail) = if url.starts_with("edge-error://") {
+                let (kind, detail, terminal) = if url.starts_with("edge-error://") {
                     (
                         BrowserLifecycleEventKind::NavigationFailed,
                         Some("WebView2 loaded an error document".to_string()),
+                        true,
                     )
                 } else {
                     match payload.event() {
-                        PageLoadEvent::Started => {
-                            (BrowserLifecycleEventKind::NavigationCommitted, None)
-                        }
-                        PageLoadEvent::Finished => {
-                            (BrowserLifecycleEventKind::NavigationFinished, None)
-                        }
+                        PageLoadEvent::Started => (
+                            BrowserLifecycleEventKind::NavigationCommitted,
+                            None,
+                            false,
+                        ),
+                        PageLoadEvent::Finished => (
+                            BrowserLifecycleEventKind::NavigationFinished,
+                            None,
+                            true,
+                        ),
                     }
                 };
                 emit_native_event(
-                    &load_app,
+                    &load_event_pump,
                     &load_events,
                     &load_sequence,
                     &load_page_id,
@@ -586,10 +640,15 @@ impl BrowserProvider for NativeBrowserProvider {
                     Some(url),
                     detail,
                 );
+                if terminal {
+                    if let Ok(mut starts) = load_managed_navigation_starts.lock() {
+                        starts.remove(&load_page_id);
+                    }
+                }
             })
             .on_document_title_changed(move |_webview, title| {
                 emit_native_event(
-                    &title_app,
+                    &title_event_pump,
                     &title_events,
                     &title_sequence,
                     &title_page_id,
@@ -612,7 +671,7 @@ impl BrowserProvider for NativeBrowserProvider {
                             Ok(path) => {
                                 *destination = path.clone();
                                 emit_native_event(
-                                    &download_app,
+                                    &download_event_pump,
                                     &download_events,
                                     &download_sequence,
                                     &download_page_id,
@@ -625,7 +684,7 @@ impl BrowserProvider for NativeBrowserProvider {
                             }
                             Err(error) => {
                                 emit_native_event(
-                                    &download_app,
+                                    &download_event_pump,
                                     &download_events,
                                     &download_sequence,
                                     &download_page_id,
@@ -640,7 +699,7 @@ impl BrowserProvider for NativeBrowserProvider {
                     }
                     DownloadEvent::Finished { url, path, success } => {
                         emit_native_event(
-                            &download_app,
+                            &download_event_pump,
                             &download_events,
                             &download_sequence,
                             &download_page_id,
@@ -676,7 +735,7 @@ impl BrowserProvider for NativeBrowserProvider {
             .map_err(|error| {
                 BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string())
             })?;
-        let attach_app = self.app.clone();
+        let attach_event_pump = self.event_pump_scheduler.clone();
         let attach_events = self.events.clone();
         let attach_sequence = self.event_sequence.clone();
         let attach_generations = self.navigation_generations.clone();
@@ -688,7 +747,7 @@ impl BrowserProvider for NativeBrowserProvider {
             .with_webview(move |platform| {
                 if let Err(error) = attach_native_prompt_handlers(
                     platform,
-                    attach_app.clone(),
+                    attach_event_pump.clone(),
                     attach_events.clone(),
                     attach_sequence.clone(),
                     attach_generations.clone(),
@@ -698,7 +757,7 @@ impl BrowserProvider for NativeBrowserProvider {
                     attach_dialogs,
                 ) {
                     emit_native_event(
-                        &attach_app,
+                        &attach_event_pump,
                         &attach_events,
                         &attach_sequence,
                         &attach_page_id,
@@ -747,7 +806,9 @@ impl BrowserProvider for NativeBrowserProvider {
             Some(request.profile_id.clone()),
         );
         drop(pages);
-        self.write_registry()?;
+        // The registry is diagnostic/recovery metadata. The native page is already
+        // realized and owned here, so a registry write failure must not orphan it.
+        let _ = self.write_registry();
         Ok(())
     }
 
@@ -822,6 +883,11 @@ impl BrowserProvider for NativeBrowserProvider {
             .ok_or_else(|| BrowserError::not_found(page_id))?;
         let previous = page.state.clone();
         let apply = (|| {
+            let repositioning_visible_page =
+                previous.visible && bounds.is_some_and(|next| next != previous.bounds);
+            if !visible || repositioning_visible_page {
+                page.webview.hide().map_err(native_error)?;
+            }
             if let Some(bounds) = bounds {
                 page.webview
                     .set_bounds(Rect {
@@ -832,8 +898,6 @@ impl BrowserProvider for NativeBrowserProvider {
             }
             if visible {
                 page.webview.show().map_err(native_error)?;
-            } else {
-                page.webview.hide().map_err(native_error)?;
             }
             if visible && focused {
                 page.webview.set_focus().map_err(native_error)?;
@@ -876,6 +940,7 @@ impl BrowserProvider for NativeBrowserProvider {
         let page = pages
             .get(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
+        let previous_generation = generation_for(&self.navigation_generations, page_id);
         prepare_managed_navigation(
             &self.navigation_generations,
             &self.managed_navigation_starts,
@@ -887,7 +952,7 @@ impl BrowserProvider for NativeBrowserProvider {
                 &self.navigation_generations,
                 &self.managed_navigation_starts,
                 page_id,
-                navigation_generation,
+                previous_generation,
             );
             self.emit_event(
                 page_id,
@@ -918,19 +983,6 @@ impl BrowserProvider for NativeBrowserProvider {
                 generation,
             )
         }
-    }
-
-    fn clear_pending_navigation(&self, page_id: &str) -> BrowserResult<()> {
-        self.managed_navigation_starts
-            .lock()
-            .map_err(|_| {
-                BrowserError::new(
-                    BrowserErrorCode::Internal,
-                    "browser navigation start lock is poisoned",
-                )
-            })?
-            .remove(page_id);
-        Ok(())
     }
 
     fn go_back(&self, page_id: &str) -> BrowserResult<()> {
@@ -964,13 +1016,13 @@ impl BrowserProvider for NativeBrowserProvider {
             .map(|pending| {
                 pending
                     .iter()
-                    .filter(|(_, value)| value.as_str() == page_id)
+                    .filter(|(_, value)| value.page_id == page_id)
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         for request_id in permission_ids {
-            let _ = self.resolve_permission(&request_id, PermissionDecision::Deny);
+            self.resolve_permission(&request_id, PermissionDecision::Deny)?;
         }
         let certificate_ids = self
             .pending_certificates
@@ -978,13 +1030,13 @@ impl BrowserProvider for NativeBrowserProvider {
             .map(|pending| {
                 pending
                     .iter()
-                    .filter(|(_, value)| value.as_str() == page_id)
+                    .filter(|(_, value)| value.page_id == page_id)
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         for request_id in certificate_ids {
-            let _ = self.resolve_certificate(&request_id, CertificateDecision::Deny);
+            self.resolve_certificate(&request_id, CertificateDecision::Deny)?;
         }
         let dialog_ids = self
             .pending_dialogs
@@ -992,16 +1044,21 @@ impl BrowserProvider for NativeBrowserProvider {
             .map(|pending| {
                 pending
                     .iter()
-                    .filter(|(_, value)| value.as_str() == page_id)
+                    .filter(|(_, value)| value.page_id == page_id)
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         for request_id in dialog_ids {
-            let _ = self.resolve_dialog(&request_id, false);
+            self.resolve_dialog(&request_id, false)?;
         }
-        let page = self
+        let webview = self
             .pages()?
+            .get(page_id)
+            .map(|page| page.webview.clone())
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        webview.close().map_err(native_error)?;
+        self.pages()?
             .remove(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
         let generation = self
@@ -1013,7 +1070,15 @@ impl BrowserProvider for NativeBrowserProvider {
         if let Ok(mut starts) = self.managed_navigation_starts.lock() {
             starts.remove(page_id);
         }
-        page.webview.close().map_err(native_error)?;
+        if let Ok(mut pending) = self.pending_permissions.lock() {
+            pending.retain(|_, request| request.page_id != page_id);
+        }
+        if let Ok(mut pending) = self.pending_certificates.lock() {
+            pending.retain(|_, request| request.page_id != page_id);
+        }
+        if let Ok(mut pending) = self.pending_dialogs.lock() {
+            pending.retain(|_, request| request.page_id != page_id);
+        }
         self.emit_event(
             page_id,
             generation,
@@ -1021,7 +1086,8 @@ impl BrowserProvider for NativeBrowserProvider {
             None,
             None,
         );
-        self.write_registry()
+        let _ = self.write_registry();
+        Ok(())
     }
     fn set_design_mode(&self, page_id: &str, enabled: bool) -> BrowserResult<()> {
         let pages = self.pages()?;
@@ -1100,13 +1166,19 @@ impl BrowserProvider for NativeBrowserProvider {
         .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
     }
 
-    fn detect_cookie_import_source(&self, endpoint: &str) -> BrowserResult<BrowserCookieImportSource> {
+    fn detect_cookie_import_source(
+        &self,
+        endpoint: &str,
+    ) -> BrowserResult<BrowserCookieImportSource> {
         let detected = detect_loopback_cookie_source(endpoint)?;
         reject_owned_cookie_source_port(self, &detected.endpoint)?;
         Ok(detected)
     }
 
-    fn import_cookies(&self, input: &BrowserCookieImportInput) -> BrowserResult<BrowserCookieImportResult> {
+    fn import_cookies(
+        &self,
+        input: &BrowserCookieImportInput,
+    ) -> BrowserResult<BrowserCookieImportResult> {
         if !input.consent {
             return Err(BrowserError::new(
                 BrowserErrorCode::DeniedCapability,
@@ -1116,7 +1188,10 @@ impl BrowserProvider for NativeBrowserProvider {
         let detected = detect_loopback_cookie_source(&input.endpoint)?;
         let requested = normalize_cookie_origins(&input.origins)?;
         let detected_origins = detected.origins.into_iter().collect::<HashSet<_>>();
-        if requested.iter().any(|origin| !detected_origins.contains(origin)) {
+        if requested
+            .iter()
+            .any(|origin| !detected_origins.contains(origin))
+        {
             return Err(BrowserError::new(
                 BrowserErrorCode::DeniedCapability,
                 "cookie import origin was not present in the explicit source detection result",
@@ -1128,7 +1203,9 @@ impl BrowserProvider for NativeBrowserProvider {
         let source_payload = get_all_cookie_payload(&mut source)?;
         let source_cookies = filter_cookie_payload(&source_payload, &requested)?;
         if source_cookies.len() > 4_096 {
-            return Err(BrowserError::invalid("cookie import exceeds the bounded cookie count"));
+            return Err(BrowserError::invalid(
+                "cookie import exceeds the bounded cookie count",
+            ));
         }
         let mut destination = connect_page_cdp(destination_port, &input.page_id)?;
         destination
@@ -1195,27 +1272,68 @@ impl BrowserProvider for NativeBrowserProvider {
         request_id: &str,
         decision: PermissionDecision,
     ) -> BrowserResult<()> {
-        let page_id = self
-            .pending_permissions
-            .lock()
-            .map_err(|_| BrowserError::new(BrowserErrorCode::Internal, "permission lock poisoned"))?
-            .remove(request_id)
-            .ok_or_else(|| {
+        let page_id = {
+            let mut pending = self.pending_permissions.lock().map_err(|_| {
+                BrowserError::new(BrowserErrorCode::Internal, "permission lock poisoned")
+            })?;
+            let request = pending.get_mut(request_id).ok_or_else(|| {
                 BrowserError::new(
                     BrowserErrorCode::PermissionNotFound,
                     format!("permission request not found: {request_id}"),
                 )
             })?;
-        let request_id = request_id.to_string();
-        self.complete_on_page(&page_id, move || {
-            NATIVE_PERMISSION_RESOLVERS.with(|resolutions| {
-                let resolver = resolutions
-                    .borrow_mut()
-                    .remove(&request_id)
-                    .ok_or_else(|| BrowserError::not_found(&request_id))?;
-                resolver(decision)
-            })
-        })
+            match request.status {
+                PromptResolutionStatus::Completed => return Ok(()),
+                PromptResolutionStatus::InFlight => {
+                    return Err(BrowserError::new(
+                        BrowserErrorCode::Timeout,
+                        "permission resolution is still completing on the browser thread",
+                    ));
+                }
+                PromptResolutionStatus::Queued => request.status = PromptResolutionStatus::InFlight,
+            }
+            request.page_id.clone()
+        };
+        let request_key = request_id.to_string();
+        let pending_requests = self.pending_permissions.clone();
+        let operation_key = request_key.clone();
+        let result = self.complete_on_page(&page_id, move || {
+            let result = NATIVE_PERMISSION_RESOLVERS.with(|resolutions| {
+                let mut resolutions = resolutions.borrow_mut();
+                let result = resolutions
+                    .get(&operation_key)
+                    .ok_or_else(|| BrowserError::not_found(&operation_key))?(
+                    decision
+                );
+                if result.is_ok() {
+                    resolutions.remove(&operation_key);
+                }
+                result
+            });
+            if let Ok(mut pending) = pending_requests.lock() {
+                if let Some(request) = pending.get_mut(&operation_key) {
+                    request.status = if result.is_ok() {
+                        PromptResolutionStatus::Completed
+                    } else {
+                        PromptResolutionStatus::Queued
+                    };
+                }
+            }
+            result
+        });
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code != BrowserErrorCode::Timeout)
+        {
+            if let Ok(mut pending) = self.pending_permissions.lock() {
+                if let Some(request) = pending.get_mut(&request_key) {
+                    if request.status == PromptResolutionStatus::InFlight {
+                        request.status = PromptResolutionStatus::Queued;
+                    }
+                }
+            }
+        }
+        result
     }
 
     fn resolve_certificate(
@@ -1223,48 +1341,138 @@ impl BrowserProvider for NativeBrowserProvider {
         request_id: &str,
         decision: CertificateDecision,
     ) -> BrowserResult<()> {
-        let page_id = self
-            .pending_certificates
-            .lock()
-            .map_err(|_| {
+        let page_id = {
+            let mut pending = self.pending_certificates.lock().map_err(|_| {
                 BrowserError::new(BrowserErrorCode::Internal, "certificate lock poisoned")
-            })?
-            .remove(request_id)
-            .ok_or_else(|| {
+            })?;
+            let request = pending.get_mut(request_id).ok_or_else(|| {
                 BrowserError::new(
                     BrowserErrorCode::CertificateNotFound,
                     format!("certificate request not found: {request_id}"),
                 )
             })?;
-        let request_id = request_id.to_string();
-        self.complete_on_page(&page_id, move || {
-            NATIVE_CERTIFICATE_RESOLVERS.with(|resolutions| {
-                let resolver = resolutions
-                    .borrow_mut()
-                    .remove(&request_id)
-                    .ok_or_else(|| BrowserError::not_found(&request_id))?;
-                resolver(decision)
-            })
-        })
+            match request.status {
+                PromptResolutionStatus::Completed => return Ok(()),
+                PromptResolutionStatus::InFlight => {
+                    return Err(BrowserError::new(
+                        BrowserErrorCode::Timeout,
+                        "certificate resolution is still completing on the browser thread",
+                    ));
+                }
+                PromptResolutionStatus::Queued => request.status = PromptResolutionStatus::InFlight,
+            }
+            request.page_id.clone()
+        };
+        let request_key = request_id.to_string();
+        let pending_requests = self.pending_certificates.clone();
+        let operation_key = request_key.clone();
+        let result = self.complete_on_page(&page_id, move || {
+            let result = NATIVE_CERTIFICATE_RESOLVERS.with(|resolutions| {
+                let mut resolutions = resolutions.borrow_mut();
+                let result = resolutions
+                    .get(&operation_key)
+                    .ok_or_else(|| BrowserError::not_found(&operation_key))?(
+                    decision
+                );
+                if result.is_ok() {
+                    resolutions.remove(&operation_key);
+                }
+                result
+            });
+            if let Ok(mut pending) = pending_requests.lock() {
+                if let Some(request) = pending.get_mut(&operation_key) {
+                    request.status = if result.is_ok() {
+                        PromptResolutionStatus::Completed
+                    } else {
+                        PromptResolutionStatus::Queued
+                    };
+                }
+            }
+            result
+        });
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code != BrowserErrorCode::Timeout)
+        {
+            if let Ok(mut pending) = self.pending_certificates.lock() {
+                if let Some(request) = pending.get_mut(&request_key) {
+                    if request.status == PromptResolutionStatus::InFlight {
+                        request.status = PromptResolutionStatus::Queued;
+                    }
+                }
+            }
+        }
+        result
     }
 
     fn resolve_dialog(&self, request_id: &str, accept: bool) -> BrowserResult<()> {
-        let page_id = self
-            .pending_dialogs
-            .lock()
-            .map_err(|_| BrowserError::new(BrowserErrorCode::Internal, "dialog lock poisoned"))?
-            .remove(request_id)
-            .ok_or_else(|| BrowserError::not_found(request_id))?;
-        let request_id = request_id.to_string();
-        self.complete_on_page(&page_id, move || {
-            NATIVE_DIALOG_RESOLVERS.with(|resolutions| {
-                let resolver = resolutions
-                    .borrow_mut()
-                    .remove(&request_id)
-                    .ok_or_else(|| BrowserError::not_found(&request_id))?;
-                resolver(accept)
-            })
-        })
+        let page_id = {
+            let mut pending = self.pending_dialogs.lock().map_err(|_| {
+                BrowserError::new(BrowserErrorCode::Internal, "dialog lock poisoned")
+            })?;
+            let request = pending
+                .get_mut(request_id)
+                .ok_or_else(|| BrowserError::not_found(request_id))?;
+            match request.status {
+                PromptResolutionStatus::Completed => return Ok(()),
+                PromptResolutionStatus::InFlight => {
+                    return Err(BrowserError::new(
+                        BrowserErrorCode::Timeout,
+                        "dialog resolution is still completing on the browser thread",
+                    ));
+                }
+                PromptResolutionStatus::Queued => request.status = PromptResolutionStatus::InFlight,
+            }
+            request.page_id.clone()
+        };
+        let request_key = request_id.to_string();
+        let pending_requests = self.pending_dialogs.clone();
+        let operation_key = request_key.clone();
+        let result = self.complete_on_page(&page_id, move || {
+            let result = NATIVE_DIALOG_RESOLVERS.with(|resolutions| {
+                let mut resolutions = resolutions.borrow_mut();
+                let result = resolutions
+                    .get(&operation_key)
+                    .ok_or_else(|| BrowserError::not_found(&operation_key))?(
+                    accept
+                );
+                if result.is_ok() {
+                    resolutions.remove(&operation_key);
+                }
+                result
+            });
+            if let Ok(mut pending) = pending_requests.lock() {
+                if let Some(request) = pending.get_mut(&operation_key) {
+                    request.status = if result.is_ok() {
+                        PromptResolutionStatus::Completed
+                    } else {
+                        PromptResolutionStatus::Queued
+                    };
+                }
+            }
+            result
+        });
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code != BrowserErrorCode::Timeout)
+        {
+            if let Ok(mut pending) = self.pending_dialogs.lock() {
+                if let Some(request) = pending.get_mut(&request_key) {
+                    if request.status == PromptResolutionStatus::InFlight {
+                        request.status = PromptResolutionStatus::Queued;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn publish_lifecycle_event(&self, event: &BrowserLifecycleEvent) {
+        let _ = self.app.emit("browser-lifecycle", event.clone());
+    }
+
+    fn release_profile(&self, profile_id: &str) -> BrowserResult<()> {
+        self.release_profile_port(profile_id)
     }
 
     fn drain_events(&self) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
@@ -1272,6 +1480,16 @@ impl BrowserProvider for NativeBrowserProvider {
             BrowserError::new(BrowserErrorCode::Internal, "browser event lock is poisoned")
         })?;
         Ok(events.drain(..).collect())
+    }
+
+    fn requeue_events(&self, events: Vec<BrowserLifecycleEvent>) -> BrowserResult<()> {
+        let mut queue = self.events.lock().map_err(|_| {
+            BrowserError::new(BrowserErrorCode::Internal, "browser event lock is poisoned")
+        })?;
+        for event in events.into_iter().rev() {
+            queue.push_front(event);
+        }
+        Ok(())
     }
 
     fn state(&self, page_id: &str) -> BrowserResult<ChildWebViewState> {
@@ -1294,35 +1512,40 @@ fn generation_for(generations: &Mutex<HashMap<String, u64>>, page_id: &str) -> u
 #[cfg(windows)]
 fn begin_native_navigation(
     generations: &Mutex<HashMap<String, u64>>,
-    managed_starts: &Mutex<HashSet<String>>,
+    managed_starts: &Mutex<HashMap<String, u64>>,
     page_id: &str,
 ) -> (u64, bool) {
-    let managed_start = managed_starts
-        .lock()
-        .ok()
-        .is_some_and(|mut starts| starts.remove(page_id));
+    let Ok(mut starts) = managed_starts.lock() else {
+        return (0, false);
+    };
     let Ok(mut values) = generations.lock() else {
         return (0, false);
     };
-    if managed_start {
-        return (values.get(page_id).copied().unwrap_or_default(), false);
+    if let Some(target_generation) = starts.get(page_id).copied() {
+        let current = values.entry(page_id.to_string()).or_default();
+        if *current < target_generation {
+            *current = target_generation;
+        }
+        return (*current, false);
     }
-    match values.get_mut(page_id) {
+    let generation = match values.get_mut(page_id) {
         Some(generation) => {
             *generation = generation.saturating_add(1);
-            (*generation, true)
+            *generation
         }
         None => {
             values.insert(page_id.to_string(), 0);
-            (0, false)
+            0
         }
-    }
+    };
+    starts.insert(page_id.to_string(), generation);
+    (generation, true)
 }
 
 #[cfg(windows)]
 fn prepare_managed_navigation(
-    generations: &Mutex<HashMap<String, u64>>,
-    managed_starts: &Mutex<HashSet<String>>,
+    _generations: &Mutex<HashMap<String, u64>>,
+    managed_starts: &Mutex<HashMap<String, u64>>,
     page_id: &str,
     generation: u64,
 ) -> BrowserResult<()> {
@@ -1332,21 +1555,20 @@ fn prepare_managed_navigation(
             "browser navigation start lock is poisoned",
         )
     })?;
-    let mut values = generations.lock().map_err(|_| {
-        BrowserError::new(
-            BrowserErrorCode::Internal,
-            "browser generation lock is poisoned",
-        )
-    })?;
-    values.insert(page_id.to_string(), generation);
-    starts.insert(page_id.to_string());
+    if starts.contains_key(page_id) {
+        return Err(BrowserError::new(
+            BrowserErrorCode::Conflict,
+            "browser navigation is already in progress",
+        ));
+    }
+    starts.insert(page_id.to_string(), generation);
     Ok(())
 }
 
 #[cfg(windows)]
 fn restore_navigation_generation(
     generations: &Mutex<HashMap<String, u64>>,
-    managed_starts: &Mutex<HashSet<String>>,
+    managed_starts: &Mutex<HashMap<String, u64>>,
     page_id: &str,
     generation: u64,
 ) -> BrowserResult<()> {
@@ -1369,7 +1591,7 @@ fn restore_navigation_generation(
 
 #[cfg(windows)]
 fn emit_native_event(
-    app: &AppHandle<Wry>,
+    schedule_event_pump: &EventPumpScheduler,
     events: &Mutex<VecDeque<BrowserLifecycleEvent>>,
     sequence: &AtomicU64,
     page_id: &str,
@@ -1391,25 +1613,25 @@ fn emit_native_event(
             .unwrap_or_default(),
     };
     if let Ok(mut queue) = events.lock() {
-        queue.push_back(event.clone());
+        queue.push_back(event);
     }
-    let _ = app.emit("browser-lifecycle", event);
+    schedule_event_pump();
 }
 #[cfg(windows)]
 fn attach_native_prompt_handlers(
     platform: tauri::webview::PlatformWebview,
-    app: AppHandle<Wry>,
+    event_pump_scheduler: EventPumpScheduler,
     events: Arc<Mutex<VecDeque<BrowserLifecycleEvent>>>,
     sequence: Arc<AtomicU64>,
     generations: Arc<Mutex<HashMap<String, u64>>>,
     page_id: String,
-    pending_permissions: Arc<Mutex<HashMap<String, String>>>,
-    pending_certificates: Arc<Mutex<HashMap<String, String>>>,
-    pending_dialogs: Arc<Mutex<HashMap<String, String>>>,
+    pending_permissions: Arc<Mutex<HashMap<String, PendingPrompt>>>,
+    pending_certificates: Arc<Mutex<HashMap<String, PendingPrompt>>>,
+    pending_dialogs: Arc<Mutex<HashMap<String, PendingPrompt>>>,
 ) -> windows::core::Result<()> {
     let core = unsafe { platform.controller().CoreWebView2()? };
 
-    let permission_app = app.clone();
+    let permission_event_pump = event_pump_scheduler.clone();
     let permission_events = events.clone();
     let permission_sequence = sequence.clone();
     let permission_generations = generations.clone();
@@ -1435,7 +1657,13 @@ fn attach_native_prompt_handlers(
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let permission = permission_kind_name(kind).to_string();
                 if let Ok(mut resolutions) = permission_pending.lock() {
-                    resolutions.insert(request_id.clone(), permission_page_id.clone());
+                    resolutions.insert(
+                        request_id.clone(),
+                        PendingPrompt {
+                            page_id: permission_page_id.clone(),
+                            status: PromptResolutionStatus::Queued,
+                        },
+                    );
                 } else {
                     args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
                     deferral.Complete()?;
@@ -1469,7 +1697,7 @@ fn attach_native_prompt_handlers(
                         .insert(request_id.clone(), resolver);
                 });
                 emit_native_event(
-                    &permission_app,
+                    &permission_event_pump,
                     &permission_events,
                     &permission_sequence,
                     &permission_page_id,
@@ -1490,7 +1718,7 @@ fn attach_native_prompt_handlers(
         )?;
     }
 
-    let dialog_app = app.clone();
+    let dialog_event_pump = event_pump_scheduler.clone();
     let dialog_events = events.clone();
     let dialog_sequence = sequence.clone();
     let dialog_generations = generations.clone();
@@ -1516,7 +1744,13 @@ fn attach_native_prompt_handlers(
                 let kind = browser_dialog_kind(raw_kind);
                 let request_id = uuid::Uuid::new_v4().to_string();
                 if let Ok(mut resolutions) = dialog_pending.lock() {
-                    resolutions.insert(request_id.clone(), dialog_page_id.clone());
+                    resolutions.insert(
+                        request_id.clone(),
+                        PendingPrompt {
+                            page_id: dialog_page_id.clone(),
+                            status: PromptResolutionStatus::Queued,
+                        },
+                    );
                 } else {
                     deferral.Complete()?;
                     return Ok(());
@@ -1535,7 +1769,7 @@ fn attach_native_prompt_handlers(
                         .insert(request_id.clone(), resolver);
                 });
                 emit_native_event(
-                    &dialog_app,
+                    &dialog_event_pump,
                     &dialog_events,
                     &dialog_sequence,
                     &dialog_page_id,
@@ -1558,7 +1792,7 @@ fn attach_native_prompt_handlers(
         )?;
     }
 
-    let certificate_app = app;
+    let certificate_event_pump = event_pump_scheduler;
     let certificate_events = events;
     let certificate_sequence = sequence;
     let certificate_generations = generations;
@@ -1579,7 +1813,13 @@ fn attach_native_prompt_handlers(
                 let error_code = format!("{status:?}");
                 let request_id = uuid::Uuid::new_v4().to_string();
                 if let Ok(mut resolutions) = certificate_pending.lock() {
-                    resolutions.insert(request_id.clone(), certificate_page_id.clone());
+                    resolutions.insert(
+                        request_id.clone(),
+                        PendingPrompt {
+                            page_id: certificate_page_id.clone(),
+                            status: PromptResolutionStatus::Queued,
+                        },
+                    );
                 } else {
                     args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL)?;
                     deferral.Complete()?;
@@ -1603,7 +1843,7 @@ fn attach_native_prompt_handlers(
                         .insert(request_id.clone(), resolver);
                 });
                 emit_native_event(
-                    &certificate_app,
+                    &certificate_event_pump,
                     &certificate_events,
                     &certificate_sequence,
                     &certificate_page_id,
@@ -1739,7 +1979,10 @@ enum CdpCommandError {
 impl LoopbackCdp {
     fn connect(websocket_url: &str, expected_port: u16) -> BrowserResult<Self> {
         let parsed = url::Url::parse(websocket_url).map_err(|_| {
-            BrowserError::new(BrowserErrorCode::DeniedCapability, "invalid loopback CDP websocket")
+            BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "invalid loopback CDP websocket",
+            )
         })?;
         if parsed.scheme() != "ws"
             || !is_loopback_websocket_host(&parsed)
@@ -1753,7 +1996,10 @@ impl LoopbackCdp {
             ));
         }
         let (mut socket, _) = connect(parsed.as_str()).map_err(|_| {
-            BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP websocket is unavailable")
+            BrowserError::new(
+                BrowserErrorCode::RuntimeUnavailable,
+                "loopback CDP websocket is unavailable",
+            )
         })?;
         let MaybeTlsStream::Plain(stream) = socket.get_mut() else {
             return Err(BrowserError::new(
@@ -1786,25 +2032,32 @@ impl LoopbackCdp {
     fn command(&mut self, method: &str, params: Value) -> Result<Value, CdpCommandError> {
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
-        let message = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))
-            .map_err(|_| CdpCommandError::Transport)?;
+        let message =
+            serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))
+                .map_err(|_| CdpCommandError::Transport)?;
         self.socket
             .send(Message::Text(message.into()))
             .map_err(|_| CdpCommandError::Transport)?;
         loop {
             let message = self.socket.read().map_err(|_| CdpCommandError::Transport)?;
-            let Message::Text(text) = message else { continue };
+            let Message::Text(text) = message else {
+                continue;
+            };
             if text.len() as u64 > MAX_CDP_METADATA_BYTES {
                 return Err(CdpCommandError::Transport);
             }
-            let value: Value = serde_json::from_str(text.as_str()).map_err(|_| CdpCommandError::Transport)?;
+            let value: Value =
+                serde_json::from_str(text.as_str()).map_err(|_| CdpCommandError::Transport)?;
             if value.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
             if value.get("error").is_some() {
                 return Err(CdpCommandError::Protocol);
             }
-            return value.get("result").cloned().ok_or(CdpCommandError::Protocol);
+            return value
+                .get("result")
+                .cloned()
+                .ok_or(CdpCommandError::Protocol);
         }
     }
 }
@@ -1859,38 +2112,79 @@ struct CookieMaterial {
 #[cfg(windows)]
 impl CookieMaterial {
     fn from_value(value: &Value) -> BrowserResult<Self> {
-        let name = value.get("name").and_then(Value::as_str).ok_or_else(cookie_payload_error)?;
-        let cookie_value = value.get("value").and_then(Value::as_str).ok_or_else(cookie_payload_error)?;
-        let domain = value.get("domain").and_then(Value::as_str).ok_or_else(cookie_payload_error)?;
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(cookie_payload_error)?;
+        let cookie_value = value
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(cookie_payload_error)?;
+        let domain = value
+            .get("domain")
+            .and_then(Value::as_str)
+            .ok_or_else(cookie_payload_error)?;
         let path = value.get("path").and_then(Value::as_str).unwrap_or("/");
-        if name.len() > 4_096 || cookie_value.len() > 64 * 1024 || domain.len() > 4_096 || path.len() > 16 * 1024 {
-            return Err(BrowserError::invalid("cookie import contains an oversized field"));
+        if name.len() > 4_096
+            || cookie_value.len() > 64 * 1024
+            || domain.len() > 4_096
+            || path.len() > 16 * 1024
+        {
+            return Err(BrowserError::invalid(
+                "cookie import contains an oversized field",
+            ));
         }
         Ok(Self {
             name: name.to_string(),
             value: cookie_value.to_string(),
             domain: domain.to_ascii_lowercase(),
             path: path.to_string(),
-            secure: value.get("secure").and_then(Value::as_bool).unwrap_or(false),
-            http_only: value.get("httpOnly").and_then(Value::as_bool).unwrap_or(false),
-            same_site: value.get("sameSite").and_then(Value::as_str).map(str::to_string),
-            expires: value.get("expires").and_then(Value::as_f64).filter(|value| value.is_finite() && *value > 0.0),
-            priority: value.get("priority").and_then(Value::as_str).map(str::to_string),
+            secure: value
+                .get("secure")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            http_only: value
+                .get("httpOnly")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            same_site: value
+                .get("sameSite")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            expires: value
+                .get("expires")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value > 0.0),
+            priority: value
+                .get("priority")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             same_party: value.get("sameParty").and_then(Value::as_bool),
-            source_scheme: value.get("sourceScheme").and_then(Value::as_str).map(str::to_string),
+            source_scheme: value
+                .get("sourceScheme")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             source_port: value.get("sourcePort").and_then(Value::as_i64),
         })
     }
 
     fn identity(&self) -> CookieIdentity {
-        CookieIdentity { name: self.name.clone(), domain: self.domain.clone(), path: self.path.clone() }
+        CookieIdentity {
+            name: self.name.clone(),
+            domain: self.domain.clone(),
+            path: self.path.clone(),
+        }
     }
 
     fn matches_origin(&self, origins: &[String]) -> bool {
         let domain = self.domain.trim_start_matches('.');
         origins.iter().any(|origin| {
-            let Ok(url) = url::Url::parse(origin) else { return false };
-            if self.secure && url.scheme() != "https" { return false; }
+            let Ok(url) = url::Url::parse(origin) else {
+                return false;
+            };
+            if self.secure && url.scheme() != "https" {
+                return false;
+            }
             url.host_str()
                 .map(str::to_ascii_lowercase)
                 .is_some_and(|host| host == domain || host.ends_with(&format!(".{domain}")))
@@ -1905,12 +2199,29 @@ impl CookieMaterial {
         value.insert("path".to_string(), Value::String(self.path.clone()));
         value.insert("secure".to_string(), Value::Bool(self.secure));
         value.insert("httpOnly".to_string(), Value::Bool(self.http_only));
-        if let Some(same_site) = &self.same_site { value.insert("sameSite".to_string(), Value::String(same_site.clone())); }
-        if let Some(expires) = self.expires { if let Some(number) = serde_json::Number::from_f64(expires) { value.insert("expires".to_string(), Value::Number(number)); } }
-        if let Some(priority) = &self.priority { value.insert("priority".to_string(), Value::String(priority.clone())); }
-        if let Some(same_party) = self.same_party { value.insert("sameParty".to_string(), Value::Bool(same_party)); }
-        if let Some(source_scheme) = &self.source_scheme { value.insert("sourceScheme".to_string(), Value::String(source_scheme.clone())); }
-        if let Some(source_port) = self.source_port { value.insert("sourcePort".to_string(), Value::Number(source_port.into())); }
+        if let Some(same_site) = &self.same_site {
+            value.insert("sameSite".to_string(), Value::String(same_site.clone()));
+        }
+        if let Some(expires) = self.expires {
+            if let Some(number) = serde_json::Number::from_f64(expires) {
+                value.insert("expires".to_string(), Value::Number(number));
+            }
+        }
+        if let Some(priority) = &self.priority {
+            value.insert("priority".to_string(), Value::String(priority.clone()));
+        }
+        if let Some(same_party) = self.same_party {
+            value.insert("sameParty".to_string(), Value::Bool(same_party));
+        }
+        if let Some(source_scheme) = &self.source_scheme {
+            value.insert(
+                "sourceScheme".to_string(),
+                Value::String(source_scheme.clone()),
+            );
+        }
+        if let Some(source_port) = self.source_port {
+            value.insert("sourcePort".to_string(), Value::Number(source_port.into()));
+        }
         Value::Object(value)
     }
 
@@ -1938,7 +2249,9 @@ fn detect_loopback_cookie_source(endpoint: &str) -> BrowserResult<BrowserCookieI
     let version: CdpMetadata = read_loopback_json(&format!("{endpoint}/json/version"))?;
     let targets: Vec<CdpTargetMetadata> = read_loopback_json(&format!("{endpoint}/json"))?;
     if targets.len() > 512 {
-        return Err(BrowserError::invalid("loopback CDP exposed too many targets"));
+        return Err(BrowserError::invalid(
+            "loopback CDP exposed too many targets",
+        ));
     }
     let mut origins = BTreeSet::new();
     for target in targets {
@@ -1965,21 +2278,35 @@ fn detect_loopback_cookie_source(endpoint: &str) -> BrowserResult<BrowserCookieI
         ));
     }
     if origins.len() > 256 {
-        return Err(BrowserError::invalid("loopback CDP exposed too many distinct origins"));
+        return Err(BrowserError::invalid(
+            "loopback CDP exposed too many distinct origins",
+        ));
     }
-    Ok(BrowserCookieImportSource { endpoint, browser: browser.to_string(), origins: origins.into_iter().collect() })
+    Ok(BrowserCookieImportSource {
+        endpoint,
+        browser: browser.to_string(),
+        origins: origins.into_iter().collect(),
+    })
 }
 
 #[cfg(windows)]
-fn reject_owned_cookie_source_port(provider: &NativeBrowserProvider, endpoint: &str) -> BrowserResult<()> {
+fn reject_owned_cookie_source_port(
+    provider: &NativeBrowserProvider,
+    endpoint: &str,
+) -> BrowserResult<()> {
     let source_port = url::Url::parse(endpoint)
         .ok()
         .and_then(|url| url.port())
         .ok_or_else(|| BrowserError::invalid("cookie import source requires an explicit port"))?;
     let owned_ports = provider.profile_ports.lock().map_err(|_| {
-        BrowserError::new(BrowserErrorCode::Internal, "native browser profile lock is poisoned")
+        BrowserError::new(
+            BrowserErrorCode::Internal,
+            "native browser profile lock is poisoned",
+        )
     })?;
-    if source_port == provider.main_cdp_port || owned_ports.values().any(|port| *port == source_port) {
+    if source_port == provider.main_cdp_port
+        || owned_ports.values().any(|port| *port == source_port)
+    {
         return Err(BrowserError::new(
             BrowserErrorCode::DeniedCapability,
             "cookie import source must be an external local Chrome CDP browser",
@@ -1991,26 +2318,47 @@ fn reject_owned_cookie_source_port(provider: &NativeBrowserProvider, endpoint: &
 #[cfg(windows)]
 fn connect_browser_cdp(endpoint: &str) -> BrowserResult<LoopbackCdp> {
     let endpoint = normalize_loopback_endpoint(endpoint)?;
-    let parsed = url::Url::parse(&endpoint).map_err(|_| BrowserError::invalid("invalid loopback CDP endpoint"))?;
-    let port = parsed.port_or_known_default().ok_or_else(|| BrowserError::invalid("loopback CDP endpoint requires an explicit port"))?;
+    let parsed = url::Url::parse(&endpoint)
+        .map_err(|_| BrowserError::invalid("invalid loopback CDP endpoint"))?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| BrowserError::invalid("loopback CDP endpoint requires an explicit port"))?;
     let version: CdpMetadata = read_loopback_json(&format!("{endpoint}/json/version"))?;
     if version.web_socket_debugger_url.is_empty() {
-        return Err(BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP browser websocket is unavailable"));
+        return Err(BrowserError::new(
+            BrowserErrorCode::RuntimeUnavailable,
+            "loopback CDP browser websocket is unavailable",
+        ));
     }
     LoopbackCdp::connect(&version.web_socket_debugger_url, port)
 }
 
 #[cfg(windows)]
 fn connect_page_cdp(port: u16, page_id: &str) -> BrowserResult<LoopbackCdp> {
-    let targets: Vec<CdpTargetMetadata> = read_loopback_json(&format!("http://127.0.0.1:{port}/json"))?;
+    let targets: Vec<CdpTargetMetadata> =
+        read_loopback_json(&format!("http://127.0.0.1:{port}/json"))?;
     if targets.len() > 512 {
-        return Err(BrowserError::invalid("destination CDP exposed too many targets"));
+        return Err(BrowserError::invalid(
+            "destination CDP exposed too many targets",
+        ));
     }
     let expected_name = format!("vibelink-page:{page_id}");
-    for target in targets.into_iter().filter(|target| target.kind.is_empty() || target.kind == "page") {
-        if target.web_socket_debugger_url.is_empty() { continue; }
-        let Ok(mut connection) = LoopbackCdp::connect(&target.web_socket_debugger_url, port) else { continue };
-        let Ok(result) = connection.command("Runtime.evaluate", json!({ "expression": "window.name", "returnByValue": true })) else { continue };
+    for target in targets
+        .into_iter()
+        .filter(|target| target.kind.is_empty() || target.kind == "page")
+    {
+        if target.web_socket_debugger_url.is_empty() {
+            continue;
+        }
+        let Ok(mut connection) = LoopbackCdp::connect(&target.web_socket_debugger_url, port) else {
+            continue;
+        };
+        let Ok(result) = connection.command(
+            "Runtime.evaluate",
+            json!({ "expression": "window.name", "returnByValue": true }),
+        ) else {
+            continue;
+        };
         let name = result
             .get("result")
             .and_then(|value| value.get("value"))
@@ -2019,12 +2367,16 @@ fn connect_page_cdp(port: u16, page_id: &str) -> BrowserResult<LoopbackCdp> {
             return Ok(connection);
         }
     }
-    Err(BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "destination browser page CDP target is unavailable"))
+    Err(BrowserError::new(
+        BrowserErrorCode::RuntimeUnavailable,
+        "destination browser page CDP target is unavailable",
+    ))
 }
 
 #[cfg(windows)]
 fn normalize_loopback_endpoint(endpoint: &str) -> BrowserResult<String> {
-    let parsed = url::Url::parse(endpoint.trim()).map_err(|_| BrowserError::invalid("invalid loopback CDP endpoint"))?;
+    let parsed = url::Url::parse(endpoint.trim())
+        .map_err(|_| BrowserError::invalid("invalid loopback CDP endpoint"))?;
     if parsed.scheme() != "http"
         || !is_loopback_host(&parsed)
         || parsed.port().is_none()
@@ -2060,29 +2412,51 @@ fn is_loopback_websocket_host(url: &url::Url) -> bool {
 #[cfg(windows)]
 fn read_loopback_json<T: for<'de> Deserialize<'de>>(url: &str) -> BrowserResult<T> {
     let agent = ureq::AgentBuilder::new().redirects(0).build();
-    let response = agent.get(url).timeout(Duration::from_secs(3)).call().map_err(|_| {
-        BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP metadata is unavailable")
-    })?;
+    let response = agent
+        .get(url)
+        .timeout(Duration::from_secs(3))
+        .call()
+        .map_err(|_| {
+            BrowserError::new(
+                BrowserErrorCode::RuntimeUnavailable,
+                "loopback CDP metadata is unavailable",
+            )
+        })?;
     let mut bytes = Vec::new();
     response
         .into_reader()
         .take(MAX_CDP_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP metadata could not be read"))?;
+        .map_err(|_| {
+            BrowserError::new(
+                BrowserErrorCode::RuntimeUnavailable,
+                "loopback CDP metadata could not be read",
+            )
+        })?;
     if bytes.len() as u64 > MAX_CDP_METADATA_BYTES {
-        return Err(BrowserError::invalid("loopback CDP metadata exceeds the bounded size"));
+        return Err(BrowserError::invalid(
+            "loopback CDP metadata exceeds the bounded size",
+        ));
     }
-    serde_json::from_slice(&bytes).map_err(|_| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP metadata is invalid"))
+    serde_json::from_slice(&bytes).map_err(|_| {
+        BrowserError::new(
+            BrowserErrorCode::RuntimeUnavailable,
+            "loopback CDP metadata is invalid",
+        )
+    })
 }
 
 #[cfg(windows)]
 fn normalize_cookie_origins(origins: &[String]) -> BrowserResult<Vec<String>> {
     if origins.is_empty() || origins.len() > 64 {
-        return Err(BrowserError::invalid("cookie import requires a bounded origin allowlist"));
+        return Err(BrowserError::invalid(
+            "cookie import requires a bounded origin allowlist",
+        ));
     }
     let mut normalized = BTreeSet::new();
     for origin in origins {
-        let parsed = url::Url::parse(origin).map_err(|_| BrowserError::invalid("invalid cookie import origin"))?;
+        let parsed = url::Url::parse(origin)
+            .map_err(|_| BrowserError::invalid("invalid cookie import origin"))?;
         if !matches!(parsed.scheme(), "http" | "https")
             || parsed.host_str().is_none()
             || !parsed.username().is_empty()
@@ -2091,7 +2465,9 @@ fn normalize_cookie_origins(origins: &[String]) -> BrowserResult<Vec<String>> {
             || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
-            return Err(BrowserError::invalid("cookie import entries must be exact HTTP(S) origins"));
+            return Err(BrowserError::invalid(
+                "cookie import entries must be exact HTTP(S) origins",
+            ));
         }
         normalized.insert(parsed.origin().ascii_serialization());
     }
@@ -2099,15 +2475,29 @@ fn normalize_cookie_origins(origins: &[String]) -> BrowserResult<Vec<String>> {
 }
 
 #[cfg(windows)]
-fn filter_cookie_payload(payload: &Value, origins: &[String]) -> BrowserResult<Vec<CookieMaterial>> {
-    let values = payload.get("cookies").and_then(Value::as_array).ok_or_else(cookie_payload_error)?;
+fn filter_cookie_payload(
+    payload: &Value,
+    origins: &[String],
+) -> BrowserResult<Vec<CookieMaterial>> {
+    let values = payload
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(cookie_payload_error)?;
     let mut cookies = Vec::new();
     for value in values {
         let cookie = CookieMaterial::from_value(value)?;
-        if !cookie.matches_origin(origins) { continue; }
+        if !cookie.matches_origin(origins) {
+            continue;
+        }
         if value.get("partitionKey").is_some_and(|key| !key.is_null())
-            || value.get("partitionKeyOpaque").and_then(Value::as_bool).unwrap_or(false)
-            || value.get("partitioned").and_then(Value::as_bool).unwrap_or(false)
+            || value
+                .get("partitionKeyOpaque")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            || value
+                .get("partitioned")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         {
             return Err(BrowserError::new(
                 BrowserErrorCode::Unsupported,
@@ -2154,11 +2544,17 @@ fn rollback_cookie_transaction(
     before_hash: [u8; 32],
 ) -> bool {
     for identity in identities {
-        if destination.command("Network.deleteCookies", json!({
-            "name": identity.name.clone(),
-            "domain": identity.domain.clone(),
-            "path": identity.path.clone(),
-        })).is_err() {
+        if destination
+            .command(
+                "Network.deleteCookies",
+                json!({
+                    "name": identity.name.clone(),
+                    "domain": identity.domain.clone(),
+                    "path": identity.path.clone(),
+                }),
+            )
+            .is_err()
+        {
             return false;
         }
     }
@@ -2167,12 +2563,17 @@ fn rollback_cookie_transaction(
             "Network.setCookies",
             json!({ "cookies": before.iter().map(CookieMaterial::set_value).collect::<Vec<_>>() }),
         );
-        if !matches!(restored, Ok(value) if value.get("success").and_then(Value::as_bool).unwrap_or(true)) {
+        if !matches!(restored, Ok(value) if value.get("success").and_then(Value::as_bool).unwrap_or(true))
+        {
             return false;
         }
     }
-    let Ok(payload) = get_all_cookie_payload(destination) else { return false };
-    let Ok(cookies) = filter_cookie_payload(&payload, origins) else { return false };
+    let Ok(payload) = get_all_cookie_payload(destination) else {
+        return false;
+    };
+    let Ok(cookies) = filter_cookie_payload(&payload, origins) else {
+        return false;
+    };
     let transaction = cookies
         .into_iter()
         .filter(|cookie| identities.contains(&cookie.identity()))
@@ -2183,14 +2584,23 @@ fn rollback_cookie_transaction(
 #[cfg(windows)]
 fn safe_cdp_error(error: CdpCommandError) -> BrowserError {
     match error {
-        CdpCommandError::Protocol => BrowserError::new(BrowserErrorCode::Unsupported, "required cookie-only CDP command is unavailable"),
-        CdpCommandError::Transport => BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "loopback CDP command failed"),
+        CdpCommandError::Protocol => BrowserError::new(
+            BrowserErrorCode::Unsupported,
+            "required cookie-only CDP command is unavailable",
+        ),
+        CdpCommandError::Transport => BrowserError::new(
+            BrowserErrorCode::RuntimeUnavailable,
+            "loopback CDP command failed",
+        ),
     }
 }
 
 #[cfg(windows)]
 fn cookie_payload_error() -> BrowserError {
-    BrowserError::new(BrowserErrorCode::RuntimeUnavailable, "CDP returned an invalid cookie payload")
+    BrowserError::new(
+        BrowserErrorCode::RuntimeUnavailable,
+        "CDP returned an invalid cookie payload",
+    )
 }
 
 #[cfg(windows)]

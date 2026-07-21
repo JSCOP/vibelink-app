@@ -235,6 +235,46 @@ pub struct WorktreeAssignment {
     pub worktree_path: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceDisposition {
+    NotCreated,
+    Live,
+    Cleaned,
+    Retained,
+    CleanupFailed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchLaunchClaimRecord {
+    pub operation_id: String,
+    pub command_digest: String,
+    pub profile: Option<String>,
+    pub worktree_mode: WorktreeMode,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchResourceRecord {
+    pub session_id: String,
+    pub repository_root: Option<String>,
+    pub relative_prefix: String,
+    pub launch_path: Option<String>,
+    pub agent_instance_id: Option<String>,
+    pub pane_id: Option<String>,
+    pub root_pid: Option<u32>,
+    pub process_started_at: Option<u64>,
+    pub process_generation: Option<u64>,
+    pub worktree: Option<WorktreeAssignment>,
+    pub pane_disposition: ResourceDisposition,
+    pub worktree_disposition: ResourceDisposition,
+    pub cleanup_reason: Option<String>,
+    pub cleanup_error: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DispatchRecord {
@@ -246,6 +286,8 @@ pub struct DispatchRecord {
     pub pane_id: Option<String>,
     pub process_generation: Option<u64>,
     pub worktree: Option<WorktreeAssignment>,
+    pub launch_claim: Option<DispatchLaunchClaimRecord>,
+    pub resources: Option<DispatchResourceRecord>,
     pub failure_code: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -355,6 +397,92 @@ pub struct ScheduleResult {
     pub newly_blocked_task_ids: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeMode {
+    Reuse,
+    #[default]
+    Worktree,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct DispatchLaunchRequest {
+    pub run_id: String,
+    pub expected_run_revision: u64,
+    pub command: String,
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub worktree_mode: WorktreeMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchLaunchStatus {
+    Launched,
+    Existing,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchLaunchOutcome {
+    pub dispatch_id: String,
+    pub task_id: String,
+    pub attempt: u32,
+    pub status: DispatchLaunchStatus,
+    pub agent_instance_id: Option<String>,
+    pub pane_id: Option<String>,
+    pub runtime_identity: Option<String>,
+    pub process_generation: Option<u64>,
+    pub worktree: Option<WorktreeAssignment>,
+    pub resources: Option<DispatchResourceRecord>,
+    pub failure_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchLaunchResult {
+    pub run: RunRecord,
+    pub launches: Vec<DispatchLaunchOutcome>,
+    pub newly_ready_task_ids: Vec<String>,
+    pub newly_blocked_task_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum DispatchLaunchPreparation {
+    Intent(ScheduleResult),
+    Replay(DispatchLaunchResult),
+}
+
+#[derive(Clone, Debug)]
+pub struct DispatchLaunchSpec {
+    pub operation_id: Uuid,
+    pub command: String,
+    pub profile: Option<String>,
+    pub worktree_mode: WorktreeMode,
+}
+
+#[derive(Clone, Debug)]
+pub struct DispatchCleanupTarget {
+    pub run_id: String,
+    pub session_id: String,
+    pub dispatch: DispatchRecord,
+    pub resources: Option<DispatchResourceRecord>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DispatchResourceReservation {
+    pub dispatch_id: String,
+    pub session_id: String,
+    pub repository_root: Option<String>,
+    pub relative_prefix: String,
+    pub launch_path: Option<String>,
+    pub worktree: Option<WorktreeAssignment>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterAgentRequest {
@@ -363,6 +491,13 @@ pub struct RegisterAgentRequest {
     pub workspace_path: String,
     pub worktree_path: Option<String>,
     pub resumable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLaunchFailureRequest {
+    pub agent_instance_id: String,
+    pub failure_code: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -541,6 +676,7 @@ pub struct MergeAppliedRequest {
     pub commit_id: String,
 }
 
+#[derive(Clone)]
 pub struct CoordinatorService {
     control: Arc<ControlPlane>,
 }
@@ -680,11 +816,637 @@ impl CoordinatorService {
         operation_id: Uuid,
         request: ScheduleRequest,
     ) -> CoordinatorResult<ScheduleResult> {
-        self.mutate(operation_id, "orchestration.schedule", request, move |transaction, request| { let mut run = read_run(transaction, &request.run_id)?;
-        require_run_revision(&run, request.expected_run_revision)?;
+        self.mutate(
+            operation_id,
+            "orchestration.schedule",
+            request,
+            move |transaction, request| {
+                Self::schedule_ready_transaction(
+                    transaction,
+                    &request.run_id,
+                    request.expected_run_revision,
+                    operation_id,
+                )
+            },
+        )
+    }
+
+    pub fn prepare_dispatch_launch(
+        &self,
+        operation_id: Uuid,
+        mut request: DispatchLaunchRequest,
+    ) -> CoordinatorResult<DispatchLaunchPreparation> {
+        request.command = required(&request.command, "launch command")?;
+        request.profile = trim_optional(request.profile.take());
+        let request_hash = dispatch_launch_request_hash(&request)?;
+        let operation_id_text = operation_id.to_string();
+        self.control.with_connection_mut(move |connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            if let Some((stored_hash, state, plan_json, result_json)) = connection
+                .query_row(
+                    "SELECT request_hash,state,plan_json,result_json FROM dispatch_launch_operations WHERE operation_id=?1",
+                    [&operation_id_text],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)),
+                )
+                .optional()?
+            {
+                if stored_hash != request_hash {
+                    return Err(CoordinatorError::Conflict(
+                        "launch operation id was already used for a different immutable specification".to_string(),
+                    ));
+                }
+                if state == "final" {
+                    let result_json = result_json.ok_or_else(|| {
+                        CoordinatorError::Storage("final launch operation has no result".to_string())
+                    })?;
+                    return Ok(DispatchLaunchPreparation::Replay(serde_json::from_str(&result_json)?));
+                }
+                let mut plan: ScheduleResult = serde_json::from_str(&plan_json)?;
+                let dispatch_ids = claimed_dispatch_ids(connection, &operation_id_text)?;
+                plan.dispatches = dispatch_ids
+                    .into_iter()
+                    .map(|dispatch_id| read_dispatch(connection, &dispatch_id))
+                    .collect::<CoordinatorResult<Vec<_>>>()?;
+                return Ok(DispatchLaunchPreparation::Intent(plan));
+            }
+
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure_orchestration_runtime_schema(&transaction)?;
+            let mut plan = Self::schedule_ready_transaction(
+                &transaction,
+                &request.run_id,
+                request.expected_run_revision,
+                operation_id,
+            )?;
+            let dispatch_ids = plan
+                .dispatches
+                .iter()
+                .map(|dispatch| dispatch.id.clone())
+                .collect::<Vec<_>>();
+            transaction.execute(
+                "INSERT INTO dispatch_launch_operations(operation_id,request_hash,request_json,state,plan_json,result_json,created_at,updated_at) VALUES(?1,?2,?3,'intent',?4,NULL,?5,?5)",
+                params![
+                    operation_id_text,
+                    request_hash,
+                    serde_json::to_string(&request)?,
+                    serde_json::to_string(&plan)?,
+                    now_millis() as i64,
+                ],
+            )?;
+            let command_digest = digest_hex(request.command.as_bytes());
+            for dispatch_id in &dispatch_ids {
+                transaction.execute(
+                    "INSERT INTO dispatch_launch_claims(dispatch_id,operation_id,command,command_digest,profile,worktree_mode,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(dispatch_id) DO NOTHING",
+                    params![
+                        dispatch_id,
+                        operation_id_text,
+                        request.command,
+                        command_digest,
+                        request.profile,
+                        worktree_mode_text(request.worktree_mode),
+                        now_millis() as i64,
+                    ],
+                )?;
+                let claimed_by: String = transaction.query_row(
+                    "SELECT operation_id FROM dispatch_launch_claims WHERE dispatch_id=?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )?;
+                if claimed_by != operation_id_text {
+                    return Err(CoordinatorError::Conflict(format!(
+                        "dispatch {dispatch_id} is already claimed by another launch operation"
+                    )));
+                }
+            }
+            plan.dispatches = dispatch_ids
+                .into_iter()
+                .map(|dispatch_id| read_dispatch(&transaction, &dispatch_id))
+                .collect::<CoordinatorResult<Vec<_>>>()?;
+            transaction.execute(
+                "UPDATE dispatch_launch_operations SET plan_json=?2,updated_at=?3 WHERE operation_id=?1",
+                params![
+                    operation_id_text,
+                    serde_json::to_string(&plan)?,
+                    now_millis() as i64,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(DispatchLaunchPreparation::Intent(plan))
+        })
+    }
+
+    pub fn complete_dispatch_launch(
+        &self,
+        operation_id: Uuid,
+        request: &DispatchLaunchRequest,
+        result: &DispatchLaunchResult,
+    ) -> CoordinatorResult<DispatchLaunchResult> {
+        let request_hash = dispatch_launch_request_hash(request)?;
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let operation_id_text = operation_id.to_string();
+            let (stored_hash, state, stored_result): (String, String, Option<String>) = transaction
+                .query_row(
+                    "SELECT request_hash,state,result_json FROM dispatch_launch_operations WHERE operation_id=?1",
+                    [&operation_id_text],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+                .ok_or_else(|| CoordinatorError::NotFound(format!("launch operation {operation_id}")))?;
+            if stored_hash != request_hash {
+                return Err(CoordinatorError::Conflict(
+                    "launch operation specification changed before completion".to_string(),
+                ));
+            }
+            if state == "final" {
+                return Ok(serde_json::from_str(&stored_result.ok_or_else(|| {
+                    CoordinatorError::Storage("final launch operation has no result".to_string())
+                })?)?);
+            }
+            transaction.execute(
+                "UPDATE dispatch_launch_operations SET state='final',result_json=?2,updated_at=?3 WHERE operation_id=?1",
+                params![operation_id_text, serde_json::to_string(result)?, now_millis() as i64],
+            )?;
+            transaction.commit()?;
+            Ok(result.clone())
+        })
+    }
+
+    pub fn dispatch_launch_spec(
+        &self,
+        dispatch_id: &str,
+        operation_id: Uuid,
+    ) -> CoordinatorResult<DispatchLaunchSpec> {
+        self.control.with_connection(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            connection
+                .query_row(
+                    "SELECT operation_id,command,profile,worktree_mode FROM dispatch_launch_claims WHERE dispatch_id=?1",
+                    [dispatch_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
+                )
+                .optional()?
+                .ok_or_else(|| CoordinatorError::Conflict(format!("dispatch {dispatch_id} has no launch claim")))
+                .and_then(|(claimed_operation, command, profile, worktree_mode)| {
+                    if claimed_operation != operation_id.to_string() {
+                        return Err(CoordinatorError::Conflict(format!(
+                            "dispatch {dispatch_id} is not owned by launch operation {operation_id}"
+                        )));
+                    }
+                    Ok(DispatchLaunchSpec {
+                        operation_id,
+                        command,
+                        profile,
+                        worktree_mode: parse_worktree_mode(&worktree_mode)?,
+                    })
+                })
+        })
+    }
+
+    pub fn reserve_dispatch_resources(
+        &self,
+        operation_id: Uuid,
+        reservation: DispatchResourceReservation,
+    ) -> CoordinatorResult<DispatchResourceRecord> {
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let claimed_operation: String = transaction.query_row(
+                "SELECT operation_id FROM dispatch_launch_claims WHERE dispatch_id=?1",
+                [&reservation.dispatch_id],
+                |row| row.get(0),
+            )?;
+            if claimed_operation != operation_id.to_string() {
+                return Err(CoordinatorError::Conflict(
+                    "resource reservation does not own the dispatch launch claim".to_string(),
+                ));
+            }
+            let worktree_json = reservation
+                .worktree
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            transaction.execute(
+                "INSERT INTO dispatch_resources(dispatch_id,operation_id,session_id,repository_root,relative_prefix,launch_path,worktree_json,pane_disposition,worktree_disposition,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'not_created',?8,?9) ON CONFLICT(dispatch_id) DO NOTHING",
+                params![
+                    reservation.dispatch_id,
+                    operation_id.to_string(),
+                    reservation.session_id,
+                    reservation.repository_root,
+                    reservation.relative_prefix,
+                    reservation.launch_path,
+                    worktree_json,
+                    if reservation.worktree.is_some() { "retained" } else { "not_created" },
+                    now_millis() as i64,
+                ],
+            )?;
+            let resource = read_dispatch_resource(&transaction, &reservation.dispatch_id)?
+                .ok_or_else(|| CoordinatorError::Storage("dispatch resource reservation disappeared".to_string()))?;
+            if resource.session_id != reservation.session_id
+                || resource.repository_root != reservation.repository_root
+                || resource.relative_prefix != reservation.relative_prefix
+                || resource.launch_path != reservation.launch_path
+                || resource.worktree != reservation.worktree
+            {
+                return Err(CoordinatorError::Conflict(
+                    "dispatch resource authority changed after it was reserved".to_string(),
+                ));
+            }
+            transaction.commit()?;
+            Ok(resource)
+        })
+    }
+
+    pub fn record_dispatch_agent_resource(
+        &self,
+        dispatch_id: &str,
+        operation_id: Uuid,
+        agent_instance_id: &str,
+    ) -> CoordinatorResult<DispatchResourceRecord> {
+        self.update_dispatch_resource_owner(
+            dispatch_id,
+            operation_id,
+            Some(agent_instance_id),
+            None,
+        )
+    }
+
+    pub fn record_dispatch_pane_resource(
+        &self,
+        dispatch_id: &str,
+        operation_id: Uuid,
+        pane_id: &str,
+        root_pid: Option<u32>,
+        process_started_at: Option<u64>,
+        process_generation: u64,
+    ) -> CoordinatorResult<DispatchResourceRecord> {
+        self.update_dispatch_resource_owner(
+            dispatch_id,
+            operation_id,
+            None,
+            Some((pane_id, root_pid, process_started_at, process_generation)),
+        )
+    }
+
+    fn update_dispatch_resource_owner(
+        &self,
+        dispatch_id: &str,
+        operation_id: Uuid,
+        agent_instance_id: Option<&str>,
+        pane: Option<(&str, Option<u32>, Option<u64>, u64)>,
+    ) -> CoordinatorResult<DispatchResourceRecord> {
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let existing_operation: String = transaction.query_row(
+                "SELECT operation_id FROM dispatch_resources WHERE dispatch_id=?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )?;
+            if existing_operation != operation_id.to_string() {
+                return Err(CoordinatorError::Conflict(
+                    "dispatch resource is owned by another launch operation".to_string(),
+                ));
+            }
+            if let Some(agent_instance_id) = agent_instance_id {
+                let changed = transaction.execute(
+                    "UPDATE dispatch_resources SET agent_instance_id=COALESCE(agent_instance_id,?2),updated_at=?3 WHERE dispatch_id=?1 AND (agent_instance_id IS NULL OR agent_instance_id=?2)",
+                    params![dispatch_id, agent_instance_id, now_millis() as i64],
+                )?;
+                if changed == 0 {
+                    return Err(CoordinatorError::Conflict(
+                        "dispatch agent identity changed after it was recorded".to_string(),
+                    ));
+                }
+            }
+            if let Some((pane_id, root_pid, process_started_at, process_generation)) = pane {
+                let changed = transaction.execute(
+                    "UPDATE dispatch_resources SET pane_id=COALESCE(pane_id,?2),root_pid=COALESCE(root_pid,?3),process_started_at=COALESCE(process_started_at,?4),process_generation=COALESCE(process_generation,?5),pane_disposition='live',cleanup_reason=NULL,cleanup_error=NULL,updated_at=?6 WHERE dispatch_id=?1 AND (pane_id IS NULL OR pane_id=?2)",
+                    params![dispatch_id, pane_id, root_pid.map(i64::from), process_started_at.map(|value| value as i64), process_generation as i64, now_millis() as i64],
+                )?;
+                if changed == 0 {
+                    return Err(CoordinatorError::Conflict(
+                        "dispatch pane identity changed after it was recorded".to_string(),
+                    ));
+                }
+            }
+            let resource = read_dispatch_resource(&transaction, dispatch_id)?
+                .ok_or_else(|| CoordinatorError::NotFound(format!("dispatch resources {dispatch_id}")))?;
+            transaction.commit()?;
+            Ok(resource)
+        })
+    }
+
+    pub fn mark_dispatch_resource_disposition(
+        &self,
+        dispatch_id: &str,
+        pane_disposition: Option<ResourceDisposition>,
+        worktree_disposition: Option<ResourceDisposition>,
+        clear_pane_identity: bool,
+        clear_worktree_identity: bool,
+        cleanup_reason: Option<&str>,
+        cleanup_error: Option<&str>,
+    ) -> CoordinatorResult<DispatchResourceRecord> {
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let updated_at = now_millis();
+            let changed = transaction.execute(
+                "UPDATE dispatch_resources SET pane_disposition=COALESCE(?2,pane_disposition),worktree_disposition=COALESCE(?3,worktree_disposition),pane_id=CASE WHEN ?4 THEN NULL ELSE pane_id END,root_pid=CASE WHEN ?4 THEN NULL ELSE root_pid END,process_started_at=CASE WHEN ?4 THEN NULL ELSE process_started_at END,process_generation=CASE WHEN ?4 THEN NULL ELSE process_generation END,worktree_json=CASE WHEN ?5 THEN NULL ELSE worktree_json END,launch_path=CASE WHEN ?5 THEN NULL ELSE launch_path END,cleanup_reason=COALESCE(?6,cleanup_reason),cleanup_error=?7,cleanup_attempts=cleanup_attempts+1,updated_at=?8 WHERE dispatch_id=?1",
+                params![
+                    dispatch_id,
+                    pane_disposition.map(resource_disposition_text),
+                    worktree_disposition.map(resource_disposition_text),
+                    clear_pane_identity,
+                    clear_worktree_identity,
+                    cleanup_reason,
+                    cleanup_error,
+                    updated_at as i64,
+                ],
+            )?;
+            if changed == 0 {
+                return Err(CoordinatorError::NotFound(format!("dispatch resources {dispatch_id}")));
+            }
+            if clear_pane_identity {
+                transaction.execute(
+                    "UPDATE dispatches SET pane_id=NULL,process_generation=NULL,updated_at=?2 WHERE id=?1",
+                    params![dispatch_id, updated_at as i64],
+                )?;
+                transaction.execute(
+                    "UPDATE agent_instances SET runtime_identity=NULL,updated_at=?2 WHERE id=(SELECT agent_instance_id FROM dispatches WHERE id=?1)",
+                    params![dispatch_id, updated_at as i64],
+                )?;
+            }
+            if clear_worktree_identity {
+                transaction.execute(
+                    "UPDATE dispatches SET base_revision=NULL,branch=NULL,worktree_path=NULL,updated_at=?2 WHERE id=?1",
+                    params![dispatch_id, updated_at as i64],
+                )?;
+            }
+            let resource = read_dispatch_resource(&transaction, dispatch_id)?
+                .ok_or_else(|| CoordinatorError::NotFound(format!("dispatch resources {dispatch_id}")))?;
+            transaction.commit()?;
+            Ok(resource)
+        })
+    }
+
+    pub fn cleanup_targets_for_run(
+        &self,
+        run_id: &str,
+    ) -> CoordinatorResult<Vec<DispatchCleanupTarget>> {
+        self.control.with_connection(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let run = read_run(connection, run_id)?;
+            let dispatch_ids = query_ids(
+                connection,
+                "SELECT d.id FROM dispatches d JOIN orchestration_tasks t ON t.id=d.task_id WHERE t.run_id=?1 ORDER BY t.position,d.attempt,d.id",
+                run_id,
+            )?;
+            let dispatches = dispatch_ids
+                .into_iter()
+                .map(|dispatch_id| read_dispatch(connection, &dispatch_id))
+                .collect::<CoordinatorResult<Vec<_>>>()?;
+            Ok(dispatches
+                .into_iter()
+                .map(|dispatch| DispatchCleanupTarget {
+                    run_id: run.id.clone(),
+                    session_id: run.session_id.clone(),
+                    resources: dispatch.resources.clone(),
+                    dispatch,
+                })
+                .collect())
+        })
+    }
+
+    pub fn cleanup_target_for_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> CoordinatorResult<DispatchCleanupTarget> {
+        self.control.with_connection(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let dispatch = read_dispatch(connection, dispatch_id)?;
+            let task = read_task(connection, &dispatch.task_id)?;
+            let run = read_run(connection, &task.run_id)?;
+            Ok(DispatchCleanupTarget {
+                run_id: run.id,
+                session_id: run.session_id,
+                resources: dispatch.resources.clone(),
+                dispatch,
+            })
+        })
+    }
+
+    pub fn active_cleanup_targets(&self) -> CoordinatorResult<Vec<DispatchCleanupTarget>> {
+        self.control.with_connection(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let mut statement = connection.prepare(
+                "SELECT d.id,t.run_id,r.session_id FROM dispatches d JOIN orchestration_tasks t ON t.id=d.task_id JOIN orchestration_runs r ON r.id=t.run_id LEFT JOIN dispatch_resources dr ON dr.dispatch_id=d.id WHERE d.status IN ('pending','dispatched','running','waiting') OR dr.pane_disposition IN ('live','cleanup_failed','unknown') OR dr.worktree_disposition='cleanup_failed' ORDER BY r.created_at,t.position,d.attempt,d.id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            rows.into_iter()
+                .map(|(dispatch_id, run_id, session_id)| {
+                    let dispatch = read_dispatch(connection, &dispatch_id)?;
+                    Ok(DispatchCleanupTarget {
+                        run_id,
+                        session_id,
+                        resources: dispatch.resources.clone(),
+                        dispatch,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    pub fn record_pane_exit(
+        &self,
+        operation_id: Uuid,
+        pane_id: &str,
+        exit_code: Option<i32>,
+        observed_at: u64,
+    ) -> CoordinatorResult<Option<DispatchRecord>> {
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let dispatch_id = transaction
+                .query_row(
+                    "SELECT dispatch_id FROM dispatch_resources WHERE pane_id=?1 UNION SELECT id FROM dispatches WHERE pane_id=?1 LIMIT 1",
+                    [pane_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(dispatch_id) = dispatch_id else {
+                transaction.commit()?;
+                return Ok(None);
+            };
+            let dispatch = read_dispatch(&transaction, &dispatch_id)?;
+            let cleanup_reason = dispatch
+                .resources
+                .as_ref()
+                .and_then(|resource| resource.cleanup_reason.as_deref());
+            let intentional = matches!(
+                cleanup_reason,
+                Some("cancel" | "reject" | "gate_reject" | "merge_applied" | "launch_failure" | "daemon_restart" | "retry_cleanup")
+            );
+            transaction.execute(
+                "UPDATE dispatch_resources SET pane_id=NULL,root_pid=NULL,process_started_at=NULL,process_generation=NULL,pane_disposition='cleaned',cleanup_reason=COALESCE(cleanup_reason,'process_exit'),cleanup_error=NULL,updated_at=?2 WHERE dispatch_id=?1",
+                params![dispatch_id, observed_at as i64],
+            )?;
+            transaction.execute(
+                "UPDATE dispatches SET pane_id=NULL,process_generation=NULL,updated_at=?2 WHERE id=?1",
+                params![dispatch_id, observed_at as i64],
+            )?;
+            if let Some(agent_id) = dispatch.agent_instance_id.as_deref() {
+                transaction.execute(
+                    "UPDATE agent_instances SET runtime_identity=NULL,updated_at=?2 WHERE id=?1",
+                    params![agent_id, observed_at as i64],
+                )?;
+            }
+            let task = read_task(&transaction, &dispatch.task_id)?;
+            if dispatch.status.is_active() && !intentional {
+                let failure_code = exit_code
+                    .map(|code| format!("process_exit:{code}"))
+                    .unwrap_or_else(|| "process_exit:unknown".to_string());
+                transaction.execute(
+                    "UPDATE dispatches SET status='failed',failure_code=?2,updated_at=?3 WHERE id=?1",
+                    params![dispatch_id, failure_code, observed_at as i64],
+                )?;
+                set_task_status(
+                    &transaction,
+                    &task.id,
+                    OrchestrationTaskStatus::Blocked,
+                    Some(json!({"reason": "worker_process_exited", "exitCode": exit_code})),
+                )?;
+                if let Some(agent_id) = dispatch.agent_instance_id.as_deref() {
+                    transaction.execute(
+                        "UPDATE agent_instances SET status='failed',updated_at=?2 WHERE id=?1",
+                        params![agent_id, observed_at as i64],
+                    )?;
+                }
+                let mut run = read_run(&transaction, &task.run_id)?;
+                bump_run_revision(&transaction, &mut run)?;
+                refresh_terminal_run_status(&transaction, &mut run)?;
+                insert_event(
+                    &transaction,
+                    Some(&run.id),
+                    "orchestration",
+                    "dispatch.process_exited",
+                    Some(&dispatch_id),
+                    operation_id,
+                    json!({"paneId": pane_id, "exitCode": exit_code}),
+                )?;
+            }
+            let updated = read_dispatch(&transaction, &dispatch_id)?;
+            transaction.commit()?;
+            Ok(Some(updated))
+        })
+    }
+
+    pub fn reconcile_daemon_restart(
+        &self,
+        operation_id: Uuid,
+        observed_at: u64,
+    ) -> CoordinatorResult<Vec<String>> {
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let run_ids = {
+                let mut statement = transaction.prepare(
+                    "SELECT id FROM orchestration_runs WHERE status IN ('planning','running','waiting','paused') ORDER BY created_at,id",
+                )?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                let collected = rows.collect::<Result<Vec<_>, _>>()?;
+                collected
+            };
+            let mut reconciled = Vec::new();
+            for run_id in run_ids {
+                let dispatch_ids = query_ids(
+                    &transaction,
+                    "SELECT d.id FROM dispatches d JOIN orchestration_tasks t ON t.id=d.task_id WHERE t.run_id=?1 AND d.status IN ('pending','dispatched','running','waiting') ORDER BY t.position,d.attempt,d.id",
+                    &run_id,
+                )?;
+                let mut changed = false;
+                for dispatch_id in dispatch_ids {
+                    let dispatch = read_dispatch(&transaction, &dispatch_id)?;
+                    if dispatch.status == DispatchStatus::Pending && dispatch.launch_claim.is_some() {
+                        continue;
+                    }
+                    if dispatch.status == DispatchStatus::Pending {
+                        transaction.execute(
+                            "UPDATE dispatches SET status='failed',failure_code='restart_unclaimed',updated_at=?2 WHERE id=?1",
+                            params![dispatch.id, observed_at as i64],
+                        )?;
+                        transaction.execute(
+                            "UPDATE orchestration_tasks SET status='ready',revision=revision+1,updated_at=?2 WHERE id=?1 AND status='dispatched'",
+                            params![dispatch.task_id, observed_at as i64],
+                        )?;
+                    } else {
+                        transaction.execute(
+                            "UPDATE dispatches SET status='failed',failure_code='daemon_restart',pane_id=NULL,process_generation=NULL,updated_at=?2 WHERE id=?1",
+                            params![dispatch.id, observed_at as i64],
+                        )?;
+                        set_task_status(
+                            &transaction,
+                            &dispatch.task_id,
+                            OrchestrationTaskStatus::Blocked,
+                            Some(json!({"reason": "daemon_restart"})),
+                        )?;
+                        if let Some(agent_id) = dispatch.agent_instance_id.as_deref() {
+                            transaction.execute(
+                                "UPDATE agent_instances SET status='lost',runtime_identity=NULL,updated_at=?2 WHERE id=?1",
+                                params![agent_id, observed_at as i64],
+                            )?;
+                        }
+                    }
+                    changed = true;
+                }
+                let timed_out = transaction.execute(
+                    "UPDATE decision_gates SET status='timeout',updated_at=?2 WHERE run_id=?1 AND status='pending' AND expires_at IS NOT NULL AND expires_at<=?2",
+                    params![run_id, observed_at as i64],
+                )?;
+                changed |= timed_out > 0;
+                if changed {
+                    let mut run = read_run(&transaction, &run_id)?;
+                    bump_run_revision(&transaction, &mut run)?;
+                    refresh_terminal_run_status(&transaction, &mut run)?;
+                    insert_event(
+                        &transaction,
+                        Some(&run_id),
+                        "orchestration",
+                        "run.daemon_reconciled",
+                        Some(&run_id),
+                        operation_id,
+                        json!({"observedAt": observed_at}),
+                    )?;
+                    reconciled.push(run_id);
+                }
+            }
+            transaction.commit()?;
+            Ok(reconciled)
+        })
+    }
+
+    fn schedule_ready_transaction(
+        transaction: &Transaction<'_>,
+        run_id: &str,
+        expected_run_revision: u64,
+        operation_id: Uuid,
+    ) -> CoordinatorResult<ScheduleResult> {
+        let mut run = read_run(transaction, run_id)?;
+        require_run_revision(&run, expected_run_revision)?;
         if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
             return Err(CoordinatorError::InvalidTransition(format!(
-                "run {} cannot schedule from {:?}", run.id, run.status
+                "run {} cannot schedule from {:?}",
+                run.id, run.status
             )));
         }
 
@@ -716,12 +1478,7 @@ impl CoordinatorService {
                 .iter()
                 .all(|status| *status == OrchestrationTaskStatus::Completed)
             {
-                set_task_status(
-                    transaction,
-                    &task_id,
-                    OrchestrationTaskStatus::Ready,
-                    None,
-                )?;
+                set_task_status(transaction, &task_id, OrchestrationTaskStatus::Ready, None)?;
                 newly_ready.push(task_id);
             }
         }
@@ -757,7 +1514,15 @@ impl CoordinatorService {
                 OrchestrationTaskStatus::Dispatched,
                 None,
             )?;
-            insert_event(transaction, Some(&run.id), "orchestration", "dispatch.created", Some(&dispatch_id), operation_id, json!({"taskId": task_id, "attempt": attempt}))?;
+            insert_event(
+                transaction,
+                Some(&run.id),
+                "orchestration",
+                "dispatch.created",
+                Some(&dispatch_id),
+                operation_id,
+                json!({"taskId": task_id, "attempt": attempt}),
+            )?;
             dispatches.push(read_dispatch(transaction, &dispatch_id)?);
         }
 
@@ -772,7 +1537,55 @@ impl CoordinatorService {
             dispatches,
             newly_ready_task_ids: newly_ready,
             newly_blocked_task_ids: newly_blocked,
-        }) })
+        })
+    }
+
+    pub fn record_unbound_agent_launch_failure(
+        &self,
+        operation_id: Uuid,
+        request: AgentLaunchFailureRequest,
+    ) -> CoordinatorResult<AgentInstanceRecord> {
+        let failure_code = required(&request.failure_code, "failure code")?;
+        self.mutate(
+            operation_id,
+            "orchestration.agent.launch_failed",
+            request,
+            move |transaction, request| {
+                let agent = read_agent(transaction, &request.agent_instance_id)?;
+                let binding_count: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM dispatches WHERE agent_instance_id=?1",
+                    [&agent.id],
+                    |row| row.get(0),
+                )?;
+                if binding_count != 0 {
+                    return Err(CoordinatorError::Conflict(format!(
+                        "agent {} is already bound to a dispatch",
+                        agent.id
+                    )));
+                }
+                if agent.status != AgentLifecycleStatus::Registered {
+                    return Err(CoordinatorError::InvalidTransition(format!(
+                        "agent {} cannot fail launch from {:?}",
+                        agent.id, agent.status
+                    )));
+                }
+                let now = now_millis();
+                transaction.execute(
+                    "UPDATE agent_instances SET status='failed',updated_at=?2 WHERE id=?1",
+                    params![agent.id, now as i64],
+                )?;
+                insert_event(
+                    transaction,
+                    None,
+                    "orchestration",
+                    "agent.launch_failed",
+                    Some(&agent.id),
+                    operation_id,
+                    json!({"failureCode": failure_code}),
+                )?;
+                read_agent(transaction, &agent.id)
+            },
+        )
     }
 
     pub fn register_agent(
@@ -1115,6 +1928,10 @@ impl CoordinatorService {
                 now,
             )?;
             insert_message(transaction, &run.id, Some(&task.id), Some(&dispatch.id), None, "coordinator", MessageType::MergeReady, json!({"gateId": gate.id, "worktree": dispatch.worktree}), now)?;
+            transaction.execute(
+                "UPDATE dispatch_resources SET worktree_disposition='retained',cleanup_reason='merge_decision',cleanup_error=NULL,updated_at=?2 WHERE dispatch_id=?1",
+                params![dispatch.id, now as i64],
+            )?;
             Some(gate)
         } else {
             None
@@ -1915,8 +2732,175 @@ fn read_task(connection: &Connection, task_id: &str) -> CoordinatorResult<TaskRe
     })
 }
 
-fn read_dispatch(connection: &Connection, dispatch_id: &str) -> CoordinatorResult<DispatchRecord> {
+fn ensure_orchestration_runtime_schema(connection: &Connection) -> CoordinatorResult<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dispatch_launch_operations (
+           operation_id TEXT PRIMARY KEY,
+           request_hash TEXT NOT NULL,
+           request_json TEXT NOT NULL,
+           state TEXT NOT NULL CHECK(state IN ('intent','final')),
+           plan_json TEXT NOT NULL,
+           result_json TEXT,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS dispatch_launch_claims (
+           dispatch_id TEXT PRIMARY KEY REFERENCES dispatches(id) ON DELETE CASCADE,
+           operation_id TEXT NOT NULL REFERENCES dispatch_launch_operations(operation_id) ON DELETE RESTRICT,
+           command TEXT NOT NULL,
+           command_digest TEXT NOT NULL,
+           profile TEXT,
+           worktree_mode TEXT NOT NULL CHECK(worktree_mode IN ('reuse','worktree')),
+           created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS dispatch_launch_claims_operation ON dispatch_launch_claims(operation_id,dispatch_id);
+         CREATE TABLE IF NOT EXISTS dispatch_resources (
+           dispatch_id TEXT PRIMARY KEY REFERENCES dispatches(id) ON DELETE CASCADE,
+           operation_id TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           repository_root TEXT,
+           relative_prefix TEXT NOT NULL DEFAULT '',
+           launch_path TEXT,
+           agent_instance_id TEXT,
+           pane_id TEXT,
+           root_pid INTEGER,
+           process_started_at INTEGER,
+           process_generation INTEGER,
+           worktree_json TEXT,
+           pane_disposition TEXT NOT NULL DEFAULT 'not_created' CHECK(pane_disposition IN ('not_created','live','cleaned','retained','cleanup_failed','unknown')),
+           worktree_disposition TEXT NOT NULL DEFAULT 'not_created' CHECK(worktree_disposition IN ('not_created','live','cleaned','retained','cleanup_failed','unknown')),
+           cleanup_reason TEXT,
+           cleanup_error TEXT,
+           cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+           updated_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS dispatch_resources_pane ON dispatch_resources(pane_id);
+         CREATE INDEX IF NOT EXISTS dispatch_resources_operation ON dispatch_resources(operation_id,dispatch_id);",
+    )?;
+    Ok(())
+}
+
+fn read_dispatch_claim(
+    connection: &Connection,
+    dispatch_id: &str,
+) -> CoordinatorResult<Option<DispatchLaunchClaimRecord>> {
+    ensure_orchestration_runtime_schema(connection)?;
     connection
+        .query_row(
+            "SELECT operation_id,command_digest,profile,worktree_mode FROM dispatch_launch_claims WHERE dispatch_id=?1",
+            [dispatch_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
+        )
+        .optional()?
+        .map(|(operation_id, command_digest, profile, worktree_mode)| {
+            Ok(DispatchLaunchClaimRecord {
+                operation_id,
+                command_digest,
+                profile,
+                worktree_mode: parse_worktree_mode(&worktree_mode)?,
+            })
+        })
+        .transpose()
+}
+
+fn read_dispatch_resource(
+    connection: &Connection,
+    dispatch_id: &str,
+) -> CoordinatorResult<Option<DispatchResourceRecord>> {
+    ensure_orchestration_runtime_schema(connection)?;
+    connection
+        .query_row(
+            "SELECT session_id,repository_root,relative_prefix,launch_path,agent_instance_id,pane_id,root_pid,process_started_at,process_generation,worktree_json,pane_disposition,worktree_disposition,cleanup_reason,cleanup_error FROM dispatch_resources WHERE dispatch_id=?1",
+            [dispatch_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<i64>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Option<i64>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, String>(10)?, row.get::<_, String>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?)),
+        )
+        .optional()?
+        .map(|row| {
+            Ok(DispatchResourceRecord {
+                session_id: row.0,
+                repository_root: row.1,
+                relative_prefix: row.2,
+                launch_path: row.3,
+                agent_instance_id: row.4,
+                pane_id: row.5,
+                root_pid: row.6.map(nonnegative).and_then(|value| u32::try_from(value).ok()),
+                process_started_at: row.7.map(nonnegative),
+                process_generation: row.8.map(nonnegative),
+                worktree: row.9.map(|value| serde_json::from_str(&value)).transpose()?,
+                pane_disposition: parse_resource_disposition(&row.10)?,
+                worktree_disposition: parse_resource_disposition(&row.11)?,
+                cleanup_reason: row.12,
+                cleanup_error: row.13,
+            })
+        })
+        .transpose()
+}
+
+fn claimed_dispatch_ids(
+    connection: &Connection,
+    operation_id: &str,
+) -> CoordinatorResult<Vec<String>> {
+    ensure_orchestration_runtime_schema(connection)?;
+    let mut statement = connection.prepare(
+        "SELECT c.dispatch_id FROM dispatch_launch_claims c JOIN dispatches d ON d.id=c.dispatch_id JOIN orchestration_tasks t ON t.id=d.task_id WHERE c.operation_id=?1 ORDER BY t.position,d.attempt,d.id",
+    )?;
+    let rows = statement.query_map([operation_id], |row| row.get::<_, String>(0))?;
+    let collected = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(collected)
+}
+
+fn dispatch_launch_request_hash(request: &DispatchLaunchRequest) -> CoordinatorResult<String> {
+    Ok(digest_hex(&serde_json::to_vec(&json!({
+        "kind": "orchestration.dispatch.launch",
+        "request": request,
+    }))?))
+}
+
+fn worktree_mode_text(mode: WorktreeMode) -> &'static str {
+    match mode {
+        WorktreeMode::Reuse => "reuse",
+        WorktreeMode::Worktree => "worktree",
+    }
+}
+
+fn parse_worktree_mode(value: &str) -> CoordinatorResult<WorktreeMode> {
+    match value {
+        "reuse" => Ok(WorktreeMode::Reuse),
+        "worktree" => Ok(WorktreeMode::Worktree),
+        _ => Err(CoordinatorError::Storage(format!(
+            "unknown worktree mode: {value}"
+        ))),
+    }
+}
+
+fn resource_disposition_text(disposition: ResourceDisposition) -> &'static str {
+    match disposition {
+        ResourceDisposition::NotCreated => "not_created",
+        ResourceDisposition::Live => "live",
+        ResourceDisposition::Cleaned => "cleaned",
+        ResourceDisposition::Retained => "retained",
+        ResourceDisposition::CleanupFailed => "cleanup_failed",
+        ResourceDisposition::Unknown => "unknown",
+    }
+}
+
+fn parse_resource_disposition(value: &str) -> CoordinatorResult<ResourceDisposition> {
+    match value {
+        "not_created" => Ok(ResourceDisposition::NotCreated),
+        "live" => Ok(ResourceDisposition::Live),
+        "cleaned" => Ok(ResourceDisposition::Cleaned),
+        "retained" => Ok(ResourceDisposition::Retained),
+        "cleanup_failed" => Ok(ResourceDisposition::CleanupFailed),
+        "unknown" => Ok(ResourceDisposition::Unknown),
+        _ => Err(CoordinatorError::Storage(format!(
+            "unknown resource disposition: {value}"
+        ))),
+    }
+}
+
+fn read_dispatch(connection: &Connection, dispatch_id: &str) -> CoordinatorResult<DispatchRecord> {
+    ensure_orchestration_runtime_schema(connection)?;
+    let row = connection
         .query_row(
             "SELECT id, task_id, attempt, agent_instance_id, status, pane_id, process_generation, base_revision, branch, worktree_path, failure_code, created_at, updated_at FROM dispatches WHERE id=?1",
             [dispatch_id],
@@ -1927,27 +2911,35 @@ fn read_dispatch(connection: &Connection, dispatch_id: &str) -> CoordinatorResul
             },
         )
         .optional()?
-        .ok_or_else(|| CoordinatorError::NotFound(format!("dispatch {dispatch_id}")))
-        .and_then(|row| {
-            let worktree = match (row.7, row.8, row.9) {
-                (Some(base_revision), Some(branch), Some(worktree_path)) => Some(WorktreeAssignment { base_revision, branch, worktree_path }),
-                (None, None, None) => None,
-                _ => return Err(CoordinatorError::Storage("partial worktree record".to_string())),
-            };
-            Ok(DispatchRecord {
-                id: row.0,
-                task_id: row.1,
-                attempt: nonnegative(row.2) as u32,
-                agent_instance_id: row.3,
-                status: parse_dispatch_status(&row.4)?,
-                pane_id: row.5,
-                process_generation: row.6.map(nonnegative),
-                worktree,
-                failure_code: row.10,
-                created_at: nonnegative(row.11),
-                updated_at: nonnegative(row.12),
-            })
-        })
+        .ok_or_else(|| CoordinatorError::NotFound(format!("dispatch {dispatch_id}")))?;
+    let worktree = match (row.7, row.8, row.9) {
+        (Some(base_revision), Some(branch), Some(worktree_path)) => Some(WorktreeAssignment {
+            base_revision,
+            branch,
+            worktree_path,
+        }),
+        (None, None, None) => None,
+        _ => {
+            return Err(CoordinatorError::Storage(
+                "partial worktree record".to_string(),
+            ))
+        }
+    };
+    Ok(DispatchRecord {
+        id: row.0,
+        task_id: row.1,
+        attempt: nonnegative(row.2) as u32,
+        agent_instance_id: row.3,
+        status: parse_dispatch_status(&row.4)?,
+        pane_id: row.5,
+        process_generation: row.6.map(nonnegative),
+        worktree,
+        launch_claim: read_dispatch_claim(connection, dispatch_id)?,
+        resources: read_dispatch_resource(connection, dispatch_id)?,
+        failure_code: row.10,
+        created_at: nonnegative(row.11),
+        updated_at: nonnegative(row.12),
+    })
 }
 
 fn read_agent(connection: &Connection, agent_id: &str) -> CoordinatorResult<AgentInstanceRecord> {
@@ -2891,6 +3883,192 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn dispatch_launch_claim_is_immutable_and_replay_scoped() {
+        let fixture = Fixture::new();
+        let mut run = fixture.create_run(1);
+        fixture.create_task(&mut run, "claimed", vec![]);
+        fixture.start(&mut run);
+        let operation_id = Uuid::new_v4();
+        let request = DispatchLaunchRequest {
+            run_id: run.id.clone(),
+            expected_run_revision: run.revision,
+            command: "cargo check".to_string(),
+            profile: Some("codex".to_string()),
+            worktree_mode: WorktreeMode::Worktree,
+        };
+
+        let dispatch = match fixture
+            .service
+            .prepare_dispatch_launch(operation_id, request.clone())
+            .expect("prepare launch")
+        {
+            DispatchLaunchPreparation::Intent(plan) => {
+                assert_eq!(plan.dispatches.len(), 1);
+                plan.dispatches.into_iter().next().expect("dispatch")
+            }
+            DispatchLaunchPreparation::Replay(_) => panic!("unexpected final replay"),
+        };
+        let claim = dispatch.launch_claim.as_ref().expect("launch claim");
+        assert_eq!(claim.operation_id, operation_id.to_string());
+        assert_eq!(claim.profile.as_deref(), Some("codex"));
+        assert_eq!(claim.worktree_mode, WorktreeMode::Worktree);
+        let spec = fixture
+            .service
+            .dispatch_launch_spec(&dispatch.id, operation_id)
+            .expect("launch spec");
+        assert_eq!(spec.command, "cargo check");
+
+        let replay_dispatch = match fixture
+            .service
+            .prepare_dispatch_launch(operation_id, request.clone())
+            .expect("replay intent")
+        {
+            DispatchLaunchPreparation::Intent(plan) => {
+                assert_eq!(plan.dispatches.len(), 1);
+                plan.dispatches.into_iter().next().expect("replay dispatch")
+            }
+            DispatchLaunchPreparation::Replay(_) => panic!("unexpected final replay"),
+        };
+        assert_eq!(replay_dispatch.id, dispatch.id);
+
+        let mut changed = request;
+        changed.command = "cargo test".to_string();
+        assert_eq!(
+            fixture
+                .service
+                .prepare_dispatch_launch(operation_id, changed)
+                .expect_err("reject changed spec")
+                .code(),
+            "conflict"
+        );
+    }
+
+    #[test]
+    fn destroyed_resources_clear_runtime_and_worktree_identities() {
+        let fixture = Fixture::new();
+        let mut run = fixture.create_run(1);
+        fixture.create_task(&mut run, "cleanup", vec![]);
+        fixture.start(&mut run);
+        let operation_id = Uuid::new_v4();
+        let request = DispatchLaunchRequest {
+            run_id: run.id.clone(),
+            expected_run_revision: run.revision,
+            command: "echo cleanup".to_string(),
+            profile: None,
+            worktree_mode: WorktreeMode::Worktree,
+        };
+        let dispatch = match fixture
+            .service
+            .prepare_dispatch_launch(operation_id, request)
+            .expect("prepare launch")
+        {
+            DispatchLaunchPreparation::Intent(plan) => {
+                plan.dispatches.into_iter().next().expect("dispatch")
+            }
+            DispatchLaunchPreparation::Replay(_) => panic!("unexpected final replay"),
+        };
+        let worktree = WorktreeAssignment {
+            base_revision: "base".to_string(),
+            branch: "vibelink/run-cleanup/task-cleanup-attempt-1".to_string(),
+            worktree_path: "C:/managed/cleanup".to_string(),
+        };
+        fixture
+            .service
+            .reserve_dispatch_resources(
+                operation_id,
+                DispatchResourceReservation {
+                    dispatch_id: dispatch.id.clone(),
+                    session_id: run.session_id.clone(),
+                    repository_root: Some("C:/repository".to_string()),
+                    relative_prefix: "subproject".to_string(),
+                    launch_path: Some("C:/managed/cleanup/subproject".to_string()),
+                    worktree: Some(worktree.clone()),
+                },
+            )
+            .expect("reserve resources");
+        let agent = fixture
+            .service
+            .register_agent(
+                Uuid::new_v4(),
+                RegisterAgentRequest {
+                    provider: AgentProvider::PtyCli,
+                    profile: None,
+                    workspace_path: "C:/repository/subproject".to_string(),
+                    worktree_path: Some(worktree.worktree_path.clone()),
+                    resumable: false,
+                },
+            )
+            .expect("register agent");
+        fixture
+            .service
+            .record_dispatch_agent_resource(&dispatch.id, operation_id, &agent.id)
+            .expect("record agent resource");
+        let pane_id = Uuid::new_v4().to_string();
+        fixture
+            .service
+            .record_dispatch_pane_resource(
+                &dispatch.id,
+                operation_id,
+                &pane_id,
+                Some(42),
+                Some(99),
+                1,
+            )
+            .expect("record pane resource");
+        let task = fixture.service.tasks(&run.id).expect("tasks").remove(0);
+        fixture
+            .service
+            .bind_dispatch(
+                Uuid::new_v4(),
+                BindDispatchRequest {
+                    dispatch_id: dispatch.id.clone(),
+                    expected_task_revision: task.revision,
+                    agent_instance_id: agent.id.clone(),
+                    runtime_identity: format!("pane:{pane_id}:1"),
+                    pane_id: Some(pane_id),
+                    process_generation: 1,
+                    worktree: Some(worktree),
+                },
+            )
+            .expect("bind dispatch");
+
+        let resource = fixture
+            .service
+            .mark_dispatch_resource_disposition(
+                &dispatch.id,
+                Some(ResourceDisposition::Cleaned),
+                Some(ResourceDisposition::Cleaned),
+                true,
+                true,
+                Some("test_cleanup"),
+                None,
+            )
+            .expect("clear resource identities");
+        assert_eq!(resource.pane_id, None);
+        assert_eq!(resource.root_pid, None);
+        assert_eq!(resource.process_started_at, None);
+        assert_eq!(resource.process_generation, None);
+        assert_eq!(resource.worktree, None);
+        assert_eq!(resource.launch_path, None);
+        let dispatch = fixture
+            .service
+            .dispatches(&run.id)
+            .expect("dispatches")
+            .remove(0);
+        assert_eq!(dispatch.pane_id, None);
+        assert_eq!(dispatch.process_generation, None);
+        assert_eq!(dispatch.worktree, None);
+        let agent = fixture
+            .service
+            .agents(&run.id)
+            .expect("agents")
+            .into_iter()
+            .find(|candidate| candidate.id == agent.id)
+            .expect("bound agent");
+        assert_eq!(agent.runtime_identity, None);
     }
 
     #[test]

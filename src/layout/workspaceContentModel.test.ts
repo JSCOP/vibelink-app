@@ -74,6 +74,42 @@ describe('workspace content model', () => {
     expect(parseWorkspaceContentParams({ schema: 1, kind: 'workbench', instanceId: 'other', title: 'Workbench', icon: 'git-branch' })).toBeNull()
   })
 
+  it('rejects zero geometry, dangling panels, duplicate views or groups, and invalid active or maximized references', () => {
+    const terminal: WorkspaceContentParams = { schema: 1, kind: 'terminal', instanceId: 'pane-1', title: 'Shell', icon: 'terminal', paneId: 'pane-1' }
+    const editor: WorkspaceContentParams = { schema: 1, kind: 'editor', instanceId: 'src/App.tsx', title: 'App.tsx', icon: 'file-code', relPath: 'src/App.tsx' }
+    const terminalId = workspaceContentPanelId(terminal)
+    const editorId = workspaceContentPanelId(editor)
+    const panels = { [terminalId]: panel(terminal), [editorId]: panel(editor) }
+    const valid = dockview(panels)
+    const rejects = (candidate: unknown) => {
+      expect(normalizeWorkspaceLayoutEnvelope(JSON.stringify({ version: 3, dockview: candidate }))).toEqual(freshWorkspaceLayoutEnvelope())
+    }
+
+    rejects({ ...valid, grid: { ...valid.grid, width: 0 } })
+    rejects({ ...valid, grid: { ...valid.grid, height: 0 } })
+    rejects({ ...valid, grid: { ...valid.grid, root: { ...valid.grid.root, size: 0 } } })
+    rejects({ ...valid, grid: { ...valid.grid, root: { ...valid.grid.root, data: { ...valid.grid.root.data, views: ['missing'], activeView: 'missing' } } } })
+    rejects({ ...valid, grid: { ...valid.grid, root: { ...valid.grid.root, data: { ...valid.grid.root.data, views: [terminalId], activeView: terminalId } } } })
+    rejects({ ...valid, grid: { ...valid.grid, root: { ...valid.grid.root, data: { ...valid.grid.root.data, views: [terminalId, terminalId], activeView: terminalId } } } })
+    rejects({ ...valid, grid: { ...valid.grid, root: { ...valid.grid.root, data: { ...valid.grid.root.data, activeView: 'missing' } } } })
+    rejects({ ...valid, activeGroup: 'missing-group' })
+    rejects({ ...valid, grid: { ...valid.grid, maximizedNode: { location: [1] } } })
+    rejects({
+      ...valid,
+      grid: {
+        ...valid.grid,
+        root: {
+          type: 'branch',
+          size: 1000,
+          data: [
+            { type: 'leaf', size: 500, data: { id: 'duplicate-group', views: [terminalId], activeView: terminalId } },
+            { type: 'leaf', size: 500, data: { id: 'duplicate-group', views: [editorId], activeView: editorId } },
+          ],
+        },
+      },
+    })
+  })
+
   it('allows only normalized workspace-relative editor paths', () => {
     expect(normalizeWorkspaceRelativePath('src\\App.tsx')).toBe('src/App.tsx')
     expect(normalizeWorkspaceRelativePath('../secret.txt')).toBeNull()

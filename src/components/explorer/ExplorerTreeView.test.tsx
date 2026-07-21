@@ -118,38 +118,42 @@ describe('ExplorerTreeView', () => {
     expect(screen.getByLabelText(explanation).textContent).toBe('Modified')
   })
 
-  test('exposes a pressed preview toggle in the tree header', () => {
+  test('exposes navigator-first and visible preview toggle states in the tree header', () => {
     const onTogglePreview = vi.fn()
-    render(<ExplorerTreeView
-      nodes={[node]}
-      selectedPath="src"
-      loading={false}
-      statusSummary={null}
-      statusPresentation="letters"
-      previewVisible
-      onTogglePreview={onTogglePreview}
-      error={null}
-      renamingPath={null}
-      renameValue=""
-      contextMenu={null}
-      dragOverPath={null}
-      onSelect={noop}
-      onOpen={noop}
-      onToggle={noop}
-      onKeyDown={noop}
-      onRenameValueChange={noop}
-      onCommitRename={noop}
-      onCancelRename={noop}
-      onContextMenu={noop}
-      onCloseContextMenu={noop}
-      onDragStart={noop}
-      onDragOver={noop}
-      onDragLeave={noop}
-      onDrop={noop}
-    />)
-    const toggle = screen.getByRole('button', { name: 'Hide file preview' })
-    expect(toggle.getAttribute('aria-pressed')).toBe('true')
-    fireEvent.click(toggle)
+    const props = {
+      nodes: [node],
+      selectedPath: 'src',
+      loading: false,
+      statusSummary: null,
+      statusPresentation: 'letters' as const,
+      onTogglePreview,
+      error: null,
+      renamingPath: null,
+      renameValue: '',
+      contextMenu: null,
+      dragOverPath: null,
+      onSelect: noop,
+      onOpen: noop,
+      onToggle: noop,
+      onKeyDown: noop,
+      onRenameValueChange: noop,
+      onCommitRename: noop,
+      onCancelRename: noop,
+      onContextMenu: noop,
+      onCloseContextMenu: noop,
+      onDragStart: noop,
+      onDragOver: noop,
+      onDragLeave: noop,
+      onDrop: noop,
+    }
+    const { rerender } = render(<ExplorerTreeView {...props} previewVisible={false} />)
+
+    const showPreview = screen.getByRole('button', { name: 'Show file preview' })
+    expect(showPreview.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(showPreview)
     expect(onTogglePreview).toHaveBeenCalledTimes(1)
+
+    rerender(<ExplorerTreeView {...props} previewVisible />)
+    expect(screen.getByRole('button', { name: 'Hide file preview' }).getAttribute('aria-pressed')).toBe('true')
   })
 })

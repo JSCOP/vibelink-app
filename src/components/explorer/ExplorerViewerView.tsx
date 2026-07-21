@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react'
-import { Copy, ExternalLink, FileCode2, FileText, Folder, GitCompare, Image as ImageIcon, LoaderCircle, Maximize2, Minimize2, Terminal, TriangleAlert } from 'lucide-react'
+import { Copy, ExternalLink, FileCode2, FileText, Folder, GitCompare, Image as ImageIcon, LoaderCircle, Maximize2, Minimize2, PanelRightClose, Terminal, TriangleAlert } from 'lucide-react'
 import type { DirEntryInfo, TextFile } from '../../ipc/types'
 import './ExplorerViewerView.css'
 
 export type ExplorerViewerViewProps = {
   path: string | null
+  workspaceLabel?: string
+  workspacePath?: string
+  repositoryLabel?: string
   entry: DirEntryInfo | null
   textFile: TextFile | null
   imageSrc: string | null
@@ -14,32 +17,40 @@ export type ExplorerViewerViewProps = {
   canOpenVibeLinkEditor: boolean
   canOpenExternalEditor: boolean
   canOpenDiff: boolean
+  canOpenDefault?: boolean
   workingTreePresent: boolean
   onToggleImageFit: () => void
   onOpenVibeLinkEditor: () => void
+  onOpenDefault?: () => void
   onOpenExternalEditor: () => void
   onOpenDiff: () => void
   onOpenTerminal: () => void
   onReveal: () => void
   onCopyPath: () => void
+  onClosePreview?: () => void
 }
 
-export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, error, imageFit, canOpenVibeLinkEditor, canOpenExternalEditor, canOpenDiff, workingTreePresent, onToggleImageFit, onOpenVibeLinkEditor, onOpenExternalEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath }: ExplorerViewerViewProps) {
+export function ExplorerViewerView({ path, workspaceLabel, workspacePath, repositoryLabel, entry, textFile, imageSrc, loading, error, imageFit, canOpenVibeLinkEditor, canOpenExternalEditor, canOpenDiff, canOpenDefault, workingTreePresent, onToggleImageFit, onOpenVibeLinkEditor, onOpenDefault, onOpenExternalEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath, onClosePreview }: ExplorerViewerViewProps) {
   const lineCount = useMemo(() => (textFile && !textFile.binary ? countLines(textFile.content) : null), [textFile])
   const [imageProbe, setImageProbe] = useState<{ src: string; width: number; height: number } | null>(null)
   const imageDims = imageSrc && imageProbe && imageProbe.src === imageSrc ? imageProbe : null
+  const visibleWorkspaceLabel = workspaceLabel ?? 'Workspace'
+  const visibleRepositoryLabel = repositoryLabel ?? 'Workspace root'
 
   if (!path || !entry) {
     return (
       <main className="explorer-viewer explorer-viewer-empty">
-        <span className="explorer-viewer-empty-badge"><Folder size={20} /></span>
+        {onClosePreview ? <button type="button" className="explorer-viewer-close" title="Close file preview" aria-label="Close file preview" onClick={onClosePreview}><PanelRightClose size={13} aria-hidden="true" /></button> : null}
+        <span className="explorer-viewer-empty-badge"><Folder size={20} aria-hidden="true" /></span>
         <strong>No file selected</strong>
         <span>Select a file in the tree to preview it here.</span>
+        <span className="explorer-viewer-empty-context" title={workspacePath ?? visibleWorkspaceLabel}>Workspace {visibleWorkspaceLabel} · Repository {visibleRepositoryLabel}</span>
       </main>
     )
   }
 
   const showContent = !loading && !error
+  const showDefaultOpen = Boolean(workingTreePresent && canOpenDefault && onOpenDefault && !entry.isDir && !canOpenVibeLinkEditor)
 
   return (
     <main className="explorer-viewer" data-explorer-viewer="true">
@@ -54,22 +65,26 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           </div>
         </div>
         <div className="explorer-viewer-actions">
-          {workingTreePresent && canOpenVibeLinkEditor ? <button type="button" className="explorer-viewer-primary-action" title="Open in VibeLink Editor" onClick={onOpenVibeLinkEditor}><FileText size={13} /><span>Open</span></button> : null}
-          {canOpenDiff ? <button type="button" title="View diff in Git" onClick={onOpenDiff}><GitCompare size={13} /></button> : null}
-          <button type="button" title="Copy path" onClick={onCopyPath}><Copy size={13} /></button>
-          {workingTreePresent ? <button type="button" title="Reveal in File Explorer" onClick={onReveal}><ExternalLink size={13} /></button> : null}
-          {workingTreePresent ? <button type="button" title="Open terminal here" onClick={onOpenTerminal}><Terminal size={13} /></button> : null}
-          {workingTreePresent && canOpenExternalEditor ? <button type="button" title="Open in external editor" onClick={onOpenExternalEditor}><FileCode2 size={13} /></button> : null}
+          {workingTreePresent && canOpenVibeLinkEditor ? <button type="button" className="explorer-viewer-primary-action" title="Open in VibeLink Editor" onClick={onOpenVibeLinkEditor}><FileText size={13} aria-hidden="true" /><span>Open</span></button> : null}
+          {showDefaultOpen ? <button type="button" className="explorer-viewer-primary-action" title="Open with the default application" onClick={onOpenDefault}><ExternalLink size={13} aria-hidden="true" /><span>Open</span></button> : null}
+          {canOpenDiff ? <button type="button" title="View diff in Git" aria-label="View diff in Git" onClick={onOpenDiff}><GitCompare size={13} aria-hidden="true" /></button> : null}
+          <button type="button" title="Copy path" aria-label="Copy path" onClick={onCopyPath}><Copy size={13} aria-hidden="true" /></button>
+          {workingTreePresent ? <button type="button" title="Reveal in File Explorer" aria-label="Reveal in File Explorer" onClick={onReveal}><ExternalLink size={13} aria-hidden="true" /></button> : null}
+          {workingTreePresent ? <button type="button" title="Open terminal here" aria-label="Open terminal here" onClick={onOpenTerminal}><Terminal size={13} aria-hidden="true" /></button> : null}
+          {workingTreePresent && canOpenExternalEditor ? <button type="button" title="Open in external editor" aria-label="Open in external editor" onClick={onOpenExternalEditor}><FileCode2 size={13} aria-hidden="true" /></button> : null}
+          {onClosePreview ? <button type="button" title="Close file preview" aria-label="Close file preview" onClick={onClosePreview}><PanelRightClose size={13} aria-hidden="true" /></button> : null}
         </div>
       </header>
-      <div className="explorer-viewer-meta">
+      <div className="explorer-viewer-meta" aria-label={`Workspace ${visibleWorkspaceLabel}; repository ${visibleRepositoryLabel}; path ${path}`}>
+        <span title={workspacePath ?? visibleWorkspaceLabel}>Workspace {visibleWorkspaceLabel}</span>
+        <span title={`Owning repository: ${visibleRepositoryLabel}`}>Repository {visibleRepositoryLabel}</span>
         {!entry.isDir ? <span>{formatBytes(entry.size)}</span> : <span>Folder</span>}
         {lineCount !== null ? <span>{lineCount.toLocaleString()} {lineCount === 1 ? 'line' : 'lines'}</span> : null}
         {entry.modifiedAt ? <span title={entry.modifiedAt}>{formatWhen(entry.modifiedAt)}</span> : null}
         {entry.isSymlink ? <span>Symlink</span> : null}
       </div>
       {loading ? (
-        <div className="explorer-viewer-state">
+        <div className="explorer-viewer-state" role="status">
           <LoaderCircle size={15} className="explorer-viewer-spinner" aria-hidden="true" />
           <span>Loading preview…</span>
         </div>
@@ -83,17 +98,18 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
       {showContent && !workingTreePresent ? (
         <div className="explorer-viewer-card-zone">
           <div className="explorer-binary-card">
-            <span className="explorer-binary-icon"><GitCompare size={20} /></span>
+            <span className="explorer-binary-icon"><GitCompare size={20} aria-hidden="true" /></span>
             <strong>Not in the working tree</strong>
             <span>This tracked path was deleted or moved.</span>
             <span className="explorer-binary-hint">Use the Git diff to inspect the previous content.</span>
+            {canOpenDiff ? <div className="explorer-binary-card-actions"><button type="button" onClick={onOpenDiff}><GitCompare size={13} aria-hidden="true" />View Git diff</button></div> : null}
           </div>
         </div>
       ) : null}
       {showContent && workingTreePresent && entry.isDir ? (
         <div className="explorer-viewer-card-zone">
           <div className="explorer-binary-card">
-            <span className="explorer-binary-icon"><Folder size={20} /></span>
+            <span className="explorer-binary-icon"><Folder size={20} aria-hidden="true" /></span>
             <strong>{entry.name}</strong>
             <span>Folder{entry.modifiedAt ? ` · modified ${formatWhen(entry.modifiedAt)}` : ''}</span>
             <span className="explorer-binary-hint">Expand it in the tree to browse its contents.</span>
@@ -105,7 +121,7 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
           <div className="explorer-image-toolbar">
             <span><ImageIcon size={13} aria-hidden="true" />{imageDims ? `${imageDims.width} × ${imageDims.height} px` : 'Image'}</span>
             <button type="button" onClick={onToggleImageFit} title={imageFit ? 'Show at actual size' : 'Fit image to pane'}>
-              {imageFit ? <Maximize2 size={13} /> : <Minimize2 size={13} />}
+              {imageFit ? <Maximize2 size={13} aria-hidden="true" /> : <Minimize2 size={13} aria-hidden="true" />}
               {imageFit ? 'Actual size' : 'Fit'}
             </button>
           </div>
@@ -124,15 +140,14 @@ export function ExplorerViewerView({ path, entry, textFile, imageSrc, loading, e
       {showContent && workingTreePresent && !imageSrc && textFile?.binary ? (
         <div className="explorer-viewer-card-zone">
           <div className="explorer-binary-card">
-            <span className="explorer-binary-icon"><FileCode2 size={20} /></span>
+            <span className="explorer-binary-icon"><FileCode2 size={20} aria-hidden="true" /></span>
             <strong>Binary file</strong>
             <span>{formatBytes(entry.size)}{entry.modifiedAt ? ` · ${formatWhen(entry.modifiedAt)}` : ''}</span>
             <span className="explorer-binary-hint">Preview is unavailable for this file type.</span>
-            {canOpenExternalEditor ? (
-              <div className="explorer-binary-card-actions">
-                <button type="button" onClick={onOpenExternalEditor}><FileCode2 size={13} />Open in external editor</button>
-              </div>
-            ) : null}
+            <div className="explorer-binary-card-actions">
+              {canOpenDefault && onOpenDefault ? <button type="button" onClick={onOpenDefault}><ExternalLink size={13} aria-hidden="true" />Open</button> : null}
+              {canOpenExternalEditor ? <button type="button" onClick={onOpenExternalEditor}><FileCode2 size={13} aria-hidden="true" />External editor</button> : null}
+            </div>
           </div>
         </div>
       ) : null}

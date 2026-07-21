@@ -1,10 +1,10 @@
 use crate::browser::{
-    ArtifactDescriptor, BrowserCaptureState, BrowserDeviceMetrics, BrowserDialogRequest,
-    BrowserDownloadRecord, BrowserErrorCode, BrowserLifecycleEvent, BrowserManager, BrowserPage,
-    BrowserProfile, CertificateDecision, CertificateRequest, NativeBrowserProvider,
-    PermissionDecision, PermissionRequest, PhysicalBounds, ProfileKind, BrowserAnnotation,
-    BrowserAnnotationInput, BrowserCookieImportInput, BrowserCookieImportResult,
-    BrowserCookieImportSource,
+    ArtifactDescriptor, BrowserAnnotation, BrowserAnnotationInput, BrowserCaptureState,
+    BrowserCookieImportInput, BrowserCookieImportResult, BrowserCookieImportSource,
+    BrowserDeviceMetrics, BrowserDialogRequest, BrowserDownloadRecord, BrowserErrorCode,
+    BrowserLifecycleEvent, BrowserManager, BrowserPage, BrowserProfile, CertificateDecision,
+    CertificateRequest, NativeBrowserProvider, PermissionDecision, PermissionRequest,
+    PhysicalBounds, ProfileKind,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -13,13 +13,18 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
-use tauri::State;
+use tauri::{AppHandle, Manager as _, State, Wry};
 use uuid::Uuid;
 
 pub type ManagedBrowser = Arc<BrowserManager<NativeBrowserProvider>>;
+
+static BROWSER_EVENT_PUMP_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,7 +44,21 @@ pub async fn browser_initialize(
     workspace_id: String,
 ) -> Result<BrowserProjection, String> {
     let manager = manager.inner().clone();
-    off_main(move || browser_projection(&manager, &workspace_id)).await
+    off_main(move || {
+        match manager.restore_workspace(&workspace_id, hidden_bounds()) {
+            Ok(_) => {}
+            Err(error) if error.code == BrowserErrorCode::Conflict => {
+                std::thread::sleep(Duration::from_millis(40));
+                manager
+                    .restore_workspace(&workspace_id, hidden_bounds())
+                    .map_err(to_string)?;
+            }
+            Err(error) => return Err(to_string(error)),
+        }
+        manager.sync_provider_events().map_err(to_string)?;
+        browser_projection(&manager, &workspace_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -74,7 +93,14 @@ pub async fn browser_create_profile(
             return Ok(existing);
         }
         let profile = manager.create_profile(id, kind, owner).map_err(to_string)?;
-        manager.save_state().map_err(to_string)?;
+        if let Err(error) = manager.save_state() {
+            if let Err(rollback_error) = manager.rollback_empty_profile(&profile.id) {
+                return Err(format!(
+                    "{error}; browser profile rollback also failed: {rollback_error}"
+                ));
+            }
+            return Err(to_string(error));
+        }
         Ok(profile)
     })
     .await
@@ -89,6 +115,7 @@ pub async fn browser_create_tab(
     let manager = manager.inner().clone();
     off_main(move || {
         let default_profile_id = format!("workspace-{workspace_id}");
+        let mut created_profile = false;
         if !manager
             .profiles()
             .map_err(to_string)?
@@ -103,21 +130,48 @@ pub async fn browser_create_tab(
                 ProfileKind::Workspace,
                 Some(workspace_id.clone()),
             ) {
-                Ok(_) => {}
+                Ok(_) => created_profile = true,
                 Err(error) if error.code == BrowserErrorCode::Conflict => {}
                 Err(error) => return Err(to_string(error)),
             }
         }
-        let page = manager
-            .create_page(
-                Uuid::new_v4().to_string(),
-                workspace_id.clone(),
-                &profile_id,
-                hidden_bounds(),
-            )
-            .map_err(to_string)?;
+        let page = match manager.create_page(
+            Uuid::new_v4().to_string(),
+            workspace_id.clone(),
+            &profile_id,
+            hidden_bounds(),
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                if created_profile {
+                    let _ = manager.rollback_empty_profile(&profile_id);
+                }
+                return Err(to_string(error));
+            }
+        };
         let page = manager.page(&page.id).map_err(to_string)?;
-        manager.save_state().map_err(to_string)?;
+        if let Err(persistence_error) = manager.save_state() {
+            match manager.close_page(&page.id) {
+                Ok(()) => {
+                    if created_profile {
+                        manager
+                            .rollback_empty_profile(&profile_id)
+                            .map_err(to_string)?;
+                    }
+                    return Err(to_string(persistence_error));
+                }
+                Err(rollback_error) => {
+                    return manager
+                        .mark_page_persistence_error(
+                            &page.id,
+                            format!(
+                                "Browser state could not be saved; this page remains open for recovery. Persistence: {persistence_error}. Rollback: {rollback_error}"
+                            ),
+                        )
+                        .map_err(to_string);
+                }
+            }
+        }
         Ok(page)
     })
     .await
@@ -266,7 +320,12 @@ pub async fn browser_detect_cookie_import_source(
     endpoint: String,
 ) -> Result<BrowserCookieImportSource, String> {
     let manager = manager.inner().clone();
-    off_main(move || manager.detect_cookie_import_source(&endpoint).map_err(to_string)).await
+    off_main(move || {
+        manager
+            .detect_cookie_import_source(&endpoint)
+            .map_err(to_string)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -334,14 +393,12 @@ pub async fn browser_close_tab(
 ) -> Result<BrowserCloseResult, String> {
     let manager = manager.inner().clone();
     off_main(move || {
-        let page = manager.page(&page_id).map_err(to_string)?;
-        if page.workspace_id != workspace_id {
-            return Err("browser page belongs to another workspace".to_string());
-        }
-        manager.close_page(&page_id).map_err(to_string)?;
+        manager
+            .close_page_durable(&workspace_id, &page_id)
+            .map_err(to_string)?;
         Ok(BrowserCloseResult {
             closed: true,
-            persistence_pending: manager.save_state().is_err(),
+            persistence_pending: false,
         })
     })
     .await
@@ -353,12 +410,7 @@ pub async fn browser_cleanup_workspace(
     workspace_id: String,
 ) -> Result<(), String> {
     let manager = manager.inner().clone();
-    off_main(move || {
-        manager
-            .cleanup_workspace(&workspace_id)
-            .map_err(to_string)
-    })
-    .await
+    off_main(move || manager.cleanup_workspace(&workspace_id).map_err(to_string)).await
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -657,6 +709,32 @@ fn hidden_bounds() -> PhysicalBounds {
 
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+pub(crate) fn schedule_browser_event_pump(app: AppHandle<Wry>) {
+    if BROWSER_EVENT_PUMP_SCHEDULED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(16));
+        if let Some(manager) = app.try_state::<ManagedBrowser>() {
+            loop {
+                match manager.sync_provider_events() {
+                    Ok(events) if !events.is_empty() => continue,
+                    _ => break,
+                }
+            }
+        }
+        BROWSER_EVENT_PUMP_SCHEDULED.store(false, Ordering::Release);
+        // Close the enqueue/store race: an event after the store schedules its own
+        // pump, while an event just before the store is drained here.
+        if let Some(manager) = app.try_state::<ManagedBrowser>() {
+            let _ = manager.sync_provider_events();
+        }
+    });
 }
 
 #[cfg(test)]

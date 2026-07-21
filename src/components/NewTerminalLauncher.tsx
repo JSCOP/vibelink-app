@@ -81,8 +81,18 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
       if (rootRef.current?.contains(event.target as Node | null)) return
       closeLauncher()
     }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeLauncher()
+      buttonRef.current?.focus()
+    }
     window.addEventListener('pointerdown', onPointerDown)
-    return () => window.removeEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
   }, [closeLauncher, isOpen])
   useEffect(() => {
     if (!isOpen) return
@@ -163,12 +173,12 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   }
 
   return (
-    <div ref={rootRef} className="new-terminal-launcher">
-      <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Add terminals by dragging over free grid cells" onClick={toggleLauncher}>
-        <Plus size={14} /> <span>New</span>
+    <div ref={rootRef} className="new-terminal-launcher" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+      <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Add terminals by dragging over free grid cells" aria-label="Add terminals" aria-haspopup="dialog" aria-expanded={isOpen} aria-controls={isOpen ? 'new-terminal-popover' : undefined} onClick={toggleLauncher}>
+        <Plus size={14} aria-hidden="true" /> <span>New</span>
       </button>
       {isOpen ? (
-        <section className="new-terminal-popover" style={popoverPosition} aria-label="Add terminal panes">
+        <section id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes">
           <header className="new-terminal-popover-header">
             <Grid3X3 size={14} />
             <span>Add panes</span>

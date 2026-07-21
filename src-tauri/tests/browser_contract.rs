@@ -3,11 +3,10 @@ mod browser;
 
 use browser::{
     BrowserAnnotationInput, BrowserCookieImportInput, BrowserCookieImportResult,
-    BrowserDeviceMetrics, BrowserDialogKind, BrowserErrorCode, BrowserFrame,
-    BrowserLifecycleEvent, BrowserLifecycleEventKind, BrowserManager, BrowserPolicy,
-    BrowserProvider, BrowserResult, CertificateDecision, ChildWebViewCreate, ChildWebViewState,
-    PermissionDecision, PhysicalBounds, ProfileKind, RecoveryCandidate, SnapshotNodeInput,
-    SnapshotSource,
+    BrowserDeviceMetrics, BrowserDialogKind, BrowserErrorCode, BrowserFrame, BrowserLifecycleEvent,
+    BrowserLifecycleEventKind, BrowserManager, BrowserPolicy, BrowserProvider, BrowserResult,
+    CertificateDecision, ChildWebViewCreate, ChildWebViewState, PermissionDecision, PhysicalBounds,
+    ProfileKind, RecoveryCandidate, SnapshotNodeInput, SnapshotSource,
 };
 use std::{
     collections::HashMap,
@@ -310,7 +309,10 @@ fn profiles_are_isolated_and_workspace_cleanup_closes_owned_pages() {
         .unwrap();
     assert_ne!(default.user_data_dir, workspace.user_data_dir);
     assert_ne!(workspace.user_data_dir, imported.user_data_dir);
-    assert!(imported.user_data_dir.as_ref().is_some_and(|path| path.starts_with(&root)));
+    assert!(imported
+        .user_data_dir
+        .as_ref()
+        .is_some_and(|path| path.starts_with(&root)));
     assert!(!imported.cookie_import_quarantined);
     assert!(incognito.user_data_dir.is_none());
     fs::create_dir_all(workspace.user_data_dir.as_ref().unwrap()).unwrap();
@@ -392,13 +394,15 @@ fn profile_storage_rejects_chrome_and_edge_user_data_roots() {
         PathBuf::from("C:/Users/test/AppData/Local/Google/Chrome/User Data/VibeLink"),
         PathBuf::from("C:/Users/test/AppData/Local/Microsoft/Edge/User Data/VibeLink"),
     ] {
-        let root = std::env::temp_dir().join(format!("vibelink-browser-path-test-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("vibelink-browser-path-test-{}", Uuid::new_v4()));
         let downloads = root.join("downloads");
         let artifacts = root.join("artifacts");
         fs::create_dir_all(&downloads).unwrap();
         fs::create_dir_all(&artifacts).unwrap();
         let policy = BrowserPolicy::new(false, vec![], downloads, artifacts, 1024).unwrap();
-        let manager = BrowserManager::new(Arc::new(ContractProvider::default()), policy, browser_root);
+        let manager =
+            BrowserManager::new(Arc::new(ContractProvider::default()), policy, browser_root);
         let error = manager
             .create_profile("rejected", ProfileKind::Persistent, None)
             .unwrap_err();
@@ -436,13 +440,15 @@ fn cookie_import_crash_marker_restores_the_profile_quarantined() {
         manager.import_cookies(input).unwrap_err().code,
         BrowserErrorCode::RuntimeUnavailable
     );
-    assert!(manager
-        .profiles()
-        .unwrap()
-        .iter()
-        .find(|profile| profile.id == "imported-a")
-        .unwrap()
-        .cookie_import_quarantined);
+    assert!(
+        manager
+            .profiles()
+            .unwrap()
+            .iter()
+            .find(|profile| profile.id == "imported-a")
+            .unwrap()
+            .cookie_import_quarantined
+    );
 
     let restarted = BrowserManager::new(
         Arc::new(ContractProvider::default()),
@@ -456,13 +462,15 @@ fn cookie_import_crash_marker_restores_the_profile_quarantined() {
         .unwrap(),
         root.join("profiles"),
     );
-    assert!(restarted
-        .profiles()
-        .unwrap()
-        .iter()
-        .find(|profile| profile.id == "imported-a")
-        .unwrap()
-        .cookie_import_quarantined);
+    assert!(
+        restarted
+            .profiles()
+            .unwrap()
+            .iter()
+            .find(|profile| profile.id == "imported-a")
+            .unwrap()
+            .cookie_import_quarantined
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -497,13 +505,15 @@ fn hash_proven_cookie_rollback_clears_the_durable_marker() {
         })
         .unwrap();
     assert!(result.rolled_back);
-    assert!(!manager
-        .profiles()
-        .unwrap()
-        .iter()
-        .find(|profile| profile.id == "imported-a")
-        .unwrap()
-        .cookie_import_quarantined);
+    assert!(
+        !manager
+            .profiles()
+            .unwrap()
+            .iter()
+            .find(|profile| profile.id == "imported-a")
+            .unwrap()
+            .cookie_import_quarantined
+    );
     let restarted = BrowserManager::new(
         Arc::new(ContractProvider::default()),
         BrowserPolicy::new(
@@ -516,13 +526,15 @@ fn hash_proven_cookie_rollback_clears_the_durable_marker() {
         .unwrap(),
         root.join("profiles"),
     );
-    assert!(!restarted
-        .profiles()
-        .unwrap()
-        .iter()
-        .find(|profile| profile.id == "imported-a")
-        .unwrap()
-        .cookie_import_quarantined);
+    assert!(
+        !restarted
+            .profiles()
+            .unwrap()
+            .iter()
+            .find(|profile| profile.id == "imported-a")
+            .unwrap()
+            .cookie_import_quarantined
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -545,7 +557,7 @@ fn unsafe_schemes_are_denied_before_native_navigation() {
 
 #[test]
 fn navigation_stale_refs_never_recover_and_backend_recovery_must_be_unique() {
-    let (manager, _provider, root) = manager();
+    let (manager, provider, root) = manager();
     manager
         .create_profile("default", ProfileKind::Persistent, None)
         .unwrap();
@@ -594,6 +606,26 @@ fn navigation_stale_refs_never_recover_and_backend_recovery_must_be_unique() {
         )
         .unwrap_err();
     assert_eq!(ambiguous.code, BrowserErrorCode::StaleRef);
+
+    let in_flight = manager
+        .navigate("page-a", "https://example.test/next")
+        .unwrap_err();
+    assert_eq!(in_flight.code, BrowserErrorCode::Conflict);
+    provider.events.lock().unwrap().push(BrowserLifecycleEvent {
+        sequence: 1,
+        page_id: "page-a".to_string(),
+        navigation_generation: page.navigation_generation,
+        kind: BrowserLifecycleEventKind::NavigationFinished,
+        url: Some(page.url.clone()),
+        detail: None,
+        timestamp_ms: 1,
+    });
+    let completion = manager.sync_provider_events().unwrap();
+    assert_eq!(completion.len(), 1);
+    assert_eq!(
+        completion[0].kind,
+        BrowserLifecycleEventKind::NavigationFinished
+    );
 
     let navigated = manager
         .navigate("page-a", "https://example.test/next")
@@ -868,9 +900,9 @@ fn expired_capture_artifacts_are_swept_only_from_the_managed_root() {
         .unwrap();
     let descriptor = manager.capture_crop("page-a", bounds()).unwrap();
     let artifact_name = descriptor.path.file_name().unwrap().to_string_lossy();
-    let descriptor_path = descriptor.path.with_file_name(
-        artifact_name.replace(".png", ".artifact.json"),
-    );
+    let descriptor_path = descriptor
+        .path
+        .with_file_name(artifact_name.replace(".png", ".artifact.json"));
     let mut record: serde_json::Value =
         serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
     record["descriptor"]["expiresAtMs"] = serde_json::json!(0);
@@ -1282,7 +1314,11 @@ fn provider_lifecycle_events_update_pages_and_ignore_stale_generations() {
 fn page_originated_navigation_invalidates_exact_persisted_annotations() {
     let (manager, provider, root) = manager();
     manager
-        .create_profile("workspace-a", ProfileKind::Workspace, Some("workspace-a".to_string()))
+        .create_profile(
+            "workspace-a",
+            ProfileKind::Workspace,
+            Some("workspace-a".to_string()),
+        )
         .unwrap();
     let page = manager
         .create_page("page-a", "workspace-a", "workspace-a", bounds())
@@ -1293,7 +1329,11 @@ fn page_originated_navigation_invalidates_exact_persisted_annotations() {
         navigation_generation: page.navigation_generation,
         browser_ref: "button#submit".to_string(),
         accessible_name: "Submit".to_string(),
-        dom_ancestry: vec!["html".to_string(), "body".to_string(), "button#submit".to_string()],
+        dom_ancestry: vec![
+            "html".to_string(),
+            "body".to_string(),
+            "button#submit".to_string(),
+        ],
         bounds: bounds(),
         text: "Submit".to_string(),
         attributes: vec![("type".to_string(), "submit".to_string())],
@@ -1316,9 +1356,7 @@ fn page_originated_navigation_invalidates_exact_persisted_annotations() {
         .unwrap()
         .as_millis() as u64;
     assert!(screenshot.expires_at_ms > checked_at_ms);
-    assert!(
-        screenshot.expires_at_ms.saturating_sub(checked_at_ms) <= 24 * 60 * 60 * 1_000
-    );
+    assert!(screenshot.expires_at_ms.saturating_sub(checked_at_ms) <= 24 * 60 * 60 * 1_000);
     assert!(screenshot.expires_at_ms <= (1_u64 << 53) - 1);
 
     provider.events.lock().unwrap().push(BrowserLifecycleEvent {

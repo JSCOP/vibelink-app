@@ -8,6 +8,7 @@ pub mod query_filter;
 pub mod scrollback;
 pub mod session;
 
+use crate::agent_runtime::WorktreeManager;
 use crate::computer_use::{
     ActionRequest, ActionTarget, ApprovalRequest, ComputerAction as ProviderComputerAction,
     HostRequest, HostResponseBody, Point, ProviderError, ProviderHostSupervisor, SnapshotLimits,
@@ -24,12 +25,15 @@ use crate::dedicated_cli::{
 };
 use crate::orchestration::adapters::AgentProvider;
 use crate::orchestration::{
-    AcknowledgeEventsRequest, BindDispatchRequest, CoordinatorError, CoordinatorService,
-    CreateGateRequest, CreateRunRequest, CreateTaskRequest, HeartbeatRequest, LaunchFailureRequest,
-    LifecycleIdentity, MergeAppliedRequest, MessageType, PostMessageRequest,
-    ReconcileLivenessRequest, RegisterAgentRequest, ResolveGateRequest, RetryTaskRequest,
-    RunDecisionRequest, RunRevisionRequest, ScheduleRequest, UpdateTaskRequest, WorkerDoneRequest,
-    WorktreeAssignment,
+    AcknowledgeEventsRequest, AgentLaunchFailureRequest, BindDispatchRequest, CoordinatorError,
+    CoordinatorService, CreateGateRequest, CreateRunRequest, CreateTaskRequest,
+    DispatchCleanupTarget, DispatchLaunchOutcome, DispatchLaunchPreparation, DispatchLaunchRequest,
+    DispatchLaunchResult, DispatchLaunchStatus, DispatchResourceRecord,
+    DispatchResourceReservation, DispatchStatus, GateStatus, HeartbeatRequest,
+    LaunchFailureRequest, LifecycleIdentity, MergeAppliedRequest, MessageType, PostMessageRequest,
+    ReconcileLivenessRequest, RegisterAgentRequest, ResolveGateRequest, ResourceDisposition,
+    RetryTaskRequest, RunDecisionRequest, RunRevisionRequest, UpdateTaskRequest, WorkerDoneRequest,
+    WorktreeMode,
 };
 use crate::protocol::PaneConfig;
 use crate::protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req};
@@ -67,6 +71,7 @@ const PERSIST_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 static PERSISTENCE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static DEBOUNCED_PERSISTER: LazyLock<Mutex<Option<DebouncedPersister>>> =
     LazyLock::new(|| Mutex::new(None));
+static ORCHESTRATION_LAUNCH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct DebouncedPersister {
     dirty: Arc<AtomicBool>,
@@ -115,15 +120,13 @@ fn run_inner() -> Result<()> {
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
     let control = Arc::new(ControlPlane::open(&paths.data_dir)?);
     let coordinator = Arc::new(CoordinatorService::new(Arc::clone(&control)));
-    coordinator.reconcile_after_restart(
-        Uuid::new_v4(),
-        crate::orchestration::RestartReconciliationRequest {
-            now_millis: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-        },
-    )?;
+    let worktrees = Arc::new(WorktreeManager::new(
+        paths
+            .data_dir
+            .join("automation-artifacts")
+            .join("worktrees"),
+    )?);
+    reconcile_orchestration_startup(&state, &coordinator, &worktrees)?;
     let automation = Arc::new(AutomationService::open(
         &paths
             .data_dir
@@ -162,7 +165,6 @@ fn run_inner() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     start_automation_scheduler(
         Arc::clone(&automation),
-        Arc::clone(&coordinator),
         Arc::clone(&state),
         Arc::clone(&shutdown),
     )?;
@@ -184,6 +186,7 @@ fn run_inner() -> Result<()> {
                 let coordinator = Arc::clone(&coordinator);
                 let computer = computer.clone();
                 let automation = Arc::clone(&automation);
+                let worktrees = Arc::clone(&worktrees);
                 let remote = Arc::clone(&remote);
                 let boot_token = Arc::clone(&boot_token);
                 let user_sid = Arc::clone(&user_sid);
@@ -196,6 +199,7 @@ fn run_inner() -> Result<()> {
                             sessions_path,
                             control,
                             coordinator,
+                            worktrees,
                             automation,
                             remote,
                             shutdown,
@@ -217,7 +221,6 @@ fn run_inner() -> Result<()> {
     drop(lock_file);
     fn start_automation_scheduler(
         automation: Arc<AutomationService>,
-        coordinator: Arc<CoordinatorService>,
         state: SharedState,
         shutdown: Arc<AtomicBool>,
     ) -> Result<()> {
@@ -250,26 +253,6 @@ fn run_inner() -> Result<()> {
                         Err(error) => warn!(?error, "automation scheduler scan failed"),
                     }
 
-                    for session in lock_state(&state).list_sessions() {
-                        let session_id = session.id.to_string();
-                        if let Ok(runs) = coordinator.runs_for_session(&session_id) {
-                            for run in runs.into_iter().filter(|run| {
-                                matches!(
-                                    run.status,
-                                    crate::orchestration::RunStatus::Running
-                                        | crate::orchestration::RunStatus::Waiting
-                                )
-                            }) {
-                                let _ = coordinator.schedule_ready(
-                                    Uuid::new_v4(),
-                                    ScheduleRequest {
-                                        run_id: run.id,
-                                        expected_run_revision: run.revision,
-                                    },
-                                );
-                            }
-                        }
-                    }
 
                     if let Ok(records) = automation.list(None) {
                         for record in records {
@@ -363,6 +346,405 @@ fn init_logging(log_path: &Path) {
         .try_init();
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactProcessObservation {
+    Running,
+    Gone,
+    Reused,
+}
+
+fn orchestration_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn process_start_time(root_pid: u32) -> Option<u64> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    system
+        .process(sysinfo::Pid::from_u32(root_pid))
+        .map(sysinfo::Process::start_time)
+}
+
+fn observe_exact_process(root_pid: u32, started_at: u64) -> ExactProcessObservation {
+    match process_start_time(root_pid) {
+        None => ExactProcessObservation::Gone,
+        Some(current) if current == started_at => ExactProcessObservation::Running,
+        Some(_) => ExactProcessObservation::Reused,
+    }
+}
+
+fn processes_for_pane_identity(pane_id: Uuid) -> Vec<(u32, u64)> {
+    let expected = format!("VIBELINK_PANE_ID={pane_id}");
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::everything(),
+    );
+    let matches = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            process
+                .environ()
+                .iter()
+                .any(|entry| entry.to_string_lossy() == expected)
+                .then(|| {
+                    (
+                        pid.as_u32(),
+                        process.start_time(),
+                        process.parent().map(|parent| parent.as_u32()),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    matches
+        .iter()
+        .filter(|(_, _, parent)| {
+            parent.map_or(true, |parent| {
+                !matches.iter().any(|(pid, _, _)| *pid == parent)
+            })
+        })
+        .map(|(pid, started_at, _)| (*pid, *started_at))
+        .collect()
+}
+
+fn kill_pane_processes_until_exit(pane_id: Uuid) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let roots = processes_for_pane_identity(pane_id);
+        if roots.is_empty() {
+            return true;
+        }
+        for (root_pid, _) in roots {
+            crate::daemon::proc::kill_process_tree(root_pid);
+        }
+        if std::time::Instant::now() >= deadline {
+            return processes_for_pane_identity(pane_id).is_empty();
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn cleanup_dispatch_target(
+    state: &SharedState,
+    coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
+    target: &DispatchCleanupTarget,
+    reason: &str,
+    cleanup_worktree: bool,
+) -> (Option<DispatchResourceRecord>, Vec<String>) {
+    let mut resource = target.resources.clone().unwrap_or_else(|| {
+        let repository_root = automation_workspace(state, &target.session_id)
+            .ok()
+            .and_then(|workspace| worktrees.authority(&workspace).ok())
+            .map(|authority| authority.repository_root_string());
+        DispatchResourceRecord {
+            session_id: target.session_id.clone(),
+            repository_root,
+            relative_prefix: String::new(),
+            launch_path: None,
+            agent_instance_id: target.dispatch.agent_instance_id.clone(),
+            pane_id: target.dispatch.pane_id.clone(),
+            root_pid: None,
+            process_started_at: None,
+            process_generation: target.dispatch.process_generation,
+            worktree: target.dispatch.worktree.clone(),
+            pane_disposition: if target.dispatch.pane_id.is_some() {
+                ResourceDisposition::Live
+            } else {
+                ResourceDisposition::NotCreated
+            },
+            worktree_disposition: if target.dispatch.worktree.is_some() {
+                ResourceDisposition::Retained
+            } else {
+                ResourceDisposition::NotCreated
+            },
+            cleanup_reason: None,
+            cleanup_error: None,
+        }
+    });
+    let mut errors = Vec::new();
+    if target.resources.is_none()
+        && target.dispatch.pane_id.is_none()
+        && target.dispatch.worktree.is_none()
+    {
+        return (Some(resource), errors);
+    }
+    match coordinator.mark_dispatch_resource_disposition(
+        &target.dispatch.id,
+        None,
+        None,
+        false,
+        false,
+        Some(reason),
+        None,
+    ) {
+        Ok(updated) => resource = updated,
+        Err(error) => {
+            let message = format!(
+                "failed to persist cleanup ownership for dispatch {}: {}",
+                target.dispatch.id, error
+            );
+            resource.pane_disposition = ResourceDisposition::CleanupFailed;
+            resource.cleanup_reason = Some(reason.to_string());
+            resource.cleanup_error = Some(bounded_launch_error(&message));
+            return (Some(resource), vec![message]);
+        }
+    }
+
+    if let Some(pane_id_text) = resource
+        .pane_id
+        .clone()
+        .or_else(|| target.dispatch.pane_id.clone())
+    {
+        let pane_error_start = errors.len();
+        match (
+            Uuid::parse_str(&target.session_id),
+            Uuid::parse_str(&pane_id_text),
+        ) {
+            (Ok(session_id), Ok(pane_id)) => {
+                let live_root = lock_state(state)
+                    .resource_targets()
+                    .into_iter()
+                    .find(|(owner_session, owner_pane, _)| {
+                        *owner_session == session_id && *owner_pane == pane_id
+                    })
+                    .and_then(|(_, _, root_pid)| root_pid);
+                let root_identity_changed = live_root.is_some()
+                    && resource.root_pid.is_some()
+                    && live_root != resource.root_pid;
+                if root_identity_changed {
+                    errors.push(format!(
+                        "pane {pane_id} root process identity changed; refusing cleanup"
+                    ));
+                } else {
+                    if live_root.is_some() {
+                        match lock_state(state).close_pane(session_id, pane_id) {
+                            Ok(Some(mut pane)) => {
+                                if let Err(error) = pane.kill() {
+                                    errors.push(format!("pane {pane_id} cleanup failed: {error}"));
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                errors.push(format!("pane {pane_id} cleanup failed: {error}"))
+                            }
+                        }
+                    } else if let (Some(root_pid), Some(started_at)) =
+                        (resource.root_pid, resource.process_started_at)
+                    {
+                        if observe_exact_process(root_pid, started_at)
+                            == ExactProcessObservation::Running
+                        {
+                            crate::daemon::proc::kill_process_tree(root_pid);
+                        }
+                    }
+
+                    let identity_roots = processes_for_pane_identity(pane_id);
+                    if identity_roots.is_empty()
+                        && resource.process_started_at.is_none()
+                        && resource
+                            .root_pid
+                            .is_some_and(|root_pid| process_start_time(root_pid).is_some())
+                    {
+                        errors.push(format!(
+                            "pane {pane_id} has no durable process start identity; refusing PID-only cleanup"
+                        ));
+                    }
+                    if !kill_pane_processes_until_exit(pane_id) {
+                        errors.push(format!(
+                            "pane {pane_id} process trees remained alive after cleanup"
+                        ));
+                    }
+                    if let (Some(root_pid), Some(started_at)) =
+                        (resource.root_pid, resource.process_started_at)
+                    {
+                        if observe_exact_process(root_pid, started_at)
+                            == ExactProcessObservation::Running
+                        {
+                            errors.push(format!(
+                                "pane {pane_id} exact root process {root_pid} remained alive after cleanup"
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => errors.push(format!("invalid durable pane identity {pane_id_text}")),
+        }
+
+        let pane_error =
+            (errors.len() > pane_error_start).then(|| errors[pane_error_start..].join("; "));
+        resource.pane_disposition = if pane_error.is_some() {
+            ResourceDisposition::CleanupFailed
+        } else {
+            ResourceDisposition::Cleaned
+        };
+        if pane_error.is_none() {
+            resource.pane_id = None;
+            resource.root_pid = None;
+            resource.process_started_at = None;
+        }
+        if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
+            &target.dispatch.id,
+            Some(resource.pane_disposition),
+            None,
+            pane_error.is_none(),
+            false,
+            Some(reason),
+            pane_error.as_deref(),
+        ) {
+            resource = updated;
+        }
+    }
+
+    if cleanup_worktree
+        && matches!(
+            resource.pane_disposition,
+            ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
+        )
+    {
+        if let (Some(repository_root), Some(assignment)) = (
+            resource.repository_root.clone(),
+            resource
+                .worktree
+                .clone()
+                .or_else(|| target.dispatch.worktree.clone()),
+        ) {
+            match worktrees.cleanup(Path::new(&repository_root), &assignment, true) {
+                Ok(()) => {
+                    resource.worktree_disposition = ResourceDisposition::Cleaned;
+                    resource.worktree = None;
+                    resource.launch_path = None;
+                    if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
+                        &target.dispatch.id,
+                        None,
+                        Some(ResourceDisposition::Cleaned),
+                        false,
+                        true,
+                        Some(reason),
+                        None,
+                    ) {
+                        resource = updated;
+                    }
+                }
+                Err(error) => {
+                    let message = bounded_launch_error(&error.to_string());
+                    errors.push(format!("worktree cleanup failed: {message}"));
+                    resource.worktree_disposition = ResourceDisposition::CleanupFailed;
+                    resource.cleanup_error = Some(message.clone());
+                    if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
+                        &target.dispatch.id,
+                        None,
+                        Some(ResourceDisposition::CleanupFailed),
+                        false,
+                        false,
+                        Some(reason),
+                        Some(&message),
+                    ) {
+                        resource = updated;
+                    }
+                }
+            }
+        }
+        if resource.worktree_disposition != ResourceDisposition::Cleaned
+            && resource.repository_root.is_none()
+            && (resource.worktree.is_some() || target.dispatch.worktree.is_some())
+        {
+            let message = "worktree cleanup lacks durable Git-root authority".to_string();
+            errors.push(message.clone());
+            resource.worktree_disposition = ResourceDisposition::CleanupFailed;
+            resource.cleanup_error = Some(message.clone());
+            if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
+                &target.dispatch.id,
+                None,
+                Some(ResourceDisposition::CleanupFailed),
+                false,
+                false,
+                Some(reason),
+                Some(&message),
+            ) {
+                resource = updated;
+            }
+        }
+    }
+    (Some(resource), errors)
+}
+
+fn cleanup_run_resources(
+    state: &SharedState,
+    coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
+    run_id: &str,
+    reason: &str,
+    cleanup_worktrees: bool,
+) -> Result<(Vec<DispatchResourceRecord>, Vec<String>)> {
+    let mut resources = Vec::new();
+    let mut errors = Vec::new();
+    for target in coordinator.cleanup_targets_for_run(run_id)? {
+        let (resource, mut target_errors) = cleanup_dispatch_target(
+            state,
+            coordinator,
+            worktrees,
+            &target,
+            reason,
+            cleanup_worktrees,
+        );
+        if let Some(resource) = resource {
+            resources.push(resource);
+        }
+        errors.append(&mut target_errors);
+    }
+    Ok((resources, errors))
+}
+
+fn reconcile_orchestration_startup(
+    state: &SharedState,
+    coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
+) -> Result<()> {
+    let mut resources = Vec::new();
+    let mut cleanup_errors = Vec::new();
+    for target in coordinator.active_cleanup_targets()? {
+        let retained_reason = target
+            .resources
+            .as_ref()
+            .and_then(|resource| resource.cleanup_reason.as_deref())
+            .filter(|reason| {
+                matches!(
+                    *reason,
+                    "cancel"
+                        | "reject"
+                        | "gate_reject"
+                        | "merge_applied"
+                        | "launch_failure"
+                        | "retry_cleanup"
+                )
+            });
+        let cleanup_worktree = retained_reason.is_some();
+        let cleanup_reason = retained_reason.unwrap_or("daemon_restart");
+        let (resource, mut errors) = cleanup_dispatch_target(
+            state,
+            coordinator,
+            worktrees,
+            &target,
+            cleanup_reason,
+            cleanup_worktree,
+        );
+        if let Some(resource) = resource {
+            resources.push(resource);
+        }
+        cleanup_errors.append(&mut errors);
+    }
+    require_workers_stopped(&resources, &cleanup_errors)
+        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    coordinator.reconcile_daemon_restart(Uuid::new_v4(), orchestration_now_millis())?;
+    Ok(())
+}
+
 fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> {
     for persisted in load_sessions(sessions_path)? {
         lock_state(&state).insert_session(
@@ -394,6 +776,7 @@ fn handle_connection(
     sessions_path: Arc<PathBuf>,
     control: Arc<ControlPlane>,
     coordinator: Arc<CoordinatorService>,
+    worktrees: Arc<WorktreeManager>,
     automation: Arc<AutomationService>,
     remote: Arc<RemoteServer>,
     shutdown: Arc<AtomicBool>,
@@ -483,6 +866,7 @@ fn handle_connection(
             &tx,
             Arc::clone(&control),
             Arc::clone(&coordinator),
+            Arc::clone(&worktrees),
             Arc::clone(&automation),
             Arc::clone(&remote),
             computer.clone(),
@@ -561,12 +945,23 @@ struct OrchestrationRpcError {
 }
 
 fn orchestration_rpc_response(
+    state: &SharedState,
+    sessions_path: &Path,
     coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
     operation_id: Uuid,
     method: &str,
     payload_json: &str,
 ) -> String {
-    let result = dispatch_orchestration_rpc(coordinator, operation_id, method, payload_json);
+    let result = dispatch_orchestration_rpc(
+        state,
+        sessions_path,
+        coordinator,
+        worktrees,
+        operation_id,
+        method,
+        payload_json,
+    );
     let envelope = match result {
         Ok(data) => OrchestrationRpcEnvelope {
             ok: true,
@@ -583,7 +978,10 @@ fn orchestration_rpc_response(
 }
 
 fn dispatch_orchestration_rpc(
+    state: &SharedState,
+    sessions_path: &Path,
     coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
     operation_id: Uuid,
     method: &str,
     payload_json: &str,
@@ -597,22 +995,308 @@ fn dispatch_orchestration_rpc(
     match method {
         "run.create" => mutation!(CreateRunRequest, create_run),
         "run.start" => mutation!(RunRevisionRequest, start_run),
-        "run.cancel" => mutation!(RunRevisionRequest, cancel_run),
-        "run.accept" => mutation!(RunDecisionRequest, accept_run),
-        "run.reject" => mutation!(RunDecisionRequest, reject_run),
+        "run.cancel" => {
+            let request: RunRevisionRequest = parse_orchestration_payload(payload_json)?;
+            let current = coordinator
+                .run(&request.run_id)
+                .map_err(orchestration_coordinator_error)?;
+            if current.status == crate::orchestration::RunStatus::Cancelled {
+                let run = coordinator
+                    .cancel_run(operation_id, request)
+                    .map_err(orchestration_coordinator_error)?;
+                let resources = coordinator
+                    .cleanup_targets_for_run(&run.id)
+                    .map_err(orchestration_coordinator_error)?
+                    .into_iter()
+                    .filter_map(|target| target.resources)
+                    .collect::<Vec<_>>();
+                return Ok(json!({ "run": run, "resources": resources, "cleanupErrors": [] }));
+            }
+            validate_run_cleanup_revision(
+                coordinator,
+                &request.run_id,
+                request.expected_run_revision,
+            )?;
+            let (resources, cleanup_errors) = cleanup_run_resources(
+                state,
+                coordinator,
+                worktrees,
+                &request.run_id,
+                "cancel",
+                true,
+            )
+            .map_err(orchestration_internal_error)?;
+            require_workers_stopped(&resources, &cleanup_errors)?;
+            persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+            let run = coordinator
+                .cancel_run(operation_id, request)
+                .map_err(orchestration_coordinator_error)?;
+            Ok(json!({ "run": run, "resources": resources, "cleanupErrors": cleanup_errors }))
+        }
+        "run.accept" => {
+            let request: RunDecisionRequest = parse_orchestration_payload(payload_json)?;
+            let cleanup_pending = coordinator
+                .cleanup_targets_for_run(&request.run_id)
+                .map_err(orchestration_coordinator_error)?
+                .into_iter()
+                .any(|target| {
+                    target.dispatch.worktree.is_some()
+                        && !target.resources.as_ref().is_some_and(|resource| {
+                            resource.worktree_disposition == ResourceDisposition::Cleaned
+                        })
+                });
+            if cleanup_pending {
+                return Err(OrchestrationRpcError {
+                    code: "cleanup_pending".to_string(),
+                    message:
+                        "Run worktrees must be merged or rejected and cleaned before acceptance."
+                            .to_string(),
+                });
+            }
+            coordinator_value(coordinator.accept_run(operation_id, request))
+        }
+        "run.reject" => {
+            let request: RunDecisionRequest = parse_orchestration_payload(payload_json)?;
+            let current = coordinator
+                .run(&request.run_id)
+                .map_err(orchestration_coordinator_error)?;
+            if current.status == crate::orchestration::RunStatus::Cancelled {
+                let decision = coordinator
+                    .reject_run(operation_id, request)
+                    .map_err(orchestration_coordinator_error)?;
+                let resources = coordinator
+                    .cleanup_targets_for_run(&decision.run.id)
+                    .map_err(orchestration_coordinator_error)?
+                    .into_iter()
+                    .filter_map(|target| target.resources)
+                    .collect::<Vec<_>>();
+                return Ok(
+                    json!({ "decision": decision, "resources": resources, "cleanupErrors": [] }),
+                );
+            }
+            validate_run_cleanup_revision(
+                coordinator,
+                &request.run_id,
+                request.expected_run_revision,
+            )?;
+            let (resources, cleanup_errors) = cleanup_run_resources(
+                state,
+                coordinator,
+                worktrees,
+                &request.run_id,
+                "reject",
+                true,
+            )
+            .map_err(orchestration_internal_error)?;
+            require_workers_stopped(&resources, &cleanup_errors)?;
+            persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+            let decision = coordinator
+                .reject_run(operation_id, request)
+                .map_err(orchestration_coordinator_error)?;
+            Ok(
+                json!({ "decision": decision, "resources": resources, "cleanupErrors": cleanup_errors }),
+            )
+        }
         "task.create" => mutation!(CreateTaskRequest, create_task),
         "task.update" => mutation!(UpdateTaskRequest, update_task),
         "task.retry" => mutation!(RetryTaskRequest, retry_task),
-        "schedule.ready" => mutation!(ScheduleRequest, schedule_ready),
-        "agent.register" => mutation!(RegisterAgentRequest, register_agent),
-        "dispatch.bind" => mutation!(BindDispatchRequest, bind_dispatch),
-        "dispatch.launchFailed" => mutation!(LaunchFailureRequest, record_launch_failure),
+        "dispatch.launch" => {
+            let request: DispatchLaunchRequest = parse_orchestration_payload(payload_json)?;
+            let result = launch_ready_dispatches(
+                state,
+                sessions_path,
+                coordinator,
+                worktrees,
+                operation_id,
+                request,
+            )?;
+            serde_json::to_value(result).map_err(|error| OrchestrationRpcError {
+                code: "internal".to_string(),
+                message: error.to_string(),
+            })
+        }
+        "dispatch.cleanup" => {
+            let request: RpcIdRequest = parse_orchestration_payload(payload_json)?;
+            let target = coordinator
+                .cleanup_target_for_dispatch(&request.id)
+                .map_err(orchestration_coordinator_error)?;
+            let retryable = target.resources.as_ref().is_some_and(|resource| {
+                resource.pane_disposition == ResourceDisposition::CleanupFailed
+                    || resource.worktree_disposition == ResourceDisposition::CleanupFailed
+            });
+            let already_clean = target.resources.as_ref().is_some_and(|resource| {
+                matches!(
+                    resource.pane_disposition,
+                    ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
+                ) && matches!(
+                    resource.worktree_disposition,
+                    ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
+                )
+            });
+            if already_clean {
+                return Ok(json!({
+                    "resources": target.resources.into_iter().collect::<Vec<_>>(),
+                    "cleanupErrors": [],
+                }));
+            }
+            if !retryable {
+                return Err(OrchestrationRpcError {
+                    code: "invalid_transition".to_string(),
+                    message: "Dispatch resources are not in a retryable cleanup-failure state."
+                        .to_string(),
+                });
+            }
+            let (resource, cleanup_errors) = cleanup_dispatch_target(
+                state,
+                coordinator,
+                worktrees,
+                &target,
+                "retry_cleanup",
+                true,
+            );
+            let resources = resource.into_iter().collect::<Vec<_>>();
+            require_workers_stopped(&resources, &cleanup_errors)?;
+            persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+            Ok(json!({ "resources": resources, "cleanupErrors": cleanup_errors }))
+        }
         "agent.heartbeat" => mutation!(HeartbeatRequest, heartbeat),
         "agent.reconcile" => mutation!(ReconcileLivenessRequest, reconcile_liveness),
         "worker.done" => mutation!(WorkerDoneRequest, worker_done),
         "gate.create" => mutation!(CreateGateRequest, create_gate),
-        "gate.resolve" => mutation!(ResolveGateRequest, resolve_gate),
-        "merge.applied" => mutation!(MergeAppliedRequest, mark_merge_applied),
+        "gate.resolve" => {
+            let request: ResolveGateRequest = parse_orchestration_payload(payload_json)?;
+            let gate = coordinator
+                .gate(&request.gate_id)
+                .map_err(orchestration_coordinator_error)?;
+            if gate.status != GateStatus::Pending {
+                let mutation = coordinator
+                    .resolve_gate(operation_id, request)
+                    .map_err(orchestration_coordinator_error)?;
+                let resources = gate
+                    .dispatch_id
+                    .as_deref()
+                    .and_then(|dispatch_id| {
+                        coordinator.cleanup_target_for_dispatch(dispatch_id).ok()
+                    })
+                    .and_then(|target| target.resources)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                return Ok(
+                    json!({ "mutation": mutation, "resources": resources, "cleanupErrors": [] }),
+                );
+            }
+            validate_run_cleanup_revision(
+                coordinator,
+                &gate.run_id,
+                request.expected_run_revision,
+            )?;
+            let decision = request.resolution.get("decision").and_then(Value::as_str);
+            let mut resources = Vec::new();
+            let mut cleanup_errors = Vec::new();
+            if gate.gate_type == "merge" && decision == Some("reject") {
+                if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
+                    let target = coordinator
+                        .cleanup_target_for_dispatch(dispatch_id)
+                        .map_err(orchestration_coordinator_error)?;
+                    let (resource, errors) = cleanup_dispatch_target(
+                        state,
+                        coordinator,
+                        worktrees,
+                        &target,
+                        "gate_reject",
+                        true,
+                    );
+                    if let Some(resource) = resource {
+                        resources.push(resource);
+                    }
+                    cleanup_errors.extend(errors);
+                    require_workers_stopped(&resources, &cleanup_errors)?;
+                    persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+                }
+            }
+            let mutation = coordinator
+                .resolve_gate(operation_id, request)
+                .map_err(orchestration_coordinator_error)?;
+            Ok(
+                json!({ "mutation": mutation, "resources": resources, "cleanupErrors": cleanup_errors }),
+            )
+        }
+        "merge.applied" => {
+            let request: MergeAppliedRequest = parse_orchestration_payload(payload_json)?;
+            let gate = coordinator
+                .gate(&request.gate_id)
+                .map_err(orchestration_coordinator_error)?;
+            let applied_commit = gate
+                .resolution
+                .as_ref()
+                .filter(|resolution| {
+                    resolution.get("applied").and_then(Value::as_bool) == Some(true)
+                })
+                .and_then(|resolution| resolution.get("commitId"))
+                .and_then(Value::as_str);
+            if let Some(applied_commit) = applied_commit {
+                if applied_commit != request.commit_id {
+                    return Err(OrchestrationRpcError {
+                        code: "conflict".to_string(),
+                        message: "Merge gate was already applied with a different commit identity."
+                            .to_string(),
+                    });
+                }
+            } else {
+                validate_run_cleanup_revision(
+                    coordinator,
+                    &gate.run_id,
+                    request.expected_run_revision,
+                )?;
+                let cleanup_already_completed = gate
+                    .dispatch_id
+                    .as_deref()
+                    .and_then(|dispatch_id| {
+                        coordinator.cleanup_target_for_dispatch(dispatch_id).ok()
+                    })
+                    .and_then(|target| target.resources)
+                    .is_some_and(|resource| {
+                        resource.cleanup_reason.as_deref() == Some("merge_applied")
+                            && resource.worktree_disposition == ResourceDisposition::Cleaned
+                            && matches!(
+                                resource.pane_disposition,
+                                ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
+                            )
+                    });
+                if !cleanup_already_completed {
+                    coordinator
+                        .merge_authorization(&request.gate_id)
+                        .map_err(orchestration_coordinator_error)?;
+                }
+            }
+            let mut resources = Vec::new();
+            let mut cleanup_errors = Vec::new();
+            if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
+                let target = coordinator
+                    .cleanup_target_for_dispatch(dispatch_id)
+                    .map_err(orchestration_coordinator_error)?;
+                let (resource, errors) = cleanup_dispatch_target(
+                    state,
+                    coordinator,
+                    worktrees,
+                    &target,
+                    "merge_applied",
+                    true,
+                );
+                if let Some(resource) = resource {
+                    resources.push(resource);
+                }
+                cleanup_errors.extend(errors);
+            }
+            require_workers_stopped(&resources, &cleanup_errors)?;
+            persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+            let mutation = coordinator
+                .mark_merge_applied(operation_id, request)
+                .map_err(orchestration_coordinator_error)?;
+            Ok(
+                json!({ "mutation": mutation, "resources": resources, "cleanupErrors": cleanup_errors }),
+            )
+        }
         "message.post" => mutation!(PostMessageRequest, post_message),
         "events.acknowledge" => mutation!(AcknowledgeEventsRequest, acknowledge_events),
         "dispatch.running" => {
@@ -706,6 +1390,547 @@ fn coordinator_value<T: Serialize>(
         message: error.to_string(),
     })
 }
+
+fn orchestration_internal_error(error: anyhow::Error) -> OrchestrationRpcError {
+    OrchestrationRpcError {
+        code: "internal".to_string(),
+        message: bounded_launch_error(&error.to_string()),
+    }
+}
+
+fn validate_run_cleanup_revision(
+    coordinator: &CoordinatorService,
+    run_id: &str,
+    expected_revision: u64,
+) -> std::result::Result<(), OrchestrationRpcError> {
+    let run = coordinator
+        .run(run_id)
+        .map_err(orchestration_coordinator_error)?;
+    if run.revision != expected_revision {
+        return Err(OrchestrationRpcError {
+            code: "stale_revision".to_string(),
+            message: format!(
+                "stale revision for run {}: expected {}, current {}",
+                run.id, expected_revision, run.revision
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn require_workers_stopped(
+    resources: &[DispatchResourceRecord],
+    cleanup_errors: &[String],
+) -> std::result::Result<(), OrchestrationRpcError> {
+    let workers_running = resources.iter().any(|resource| {
+        matches!(
+            resource.pane_disposition,
+            ResourceDisposition::Live
+                | ResourceDisposition::Retained
+                | ResourceDisposition::CleanupFailed
+                | ResourceDisposition::Unknown
+        )
+    });
+    if workers_running {
+        return Err(OrchestrationRpcError {
+            code: "cleanup_failed".to_string(),
+            message: if cleanup_errors.is_empty() {
+                "One or more orchestration workers could not be proven stopped.".to_string()
+            } else {
+                bounded_launch_error(&cleanup_errors.join("; "))
+            },
+        });
+    }
+    Ok(())
+}
+
+fn derived_operation_id(operation_id: Uuid, dispatch_id: &str, stage: &str) -> Uuid {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(operation_id.as_bytes());
+    digest.update(dispatch_id.as_bytes());
+    digest.update(stage.as_bytes());
+    let bytes = digest.finalize();
+    let mut uuid_bytes = [0_u8; 16];
+    uuid_bytes.copy_from_slice(&bytes[..16]);
+    uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x40;
+    uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(uuid_bytes)
+}
+
+fn launch_ready_dispatches(
+    state: &SharedState,
+    sessions_path: &Path,
+    coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
+    operation_id: Uuid,
+    mut request: DispatchLaunchRequest,
+) -> std::result::Result<DispatchLaunchResult, OrchestrationRpcError> {
+    let _launch = ORCHESTRATION_LAUNCH_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    request.command = request.command.trim().to_string();
+    request.profile = request.profile.take().and_then(|profile| {
+        let profile = profile.trim().to_string();
+        (!profile.is_empty()).then_some(profile)
+    });
+    let plan = match coordinator
+        .prepare_dispatch_launch(operation_id, request.clone())
+        .map_err(orchestration_coordinator_error)?
+    {
+        DispatchLaunchPreparation::Replay(result) => return Ok(result),
+        DispatchLaunchPreparation::Intent(plan) => plan,
+    };
+    let session_id =
+        Uuid::parse_str(&plan.run.session_id).map_err(|error| OrchestrationRpcError {
+            code: "internal".to_string(),
+            message: format!("run session identity is invalid: {error}"),
+        })?;
+    let workspace = automation_workspace(state, &plan.run.session_id)
+        .map_err(|error| bounded_launch_error(&error.to_string()));
+    let tasks = coordinator
+        .tasks(&request.run_id)
+        .map_err(orchestration_coordinator_error)?;
+    let mut launches = Vec::with_capacity(plan.dispatches.len());
+    let mut spawned_any = false;
+
+    for planned in plan.dispatches {
+        let current = coordinator
+            .dispatches(&request.run_id)
+            .map_err(orchestration_coordinator_error)?
+            .into_iter()
+            .find(|dispatch| dispatch.id == planned.id)
+            .unwrap_or(planned);
+        if current.status != DispatchStatus::Pending {
+            let agents = coordinator
+                .agents(&request.run_id)
+                .map_err(orchestration_coordinator_error)?;
+            launches.push(existing_launch_outcome(&current, &agents));
+            continue;
+        }
+        let Some(task) = tasks.iter().find(|task| task.id == current.task_id) else {
+            launches.push(DispatchLaunchOutcome {
+                dispatch_id: current.id,
+                task_id: current.task_id,
+                attempt: current.attempt,
+                status: DispatchLaunchStatus::Failed,
+                agent_instance_id: None,
+                pane_id: None,
+                runtime_identity: None,
+                process_generation: None,
+                worktree: None,
+                resources: current.resources,
+                failure_code: Some("task_missing".to_string()),
+                error: Some("The dispatch task record is unavailable.".to_string()),
+            });
+            continue;
+        };
+
+        let spec = coordinator
+            .dispatch_launch_spec(&current.id, operation_id)
+            .map_err(orchestration_coordinator_error)?;
+        let mut agent_instance_id = current.agent_instance_id.clone();
+        let mut durably_bound = false;
+        let mut failure_code = "workspace_unavailable";
+        let launch = (|| -> Result<DispatchLaunchOutcome> {
+            let workspace = workspace
+                .as_ref()
+                .map_err(|message| anyhow::anyhow!(message.clone()))?
+                .canonicalize()
+                .context("canonicalize orchestration workspace authority")?;
+            let (authority, planned_worktree, planned_launch_path) =
+                if spec.worktree_mode == WorktreeMode::Worktree {
+                    failure_code = "worktree_authority";
+                    let authority = worktrees.authority(&workspace)?;
+                    let assignment = current
+                        .resources
+                        .as_ref()
+                        .and_then(|resource| resource.worktree.clone())
+                        .unwrap_or(worktrees.plan(
+                            &authority,
+                            &request.run_id,
+                            &task.id,
+                            current.attempt,
+                        )?);
+                    let launch_path = PathBuf::from(&assignment.worktree_path)
+                        .join(&authority.relative_prefix)
+                        .to_string_lossy()
+                        .to_string();
+                    (Some(authority), Some(assignment), launch_path)
+                } else {
+                    (None, None, workspace.to_string_lossy().to_string())
+                };
+            let mut resource = coordinator
+                .reserve_dispatch_resources(
+                    operation_id,
+                    DispatchResourceReservation {
+                        dispatch_id: current.id.clone(),
+                        session_id: session_id.to_string(),
+                        repository_root: authority
+                            .as_ref()
+                            .map(|value| value.repository_root_string()),
+                        relative_prefix: authority
+                            .as_ref()
+                            .map(|value| value.relative_prefix_string())
+                            .unwrap_or_default(),
+                        launch_path: Some(planned_launch_path),
+                        worktree: planned_worktree.clone(),
+                    },
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if matches!(
+                resource.pane_disposition,
+                ResourceDisposition::CleanupFailed | ResourceDisposition::Unknown
+            ) || resource.worktree_disposition == ResourceDisposition::CleanupFailed
+            {
+                failure_code = "cleanup_pending";
+                anyhow::bail!(
+                    "prior dispatch resources require successful cleanup before relaunch"
+                );
+            }
+
+            let cwd = if let (Some(authority), Some(assignment)) =
+                (authority.as_ref(), planned_worktree.as_ref())
+            {
+                failure_code = "worktree_create";
+                worktrees.materialize(authority, assignment)?;
+                let launch_path = worktrees.launch_path(authority, assignment)?;
+                resource = coordinator
+                    .mark_dispatch_resource_disposition(
+                        &current.id,
+                        None,
+                        Some(ResourceDisposition::Live),
+                        false,
+                        false,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                launch_path.to_string_lossy().to_string()
+            } else {
+                workspace.to_string_lossy().to_string()
+            };
+
+            failure_code = "agent_register";
+            let agent = coordinator
+                .register_agent(
+                    derived_operation_id(operation_id, &current.id, "agent-register"),
+                    RegisterAgentRequest {
+                        provider: AgentProvider::PtyCli,
+                        profile: spec.profile.clone(),
+                        workspace_path: workspace.to_string_lossy().to_string(),
+                        worktree_path: planned_worktree
+                            .as_ref()
+                            .map(|assignment| assignment.worktree_path.clone()),
+                        resumable: false,
+                    },
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            agent_instance_id = Some(agent.id.clone());
+            resource = coordinator
+                .record_dispatch_agent_resource(&current.id, operation_id, &agent.id)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+            failure_code = "pane_spawn";
+            let next_pane_id = derived_operation_id(operation_id, &current.id, "pane");
+            resource = coordinator
+                .record_dispatch_pane_resource(
+                    &current.id,
+                    operation_id,
+                    &next_pane_id.to_string(),
+                    None,
+                    None,
+                    1,
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let existing_pane = lock_state(state)
+                .pane_metas(session_id)?
+                .into_iter()
+                .find(|pane| pane.id == next_pane_id && pane.alive);
+            let pane = if let Some(pane) = existing_pane {
+                pane
+            } else {
+                spawned_any = true;
+                spawn_orchestration_pane_for_session(
+                    Arc::clone(state),
+                    sessions_path.to_path_buf(),
+                    session_id,
+                    PaneConfig {
+                        pane_id: next_pane_id,
+                        shell: Some("cmd.exe".to_string()),
+                        args: vec![
+                            "/D".to_string(),
+                            "/S".to_string(),
+                            "/C".to_string(),
+                            spec.command.clone(),
+                        ],
+                        cwd: Some(cwd),
+                        env: vec![
+                            ("VIBELINK_RUN_ID".to_string(), request.run_id.clone()),
+                            ("VIBELINK_TASK_ID".to_string(), task.id.clone()),
+                            ("VIBELINK_DISPATCH_ID".to_string(), current.id.clone()),
+                            ("VIBELINK_AGENT_INSTANCE_ID".to_string(), agent.id.clone()),
+                            ("VIBELINK_SESSION_ID".to_string(), session_id.to_string()),
+                        ],
+                        title: Some(task.title.clone()),
+                        icon: Some("bot".to_string()),
+                        profile_id: spec.profile.clone(),
+                        role: Some("orchestration-worker".to_string()),
+                        cols: 120,
+                        rows: 32,
+                    },
+                    Arc::new(coordinator.clone()),
+                )?
+            };
+            let root_pid = lock_state(state)
+                .resource_targets()
+                .into_iter()
+                .find(|(owner_session, pane_id, _)| {
+                    *owner_session == session_id && *pane_id == pane.id
+                })
+                .and_then(|(_, _, root_pid)| root_pid)
+                .context("orchestration pane has no project-owned root process identity")?;
+            let started_at = process_start_time(root_pid)
+                .context("orchestration pane root process exited before identity capture")?;
+            let process_generation = 1;
+            resource = coordinator
+                .record_dispatch_pane_resource(
+                    &current.id,
+                    operation_id,
+                    &pane.id.to_string(),
+                    Some(root_pid),
+                    Some(started_at),
+                    process_generation,
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if !lock_state(state)
+                .pane_metas(session_id)?
+                .into_iter()
+                .any(|current_pane| current_pane.id == pane.id && current_pane.alive)
+            {
+                anyhow::bail!("orchestration pane exited before durable binding");
+            }
+            let runtime_identity = format!("pane:{}:{process_generation}", pane.id);
+
+            failure_code = "dispatch_bind";
+            let bound = coordinator
+                .bind_dispatch(
+                    derived_operation_id(operation_id, &current.id, "dispatch-bind"),
+                    BindDispatchRequest {
+                        dispatch_id: current.id.clone(),
+                        expected_task_revision: task.revision,
+                        agent_instance_id: agent.id.clone(),
+                        runtime_identity,
+                        pane_id: Some(pane.id.to_string()),
+                        process_generation,
+                        worktree: planned_worktree,
+                    },
+                )
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            durably_bound = true;
+            Ok(DispatchLaunchOutcome {
+                dispatch_id: bound.dispatch.id,
+                task_id: bound.task.id,
+                attempt: bound.dispatch.attempt,
+                status: DispatchLaunchStatus::Launched,
+                agent_instance_id: Some(bound.agent.id),
+                pane_id: bound.dispatch.pane_id,
+                runtime_identity: bound.agent.runtime_identity,
+                process_generation: bound.dispatch.process_generation,
+                worktree: bound.dispatch.worktree,
+                resources: Some(resource),
+                failure_code: None,
+                error: None,
+            })
+        })();
+
+        match launch {
+            Ok(outcome) => launches.push(outcome),
+            Err(error) => {
+                let mut details = bounded_launch_error(&error.to_string());
+                let mut resource = coordinator
+                    .cleanup_target_for_dispatch(&current.id)
+                    .ok()
+                    .and_then(|target| target.resources);
+                if !durably_bound {
+                    if let Ok(target) = coordinator.cleanup_target_for_dispatch(&current.id) {
+                        let (cleaned, cleanup_errors) = cleanup_dispatch_target(
+                            state,
+                            coordinator,
+                            worktrees,
+                            &target,
+                            "launch_failure",
+                            true,
+                        );
+                        resource = cleaned;
+                        if !cleanup_errors.is_empty() {
+                            details.push_str("; ");
+                            details.push_str(&bounded_launch_error(&cleanup_errors.join("; ")));
+                        }
+                    }
+                }
+                let recorded = coordinator.record_launch_failure(
+                    derived_operation_id(operation_id, &current.id, "launch-failure"),
+                    LaunchFailureRequest {
+                        dispatch_id: current.id.clone(),
+                        expected_task_revision: task.revision,
+                        failure_code: failure_code.to_string(),
+                    },
+                );
+                let stored_failure = match recorded {
+                    Ok(result) => result.dispatch.failure_code,
+                    Err(record_error) => {
+                        details.push_str("; failure recording failed: ");
+                        details.push_str(&bounded_launch_error(&record_error.to_string()));
+                        Some(format!("launch:{failure_code}"))
+                    }
+                };
+                if let Some(agent_id) = agent_instance_id.as_ref() {
+                    if let Err(agent_error) = coordinator.record_unbound_agent_launch_failure(
+                        derived_operation_id(operation_id, &current.id, "agent-launch-failure"),
+                        AgentLaunchFailureRequest {
+                            agent_instance_id: agent_id.clone(),
+                            failure_code: failure_code.to_string(),
+                        },
+                    ) {
+                        details.push_str("; agent cleanup failed: ");
+                        details.push_str(&bounded_launch_error(&agent_error.to_string()));
+                    }
+                }
+                let pane_retained = resource
+                    .as_ref()
+                    .is_some_and(|value| value.pane_disposition != ResourceDisposition::Cleaned);
+                let worktree_retained = resource.as_ref().is_some_and(|value| {
+                    !matches!(
+                        value.worktree_disposition,
+                        ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
+                    )
+                });
+                launches.push(DispatchLaunchOutcome {
+                    dispatch_id: current.id,
+                    task_id: current.task_id,
+                    attempt: current.attempt,
+                    status: DispatchLaunchStatus::Failed,
+                    agent_instance_id: if pane_retained {
+                        agent_instance_id
+                    } else {
+                        None
+                    },
+                    pane_id: resource
+                        .as_ref()
+                        .filter(|_| pane_retained)
+                        .and_then(|value| value.pane_id.clone()),
+                    runtime_identity: None,
+                    process_generation: resource
+                        .as_ref()
+                        .filter(|_| pane_retained)
+                        .and_then(|value| value.process_generation),
+                    worktree: if worktree_retained {
+                        resource.as_ref().and_then(|value| value.worktree.clone())
+                    } else {
+                        None
+                    },
+                    resources: resource,
+                    failure_code: stored_failure,
+                    error: Some(bounded_launch_error(&details)),
+                });
+            }
+        }
+    }
+
+    persist_state(state, sessions_path).map_err(|error| OrchestrationRpcError {
+        code: "internal".to_string(),
+        message: error.to_string(),
+    })?;
+    if spawned_any {
+        notify_session_changed(state, session_id).map_err(|error| OrchestrationRpcError {
+            code: "internal".to_string(),
+            message: error.to_string(),
+        })?;
+    }
+    let result = DispatchLaunchResult {
+        run: coordinator
+            .run(&request.run_id)
+            .map_err(orchestration_coordinator_error)?,
+        launches,
+        newly_ready_task_ids: plan.newly_ready_task_ids,
+        newly_blocked_task_ids: plan.newly_blocked_task_ids,
+    };
+    coordinator
+        .complete_dispatch_launch(operation_id, &request, &result)
+        .map_err(orchestration_coordinator_error)
+}
+
+fn existing_launch_outcome(
+    dispatch: &crate::orchestration::DispatchRecord,
+    agents: &[crate::orchestration::AgentInstanceRecord],
+) -> DispatchLaunchOutcome {
+    let agent = dispatch
+        .agent_instance_id
+        .as_deref()
+        .and_then(|agent_id| agents.iter().find(|agent| agent.id == agent_id));
+    let pane_live = dispatch.resources.as_ref().is_some_and(|resource| {
+        resource.pane_disposition == ResourceDisposition::Live && resource.pane_id.is_some()
+    });
+    let has_identity = dispatch.agent_instance_id.is_some()
+        && (pane_live || dispatch.status == DispatchStatus::Completed);
+    let status = if has_identity
+        && matches!(
+            dispatch.status,
+            DispatchStatus::Dispatched
+                | DispatchStatus::Running
+                | DispatchStatus::Waiting
+                | DispatchStatus::Completed
+        ) {
+        DispatchLaunchStatus::Existing
+    } else {
+        DispatchLaunchStatus::Failed
+    };
+    let worktree_live = dispatch.resources.as_ref().is_some_and(|resource| {
+        matches!(
+            resource.worktree_disposition,
+            ResourceDisposition::Live
+                | ResourceDisposition::Retained
+                | ResourceDisposition::CleanupFailed
+        )
+    });
+    DispatchLaunchOutcome {
+        dispatch_id: dispatch.id.clone(),
+        task_id: dispatch.task_id.clone(),
+        attempt: dispatch.attempt,
+        status,
+        agent_instance_id: (status == DispatchLaunchStatus::Existing)
+            .then(|| dispatch.agent_instance_id.clone())
+            .flatten(),
+        pane_id: dispatch
+            .resources
+            .as_ref()
+            .filter(|_| pane_live)
+            .and_then(|resource| resource.pane_id.clone()),
+        runtime_identity: (status == DispatchLaunchStatus::Existing)
+            .then(|| agent.and_then(|record| record.runtime_identity.clone()))
+            .flatten(),
+        process_generation: pane_live.then_some(dispatch.process_generation).flatten(),
+        worktree: worktree_live.then(|| dispatch.worktree.clone()).flatten(),
+        resources: dispatch.resources.clone(),
+        failure_code: dispatch.failure_code.clone().or_else(|| {
+            (status == DispatchLaunchStatus::Failed)
+                .then(|| "launch_state_inconsistent".to_string())
+        }),
+        error: None,
+    }
+}
+
+fn orchestration_coordinator_error(error: CoordinatorError) -> OrchestrationRpcError {
+    OrchestrationRpcError {
+        code: error.code().to_string(),
+        message: error.to_string(),
+    }
+}
+
+fn bounded_launch_error(message: &str) -> String {
+    message.chars().take(1_000).collect()
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CliRequestEnvelope {
@@ -718,6 +1943,7 @@ fn dispatch_cli_request(
     sessions_path: &Path,
     control: &ControlPlane,
     coordinator: &CoordinatorService,
+    worktrees: &WorktreeManager,
     automation: &AutomationService,
     remote: &RemoteServer,
     computer: &SharedComputerHost,
@@ -955,13 +2181,54 @@ fn dispatch_cli_request(
                 }
                 OrchestrationAction::RunStop => {
                     let run_id = run_id.context("--run-id is required")?;
-                    Ok(serde_json::to_value(coordinator.cancel_run(
+                    let expected_run_revision = expected_revision.context("--expected-revision is required")?;
+                    let run = coordinator.run(&run_id)?;
+                    if run.status == crate::orchestration::RunStatus::Cancelled {
+                        let run = coordinator.cancel_run(
+                            outer_operation_id,
+                            RunRevisionRequest {
+                                run_id: run_id.clone(),
+                                expected_run_revision,
+                            },
+                        )?;
+                        let resources = coordinator
+                            .cleanup_targets_for_run(&run.id)?
+                            .into_iter()
+                            .filter_map(|target| target.resources)
+                            .collect::<Vec<_>>();
+                        return Ok(json!({
+                            "run": run,
+                            "resources": resources,
+                            "cleanupErrors": [],
+                        }));
+                    }
+                    if run.revision != expected_run_revision {
+                        anyhow::bail!(
+                            "stale revision for run {}: expected {}, current {}",
+                            run.id,
+                            expected_run_revision,
+                            run.revision
+                        );
+                    }
+                    let (resources, cleanup_errors) = cleanup_run_resources(
+                        state,
+                        coordinator,
+                        worktrees,
+                        &run_id,
+                        "cancel",
+                        true,
+                    )?;
+                    require_workers_stopped(&resources, &cleanup_errors)
+                        .map_err(|error| anyhow::anyhow!(error.message))?;
+                    persist_state(state, sessions_path)?;
+                    let run = coordinator.cancel_run(
                         outer_operation_id,
                         RunRevisionRequest {
                             run_id,
-                            expected_run_revision: expected_revision.context("--expected-revision is required")?,
+                            expected_run_revision,
                         },
-                    )?)?)
+                    )?;
+                    Ok(json!({ "run": run, "resources": resources, "cleanupErrors": cleanup_errors }))
                 }
                 OrchestrationAction::TaskCreate => {
                     let run_id = run_id.context("--run-id is required")?;
@@ -1060,94 +2327,107 @@ fn dispatch_cli_request(
                 }
                 OrchestrationAction::Dispatch => {
                     let run_id = run_id.context("--run-id is required")?;
-                    let session_id = resolve_cli_session(state, command.selectors.workspace.as_deref())?;
-                    let command_line = required_cli_option(&command.arguments, "command")?.to_string();
-                    let schedule = coordinator.schedule_ready(
-                        outer_operation_id,
-                        ScheduleRequest {
-                            run_id: run_id.clone(),
-                            expected_run_revision: expected_revision.context("--expected-revision is required")?,
-                        },
-                    )?;
-                    let tasks = coordinator.tasks(&run_id)?;
-                    let workspace_path = automation_workspace(state, &session_id.to_string())?;
-                    let worktree = cli_option(&command.arguments, "worktree")?.map(|path| {
-                        Ok::<_, anyhow::Error>(WorktreeAssignment {
-                            base_revision: required_cli_option(&command.arguments, "base-revision")?.to_string(),
-                            branch: required_cli_option(&command.arguments, "branch")?.to_string(),
-                            worktree_path: path.to_string(),
-                        })
-                    }).transpose()?;
-                    let cwd = worktree.as_ref().map(|value| value.worktree_path.clone()).unwrap_or_else(|| workspace_path.to_string_lossy().to_string());
-                    let mut launches = Vec::new();
-                    for dispatch in &schedule.dispatches {
-                        let task = tasks.iter().find(|task| task.id == dispatch.task_id)
-                            .with_context(|| format!("task not found for dispatch {}", dispatch.id))?;
-                        let agent = coordinator.register_agent(
-                            Uuid::new_v4(),
-                            RegisterAgentRequest {
-                                provider: AgentProvider::PtyCli,
-                                profile: cli_option(&command.arguments, "profile")?.map(str::to_string),
-                                workspace_path: workspace_path.to_string_lossy().to_string(),
-                                worktree_path: worktree.as_ref().map(|value| value.worktree_path.clone()),
-                                resumable: false,
-                            },
-                        )?;
-                        let pane_id = Uuid::new_v4();
-                        let pane = spawn_pane_for_session(
-                            Arc::clone(state),
-                            sessions_path.to_path_buf(),
-                            session_id,
-                            crate::protocol::PaneConfig {
-                                pane_id,
-                                shell: Some("cmd.exe".to_string()),
-                                args: vec!["/D".to_string(), "/S".to_string(), "/C".to_string(), command_line.clone()],
-                                cwd: Some(cwd.clone()),
-                                env: vec![
-                                    ("VIBELINK_RUN_ID".to_string(), run_id.clone()),
-                                    ("VIBELINK_TASK_ID".to_string(), task.id.clone()),
-                                    ("VIBELINK_DISPATCH_ID".to_string(), dispatch.id.clone()),
-                                    ("VIBELINK_AGENT_INSTANCE_ID".to_string(), agent.id.clone()),
-                                    ("VIBELINK_SESSION_ID".to_string(), session_id.to_string()),
-                                ],
-                                title: Some(task.title.clone()),
-                                icon: Some("bot".to_string()),
-                                profile_id: cli_option(&command.arguments, "profile")?.map(str::to_string),
-                                role: Some("orchestration-worker".to_string()),
-                                cols: 120,
-                                rows: 32,
-                            },
-                            None,
-                        )?;
-                        let bound = coordinator.bind_dispatch(
-                            Uuid::new_v4(),
-                            BindDispatchRequest {
-                                dispatch_id: dispatch.id.clone(),
-                                expected_task_revision: task.revision,
-                                agent_instance_id: agent.id,
-                                runtime_identity: format!("pane:{}:1", pane.id),
-                                pane_id: Some(pane.id.to_string()),
-                                process_generation: 1,
-                                worktree: worktree.clone(),
-                            },
-                        )?;
-                        launches.push(json!({ "pane": pane, "binding": bound }));
+                    if cli_option(&command.arguments, "worktree")?.is_some()
+                        || cli_option(&command.arguments, "base-revision")?.is_some()
+                        || cli_option(&command.arguments, "branch")?.is_some()
+                    {
+                        anyhow::bail!(
+                            "raw worktree paths and refs are not accepted; use --worktree-mode worktree"
+                        );
                     }
-                    persist_state(state, sessions_path)?;
-                    Ok(json!({ "schedule": schedule, "launches": launches }))
+                    let worktree_mode = match cli_option(&command.arguments, "worktree-mode")?
+                        .unwrap_or("worktree")
+                    {
+                        "worktree" => WorktreeMode::Worktree,
+                        "reuse" => WorktreeMode::Reuse,
+                        value => anyhow::bail!("unsupported --worktree-mode: {value}"),
+                    };
+                    let result = launch_ready_dispatches(
+                        state,
+                        sessions_path,
+                        coordinator,
+                        worktrees,
+                        outer_operation_id,
+                        DispatchLaunchRequest {
+                            run_id,
+                            expected_run_revision: expected_revision
+                                .context("--expected-revision is required")?,
+                            command: required_cli_option(&command.arguments, "command")?
+                                .to_string(),
+                            profile: cli_option(&command.arguments, "profile")?
+                                .map(str::to_string),
+                            worktree_mode,
+                        },
+                    )
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                    Ok(serde_json::to_value(result)?)
                 }
                 OrchestrationAction::GateList => {
                     Ok(serde_json::to_value(coordinator.gates(&run_id.context("--run-id is required")?)?)?)
                 }
                 OrchestrationAction::GateResolve => {
-                    Ok(serde_json::to_value(coordinator.resolve_gate(
-                        outer_operation_id,
-                        ResolveGateRequest {
-                            gate_id: required_cli_option(&command.arguments, "gate-id")?.to_string(),
-                            resolution: serde_json::json!(required_cli_option(&command.arguments, "resolution")?),
-                            expected_run_revision: expected_revision.context("--expected-revision is required")?,
-                        },
-                    )?)?)
+                    let request = ResolveGateRequest {
+                        gate_id: required_cli_option(&command.arguments, "gate-id")?.to_string(),
+                        resolution: json!({
+                            "decision": required_cli_option(&command.arguments, "resolution")?,
+                        }),
+                        expected_run_revision: expected_revision
+                            .context("--expected-revision is required")?,
+                    };
+                    let gate = coordinator.gate(&request.gate_id)?;
+                    if gate.status != GateStatus::Pending {
+                        let mutation = coordinator.resolve_gate(outer_operation_id, request)?;
+                        let resources = gate
+                            .dispatch_id
+                            .as_deref()
+                            .and_then(|dispatch_id| coordinator.cleanup_target_for_dispatch(dispatch_id).ok())
+                            .and_then(|target| target.resources)
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        return Ok(json!({
+                            "mutation": mutation,
+                            "resources": resources,
+                            "cleanupErrors": [],
+                        }));
+                    }
+                    validate_run_cleanup_revision(
+                        coordinator,
+                        &gate.run_id,
+                        request.expected_run_revision,
+                    )
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                    let decision = request
+                        .resolution
+                        .get("decision")
+                        .and_then(Value::as_str);
+                    let mut resources = Vec::new();
+                    let mut cleanup_errors = Vec::new();
+                    if gate.gate_type == "merge" && decision == Some("reject") {
+                        if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
+                            let target = coordinator.cleanup_target_for_dispatch(dispatch_id)?;
+                            let (resource, errors) = cleanup_dispatch_target(
+                                state,
+                                coordinator,
+                                worktrees,
+                                &target,
+                                "gate_reject",
+                                true,
+                            );
+                            if let Some(resource) = resource {
+                                resources.push(resource);
+                            }
+                            cleanup_errors.extend(errors);
+                            require_workers_stopped(&resources, &cleanup_errors)
+                                .map_err(|error| anyhow::anyhow!(error.message))?;
+                            persist_state(state, sessions_path)?;
+                        }
+                    }
+                    let mutation = coordinator.resolve_gate(outer_operation_id, request)?;
+                    Ok(json!({
+                        "mutation": mutation,
+                        "resources": resources,
+                        "cleanupErrors": cleanup_errors,
+                    }))
                 }
                 OrchestrationAction::GateCreate => {
                     let run_id = run_id.context("--run-id is required")?;
@@ -1892,6 +3172,7 @@ fn dispatch_message(
     tx: &Sender<DaemonToClient>,
     control: Arc<ControlPlane>,
     coordinator: Arc<CoordinatorService>,
+    worktrees: Arc<WorktreeManager>,
     automation: Arc<AutomationService>,
     remote: Arc<RemoteServer>,
     computer: SharedComputerHost,
@@ -2165,7 +3446,10 @@ fn dispatch_message(
             DaemonToClient::Reply {
                 req,
                 result: ReplyResult::Orchestration(orchestration_rpc_response(
+                    &state,
+                    sessions_path,
                     &coordinator,
+                    &worktrees,
                     operation_id,
                     &method,
                     &payload_json,
@@ -2182,6 +3466,7 @@ fn dispatch_message(
                 sessions_path,
                 &control,
                 &coordinator,
+                &worktrees,
                 &automation,
                 &remote,
                 &computer,
@@ -2429,8 +3714,36 @@ fn spawn_pane_for_session(
     state: SharedState,
     sessions_path: PathBuf,
     session_id: Uuid,
+    cfg: crate::protocol::PaneConfig,
+    attach_client: Option<Uuid>,
+) -> Result<crate::protocol::PaneMeta> {
+    spawn_pane_for_session_internal(state, sessions_path, session_id, cfg, attach_client, None)
+}
+
+fn spawn_orchestration_pane_for_session(
+    state: SharedState,
+    sessions_path: PathBuf,
+    session_id: Uuid,
+    cfg: crate::protocol::PaneConfig,
+    coordinator: Arc<CoordinatorService>,
+) -> Result<crate::protocol::PaneMeta> {
+    spawn_pane_for_session_internal(
+        state,
+        sessions_path,
+        session_id,
+        cfg,
+        None,
+        Some(coordinator),
+    )
+}
+
+fn spawn_pane_for_session_internal(
+    state: SharedState,
+    sessions_path: PathBuf,
+    session_id: Uuid,
     mut cfg: crate::protocol::PaneConfig,
     attach_client: Option<Uuid>,
+    coordinator: Option<Arc<CoordinatorService>>,
 ) -> Result<crate::protocol::PaneMeta> {
     lock_state(&state).pane_metas(session_id)?;
 
@@ -2451,9 +3764,6 @@ fn spawn_pane_for_session(
                 return Err(err);
             }
         };
-        // Attach before the reader thread exists so the client receives the
-        // pane's output live from the very first byte — a later AttachPane is
-        // then a no-op and never has to replay a snapshot into the emulator.
         if let Some(client_id) = attach_client {
             guard.attach_client_to_pane(client_id, pane_id);
         }
@@ -2462,7 +3772,16 @@ fn spawn_pane_for_session(
 
     thread::Builder::new()
         .name(format!("vibelink-pty-{pane_id}"))
-        .spawn(move || read_pane_loop(state, pane_id, reader, child, Arc::new(sessions_path)))?;
+        .spawn(move || {
+            read_pane_loop(
+                state,
+                pane_id,
+                reader,
+                child,
+                Arc::new(sessions_path),
+                coordinator,
+            )
+        })?;
 
     Ok(meta)
 }
@@ -2473,6 +3792,7 @@ fn read_pane_loop(
     mut reader: Box<dyn Read + Send>,
     child: SharedChild,
     sessions_path: Arc<PathBuf>,
+    coordinator: Option<Arc<CoordinatorService>>,
 ) {
     let mut buf = [0_u8; 65536];
     loop {
@@ -2499,6 +3819,16 @@ fn read_pane_loop(
     let senders = lock_state(&state).mark_exited(pane_id);
     for sender in senders {
         let _ = sender.send(DaemonToClient::PaneExited { pane_id, exit_code });
+    }
+    if let Some(coordinator) = coordinator {
+        if let Err(error) = coordinator.record_pane_exit(
+            Uuid::new_v4(),
+            &pane_id.to_string(),
+            exit_code,
+            orchestration_now_millis(),
+        ) {
+            warn!(?error, %pane_id, "failed to reconcile orchestration pane exit");
+        }
     }
     if let Err(err) = persist_state(&state, &sessions_path) {
         error!(?err, %pane_id, "failed to persist pane exit");

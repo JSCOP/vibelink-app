@@ -1,7 +1,7 @@
 import type { WorkspaceContentKind } from '../layout/workspaceContentModel'
 import type { LicenseStatus } from '../ipc/types'
 
-export const PRO_CONTENT_KINDS: readonly WorkspaceContentKind[] = ['browser', 'editor', 'explorer', 'workbench', 'agent', 'kanban', 'todo', 'diff']
+export const PRO_CONTENT_KINDS: readonly WorkspaceContentKind[] = ['browser', 'editor', 'explorer', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff']
 
 export function isProEntitled(status: LicenseStatus | null | undefined): boolean {
   return Boolean(status?.entitled)

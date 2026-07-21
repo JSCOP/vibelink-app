@@ -54,15 +54,19 @@ export function BrowserContentPanel({
   active,
   focused,
   workspaceVisible,
+  nativeSurfacesSuspended = false,
   onTitleChange,
   onDeliverAnnotation,
-}: BrowserContentPanelProps) {
+}: BrowserContentPanelProps & { nativeSurfacesSuspended?: boolean }) {
   const panes = useWorkspaceStore((state) => state.panes)
   const settings = useWorkspaceStore((state) => state.settings)
   const [initialState, setInitialState] = useState<BrowserContentState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [surfaceOwnerGeneration] = useState(nextSurfaceOwnerGeneration)
   const surfaceUpdateTail = useRef<Promise<void>>(Promise.resolve())
+  const latestSurfaceUpdateGeneration = useRef(0)
+  const lifecycleSubscribers = useRef(new Set<(event: BrowserLifecycleEvent) => void>())
+  const bufferedLifecycleEvents = useRef<BrowserLifecycleEvent[]>([])
 
   const liveAgentPanes = useMemo(() => Object.values(panes)
     .filter((pane) => pane.alive && isAgentPane(pane, settings))
@@ -87,15 +91,19 @@ export function BrowserContentPanel({
       return toPage(await invoke<BackendPage>('browser_reload', { pageId: targetPageId }))
     },
     async setSurfaceState(targetPageId, state) {
+      const updateGeneration = ++latestSurfaceUpdateGeneration.current
       const update = surfaceUpdateTail.current
         .catch(() => undefined)
-        .then(() => invoke('browser_set_surface', {
-          pageId: targetPageId,
-          bounds: state.bounds,
-          visible: state.visible,
-          focused: state.focused,
-          ownerGeneration: surfaceOwnerGeneration,
-        }))
+        .then(() => {
+          if (updateGeneration !== latestSurfaceUpdateGeneration.current) return
+          return invoke('browser_set_surface', {
+            pageId: targetPageId,
+            bounds: state.bounds,
+            visible: state.visible,
+            focused: state.focused,
+            ownerGeneration: surfaceOwnerGeneration,
+          })
+        })
         .then(() => undefined)
       surfaceUpdateTail.current = update.catch(() => undefined)
       await update
@@ -140,7 +148,12 @@ export function BrowserContentPanel({
       return invoke<BrowserCookieImportResult>('browser_import_cookies', { input: { ...input, workspaceId } })
     },
     async subscribeLifecycle(handler) {
-      return listen<BrowserLifecycleEvent>('browser-lifecycle', ({ payload }) => handler(payload))
+      lifecycleSubscribers.current.add(handler)
+      const buffered = bufferedLifecycleEvents.current.splice(0)
+      for (const event of buffered) handler(event)
+      return () => {
+        lifecycleSubscribers.current.delete(handler)
+      }
     },
     async subscribeDesignGrabs(handler) {
       return listen<RawDesignGrab>('browser-design-grab', ({ payload }) => {
@@ -150,21 +163,45 @@ export function BrowserContentPanel({
   }), [surfaceOwnerGeneration, workspaceId])
 
   useEffect(() => {
+    const lifecycleSubscriberSet = lifecycleSubscribers.current
     let cancelled = false
-    void invoke<BrowserProjection>('browser_initialize', { workspaceId })
-      .then((projection) => {
-        if (cancelled) return
-        const page = projection.pages.find((candidate) => candidate.id === pageId)
-        const profile = projection.profiles.find((candidate) => candidate.id === profileId)
-        if (!page || page.workspaceId !== workspaceId) throw new Error('The native browser page is not available in this workspace.')
-        if (!profile || page.profileId !== profile.id) throw new Error('The browser content profile does not match its native page.')
-        setInitialState(toContentState(projection, toPage(page), toProfile(profile)))
-        setError(null)
+    let stopLifecycle: (() => void) | undefined
+    const initialize = async () => {
+      const stop = await listen<BrowserLifecycleEvent>('browser-lifecycle', ({ payload }) => {
+        if (payload.pageId !== pageId) return
+        const subscribers = [...lifecycleSubscribers.current]
+        if (subscribers.length === 0) {
+          bufferedLifecycleEvents.current.push(payload)
+          if (bufferedLifecycleEvents.current.length > 64) bufferedLifecycleEvents.current.shift()
+          return
+        }
+        for (const subscriber of subscribers) subscriber(payload)
       })
-      .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
-      })
-    return () => { cancelled = true }
+      if (cancelled) {
+        stop()
+        return
+      }
+      stopLifecycle = stop
+      const projection = await invoke<BrowserProjection>('browser_initialize', { workspaceId })
+      if (cancelled) return
+      const page = projection.pages.find((candidate) => candidate.id === pageId)
+      const profile = projection.profiles.find((candidate) => candidate.id === profileId)
+      if (!page || page.workspaceId !== workspaceId) throw new Error('The native browser page is not available in this workspace.')
+      if (!profile || page.profileId !== profile.id) throw new Error('The browser content profile does not match its native page.')
+      setInitialState(toContentState(projection, toPage(page), toProfile(profile)))
+      setError(null)
+    }
+    void initialize().catch((cause) => {
+      stopLifecycle?.()
+      stopLifecycle = undefined
+      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause))
+    })
+    return () => {
+      cancelled = true
+      stopLifecycle?.()
+      lifecycleSubscriberSet.clear()
+      bufferedLifecycleEvents.current = []
+    }
   }, [pageId, profileId, workspaceId])
 
   if (error) return <div className="browser-panel-error">{error}</div>
@@ -182,6 +219,7 @@ export function BrowserContentPanel({
       active={active}
       focused={focused}
       workspaceVisible={workspaceVisible}
+      nativeSurfacesSuspended={nativeSurfacesSuspended}
       liveAgentPanes={liveAgentPanes}
       onTitleChange={onTitleChange}
       onDeliverAnnotation={onDeliverAnnotation}
@@ -193,7 +231,7 @@ function toContentState(projection: BrowserProjection, page: BrowserPage, profil
   return {
     profile,
     page,
-    addressDraft: page.url,
+    addressDraft: page.url === 'about:blank' ? '' : page.url,
     designMode: false,
     annotation: null,
     annotationComment: '',

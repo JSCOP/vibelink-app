@@ -25,6 +25,7 @@
   justify-content: center;
   padding: 24px 16px;
   text-align: center;
+  position: relative;
 }
 
 .explorer-viewer-empty-badge {
@@ -49,6 +50,43 @@
   color: var(--vibelink-muted);
   font-size: 11px;
   max-width: 260px;
+}
+
+.explorer-viewer-empty > .explorer-viewer-empty-context {
+  font-family: var(--vibelink-mono);
+  font-size: 9.5px;
+  margin-top: 6px;
+  max-width: min(100%, 360px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-viewer-close {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 22px;
+}
+
+.explorer-viewer-close:hover {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.explorer-viewer-close:focus-visible {
+  border-color: var(--vibelink-focus);
+  outline: none;
 }
 
 /* Header: file identity + actions */
@@ -114,6 +152,7 @@
   display: flex;
   flex: none;
   gap: 2px;
+  min-width: 0;
 }
 
 .explorer-viewer-actions > button {
@@ -285,6 +324,7 @@
 .explorer-binary-card-actions {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
   margin-top: 8px;
 }
 
@@ -494,17 +534,60 @@
 
 /* Narrow panes — query the viewer pane itself, not the window */
 
-@container explorer-viewer (max-width: 380px) {
+@container explorer-viewer (max-width: 520px) {
   .explorer-viewer-header {
+    align-items: flex-start;
     padding: 4px 6px 4px 8px;
   }
 
-  .explorer-viewer-path {
-    display: none;
+  .explorer-viewer-title {
+    min-width: 84px;
+  }
+
+  .explorer-viewer-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 104px;
   }
 
   .explorer-viewer-meta {
     padding: 3px 8px;
+  }
+
+  .explorer-viewer-meta > span:first-child,
+  .explorer-viewer-meta > span:nth-child(2) {
+    max-width: calc(50% - 8px);
+  }
+
+  .explorer-image-toolbar {
+    gap: 4px;
+    padding-inline: 8px;
+  }
+
+  .explorer-viewer-actions > .explorer-viewer-primary-action > span {
+    display: none;
+  }
+
+  .explorer-viewer-actions > .explorer-viewer-primary-action {
+    padding: 0;
+    width: 22px;
+  }
+}
+
+@container explorer-viewer (max-width: 300px) {
+  .explorer-viewer-actions {
+    max-width: 72px;
+  }
+
+  .explorer-viewer-meta > span:first-child,
+  .explorer-viewer-meta > span:nth-child(2) {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .explorer-viewer-meta > span:nth-child(2)::before {
+    content: none;
+    margin: 0;
   }
 
   .explorer-image-toolbar > span {
@@ -515,12 +598,7 @@
     justify-content: flex-end;
   }
 
-  .explorer-viewer-actions > .explorer-viewer-primary-action > span {
-    display: none;
-  }
-
-  .explorer-viewer-actions > .explorer-viewer-primary-action {
-    padding: 0;
-    width: 22px;
+  .explorer-binary-card {
+    padding-inline: 14px;
   }
 }

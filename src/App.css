@@ -542,6 +542,55 @@ button {
   box-shadow: var(--vibelink-shadow);
 }
 
+.workspace-view-launcher {
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.workspace-view-menu {
+  background: var(--vibelink-dialog);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 4px;
+  box-shadow: var(--vibelink-shadow);
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  position: fixed;
+  width: 200px;
+}
+
+.workspace-view-menu button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--vibelink-text);
+  display: flex;
+  font: 12px/1 var(--vibelink-sans);
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 28px;
+  padding: 0 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-view-menu button:hover,
+.workspace-view-menu button:focus-visible {
+  background: var(--vibelink-hover);
+  border-color: var(--vibelink-border-soft);
+  outline: none;
+}
+
+.workspace-view-menu button.active {
+  background: var(--vibelink-accent-soft);
+  color: var(--vibelink-accent);
+}
+
+.workspace-view-menu-check {
+  margin-left: auto;
+}
+
 .new-terminal-popover-header,
 .new-terminal-summary,
 .new-terminal-legend {
@@ -5772,4 +5821,38 @@ button.git-window-primary-action,
 
 .dirty-editor-dialog footer {
   justify-content: flex-end;
+}
+
+/* Global app-chrome stacking contract. Dockview/native surfaces stay below
+   launchers, while every app dialog remains the final interaction layer. */
+.topbar {
+  z-index: calc(var(--z-overlay) + 1);
+}
+
+.topbar button,
+.topbar select,
+.workspace-view-launcher,
+.new-terminal-launcher,
+.workspace-view-menu,
+.new-terminal-popover {
+  -webkit-app-region: no-drag;
+}
+
+.workspace-view-menu,
+.new-terminal-popover {
+  z-index: calc(var(--z-overlay) + 2);
+}
+
+.settings-backdrop,
+.workspace-create-backdrop,
+.startup-workspace-backdrop,
+.capture-annotator-backdrop,
+.setup-wizard-backdrop,
+.git-clone-backdrop {
+  z-index: calc(var(--z-modal) + 10);
+}
+
+.vibelink-quick-pick-backdrop,
+.dirty-editor-backdrop {
+  z-index: calc(var(--z-modal) + 20);
 }

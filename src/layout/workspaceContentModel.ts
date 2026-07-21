@@ -11,6 +11,7 @@ export type WorkspaceContentKind =
   | 'explorer'
   | 'workbench'
   | 'agent'
+  | 'orchestration'
   | 'kanban'
   | 'todo'
   | 'diff'
@@ -19,7 +20,7 @@ export type WorkspaceContentParams =
   | { schema: 1; kind: 'terminal'; instanceId: string; title: string; icon: string; paneId: string }
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
-  | { schema: 1; kind: 'explorer' | 'workbench' | 'agent' | 'kanban' | 'todo' | 'diff'; instanceId: string; title: string; icon: string }
+  | { schema: 1; kind: 'explorer' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff'; instanceId: string; title: string; icon: string }
 
 export type WorkspaceLayoutEnvelope = {
   version: 3
@@ -35,6 +36,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
   explorer: 'singleton',
   workbench: 'singleton',
   agent: 'singleton',
+  orchestration: 'singleton',
   kanban: 'singleton',
   todo: 'singleton',
   diff: 'singleton',
@@ -44,6 +46,7 @@ const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
   explorer: true,
   workbench: true,
   agent: true,
+  orchestration: true,
   kanban: true,
   todo: true,
   diff: true,
@@ -55,6 +58,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
   explorer: true,
   workbench: true,
   agent: true,
+  orchestration: true,
   kanban: true,
   todo: true,
   diff: true,
@@ -117,6 +121,7 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
   const grid = parsed.dockview.grid
   if (!isRecord(panels) || !isRecord(grid) || !isRecord(grid.root)) return freshWorkspaceLayoutEnvelope()
 
+  const panelIds = new Set(Object.keys(panels))
   const resources = new Set<string>()
   for (const [panelId, panel] of Object.entries(panels)) {
     if (!isRecord(panel)) return freshWorkspaceLayoutEnvelope()
@@ -124,6 +129,7 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
     if (
       !params
       || panelId !== workspaceContentPanelId(params)
+      || panel.id !== panelId
       || panel.contentComponent !== params.kind
       || panel.tabComponent !== 'workspaceContentTab'
       || panel.renderer !== 'always'
@@ -132,6 +138,15 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
     if (resources.has(resourceKey)) return freshWorkspaceLayoutEnvelope()
     resources.add(resourceKey)
   }
+
+  if (!isPositiveNumber(grid.width) || !isPositiveNumber(grid.height) || !isOrientation(grid.orientation)) return freshWorkspaceLayoutEnvelope()
+  const referencedPanels = new Set<string>()
+  const groupIds = new Set<string>()
+  if (!validateGridNode(grid.root, panelIds, referencedPanels, groupIds)) return freshWorkspaceLayoutEnvelope()
+  if (!validateAdditionalGroups(parsed.dockview, panelIds, referencedPanels, groupIds)) return freshWorkspaceLayoutEnvelope()
+  if (referencedPanels.size !== panelIds.size || [...panelIds].some((panelId) => !referencedPanels.has(panelId))) return freshWorkspaceLayoutEnvelope()
+  if (grid.maximizedNode !== undefined && !validateMaximizedNode(grid.root, grid.maximizedNode)) return freshWorkspaceLayoutEnvelope()
+  if (parsed.dockview.activeGroup !== undefined && (typeof parsed.dockview.activeGroup !== 'string' || !groupIds.has(parsed.dockview.activeGroup))) return freshWorkspaceLayoutEnvelope()
 
   return { version: 3, dockview: parsed.dockview as unknown as SerializedDockview }
 }
@@ -161,6 +176,107 @@ function containsControlCharacter(value: string): boolean {
 
 function readDisplayString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null
+}
+
+function validateGridNode(
+  node: unknown,
+  panelIds: Set<string>,
+  referencedPanels: Set<string>,
+  groupIds: Set<string>,
+): boolean {
+  if (!isRecord(node) || !isPositiveNumber(node.size)) return false
+  if (node.visible !== undefined && typeof node.visible !== 'boolean') return false
+  if (node.type === 'leaf') return validateGroupState(node.data, panelIds, referencedPanels, groupIds)
+  if (node.type !== 'branch' || !Array.isArray(node.data) || node.data.length === 0) return false
+  return node.data.every((child) => validateGridNode(child, panelIds, referencedPanels, groupIds))
+}
+
+function validateGroupState(
+  value: unknown,
+  panelIds: Set<string>,
+  referencedPanels: Set<string>,
+  groupIds: Set<string>,
+): boolean {
+  if (!isRecord(value) || typeof value.id !== 'string' || !value.id || groupIds.has(value.id) || !Array.isArray(value.views) || value.views.length === 0) return false
+  const localViews = new Set<string>()
+  for (const panelId of value.views) {
+    if (typeof panelId !== 'string' || !panelIds.has(panelId) || localViews.has(panelId) || referencedPanels.has(panelId)) return false
+    localViews.add(panelId)
+  }
+  if (value.activeView !== undefined && (typeof value.activeView !== 'string' || !localViews.has(value.activeView))) return false
+  groupIds.add(value.id)
+  for (const panelId of localViews) referencedPanels.add(panelId)
+  return true
+}
+
+function validateAdditionalGroups(
+  dockview: Record<string, unknown>,
+  panelIds: Set<string>,
+  referencedPanels: Set<string>,
+  groupIds: Set<string>,
+): boolean {
+  if (dockview.floatingGroups !== undefined) {
+    if (!Array.isArray(dockview.floatingGroups)) return false
+    for (const entry of dockview.floatingGroups) {
+      if (!isRecord(entry) || !validateAnchoredBox(entry.position) || !validateGroupState(entry.data, panelIds, referencedPanels, groupIds)) return false
+    }
+  }
+  if (dockview.popoutGroups !== undefined) {
+    if (!Array.isArray(dockview.popoutGroups)) return false
+    for (const entry of dockview.popoutGroups) {
+      if (!isRecord(entry) || !(entry.position === null || validateBox(entry.position)) || !validateGroupState(entry.data, panelIds, referencedPanels, groupIds)) return false
+      if (entry.gridReferenceGroup !== undefined && typeof entry.gridReferenceGroup !== 'string') return false
+      if (entry.url !== undefined && typeof entry.url !== 'string') return false
+    }
+  }
+  if (dockview.edgeGroups !== undefined) {
+    if (!isRecord(dockview.edgeGroups)) return false
+    for (const position of ['top', 'bottom', 'left', 'right']) {
+      const entry = dockview.edgeGroups[position]
+      if (entry === undefined) continue
+      if (!isRecord(entry) || !isPositiveNumber(entry.size) || typeof entry.visible !== 'boolean') return false
+      if (entry.collapsed !== undefined && typeof entry.collapsed !== 'boolean') return false
+      if (entry.group !== undefined && !validateGroupState(entry.group, panelIds, referencedPanels, groupIds)) return false
+    }
+  }
+  return true
+}
+
+function validateMaximizedNode(root: unknown, value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.location) || value.location.length === 0) return false
+  let node = root
+  for (const index of value.location) {
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || !isRecord(node) || node.type !== 'branch' || !Array.isArray(node.data) || index >= node.data.length) return false
+    node = node.data[index]
+  }
+  return isRecord(node) && node.type === 'leaf'
+}
+
+function validateAnchoredBox(value: unknown): boolean {
+  if (!isRecord(value) || !isPositiveNumber(value.width) || !isPositiveNumber(value.height)) return false
+  const horizontal = isFiniteNumber(value.left) !== isFiniteNumber(value.right)
+  const vertical = isFiniteNumber(value.top) !== isFiniteNumber(value.bottom)
+  return horizontal && vertical
+}
+
+function validateBox(value: unknown): boolean {
+  return isRecord(value)
+    && isFiniteNumber(value.left)
+    && isFiniteNumber(value.top)
+    && isPositiveNumber(value.width)
+    && isPositiveNumber(value.height)
+}
+
+function isOrientation(value: unknown): boolean {
+  return value === 'HORIZONTAL' || value === 'VERTICAL'
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
 }
 
 function parseJson(raw: string | null | undefined): unknown {

@@ -24,6 +24,11 @@ const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 let workspaceSessionEpoch = 0
 let workspaceSessionReadyEpoch = 0
 let workspaceSessionTargetId: string | null = null
+let workspaceInitialPanePending: { sessionId: string; epoch: number } | null = null
+
+export function isWorkspaceInitialPanePending(sessionId: string, epoch: number): boolean {
+  return workspaceInitialPanePending?.sessionId === sessionId && workspaceInitialPanePending.epoch === epoch
+}
 
 export function getWorkspaceSessionEpoch(): number {
   return workspaceSessionEpoch
@@ -35,6 +40,14 @@ export function getWorkspaceSessionReadyEpoch(): number {
 
 export function getWorkspaceSessionTargetId(): string | null {
   return workspaceSessionTargetId
+}
+
+export function resetWorkspaceSessionOwnershipForTests(): void {
+  if (import.meta.env.MODE !== 'test') throw new Error('Workspace session ownership can only be reset in tests.')
+  workspaceSessionEpoch = 0
+  workspaceSessionReadyEpoch = 0
+  workspaceSessionTargetId = null
+  workspaceInitialPanePending = null
 }
 
 
@@ -250,15 +263,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (workspaceSessionEpoch !== requestEpoch || workspaceSessionTargetId !== sessionId) return { layoutJson: null, panes: [] }
     const attached = await get().attachSession(sessionId, requestEpoch)
     if (workspaceSessionEpoch !== requestEpoch || get().activeSessionId !== sessionId) return attached
-    if (attached.panes.length === 0) {
-      try {
-        await get().spawnPane(sessionId)
-      } catch (error) {
-        if (workspaceSessionEpoch !== requestEpoch || get().activeSessionId !== sessionId) return attached
-        throw error
-      }
-    }
-    if (workspaceSessionEpoch !== requestEpoch || get().activeSessionId !== sessionId) return attached
     await get().refreshSessions()
     return attached
   },
@@ -277,6 +281,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return attached
     }
     const panes = Object.fromEntries(attached.panes.map((pane) => [pane.id, pane]))
+    workspaceInitialPanePending = attached.panes.length === 0 ? { sessionId, epoch } : null
     const workspaceLayout = normalizeWorkspaceLayoutState(attached.layoutJson)
     window.localStorage.setItem('vibelink:lastActiveSessionId', sessionId)
     workspaceSessionReadyEpoch = epoch
@@ -291,6 +296,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }))
     if (previousSessionId && previousSessionId !== sessionId) {
       void invoke('detach_session', { sessionId: previousSessionId }).catch(() => {})
+    }
+    if (attached.panes.length === 0
+      && workspaceSessionEpoch === epoch
+      && workspaceSessionTargetId === sessionId
+      && get().activeSessionId === sessionId) {
+      try {
+        await get().spawnPane(sessionId)
+      } finally {
+        if (isWorkspaceInitialPanePending(sessionId, epoch)) workspaceInitialPanePending = null
+      }
     }
     if (get().license.ready && get().license.status?.entitled) {
       const boardJson = await invoke<string>('board_read', { sessionId })
@@ -317,7 +332,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       })
     }
     await get().attachSession(created.id)
-    if (get().activeSessionId === created.id) await get().spawnPane(created.id, { profileId })
     persistCurrentKanban(get())
     return created
   },
@@ -402,9 +416,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!currentSessionId || currentSessionId === sessionId || !sessions.some((session) => session.id === currentSessionId)) {
       const next = sessions[0]
       await get().attachSession(next.id)
-      if (get().activeSessionId === next.id && Object.keys(get().panes).length === 0) {
-        await get().spawnPane(next.id)
-      }
     }
   },
 
@@ -440,6 +451,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
       throw new Error('Workspace changed while the terminal was opening.')
     }
+    if (isWorkspaceInitialPanePending(sessionId, sessionEpoch)) workspaceInitialPanePending = null
     set((state) => state.activeSessionId === sessionId
       ? { panes: { ...state.panes, [pane.id]: pane } }
       : {})

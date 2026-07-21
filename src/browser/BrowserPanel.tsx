@@ -1,15 +1,19 @@
 import './BrowserPanel.css'
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import { activeSurfaceVisible, browserPanelReducer, createBrowserPanelState } from './state'
 import type {
   BrowserAnnotation,
+  BrowserCertificatePrompt,
   BrowserAnnotationDestination,
   BrowserContentController,
   BrowserContentState,
   BrowserCookieImportSource,
+  BrowserDialogPrompt,
   BrowserDeviceMetrics,
+  BrowserLifecycleEvent,
   BrowserPage,
+  BrowserPermissionPrompt,
   PhysicalBounds,
 } from './types'
 
@@ -21,6 +25,7 @@ type BrowserPanelProps = {
   active: boolean
   focused: boolean
   workspaceVisible: boolean
+  nativeSurfacesSuspended?: boolean
   liveAgentPanes?: LiveAgentPane[]
   onStateChange?: (state: BrowserContentState) => void
   onError?: (error: string) => void
@@ -34,12 +39,77 @@ const devicePresets: Record<string, BrowserDeviceMetrics | null> = {
   tablet: { width: 820, height: 1180, deviceScaleFactor: 2, mobile: true },
 }
 
+const POST_ACTIVATION_MEASURE_FRAMES = 8
+
+function scheduleFrame(callback: FrameRequestCallback): number {
+  if (typeof window.requestAnimationFrame === 'function') return window.requestAnimationFrame(callback)
+  return window.setTimeout(() => callback(window.performance.now()), 16)
+}
+
+function cancelFrame(handle: number): void {
+  if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(handle)
+  else window.clearTimeout(handle)
+}
+
+function sameBounds(left: PhysicalBounds | null, right: PhysicalBounds | null): boolean {
+  return left === right || (left !== null && right !== null
+    && left.x === right.x
+    && left.y === right.y
+    && left.width === right.width
+    && left.height === right.height
+    && left.scaleFactorMilli === right.scaleFactorMilli)
+}
+
+function lifecycleDetail(event: BrowserLifecycleEvent): Record<string, unknown> | null {
+  if (!event.detail) return null
+  try {
+    const value: unknown = JSON.parse(event.detail)
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+function permissionPrompt(event: BrowserLifecycleEvent): BrowserPermissionPrompt | null {
+  if (event.kind !== 'permission_requested') return null
+  const detail = lifecycleDetail(event)
+  if (typeof detail?.requestId !== 'string' || typeof detail.permission !== 'string') return null
+  return { id: detail.requestId, pageId: event.pageId, origin: event.url ?? '', permission: detail.permission }
+}
+
+function certificatePrompt(event: BrowserLifecycleEvent): BrowserCertificatePrompt | null {
+  if (event.kind !== 'certificate_error') return null
+  const detail = lifecycleDetail(event)
+  if (typeof detail?.requestId !== 'string' || typeof detail.errorCode !== 'string') return null
+  return { id: detail.requestId, pageId: event.pageId, origin: event.url ?? '', errorCode: detail.errorCode }
+}
+
+function dialogPrompt(event: BrowserLifecycleEvent): BrowserDialogPrompt | null {
+  if (event.kind !== 'dialog_requested') return null
+  const detail = lifecycleDetail(event)
+  const kind = detail?.kind
+  if (typeof detail?.requestId !== 'string'
+    || typeof detail.message !== 'string'
+    || !['alert', 'confirm', 'prompt', 'before_unload'].includes(String(kind))) return null
+  return {
+    id: detail.requestId,
+    pageId: event.pageId,
+    origin: event.url ?? '',
+    kind: kind as BrowserDialogPrompt['kind'],
+    message: detail.message,
+    defaultText: typeof detail.defaultText === 'string' ? detail.defaultText : null,
+  }
+}
+
 export function BrowserPanel({
   controller,
   initialState,
   active,
   focused,
   workspaceVisible,
+  nativeSurfacesSuspended = false,
   liveAgentPanes = [],
   onStateChange,
   onError,
@@ -55,10 +125,33 @@ export function BrowserPanel({
   const [cookieConsent, setCookieConsent] = useState(false)
   const [cookieImportStatus, setCookieImportStatus] = useState<string | null>(null)
   const [operationError, setOperationError] = useState<string | null>(null)
+  const [navigationActionPending, setNavigationActionPending] = useState(false)
+  const addressInput = useRef<HTMLInputElement>(null)
   const surfaceHost = useRef<HTMLDivElement>(null)
+  const surfaceEpoch = useRef(0)
+  const activationRaf = useRef<number | null>(null)
+  const resizeRaf = useRef<number | null>(null)
+  const mounted = useRef(true)
+  const navigationActionPendingRef = useRef(false)
+  const authoritativeGeneration = useRef(initialState.page.navigationGeneration)
+  const latestBounds = useRef<PhysicalBounds | null>(state.surfaceBounds)
+  const lastPublishedSurface = useRef<{ bounds: PhysicalBounds | null; visible: boolean; focused: boolean } | null>(null)
   const page = state.page
-  const pendingPromptCount = state.permissionQueue.length + state.certificateQueue.length + state.dialogQueue.length
-  const panelVisible = active && workspaceVisible && activeSurfaceVisible(state) && !overflowOpen && !cookieImportOpen && pendingPromptCount === 0
+  const pendingPromptCount: number = state.permissionQueue.length + state.certificateQueue.length + state.dialogQueue.length
+  const navigationBlocked = navigationActionPending || page.loadState === 'loading'
+  const domSurfaceBlocker = overflowOpen || cookieImportOpen || pendingPromptCount > 0 || state.annotation !== null
+  const panelVisible = active
+    && workspaceVisible
+    && !nativeSurfacesSuspended
+    && activeSurfaceVisible(state)
+    && !domSurfaceBlocker
+  const panelVisibleRef = useRef(false)
+  const focusedRef = useRef(false)
+
+  useLayoutEffect(() => {
+    panelVisibleRef.current = panelVisible
+    focusedRef.current = focused && page.url !== 'about:blank'
+  }, [focused, page.url, panelVisible])
 
   useEffect(() => onStateChange?.(state), [onStateChange, state])
   useEffect(() => onTitleChange?.(page.title || 'Browser'), [onTitleChange, page.title])
@@ -69,44 +162,148 @@ export function BrowserPanel({
     onError?.(message)
   }, [onError])
 
-  const measureSurface = useCallback(() => {
+  const measureSurface = useCallback((): PhysicalBounds | null => {
     const element = surfaceHost.current
-    if (!element) return
+    if (!element || !element.isConnected || element.getClientRects().length === 0) return null
+    const hostStyle = window.getComputedStyle(element)
+    if (hostStyle.display === 'none' || hostStyle.visibility === 'hidden') return null
     const rectangle = element.getBoundingClientRect()
+    if (![rectangle.left, rectangle.top, rectangle.right, rectangle.bottom, rectangle.width, rectangle.height].every(Number.isFinite)
+      || rectangle.width <= 0
+      || rectangle.height <= 0) return null
+
+    let left = Math.max(0, rectangle.left)
+    let top = Math.max(0, rectangle.top)
+    let right = Math.min(window.innerWidth, rectangle.right)
+    let bottom = Math.min(window.innerHeight, rectangle.bottom)
+    for (let ancestor = element.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
+      const style = window.getComputedStyle(ancestor)
+      if (style.display === 'none' || style.visibility === 'hidden') return null
+      const clipsX = style.overflowX !== 'visible'
+      const clipsY = style.overflowY !== 'visible'
+      if (!clipsX && !clipsY) continue
+      const clip = ancestor.getBoundingClientRect()
+      if (clipsX) {
+        left = Math.max(left, clip.left)
+        right = Math.min(right, clip.right)
+      }
+      if (clipsY) {
+        top = Math.max(top, clip.top)
+        bottom = Math.min(bottom, clip.bottom)
+      }
+    }
+    if (right <= left || bottom <= top) return null
+
     const scale = window.devicePixelRatio || 1
-    const bounds: PhysicalBounds | null = rectangle.width > 0 && rectangle.height > 0
-      ? {
-          x: Math.round(rectangle.left * scale),
-          y: Math.round(rectangle.top * scale),
-          width: Math.max(1, Math.round(rectangle.width * scale)),
-          height: Math.max(1, Math.round(rectangle.height * scale)),
-          scaleFactorMilli: Math.round(scale * 1000),
-        }
-      : null
-    dispatch({ type: 'surfaceBoundsChanged', bounds })
+    const x = Math.ceil(left * scale)
+    const y = Math.ceil(top * scale)
+    const physicalRight = Math.floor(right * scale)
+    const physicalBottom = Math.floor(bottom * scale)
+    if (physicalRight <= x || physicalBottom <= y) return null
+    return {
+      x,
+      y,
+      width: physicalRight - x,
+      height: physicalBottom - y,
+      scaleFactorMilli: Math.max(1, Math.round(scale * 1000)),
+    }
   }, [])
 
-  useEffect(() => {
-    measureSurface()
-    const element = surfaceHost.current
-    if (!element || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(measureSurface)
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [measureSurface])
+  const publishSurface = useCallback((bounds: PhysicalBounds | null, epoch: number, force = false): Promise<void> => {
+    if (!mounted.current || epoch !== surfaceEpoch.current) return Promise.resolve()
+    const visible = panelVisibleRef.current && bounds !== null
+    const next = { bounds, visible, focused: visible && focusedRef.current }
+    const boundsChanged = !sameBounds(latestBounds.current, bounds)
+    latestBounds.current = bounds
+    if (boundsChanged) dispatch({ type: 'surfaceBoundsChanged', bounds })
+    const previous = lastPublishedSurface.current
+    if (!force && previous
+      && sameBounds(previous.bounds, next.bounds)
+      && previous.visible === next.visible
+      && previous.focused === next.focused) return Promise.resolve()
+    lastPublishedSurface.current = next
+    return controller.setSurfaceState(page.id, next)
+      .then(() => {
+        if (mounted.current && epoch === surfaceEpoch.current) dispatch({ type: 'surfaceVisibilityChanged', visible })
+      })
+      .catch((error) => {
+        if (epoch === surfaceEpoch.current) lastPublishedSurface.current = null
+        if (mounted.current && epoch === surfaceEpoch.current) reportError(error)
+        throw error
+      })
+  }, [controller, page.id, reportError])
+
+  useLayoutEffect(() => {
+    const epoch = ++surfaceEpoch.current
+    if (activationRaf.current !== null) cancelFrame(activationRaf.current)
+    void publishSurface(null, epoch, true).catch(() => undefined)
+    if (!panelVisible) return
+    let remaining = POST_ACTIVATION_MEASURE_FRAMES
+    const measureFrame = () => {
+      if (!mounted.current || epoch !== surfaceEpoch.current) return
+      void publishSurface(measureSurface(), epoch).catch(() => undefined)
+      remaining -= 1
+      if (remaining > 0) activationRaf.current = scheduleFrame(measureFrame)
+    }
+    activationRaf.current = scheduleFrame(measureFrame)
+    return () => {
+      if (activationRaf.current !== null) cancelFrame(activationRaf.current)
+      activationRaf.current = null
+    }
+  }, [measureSurface, panelVisible, publishSurface])
 
   useEffect(() => {
-    const visible = panelVisible && state.surfaceBounds !== null
-    void controller.setSurfaceState(page.id, {
-      bounds: state.surfaceBounds,
-      visible,
-      focused: visible && focused,
+    const element = surfaceHost.current
+    if (!element) return
+    const scheduleMeasurement = () => {
+      if (resizeRaf.current !== null) cancelFrame(resizeRaf.current)
+      const epoch = surfaceEpoch.current
+      // A native child is not clipped by DOM ancestors. Hide it synchronously in the
+      // serialized surface queue before accepting any geometry that may have moved.
+      void publishSurface(null, epoch, true).catch(() => undefined)
+      resizeRaf.current = scheduleFrame(() => {
+        resizeRaf.current = null
+        if (!mounted.current || epoch !== surfaceEpoch.current) return
+        void publishSurface(panelVisibleRef.current ? measureSurface() : null, epoch).catch(() => undefined)
+      })
+    }
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleMeasurement)
+    for (let target: Element | null = element; observer && target && target !== document.body; target = target.parentElement) observer.observe(target)
+    const mutationObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(scheduleMeasurement)
+    for (let target = element.parentElement; mutationObserver && target && target !== document.body; target = target.parentElement) {
+      mutationObserver.observe(target, { attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'] })
+    }
+    window.addEventListener('resize', scheduleMeasurement)
+    window.addEventListener('scroll', scheduleMeasurement, true)
+    return () => {
+      observer?.disconnect()
+      mutationObserver?.disconnect()
+      window.removeEventListener('resize', scheduleMeasurement)
+      window.removeEventListener('scroll', scheduleMeasurement, true)
+      if (resizeRaf.current !== null) cancelFrame(resizeRaf.current)
+      resizeRaf.current = null
+    }
+  }, [measureSurface, publishSurface])
+
+  useEffect(() => {
+    const epoch = surfaceEpoch.current
+    void publishSurface(latestBounds.current, epoch, true).catch(() => undefined)
+  }, [focused, page.url, publishSurface])
+
+  useEffect(() => {
+    if (!active || !workspaceVisible || nativeSurfacesSuspended || page.url !== 'about:blank') return
+    const frame = scheduleFrame(() => {
+      addressInput.current?.focus()
+      addressInput.current?.select()
     })
-      .then(() => dispatch({ type: 'surfaceVisibilityChanged', visible }))
-      .catch(reportError)
-  }, [controller, focused, page.id, panelVisible, reportError, state.surfaceBounds])
+    return () => cancelFrame(frame)
+  }, [active, nativeSurfacesSuspended, page.id, page.navigationGeneration, page.url, workspaceVisible])
 
   useEffect(() => () => {
+    mounted.current = false
+    surfaceEpoch.current += 1
+    if (activationRaf.current !== null) cancelFrame(activationRaf.current)
+    if (resizeRaf.current !== null) cancelFrame(resizeRaf.current)
     void controller.setSurfaceState(page.id, { bounds: null, visible: false, focused: false }).catch(() => undefined)
   }, [controller, page.id])
 
@@ -114,7 +311,22 @@ export function BrowserPanel({
     if (!controller.subscribeLifecycle) return
     let cancelled = false
     let unsubscribe: (() => void) | undefined
-    void controller.subscribeLifecycle((event) => dispatch({ type: 'lifecycleReceived', event }))
+    void controller.subscribeLifecycle((event) => {
+      if (cancelled) return
+      if (event.pageId !== page.id || event.navigationGeneration < authoritativeGeneration.current) return
+      authoritativeGeneration.current = Math.max(authoritativeGeneration.current, event.navigationGeneration)
+      dispatch({ type: 'lifecycleReceived', event })
+      const permission = permissionPrompt(event)
+      if (permission) dispatch({ type: 'permissionQueued', request: permission })
+      const certificate = certificatePrompt(event)
+      if (certificate) dispatch({ type: 'certificateQueued', request: certificate })
+      const dialog = dialogPrompt(event)
+      if (dialog) dispatch({ type: 'dialogQueued', request: dialog })
+      if (event.kind === 'navigation_finished' || event.kind === 'navigation_failed') {
+        navigationActionPendingRef.current = false
+        setNavigationActionPending(false)
+      }
+    })
       .then((stop) => {
         if (cancelled) stop()
         else unsubscribe = stop
@@ -124,7 +336,7 @@ export function BrowserPanel({
       cancelled = true
       unsubscribe?.()
     }
-  }, [controller, reportError])
+  }, [controller, page.id, reportError])
 
   useEffect(() => {
     if (!controller.subscribeDesignGrabs) return
@@ -156,17 +368,21 @@ export function BrowserPanel({
 
   const navigateTo = (input: string) => {
     const normalized = input.trim()
-    if (!normalized) return
-    const generation = page.navigationGeneration + 1
-    dispatch({ type: 'navigationStarted', input: normalized, generation })
+    if (!normalized || navigationActionPendingRef.current || page.loadState === 'loading') return
+    navigationActionPendingRef.current = true
+    setNavigationActionPending(true)
     void (state.designMode ? controller.setDesignMode(page.id, false) : Promise.resolve())
       .then(() => controller.navigate(page.id, normalized))
       .then((result) => {
-        if (result.navigationGeneration !== generation) throw new Error('Native browser returned an unexpected navigation generation.')
-        dispatch({ type: 'navigationCommitted', url: result.url, generation })
+        if (result.navigationGeneration > authoritativeGeneration.current) {
+          authoritativeGeneration.current = result.navigationGeneration
+          dispatch({ type: 'navigationStarted', input: normalized, generation: result.navigationGeneration })
+          dispatch({ type: 'navigationCommitted', url: result.url, generation: result.navigationGeneration })
+        }
       })
       .catch((error) => {
-        dispatch({ type: 'navigationFailed', generation, error: error instanceof Error ? error.message : String(error) })
+        navigationActionPendingRef.current = false
+        setNavigationActionPending(false)
         reportError(error)
       })
   }
@@ -184,20 +400,22 @@ export function BrowserPanel({
   }
 
   const runPageNavigation = (action: () => Promise<BrowserPage | void>) => {
-    const generation = page.navigationGeneration + 1
-    dispatch({ type: 'navigationStarted', input: page.url, generation })
+    if (navigationActionPendingRef.current || page.loadState === 'loading') return
+    navigationActionPendingRef.current = true
+    setNavigationActionPending(true)
     const leaveDesignMode = state.designMode
       ? controller.setDesignMode(page.id, false).then(() => dispatch({ type: 'designModeChanged', enabled: false }))
       : Promise.resolve()
     void leaveDesignMode
       .then(action)
       .then((nextPage) => {
-        if (nextPage && nextPage.navigationGeneration !== generation) {
-          throw new Error('Native browser returned an unexpected navigation generation.')
-        }
+        if (!nextPage || nextPage.navigationGeneration <= authoritativeGeneration.current) return
+        authoritativeGeneration.current = nextPage.navigationGeneration
+        dispatch({ type: 'deviceMetricsChanged', page: nextPage })
       })
       .catch((error) => {
-        dispatch({ type: 'navigationFailed', generation, error: error instanceof Error ? error.message : String(error) })
+        navigationActionPendingRef.current = false
+        setNavigationActionPending(false)
         reportError(error)
       })
   }
@@ -262,23 +480,37 @@ export function BrowserPanel({
     })
   }
 
+  const toggleOverflow = () => {
+    if (overflowOpen) {
+      setOverflowOpen(false)
+      return
+    }
+    const epoch = ++surfaceEpoch.current
+    if (activationRaf.current !== null) cancelFrame(activationRaf.current)
+    void publishSurface(null, epoch, true)
+      .then(() => {
+        if (mounted.current && epoch === surfaceEpoch.current) setOverflowOpen(true)
+      })
+      .catch(() => undefined)
+  }
+
   return (
     <section className="browser-panel" aria-label={`Browser page ${page.title}`} aria-busy={page.loadState === 'loading'} data-load-state={page.loadState}>
       <div className="browser-toolbar">
-        <button type="button" aria-label="Back" disabled={!page.canGoBack} onClick={() => runPageNavigation(() => controller.goBack(page.id))}>←</button>
-        <button type="button" aria-label="Forward" disabled={!page.canGoForward} onClick={() => runPageNavigation(() => controller.goForward(page.id))}>→</button>
-        <button type="button" aria-label="Reload" onClick={() => runPageNavigation(() => controller.reload(page.id))}>↻</button>
+        <button type="button" aria-label="Back" disabled={navigationBlocked || !page.canGoBack} onClick={() => runPageNavigation(() => controller.goBack(page.id))}>←</button>
+        <button type="button" aria-label="Forward" disabled={navigationBlocked || !page.canGoForward} onClick={() => runPageNavigation(() => controller.goForward(page.id))}>→</button>
+        <button type="button" aria-label="Reload" disabled={navigationBlocked} onClick={() => runPageNavigation(() => controller.reload(page.id))}>↻</button>
         <form onSubmit={navigate}>
           <label className="browser-address-label">
             <span>Address or search</span>
-            <input aria-label="Address or search" value={state.addressDraft} onChange={(event) => dispatch({ type: 'addressChanged', value: event.target.value })} />
+            <input ref={addressInput} aria-label="Address or search" value={state.addressDraft} onChange={(event) => dispatch({ type: 'addressChanged', value: event.target.value })} />
           </label>
         </form>
         <button type="button" aria-pressed={state.designMode} onClick={setDesignMode}>{state.designMode ? 'Picking…' : 'Pick'}</button>
         {page.loadState === 'loading' ? <span className="browser-load-indicator" aria-label="Page loading" /> : null}
         <span className={`browser-profile-badge profile-${state.profile.kind}`} title={`Isolated ${profileLabel.toLowerCase()} browser profile`}>{profileLabel}</span>
         <div className="browser-overflow">
-          <button type="button" aria-label="Browser page options" aria-expanded={overflowOpen} onClick={() => setOverflowOpen((value) => !value)}>⋯</button>
+          <button type="button" aria-label="Browser page options" aria-expanded={overflowOpen} onClick={toggleOverflow}>⋯</button>
           {overflowOpen ? (
             <div className="browser-overflow-menu" role="menu">
               <label>
@@ -322,7 +554,7 @@ export function BrowserPanel({
         </aside>
       ) : null}
 
-      {pendingPromptCount > 0 ? (
+      {pendingPromptCount > 0 && !page.effectiveVisible ? (
         <section className="browser-prompts" aria-label="Browser security prompts">
           {state.permissionQueue.map((request) => (
             <article key={request.id}>
@@ -376,7 +608,7 @@ export function BrowserPanel({
         aria-label={`Native browser page ${page.title}`}
         data-page-id={page.id}
         data-profile-id={state.profile.id}
-        data-native-surface-visible={panelVisible && state.surfaceBounds !== null ? 'true' : 'false'}
+        data-native-surface-visible={page.effectiveVisible ? 'true' : 'false'}
       />
     </section>
   )

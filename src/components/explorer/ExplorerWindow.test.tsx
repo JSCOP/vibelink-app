@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 
 import { useExplorerStore } from '../../state/explorer'
 import { useGitStore } from '../../state/git'
-import { useWorkspaceStore } from '../../state/store'
+import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../../state/store'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
 import { ExplorerWindow } from './ExplorerWindow'
 
@@ -47,12 +47,21 @@ const status: WorkingStatus = {
   truncated: false,
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   cleanup()
   window.localStorage.clear()
+  resetWorkspaceSessionOwnershipForTests()
   invoke.mockReset()
   openWorkspaceContent.mockClear()
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'attach_session') return {
+      layoutJson: null,
+      panes: [{
+        id: 'pane-test',
+        config: { paneId: 'pane-test', shell: 'pwsh.exe', args: [], cwd: 'C:/repo', env: [], title: 'PowerShell', cols: 120, rows: 32 },
+        alive: true,
+      }],
+    }
     if (command === 'fs_list_dir') {
       return args?.relPath === 'src'
         ? [{ name: 'changed.ts', isDir: false, isSymlink: false, size: 7, modifiedAt: null }]
@@ -67,13 +76,18 @@ beforeEach(() => {
   useExplorerStore.setState({ sessions: {} })
   useGitStore.setState({ sessions: {} })
   useWorkspaceStore.setState({
-    activeSessionId: 'session-1',
+    activeSessionId: undefined,
+    workspaceEpoch: 0,
+    workspaceReadyEpoch: 0,
+    panes: {},
+    license: { ready: false, status: null },
     sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
   })
+  await useWorkspaceStore.getState().attachSession('session-1')
 })
 
 describe('ExplorerWindow Git integration', () => {
-  test('keeps single-click as preview and opens files through content actions on double-click', async () => {
+  test('previews on single-click and opens files through content actions on double-click', async () => {
     const openContent = vi.fn(async () => 'content:editor:src/changed.ts')
     const actions = workspaceContentActions(openContent)
     render(
@@ -81,14 +95,16 @@ describe('ExplorerWindow Git integration', () => {
         <ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />
       </WorkspaceContentActionsContext.Provider>,
     )
+    fireEvent.click(await screen.findByRole('button', { name: 'Show file preview' }))
     fireEvent.click(await screen.findByLabelText('Expand src'))
     const file = await screen.findByText('changed.ts')
 
     fireEvent.click(file)
     expect(openContent).not.toHaveBeenCalled()
+    expect(await screen.findByText('changed')).toBeTruthy()
     fireEvent.doubleClick(file)
 
-    await waitFor(() => expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'src/changed.ts' }))
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'editor', relPath: 'src/changed.ts' })))
   })
 
   test('uses the filesystem tree for Git navigation and folder actions', async () => {
@@ -110,15 +126,34 @@ describe('ExplorerWindow Git integration', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stage', { workspaceFolder: 'C:/repo', paths: ['src'] }))
   })
 
-  test('persists the Explorer preview visibility toggle', async () => {
+  test('defaults to navigator-only and persists explicit preview enablement and disablement', async () => {
     render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Hide file preview' }))
 
+    const showPreview = await screen.findByRole('button', { name: 'Show file preview' })
+    expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('false')
+    expect(document.querySelector('.explorer-viewer')).toBeNull()
+    expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBeNull()
+
+    fireEvent.click(showPreview)
+    expect(await screen.findByRole('button', { name: 'Hide file preview' })).toBeTruthy()
+    expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('true')
+    expect(document.querySelector('.explorer-viewer')).toBeTruthy()
+    expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBe('true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide file preview' }))
+    expect(await screen.findByRole('button', { name: 'Show file preview' })).toBeTruthy()
     expect(document.querySelector('.explorer-window')?.getAttribute('data-preview-visible')).toBe('false')
     expect(document.querySelector('.explorer-viewer')).toBeNull()
     expect(window.localStorage.getItem('vibelink:explorerPreviewVisible')).toBe('false')
 
     cleanup()
+    window.localStorage.setItem('vibelink:explorerPreviewVisible', 'true')
+    render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
+    expect(await screen.findByRole('button', { name: 'Hide file preview' })).toBeTruthy()
+    expect(document.querySelector('.explorer-viewer')).toBeTruthy()
+
+    cleanup()
+    window.localStorage.setItem('vibelink:explorerPreviewVisible', 'false')
     render(<ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />)
     expect(await screen.findByRole('button', { name: 'Show file preview' })).toBeTruthy()
     expect(document.querySelector('.explorer-viewer')).toBeNull()
@@ -151,7 +186,7 @@ test('discovers an uninitialized submodule and separates repository from pointer
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Pointer History in Parent' }))
   await waitFor(() => expect(useGitStore.getState().sessions['session-1']).toMatchObject({ activeRepoRoot: '', activeTab: 'history', pathFilter: 'modules/child' }))
-  expect(openWorkspaceContent).toHaveBeenCalledWith({ kind: 'workbench' })
+  expect(openWorkspaceContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'workbench' }))
 
   fireEvent.contextMenu(childRow, { clientX: 80, clientY: 90 })
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Initialize Submodule' }))

@@ -90,11 +90,13 @@ pub fn run() {
                 .ok()
                 .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(9333);
+            let browser_event_app = app.handle().clone();
             let browser_provider = Arc::new(NativeBrowserProvider::new(
                 app.handle().clone(),
                 "main",
                 browser_root.join("cdp-registry.json"),
                 browser_cdp_port,
+                move || browser::schedule_browser_event_pump(browser_event_app.clone()),
             ));
             app.manage(Arc::new(BrowserManager::new(
                 browser_provider,

@@ -1,8 +1,9 @@
 import {
   createContext,
-  useCallback,
   useContext,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -21,7 +22,7 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react'
 import { getGridLocation, type AddPanelOptions } from 'dockview-core'
-import { Bot, FileCode2, FolderTree, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, MoreHorizontal, Plus, SquareTerminal } from 'lucide-react'
+import { Bot, FileCode2, FolderTree, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, MoreHorizontal, Plus, SquareTerminal, Workflow } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
 import { QuickPick } from '../components/QuickPick'
 import type { PickerEntry } from '../components/pickerModel'
@@ -30,6 +31,7 @@ import { TaskDiffView } from '../components/TaskDiffView'
 import { WorkbenchContentPanel as WorkbenchPanel } from '../components/git/GitWindow'
 import { ExplorerWindow } from '../components/explorer/ExplorerWindow'
 import { OrchestratorChat } from '../components/OrchestratorChat'
+import { OrchestrationWorkspacePanel } from '../components/OrchestrationWorkspacePanel'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { ProLockedPanel } from '../components/ProLockedPanel'
@@ -53,6 +55,7 @@ import {
   getWorkspaceSessionEpoch,
   getWorkspaceSessionReadyEpoch,
   getWorkspaceSessionTargetId,
+  isWorkspaceInitialPanePending,
   useWorkspaceStore,
 } from '../state/store'
 import { useRemotePaneLeaseStore } from '../remote/paneLease'
@@ -60,6 +63,7 @@ import {
   WorkspaceContentActionsContext,
   type OpenContentRequest,
   type WorkspaceContentActions,
+  type WorkspaceContentOwnership,
   type WorkspaceContentChromeState,
 } from './contentActions'
 import { TerminalPanePanel } from './TerminalPanePanel'
@@ -68,7 +72,7 @@ import { vibelinkDockviewTheme } from './dockviewTheme'
 import { nearestPaneIdInDirection, paneIdsInReadingOrder, type PaneDirection } from './paneSwap'
 import { expandGridRowsForPaneCount } from './paneGridPlan'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
-import { settleDockviewOverlayLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { withSuppressedPanelRemoval } from './suppression'
 import { hideRemoteLeasedPane, paneIdsForSession, restoreRemoteLeasedPane, type RemotePaneVisibilityState } from './remotePaneVisibility'
 import {
@@ -108,7 +112,9 @@ export type WorkspaceViewProps = {
   contentComponents?: WorkspaceContentComponentMap
   onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
   onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
-  keyboardShortcutsDisabled?: boolean
+  workspaceInteractionSuspended?: boolean
+  onWorkspaceInteractionSuspendedChange?: (suspended: boolean) => void
+  nativeSurfacesSuspended?: boolean
 }
 
 type AddContentOptions = {
@@ -125,6 +131,7 @@ type BrowserProjection = {
 
 type FilePickerState = {
   sessionId: string
+  sessionEpoch: number
   paths: string[]
   targetGroupId?: string
 }
@@ -135,6 +142,7 @@ type WorkspaceLayoutOwner = {
   sessionEpoch: number
   epoch: number
 }
+type WorkspaceLayoutIdentity = Pick<WorkspaceLayoutOwner, 'sessionId' | 'sessionEpoch'>
 
 function TerminalContentPanel(props: WorkspaceContentPanelProps) {
   const params = parseWorkspaceContentParams(props.params)
@@ -156,6 +164,10 @@ function AgentContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent"><ProPanelBoundary feature="VibeLink Agent"><ErrorBoundary label="VibeLink Agent panel"><OrchestratorChat /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
+function OrchestrationContentPanel(props: WorkspaceContentPanelProps) {
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-orchestration"><ProPanelBoundary feature="Orchestration"><ErrorBoundary label="Orchestration panel"><OrchestrationWorkspacePanel /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
 function KanbanContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban"><ProPanelBoundary feature="Kanban"><ErrorBoundary label="Kanban panel"><KanbanBoard /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
@@ -171,14 +183,26 @@ function DiffContentPanel(props: WorkspaceContentPanelProps) {
 type WorkspaceIntegrationContextValue = {
   onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
   openFilePicker?: (targetGroupId?: string) => void
+  nativeSurfacesSuspended?: boolean
+  layoutOwner?: WorkspaceLayoutIdentity | null
+  setWorkspaceOverlayOpen?: (overlayId: string, open: boolean) => void
 }
 
 const WorkspaceIntegrationContext = createContext<WorkspaceIntegrationContextValue>({})
 
 function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   const actions = useContext(WorkspaceContentActionsContext)
+  const { layoutOwner, nativeSurfacesSuspended = false } = useContext(WorkspaceIntegrationContext)
   const params = parseWorkspaceContentParams(props.params)
-  const workspaceId = useWorkspaceStore((state) => state.activeSessionId)
+  const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const workspaceId = layoutOwner
+    && activeSessionId === layoutOwner.sessionId
+    && getWorkspaceSessionEpoch() === layoutOwner.sessionEpoch
+    && getWorkspaceSessionReadyEpoch() === layoutOwner.sessionEpoch
+    && getWorkspaceSessionTargetId() === layoutOwner.sessionId
+    ? layoutOwner.sessionId
+    : null
+  const workspaceEpoch = workspaceId ? layoutOwner?.sessionEpoch ?? null : null
   const [panelState, setPanelState] = useState(() => ({
     active: props.api.isActive,
     visible: props.api.isVisible,
@@ -199,7 +223,7 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
     }
   }, [props.api])
 
-  if (!workspaceId || params?.kind !== 'browser') {
+  if (!workspaceId || workspaceEpoch === null || params?.kind !== 'browser') {
     return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Browser content metadata is missing.</div></WindowPanelShell>
   }
   const targetGroupId = props.api.group.id
@@ -213,7 +237,8 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
             profileId={params.profileId}
             active={panelState.active}
             focused={panelState.focused}
-            workspaceVisible={panelState.visible}
+            workspaceVisible={panelState.visible && !nativeSurfacesSuspended}
+            nativeSurfacesSuspended={nativeSurfacesSuspended}
             onTitleChange={(title) => {
               const nextTitle = title.trim() || 'Browser'
               const next = { ...params, title: nextTitle }
@@ -224,9 +249,11 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
               if (!actions) throw new Error('Workspace content actions are unavailable.')
               const payload = browserAnnotationDeliveryPayload(annotation, destination)
               if (destination.kind === 'agent') {
-                const panelId = await actions.openContent({ kind: 'agent', targetGroupId })
+                const panelId = await actions.openContent({ kind: 'agent', targetGroupId, workspaceId, workspaceEpoch })
+                if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
                 if (panelId) actions.activateContent(panelId)
                 await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+                if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
                 publishBrowserAnnotationDraft(annotation)
                 return
               }
@@ -234,10 +261,13 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
                 await navigator.clipboard.writeText(payload.prompt)
                 return
               }
+              if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) throw new Error('The browser workspace changed before delivery completed.')
               const pane = useWorkspaceStore.getState().panes[destination.paneId]
               if (!pane?.alive || !payload.paneId) throw new Error('The selected terminal destination is no longer live.')
               await sendToPane(workspaceId, payload.paneId, payload.prompt, false)
+              if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
               await submitAgentPrompt(workspaceId, payload.paneId)
+              if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
               actions.activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: payload.paneId }))
             }}
           />
@@ -260,13 +290,20 @@ function WorkbenchContentPanel(props: WorkspaceContentPanelProps) {
 
 function ExplorerContentPanel(props: WorkspaceContentPanelProps) {
   const actions = useContext(WorkspaceContentActionsContext)
-  const sessionId = useWorkspaceStore((state) => state.activeSessionId)
-  const workspaceFolder = useWorkspaceStore((state) => state.sessions.find((session) => session.id === state.activeSessionId)?.workspaceFolder ?? null)
+  const { layoutOwner } = useContext(WorkspaceIntegrationContext)
+  const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const ownedLayout = layoutOwner?.sessionId === activeSessionId ? layoutOwner : null
+  const sessionId = ownedLayout?.sessionId ?? null
+  const workspaceFolder = useWorkspaceStore((state) => state.sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null)
   const targetGroupId = props.api.group.id
-  const scopedActions = useMemo<WorkspaceContentActions | null>(() => actions ? {
+  const ownership = useMemo<WorkspaceContentOwnership | null>(() => ownedLayout
+    ? { workspaceId: ownedLayout.sessionId, workspaceEpoch: ownedLayout.sessionEpoch }
+    : null, [ownedLayout])
+  const scopedActions = useMemo<WorkspaceContentActions | null>(() => actions && ownership ? {
     ...actions,
-    openContent: (request) => actions.openContent({ ...request, targetGroupId: request.targetGroupId ?? targetGroupId }),
-  } : null, [actions, targetGroupId])
+    openContent: (request) => actions.openContent({ ...request, ...ownership, targetGroupId: request.targetGroupId ?? targetGroupId }),
+    requestCloseContent: (panelId) => actions.requestCloseContent(panelId, ownership),
+  } : null, [actions, ownership, targetGroupId])
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-explorer">
       <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><ExplorerWindow sessionId={sessionId} workspaceFolder={workspaceFolder} /></WorkspaceContentActionsContext.Provider> : <div className="placeholder-panel">Select a local workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
@@ -291,6 +328,7 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   explorer: ExplorerContentPanel,
   workbench: WorkbenchContentPanel,
   agent: AgentContentPanel,
+  orchestration: OrchestrationContentPanel,
   kanban: KanbanContentPanel,
   todo: TodoContentPanel,
   diff: DiffContentPanel,
@@ -308,17 +346,22 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null)
   const groupId = props.group.id
+  const overlayId = `group-menu:${groupId}`
   const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
   const open = (request: OpenContentRequest) => {
     setMenuOpen(false)
     void actions?.openContent({ ...request, targetGroupId: groupId })
   }
   useEffect(() => {
-    if (!menuOpen) return
+    integration.setWorkspaceOverlayOpen?.(overlayId, menuOpen)
+    if (!menuOpen) return () => integration.setWorkspaceOverlayOpen?.(overlayId, false)
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false) }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [menuOpen])
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      integration.setWorkspaceOverlayOpen?.(overlayId, false)
+    }
+  }, [integration, menuOpen, overlayId])
   return (
     <div className="workspace-group-actions" onMouseDown={stop} onPointerDown={stop}>
       <button type="button" title="New terminal in this group" aria-label="New terminal in this group" onClick={() => open({ kind: 'terminal' })}><Plus size={13} aria-hidden="true" /></button>
@@ -343,6 +386,7 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
             <button type="button" role="menuitem" onClick={() => open({ kind: 'browser' })}><Globe size={13} aria-hidden="true" /> Browser</button>
             <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); integration.openFilePicker?.(groupId) }}><FileCode2 size={13} aria-hidden="true" /> Editor</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'agent' })}><Bot size={13} aria-hidden="true" /> VibeLink Agent</button>
+            <button type="button" role="menuitem" onClick={() => open({ kind: 'orchestration' })}><Workflow size={13} aria-hidden="true" /> Orchestration</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'explorer' })}><FolderTree size={13} aria-hidden="true" /> Explorer</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'workbench' })}><GitBranch size={13} aria-hidden="true" /> Workbench</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'kanban' })}><LayoutGrid size={13} aria-hidden="true" /> Kanban</button>
@@ -368,7 +412,9 @@ export function WorkspaceView({
   contentComponents,
   onDeleteWorkspaceRequested,
   onWorkspaceInput,
-  keyboardShortcutsDisabled = false,
+  onWorkspaceInteractionSuspendedChange,
+  workspaceInteractionSuspended = false,
+  nativeSurfacesSuspended = false,
 }: WorkspaceViewProps) {
   const apiRef = useRef<DockviewApi | null>(null)
   const dockRef = useRef<HTMLDivElement | null>(null)
@@ -390,10 +436,17 @@ export function WorkspaceView({
   const pendingTerminalPaneIdsRef = useRef(new Set<string>())
   const [apiVersion, setApiVersion] = useState(0)
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null)
+  const [loadedLayoutOwner, setLoadedLayoutOwner] = useState<WorkspaceLayoutIdentity | null>(null)
+  const [workspaceOverlayIds, setWorkspaceOverlayIds] = useState<ReadonlySet<string>>(() => new Set())
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const workspaceEpoch = useWorkspaceStore((state) => state.workspaceEpoch)
   const workspaceReadyEpoch = useWorkspaceStore((state) => state.workspaceReadyEpoch)
-  const activeFilePicker = filePicker?.sessionId === activeSessionId ? filePicker : null
+  const activeFilePicker = filePicker
+    && filePicker.sessionId === activeSessionId
+    && filePicker.sessionEpoch === workspaceReadyEpoch
+    && filePicker.sessionEpoch === workspaceEpoch
+    ? filePicker
+    : null
   const layoutJson = useWorkspaceStore((state) => state.layoutJson)
   const panes = useWorkspaceStore((state) => state.panes)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
@@ -403,6 +456,26 @@ export function WorkspaceView({
   const renamePaneTitle = useWorkspaceStore((state) => state.renamePaneTitle)
   const remotePaneLeases = useRemotePaneLeaseStore((state) => state.leases)
   const remoteLeasedPaneIds = useMemo(() => paneIdsForSession(remotePaneLeases, activeSessionId), [activeSessionId, remotePaneLeases])
+  const setWorkspaceOverlayOpen = useCallback((overlayId: string, open: boolean) => {
+    setWorkspaceOverlayIds((current) => {
+      if (open === current.has(overlayId)) return current
+      const next = new Set(current)
+      if (open) next.add(overlayId)
+      else next.delete(overlayId)
+      return next
+    })
+  }, [])
+  const workspaceLocalOverlaySuspended = Boolean(activeFilePicker) || workspaceOverlayIds.size > 0
+  const effectiveWorkspaceInteractionSuspended = workspaceInteractionSuspended || workspaceLocalOverlaySuspended
+  const effectiveNativeSurfacesSuspended = nativeSurfacesSuspended || workspaceLocalOverlaySuspended
+  const workspaceInteractionSuspendedRef = useRef(effectiveWorkspaceInteractionSuspended)
+  useLayoutEffect(() => {
+    workspaceInteractionSuspendedRef.current = effectiveWorkspaceInteractionSuspended
+  }, [effectiveWorkspaceInteractionSuspended])
+  useEffect(() => {
+    onWorkspaceInteractionSuspendedChange?.(workspaceLocalOverlaySuspended)
+    return () => onWorkspaceInteractionSuspendedChange?.(false)
+  }, [onWorkspaceInteractionSuspendedChange, workspaceLocalOverlaySuspended])
   const components = useMemo(() => {
     const merged = { ...builtInContentComponents }
     for (const [kind, component] of Object.entries(contentComponents ?? {})) {
@@ -448,19 +521,32 @@ export function WorkspaceView({
     const state = useWorkspaceStore.getState()
     const sessionId = state.activeSessionId
     const workspaceFolder = state.sessions.find((session) => session.id === sessionId)?.workspaceFolder
-    if (!sessionId || !workspaceFolder) return
+    const sessionEpoch = getWorkspaceSessionEpoch()
+    if (!sessionId || !workspaceFolder || getWorkspaceSessionReadyEpoch() !== sessionEpoch || getWorkspaceSessionTargetId() !== sessionId) return
     void listContainedWorkspaceFiles(workspaceFolder)
-      .then((paths) => { if (useWorkspaceStore.getState().activeSessionId === sessionId) setFilePicker({ sessionId, paths, targetGroupId }) })
-      .catch((error) => useWorkspaceStore.getState().setError(String(error)))
+      .then((paths) => {
+        if (useWorkspaceStore.getState().activeSessionId === sessionId
+          && getWorkspaceSessionEpoch() === sessionEpoch
+          && getWorkspaceSessionReadyEpoch() === sessionEpoch
+          && getWorkspaceSessionTargetId() === sessionId) setFilePicker({ sessionId, sessionEpoch, paths, targetGroupId })
+      })
+      .catch((error) => {
+        if (useWorkspaceStore.getState().activeSessionId === sessionId && getWorkspaceSessionEpoch() === sessionEpoch) useWorkspaceStore.getState().setError(String(error))
+      })
   }, [])
-  const integration = useMemo<WorkspaceIntegrationContextValue>(() => ({ onWorkspaceInput, openFilePicker }), [onWorkspaceInput, openFilePicker])
+  const integration = useMemo<WorkspaceIntegrationContextValue>(() => ({
+    onWorkspaceInput,
+    openFilePicker,
+    nativeSurfacesSuspended: effectiveNativeSurfacesSuspended,
+    layoutOwner: loadedLayoutOwner,
+    setWorkspaceOverlayOpen,
+  }), [effectiveNativeSurfacesSuspended, loadedLayoutOwner, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
 
   const layoutDockview = useCallback((api: DockviewApi) => {
     const root = dockRef.current
     if (!isDockElementMeasurable(root)) return false
     const rect = root.getBoundingClientRect()
     api.layout(rect.width, rect.height, true)
-    forceOverlayReposition(api)
     return true
   }, [])
 
@@ -470,7 +556,8 @@ export function WorkspaceView({
     const dockview = remoteLeasedPaneIds.length > 0 && remoteUnleasedLayoutRef.current
       ? remoteUnleasedLayoutRef.current
       : api.toJSON()
-    return serializeWorkspaceLayoutEnvelope({ version: 3, dockview })
+    const serialized = serializeWorkspaceLayoutEnvelope({ version: 3, dockview })
+    return normalizeWorkspaceLayoutState(serialized).dockview ? serialized : null
   }, [remoteLeasedPaneIds.length])
 
   const persistLayoutNow = useCallback(async () => {
@@ -500,7 +587,12 @@ export function WorkspaceView({
     await settleDockviewOverlayLayout({
       layout: () => { if (!owner || ownsLayout(owner)) layoutDockview(api) },
       refresh: () => { if (!owner || ownsLayout(owner)) forceOverlayReposition(api) },
-      complete: () => { if (!owner || ownsLayout(owner)) reflowTerminalsAfterLayout({ syncPty: options.syncPty, paneIds: options.paneIds }) },
+      isSettled: () => owner ? !ownsLayout(owner) || dockviewOverlaysSettled(api) : dockviewOverlaysSettled(api),
+      complete: () => {
+        if (owner && !ownsLayout(owner)) return
+        reflowTerminalsAfterLayout({ syncPty: options.syncPty, paneIds: options.paneIds })
+        focusActiveContentAfterLayout(api, () => !workspaceInteractionSuspendedRef.current)
+      },
     })
   }, [layoutDockview, ownsLayout])
 
@@ -514,7 +606,7 @@ export function WorkspaceView({
     if (content?.kind === 'terminal') {
       useWorkspaceStore.getState().setActivePaneId(content.paneId)
       useWorkspaceStore.getState().clearPaneCompletionHighlight(content.paneId)
-      TerminalManager.focus(content.paneId)
+      if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(content.paneId)
     }
   }, [])
 
@@ -524,7 +616,7 @@ export function WorkspaceView({
     const panelId = workspaceContentPanelId(params)
     const existing = api.getPanel(panelId)
     if (existing) {
-      if (!options.inactive) existing.api.setActive()
+      if (!options.inactive) activateContent(existing.id)
       return existing
     }
     const targetGroup = options.targetGroupId ? api.groups.find((group) => group.id === options.targetGroupId) : undefined
@@ -559,10 +651,11 @@ export function WorkspaceView({
     if (referencePanel && options.direction && localSplit) {
       finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
     }
+    if (!options.inactive) activateContent(panel.id)
     return panel
-  }, [])
+  }, [activateContent])
 
-  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: AddContentOptions & { profileId?: string | null } = {}) => {
+  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: AddContentOptions & { profileId?: string | null; cwd?: string | null } = {}) => {
     if (!ownsLayout(owner)) return ''
     const profile = profileById(useWorkspaceStore.getState().settings, options.profileId)
     const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
@@ -574,17 +667,13 @@ export function WorkspaceView({
       const panel = addContentPanel(createTerminalContentParams(pending), options, owner.api)
       if (!panel || !ownsLayout(owner)) return ''
       panelId = panel.id
-      panel.api.setActive()
-      layoutDockview(owner.api)
-      await waitForDockviewOverlayLayout()
+      await settleLayout({}, owner)
       if (!ownsLayout(owner) || !owner.api.getPanel(panel.id)) return ''
-      layoutDockview(owner.api)
-      forceOverlayReposition(owner.api)
       const size = await measuredSpawnSize(pending.id)
-      if (!ownsLayout(owner)) return ''
       const spawned = await spawnPane(owner.sessionId, {
         paneId: pending.id,
         profileId: options.profileId,
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
         title: pending.config.title ?? undefined,
         cols: size?.cols,
         rows: size?.rows,
@@ -597,7 +686,7 @@ export function WorkspaceView({
       livePanel.update({ params: liveParams })
       livePanel.api.setTitle(liveParams.title)
       useWorkspaceStore.getState().setActivePaneId(spawned.id)
-      TerminalManager.focus(spawned.id)
+      if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(spawned.id)
       reflowTerminalsAfterLayout({ syncPty: true, paneIds: [spawned.id] })
       persistLayoutSoon()
       committed = true
@@ -626,7 +715,7 @@ export function WorkspaceView({
         pendingTerminalPaneIdsRef.current.delete(pending.id)
       }
     }
-  }, [addContentPanel, closePaneInStore, layoutDockview, ownsLayout, persistLayoutSoon, spawnPane])
+  }, [addContentPanel, closePaneInStore, ownsLayout, persistLayoutSoon, settleLayout, spawnPane])
 
   const findContentByResource = useCallback((params: WorkspaceContentParams, targetApi?: DockviewApi) => (targetApi ?? apiRef.current)?.panels.find((panel) => {
     const current = parseWorkspaceContentParams(panel.params)
@@ -661,12 +750,17 @@ export function WorkspaceView({
   }, [ownsLayout, persistLayoutSoon, remoteLeasedPaneIds.length, settleLayout])
 
   const openContent = useCallback(async (request: OpenContentRequest): Promise<string> => {
-    const requestedSessionId = useWorkspaceStore.getState().activeSessionId
+    const currentEpoch = getWorkspaceSessionEpoch()
+    const activeSessionId = useWorkspaceStore.getState().activeSessionId
+    if (request.workspaceId && request.workspaceId !== activeSessionId) return ''
+    if (request.workspaceEpoch !== undefined && request.workspaceEpoch !== currentEpoch) return ''
+    const requestedSessionId = request.workspaceId ?? activeSessionId
     if (!requestedSessionId) return ''
     const owner = await waitForLayoutOwner(requestedSessionId)
     if (!owner || !ownsLayout(owner)) return ''
+    if (request.workspaceEpoch !== undefined && owner.sessionEpoch !== request.workspaceEpoch) return ''
     if (request.kind === 'terminal') {
-      return spawnTerminal(owner, { targetGroupId: request.targetGroupId, profileId: request.profileId, direction: request.split })
+      return spawnTerminal(owner, { targetGroupId: request.targetGroupId, profileId: request.profileId, cwd: request.cwd, direction: request.split })
     }
     if (request.kind === 'terminal-grid') {
       const api = owner.api
@@ -779,7 +873,7 @@ export function WorkspaceView({
         const params: WorkspaceContentParams = { schema: 1, kind: 'browser', instanceId: page.id, title: page.title?.trim() || (request.private ? 'Private Browser' : 'Browser'), icon: 'globe', pageId: page.id, profileId: page.profileId }
         const existing = findContentByResource(params, owner.api)
         if (existing) {
-          existing.api.setActive()
+          activateContent(existing.id)
           committed = true
           return existing.id
         }
@@ -820,7 +914,7 @@ export function WorkspaceView({
     if (!ownsLayout(owner)) return ''
     const existing = findContentByResource(params, owner.api)
     if (existing) {
-      existing.api.setActive()
+      activateContent(existing.id)
       return existing.id
     }
     const panel = addContentPanel(params, { targetGroupId: request.targetGroupId }, owner.api)
@@ -836,8 +930,10 @@ export function WorkspaceView({
     return panel.id
   }, [activateContent, addContentPanel, arrangeTerminals, closePaneInStore, findContentByResource, ownsLayout, persistLayoutSoon, settleLayout, spawnPane, spawnTerminal, waitForLayoutOwner])
 
-  const requestCloseContent = useCallback(async (panelId: string): Promise<'closed' | 'cancelled'> => {
+  const requestCloseContent = useCallback(async (panelId: string, ownership?: WorkspaceContentOwnership): Promise<'closed' | 'cancelled'> => {
     const owner = currentLayoutOwner()
+    if (ownership?.workspaceId && owner?.sessionId !== ownership.workspaceId) return 'cancelled'
+    if (ownership?.workspaceEpoch !== undefined && owner?.sessionEpoch !== ownership.workspaceEpoch) return 'cancelled'
     const api = owner?.api
     const panel = api?.getPanel(panelId)
     const content = parseWorkspaceContentParams(panel?.params)
@@ -929,8 +1025,16 @@ export function WorkspaceView({
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
       api.clear()
       const fallback = createDefaultWorkspaceDockviewLayout(livePanes)
-      if (fallback) api.fromJSON(fallback as Parameters<DockviewApi['fromJSON']>[0])
-      for (const params of preservedContent) addContentPanel(params, { inactive: true }, api)
+      api.fromJSON(fallback as Parameters<DockviewApi['fromJSON']>[0])
+      const explorerPanelId = workspaceContentPanelId(createSingletonContentParams('explorer'))
+      let rightGroupId = api.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')?.group.id
+      for (const params of preservedContent) {
+        if (params.kind === 'explorer') continue
+        const panel = rightGroupId
+          ? addContentPanel(params, { targetGroupId: rightGroupId, inactive: true }, api)
+          : addContentPanel(params, { referencePanelId: explorerPanelId, direction: 'right', inactive: true }, api)
+        if (panel && !rightGroupId) rightGroupId = panel.group.id
+      }
     })
     if (apiRef.current !== api
       || getWorkspaceSessionEpoch() !== owner.sessionEpoch
@@ -938,6 +1042,7 @@ export function WorkspaceView({
       || getWorkspaceSessionTargetId() !== owner.sessionId
       || useWorkspaceStore.getState().activeSessionId !== owner.sessionId) return
     layoutOwnerRef.current = owner
+    setLoadedLayoutOwner({ sessionId: owner.sessionId, sessionEpoch: owner.sessionEpoch })
     await settleLayout({ syncPty: true }, owner)
     if (ownsLayout(owner)) await persistLayoutNow()
   }, [addContentPanel, currentLayoutOwner, ownsLayout, persistLayoutNow, settleLayout])
@@ -962,13 +1067,22 @@ export function WorkspaceView({
       const raw = useWorkspaceStore.getState().layoutJson
       if (!api || !sessionId || !isDockElementMeasurable(dockRef.current)) return
       if (getWorkspaceSessionReadyEpoch() !== getWorkspaceSessionEpoch() || getWorkspaceSessionTargetId() !== sessionId) return
+      const sessionEpoch = getWorkspaceSessionEpoch()
+      const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
+      const envelope = normalizeWorkspaceLayoutState(raw)
+      const requiresFirstTerminalLayout = livePanes.length > 0
+        && api.panels.length === 1
+        && parseWorkspaceContentParams(api.panels[0]?.params)?.kind === 'explorer'
+      if (!envelope.dockview && livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) return
       if (loadedSessionRef.current === sessionId
         && loadedLayoutJsonRef.current === raw
         && loadedApiRef.current === api
-        && loadedSessionEpochRef.current === getWorkspaceSessionEpoch()) return
+        && loadedSessionEpochRef.current === sessionEpoch
+        && !requiresFirstTerminalLayout) return
       const epoch = ++layoutEpochRef.current
-      const owner: WorkspaceLayoutOwner = { api, sessionId, sessionEpoch: getWorkspaceSessionEpoch(), epoch }
+      const owner: WorkspaceLayoutOwner = { api, sessionId, sessionEpoch, epoch }
       layoutOwnerRef.current = null
+      setLoadedLayoutOwner(null)
       const transactionIsCurrent = () => layoutEpochRef.current === epoch
         && apiRef.current === api
         && getWorkspaceSessionEpoch() === owner.sessionEpoch
@@ -979,8 +1093,6 @@ export function WorkspaceView({
         const previous = serializeCurrentLayout()
         if (previous) void saveLayout(loadedSessionRef.current, previous).catch(() => undefined)
       }
-      const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
-      const envelope = normalizeWorkspaceLayoutState(raw)
       // A valid v3 layout can be restored even when the daemon's live terminal
       // set changed while the app was closed. Resource reconciliation below
       // removes stale UI owners and adds only resources proven live.
@@ -988,14 +1100,17 @@ export function WorkspaceView({
       await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
         api.clear()
         const dockview = restore ?? createDefaultWorkspaceDockviewLayout(livePanes)
-        if (dockview) {
-          try {
-            api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0])
-          } catch {
-            api.clear()
-            const fallback = createDefaultWorkspaceDockviewLayout(livePanes)
-            if (fallback) api.fromJSON(fallback as Parameters<DockviewApi['fromJSON']>[0])
-          }
+        try {
+          api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0])
+        } catch {
+          api.clear()
+          api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes) as Parameters<DockviewApi['fromJSON']>[0])
+        }
+        if (livePanes.length > 0
+          && api.panels.length === 1
+          && parseWorkspaceContentParams(api.panels[0]?.params)?.kind === 'explorer') {
+          api.clear()
+          api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes) as Parameters<DockviewApi['fromJSON']>[0])
         }
       })
       if (!transactionIsCurrent()) return
@@ -1004,6 +1119,7 @@ export function WorkspaceView({
       loadedApiRef.current = api
       loadedSessionEpochRef.current = owner.sessionEpoch
       layoutOwnerRef.current = owner
+      setLoadedLayoutOwner({ sessionId: owner.sessionId, sessionEpoch: owner.sessionEpoch })
       remotePaneVisibilityRef.current = []
       remoteUnleasedLayoutRef.current = null
       await reconcileTerminalPanels(api, suppressPanelRemovalRef, addContentPanel, () => undefined)
@@ -1037,6 +1153,7 @@ export function WorkspaceView({
     for (const disposable of apiDisposablesRef.current) disposable.dispose()
     layoutEpochRef.current += 1
     layoutOwnerRef.current = null
+    setLoadedLayoutOwner(null)
     apiRef.current = event.api
     setApiVersion((value) => value + 1)
     onApiReady?.(event.api)
@@ -1055,7 +1172,7 @@ export function WorkspaceView({
         const content = parseWorkspaceContentParams(panel?.params)
         if (content?.kind === 'terminal') {
           useWorkspaceStore.getState().setActivePaneId(content.paneId)
-          TerminalManager.focus(content.paneId)
+          if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(content.paneId)
         }
         syncChromeState()
       }),
@@ -1095,6 +1212,8 @@ export function WorkspaceView({
       || state.workspaceReadyEpoch !== previousState.workspaceReadyEpoch) {
       layoutEpochRef.current += 1
       layoutOwnerRef.current = null
+      setLoadedLayoutOwner(null)
+      setWorkspaceOverlayIds(new Set())
       setFilePicker(null)
     }
   }), [])
@@ -1102,7 +1221,7 @@ export function WorkspaceView({
   useEffect(() => {
     if (!apiRef.current) return
     void loadActiveSessionLayout()
-  }, [activeSessionId, apiVersion, layoutJson, loadActiveSessionLayout, workspaceEpoch, workspaceReadyEpoch])
+  }, [activeSessionId, apiVersion, layoutJson, loadActiveSessionLayout, panes, workspaceEpoch, workspaceReadyEpoch])
 
   useEffect(() => {
     const root = dockRef.current
@@ -1110,13 +1229,12 @@ export function WorkspaceView({
     const observer = new ResizeObserver(() => {
       const api = apiRef.current
       if (!api || !isDockElementMeasurable(root)) return
-      layoutDockview(api)
+      void settleLayout()
       void loadActiveSessionLayout()
-      reflowTerminalsAfterLayout()
     })
     observer.observe(root)
     return () => observer.disconnect()
-  }, [apiVersion, layoutDockview, loadActiveSessionLayout])
+  }, [apiVersion, loadActiveSessionLayout, settleLayout])
 
   useEffect(() => {
     const api = apiRef.current
@@ -1134,17 +1252,26 @@ export function WorkspaceView({
         if (state) remotePaneVisibilityRef.current.push(state)
       }
     }).then(() => {
-      layoutDockview(api)
+      void settleLayout({ syncPty: true })
       if (remoteLeasedPaneIds.length === 0) persistLayoutSoon()
     }).catch((error) => useWorkspaceStore.getState().setError(String(error)))
-  }, [activeSessionId, apiVersion, layoutDockview, persistLayoutSoon, remoteLeasedPaneIds])
+  }, [activeSessionId, apiVersion, persistLayoutSoon, remoteLeasedPaneIds, settleLayout])
 
   useEffect(() => {
     const api = apiRef.current
     if (!api || loadedSessionRef.current !== activeSessionId || suppressPanelRemovalRef.current) return
-    const livePaneIds = new Set(Object.values(panes).filter((pane) => pane.alive).map((pane) => pane.id))
+    const livePanes = Object.values(panes).filter((pane) => pane.alive)
+    const livePaneIds = new Set(livePanes.map((pane) => pane.id))
+    const explorerOnlyFallback = livePanes.length > 0
+      && api.panels.length === 1
+      && parseWorkspaceContentParams(api.panels[0]?.params)?.kind === 'explorer'
     void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      for (const pane of Object.values(panes).filter((candidate) => candidate.alive)) {
+      if (explorerOnlyFallback) {
+        api.clear()
+        api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes) as Parameters<DockviewApi['fromJSON']>[0])
+        return
+      }
+      for (const pane of livePanes) {
         const id = workspaceContentPanelId({ kind: 'terminal', instanceId: pane.id })
         const panel = api.getPanel(id)
         if (!panel) addContentPanel(createTerminalContentParams(pane), { inactive: true })
@@ -1160,8 +1287,11 @@ export function WorkspaceView({
         TerminalManager.dispose(params.paneId)
         panel.api.close()
       }
-    }).then(() => settleLayout({ syncPty: true })).catch(() => undefined)
-  }, [activeSessionId, addContentPanel, apiVersion, panes, settleLayout])
+    }).then(() => {
+      void settleLayout({ syncPty: true })
+      persistLayoutSoon()
+    }).catch(() => undefined)
+  }, [activeSessionId, addContentPanel, apiVersion, panes, persistLayoutSoon, settleLayout])
 
   useEffect(() => {
     if (!arrangeRequestId || applyingArrangeRequestRef.current === arrangeRequestId) return
@@ -1183,7 +1313,7 @@ export function WorkspaceView({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (keyboardShortcutsDisabled) return
+      if (effectiveWorkspaceInteractionSuspended) return
       const api = apiRef.current
       const active = api?.activePanel
       if (!api || !active) return
@@ -1207,14 +1337,16 @@ export function WorkspaceView({
             event.preventDefault()
             event.stopPropagation()
             const state = useWorkspaceStore.getState()
-            const workspaceFolder = state.sessions.find((session) => session.id === state.activeSessionId)?.workspaceFolder
-            if (!state.activeSessionId || !workspaceFolder) return
-            const store = getEditorDocumentStore(state.activeSessionId, workspaceFolder)
+            const sessionId = state.activeSessionId
+            const sessionEpoch = getWorkspaceSessionEpoch()
+            const workspaceFolder = state.sessions.find((session) => session.id === sessionId)?.workspaceFolder
+            if (!sessionId || !workspaceFolder || getWorkspaceSessionReadyEpoch() !== sessionEpoch || getWorkspaceSessionTargetId() !== sessionId) return
+            const store = getEditorDocumentStore(sessionId, workspaceFolder)
             if (event.shiftKey) {
               const target = window.prompt('Save As (workspace-relative path)', content.relPath)?.trim()
               if (!target) return
               void store.saveAs(content.relPath, target).then((result: NativeSaveTextDocumentResult) => {
-                if (result.status === 'saved') void actions.openContent({ kind: 'editor', relPath: target, targetGroupId: active.group.id })
+                if (result.status === 'saved') void actions.openContent({ kind: 'editor', relPath: target, targetGroupId: active.group.id, workspaceId: sessionId, workspaceEpoch: sessionEpoch })
               }).catch((error: unknown) => useWorkspaceStore.getState().setError(String(error)))
             } else {
               void store.save(content.relPath).catch((error: unknown) => useWorkspaceStore.getState().setError(String(error)))
@@ -1227,7 +1359,7 @@ export function WorkspaceView({
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [actions, keyboardShortcutsDisabled, keybindings, onDeleteWorkspaceRequested, openFilePicker, persistLayoutNow])
+  }, [actions, effectiveWorkspaceInteractionSuspended, keybindings, onDeleteWorkspaceRequested, openFilePicker, persistLayoutNow])
 
   useEffect(() => () => {
     layoutEpochRef.current += 1
@@ -1280,7 +1412,13 @@ export function WorkspaceView({
               onPreview={() => undefined}
               onSelect={(relPath) => {
                 setFilePicker(null)
-                if (relPath) void actions.openContent({ kind: 'editor', relPath, targetGroupId: activeFilePicker.targetGroupId })
+                if (relPath) void actions.openContent({
+                  kind: 'editor',
+                  relPath,
+                  targetGroupId: activeFilePicker.targetGroupId,
+                  workspaceId: activeFilePicker.sessionId,
+                  workspaceEpoch: activeFilePicker.sessionEpoch,
+                })
               }}
               onCancel={() => setFilePicker(null)}
             />
@@ -1319,18 +1457,18 @@ async function reconcileRestoredBrowserPanels(
     const params = parseWorkspaceContentParams(panel.params)
     return params?.kind === 'browser' ? [{ panel, params }] : []
   })
-  if (restored.length === 0) return
   const projection = await invoke<BrowserProjection>('browser_initialize', { workspaceId: sessionId })
   if (!isCurrent()) return
   const pages = new Map(projection.pages.filter((page) => page.workspaceId === sessionId).map((page) => [page.id, page]))
-  const matched = restored.filter(({ params }) => pages.has(params.pageId))
   await withSuppressedPanelRemoval(suppression, async () => {
+    const ownedPageIds = new Set<string>()
     for (const { panel, params } of restored) {
       const page = pages.get(params.pageId)
       if (!page) {
         panel.api.close()
         continue
       }
+      ownedPageIds.add(page.id)
       const next: WorkspaceContentParams = {
         ...params,
         profileId: page.profileId,
@@ -1339,23 +1477,17 @@ async function reconcileRestoredBrowserPanels(
       panel.update({ params: next })
       if (panel.api.title !== next.title) panel.api.setTitle(next.title)
     }
-    // A non-empty match proves this is a real persisted browser projection,
-    // rather than a backend-created home page produced while probing a stale
-    // layout. Recover every additional live page exactly once.
-    if (matched.length > 0) {
-      const ownedPageIds = new Set(matched.map(({ params }) => params.pageId))
-      for (const page of pages.values()) {
-        if (ownedPageIds.has(page.id)) continue
-        addPanel({
-          schema: 1,
-          kind: 'browser',
-          instanceId: page.id,
-          title: page.title?.trim() || 'Browser',
-          icon: 'globe',
-          pageId: page.id,
-          profileId: page.profileId,
-        }, { inactive: true })
-      }
+    for (const page of pages.values()) {
+      if (ownedPageIds.has(page.id)) continue
+      addPanel({
+        schema: 1,
+        kind: 'browser',
+        instanceId: page.id,
+        title: page.title?.trim() || 'Browser',
+        icon: 'globe',
+        pageId: page.id,
+        profileId: page.profileId,
+      }, { inactive: true })
     }
   })
 }
@@ -1462,7 +1594,7 @@ async function runKeybindingAction(
       const target = targetId ? api.getPanel(targetId) : undefined
       if (!target) return
       active.api.moveTo({ group: target.group, position: 'center' })
-      active.api.setActive()
+      actions.activateContent(active.id)
       return
     }
     case 'copyTerminalContents':
@@ -1535,12 +1667,51 @@ function isDockElementMeasurable(element: HTMLElement | null): element is HTMLEl
   return rect.width > 0 && rect.height > 0
 }
 
-function forceOverlayReposition(api: DockviewApi): void {
+type DockviewOverlayRenderContainer = {
+  map?: Record<string, { element?: HTMLElement }>
+  updateAllPositions: () => void
+}
+
+function dockviewOverlayRenderContainer(api: DockviewApi): DockviewOverlayRenderContainer | null {
   const holder: unknown = api
-  if (!holder || typeof holder !== 'object' || !('component' in holder)) return
+  if (!holder || typeof holder !== 'object' || !('component' in holder)) return null
   const component = holder.component
-  if (!component || typeof component !== 'object' || !('overlayRenderContainer' in component)) return
+  if (!component || typeof component !== 'object' || !('overlayRenderContainer' in component)) return null
   const container = component.overlayRenderContainer
-  if (!container || typeof container !== 'object' || !('updateAllPositions' in container) || typeof container.updateAllPositions !== 'function') return
-  container.updateAllPositions()
+  if (!container || typeof container !== 'object' || !('updateAllPositions' in container) || typeof container.updateAllPositions !== 'function') return null
+  return container as DockviewOverlayRenderContainer
+}
+
+function forceOverlayReposition(api: DockviewApi): void {
+  dockviewOverlayRenderContainer(api)?.updateAllPositions()
+}
+
+function dockviewOverlaysSettled(api: DockviewApi): boolean {
+  const container = dockviewOverlayRenderContainer(api)
+  if (!container?.map) return false
+  for (const panel of api.panels) {
+    if (!panel.api.isVisible || panel.api.renderer !== 'always') continue
+    const overlay = container.map[panel.id]?.element
+    const owner = panel.group.element.querySelector<HTMLElement>('.dv-content-container')
+    if (!overlay || !owner || overlay.style.visibility === 'hidden') return false
+    const overlayRect = overlay.getBoundingClientRect()
+    const ownerRect = owner.getBoundingClientRect()
+    if (ownerRect.width <= 0 || ownerRect.height <= 0 || !rectsMatch(overlayRect, ownerRect)) return false
+  }
+  return true
+}
+
+function focusActiveContentAfterLayout(api: DockviewApi, canFocus: () => boolean): void {
+  requestAnimationFrame(() => {
+    if (!canFocus()) return
+    const content = parseWorkspaceContentParams(api.activePanel?.params)
+    if (content?.kind === 'terminal') TerminalManager.focus(content.paneId)
+  })
+}
+
+function rectsMatch(left: DOMRect, right: DOMRect, tolerance = 1): boolean {
+  return Math.abs(left.left - right.left) <= tolerance
+    && Math.abs(left.top - right.top) <= tolerance
+    && Math.abs(left.width - right.width) <= tolerance
+    && Math.abs(left.height - right.height) <= tolerance
 }

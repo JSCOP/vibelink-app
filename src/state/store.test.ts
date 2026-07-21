@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
-import { loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneReviewMarkers, useWorkspaceStore } from './store'
+import { loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
 
 const spawnedPane: PaneMeta = {
   id: 'pane-test',
@@ -50,6 +50,14 @@ const secondSession: SessionMeta = {
   workspaceFolder: 'E:/other',
 }
 
+const profileSession: SessionMeta = {
+  id: 'session-1',
+  name: 'Profile test workspace',
+  paneCount: 0,
+  createdAt: 125,
+  workspaceFolder: null,
+}
+
 const unlicensedStatus: LicenseStatus = {
   state: 'unlicensed',
   entitled: false,
@@ -77,13 +85,23 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (command: string) => {
     if (command === 'license_status') return unlicensedStatus
     if (command === 'spawn_pane') return spawnedPane
+    if (command === 'attach_session') return { layoutJson: null, panes: [] }
     if (command === 'list_sessions') return []
     return null
   }),
 }))
 
+async function attachReadySession(session: SessionMeta, sessions: SessionMeta[] = [session]): Promise<void> {
+  useWorkspaceStore.setState({ sessions })
+  // A ready fixture must already own a pane; an empty attach auto-spawns and refreshes sessions before the spawn under test.
+  vi.mocked(invoke).mockResolvedValueOnce({ layoutJson: null, panes: [nonAgentPane] })
+  await useWorkspaceStore.getState().attachSession(session.id)
+  vi.mocked(invoke).mockClear()
+}
+
 describe('workspace store profiles', () => {
   beforeEach(() => {
+    resetWorkspaceSessionOwnershipForTests()
     vi.stubGlobal('window', { localStorage: localStorageStub })
     vi.stubGlobal('document', { hasFocus: () => false })
     localStorageStub.getItem.mockReturnValue(null)
@@ -94,10 +112,13 @@ describe('workspace store profiles', () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'license_status') return unlicensedStatus
       if (command === 'spawn_pane') return spawnedPane
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'list_sessions') return []
       return null
     })
     useWorkspaceStore.setState({
+      workspaceEpoch: 0,
+      workspaceReadyEpoch: 0,
       license: { ready: false, status: null },
       sessions: [],
       activeSessionId: undefined,
@@ -143,7 +164,15 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().status).toBe('error')
   })
 
+  test('spawnPane rejects a workspace that is not active and ready', async () => {
+    await expect(useWorkspaceStore.getState().spawnPane(profileSession.id, { paneId: 'pane-test' }))
+      .rejects.toThrow('Workspace changed while the terminal was opening.')
+
+    expect(invoke).not.toHaveBeenCalledWith('spawn_pane', expect.anything())
+  })
+
   test('spawnPane advertises color terminal capabilities by default', async () => {
+    await attachReadySession(profileSession)
     await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
 
     expect(invoke).toHaveBeenCalledWith('spawn_pane', {
@@ -161,6 +190,7 @@ describe('workspace store profiles', () => {
   })
 
   test('spawnPane uses the selected profile when no pane overrides are supplied', async () => {
+    await attachReadySession(profileSession)
     await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'spawn_pane', {
@@ -190,6 +220,7 @@ describe('workspace store profiles', () => {
   })
 
   test('spawnPane exposes pane and session ids to terminal agents', async () => {
+    await attachReadySession(profileSession)
     await useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
 
     expect(invoke).toHaveBeenCalledWith('spawn_pane', {
@@ -337,7 +368,7 @@ describe('workspace store profiles', () => {
   })
 
   test('spawnPane prefers the session workspace folder over the active profile cwd', async () => {
-    useWorkspaceStore.setState({ sessions: [createdSession], activeSessionId: createdSession.id })
+    await attachReadySession(createdSession)
 
     await useWorkspaceStore.getState().spawnPane(createdSession.id, { paneId: 'pane-test' })
 
@@ -348,7 +379,7 @@ describe('workspace store profiles', () => {
   })
 
   test('spawnPane preserves an explicit cwd override when a session has a workspace folder', async () => {
-    useWorkspaceStore.setState({ sessions: [createdSession], activeSessionId: createdSession.id })
+    await attachReadySession(createdSession)
 
     await useWorkspaceStore.getState().spawnPane(createdSession.id, { paneId: 'pane-test', cwd: null })
 
@@ -360,7 +391,6 @@ describe('workspace store profiles', () => {
 
   test('setDefaultProfile stores the active profile per workspace', async () => {
     useWorkspaceStore.setState({
-      activeSessionId: createdSession.id,
       sessions: [createdSession, secondSession],
       settings: normalizeSettings({
         ...defaultSettings,
@@ -389,6 +419,7 @@ describe('workspace store profiles', () => {
         ],
       }),
     })
+    await attachReadySession(createdSession, [createdSession, secondSession])
 
     useWorkspaceStore.getState().setDefaultProfile('powershell')
 

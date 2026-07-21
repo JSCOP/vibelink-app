@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, File, FileMinus2, FilePlus2, Folder, FolderGit2, FolderOpen, GitCommit, GitFork, Link2, LoaderCircle, PanelRightClose, PanelRightOpen, Pencil, RefreshCw } from 'lucide-react'
@@ -19,6 +19,10 @@ export type ExplorerTreeViewProps = {
   statusPresentation: GitStatusPresentation
   previewVisible: boolean
   onTogglePreview: () => void
+  treeId?: string
+  workspaceLabel?: string
+  workspacePath?: string
+  repositoryLabel?: string
   renamingPath: string | null
   renameValue: string
   contextMenu: ExplorerContextMenu
@@ -38,14 +42,29 @@ export type ExplorerTreeViewProps = {
   onDrop: (event: React.DragEvent, node: ExplorerNode) => void
 }
 
-export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, previewVisible, onTogglePreview, renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onOpen, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
+export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSummary, statusPresentation, previewVisible, onTogglePreview, treeId = 'explorer-tree', workspaceLabel = 'Workspace', workspacePath, repositoryLabel = 'Workspace root', renamingPath, renameValue, contextMenu, dragOverPath, onSelect, onOpen, onToggle, onKeyDown, onRenameValueChange, onCommitRename, onCancelRename, onContextMenu, onCloseContextMenu, onDragStart, onDragOver, onDragLeave, onDrop }: ExplorerTreeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const domTreeId = useMemo(() => stableDomId(treeId), [treeId])
+  const rowIds = useMemo(() => new Map(nodes.map((node) => [node.path, `${domTreeId}-row-${stableDomId(node.path)}`])), [domTreeId, nodes])
+  const siblingMetadata = useMemo(() => {
+    const totals = new Map<string, number>()
+    const positions = new Map<string, number>()
+    for (const node of nodes) totals.set(node.parentPath, (totals.get(node.parentPath) ?? 0) + 1)
+    const seen = new Map<string, number>()
+    for (const node of nodes) {
+      const position = (seen.get(node.parentPath) ?? 0) + 1
+      seen.set(node.parentPath, position)
+      positions.set(node.path, position)
+    }
+    return { positions, totals }
+  }, [nodes])
   // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
   // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({ count: nodes.length, getScrollElement: () => scrollRef.current, estimateSize: () => 24, overscan: 20 })
   const virtualItems = virtualizer.getVirtualItems()
   const rows = virtualItems.length > 0 ? virtualItems : nodes.map((_, index) => ({ index, key: index, start: index * 24, size: 24, end: (index + 1) * 24, lane: 0 }))
   const contextPosition = contextMenu ? clampMenuPosition(contextMenu.x, contextMenu.y, contextMenu.actions.length) : null
+  const activeDescendant = selectedPath ? rowIds.get(selectedPath) : undefined
 
   useEffect(() => {
     if (!selectedPath) return
@@ -53,19 +72,37 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
     if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' })
   }, [nodes, selectedPath, virtualizer])
 
+  const focusTree = () => scrollRef.current?.focus({ preventScroll: true })
+
   return (
     <aside className="explorer-tree-pane" data-explorer-tree="true">
       <header>
-        <strong>EXPLORER</strong>
-        <span className="explorer-tree-header-spacer" />
-        {statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}
-        {loading ? <LoaderCircle className="spin" size={13} /> : null}
-        <button type="button" className="explorer-preview-toggle" title={previewVisible ? 'Hide file preview' : 'Show file preview'} aria-pressed={previewVisible} onClick={onTogglePreview}>
-          {previewVisible ? <PanelRightClose size={13} aria-hidden="true" /> : <PanelRightOpen size={13} aria-hidden="true" />}
-        </button>
+        <div className="explorer-tree-titlebar">
+          <strong>EXPLORER</strong>
+          <span className="explorer-tree-header-spacer" />
+          {statusSummary ? <ChangeSummaryBadges summary={statusSummary} presentation={statusPresentation} compact /> : null}
+          {loading ? <LoaderCircle className="spin" size={13} /> : null}
+          <button type="button" className="explorer-preview-toggle" title={previewVisible ? 'Hide file preview' : 'Show file preview'} aria-label={previewVisible ? 'Hide file preview' : 'Show file preview'} aria-pressed={previewVisible} onClick={onTogglePreview}>
+            {previewVisible ? <PanelRightClose size={13} aria-hidden="true" /> : <PanelRightOpen size={13} aria-hidden="true" />}
+          </button>
+        </div>
+        <div className="explorer-tree-context" aria-label={`Workspace ${workspaceLabel}; Git repository ${repositoryLabel}`}>
+          <span title={workspacePath ?? workspaceLabel}><b>Workspace</b><span>{workspaceLabel}</span></span>
+          <span title={`Git repository: ${repositoryLabel}`}><b>Git</b><span>{repositoryLabel}</span></span>
+        </div>
       </header>
-      {error ? <div className="explorer-error">{error}</div> : null}
-      <div ref={scrollRef} className="explorer-tree-scroll" role="tree" tabIndex={0} onKeyDown={onKeyDown}>
+      {error ? <div className="explorer-error" role="alert">{error}</div> : null}
+      <div
+        id={domTreeId}
+        ref={scrollRef}
+        className="explorer-tree-scroll"
+        role="tree"
+        aria-label={`Files in ${workspaceLabel}`}
+        aria-activedescendant={activeDescendant}
+        aria-busy={loading}
+        tabIndex={0}
+        onKeyDown={onKeyDown}
+      >
         <div className="explorer-tree-virtual" style={{ height: `${virtualizer.getTotalSize() || nodes.length * 24}px` }}>
           {rows.map((virtualRow) => {
             const node = nodes[virtualRow.index]
@@ -73,9 +110,13 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
             const Icon = node.entry.isSymlink ? Link2 : node.entry.repoKind ? FolderGit2 : node.entry.isDir ? (node.expanded ? FolderOpen : Folder) : File
             return (
               <div
+                id={rowIds.get(node.path)}
                 key={node.path}
                 className="explorer-tree-row"
                 role="treeitem"
+                aria-level={node.depth + 1}
+                aria-posinset={siblingMetadata.positions.get(node.path)}
+                aria-setsize={siblingMetadata.totals.get(node.parentPath)}
                 aria-expanded={node.entry.isDir ? node.expanded : undefined}
                 aria-selected={selectedPath === node.path}
                 data-selected={selectedPath === node.path || undefined}
@@ -88,18 +129,18 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
                 data-repository-initialized={node.entry.repositoryInitialized === false ? 'false' : undefined}
                 draggable={!node.gitOnly && !node.entry.repoKind}
                 style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)`, '--explorer-depth': node.depth } as React.CSSProperties}
-                onClick={() => onSelect(node)}
-                onDoubleClick={() => { if (node.entry.isDir) onToggle(node); else onOpen(node) }}
-                onContextMenu={(event) => onContextMenu(event, node)}
+                onClick={() => { focusTree(); onSelect(node) }}
+                onDoubleClick={() => { focusTree(); if (node.entry.isDir) onToggle(node); else onOpen(node) }}
+                onContextMenu={(event) => { focusTree(); onContextMenu(event, node) }}
                 onDragStart={() => onDragStart(node)}
                 onDragOver={(event) => onDragOver(event, node)}
                 onDragLeave={onDragLeave}
                 onDrop={(event) => onDrop(event, node)}
               >
-                {node.entry.isDir ? <button type="button" className="explorer-tree-twisty" tabIndex={-1} aria-label={node.expanded ? `Collapse ${node.name}` : `Expand ${node.name}`} onClick={(event) => { event.stopPropagation(); onToggle(node) }}>{node.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</button> : <span className="explorer-tree-indent" />}
-                <Icon className="explorer-tree-icon" size={14} />
+                {node.entry.isDir ? <button type="button" className="explorer-tree-twisty" tabIndex={-1} aria-label={node.expanded ? `Collapse ${node.name}` : `Expand ${node.name}`} onClick={(event) => { event.stopPropagation(); focusTree(); onToggle(node) }}>{node.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</button> : <span className="explorer-tree-indent" />}
+                <Icon className="explorer-tree-icon" size={14} aria-hidden="true" />
                 {renamingPath === node.path ? (
-                  <input className="explorer-tree-rename" autoFocus value={renameValue} onChange={(event) => onRenameValueChange(event.target.value)} onBlur={onCommitRename} onKeyDown={(event) => { if (event.key === 'Enter') onCommitRename(); if (event.key === 'Escape') onCancelRename() }} />
+                  <input className="explorer-tree-rename" aria-label={`Rename ${node.name}`} autoFocus value={renameValue} onChange={(event) => onRenameValueChange(event.target.value)} onBlur={onCommitRename} onKeyDown={(event) => { event.stopPropagation(); if (event.key === 'Enter') onCommitRename(); if (event.key === 'Escape') onCancelRename() }} />
                 ) : <span className="explorer-tree-name">{node.name}</span>}
                 {node.repositoryRef ? <span className="explorer-repository-ref" title={`Checked out ${node.repositoryRef}`}>{node.repositoryRef}</span> : null}
                 {node.entry.repoKind ? <RepositoryBadges node={node} presentation={statusPresentation} /> : null}
@@ -114,7 +155,7 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
       {contextMenu && contextPosition ? createPortal(
         <>
           <div className="terminal-context-backdrop" onMouseDown={onCloseContextMenu} onContextMenu={(event) => { event.preventDefault(); onCloseContextMenu() }} />
-          <div className="terminal-context-menu explorer-context-menu" role="menu" style={{ left: contextPosition.x, top: contextPosition.y }}>
+          <div className="terminal-context-menu explorer-context-menu" role="menu" aria-label={`Actions for ${contextMenu.path}`} style={{ left: contextPosition.x, top: contextPosition.y }}>
             {contextMenu.actions.map((action) => <button key={action.id} type="button" role="menuitem" disabled={action.disabled} data-danger={action.danger || undefined} onClick={action.onClick}>{action.label}</button>)}
           </div>
         </>,
@@ -122,6 +163,11 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
       ) : null}
     </aside>
   )
+}
+
+function stableDomId(value: string): string {
+  if (!value) return 'root'
+  return Array.from(value, (character) => character.codePointAt(0)?.toString(16) ?? '0').join('-')
 }
 
 type ChangeBadgeMeta = {

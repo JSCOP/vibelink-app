@@ -1,6 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
-import { CheckCircle2, Maximize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { CheckCircle2, Maximize2, Minimize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { formatKeyChord } from '../state/keybindings'
@@ -9,7 +9,7 @@ import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../lay
 
 type WorkspaceContentTabProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
 
-export function WorkspaceContentTab({ api, params }: WorkspaceContentTabProps) {
+export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceContentTabProps) {
   const actions = useWorkspaceContentActions()
   const content = parseWorkspaceContentParams(params)
   const paneId = content?.kind === 'terminal' ? content.paneId : null
@@ -20,11 +20,28 @@ export function WorkspaceContentTab({ api, params }: WorkspaceContentTabProps) {
   const [title, setTitle] = useState(api.title ?? content?.title ?? 'Content')
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
+  const [isActive, setIsActive] = useState(api.isActive)
+  const [isMaximized, setIsMaximized] = useState(() => api.isMaximized())
 
   useEffect(() => {
     const disposable = api.onDidTitleChange((event) => setTitle(event.title))
     return () => disposable.dispose()
   }, [api])
+
+  useEffect(() => {
+    const syncActive = () => setIsActive(api.isActive)
+    const syncMaximized = () => setIsMaximized(api.isMaximized())
+    const active = api.onDidActiveChange(syncActive)
+    const group = api.onDidGroupChange(syncMaximized)
+    const maximized = containerApi.onDidMaximizedGroupChange(syncMaximized)
+    syncActive()
+    syncMaximized()
+    return () => {
+      active.dispose()
+      group.dispose()
+      maximized.dispose()
+    }
+  }, [api, containerApi])
 
   const activateAndStop = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
     actions.activateContent(api.id)
@@ -46,6 +63,12 @@ export function WorkspaceContentTab({ api, params }: WorkspaceContentTabProps) {
       setIsEditing(false)
     }
   }
+  const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault()
+    event.stopPropagation()
+    actions.activateContent(api.id)
+  }
 
   return (
     <div
@@ -53,6 +76,12 @@ export function WorkspaceContentTab({ api, params }: WorkspaceContentTabProps) {
       title={reviewed ? `${title} · reviewed` : hasCompletionHighlight ? `${title} · response complete` : title}
       data-content-panel-id={api.id}
       data-pane-id={paneId ?? undefined}
+      role="tab"
+      tabIndex={0}
+      aria-selected={isActive}
+      aria-label={title}
+      onPointerDown={() => actions.activateContent(api.id)}
+      onKeyDown={onRootKeyDown}
     >
       <span aria-hidden="true"><ProfileIcon name={content?.icon} size={13} className="terminal-tab-icon" /></span>
       {paneId
@@ -96,8 +125,8 @@ export function WorkspaceContentTab({ api, params }: WorkspaceContentTabProps) {
             </button>
           </>
         ) : null}
-        <button type="button" title="Maximize content" aria-label="Maximize or restore content" onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id) }}>
-          <Maximize2 size={12} aria-hidden="true" />
+        <button type="button" title={isMaximized ? 'Restore content' : 'Maximize content'} aria-label={isMaximized ? 'Restore content' : 'Maximize content'} onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id); setIsMaximized(api.isMaximized()) }}>
+          {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
         </button>
         <button type="button" title={paneId ? 'Close terminal' : 'Close content'} aria-label={paneId ? 'Close terminal' : 'Close content'} onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
           <X size={12} aria-hidden="true" />
