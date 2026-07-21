@@ -22,6 +22,7 @@ import {
   GitCompare,
   LayoutGrid,
   ListTodo,
+  MonitorCog,
 } from 'lucide-react'
 
 type IconComponent = typeof Terminal
@@ -50,6 +51,7 @@ export const profileIcons: Record<string, IconComponent> = {
   'git-compare': GitCompare,
   'layout-grid': LayoutGrid,
   'list-todo': ListTodo,
+  'monitor-cog': MonitorCog,
 }
 
 export const defaultProfileIconName = 'terminal'

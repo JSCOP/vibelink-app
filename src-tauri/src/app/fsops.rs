@@ -37,7 +37,10 @@ pub async fn fs_list_dir(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<Vec<DirEntryInfo>, String> {
-    entitled_spawn(license, move || list_dir_native(&workspace_folder, &rel_path)).await
+    entitled_spawn(license, move || {
+        list_dir_native(&workspace_folder, &rel_path)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -46,7 +49,10 @@ pub async fn fs_read_text(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextFile, String> {
-    entitled_spawn(license, move || read_text_native(&workspace_folder, &rel_path)).await
+    entitled_spawn(license, move || {
+        read_text_native(&workspace_folder, &rel_path)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -55,7 +61,10 @@ pub async fn fs_read_image(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<String, String> {
-    entitled_spawn(license, move || read_base64_native(&workspace_folder, &rel_path)).await
+    entitled_spawn(license, move || {
+        read_base64_native(&workspace_folder, &rel_path)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -64,7 +73,10 @@ pub async fn fs_create_file(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || create_file_native(&workspace_folder, &rel_path)).await
+    entitled_spawn(license, move || {
+        create_file_native(&workspace_folder, &rel_path)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -73,7 +85,10 @@ pub async fn fs_create_dir(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || create_dir_native(&workspace_folder, &rel_path)).await
+    entitled_spawn(license, move || {
+        create_dir_native(&workspace_folder, &rel_path)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -83,7 +98,10 @@ pub async fn fs_rename(
     from_rel: String,
     to_rel: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || rename_native(&workspace_folder, &from_rel, &to_rel)).await
+    entitled_spawn(license, move || {
+        rename_native(&workspace_folder, &from_rel, &to_rel)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -92,7 +110,10 @@ pub async fn fs_delete(
     workspace_folder: String,
     rel_paths: Vec<String>,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || delete_native(&workspace_folder, &rel_paths)).await
+    entitled_spawn(license, move || {
+        delete_native(&workspace_folder, &rel_paths)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -102,7 +123,10 @@ pub async fn open_in_editor(
     rel_path: String,
     editor_command: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || open_in_editor_native(&workspace_folder, &rel_path, &editor_command)).await
+    entitled_spawn(license, move || {
+        open_in_editor_native(&workspace_folder, &rel_path, &editor_command)
+    })
+    .await
 }
 
 fn list_dir_native(root: &str, rel_path: &str) -> Result<Vec<DirEntryInfo>> {
@@ -111,7 +135,9 @@ fn list_dir_native(root: &str, rel_path: &str) -> Result<Vec<DirEntryInfo>> {
         bail!("directory does not exist");
     }
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&directory).with_context(|| format!("read {}", directory.display()))? {
+    for entry in
+        std::fs::read_dir(&directory).with_context(|| format!("read {}", directory.display()))?
+    {
         let entry = entry?;
         let metadata = std::fs::symlink_metadata(entry.path())?;
         let file_type = metadata.file_type();
@@ -120,7 +146,10 @@ fn list_dir_native(root: &str, rel_path: &str) -> Result<Vec<DirEntryInfo>> {
             is_dir: file_type.is_dir(),
             is_symlink: file_type.is_symlink(),
             size: metadata.len(),
-            modified_at: metadata.modified().ok().map(|time| DateTime::<Utc>::from(time).to_rfc3339()),
+            modified_at: metadata
+                .modified()
+                .ok()
+                .map(|time| DateTime::<Utc>::from(time).to_rfc3339()),
         });
     }
     Ok(entries)
@@ -135,7 +164,11 @@ fn read_text_native(root: &str, rel_path: &str) -> Result<TextFile> {
     bytes.truncate(TEXT_LIMIT);
     let binary = bytes.iter().take(8 * 1024).any(|byte| *byte == 0);
     Ok(TextFile {
-        content: if binary { String::new() } else { String::from_utf8_lossy(&bytes).to_string() },
+        content: if binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&bytes).to_string()
+        },
         truncated,
         binary,
     })
@@ -173,7 +206,8 @@ fn rename_native(root: &str, from_rel: &str, to_rel: &str) -> Result<()> {
     if to.exists() {
         bail!("target already exists");
     }
-    std::fs::rename(&from, &to).with_context(|| format!("rename {} to {}", from.display(), to.display()))
+    std::fs::rename(&from, &to)
+        .with_context(|| format!("rename {} to {}", from.display(), to.display()))
 }
 
 fn delete_native(root: &str, rel_paths: &[String]) -> Result<()> {
@@ -203,7 +237,10 @@ fn open_in_editor_native(root: &str, rel_path: &str, editor_command: &str) -> Re
     Ok(())
 }
 
-async fn entitled_spawn<T, F>(license: State<'_, Arc<LicenseService>>, operation: F) -> Result<T, String>
+async fn entitled_spawn<T, F>(
+    license: State<'_, Arc<LicenseService>>,
+    operation: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
@@ -252,7 +289,11 @@ mod tests {
         let root = temp_root();
         let root_str = root.to_str().expect("utf8 root");
         assert!(read_text_native(root_str, "../secret.txt").is_err());
-        let absolute = if cfg!(windows) { r"C:\Windows\win.ini" } else { "/etc/passwd" };
+        let absolute = if cfg!(windows) {
+            r"C:\Windows\win.ini"
+        } else {
+            "/etc/passwd"
+        };
         assert!(read_text_native(root_str, absolute).is_err());
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -282,7 +323,11 @@ mod tests {
     fn delete_removes_file_from_workspace() {
         let root = temp_root();
         std::fs::write(root.join("delete.txt"), "delete").expect("write");
-        delete_native(root.to_str().expect("utf8 root"), &["delete.txt".to_string()]).expect("delete");
+        delete_native(
+            root.to_str().expect("utf8 root"),
+            &["delete.txt".to_string()],
+        )
+        .expect("delete");
         assert!(!root.join("delete.txt").exists());
         std::fs::remove_dir_all(root).expect("cleanup");
     }

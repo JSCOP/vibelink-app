@@ -1,6 +1,6 @@
 import { shouldRestoreDockviewLayout } from './layoutRestore'
 
-export type WorkspaceWindowKind = 'terminal' | 'agent' | 'kanban' | 'diff' | 'todo' | 'git' | 'explorer'
+export type WorkspaceWindowKind = 'terminal' | 'agent' | 'kanban' | 'diff' | 'todo' | 'git' | 'explorer' | 'browser' | 'computer'
 
 export type TerminalWindowOpenMode = 'existing' | 'new'
 
@@ -116,6 +116,22 @@ export const workspaceWindowDescriptors: Record<WorkspaceWindowKind, WorkspaceWi
     component: 'todo',
     title: 'Todo List',
     icon: 'list-todo',
+    singleton: true,
+  },
+  browser: {
+    kind: 'browser',
+    panelId: 'browser',
+    component: 'browserWindow',
+    title: 'Browser',
+    icon: 'globe',
+    singleton: true,
+  },
+  computer: {
+    kind: 'computer',
+    panelId: 'computer',
+    component: 'computerWindow',
+    title: 'Computer',
+    icon: 'monitor-cog',
     singleton: true,
   },
 }

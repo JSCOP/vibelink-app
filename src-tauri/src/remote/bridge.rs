@@ -1,4 +1,14 @@
+use super::v2::{
+    secure::{SecureFrameKind, SecureHandshake, SecureTransport},
+    wire::{
+        BinaryChannel, BinaryFrame, DomainSequenceValidator, OperationReplayWindow, SequenceError,
+        FLAG_FINAL, FLAG_RESYNC, MAX_BINARY_PAYLOAD_BYTES,
+    },
+    CONTRACT_SHA256 as V2_CONTRACT_SHA256, PROTOCOL_VERSION as V2_PROTOCOL_VERSION,
+    SUBPROTOCOL as V2_SUBPROTOCOL,
+};
 use super::{
+    devices::{TERMINAL_INPUT_GRANT, TERMINAL_VIEW_GRANT},
     layout_order::pane_order,
     protocol::{
         encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage,
@@ -6,6 +16,7 @@ use super::{
     },
     server::{desktop_name, PaneLease, RemotePaneLeaseEvent, RemoteShared},
 };
+use crate::dedicated_cli::{parse_args as parse_cli_args, CliControlRequest};
 use crate::{
     app::spawn_daemon,
     protocol::{
@@ -13,14 +24,19 @@ use crate::{
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use interprocess::local_socket::prelude::*;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
-    io,
+    fs, io,
     net::TcpStream,
-    sync::Arc,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -37,17 +53,21 @@ const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(60);
 const DAEMON_OUTPUT_QUEUE_CAPACITY: usize = 1024;
 const PUSH_QUEUE_CAPACITY: usize = 1024;
 const MAX_OUTPUT_FRAMES_PER_LOOP: usize = 32;
+const MAX_REMOTE_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_REMOTE_FRAME_BYTES: usize = 1024 * 1024;
 
 type RemoteSocket = WebSocket<StreamOwned<ServerConnection, TcpStream>>;
 
 struct DaemonSenders {
     control: Sender<DaemonToClient>,
     output: Sender<DaemonToClient>,
+    dropped_output: Arc<Mutex<HashMap<Uuid, u64>>>,
 }
 
 struct DaemonInbox {
     control: Receiver<DaemonToClient>,
     output: Receiver<DaemonToClient>,
+    dropped_output: Arc<Mutex<HashMap<Uuid, u64>>>,
     deferred_control: VecDeque<DaemonToClient>,
 }
 
@@ -82,27 +102,50 @@ impl DaemonInbox {
             Err(TryRecvError::Disconnected) => bail!("remote daemon connection closed"),
         }
     }
+
+    fn take_output_drops(&self, pane_id: Uuid) -> u64 {
+        self.dropped_output
+            .lock()
+            .expect("remote output drops mutex")
+            .remove(&pane_id)
+            .unwrap_or(0)
+    }
 }
 
 fn daemon_channels(output_capacity: usize) -> (DaemonSenders, DaemonInbox) {
     let (control_tx, control_rx) = unbounded();
     let (output_tx, output_rx) = bounded(output_capacity);
+    let dropped_output = Arc::new(Mutex::new(HashMap::new()));
     (
         DaemonSenders {
             control: control_tx,
             output: output_tx,
+            dropped_output: Arc::clone(&dropped_output),
         },
         DaemonInbox {
             control: control_rx,
             output: output_rx,
             deferred_control: VecDeque::new(),
+            dropped_output,
         },
     )
 }
 
 fn route_daemon_message(senders: &DaemonSenders, message: DaemonToClient) -> bool {
     match message {
-        output @ DaemonToClient::Output { .. } => senders.output.try_send(output).is_ok(),
+        output @ DaemonToClient::Output { pane_id, .. } => {
+            if senders.output.try_send(output).is_ok() {
+                true
+            } else {
+                let mut drops = senders
+                    .dropped_output
+                    .lock()
+                    .expect("remote output drops mutex");
+                let count = drops.entry(pane_id).or_default();
+                *count = count.saturating_add(1);
+                false
+            }
+        }
         control => senders.control.send(control).is_ok(),
     }
 }
@@ -116,40 +159,59 @@ pub fn handle_connection(
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let tls = StreamOwned::new(ServerConnection::new(tls_config)?, stream);
-    let mut ws = tungstenite::accept_hdr(tls, |request: &Request, mut response: Response| {
-        let offered = request
-            .headers()
-            .get("sec-websocket-protocol")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
-        if !offered
-            .split(',')
-            .map(str::trim)
-            .any(|value| value == SUBPROTOCOL)
-        {
-            return Err(tungstenite::http::Response::builder()
-                .status(400)
-                .body(Some("missing vibelink-remote-v1 subprotocol".to_string()))
-                .expect("error response"));
-        }
-        response.headers_mut().insert(
-            "sec-websocket-protocol",
-            SUBPROTOCOL.parse().expect("subprotocol header"),
-        );
-        Ok(response)
-    })
+    let websocket_config = tungstenite::protocol::WebSocketConfig::default()
+        .read_buffer_size(32 * 1024)
+        .write_buffer_size(32 * 1024)
+        .max_write_buffer_size(2 * 1024 * 1024)
+        .max_message_size(Some(MAX_REMOTE_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_REMOTE_FRAME_BYTES));
+    let negotiated_v2 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let negotiation = Arc::clone(&negotiated_v2);
+    let mut ws = tungstenite::accept_hdr_with_config(
+        tls,
+        move |request: &Request, mut response: Response| {
+            let offered = request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            let selected = if offered.contains(&V2_SUBPROTOCOL) {
+                negotiation.store(true, std::sync::atomic::Ordering::Release);
+                V2_SUBPROTOCOL
+            } else if offered.contains(&SUBPROTOCOL) {
+                SUBPROTOCOL
+            } else {
+                return Err(tungstenite::http::Response::builder()
+                    .status(400)
+                    .body(Some("missing VibeLink remote subprotocol".to_string()))
+                    .expect("error response"));
+            };
+            response.headers_mut().insert(
+                "sec-websocket-protocol",
+                selected.parse().expect("subprotocol header"),
+            );
+            Ok(response)
+        },
+        Some(websocket_config),
+    )
     .context("accept remote websocket")?;
+    if negotiated_v2.load(std::sync::atomic::Ordering::Acquire) {
+        return handle_v2_connection(ws, shared);
+    }
 
     let first = ws.read().context("read remote hello")?;
     let hello: ClientMessage = match first {
         Message::Text(text) => serde_json::from_str(text.as_ref()).context("parse remote hello")?,
         _ => bail!("remote hello must be a text frame"),
     };
-    let (device_id, device_token) = authenticate(&mut ws, &shared, hello)?;
+    let (device_id, device_token, grants) = authenticate(&mut ws, &shared, hello)?;
     send_json(
         &mut ws,
         &ServerMessage::Authed {
-            device_id,
+            device_id: device_id.clone(),
             device_token,
             desktop_name: desktop_name(),
             protocol_version: PROTOCOL_VERSION,
@@ -167,6 +229,11 @@ pub fn handle_connection(
         .lock()
         .expect("remote clients mutex")
         .insert(client_key, push_tx);
+    shared
+        .client_devices
+        .lock()
+        .expect("remote client devices mutex")
+        .insert(client_key, device_id);
 
     let result = run_authenticated(
         &mut ws,
@@ -175,6 +242,7 @@ pub fn handle_connection(
         &push_rx,
         &shared,
         client_key,
+        &grants,
     );
     if let Err(error) = restore_owned_leases(&shared, client_key, &mut daemon_writer, None) {
         tracing::warn!(?error, %client_key, "failed to restore remote pane leases during disconnect");
@@ -184,6 +252,11 @@ pub fn handle_connection(
         .lock()
         .expect("remote clients mutex")
         .remove(&client_key);
+    shared
+        .client_devices
+        .lock()
+        .expect("remote client devices mutex")
+        .remove(&client_key);
     result
 }
 
@@ -191,7 +264,7 @@ fn authenticate(
     ws: &mut RemoteSocket,
     shared: &RemoteShared,
     hello: ClientMessage,
-) -> Result<(String, Option<String>)> {
+) -> Result<(String, Option<String>, Vec<String>)> {
     let ClientMessage::Hello {
         protocol_version,
         auth,
@@ -213,7 +286,7 @@ fn authenticate(
     match auth {
         AuthRequest::Pair { code, device_name } => {
             match devices.consume_pairing(&code, &device_name) {
-                Ok((record, token)) => Ok((record.id, Some(token))),
+                Ok((record, token)) => Ok((record.id, Some(token), record.grants)),
                 Err(error) => {
                     let code = auth_error_code(&error);
                     send_error(ws, code, "remote pairing failed", None)?;
@@ -222,7 +295,10 @@ fn authenticate(
             }
         }
         AuthRequest::Token { device_id, token } => match devices.verify_token(&device_id, &token) {
-            Ok(true) => Ok((device_id, None)),
+            Ok(true) => {
+                let grants = devices.grants_for(&device_id).unwrap_or_default();
+                Ok((device_id, None, grants))
+            }
             _ => {
                 send_error(ws, "authFailed", "remote authentication failed", None)?;
                 bail!("remote token authentication failed")
@@ -238,17 +314,1014 @@ fn auth_error_code(error: &super::devices::AuthFailure) -> &'static str {
         super::devices::AuthFailure::RateLimited => "rateLimited",
     }
 }
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2AuthRequest {
+    mode: String,
+    code: Option<String>,
+    device_name: Option<String>,
+    device_id: Option<String>,
+    revocation_epoch: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2Envelope {
+    version: u16,
+    request_id: String,
+    domain: String,
+    method: String,
+    operation_id: String,
+    sequence: u64,
+    revocation_epoch: u64,
+    #[serde(default)]
+    payload: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct V2Response<'a> {
+    version: u16,
+    request_id: &'a str,
+    domain: &'a str,
+    method: &'a str,
+    operation_id: &'a str,
+    sequence: u64,
+    revocation_epoch: u64,
+    payload: Value,
+    error: Option<Value>,
+}
+
+fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Result<()> {
+    let mut handshake = SecureHandshake::responder(&shared.v2_identity)?;
+    let first = read_binary(&mut ws, "remote-v2 handshake message one")?;
+    handshake.read(&first)?;
+    let server_hello = serde_json::to_vec(&json!({
+        "protocolVersion": V2_PROTOCOL_VERSION,
+        "contractSha256": V2_CONTRACT_SHA256,
+        "desktopName": desktop_name(),
+        "desktopFingerprint": shared.v2_identity.fingerprint(),
+    }))?;
+    ws.send(Message::Binary(handshake.write(&server_hello)?.into()))?;
+    let third = read_binary(&mut ws, "remote-v2 handshake message three")?;
+    let auth_payload = handshake.read(&third)?;
+    let auth: V2AuthRequest =
+        serde_json::from_slice(&auth_payload).context("parse remote-v2 auth")?;
+    let transport = handshake.finish(None)?;
+    let peer_fingerprint = transport.peer_fingerprint().to_string();
+    let (device_id, grants, revocation_epoch) = {
+        let mut devices = shared.devices.lock().expect("remote devices mutex");
+        match auth.mode.as_str() {
+            "pair" => {
+                let record = devices
+                    .consume_v2_pairing(
+                        auth.code.as_deref().context("pair code is required")?,
+                        auth.device_name
+                            .as_deref()
+                            .context("device name is required")?,
+                        &peer_fingerprint,
+                    )
+                    .map_err(|_| anyhow!("remote-v2 pairing failed"))?;
+                (record.id, record.grants, record.revocation_epoch)
+            }
+            "resume" => {
+                let device_id = auth.device_id.context("device id is required")?;
+                devices
+                    .verify_v2_identity(&device_id, &peer_fingerprint)
+                    .map_err(|_| anyhow!("remote-v2 identity verification failed"))?;
+                let authorization = devices
+                    .v2_authorization(&device_id, &peer_fingerprint)
+                    .context("remote-v2 device was revoked")?;
+                if auth.revocation_epoch != Some(authorization.revocation_epoch) {
+                    bail!("remote-v2 stale revocation epoch");
+                }
+                (
+                    device_id,
+                    authorization.grants,
+                    authorization.revocation_epoch,
+                )
+            }
+            _ => bail!("unsupported remote-v2 auth mode"),
+        }
+    };
+    let mut transport = transport;
+    let auth_response = serde_json::to_vec(&json!({
+        "version": V2_PROTOCOL_VERSION,
+        "requestId": "auth",
+        "domain": "system",
+        "method": "authenticated",
+        "operationId": Uuid::new_v4().to_string(),
+        "sequence": 0,
+        "revocationEpoch": revocation_epoch,
+        "payload": {
+            "deviceId": device_id,
+            "grants": grants,
+            "revocationEpoch": revocation_epoch,
+            "contractSha256": V2_CONTRACT_SHA256
+        },
+        "error": null,
+    }))?;
+    ws.send(Message::Binary(
+        transport
+            .seal(SecureFrameKind::Control, &auth_response)?
+            .into(),
+    ))?;
+    ws.get_mut().sock.set_read_timeout(Some(POLL_TIMEOUT))?;
+
+    let client_key = Uuid::new_v4();
+    let (push_tx, push_rx) = bounded(PUSH_QUEUE_CAPACITY);
+    shared
+        .client_senders
+        .lock()
+        .expect("remote clients mutex")
+        .insert(client_key, push_tx);
+    shared
+        .client_devices
+        .lock()
+        .expect("remote client devices mutex")
+        .insert(client_key, device_id.clone());
+    shared
+        .v2_clients
+        .lock()
+        .expect("remote v2 clients mutex")
+        .insert(client_key);
+
+    let result = run_v2_authenticated(
+        &mut ws,
+        &mut transport,
+        &shared,
+        &push_rx,
+        &device_id,
+        &peer_fingerprint,
+        revocation_epoch,
+    );
+    shared
+        .client_senders
+        .lock()
+        .expect("remote clients mutex")
+        .remove(&client_key);
+    shared
+        .client_devices
+        .lock()
+        .expect("remote client devices mutex")
+        .remove(&client_key);
+    shared
+        .v2_clients
+        .lock()
+        .expect("remote v2 clients mutex")
+        .remove(&client_key);
+    result
+}
+
+fn run_v2_authenticated(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    shared: &RemoteShared,
+    push_rx: &Receiver<Message>,
+    device_id: &str,
+    peer_fingerprint: &str,
+    session_epoch: u64,
+) -> Result<()> {
+    let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
+    let mut next_req = 1_u64;
+    let mut sequences = DomainSequenceValidator::default();
+    let mut binary_sequences: HashMap<(BinaryChannel, u64), u64> = HashMap::new();
+    loop {
+        match push_rx.try_recv() {
+            Ok(Message::Close(_)) | Err(TryRecvError::Disconnected) => {
+                let _ = ws.send(Message::Close(None));
+                break;
+            }
+            Ok(_) | Err(TryRecvError::Empty) => {}
+        }
+
+        let authorization = shared
+            .devices
+            .lock()
+            .expect("remote devices mutex")
+            .v2_authorization(device_id, peer_fingerprint);
+        let Some(authorization) = authorization else {
+            send_v2_session_error(
+                ws,
+                transport,
+                session_epoch,
+                "revoked",
+                "remote device was revoked",
+            )?;
+            let _ = ws.send(Message::Close(None));
+            break;
+        };
+        if authorization.revocation_epoch != session_epoch {
+            send_v2_session_error(
+                ws,
+                transport,
+                authorization.revocation_epoch,
+                "revoked",
+                "remote device authorization changed",
+            )?;
+            let _ = ws.send(Message::Close(None));
+            break;
+        }
+
+        match ws.read() {
+            Ok(Message::Binary(ciphertext)) => {
+                let frame = transport.open(&ciphertext)?;
+                if frame.kind != SecureFrameKind::Control {
+                    continue;
+                }
+                let request: V2Envelope =
+                    serde_json::from_slice(&frame.payload).context("parse remote-v2 envelope")?;
+                let mut binary_after_response = Vec::new();
+                let response = if request.version != V2_PROTOCOL_VERSION {
+                    v2_error(
+                        &request,
+                        "protocol_mismatch",
+                        "remote protocol version mismatch",
+                    )
+                } else if request.revocation_epoch != authorization.revocation_epoch {
+                    v2_error(&request, "revoked", "remote device authorization is stale")
+                } else if Uuid::parse_str(&request.operation_id).is_err() {
+                    v2_error(&request, "invalid_argument", "operationId must be a UUID")
+                } else {
+                    match sequences.validate(&request.domain, request.sequence) {
+                        Err(SequenceError::Replay { expected, received }) => v2_error_with_details(
+                            &request,
+                            "sequence_replay",
+                            "remote-v2 sequence was already processed",
+                            json!({ "expected": expected, "received": received }),
+                        ),
+                        Err(SequenceError::Gap { expected, received }) => v2_error_with_details(
+                            &request,
+                            "sequence_gap",
+                            "remote-v2 sequence gap requires domain resync",
+                            json!({ "expected": expected, "received": received, "resyncRequired": true }),
+                        ),
+                        Err(SequenceError::InvalidDomain) => v2_error(
+                            &request,
+                            "invalid_argument",
+                            "remote-v2 domain is invalid or the domain limit was reached",
+                        ),
+                        Ok(())
+                            if !record_v2_operation(shared, device_id, &request.operation_id)? =>
+                        {
+                            v2_error(
+                                &request,
+                                "sequence_replay",
+                                "remote-v2 operationId was already processed",
+                            )
+                        }
+                        Ok(()) if request.domain == "system" && request.method == "resync" => {
+                            let target_domain = request
+                                .payload
+                                .get("domain")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let next_sequence = request
+                                .payload
+                                .get("nextSequence")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0);
+                            match sequences.resync(target_domain, next_sequence) {
+                                Ok(()) => V2Response {
+                                    version: V2_PROTOCOL_VERSION,
+                                    request_id: &request.request_id,
+                                    domain: &request.domain,
+                                    method: &request.method,
+                                    operation_id: &request.operation_id,
+                                    sequence: request.sequence,
+                                    revocation_epoch: request.revocation_epoch,
+                                    payload: json!({ "domain": target_domain, "nextSequence": next_sequence }),
+                                    error: None,
+                                },
+                                Err(error) => {
+                                    v2_error(&request, "resync_required", &error.to_string())
+                                }
+                            }
+                        }
+                        Ok(()) => {
+                            let result =
+                                if request.domain == "terminal" && request.method == "snapshot" {
+                                    require_grant(&authorization.grants, TERMINAL_VIEW_GRANT)
+                                        .and_then(|_| {
+                                            v2_terminal_snapshot(
+                                                &request,
+                                                &mut daemon_writer,
+                                                &mut daemon_inbox,
+                                                &mut next_req,
+                                                &mut binary_sequences,
+                                            )
+                                        })
+                                        .map(|(payload, frames)| {
+                                            binary_after_response = frames;
+                                            payload
+                                        })
+                                } else {
+                                    handle_v2_request(
+                                        &request,
+                                        &authorization.grants,
+                                        &mut daemon_writer,
+                                        &mut daemon_inbox,
+                                        &mut next_req,
+                                    )
+                                };
+                            match result {
+                                Ok(payload) => V2Response {
+                                    version: V2_PROTOCOL_VERSION,
+                                    request_id: &request.request_id,
+                                    domain: &request.domain,
+                                    method: &request.method,
+                                    operation_id: &request.operation_id,
+                                    sequence: request.sequence,
+                                    revocation_epoch: request.revocation_epoch,
+                                    payload,
+                                    error: None,
+                                },
+                                Err(error) => {
+                                    v2_error(&request, v2_error_code(&error), &error.to_string())
+                                }
+                            }
+                        }
+                    }
+                };
+                let payload = serde_json::to_vec(&response)?;
+                ws.send(Message::Binary(
+                    transport.seal(SecureFrameKind::Control, &payload)?.into(),
+                ))?;
+                for frame in binary_after_response {
+                    send_v2_binary(ws, transport, frame)?;
+                }
+            }
+            Ok(Message::Ping(payload)) => ws.send(Message::Pong(payload))?,
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if authorization
+            .grants
+            .iter()
+            .any(|grant| grant == TERMINAL_VIEW_GRANT || grant == "admin")
+        {
+            for _ in 0..MAX_OUTPUT_FRAMES_PER_LOOP {
+                let Some(message) = daemon_inbox.try_output()? else {
+                    break;
+                };
+                if let DaemonToClient::Output { pane_id, data } = message {
+                    let dropped = daemon_inbox.take_output_drops(pane_id);
+                    send_v2_terminal_output(
+                        ws,
+                        transport,
+                        pane_id,
+                        &data,
+                        dropped,
+                        &mut binary_sequences,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_v2_operation(shared: &RemoteShared, device_id: &str, operation_id: &str) -> Result<bool> {
+    let mut devices = shared
+        .v2_operation_ids
+        .lock()
+        .expect("remote v2 replay mutex");
+    if !devices.contains_key(device_id) {
+        devices.insert(device_id.to_string(), OperationReplayWindow::new(4096)?);
+    }
+    Ok(devices
+        .get_mut(device_id)
+        .expect("inserted remote v2 replay window")
+        .record(operation_id))
+}
+fn v2_terminal_snapshot(
+    request: &V2Envelope,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+) -> Result<(Value, Vec<BinaryFrame>)> {
+    let session_id = v2_uuid(&request.payload, "sessionId")?;
+    let pane_id = v2_uuid(&request.payload, "paneId")?;
+    let req = take_req(next_req);
+    let data = match request_reply(
+        daemon_writer,
+        daemon_inbox,
+        req,
+        ClientToDaemon::GetScrollback {
+            req,
+            session_id,
+            pane_id,
+        },
+    )? {
+        ReplyResult::ScrollbackData(data) => data,
+        other => bail!("unexpected terminal snapshot reply: {other:?}"),
+    };
+    let stream_id = v2_stream_id(pane_id);
+    let frames = v2_binary_chunks(
+        BinaryChannel::TerminalSnapshot,
+        stream_id,
+        &data,
+        0,
+        sequences,
+    )?;
+    Ok((
+        json!({
+            "paneId": pane_id,
+            "streamId": stream_id,
+            "bytes": data.len(),
+            "chunks": frames.len(),
+        }),
+        frames,
+    ))
+}
+
+fn send_v2_terminal_output(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    pane_id: Uuid,
+    data: &[u8],
+    dropped_frames: u64,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+) -> Result<()> {
+    let stream_id = v2_stream_id(pane_id);
+    if dropped_frames > 0 {
+        let next = sequences
+            .entry((BinaryChannel::TerminalOutput, stream_id))
+            .or_insert(1);
+        *next = next.saturating_add(dropped_frames);
+    }
+    let flags = if dropped_frames > 0 { FLAG_RESYNC } else { 0 };
+    for frame in v2_binary_chunks(
+        BinaryChannel::TerminalOutput,
+        stream_id,
+        data,
+        flags,
+        sequences,
+    )? {
+        send_v2_binary(ws, transport, frame)?;
+    }
+    Ok(())
+}
+
+fn v2_binary_chunks(
+    channel: BinaryChannel,
+    stream_id: u64,
+    data: &[u8],
+    first_flags: u16,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+) -> Result<Vec<BinaryFrame>> {
+    let chunks = data.chunks(MAX_BINARY_PAYLOAD_BYTES).collect::<Vec<_>>();
+    if chunks.is_empty() {
+        let sequence = take_binary_sequence(sequences, channel, stream_id)?;
+        return Ok(vec![BinaryFrame {
+            channel,
+            flags: first_flags | FLAG_FINAL,
+            stream_id,
+            sequence,
+            dropped_before: 0,
+            payload: Vec::new(),
+        }]);
+    }
+    let last = chunks.len() - 1;
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            Ok(BinaryFrame {
+                channel,
+                flags: (if index == 0 { first_flags } else { 0 })
+                    | if index == last { FLAG_FINAL } else { 0 },
+                stream_id,
+                sequence: take_binary_sequence(sequences, channel, stream_id)?,
+                dropped_before: 0,
+                payload: chunk.to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn take_binary_sequence(
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    channel: BinaryChannel,
+    stream_id: u64,
+) -> Result<u64> {
+    let next = sequences.entry((channel, stream_id)).or_insert(1);
+    let sequence = *next;
+    *next = next
+        .checked_add(1)
+        .context("remote-v2 binary sequence exhausted")?;
+    Ok(sequence)
+}
+
+fn send_v2_binary(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    frame: BinaryFrame,
+) -> Result<()> {
+    let encoded = frame.encode()?;
+    ws.send(Message::Binary(
+        transport.seal(SecureFrameKind::Binary, &encoded)?.into(),
+    ))?;
+    Ok(())
+}
+
+fn v2_stream_id(pane_id: Uuid) -> u64 {
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&pane_id.as_bytes()[..8]);
+    u64::from_be_bytes(bytes).max(1)
+}
+
+fn send_v2_session_error(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    revocation_epoch: u64,
+    code: &str,
+    message: &str,
+) -> Result<()> {
+    let payload = serde_json::to_vec(&json!({
+        "version": V2_PROTOCOL_VERSION,
+        "requestId": "session",
+        "domain": "system",
+        "method": "closed",
+        "operationId": Uuid::new_v4().to_string(),
+        "sequence": 0,
+        "revocationEpoch": revocation_epoch,
+        "payload": null,
+        "error": { "code": code, "message": message },
+    }))?;
+    ws.send(Message::Binary(
+        transport.seal(SecureFrameKind::Control, &payload)?.into(),
+    ))?;
+    Ok(())
+}
+
+fn handle_v2_request(
+    request: &V2Envelope,
+    grants: &[String],
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<Value> {
+    match (request.domain.as_str(), request.method.as_str()) {
+        ("system", "status") => Ok(json!({
+            "protocolVersion": V2_PROTOCOL_VERSION,
+            "contractSha256": V2_CONTRACT_SHA256,
+            "capabilities": grants,
+        })),
+        ("workspace", "list") => {
+            require_grant(grants, TERMINAL_VIEW_GRANT)?;
+            Ok(serde_json::to_value(list_sessions(
+                daemon_writer,
+                daemon_inbox,
+                next_req,
+            )?)?)
+        }
+        ("workspace", "attach") => {
+            require_grant(grants, TERMINAL_VIEW_GRANT)?;
+            let session_id = v2_uuid(&request.payload, "sessionId")?;
+            let (layout_json, panes) =
+                attach_session(daemon_writer, daemon_inbox, next_req, session_id)?;
+            let panes = panes
+                .iter()
+                .map(|pane| {
+                    let mut value = serde_json::to_value(PaneDto::from(pane))?;
+                    value
+                        .as_object_mut()
+                        .context("pane projection must be an object")?
+                        .insert(
+                            "terminalOutputStreamId".to_string(),
+                            json!(v2_stream_id(pane.id)),
+                        );
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!({ "layoutJson": layout_json, "panes": panes }))
+        }
+        ("terminal", "input") => {
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let session_id = v2_uuid(&request.payload, "sessionId")?;
+            let pane_id = v2_uuid(&request.payload, "paneId")?;
+            let data = request
+                .payload
+                .get("data")
+                .and_then(Value::as_str)
+                .context("data is required")?;
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .context("decode terminal input")?;
+            write_frame(
+                daemon_writer,
+                &ClientToDaemon::WritePane {
+                    session_id,
+                    pane_id,
+                    data,
+                },
+            )?;
+            Ok(json!({ "ok": true }))
+        }
+        ("files", method) => {
+            require_grant(
+                grants,
+                if method == "write" {
+                    "admin"
+                } else {
+                    "files.view"
+                },
+            )?;
+            handle_v2_files(request, method, daemon_writer, daemon_inbox, next_req)
+        }
+        ("git", method) => {
+            require_grant(
+                grants,
+                if matches!(method, "status" | "log" | "diff") {
+                    "files.view"
+                } else {
+                    "git.write"
+                },
+            )?;
+            handle_v2_git(request, method, daemon_writer, daemon_inbox, next_req)
+        }
+        ("orchestration", method) => {
+            require_grant(grants, "orchestration.view")?;
+            if !matches!(
+                method,
+                "runs.list" | "run.get" | "tasks.list" | "messages.list" | "gates.list"
+            ) {
+                require_grant(grants, "orchestration.control")?;
+            }
+            let req = take_req(next_req);
+            let operation_id = Uuid::parse_str(&request.operation_id)?;
+            match request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::Orchestration {
+                    req,
+                    operation_id,
+                    method: method.to_string(),
+                    payload_json: request.payload.to_string(),
+                },
+            )? {
+                ReplyResult::Orchestration(response) => Ok(serde_json::from_str(&response)?),
+                other => bail!("unexpected orchestration reply: {other:?}"),
+            }
+        }
+        (domain @ ("browser" | "computer" | "automation" | "skill" | "remote"), method) => {
+            let grant = match domain {
+                "browser"
+                    if matches!(
+                        method,
+                        "tabs"
+                            | "profiles"
+                            | "snapshot"
+                            | "screenshot"
+                            | "full-screenshot"
+                            | "get"
+                            | "is"
+                            | "console"
+                            | "network"
+                            | "cookies"
+                            | "storage"
+                    ) =>
+                {
+                    "browser.view"
+                }
+                "browser" => "browser.control",
+                "computer"
+                    if matches!(
+                        method,
+                        "capabilities" | "list-apps" | "list-windows" | "get-app-state"
+                    ) =>
+                {
+                    "computer.observe"
+                }
+                "computer" => "computer.control",
+                "automation" => "orchestration.control",
+                _ => "admin",
+            };
+            require_grant(grants, grant)?;
+            dispatch_v2_cli(
+                request,
+                domain,
+                method,
+                daemon_writer,
+                daemon_inbox,
+                next_req,
+            )
+        }
+        _ => bail!(
+            "unsupported remote-v2 method {}.{}",
+            request.domain,
+            request.method
+        ),
+    }
+}
+
+fn dispatch_v2_cli(
+    request: &V2Envelope,
+    domain: &str,
+    method: &str,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<Value> {
+    let mut args = vec![domain.to_string(), method.to_string()];
+    if let Some(extra) = request.payload.get("args").and_then(Value::as_array) {
+        for argument in extra {
+            args.push(
+                argument
+                    .as_str()
+                    .context("remote-v2 CLI args must be strings")?
+                    .to_string(),
+            );
+        }
+    }
+    let invocation = parse_cli_args(args).map_err(|error| anyhow!(error.to_string()))?;
+    let cli_request = CliControlRequest {
+        schema_version: crate::dedicated_cli::COMMAND_SCHEMA_VERSION,
+        operation_id: Uuid::parse_str(&request.operation_id)?,
+        expected_revision: request
+            .payload
+            .get("expectedRevision")
+            .and_then(Value::as_u64),
+        command: invocation.command,
+    };
+    let request_json = serde_json::to_string(&json!({ "kind": "cli", "request": cli_request }))?;
+    let req = take_req(next_req);
+    match request_reply(
+        daemon_writer,
+        daemon_inbox,
+        req,
+        ClientToDaemon::Cli {
+            req,
+            operation_id: cli_request.operation_id,
+            request_json,
+        },
+    )? {
+        ReplyResult::Cli(response) => {
+            let value: Value = serde_json::from_str(&response)?;
+            if value.get("ok").and_then(Value::as_bool) == Some(false) {
+                bail!(
+                    "remote CLI request failed: {}",
+                    value.get("error").cloned().unwrap_or(Value::Null)
+                );
+            }
+            Ok(value.get("result").cloned().unwrap_or(Value::Null))
+        }
+        other => bail!("unexpected remote CLI reply: {other:?}"),
+    }
+}
+
+fn handle_v2_files(
+    request: &V2Envelope,
+    method: &str,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<Value> {
+    let root = v2_workspace_root(&request.payload, daemon_writer, daemon_inbox, next_req)?;
+    let relative = request
+        .payload
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let path = confined_workspace_path(&root, relative, method == "write")?;
+    match method {
+        "list" => {
+            let mut entries = fs::read_dir(&path)?
+                .map(|entry| {
+                    let entry = entry?;
+                    let metadata = entry.metadata()?;
+                    Ok(json!({
+                        "name": entry.file_name().to_string_lossy(),
+                        "path": entry.path().strip_prefix(&root).unwrap_or(entry.path().as_path()).to_string_lossy().replace('\\', "/"),
+                        "kind": if metadata.is_dir() { "directory" } else { "file" },
+                        "size": metadata.len(),
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            entries.sort_by(|left, right| {
+                left.get("name")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("name").and_then(Value::as_str))
+            });
+            Ok(json!({ "path": relative, "entries": entries }))
+        }
+        "read" => {
+            let metadata = fs::metadata(&path)?;
+            if metadata.len() > 1024 * 1024 {
+                bail!("file exceeds remote text read limit");
+            }
+            Ok(json!({ "path": relative, "text": fs::read_to_string(&path)? }))
+        }
+        "write" => {
+            let text = request
+                .payload
+                .get("text")
+                .and_then(Value::as_str)
+                .context("text is required")?;
+            if text.len() > 1024 * 1024 {
+                bail!("file exceeds remote text write limit");
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, text)?;
+            Ok(json!({ "path": relative, "bytes": text.len() }))
+        }
+        _ => bail!("unsupported remote-v2 files method {method}"),
+    }
+}
+
+fn handle_v2_git(
+    request: &V2Envelope,
+    method: &str,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<Value> {
+    let root = v2_workspace_root(&request.payload, daemon_writer, daemon_inbox, next_req)?;
+    let args = match method {
+        "status" => vec!["status", "--short", "--branch"],
+        "log" => vec![
+            "log",
+            "-n",
+            "50",
+            "--date=iso-strict",
+            "--pretty=format:%H%x09%ad%x09%an%x09%s",
+        ],
+        "diff" => vec!["diff", "--no-ext-diff"],
+        "stage" => vec![
+            "add",
+            request
+                .payload
+                .get("path")
+                .and_then(Value::as_str)
+                .context("path is required")?,
+        ],
+        "commit" => vec![
+            "commit",
+            "-m",
+            request
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .context("message is required")?,
+        ],
+        _ => bail!("unsupported remote-v2 git method {method}"),
+    };
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(args)
+        .output()
+        .context("run git")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        bail!("git {method} failed: {stderr}");
+    }
+    Ok(json!({ "stdout": stdout, "stderr": stderr, "exitCode": output.status.code() }))
+}
+
+fn v2_workspace_root(
+    payload: &Value,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<PathBuf> {
+    let workspace_id = v2_uuid(payload, "workspaceId")?;
+    let session = list_sessions(daemon_writer, daemon_inbox, next_req)?
+        .into_iter()
+        .find(|session| session.id == workspace_id)
+        .context("workspace not found")?;
+    let root = PathBuf::from(
+        session
+            .workspace_folder
+            .context("workspace has no folder")?,
+    );
+    fs::canonicalize(root).context("canonicalize workspace folder")
+}
+
+fn confined_workspace_path(root: &Path, relative: &str, allow_missing: bool) -> Result<PathBuf> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("path must stay within the workspace");
+    }
+    let candidate = root.join(relative);
+    if candidate.exists() {
+        let canonical = fs::canonicalize(&candidate)?;
+        if !canonical.starts_with(root) {
+            bail!("path escapes the workspace");
+        }
+        return Ok(canonical);
+    }
+    if !allow_missing {
+        bail!("path not found");
+    }
+    let parent = candidate.parent().context("path has no parent")?;
+    let canonical_parent = fs::canonicalize(parent).context("write parent not found")?;
+    if !canonical_parent.starts_with(root) {
+        bail!("path escapes the workspace");
+    }
+    Ok(candidate)
+}
+
+fn v2_error<'a>(request: &'a V2Envelope, code: &str, message: &str) -> V2Response<'a> {
+    V2Response {
+        version: V2_PROTOCOL_VERSION,
+        request_id: &request.request_id,
+        domain: &request.domain,
+        method: &request.method,
+        operation_id: &request.operation_id,
+        sequence: request.sequence,
+        revocation_epoch: request.revocation_epoch,
+        payload: Value::Null,
+        error: Some(json!({ "code": code, "message": message })),
+    }
+}
+
+fn v2_error_with_details<'a>(
+    request: &'a V2Envelope,
+    code: &str,
+    message: &str,
+    details: Value,
+) -> V2Response<'a> {
+    let mut response = v2_error(request, code, message);
+    if let Some(error) = response.error.as_mut().and_then(Value::as_object_mut) {
+        error.insert("details".to_string(), details);
+    }
+    response
+}
+
+fn v2_error_code(error: &anyhow::Error) -> &'static str {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("capability_denied") {
+        "capability_denied"
+    } else if message.contains("unsupported") {
+        "unsupported"
+    } else if message.contains("not found") || message.contains("not_found") {
+        "not_found"
+    } else if message.contains("too large") || message.contains("exceeds") {
+        "frame_too_large"
+    } else if message.contains("timeout") || message.contains("timed out") {
+        "timeout"
+    } else if message.contains("conflict") {
+        "conflict"
+    } else if message.contains("required")
+        || message.contains("invalid")
+        || message.contains("must")
+        || message.contains("within the workspace")
+    {
+        "invalid_argument"
+    } else {
+        "internal"
+    }
+}
+
+fn read_binary(ws: &mut RemoteSocket, context: &str) -> Result<Vec<u8>> {
+    match ws.read().with_context(|| context.to_string())? {
+        Message::Binary(bytes) => Ok(bytes.to_vec()),
+        _ => bail!("{context} must be binary"),
+    }
+}
+
+fn v2_uuid(payload: &Value, key: &str) -> Result<Uuid> {
+    Uuid::parse_str(
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .with_context(|| format!("{key} is required"))?,
+    )
+    .with_context(|| format!("{key} must be a UUID"))
+}
+
+fn require_grant(grants: &[String], grant: &str) -> Result<()> {
+    if grants
+        .iter()
+        .any(|candidate| candidate == grant || candidate == "admin")
+    {
+        Ok(())
+    } else {
+        bail!("capability_denied: {grant}")
+    }
+}
 
 fn open_daemon_connection() -> Result<(interprocess::local_socket::SendHalf, DaemonInbox)> {
     let stream =
-        spawn_daemon::connect_daemon().context("connect dedicated remote daemon client")?;
-    let (reader, mut writer) = stream.split();
-    write_frame(
-        &mut writer,
-        &ClientToDaemon::Hello {
-            client_id: Uuid::new_v4(),
-        },
-    )?;
+        spawn_daemon::connect_daemon().context("connect authenticated remote daemon client")?;
+    let (reader, writer) = stream.split();
     let (senders, inbox) = daemon_channels(DAEMON_OUTPUT_QUEUE_CAPACITY);
     thread::Builder::new()
         .name("vibelink-remote-daemon-reader".to_string())
@@ -277,7 +1350,17 @@ fn run_authenticated(
     push_rx: &Receiver<Message>,
     shared: &RemoteShared,
     client_key: Uuid,
+    grants: &[String],
 ) -> Result<()> {
+    if !has_grant(grants, TERMINAL_VIEW_GRANT) {
+        send_error(
+            ws,
+            "capabilityDenied",
+            "terminal viewing is not granted",
+            None,
+        )?;
+        bail!("remote device lacks terminal.view");
+    }
     let mut next_req = 1_u64;
     let mut attached: Option<Uuid> = None;
     let mut attached_panes: Vec<Uuid> = Vec::new();
@@ -360,6 +1443,7 @@ fn run_authenticated(
                     &mut attached,
                     &mut attached_panes,
                     &mut pane_geometry,
+                    grants,
                     message,
                 )?;
             }
@@ -401,8 +1485,19 @@ fn handle_client_message(
     attached: &mut Option<Uuid>,
     attached_panes: &mut Vec<Uuid>,
     pane_geometry: &mut HashMap<Uuid, (u16, u16)>,
+    grants: &[String],
     message: ClientMessage,
 ) -> Result<()> {
+    if let Some(required) = required_grant(&message) {
+        if !has_grant(grants, required) {
+            return send_error(
+                ws,
+                "capabilityDenied",
+                "remote device capability denied",
+                message.req_id(),
+            );
+        }
+    }
     match message {
         ClientMessage::Hello { .. } => {
             send_error(ws, "authFailed", "hello may only be sent once", None)
@@ -605,6 +1700,22 @@ fn handle_client_message(
         ClientMessage::Unknown => Ok(()),
         ClientMessage::Ping { req_id } => send_json(ws, &ServerMessage::Pong { req_id }),
     }
+}
+fn required_grant(message: &ClientMessage) -> Option<&'static str> {
+    match message {
+        ClientMessage::WritePane { .. }
+        | ClientMessage::ClaimPane { .. }
+        | ClientMessage::ReleasePane { .. } => Some(TERMINAL_INPUT_GRANT),
+        ClientMessage::ListWorkspaces { .. }
+        | ClientMessage::AttachWorkspace { .. }
+        | ClientMessage::DetachWorkspace { .. }
+        | ClientMessage::RefreshPane { .. } => Some(TERMINAL_VIEW_GRANT),
+        ClientMessage::Hello { .. } | ClientMessage::Ping { .. } | ClientMessage::Unknown => None,
+    }
+}
+
+fn has_grant(grants: &[String], required: &str) -> bool {
+    grants.iter().any(|grant| grant == required)
 }
 
 fn handle_daemon_control(
@@ -1089,6 +2200,7 @@ mod tests {
                 data: vec![2]
             }
         ));
+        assert_eq!(inbox.take_output_drops(pane_id), 1);
         assert!(route_daemon_message(
             &senders,
             DaemonToClient::SessionChanged { session_id }
@@ -1257,5 +2369,40 @@ mod tests {
         );
         assert!(leases.contains_key(&pane_b));
         assert!(leases.contains_key(&pane_other));
+    }
+
+    #[test]
+    fn v2_binary_chunks_are_bounded_and_sequence_terminal_data() {
+        let pane_id = Uuid::new_v4();
+        let stream_id = v2_stream_id(pane_id);
+        let mut sequences = HashMap::new();
+        let payload = vec![7_u8; MAX_BINARY_PAYLOAD_BYTES + 1];
+        let chunks = v2_binary_chunks(
+            BinaryChannel::TerminalOutput,
+            stream_id,
+            &payload,
+            FLAG_RESYNC,
+            &mut sequences,
+        )
+        .unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].sequence, 1);
+        assert_eq!(chunks[0].flags & FLAG_RESYNC, FLAG_RESYNC);
+        assert_eq!(chunks[1].sequence, 2);
+        assert_eq!(chunks[1].flags & FLAG_FINAL, FLAG_FINAL);
+        assert!(chunks
+            .iter()
+            .all(|frame| frame.payload.len() <= MAX_BINARY_PAYLOAD_BYTES));
+    }
+
+    #[test]
+    fn remote_v1_literals_and_binary_output_remain_unchanged() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(SUBPROTOCOL, "vibelink-remote-v1");
+        let frame = frame_pane_output("pane-1", b"abc");
+        assert_eq!(
+            frame,
+            vec![0, 6, b'p', b'a', b'n', b'e', b'-', b'1', b'a', b'b', b'c']
+        );
     }
 }

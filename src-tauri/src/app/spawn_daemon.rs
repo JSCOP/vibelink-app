@@ -20,6 +20,7 @@ use std::{
 pub type DaemonStream = LocalSocketStream;
 
 const STARTUP_PING_REQ: Req = 0;
+const AUTHENTICATE_REQ: Req = u64::MAX;
 const STARTUP_PING_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -262,7 +263,10 @@ pub(super) fn ensure_daemon_with_recovery(
 }
 
 pub fn connect_daemon() -> io::Result<DaemonStream> {
-    connect_daemon_with_timeout(socket_name()?, STARTUP_CONNECT_TIMEOUT)
+    let mut stream = connect_daemon_with_timeout(socket_name()?, STARTUP_CONNECT_TIMEOUT)?;
+    authenticate_daemon_io(&mut stream)
+        .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))?;
+    Ok(stream)
 }
 
 fn connect_daemon_with_timeout(name: Name<'static>, timeout: Duration) -> io::Result<DaemonStream> {
@@ -320,6 +324,32 @@ fn probe_daemon(stream: DaemonStream) -> Result<DaemonStream> {
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             bail!("daemon startup probe stopped before returning a stream")
         }
+    }
+}
+
+pub fn authenticate_daemon_io<S>(stream: &mut S) -> Result<()>
+where
+    S: Read + Write,
+{
+    let (boot_token, user_sid) = paths::daemon_auth_material()?;
+    write_frame(
+        stream,
+        &ClientToDaemon::Authenticate {
+            req: AUTHENTICATE_REQ,
+            client_id: uuid::Uuid::new_v4(),
+            boot_token,
+            process_id: std::process::id(),
+            user_sid,
+        },
+    )
+    .context("write daemon authentication")?;
+    match read_frame::<_, DaemonToClient>(stream).context("read daemon authentication")? {
+        DaemonToClient::Reply {
+            req: AUTHENTICATE_REQ,
+            result: crate::protocol::ReplyResult::Ok,
+        } => Ok(()),
+        DaemonToClient::Error { message, .. } => bail!("daemon authentication rejected: {message}"),
+        other => bail!("unexpected daemon authentication response: {other:?}"),
     }
 }
 

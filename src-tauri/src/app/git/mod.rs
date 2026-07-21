@@ -11,7 +11,6 @@ pub(crate) mod submodule;
 #[cfg(test)]
 mod test_support;
 
-
 use self::exec::{
     git_exit_status, git_read as git_output, git_read_allow_fail as git_output_allow_fail,
     git_write,
@@ -25,12 +24,12 @@ use tauri::State;
 
 #[cfg(test)]
 use self::exec::CREATE_NO_WINDOW;
+#[cfg(all(test, windows))]
+use std::os::windows::process::CommandExt;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
-#[cfg(all(test, windows))]
-use std::os::windows::process::CommandExt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,8 +305,12 @@ pub(crate) fn parse_numstat(bytes: &[u8]) -> Vec<(String, (u32, u32, bool))> {
             continue;
         }
         let mut fields = record.splitn(3, '\t');
-        let Some(additions) = fields.next() else { continue };
-        let Some(deletions) = fields.next() else { continue };
+        let Some(additions) = fields.next() else {
+            continue;
+        };
+        let Some(deletions) = fields.next() else {
+            continue;
+        };
         let Some(path) = fields.next() else { continue };
         let path = if path.is_empty() && index + 1 < records.len() {
             index += 1;
@@ -364,7 +367,6 @@ pub(crate) fn change_type_from_status(status: char) -> ChangeType {
     }
 }
 
-
 fn short_task_id(task_id: &str) -> String {
     let short: String = task_id
         .chars()
@@ -377,7 +379,6 @@ fn short_task_id(task_id: &str) -> String {
         short
     }
 }
-
 
 pub(crate) fn to_string(err: impl std::fmt::Display) -> String {
     err.to_string()

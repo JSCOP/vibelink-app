@@ -19,6 +19,8 @@ import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
 import { GitHostingSettings } from './GitHostingSettings'
+import { ProviderIntegrationsPanel } from './ProviderIntegrationsPanel'
+import { AndroidDeviceLabPanel } from './AndroidDeviceLabPanel'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -618,9 +620,12 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             ) : null}
 
             {activeSection === 'gitHosting' ? (
-              <SettingsGroup title="GitHub & GitLab" description="Tokens stay in Windows Credential Manager and are scoped per host. Provider overrides support self-hosted instances.">
-                <GitHostingSettings />
-              </SettingsGroup>
+              <>
+                <SettingsGroup title="GitHub & GitLab" description="Tokens stay in Windows Credential Manager and are scoped per host. Provider overrides support self-hosted instances.">
+                  <GitHostingSettings />
+                </SettingsGroup>
+                <ProviderIntegrationsPanel />
+              </>
             ) : null}
 
             {activeSection === 'remote' ? <RemoteSettings /> : null}
@@ -675,6 +680,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                     ))}
                   </div>
                 </SettingsGroup>
+                <AndroidDeviceLabPanel />
               </>
             ) : null}
 
@@ -699,7 +705,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             {activeSection === 'mcp' ? (
               <SettingsGroup title="MCP servers" description="VibeLink registers its workspace MCP bridge per agent session over ACP; your Hermes config file is never modified.">
                 <ReadonlyRow label="Server" value="vibelink" />
-                <ReadonlyRow label="Command" value="app.exe mcp serve" mono />
+                <ReadonlyRow label="Command" value="vibelink.exe mcp serve" mono />
                 <ReadonlyRow label="Scope" value={activeSessionId ? `VIBELINK_SESSION_ID=${activeSessionId}` : 'Open a workspace'} mono />
                 <div className="vibelink-settings-actions">
                   <button type="button" disabled={!activeSessionId || mcpCheckBusy} onClick={() => void checkMcp()}>

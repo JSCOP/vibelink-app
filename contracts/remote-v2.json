@@ -1,0 +1,149 @@
+{
+  "contractVersion": 2,
+  "protocolVersion": 2,
+  "subprotocol": "vibelink-remote-v2",
+  "noiseSuite": "Noise_XX_25519_ChaChaPoly_BLAKE2s",
+  "authorization": "paired-device-key",
+  "accountAuthorization": false,
+  "sessionAuth": {
+    "pairRequired": ["mode", "code", "deviceName"],
+    "resumeRequired": ["mode", "deviceId", "revocationEpoch"],
+    "peerIdentity": "noise-static-key-fingerprint",
+    "tlsIdentity": "sha256-certificate-pin",
+    "liveGrantRecheck": true,
+    "liveEpochRecheck": true
+  },
+  "envelope": {
+    "required": ["version", "requestId", "domain", "method", "operationId", "sequence", "revocationEpoch", "payload"],
+    "responseRequired": ["version", "requestId", "domain", "method", "operationId", "sequence", "revocationEpoch", "payload", "error"],
+    "sequenceScope": "device-session-domain",
+    "sequenceStartsAt": 1,
+    "operationIdFormat": "uuid",
+    "operationReplayWindow": 4096,
+    "unknownFields": "ignore",
+    "unknownMethods": "typed-error"
+  },
+  "sequence": {
+    "duplicateError": "sequence_replay",
+    "gapError": "sequence_gap",
+    "gapRequiresResync": true,
+    "resyncMethod": "system.resync",
+    "maxResyncAdvance": 4096,
+    "resyncPayloadRequired": ["domain", "nextSequence"]
+  },
+  "binaryFrame": {
+    "header": ["version:u8", "channel:u8", "flags:u16be", "streamId:u64be", "sequence:u64be", "droppedBefore:u32be", "payloadLength:u32be"],
+    "headerBytes": 28,
+    "maxPayloadBytes": 61440,
+    "flags": {
+      "final": 1,
+      "keyframe": 2,
+      "resync": 4,
+      "droppedBefore": 8
+    },
+    "channels": {
+      "terminalOutput": 1,
+      "terminalSnapshot": 2,
+      "browserScreencast": 3,
+      "screenshot": 4,
+      "file": 5,
+      "attachment": 6,
+      "emulator": 7
+    },
+    "delivery": {
+      "terminalOutput": "ordered-lossless-gap-resync",
+      "terminalSnapshot": "ordered-lossless",
+      "browserScreencast": "latest-frame-wins-with-drop-count",
+      "screenshot": "ordered-lossless",
+      "file": "ordered-lossless",
+      "attachment": "ordered-lossless",
+      "emulator": "latest-frame-wins-with-drop-count"
+    },
+    "dropAccounting": {
+      "allowedChannels": ["browserScreencast", "emulator"],
+      "field": "droppedBefore",
+      "flag": "droppedBefore",
+      "losslessChannelsRequireZero": true
+    }
+  },
+  "methods": {
+    "system": ["status", "resync"],
+    "workspace": ["list", "attach"],
+    "terminal": ["snapshot", "input", "lease.claim", "lease.release"],
+    "notifications": ["catchup", "ack", "register"],
+    "orchestration": ["runs.list", "tasks.list", "messages.list", "message.reply", "run.cancel", "task.retry", "gates.list", "gate.resolve"],
+    "browser": ["tabs", "screencast.start", "screencast.stop", "input.pointer", "input.key", "dialog.resolve", "permission.resolve", "viewport.set"],
+    "files": ["list", "read", "diff", "attachment.upload"],
+    "git": ["status", "stage", "unstage", "commit", "worktree.create", "review.comment"],
+    "account": ["summary", "usage"],
+    "dictation": ["transcribe"]
+  },
+  "capabilities": [
+    "terminal.view",
+    "terminal.input",
+    "orchestration.view",
+    "orchestration.control",
+    "browser.view",
+    "browser.control",
+    "files.view",
+    "git.write",
+    "computer.observe",
+    "computer.control",
+    "admin"
+  ],
+  "errors": [
+    "invalid_argument",
+    "protocol_mismatch",
+    "auth_failed",
+    "invite_expired",
+    "identity_mismatch",
+    "not_found",
+    "stale_target",
+    "stale_ref",
+    "capability_denied",
+    "revoked",
+    "conflict",
+    "rate_limited",
+    "frame_too_large",
+    "sequence_replay",
+    "sequence_gap",
+    "resync_required",
+    "timeout",
+    "relay_unavailable",
+    "elevation_required",
+    "app_blocked",
+    "unsupported",
+    "internal"
+  ],
+  "revocation": {
+    "epochRequired": true,
+    "disconnectDeadlineMs": 5000,
+    "connectionRegistrationRequired": true
+  },
+  "resume": {
+    "credentialRotation": true,
+    "sequenceCatchup": true,
+    "domainResyncOnGap": true,
+    "boundedReplayRequired": true
+  },
+  "relay": {
+    "opaque": true,
+    "directFirst": true,
+    "desktopChannelsPerHost": 1,
+    "plaintextLogging": false,
+    "fallbackCircuitBreakerFailures": 3,
+    "fallbackCircuitBreakerCooldownMs": 30000
+  },
+  "notifications": {
+    "payloadContainsContent": false,
+    "encryptedTransportRequired": true,
+    "deduplicateBy": "notificationId",
+    "catchupBy": "globalSequence",
+    "allowedMetadata": ["notificationId", "globalSequence", "kind", "entityId", "metadata"],
+    "forbiddenMetadataKeyFragments": ["prompt", "result", "text", "content", "terminal", "token", "secret", "path"]
+  },
+  "compatibility": {
+    "v1SubprotocolUnchanged": "vibelink-remote-v1",
+    "v1BinaryFramesUnchanged": true
+  }
+}

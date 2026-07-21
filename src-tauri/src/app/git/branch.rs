@@ -1,4 +1,6 @@
-use super::exec::{ensure_success, git_read, git_read_output, git_write, git_write_output_with_env};
+use super::exec::{
+    ensure_success, git_read, git_read_output, git_write, git_write_output_with_env,
+};
 use super::paths::{validate_base_ref, validate_repo_relative_path};
 use super::to_string;
 use crate::app::license::LicenseService;
@@ -205,7 +207,11 @@ fn conflict_take_native(repo: &str, paths: Vec<String>, side: String) -> Result<
     if paths.is_empty() {
         return Ok(());
     }
-    let mut checkout = vec!["checkout".to_string(), format!("--{side}"), "--".to_string()];
+    let mut checkout = vec![
+        "checkout".to_string(),
+        format!("--{side}"),
+        "--".to_string(),
+    ];
     checkout.extend(paths.iter().cloned());
     git_write(repo, &checkout)?;
     let mut add = vec!["add".to_string(), "--".to_string()];
@@ -216,7 +222,11 @@ fn conflict_take_native(repo: &str, paths: Vec<String>, side: String) -> Result<
 fn tag_list_native(repo: &str) -> Result<Vec<TagInfo>> {
     let bytes = git_read(
         repo,
-        ["for-each-ref", "refs/tags", "--format=%(refname:short)%01%(objectname)%01%(contents:subject)"],
+        [
+            "for-each-ref",
+            "refs/tags",
+            "--format=%(refname:short)%01%(objectname)%01%(contents:subject)",
+        ],
     )?;
     Ok(String::from_utf8_lossy(&bytes)
         .lines()
@@ -231,7 +241,12 @@ fn tag_list_native(repo: &str) -> Result<Vec<TagInfo>> {
         .collect())
 }
 
-fn tag_create_native(repo: &str, name: String, ref_name: Option<String>, message: Option<String>) -> Result<()> {
+fn tag_create_native(
+    repo: &str,
+    name: String,
+    ref_name: Option<String>,
+    message: Option<String>,
+) -> Result<()> {
     validate_tag_name(repo, &name)?;
     if let Some(ref_name) = &ref_name {
         validate_base_ref(ref_name)?;
@@ -270,7 +285,10 @@ fn validate_tag_name(repo: &str, name: &str) -> Result<()> {
         bail!("invalid git tag name");
     }
     let full = format!("refs/tags/{name}");
-    if git_read_output(repo, ["check-ref-format", &full])?.status.success() {
+    if git_read_output(repo, ["check-ref-format", &full])?
+        .status
+        .success()
+    {
         Ok(())
     } else {
         bail!("invalid git tag name")
@@ -319,7 +337,8 @@ mod tests {
         .expect("create feature");
         std::fs::write(repo.join("conflict.txt"), "feature\n").expect("write feature");
         run_git(&repo, &["commit", "-am", "feature"]);
-        checkout_native(repo.to_str().expect("utf8 repo"), "main".to_string()).expect("checkout main");
+        checkout_native(repo.to_str().expect("utf8 repo"), "main".to_string())
+            .expect("checkout main");
         std::fs::write(repo.join("conflict.txt"), "main\n").expect("write main");
         run_git(&repo, &["commit", "-am", "main"]);
         assert!(merge_native(repo.to_str().expect("utf8 repo"), "feature".to_string()).is_err());

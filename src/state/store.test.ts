@@ -179,7 +179,7 @@ describe('workspace store profiles', () => {
           ['TERM_PROGRAM', 'VibeLink'],
           ['VIBELINK_SESSION_ID', 'session-1'],
           ['VIBELINK_PANE_ID', 'pane-test'],
-          ['VIBELINK_APP_EXE', 'app.exe'],
+          ['VIBELINK_CLI_EXE', 'vibelink.exe'],
         ],
         title: 'Codex',
         icon: 'sparkles',

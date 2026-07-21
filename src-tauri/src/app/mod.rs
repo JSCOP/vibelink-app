@@ -1,22 +1,29 @@
 pub mod agents;
+pub mod android_device_lab;
 pub mod board;
+pub mod browser;
 pub mod capture;
+pub mod cli;
+pub mod cli_path;
 pub mod commands;
+pub mod computer_use;
 pub mod daemon_client;
 pub mod fsops;
 pub mod git;
 pub mod hermes;
 pub mod license;
 pub mod mcp_check;
+pub mod orchestration;
+pub mod provider_integrations;
 pub mod skills;
 pub mod spawn_daemon;
 #[cfg(windows)]
 mod window_chrome;
 
-use crate::remote::RemoteServer;
+use crate::browser::{BrowserManager, BrowserPolicy, NativeBrowserProvider};
 use daemon_client::DaemonClient;
 use std::sync::Arc;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 pub struct KeepAlivePrefs(pub std::sync::atomic::AtomicBool);
 
@@ -27,6 +34,7 @@ impl Default for KeepAlivePrefs {
 }
 
 pub fn run() {
+    configure_browser_cdp();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -37,7 +45,16 @@ pub fn run() {
                 let main_window = app.get_webview_window("main").ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "main window not found")
                 })?;
-                window_chrome::disable_system_menu(&main_window)?;
+                if let Err(error) = window_chrome::disable_system_menu(&main_window) {
+                    eprintln!("disable system menu: {error}");
+                }
+                std::env::remove_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
+            }
+            if let Ok(cli_executable) = cli_path::dedicated_cli_path() {
+                std::env::set_var("VIBELINK_CLI_EXE", cli_executable);
+            }
+            if let Ok(computer_host) = cli_path::computer_host_path() {
+                std::env::set_var("VIBELINK_COMPUTER_HOST_EXE", computer_host);
             }
             let stream = spawn_daemon::ensure_daemon().map_err(|err| {
                 let boxed: Box<dyn std::error::Error> = err.into();
@@ -57,20 +74,33 @@ pub fn run() {
                     boxed
                 })?
                 .data_dir;
-            let app_handle = app.handle().clone();
-            let remote = Arc::new(
-                RemoteServer::new_with_pane_lease_notifier(data_dir, move |event| {
-                    let _ = app_handle.emit("remote://pane-lease", event);
-                })
-                .map_err(|error| {
-                    let boxed: Box<dyn std::error::Error> = error.into();
-                    boxed
-                })?,
-            );
-            if let Err(error) = remote.start_if_enabled() {
-                tracing::warn!(?error, "remote access auto-start failed");
-            }
-            app.manage(remote);
+            let browser_root = data_dir.join("browser");
+            let browser_policy = BrowserPolicy::new(
+                false,
+                Vec::new(),
+                browser_root.join("downloads"),
+                browser_root.join("artifacts"),
+                64 * 1024 * 1024,
+            )
+            .map_err(|error| {
+                let boxed: Box<dyn std::error::Error> = error.into();
+                boxed
+            })?;
+            let browser_cdp_port = std::env::var("VIBELINK_BROWSER_CDP_PORT")
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(9333);
+            let browser_provider = Arc::new(NativeBrowserProvider::new(
+                app.handle().clone(),
+                "main",
+                browser_root.join("cdp-registry.json"),
+                browser_cdp_port,
+            ));
+            app.manage(Arc::new(BrowserManager::new(
+                browser_provider,
+                browser_policy,
+                browser_root.join("profiles"),
+            )));
             app.manage(capture::CaptureState::default());
             app.manage(KeepAlivePrefs::default());
             Ok(())
@@ -86,6 +116,47 @@ pub fn run() {
             board::board_task_note,
             board::board_brief_get,
             board::board_brief_set,
+            orchestration::orchestration_request,
+            browser::browser_initialize,
+            browser::browser_project_targets,
+            browser::browser_create_profile,
+            browser::browser_create_tab,
+            browser::browser_select_tab,
+            browser::browser_navigate,
+            browser::browser_go_back,
+            cli::cli_request,
+            browser::browser_go_forward,
+            computer_use::computer_request,
+            browser::browser_set_design_mode,
+            browser::browser_reload,
+            browser::browser_set_surface,
+            browser::browser_set_device_metrics,
+            browser::browser_capture_state,
+            browser::browser_capture_crop,
+            browser::browser_resolve_permission,
+            browser::browser_resolve_certificate,
+            browser::browser_resolve_dialog,
+            browser::browser_close_tab,
+            provider_integrations::provider_scopes_list,
+            provider_integrations::provider_credential_store,
+            provider_integrations::provider_credential_status,
+            provider_integrations::provider_credential_delete,
+            provider_integrations::provider_discover,
+            provider_integrations::provider_workspace_input,
+            provider_integrations::provider_review_comment,
+            android_device_lab::device_lab_sdk_discover,
+            android_device_lab::device_lab_adb_devices,
+            android_device_lab::device_lab_avd_list,
+            android_device_lab::device_lab_avd_start,
+            android_device_lab::device_lab_apk_install,
+            android_device_lab::device_lab_app_launch,
+            android_device_lab::device_lab_permission_change,
+            android_device_lab::device_lab_accessibility_status,
+            android_device_lab::device_lab_logcat,
+            android_device_lab::device_lab_scrcpy_start,
+            android_device_lab::device_lab_process_status,
+            android_device_lab::device_lab_process_cancel,
+            android_device_lab::device_lab_owned_processes,
             commands::attach_pane,
             commands::attach_session,
             commands::close_pane,
@@ -99,7 +170,9 @@ pub fn run() {
             commands::remote_get_pane_lease,
             commands::remote_set_enabled,
             commands::remote_set_port,
+            commands::remote_set_lan_enabled,
             commands::remote_create_pairing,
+            commands::remote_create_pairing_v2,
             commands::remote_revoke_device,
             commands::remote_regenerate_identity,
             commands::remote_firewall_status,
@@ -240,9 +313,6 @@ pub fn run() {
             if let Some(manager) = app.try_state::<Arc<hermes::HermesManager>>() {
                 manager.shutdown_all();
             }
-            if let Some(remote) = app.try_state::<Arc<RemoteServer>>() {
-                remote.stop();
-            }
             let keep_alive = app
                 .try_state::<KeepAlivePrefs>()
                 .map(|prefs| prefs.0.load(std::sync::atomic::Ordering::Acquire))
@@ -252,4 +322,22 @@ pub fn run() {
             }
         }
     });
+    fn configure_browser_cdp() {
+        let flavor = crate::daemon::paths::app_flavor();
+        let port = if flavor == "dev" { 9334 } else { 9333 };
+        std::env::set_var("VIBELINK_BROWSER_CDP_PORT", port.to_string());
+        let flag = format!("--remote-debugging-port={port}");
+        let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        if !existing
+            .split_whitespace()
+            .any(|argument| argument.starts_with("--remote-debugging-port="))
+        {
+            let arguments = if existing.trim().is_empty() {
+                flag
+            } else {
+                format!("{} {}", existing.trim(), flag)
+            };
+            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", arguments);
+        }
+    }
 }

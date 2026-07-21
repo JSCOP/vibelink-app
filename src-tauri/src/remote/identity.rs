@@ -71,6 +71,23 @@ impl RemoteIdentity {
     }
 }
 
+pub fn verify_certificate_fingerprint(cert_der: &[u8], expected: &str) -> Result<()> {
+    let actual = STANDARD.encode(Sha256::digest(cert_der));
+    if expected.len() != actual.len()
+        || expected
+            .as_bytes()
+            .iter()
+            .zip(actual.as_bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            != 0
+    {
+        anyhow::bail!("remote-v2 TLS identity mismatch");
+    }
+    Ok(())
+}
+
 fn generate_identity(cert_path: &Path, key_path: &Path) -> Result<()> {
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     let mut distinguished_name = DistinguishedName::new();
@@ -106,5 +123,13 @@ mod tests {
         identity.regenerate().unwrap();
         assert_ne!(identity.fingerprint(), first);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn certificate_pin_rejects_wrong_tls_identity() {
+        let certificate = b"certificate-der";
+        let expected = STANDARD.encode(Sha256::digest(certificate));
+        verify_certificate_fingerprint(certificate, &expected).unwrap();
+        assert!(verify_certificate_fingerprint(b"different-certificate", &expected).is_err());
     }
 }

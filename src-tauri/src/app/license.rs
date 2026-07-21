@@ -1,11 +1,9 @@
+use crate::persistence::{load_json_or_default, quarantine_file, write_json_atomic};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use keyring::Entry;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -165,7 +163,7 @@ struct StoredAccount {
     pending_device_code: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeviceIdentity {
     device_id: String,
@@ -740,9 +738,17 @@ fn remove_legacy_credential(service: &str) -> Result<()> {
 
 fn read_credential(entry: &Entry) -> Result<Option<StoredAccount>> {
     match entry.get_password() {
-        Ok(json) => Ok(Some(
-            serde_json::from_str(&json).context("parse stored Moobang account credential")?,
-        )),
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(stored) => Ok(Some(stored)),
+            Err(error) => {
+                tracing::warn!(?error, "discarding invalid Moobang account credential");
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(None),
+                    Err(delete_error) => Err(anyhow!(delete_error)
+                        .context("delete invalid Windows Credential Manager account entry")),
+                }
+            }
+        },
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(anyhow!(error).context("read Windows Credential Manager account entry")),
     }
@@ -1068,13 +1074,13 @@ fn load_or_create_device_identity() -> Result<DeviceIdentity> {
     let path = crate::daemon::paths::daemon_paths()?
         .data_dir
         .join("license-device.json");
-    if path.exists() {
-        let identity: DeviceIdentity = serde_json::from_str(
-            &fs::read_to_string(&path).context("read license device identity")?,
-        )
-        .context("parse license device identity")?;
-        Uuid::parse_str(&identity.device_id).context("validate license device id")?;
+    let identity: DeviceIdentity = load_json_or_default(&path, "license device identity")?;
+    if Uuid::parse_str(&identity.device_id).is_ok() && !identity.device_name.trim().is_empty() {
         return Ok(identity);
+    }
+    if path.exists() {
+        let quarantine = quarantine_file(&path, "invalid")?;
+        tracing::warn!(path = %quarantine.display(), "quarantined invalid license device identity");
     }
     let device_name = std::env::var("COMPUTERNAME")
         .unwrap_or_else(|_| "Windows device".to_string())
@@ -1090,24 +1096,8 @@ fn load_or_create_device_identity() -> Result<DeviceIdentity> {
             device_name
         },
     };
-    write_atomic_json(path, &identity)?;
+    write_json_atomic(&path, &identity)?;
     Ok(identity)
-}
-
-fn write_atomic_json(path: PathBuf, value: &impl Serialize) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("license device path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let temp = path.with_extension("tmp");
-    {
-        let mut file = fs::File::create(&temp).context("create license device temp file")?;
-        file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
-        file.flush()?;
-        file.sync_all()?;
-    }
-    fs::rename(&temp, &path).context("replace license device identity")?;
-    Ok(())
 }
 
 #[tauri::command]

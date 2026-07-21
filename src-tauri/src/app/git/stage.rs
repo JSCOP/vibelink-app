@@ -148,7 +148,11 @@ fn unstage_native(repo: &str, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["restore".to_string(), "--staged".to_string(), "--".to_string()];
+    let mut args = vec![
+        "restore".to_string(),
+        "--staged".to_string(),
+        "--".to_string(),
+    ];
     args.extend(paths.iter().cloned());
     let output = git_write_output(repo, &args)?;
     if output.status.success() {
@@ -172,7 +176,10 @@ fn unstage_all_native(repo: &str) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    if !git_read_output(repo, ["rev-parse", "--verify", "HEAD"])?.status.success() {
+    if !git_read_output(repo, ["rev-parse", "--verify", "HEAD"])?
+        .status
+        .success()
+    {
         Ok(())
     } else {
         ensure_success(output).map(|_| ())
@@ -270,8 +277,11 @@ mod tests {
     fn stage_commit_and_log_round_trip() {
         let repo = test_repo();
         std::fs::write(repo.join("hello.txt"), "hello\n").expect("write file");
-        stage_native(repo.to_str().expect("utf8 repo"), &["hello.txt".to_string()])
-            .expect("stage");
+        stage_native(
+            repo.to_str().expect("utf8 repo"),
+            &["hello.txt".to_string()],
+        )
+        .expect("stage");
         let sha = commit_native(repo.to_str().expect("utf8 repo"), "initial", false, false)
             .expect("commit");
         let page = git_log_native(

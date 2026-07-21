@@ -1,9 +1,7 @@
-use anyhow::{Context, Result};
+use crate::persistence::{load_json_or_default, write_json_atomic};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 pub const DEFAULT_REMOTE_PORT: u16 = 42_811;
 
@@ -12,6 +10,8 @@ pub const DEFAULT_REMOTE_PORT: u16 = 42_811;
 pub struct RemoteConfig {
     pub enabled: bool,
     pub port: u16,
+    #[serde(default)]
+    pub lan_enabled: bool,
 }
 
 impl Default for RemoteConfig {
@@ -19,36 +19,19 @@ impl Default for RemoteConfig {
         Self {
             enabled: false,
             port: DEFAULT_REMOTE_PORT,
+            lan_enabled: false,
         }
     }
 }
 
 impl RemoteConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let config: Self =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-        Ok(config)
+        load_json_or_default(path, "remote config")
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary = temporary_path(path);
-        fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
-        fs::rename(&temporary, path)?;
-        Ok(())
+        write_json_atomic(path, self)
     }
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(".tmp");
-    PathBuf::from(value)
 }
 
 #[cfg(test)]
@@ -64,9 +47,10 @@ mod tests {
         let config = RemoteConfig {
             enabled: true,
             port: 45_000,
+            lan_enabled: true,
         };
         config.save(&path).unwrap();
         assert_eq!(RemoteConfig::load(&path).unwrap(), config);
-        let _ = fs::remove_file(path);
+        let _ = std::fs::remove_file(path);
     }
 }

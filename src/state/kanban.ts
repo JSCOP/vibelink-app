@@ -66,9 +66,9 @@ export function composeTaskPrompt(
     worktreeLine,
     description || undefined,
     'When you make progress, report a note from this VibeLink pane with:',
-    `& $env:VIBELINK_APP_EXE cli task note --task ${task.id} --message "<short progress note>"`,
+    `& $env:VIBELINK_CLI_EXE orchestration send --workspace ${task.sessionId} --task-id ${task.id} --message "<short progress note>"`,
     'When finished, report completion from this VibeLink pane with:',
-    `& $env:VIBELINK_APP_EXE cli task done --task ${task.id} --result-summary "<short result summary>"`,
+    `& $env:VIBELINK_CLI_EXE orchestration task-update --workspace ${task.sessionId} --task-id ${task.id} --status completed --result-summary "<short result summary>"`,
   ]
     .filter((line): line is string => line !== undefined)
     .join(' | ')

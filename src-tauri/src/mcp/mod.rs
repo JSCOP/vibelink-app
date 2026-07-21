@@ -9,7 +9,10 @@ use crate::app::license::HeadlessLicenseCache;
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
 };
-use crate::cli::write_payload;
+use crate::dedicated_cli::{
+    command_contracts, parse_args, CommandContract, ControlExecutor, RiskLevel, SocketExecutor,
+    ValueKind,
+};
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, TaskSignal};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -24,11 +27,11 @@ const MAX_TERMINAL_GRID_ROWS: usize = 10;
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     let mut args = args.into_iter();
     if args.next().as_deref() == Some("mcp") {
-        // app.exe mcp serve
+        // vibelink mcp serve
     }
     match args.next().as_deref() {
         Some("serve") => serve(),
-        _ => bail!("usage: app.exe mcp serve"),
+        _ => bail!("usage: vibelink mcp serve"),
     }
 }
 
@@ -36,7 +39,8 @@ fn serve() -> Result<()> {
     let session_id =
         std::env::var("VIBELINK_SESSION_ID").context("VIBELINK_SESSION_ID is required")?;
     let session_id = parse_uuid(&session_id)?;
-    let stream = crate::app::spawn_daemon::ensure_daemon().context("connect to daemon")?;
+    let stream = crate::app::spawn_daemon::connect_daemon()
+        .context("connect to the running VibeLink control plane")?;
     let client = DaemonClient::new(stream);
     let license = HeadlessLicenseCache::load()?;
     license.require_entitled()?;
@@ -123,10 +127,24 @@ fn handle_message_with_license(
             if let Some(license) = license {
                 license.require_entitled()?;
             }
-            let text = call_tool(client, session_id, name, &args)?;
-            Ok(
-                json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }),
-            )
+            match call_tool(client, session_id, name, &args) {
+                Ok(text) => Ok(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "content": [{ "type": "text", "text": text }], "isError": false }
+                })),
+                Err(error) => {
+                    let typed = error
+                        .downcast_ref::<crate::dedicated_cli::CliError>()
+                        .and_then(|error| serde_json::to_value(error).ok())
+                        .unwrap_or_else(
+                            || json!({ "code": "internal_failure", "message": error.to_string() }),
+                        );
+                    Ok(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [{ "type": "text", "text": serde_json::to_string(&typed)? }], "isError": true }
+                    }))
+                }
+            }
         }
         Some("ping") => Ok(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
         Some(other) => Ok(error_response(
@@ -143,7 +161,38 @@ fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> R
 }
 
 fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) -> Result<String> {
+    if let Some(contract) = mcp_cli_contract(name) {
+        return call_cli_contract(session_id, contract, args);
+    }
     match name {
+        "vibelink_cli" => {
+            let values = args
+                .get("args")
+                .and_then(Value::as_array)
+                .context("args must be an array")?;
+            let argv = values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .context("each CLI argument must be a string")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut invocation = parse_args(argv).map_err(anyhow::Error::new)?;
+            scope_mcp_invocation(&mut invocation.command, session_id)?;
+            let mut executor = SocketExecutor;
+            Ok(serde_json::to_string(
+                &executor.execute(invocation).map_err(anyhow::Error::new)?,
+            )?)
+        }
+        "vibelink_status" => {
+            let invocation = parse_args(["status"]).map_err(anyhow::Error::new)?;
+            let mut executor = SocketExecutor;
+            Ok(serde_json::to_string(
+                &executor.execute(invocation).map_err(anyhow::Error::new)?,
+            )?)
+        }
         "vibelink_pane_list" => {
             match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
                 ReplyResult::Attached { panes, .. } => Ok(serde_json::to_string(&panes)?),
@@ -355,6 +404,39 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
         other => bail!("unknown tool: {other}"),
     }
 }
+fn scope_mcp_invocation(
+    command: &mut crate::dedicated_cli::Command,
+    session_id: Uuid,
+) -> Result<()> {
+    macro_rules! scope {
+        ($command:expr, $domain:literal) => {{
+            if let Some(workspace) = $command.selectors.workspace.as_deref() {
+                if workspace != session_id.to_string() {
+                    return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
+                        crate::dedicated_cli::ErrorCode::DeniedCapability,
+                        "MCP tools cannot target a different workspace",
+                    )));
+                }
+            } else if crate::dedicated_cli::find_contract($domain, $command.action.as_str())
+                .is_some_and(|contract| contract.selectors.contains(&"workspace"))
+            {
+                $command.selectors.workspace = Some(session_id.to_string());
+            }
+        }};
+    }
+    match command {
+        crate::dedicated_cli::Command::Workspace(value) => scope!(value, "workspace"),
+        crate::dedicated_cli::Command::Terminal(value) => scope!(value, "terminal"),
+        crate::dedicated_cli::Command::Orchestration(value) => scope!(value, "orchestration"),
+        crate::dedicated_cli::Command::Automation(value) => scope!(value, "automation"),
+        crate::dedicated_cli::Command::Computer(value) => scope!(value, "computer"),
+        crate::dedicated_cli::Command::Skill(value) => scope!(value, "skill"),
+        crate::dedicated_cli::Command::Remote(value) => scope!(value, "remote"),
+        crate::dedicated_cli::Command::Browser(value) => scope!(value, "browser"),
+        crate::dedicated_cli::Command::Status | crate::dedicated_cli::Command::Mcp(_) => {}
+    }
+    Ok(())
+}
 
 fn strip_ansi(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
@@ -431,7 +513,23 @@ fn ansi_string_sequence_end(bytes: &[u8], mut index: usize, bel_terminates: bool
 }
 
 fn tool_schemas() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
+        tool_schema(
+            "vibelink_cli",
+            "Run any typed VibeLink CLI operation against the shared daemon control plane. Arguments exclude the executable name; this workspace is selected automatically unless --workspace is supplied.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "args": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                },
+                "required": ["args"]
+            }),
+        ),
+        tool_schema(
+            "vibelink_status",
+            "Read the current flavor-scoped VibeLink control-plane status.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        ),
         tool_schema(
             "vibelink_pane_list",
             "List panes in this VibeLink workspace",
@@ -497,7 +595,8 @@ fn tool_schemas() -> Vec<Value> {
                     "content": { "type": "string", "description": "Markdown instructions to write to SKILL.md." },
                     "scope": { "type": "string", "enum": ["global", "workspace"], "description": "Defaults to workspace for MCP calls." },
                     "sessionId": { "type": "string", "description": "Optional workspace session id. Defaults to the MCP server workspace." },
-                    "enabled": { "type": "boolean", "description": "Defaults to true." }
+                    "enabled": { "type": "boolean", "description": "Defaults to true." },
+                    "requiredCapabilities": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 64 },
                 },
                 "required": ["id", "content"]
             }),
@@ -542,11 +641,216 @@ fn tool_schemas() -> Vec<Value> {
             "Append a note to a task",
             json!({ "type": "object", "properties": { "taskId": { "type": "string" }, "message": { "type": "string" } }, "required": ["taskId", "message"] }),
         ),
-    ]
+    ];
+    let existing = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<std::collections::HashSet<_>>();
+    tools.extend(
+        command_contracts()
+            .into_iter()
+            .map(cli_contract_tool_schema)
+            .filter(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !existing.contains(name))
+            }),
+    );
+    tools
 }
 
 fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
     json!({ "name": name, "description": description, "inputSchema": input_schema })
+}
+
+fn cli_contract_tool_name(contract: &CommandContract) -> String {
+    format!(
+        "vibelink_{}_{}",
+        contract.domain.replace('-', "_"),
+        contract.action.replace('-', "_")
+    )
+}
+
+fn mcp_cli_contract(name: &str) -> Option<CommandContract> {
+    if matches!(
+        name,
+        "vibelink_skill_list" | "vibelink_skill_apply" | "vibelink_skill_delete"
+    ) {
+        return None;
+    }
+    command_contracts()
+        .into_iter()
+        .find(|contract| cli_contract_tool_name(contract) == name)
+}
+
+fn cli_contract_tool_schema(contract: CommandContract) -> Value {
+    let mut properties = Map::new();
+    for selector in contract.selectors {
+        properties.insert(
+            kebab_to_camel(selector),
+            json!({ "type": "string", "minLength": 1 }),
+        );
+    }
+    let mut required = Vec::new();
+    for option in &contract.options {
+        let property = kebab_to_camel(option.name);
+        let scalar = match option.kind {
+            ValueKind::String | ValueKind::Uuid => json!({ "type": "string", "minLength": 1 }),
+            ValueKind::Integer => json!({ "type": "integer" }),
+            ValueKind::UnsignedInteger => json!({ "type": "integer", "minimum": 0 }),
+        };
+        properties.insert(
+            property.clone(),
+            if option.repeatable {
+                json!({ "type": "array", "items": scalar, "minItems": 1 })
+            } else {
+                scalar
+            },
+        );
+        if option.required {
+            required.push(Value::String(property));
+        }
+    }
+    for switch in contract.switches {
+        properties.insert(kebab_to_camel(switch), json!({ "type": "boolean" }));
+    }
+    properties.insert(
+        "operationId".to_string(),
+        json!({ "type": "string", "format": "uuid" }),
+    );
+    properties.insert(
+        "expectedRevision".to_string(),
+        json!({ "type": "integer", "minimum": 0 }),
+    );
+    properties.insert(
+        "requestTimeoutSeconds".to_string(),
+        json!({ "type": "integer", "minimum": 1, "maximum": 600 }),
+    );
+    properties.insert(
+        "flavor".to_string(),
+        json!({ "type": "string", "enum": ["dev", "prod"] }),
+    );
+    if contract.requires_expected_revision {
+        required.push(Value::String("expectedRevision".to_string()));
+    }
+    let risk = match contract.risk {
+        RiskLevel::ReadOnly => "Read-only.",
+        RiskLevel::Mutating => "Mutates VibeLink state using an idempotent operation ID.",
+        RiskLevel::HighRisk => {
+            "High-risk: present exact targets and obtain the required approval before calling."
+        }
+    };
+    tool_schema(
+        &cli_contract_tool_name(&contract),
+        &format!("{} {risk}", contract.description),
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        }),
+    )
+}
+
+fn call_cli_contract(session_id: Uuid, contract: CommandContract, args: &Value) -> Result<String> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| anyhow!("tool arguments must be an object"))?;
+    if contract.selectors.contains(&"workspace") {
+        if let Some(workspace) = object.get("workspace").and_then(Value::as_str) {
+            if workspace != session_id.to_string() {
+                return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
+                    crate::dedicated_cli::ErrorCode::DeniedCapability,
+                    "MCP tools cannot target a different workspace",
+                )));
+            }
+        }
+    }
+    let mut argv = vec![contract.domain.to_string(), contract.action.to_string()];
+    for selector in contract.selectors {
+        let property = kebab_to_camel(selector);
+        if let Some(value) = object.get(&property) {
+            push_cli_scalar(&mut argv, selector, value)?;
+        }
+    }
+    if contract.selectors.contains(&"workspace") && !object.contains_key("workspace") {
+        argv.extend(["--workspace".to_string(), session_id.to_string()]);
+    }
+    for option in &contract.options {
+        let property = kebab_to_camel(option.name);
+        let Some(value) = object.get(&property) else {
+            continue;
+        };
+        if option.repeatable {
+            let values = value
+                .as_array()
+                .ok_or_else(|| anyhow!("{property} must be an array"))?;
+            for value in values {
+                push_cli_scalar(&mut argv, option.name, value)?;
+            }
+        } else {
+            push_cli_scalar(&mut argv, option.name, value)?;
+        }
+    }
+    for switch in contract.switches {
+        let property = kebab_to_camel(switch);
+        if object
+            .get(&property)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            argv.push(format!("--{switch}"));
+        }
+    }
+    for (property, flag) in [
+        ("operationId", "--operation-id"),
+        ("expectedRevision", "--expected-revision"),
+        ("requestTimeoutSeconds", "--request-timeout-seconds"),
+        ("flavor", "--flavor"),
+    ] {
+        if let Some(value) = object.get(property) {
+            argv.push(flag.to_string());
+            argv.push(
+                json_scalar_text(value).ok_or_else(|| anyhow!("{property} must be a scalar"))?,
+            );
+        }
+    }
+    let invocation = parse_args(argv).map_err(anyhow::Error::new)?;
+    let mut executor = SocketExecutor;
+    let result = executor.execute(invocation).map_err(anyhow::Error::new)?;
+    Ok(serde_json::to_string(&result)?)
+}
+
+fn push_cli_scalar(argv: &mut Vec<String>, name: &str, value: &Value) -> Result<()> {
+    argv.push(format!("--{name}"));
+    argv.push(json_scalar_text(value).ok_or_else(|| anyhow!("{name} must be a scalar"))?);
+    Ok(())
+}
+
+fn json_scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn kebab_to_camel(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut uppercase = false;
+    for character in value.chars() {
+        if character == '-' {
+            uppercase = true;
+        } else if uppercase {
+            output.extend(character.to_uppercase());
+            uppercase = false;
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -> Result<String> {
@@ -784,6 +1088,22 @@ fn skill_apply_input(args: &Value, default_session_id: Option<&str>) -> Result<S
         scope,
         session_id,
         enabled: Some(args.get("enabled").and_then(Value::as_bool).unwrap_or(true)),
+        required_capabilities: args
+            .get("requiredCapabilities")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .context("requiredCapabilities entries must be strings")
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -1058,11 +1378,11 @@ fn compose_task_prompt(
     lines.extend([
         "When you make progress, report a note from this VibeLink pane with:".to_string(),
         format!(
-            "& $env:VIBELINK_APP_EXE cli task note --task {task_id} --message \"<short progress note>\""
+            "& $env:VIBELINK_CLI_EXE orchestration send --workspace $env:VIBELINK_SESSION_ID --task-id {task_id} --message \"<short progress note>\""
         ),
         "When finished, report completion from this VibeLink pane with:".to_string(),
         format!(
-            "& $env:VIBELINK_APP_EXE cli task done --task {task_id} --result-summary \"<short result summary>\""
+            "& $env:VIBELINK_CLI_EXE orchestration task-update --workspace $env:VIBELINK_SESSION_ID --task-id {task_id} --status completed --result-summary \"<short result summary>\""
         ),
     ]);
     lines.join(" | ")
@@ -1090,6 +1410,14 @@ fn pane_write_payloads(text: &str, enter: bool, split_submit: bool) -> Vec<Vec<u
     } else {
         vec![write_payload(text.to_string(), enter)]
     }
+}
+
+fn write_payload(text: String, enter: bool) -> Vec<u8> {
+    let mut data = text.into_bytes();
+    if enter {
+        data.push(b'\r');
+    }
+    data
 }
 
 fn agent_submit_payload() -> Vec<u8> {
@@ -1174,6 +1502,52 @@ mod tests {
         assert!(names.contains(&"vibelink_skill_get"));
         assert!(names.contains(&"vibelink_skill_apply"));
         assert!(names.contains(&"vibelink_skill_delete"));
+        for name in [
+            "vibelink_workspace_list",
+            "vibelink_terminal_wait",
+            "vibelink_orchestration_run",
+            "vibelink_orchestration_gate_resolve",
+            "vibelink_automation_precheck",
+            "vibelink_computer_get_app_state",
+            "vibelink_remote_revoke",
+        ] {
+            assert!(names.contains(&name), "missing generated MCP tool {name}");
+        }
+        assert_eq!(
+            names.len(),
+            names
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+    }
+
+    #[test]
+    fn generated_mcp_schemas_preserve_types_revisions_and_risk() {
+        let tools = tool_schemas();
+        let gate = tools
+            .iter()
+            .find(|tool| tool["name"] == "vibelink_orchestration_gate_resolve")
+            .expect("gate resolve tool");
+        assert_eq!(
+            gate["inputSchema"]["properties"]["expectedRevision"]["type"],
+            "integer"
+        );
+        assert!(gate["inputSchema"]["required"]
+            .as_array()
+            .expect("required array")
+            .contains(&json!("expectedRevision")));
+        assert!(gate["description"]
+            .as_str()
+            .expect("description")
+            .contains("High-risk"));
+
+        let list = tools
+            .iter()
+            .find(|tool| tool["name"] == "vibelink_workspace_list")
+            .expect("workspace list tool");
+        assert_eq!(list["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]
@@ -1358,8 +1732,8 @@ mod tests {
         assert!(prompt.contains("Workspace purpose: Ship onboarding"));
         assert!(prompt.contains("Do the thing"));
         assert!(!prompt.contains('\n'));
-        assert!(prompt.contains("& $env:VIBELINK_APP_EXE cli task note --task 12345678-aaaa"));
-        assert!(prompt.contains("& $env:VIBELINK_APP_EXE cli task done --task 12345678-aaaa"));
+        assert!(prompt.contains("& $env:VIBELINK_CLI_EXE orchestration send --workspace $env:VIBELINK_SESSION_ID --task-id 12345678-aaaa"));
+        assert!(prompt.contains("& $env:VIBELINK_CLI_EXE orchestration task-update --workspace $env:VIBELINK_SESSION_ID --task-id 12345678-aaaa --status completed"));
         assert!(prompt.contains("--result-summary \"<short result summary>\""));
     }
 

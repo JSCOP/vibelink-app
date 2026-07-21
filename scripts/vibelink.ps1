@@ -12,6 +12,7 @@ $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $DevConfig = Join-Path $RepoRoot 'src-tauri\tauri.dev.conf.json'
 $ReleaseExe = Join-Path $RepoRoot 'src-tauri\target\release\app.exe'
 $StopLegacyDevLocks = Join-Path $RepoRoot 'scripts\stop-legacy-dev-locks.ps1'
+$StageSidecars = Join-Path $RepoRoot 'scripts\stage-sidecars.ps1'
 $PackageJson = Join-Path $RepoRoot 'package.json'
 $CargoToml = Join-Path $RepoRoot 'src-tauri\Cargo.toml'
 $CargoLock = Join-Path $RepoRoot 'src-tauri\Cargo.lock'
@@ -241,6 +242,8 @@ function Invoke-DevRun {
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
   }
+  & $StageSidecars -Profile debug
+  if ($LASTEXITCODE -ne 0) { throw "Sidecar staging failed with exit code $LASTEXITCODE" }
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'dev', '--config', $DevConfig)
 }
 

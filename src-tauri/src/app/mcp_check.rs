@@ -24,6 +24,7 @@ pub struct McpCheckReport {
     pub spawn_ok: bool,
     pub initialize_ok: bool,
     pub tool_count: u32,
+    pub tool_call_ok: bool,
     pub error: Option<String>,
 }
 
@@ -36,7 +37,7 @@ pub async fn mcp_self_check(
         .require_entitled_cached()
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        let executable = std::env::current_exe().context("resolve current executable")?;
+        let executable = super::cli_path::dedicated_cli_path()?;
         Ok::<_, anyhow::Error>(mcp_self_check_native(
             &executable,
             &session_id,
@@ -145,6 +146,23 @@ fn run_mcp_self_check(
         if tools.get("error").is_some() {
             anyhow::bail!("MCP tools/list returned {}", tools);
         }
+
+        send_request(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "vibelink_cli", "arguments": { "args": ["status"] } }
+            }),
+        )?;
+        let call = receive_response(&line_rx, deadline)?;
+        report.tool_call_ok = call.pointer("/result/isError").and_then(Value::as_bool)
+            == Some(false)
+            && call.pointer("/result/content/0/text").is_some();
+        if !report.tool_call_ok {
+            anyhow::bail!("MCP representative tools/call returned {}", call);
+        }
         Ok(())
     })();
 
@@ -213,6 +231,7 @@ mod tests {
         assert!(!report.spawn_ok);
         assert!(!report.initialize_ok);
         assert_eq!(report.tool_count, 0);
+        assert!(!report.tool_call_ok);
         assert!(report.error.is_some());
     }
 

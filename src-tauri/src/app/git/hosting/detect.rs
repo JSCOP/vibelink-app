@@ -33,10 +33,7 @@ pub(crate) fn detect_hosting(repo: &str) -> Result<HostingInfo> {
         return Ok(empty_hosting_info());
     };
 
-    let provider = provider_for_host(
-        &origin.host,
-        &load_provider_overrides(&overrides_path()?)?,
-    );
+    let provider = provider_for_host(&origin.host, &load_provider_overrides(&overrides_path()?)?);
     let token_present = token_status(&origin.host)?;
     Ok(HostingInfo {
         provider,
@@ -153,7 +150,10 @@ fn set_provider_override_at(path: &Path, host: &str, provider: &str) -> Result<(
     overrides.0.insert(host, provider.to_string());
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
-            format!("create Git hosting overrides directory {}", parent.display())
+            format!(
+                "create Git hosting overrides directory {}",
+                parent.display()
+            )
         })?;
     }
     let json = serde_json::to_string_pretty(&overrides.0)
@@ -243,8 +243,14 @@ mod tests {
         overrides
             .0
             .insert("git.example.test".to_string(), "github".to_string());
-        assert_eq!(provider_for_host("github.com", &overrides).as_deref(), Some("github"));
-        assert_eq!(provider_for_host("gitlab.com", &overrides).as_deref(), Some("gitlab"));
+        assert_eq!(
+            provider_for_host("github.com", &overrides).as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            provider_for_host("gitlab.com", &overrides).as_deref(),
+            Some("gitlab")
+        );
         assert_eq!(
             provider_for_host("git.example.test", &overrides).as_deref(),
             Some("github")
@@ -259,8 +265,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let path = dir.join(OVERRIDES_FILE);
-        set_provider_override_at(&path, "Git.Example.Test", "gitlab")
-            .expect("set gitlab override");
+        set_provider_override_at(&path, "Git.Example.Test", "gitlab").expect("set gitlab override");
         set_provider_override_at(&path, "code.example.test", "github")
             .expect("set github override");
 

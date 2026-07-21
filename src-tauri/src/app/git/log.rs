@@ -107,7 +107,10 @@ pub(crate) fn git_log_native(repo: &str, options: LogOptions) -> Result<LogPage>
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("does not have any commits") || stderr.contains("unknown revision") {
-            return Ok(LogPage { commits: Vec::new(), has_more: false });
+            return Ok(LogPage {
+                commits: Vec::new(),
+                has_more: false,
+            });
         }
         return Err(anyhow!(super::exec::stderr_or_status(&output)));
     }
@@ -136,7 +139,11 @@ pub(crate) fn git_commit_detail_native(repo: &str, sha: &str) -> Result<CommitDe
     )?;
     let fields = metadata
         .splitn(8, |byte| *byte == 1)
-        .map(|field| String::from_utf8_lossy(field).trim_end_matches('\0').to_string())
+        .map(|field| {
+            String::from_utf8_lossy(field)
+                .trim_end_matches('\0')
+                .to_string()
+        })
         .collect::<Vec<_>>();
     if fields.len() != 8 {
         return Err(anyhow!("git returned malformed commit metadata"));
@@ -160,17 +167,62 @@ fn changed_files_for_commit(repo: &str, sha: &str) -> Result<Vec<ChangedFile>> {
     let parent = format!("{sha}^");
     let name_output = git_read_output(
         repo,
-        ["diff-tree", "--no-commit-id", "-r", "-z", "--name-status", "-M", &parent, sha],
+        [
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "-z",
+            "--name-status",
+            "-M",
+            &parent,
+            sha,
+        ],
     )?;
     let (names, stats) = if name_output.status.success() {
         (
             name_output.stdout,
-            git_read(repo, ["diff-tree", "--no-commit-id", "-r", "-z", "--numstat", "-M", &parent, sha])?,
+            git_read(
+                repo,
+                [
+                    "diff-tree",
+                    "--no-commit-id",
+                    "-r",
+                    "-z",
+                    "--numstat",
+                    "-M",
+                    &parent,
+                    sha,
+                ],
+            )?,
         )
     } else {
         (
-            git_read(repo, ["diff-tree", "--no-commit-id", "-r", "--root", "-z", "--name-status", "-M", sha])?,
-            git_read(repo, ["diff-tree", "--no-commit-id", "-r", "--root", "-z", "--numstat", "-M", sha])?,
+            git_read(
+                repo,
+                [
+                    "diff-tree",
+                    "--no-commit-id",
+                    "-r",
+                    "--root",
+                    "-z",
+                    "--name-status",
+                    "-M",
+                    sha,
+                ],
+            )?,
+            git_read(
+                repo,
+                [
+                    "diff-tree",
+                    "--no-commit-id",
+                    "-r",
+                    "--root",
+                    "-z",
+                    "--numstat",
+                    "-M",
+                    sha,
+                ],
+            )?,
         )
     };
     let mut files = parse_name_status(&names);
@@ -202,4 +254,3 @@ fn parse_commit_info(record: &[u8]) -> Option<CommitInfo> {
 fn split_words(value: &str) -> Vec<String> {
     value.split_whitespace().map(str::to_string).collect()
 }
-

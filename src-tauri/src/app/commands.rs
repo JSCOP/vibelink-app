@@ -1,8 +1,9 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use super::license::LicenseService;
 use crate::protocol::{ClientToDaemon, PaneConfig, PaneMeta, ReplyResult, SessionMeta};
-use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteServer, RemoteStatus};
-use serde_json::Value;
+use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{ipc::Channel, State};
 
@@ -72,78 +73,124 @@ pub fn terminal_ws_port(client: State<'_, DaemonClient>) -> u16 {
 }
 
 #[tauri::command]
-pub fn remote_get_status(remote: State<'_, Arc<RemoteServer>>) -> RemoteStatus {
-    remote.status()
+pub fn remote_get_status(client: State<'_, DaemonClient>) -> Result<RemoteStatus, String> {
+    remote_request(&client, json!({ "action": "status" }))
 }
 
 #[tauri::command]
 pub fn remote_get_pane_lease(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
     pane_id: String,
 ) -> Result<Option<RemotePaneLeaseStatus>, String> {
-    remote.pane_lease(&pane_id).map_err(to_string)
+    remote_request(&client, json!({ "action": "paneLease", "paneId": pane_id }))
 }
 
 #[tauri::command]
 pub async fn remote_set_enabled(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
     enabled: bool,
 ) -> Result<RemoteStatus, String> {
-    remote.set_enabled(enabled).map_err(to_string)
+    remote_request(
+        &client,
+        json!({ "action": "setEnabled", "enabled": enabled }),
+    )
 }
 
 #[tauri::command]
 pub async fn remote_set_port(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
     port: u16,
 ) -> Result<RemoteStatus, String> {
-    remote.set_port(port).map_err(to_string)
+    remote_request(&client, json!({ "action": "setPort", "port": port }))
+}
+
+#[tauri::command]
+pub async fn remote_set_lan_enabled(
+    client: State<'_, DaemonClient>,
+    lan_enabled: bool,
+) -> Result<RemoteStatus, String> {
+    remote_request(
+        &client,
+        json!({ "action": "setLanEnabled", "lanEnabled": lan_enabled }),
+    )
 }
 
 #[tauri::command]
 pub async fn remote_create_pairing(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
 ) -> Result<PairingPayload, String> {
-    remote.create_pairing().map_err(to_string)
+    remote_request(&client, json!({ "action": "createPairing" }))
+}
+
+#[tauri::command]
+pub async fn remote_create_pairing_v2(
+    client: State<'_, DaemonClient>,
+) -> Result<PairingPayload, String> {
+    remote_request(&client, json!({ "action": "createPairingV2" }))
 }
 
 #[tauri::command]
 pub async fn remote_revoke_device(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
     device_id: String,
 ) -> Result<(), String> {
-    remote.revoke_device(&device_id).map_err(to_string)
+    remote_request(
+        &client,
+        json!({ "action": "revokeDevice", "deviceId": device_id }),
+    )
 }
 
 #[tauri::command]
 pub async fn remote_regenerate_identity(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
 ) -> Result<RemoteStatus, String> {
-    remote.regenerate_identity().map_err(to_string)
+    remote_request(&client, json!({ "action": "regenerateIdentity" }))
 }
 
 #[tauri::command]
-pub async fn remote_firewall_status(remote: State<'_, Arc<RemoteServer>>) -> Result<bool, String> {
-    let port = remote.status().port;
-    crate::remote::firewall::is_configured(port).map_err(to_string)
+pub async fn remote_firewall_status(client: State<'_, DaemonClient>) -> Result<bool, String> {
+    let status: RemoteStatus = remote_request(&client, json!({ "action": "status" }))?;
+    crate::remote::firewall::is_configured(status.port).map_err(to_string)
 }
 
 #[tauri::command]
-pub async fn remote_setup_firewall(remote: State<'_, Arc<RemoteServer>>) -> Result<bool, String> {
-    let port = remote.status().port;
-    crate::remote::firewall::setup(port).map_err(to_string)?;
-    crate::remote::firewall::is_configured(port).map_err(to_string)
+pub async fn remote_setup_firewall(client: State<'_, DaemonClient>) -> Result<bool, String> {
+    let status: RemoteStatus = remote_request(&client, json!({ "action": "status" }))?;
+    crate::remote::firewall::setup(status.port).map_err(to_string)?;
+    crate::remote::firewall::is_configured(status.port).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn set_remote_appearance(
-    remote: State<'_, Arc<RemoteServer>>,
+    client: State<'_, DaemonClient>,
     appearance: Value,
     workspace_order: Vec<String>,
     workspace_alerts: std::collections::HashMap<String, usize>,
 ) -> Result<(), String> {
-    remote.set_appearance(appearance, workspace_order, workspace_alerts);
-    Ok(())
+    remote_request(
+        &client,
+        json!({
+            "action": "setAppearance",
+            "appearance": appearance,
+            "workspaceOrder": workspace_order,
+            "workspaceAlerts": workspace_alerts,
+        }),
+    )
+}
+
+fn remote_request<T: DeserializeOwned>(client: &DaemonClient, request: Value) -> Result<T, String> {
+    match client
+        .request_reply(|req| ClientToDaemon::Remote {
+            req,
+            request_json: request.to_string(),
+        })
+        .map_err(to_string)?
+    {
+        ReplyResult::Remote(response_json) => {
+            serde_json::from_str(&response_json).map_err(|error| error.to_string())
+        }
+        other => Err(format!("unexpected daemon response: {other:?}")),
+    }
 }
 
 #[tauri::command]

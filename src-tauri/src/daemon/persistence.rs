@@ -1,11 +1,10 @@
-use crate::protocol::PaneConfig;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{self, Write},
-    path::Path,
+use crate::{
+    persistence::{load_json_or_default, write_json_atomic},
+    protocol::PaneConfig,
 };
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,32 +16,17 @@ pub struct PersistedSession {
     pub layout_json: Option<String>,
     #[serde(default)]
     pub workspace_folder: Option<String>,
+    #[serde(default)]
+    pub sleeping: bool,
     pub panes: Vec<PaneConfig>,
 }
 
 pub fn load_sessions(path: &Path) -> Result<Vec<PersistedSession>> {
-    match fs::read_to_string(path) {
-        Ok(json) => serde_json::from_str(&json).context("parse sessions.json"),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(err).context("read sessions.json"),
-    }
+    load_json_or_default(path, "sessions")
 }
 
 pub fn save_sessions(path: &Path, sessions: &[PersistedSession]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).context("create sessions directory")?;
-    }
-    let json = serde_json::to_string_pretty(sessions).context("serialize sessions.json")?;
-    let tmp = path.with_extension("tmp");
-    {
-        let mut file = fs::File::create(&tmp).context("create sessions temp file")?;
-        file.write_all(json.as_bytes())
-            .context("write sessions temp file")?;
-        file.flush().context("flush sessions temp file")?;
-        file.sync_all().context("fsync sessions temp file")?;
-    }
-    fs::rename(&tmp, path).context("rename sessions temp file")?;
-    Ok(())
+    write_json_atomic(path, &sessions)
 }
 
 #[cfg(test)]
@@ -58,6 +42,7 @@ mod tests {
             created_at: 123,
             layout_json: Some("{\"grid\":true}".to_string()),
             workspace_folder: None,
+            sleeping: false,
             panes: vec![PaneConfig {
                 pane_id: Uuid::new_v4(),
                 shell: Some("cmd.exe".to_string()),
@@ -94,6 +79,7 @@ mod tests {
             created_at: 123,
             layout_json: None,
             workspace_folder: Some("C:\\".to_string()),
+            sleeping: true,
             panes: Vec::new(),
         };
 
@@ -115,6 +101,7 @@ mod tests {
             created_at: 123,
             layout_json: None,
             workspace_folder: None,
+            sleeping: false,
             panes: Vec::new(),
         };
 
@@ -136,6 +123,7 @@ mod tests {
             created_at: 123,
             layout_json: None,
             workspace_folder: Some("E:/work".to_string()),
+            sleeping: false,
             panes: Vec::new(),
         };
 

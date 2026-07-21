@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+use crate::persistence::{load_json_or_default, write_json_atomic};
+use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::{rngs::OsRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -13,6 +13,8 @@ use uuid::Uuid;
 const PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 const LOCKOUT_DURATION: Duration = Duration::from_secs(60);
 const MAX_FAILED_ATTEMPTS: u8 = 5;
+pub const TERMINAL_VIEW_GRANT: &str = "terminal.view";
+pub const TERMINAL_INPUT_GRANT: &str = "terminal.input";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,17 +22,31 @@ pub struct DeviceRecord {
     pub id: String,
     pub name: String,
     pub token_hash: String,
+    #[serde(default)]
+    pub noise_fingerprint: Option<String>,
+    #[serde(default = "initial_revocation_epoch")]
+    pub revocation_epoch: u64,
     pub created_at: i64,
     pub last_seen_at: i64,
+    #[serde(default = "default_grants")]
+    pub grants: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DevicePublic {
     pub id: String,
     pub name: String,
     pub created_at: i64,
     pub last_seen_at: i64,
+    pub grants: Vec<String>,
+    pub revocation_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceAuthorization {
+    pub grants: Vec<String>,
+    pub revocation_epoch: u64,
 }
 
 impl From<&DeviceRecord> for DevicePublic {
@@ -40,6 +56,8 @@ impl From<&DeviceRecord> for DevicePublic {
             name: value.name.clone(),
             created_at: value.created_at,
             last_seen_at: value.last_seen_at,
+            grants: value.grants.clone(),
+            revocation_epoch: value.revocation_epoch,
         }
     }
 }
@@ -73,14 +91,10 @@ pub struct DeviceStore {
 
 impl DeviceStore {
     pub fn load(path: PathBuf) -> Result<Self> {
-        let records = if path.exists() {
-            serde_json::from_slice(
-                &fs::read(&path).with_context(|| format!("read {}", path.display()))?,
-            )
-            .with_context(|| format!("parse {}", path.display()))?
-        } else {
-            Vec::new()
-        };
+        let mut records: Vec<DeviceRecord> = load_json_or_default(&path, "remote devices")?;
+        for record in &mut records {
+            record.grants.retain(|grant| is_known_grant(grant));
+        }
         Ok(Self {
             path,
             records,
@@ -134,8 +148,11 @@ impl DeviceStore {
             id: Uuid::new_v4().to_string(),
             name: sanitize_device_name(device_name),
             token_hash: token_hash(&token),
+            noise_fingerprint: None,
+            revocation_epoch: initial_revocation_epoch(),
             created_at: now,
             last_seen_at: now,
+            grants: default_grants(),
         };
         self.records.push(record.clone());
         if self.save().is_err() {
@@ -166,6 +183,110 @@ impl DeviceStore {
         self.reset_failures();
         let _ = self.save();
         Ok(true)
+    }
+    pub fn consume_v2_pairing(
+        &mut self,
+        code: &str,
+        device_name: &str,
+        noise_fingerprint: &str,
+    ) -> std::result::Result<DeviceRecord, AuthFailure> {
+        self.check_lockout()?;
+        let Some(pairing) = self.pairing.clone() else {
+            return Err(self.record_failure(AuthFailure::PairExpired));
+        };
+        if SystemTime::now() > pairing.expires_at {
+            self.pairing = None;
+            return Err(self.record_failure(AuthFailure::PairExpired));
+        }
+        if !constant_time_eq(pairing.code.as_bytes(), code.as_bytes()) {
+            return Err(self.record_failure(AuthFailure::Failed));
+        }
+        self.pairing = None;
+        self.reset_failures();
+        let now = unix_secs(SystemTime::now());
+        let record = DeviceRecord {
+            id: Uuid::new_v4().to_string(),
+            name: sanitize_device_name(device_name),
+            token_hash: String::new(),
+            noise_fingerprint: Some(noise_fingerprint.to_string()),
+            revocation_epoch: initial_revocation_epoch(),
+            created_at: now,
+            last_seen_at: now,
+            grants: remote_v2_default_grants(),
+        };
+        self.records.push(record.clone());
+        if self.save().is_err() {
+            self.records.pop();
+            return Err(AuthFailure::Failed);
+        }
+        Ok(record)
+    }
+
+    pub fn verify_v2_identity(
+        &mut self,
+        device_id: &str,
+        noise_fingerprint: &str,
+    ) -> std::result::Result<bool, AuthFailure> {
+        self.check_lockout()?;
+        let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|record| record.id == device_id)
+        else {
+            return Err(self.record_failure(AuthFailure::Failed));
+        };
+        let Some(expected) = record.noise_fingerprint.as_deref() else {
+            return Err(self.record_failure(AuthFailure::Failed));
+        };
+        if !constant_time_eq(expected.as_bytes(), noise_fingerprint.as_bytes()) {
+            return Err(self.record_failure(AuthFailure::Failed));
+        }
+        record.last_seen_at = unix_secs(SystemTime::now());
+        self.reset_failures();
+        let _ = self.save();
+        Ok(true)
+    }
+
+    pub fn grants_for(&self, device_id: &str) -> Option<Vec<String>> {
+        self.records
+            .iter()
+            .find(|record| record.id == device_id)
+            .map(|record| record.grants.clone())
+    }
+
+    pub fn v2_authorization(
+        &self,
+        device_id: &str,
+        noise_fingerprint: &str,
+    ) -> Option<DeviceAuthorization> {
+        self.records
+            .iter()
+            .find(|record| {
+                record.id == device_id
+                    && record.noise_fingerprint.as_deref().is_some_and(|expected| {
+                        constant_time_eq(expected.as_bytes(), noise_fingerprint.as_bytes())
+                    })
+            })
+            .map(|record| DeviceAuthorization {
+                grants: record.grants.clone(),
+                revocation_epoch: record.revocation_epoch,
+            })
+    }
+
+    pub fn update_grants(&mut self, device_id: &str, grants: Vec<String>) -> Result<u64> {
+        if grants.iter().any(|grant| !is_known_grant(grant)) {
+            anyhow::bail!("unknown remote grant");
+        }
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| record.id == device_id)
+            .ok_or_else(|| anyhow::anyhow!("remote device not found"))?;
+        record.grants = grants;
+        record.revocation_epoch = record.revocation_epoch.saturating_add(1);
+        let epoch = record.revocation_epoch;
+        self.save()?;
+        Ok(epoch)
     }
 
     pub fn revoke(&mut self, device_id: &str) -> Result<()> {
@@ -205,14 +326,51 @@ impl DeviceStore {
     }
 
     fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let temporary = temporary_path(&self.path);
-        fs::write(&temporary, serde_json::to_vec_pretty(&self.records)?)?;
-        fs::rename(&temporary, &self.path)?;
-        Ok(())
+        write_json_atomic(&self.path, &self.records)
     }
+}
+fn default_grants() -> Vec<String> {
+    vec![
+        TERMINAL_VIEW_GRANT.to_string(),
+        TERMINAL_INPUT_GRANT.to_string(),
+    ]
+}
+
+fn initial_revocation_epoch() -> u64 {
+    1
+}
+
+fn remote_v2_default_grants() -> Vec<String> {
+    vec![
+        TERMINAL_VIEW_GRANT.to_string(),
+        TERMINAL_INPUT_GRANT.to_string(),
+        "orchestration.view".to_string(),
+        "orchestration.control".to_string(),
+        "browser.view".to_string(),
+        "browser.control".to_string(),
+        "files.view".to_string(),
+        "git.write".to_string(),
+        "computer.observe".to_string(),
+        "computer.control".to_string(),
+        "admin".to_string(),
+    ]
+}
+
+fn is_known_grant(grant: &str) -> bool {
+    matches!(
+        grant,
+        TERMINAL_VIEW_GRANT
+            | TERMINAL_INPUT_GRANT
+            | "orchestration.view"
+            | "orchestration.control"
+            | "browser.view"
+            | "browser.control"
+            | "files.view"
+            | "git.write"
+            | "computer.observe"
+            | "computer.control"
+            | "admin"
+    )
 }
 
 fn token_hash(token: &str) -> String {
@@ -236,12 +394,6 @@ fn sanitize_device_name(value: &str) -> String {
     } else {
         trimmed.chars().take(80).collect()
     }
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(".tmp");
-    PathBuf::from(value)
 }
 
 fn unix_secs(value: SystemTime) -> i64 {
@@ -292,5 +444,35 @@ mod tests {
             store.consume_pairing(&pairing.code, "Phone"),
             Err(AuthFailure::RateLimited)
         ));
+    }
+
+    #[test]
+    fn v2_authorization_rechecks_identity_grants_and_epoch() {
+        let mut store = store();
+        let pairing = store.create_pairing_code();
+        let record = store
+            .consume_v2_pairing(&pairing.code, "Phone", "noise-fingerprint")
+            .unwrap();
+        let initial = store
+            .v2_authorization(&record.id, "noise-fingerprint")
+            .unwrap();
+        assert_eq!(initial.revocation_epoch, 1);
+        assert!(store
+            .v2_authorization(&record.id, "wrong-identity")
+            .is_none());
+
+        let next_epoch = store
+            .update_grants(&record.id, vec![TERMINAL_VIEW_GRANT.to_string()])
+            .unwrap();
+        let changed = store
+            .v2_authorization(&record.id, "noise-fingerprint")
+            .unwrap();
+        assert_eq!(changed.revocation_epoch, next_epoch);
+        assert_eq!(changed.grants, vec![TERMINAL_VIEW_GRANT]);
+
+        store.revoke(&record.id).unwrap();
+        assert!(store
+            .v2_authorization(&record.id, "noise-fingerprint")
+            .is_none());
     }
 }

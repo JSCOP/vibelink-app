@@ -1,0 +1,202 @@
+.orchestration-workspace-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--panel-bg, #111419);
+  color: var(--text-primary, #eef1f5);
+}
+
+.orchestration-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-color, #2a3038);
+}
+
+.orchestration-tabs button,
+.orchestration-run-actions button,
+.orchestration-task-form button,
+.orchestration-chat-form button,
+.orchestration-gates button,
+.orchestration-create-run button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border-color, #343b45);
+  border-radius: 6px;
+  background: var(--button-bg, #20262f);
+  color: inherit;
+  min-height: 30px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.orchestration-tabs button[aria-selected='true'] {
+  border-color: var(--accent-color, #6ea8fe);
+  background: color-mix(in srgb, var(--accent-color, #6ea8fe) 18%, transparent);
+}
+
+.orchestration-tab-content {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.orchestration-run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+}
+
+.orchestration-run-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.orchestration-run-header h3,
+.orchestration-create-run h3 {
+  margin: 5px 0 2px;
+}
+
+.orchestration-run-header small,
+.orchestration-task-card small,
+.orchestration-task-card span,
+.orchestration-message-feed header span {
+  color: var(--text-muted, #9aa4b2);
+}
+
+.orchestration-status {
+  display: inline-flex;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #2b3440;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.orchestration-run-actions,
+.orchestration-gates article > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.orchestration-task-form,
+.orchestration-chat-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  gap: 6px;
+}
+
+.orchestration-chat-form {
+  grid-template-columns: 1fr auto;
+}
+
+.orchestration-task-form input,
+.orchestration-chat-form input,
+.orchestration-create-run input {
+  min-width: 0;
+  border: 1px solid var(--border-color, #343b45);
+  border-radius: 6px;
+  background: var(--input-bg, #171c23);
+  color: inherit;
+  padding: 7px 9px;
+}
+
+.orchestration-task-board {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.orchestration-task-column {
+  min-width: 0;
+  border: 1px solid var(--border-color, #2d343d);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-bg, #111419) 82%, white 3%);
+  padding: 7px;
+}
+
+.orchestration-task-column > header,
+.orchestration-message-feed article > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.orchestration-task-card,
+.orchestration-message-feed article,
+.orchestration-gates article {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  border: 1px solid var(--border-color, #313945);
+  border-radius: 6px;
+  background: var(--card-bg, #1b2129);
+  padding: 8px;
+}
+
+.orchestration-gates,
+.orchestration-message-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.orchestration-message-feed {
+  min-height: 90px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.orchestration-message-feed p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.orchestration-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted, #a2acb9);
+}
+
+.orchestration-create-run input {
+  width: min(420px, 100%);
+}
+
+.orchestration-error {
+  border: 1px solid #7d3138;
+  border-radius: 6px;
+  background: #391b20;
+  color: #ffb5bd;
+  padding: 8px;
+}
+
+@media (max-width: 900px) {
+  .orchestration-task-board {
+    grid-template-columns: 1fr;
+  }
+
+  .orchestration-task-form {
+    grid-template-columns: 1fr;
+  }
+}

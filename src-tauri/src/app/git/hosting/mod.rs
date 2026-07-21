@@ -97,66 +97,119 @@ pub(crate) trait HostingClient {
 }
 
 #[tauri::command]
-pub async fn hosting_detect(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<HostingInfo, String> {
+pub async fn hosting_detect(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+) -> Result<HostingInfo, String> {
     entitled_spawn(license, move || detect::detect_hosting(&workspace_folder)).await
 }
 
 #[tauri::command]
-pub async fn hosting_token_set(license: State<'_, Arc<LicenseService>>, host: String, token: String) -> Result<(), String> {
+pub async fn hosting_token_set(
+    license: State<'_, Arc<LicenseService>>,
+    host: String,
+    token: String,
+) -> Result<(), String> {
     entitled_spawn(license, move || auth::set_token(&host, &token)).await
 }
 
 #[tauri::command]
-pub async fn hosting_token_clear(license: State<'_, Arc<LicenseService>>, host: String) -> Result<(), String> {
+pub async fn hosting_token_clear(
+    license: State<'_, Arc<LicenseService>>,
+    host: String,
+) -> Result<(), String> {
     entitled_spawn(license, move || auth::clear_token(&host)).await
 }
 
 #[tauri::command]
-pub async fn hosting_token_status(license: State<'_, Arc<LicenseService>>, host: String) -> Result<bool, String> {
+pub async fn hosting_token_status(
+    license: State<'_, Arc<LicenseService>>,
+    host: String,
+) -> Result<bool, String> {
     entitled_spawn(license, move || auth::token_status(&host)).await
 }
 
 #[tauri::command]
-pub async fn hosting_provider_override(license: State<'_, Arc<LicenseService>>, host: String, provider: String) -> Result<(), String> {
-    entitled_spawn(license, move || detect::set_provider_override(&host, &provider)).await
+pub async fn hosting_provider_override(
+    license: State<'_, Arc<LicenseService>>,
+    host: String,
+    provider: String,
+) -> Result<(), String> {
+    entitled_spawn(license, move || {
+        detect::set_provider_override(&host, &provider)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn hosting_github_device_start(license: State<'_, Arc<LicenseService>>) -> Result<DeviceCodeInfo, String> {
+pub async fn hosting_github_device_start(
+    license: State<'_, Arc<LicenseService>>,
+) -> Result<DeviceCodeInfo, String> {
     entitled_spawn(license, auth::github_device_start).await
 }
 
 #[tauri::command]
-pub async fn hosting_github_device_poll(license: State<'_, Arc<LicenseService>>, handle: String) -> Result<bool, String> {
+pub async fn hosting_github_device_poll(
+    license: State<'_, Arc<LicenseService>>,
+    handle: String,
+) -> Result<bool, String> {
     entitled_spawn(license, move || auth::github_device_poll(&handle)).await
 }
 
 #[tauri::command]
-pub async fn hosting_prs_list(license: State<'_, Arc<LicenseService>>, workspace_folder: String) -> Result<Vec<PrInfo>, String> {
-    entitled_spawn(license, move || with_client(&workspace_folder, |client| client.list_prs())).await
+pub async fn hosting_prs_list(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+) -> Result<Vec<PrInfo>, String> {
+    entitled_spawn(license, move || {
+        with_client(&workspace_folder, |client| client.list_prs())
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn hosting_pr_create(license: State<'_, Arc<LicenseService>>, workspace_folder: String, request: CreatePrRequest) -> Result<PrCreated, String> {
+pub async fn hosting_pr_create(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    request: CreatePrRequest,
+) -> Result<PrCreated, String> {
     entitled_spawn(license, move || {
-        if request.title.trim().is_empty() || request.source_branch.trim().is_empty() || request.target_branch.trim().is_empty() {
+        if request.title.trim().is_empty()
+            || request.source_branch.trim().is_empty()
+            || request.target_branch.trim().is_empty()
+        {
             bail!("pull request title, source branch, and target branch are required");
         }
         with_client(&workspace_folder, |client| client.create_pr(&request))
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn hosting_pr_detail(license: State<'_, Arc<LicenseService>>, workspace_folder: String, number: u64) -> Result<PrDetail, String> {
-    entitled_spawn(license, move || with_client(&workspace_folder, |client| client.pr_detail(number))).await
-}
-
-#[tauri::command]
-pub async fn hosting_ci_status(license: State<'_, Arc<LicenseService>>, workspace_folder: String, ref_name: String) -> Result<CiStatus, String> {
+pub async fn hosting_pr_detail(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    number: u64,
+) -> Result<PrDetail, String> {
     entitled_spawn(license, move || {
-        if ref_name.trim().is_empty() { bail!("CI reference must not be empty"); }
+        with_client(&workspace_folder, |client| client.pr_detail(number))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn hosting_ci_status(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    ref_name: String,
+) -> Result<CiStatus, String> {
+    entitled_spawn(license, move || {
+        if ref_name.trim().is_empty() {
+            bail!("CI reference must not be empty");
+        }
         with_client(&workspace_folder, |client| client.ci_status(&ref_name))
-    }).await
+    })
+    .await
 }
 
 fn with_client<T, F>(repo: &str, operation: F) -> Result<T>
@@ -164,27 +217,46 @@ where
     F: FnOnce(&dyn HostingClient) -> Result<T>,
 {
     let info = detect::detect_hosting(repo)?;
-    let provider = info.provider.context("no supported Git hosting provider detected")?;
+    let provider = info
+        .provider
+        .context("no supported Git hosting provider detected")?;
     let host = info.host.context("Git hosting remote has no host")?;
     let owner = info.owner.context("Git hosting remote has no owner")?;
     let repository = info.repo.context("Git hosting remote has no repository")?;
-    let token = auth::read_token(&host)?.ok_or_else(|| anyhow::anyhow!("AUTH: no token stored for {host}"))?;
+    let token = auth::read_token(&host)?
+        .ok_or_else(|| anyhow::anyhow!("AUTH: no token stored for {host}"))?;
     let client: Box<dyn HostingClient> = match provider.as_str() {
-        "github" if host.eq_ignore_ascii_case("github.com") => Box::new(github::GithubClient::new(owner, repository, token)),
-        "github" => Box::new(github::GithubClient::with_base_url(format!("https://{host}/api/v3"), owner, repository, token)),
+        "github" if host.eq_ignore_ascii_case("github.com") => {
+            Box::new(github::GithubClient::new(owner, repository, token))
+        }
+        "github" => Box::new(github::GithubClient::with_base_url(
+            format!("https://{host}/api/v3"),
+            owner,
+            repository,
+            token,
+        )),
         "gitlab" => Box::new(gitlab::GitlabClient::new(&host, owner, repository, token)),
         _ => bail!("unsupported Git hosting provider {provider}"),
     };
-    operation(client.as_ref()).map_err(|error| anyhow::anyhow!(auth::redact_error(&host, &error.to_string())))
+    operation(client.as_ref())
+        .map_err(|error| anyhow::anyhow!(auth::redact_error(&host, &error.to_string())))
 }
 
-async fn entitled_spawn<T, F>(license: State<'_, Arc<LicenseService>>, operation: F) -> Result<T, String>
+async fn entitled_spawn<T, F>(
+    license: State<'_, Arc<LicenseService>>,
+    operation: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
     license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(operation).await.map_err(to_string)?.map_err(to_string)
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
 }
 
-fn to_string(error: impl std::fmt::Display) -> String { error.to_string() }
+fn to_string(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}

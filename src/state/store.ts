@@ -1099,13 +1099,15 @@ const terminalCapabilityEnv: [string, string][] = [
 type TauriWindow = Window & { __TAURI_INTERNALS__?: { metadata?: { currentExe?: string } } }
 
 function terminalAgentEnv(env: [string, string][], sessionId: string, paneId: string): [string, string][] {
-  const filtered = env.filter(([key]) => !['VIBELINK_SESSION_ID', 'VIBELINK_PANE_ID', 'VIBELINK_APP_EXE'].some((reserved) => key.toLowerCase() === reserved.toLowerCase()))
+  const filtered = env.filter(([key]) => !['VIBELINK_SESSION_ID', 'VIBELINK_PANE_ID', 'VIBELINK_CLI_EXE'].some((reserved) => key.toLowerCase() === reserved.toLowerCase()))
+  const appExecutable = (window as TauriWindow).__TAURI_INTERNALS__?.metadata?.currentExe
+  const cliExecutable = appExecutable?.replace(/[^\\/]+$/, 'vibelink.exe') ?? 'vibelink.exe'
   return keepLastEnvValue([
     ...terminalCapabilityEnv,
     ...filtered,
     ['VIBELINK_SESSION_ID', sessionId],
     ['VIBELINK_PANE_ID', paneId],
-    ['VIBELINK_APP_EXE', (window as TauriWindow).__TAURI_INTERNALS__?.metadata?.currentExe ?? 'app.exe'],
+    ['VIBELINK_CLI_EXE', cliExecutable],
   ])
 }
 

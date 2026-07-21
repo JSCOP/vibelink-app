@@ -46,7 +46,7 @@ beforeEach(() => {
 })
 
 describe('VibeLink Pro gates', () => {
-  test('locks every non-terminal workspace window kind', async () => { expect(PRO_WINDOW_KINDS).toEqual(['agent', 'kanban', 'todo', 'diff', 'git', 'explorer'])
+  test('locks every non-terminal workspace window kind', async () => { expect(PRO_WINDOW_KINDS).toEqual(['agent', 'kanban', 'todo', 'diff', 'git', 'explorer', 'browser', 'computer'])
   expect(requiresProWindow('terminal')).toBe(false)
   for (const kind of PRO_WINDOW_KINDS) expect(requiresProWindow(kind)).toBe(true) })
 

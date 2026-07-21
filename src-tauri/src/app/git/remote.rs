@@ -26,10 +26,12 @@ pub async fn git_fetch(
     refspec: Option<String>,
 ) -> Result<(), String> {
     license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(move || fetch_native(&workspace_folder, remote, prune, refspec))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+    tauri::async_runtime::spawn_blocking(move || {
+        fetch_native(&workspace_folder, remote, prune, refspec)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -89,7 +91,12 @@ pub async fn git_clone(
         .map_err(to_string)
 }
 
-fn fetch_native(repo: &str, remote: Option<String>, prune: bool, refspec: Option<String>) -> Result<()> {
+fn fetch_native(
+    repo: &str,
+    remote: Option<String>,
+    prune: bool,
+    refspec: Option<String>,
+) -> Result<()> {
     let mut args = vec!["fetch".to_string()];
     if prune {
         args.push("--prune".to_string());
@@ -160,10 +167,14 @@ fn clone_native(url: &str, target_dir: &str, channel: Channel<CloneProgress>) ->
     if !parent.exists() {
         bail!("git clone target parent directory does not exist");
     }
-    let mut child = git_command(parent.to_string_lossy().as_ref(), ["clone", "--progress", url, target_dir], false)
-        .stderr(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()?;
+    let mut child = git_command(
+        parent.to_string_lossy().as_ref(),
+        ["clone", "--progress", url, target_dir],
+        false,
+    )
+    .stderr(Stdio::piped())
+    .stdout(Stdio::null())
+    .spawn()?;
     if let Some(stderr) = child.stderr.take() {
         for line in BufReader::new(stderr).lines() {
             let line = line?;
@@ -172,7 +183,10 @@ fn clone_native(url: &str, target_dir: &str, channel: Channel<CloneProgress>) ->
     }
     let status = child.wait()?;
     if status.success() {
-        let _ = channel.send(CloneProgress { line: String::new(), done: true });
+        let _ = channel.send(CloneProgress {
+            line: String::new(),
+            done: true,
+        });
         Ok(())
     } else {
         bail!("git clone exited with status {status}")
@@ -193,9 +207,9 @@ pub(crate) fn validate_refspec(refspec: &str) -> Result<()> {
 fn valid_refspec_side(value: &str) -> bool {
     value.starts_with("refs/")
         && value.len() > 5
-        && value.chars().all(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '*')
-        })
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '*'))
 }
 
 #[cfg(test)]
@@ -212,7 +226,9 @@ mod tests {
     #[test]
     fn pushes_fetches_and_reports_behind_against_bare_remote() {
         use crate::app::git::status::git_repo_info_native;
-        use crate::app::git::test_support::{file_url, run_git, run_git_at, test_repo, unique_path};
+        use crate::app::git::test_support::{
+            file_url, run_git, run_git_at, test_repo, unique_path,
+        };
 
         let repo = test_repo();
         run_git(&repo, &["branch", "-M", "main"]);
@@ -237,8 +253,14 @@ mod tests {
 
         let clone = unique_path("clone");
         let clone_string = clone.to_string_lossy().to_string();
-        run_git_at(std::env::temp_dir().as_path(), &["clone", &url, &clone_string]);
-        run_git(&clone, &["config", "user.email", "vibelink@example.invalid"]);
+        run_git_at(
+            std::env::temp_dir().as_path(),
+            &["clone", &url, &clone_string],
+        );
+        run_git(
+            &clone,
+            &["config", "user.email", "vibelink@example.invalid"],
+        );
         run_git(&clone, &["config", "user.name", "VibeLink Test"]);
         std::fs::write(clone.join("file.txt"), "two\n").expect("write second");
         run_git(&clone, &["commit", "-am", "second"]);

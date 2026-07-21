@@ -486,12 +486,20 @@ impl HermesManager {
             .map_err(|err| anyhow!(err))?;
         Ok(())
     }
-    fn augment_prompt_with_workspace_brief(session_id: &str, mut prompt: String) -> Result<String> {
-        let Some(brief) = crate::app::board::board_brief_get_native(session_id)? else {
-            return Ok(prompt);
+    fn augment_prompt_with_workspace_brief(session_id: &str, prompt: String) -> Result<String> {
+        let brief = crate::app::board::board_brief_get_native(session_id)?;
+        Ok(Self::augment_prompt_with_brief(prompt, brief.as_ref()))
+    }
+
+    fn augment_prompt_with_brief(
+        mut prompt: String,
+        brief: Option<&crate::app::board::Brief>,
+    ) -> String {
+        let Some(brief) = brief else {
+            return prompt;
         };
         if brief.purpose.is_empty() && brief.notes.is_empty() {
-            return Ok(prompt);
+            return prompt;
         }
         prompt.push_str("\n\n## Workspace brief\n");
         if !brief.purpose.is_empty() {
@@ -503,7 +511,7 @@ impl HermesManager {
             prompt.push_str("Notes: ");
             prompt.push_str(&brief.notes);
         }
-        Ok(prompt)
+        prompt
     }
 
     pub fn cancel(&self, session_id: &str) -> Result<()> {
@@ -957,9 +965,9 @@ fn spawn_stderr_drain(session_id: String, stderr: impl std::io::Read + Send + 's
 fn vibelink_mcp_servers(session_id: &str, flavor: &str) -> Value {
     json!([{
         "name": "vibelink",
-        "command": std::env::current_exe()
+        "command": super::cli_path::dedicated_cli_path()
             .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "app.exe".to_string()),
+            .unwrap_or_else(|_| "vibelink.exe".to_string()),
         "args": ["mcp", "serve"],
         "env": [
             { "name": "VIBELINK_SESSION_ID", "value": session_id },
@@ -1932,24 +1940,15 @@ model:
     }
     #[test]
     fn prompt_context_includes_workspace_brief() {
-        let session_id = uuid::Uuid::new_v4().to_string();
-        crate::app::board::board_brief_set_native(
-            &session_id,
-            "Ship onboarding".to_string(),
-            "Keep the board native-owned".to_string(),
-        )
-        .expect("set brief");
-
-        let prompt = HermesManager::augment_prompt_with_workspace_brief(
-            &session_id,
-            "User prompt".to_string(),
-        )
-        .expect("augment prompt");
+        let brief = crate::app::board::Brief {
+            purpose: "Ship onboarding".to_string(),
+            notes: "Keep the board native-owned".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let prompt =
+            HermesManager::augment_prompt_with_brief("User prompt".to_string(), Some(&brief));
         assert!(prompt.contains("## Workspace brief"));
         assert!(prompt.contains("Purpose: Ship onboarding"));
         assert!(prompt.contains("Notes: Keep the board native-owned"));
-
-        std::fs::remove_file(crate::app::board::board_path(&session_id).expect("board path"))
-            .expect("cleanup board");
     }
 }

@@ -1,29 +1,22 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_runtime;
 mod app;
-mod cli;
+mod browser;
+mod computer_use;
+mod control_plane;
 mod daemon;
-mod mcp;
+mod dedicated_cli;
+mod orchestration;
+mod persistence;
 mod protocol;
 mod remote;
 
 fn main() {
-    let args = std::env::args().collect::<Vec<_>>();
-    match args.get(1).map(String::as_str) {
-        Some("--daemon") => daemon::run(),
-        Some("cli") => {
-            if let Err(err) = cli::run(args.into_iter().skip(1)) {
-                eprintln!("CLI error: {err}");
-                std::process::exit(1);
-            }
-        }
-        Some("mcp") => {
-            if let Err(err) = mcp::run(args.into_iter().skip(1)) {
-                eprintln!("MCP error: {err}");
-                std::process::exit(1);
-            }
-        }
-        _ => app::run(),
+    if std::env::args().nth(1).as_deref() == Some("--daemon") {
+        daemon::run();
+    } else {
+        app::run();
     }
 }

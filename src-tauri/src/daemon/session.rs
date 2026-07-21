@@ -1,13 +1,12 @@
 use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
-use crate::daemon::scrollback::ScrollbackRing;
 use crate::protocol::{DaemonToClient, PaneMeta, SessionMeta};
 use crossbeam_channel::Sender;
 use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -16,6 +15,7 @@ pub struct Session {
     pub meta: SessionMeta,
     pub layout_json: Option<String>,
     pub panes: IndexMap<Uuid, Pane>,
+    pub sleeping: bool,
 }
 
 pub struct DaemonState {
@@ -23,12 +23,6 @@ pub struct DaemonState {
     clients: HashMap<Uuid, Sender<DaemonToClient>>,
     pane_clients: HashMap<Uuid, HashSet<Uuid>>,
     session_clients: HashMap<Uuid, HashSet<Uuid>>,
-}
-
-fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, ScrollbackRing> {
-    scrollback
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl DaemonState {
@@ -74,17 +68,24 @@ impl DaemonState {
                 meta: meta.clone(),
                 layout_json: None,
                 panes: IndexMap::new(),
+                sleeping: false,
             },
         );
         meta
     }
 
-    pub fn insert_session(&mut self, meta: SessionMeta, layout_json: Option<String>) {
+    pub fn insert_session(
+        &mut self,
+        meta: SessionMeta,
+        layout_json: Option<String>,
+        sleeping: bool,
+    ) {
         self.sessions.insert(
             meta.id,
             Session {
                 meta,
                 layout_json,
+                sleeping,
                 panes: IndexMap::new(),
             },
         );
@@ -131,6 +132,28 @@ impl DaemonState {
         }
         self.session_clients.remove(&session_id);
         Ok(session.panes.drain(..).map(|(_, pane)| pane).collect())
+    }
+
+    pub fn sleep_session(&mut self, session_id: Uuid) -> anyhow::Result<Vec<Pane>> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown session {session_id}"))?;
+        session.sleeping = true;
+        let pane_ids = session.panes.keys().copied().collect::<Vec<_>>();
+        for pane_id in pane_ids {
+            self.pane_clients.remove(&pane_id);
+        }
+        Ok(session.panes.drain(..).map(|(_, pane)| pane).collect())
+    }
+
+    pub fn wake_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+        self.session_mut(session_id)?.sleeping = false;
+        Ok(())
+    }
+
+    pub fn session_sleeping(&self, session_id: Uuid) -> anyhow::Result<bool> {
+        Ok(self.session(session_id)?.sleeping)
     }
 
     pub fn attach_session(
@@ -274,6 +297,16 @@ impl DaemonState {
         Ok(pane.scrollback_snapshot())
     }
 
+    pub fn terminal_snapshot(
+        &self,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<(u64, u64, bool, Vec<u8>)> {
+        let pane = self.pane_in_session(session_id, pane_id)?;
+        let (generation, sequence) = pane.output_cursor();
+        Ok((generation, sequence, pane.alive, pane.scrollback_snapshot()))
+    }
+
     pub fn close_session_panes(&mut self, session_id: Uuid) -> anyhow::Result<Vec<Pane>> {
         let pane_ids: Vec<Uuid> = {
             let session = self.session_mut(session_id)?;
@@ -368,7 +401,7 @@ impl DaemonState {
         bytes: &[u8],
     ) -> Vec<Sender<DaemonToClient>> {
         if let Ok(pane) = self.pane_any_mut(pane_id) {
-            lock_scrollback(&pane.scrollback).push(bytes);
+            pane.record_output(bytes);
         }
         self.senders_for_pane(pane_id)
     }
@@ -402,6 +435,7 @@ impl DaemonState {
                 created_at: session.meta.created_at,
                 layout_json: session.layout_json.clone(),
                 workspace_folder: session.meta.workspace_folder.clone(),
+                sleeping: session.sleeping,
                 panes: Vec::new(),
             })
             .collect();
@@ -427,6 +461,10 @@ impl DaemonState {
             .filter_map(|client_id| self.clients.get(client_id))
             .cloned()
             .collect()
+    }
+
+    pub fn all_senders(&self) -> Vec<Sender<DaemonToClient>> {
+        self.clients.values().cloned().collect()
     }
 
     fn session(&self, session_id: Uuid) -> anyhow::Result<&Session> {
@@ -535,6 +573,25 @@ mod tests {
             state.list_sessions()[0].workspace_folder.as_deref(),
             Some("C:\\")
         );
+    }
+
+    #[test]
+    fn workspace_sleep_and_wake_preserve_session_identity() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), Some("C:\\repo".to_string()));
+        let pane_id = Uuid::new_v4();
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+
+        let stopped = state.sleep_session(workspace.id).expect("sleep workspace");
+        assert_eq!(stopped.len(), 1);
+        assert!(state.session_sleeping(workspace.id).expect("sleep state"));
+        assert_eq!(state.persisted_sessions()[0].id, workspace.id);
+        assert!(state.persisted_sessions()[0].sleeping);
+
+        state.wake_session(workspace.id).expect("wake workspace");
+        assert!(!state.session_sleeping(workspace.id).expect("wake state"));
     }
 
     #[test]

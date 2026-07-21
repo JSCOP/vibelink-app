@@ -72,6 +72,21 @@ pub enum ClientMessage {
     #[serde(other)]
     Unknown,
 }
+impl ClientMessage {
+    pub fn req_id(&self) -> Option<u64> {
+        match self {
+            Self::ListWorkspaces { req_id }
+            | Self::AttachWorkspace { req_id, .. }
+            | Self::DetachWorkspace { req_id, .. }
+            | Self::WritePane { req_id, .. }
+            | Self::RefreshPane { req_id, .. }
+            | Self::ClaimPane { req_id, .. }
+            | Self::ReleasePane { req_id, .. }
+            | Self::Ping { req_id } => *req_id,
+            Self::Hello { .. } | Self::Unknown => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

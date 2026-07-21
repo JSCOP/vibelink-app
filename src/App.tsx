@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bot, Bug, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, LayoutGrid, ListTodo, Minus, Plus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Bug, Camera, Ellipsis, FolderTree, GitBranch, GitCompare, Globe2, LayoutGrid, ListTodo, Minus, Plus, Save, Settings2, Square, TerminalSquare, Eraser, Video, X } from 'lucide-react'
 import { Sidebar } from './components/Sidebar'
 import { SidebarRevealEdge } from './components/SidebarRevealEdge'
 import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
@@ -544,6 +544,9 @@ function App() {
                 </button>
                 <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('diff')}>
                   <GitCompare size={14} /> Diff
+                </button>
+                <button type="button" role="menuitem" onClick={() => openWorkspaceWindow('browser')}>
+                  <Globe2 size={14} /> Browser
                 </button>
               </div>
             ) : null}

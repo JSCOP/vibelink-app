@@ -148,7 +148,9 @@ fn repo_lock(repo: &str) -> Arc<Mutex<()>> {
     let key = Path::new(repo)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(repo));
-    let mut locks = REPO_LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut locks = REPO_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(Mutex::new(())))

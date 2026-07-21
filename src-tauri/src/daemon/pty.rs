@@ -45,6 +45,8 @@ pub struct Pane {
     pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     pub(crate) scrollback: Arc<Mutex<ScrollbackRing>>,
+    output_generation: u64,
+    output_sequence: u64,
 }
 
 impl Pane {
@@ -101,6 +103,8 @@ impl Pane {
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
                 scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
+                output_generation: 1,
+                output_sequence: 0,
             },
             reader,
         })
@@ -159,6 +163,16 @@ impl Pane {
         lock_scrollback(&self.scrollback).snapshot()
     }
 
+    pub fn record_output(&mut self, bytes: &[u8]) -> u64 {
+        lock_scrollback(&self.scrollback).push(bytes);
+        self.output_sequence = self.output_sequence.saturating_add(1);
+        self.output_sequence
+    }
+
+    pub fn output_cursor(&self) -> (u64, u64) {
+        (self.output_generation, self.output_sequence)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(config: PaneConfig, alive: bool) -> Self {
         Self {
@@ -177,6 +191,8 @@ impl Pane {
             )),
             master: Box::new(FakeMaster),
             scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
+            output_generation: 1,
+            output_sequence: 0,
         }
     }
 }
@@ -260,15 +276,14 @@ fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
         .into_iter()
         .filter(|(key, _)| {
             !key.eq_ignore_ascii_case("VIBELINK_APP_EXE")
+                && !key.eq_ignore_ascii_case("VIBELINK_CLI_EXE")
                 && !key.eq_ignore_ascii_case("VIBELINK_APP_FLAVOR")
         })
         .collect();
-    if let Ok(exe) = env::current_exe() {
-        next.push((
-            "VIBELINK_APP_EXE".to_string(),
-            exe.to_string_lossy().into_owned(),
-        ));
-    }
+    let cli_executable = env::var_os("VIBELINK_CLI_EXE")
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "vibelink.exe".to_string());
+    next.push(("VIBELINK_CLI_EXE".to_string(), cli_executable));
     next.push((
         "VIBELINK_APP_FLAVOR".to_string(),
         paths::app_flavor().to_string(),
@@ -621,24 +636,25 @@ mod tests {
     }
 
     #[test]
-    fn runtime_agent_env_records_current_binary_and_flavor() {
+    fn runtime_agent_env_records_dedicated_cli_and_flavor() {
         let entries = with_runtime_agent_env(vec![
-            ("VIBELINK_APP_EXE".to_string(), "wrong.exe".to_string()),
+            ("VIBELINK_APP_EXE".to_string(), "wrong-app.exe".to_string()),
+            ("VIBELINK_CLI_EXE".to_string(), "wrong-cli.exe".to_string()),
             ("OTHER".to_string(), "value".to_string()),
         ]);
 
-        let expected_exe = env::current_exe()
-            .expect("current exe")
-            .to_string_lossy()
-            .into_owned();
+        let expected_cli = env::var_os("VIBELINK_CLI_EXE")
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "vibelink.exe".to_string());
 
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
-        assert!(entries.contains(&("VIBELINK_APP_EXE".to_string(), expected_exe)));
+        assert!(entries.contains(&("VIBELINK_CLI_EXE".to_string(), expected_cli)));
         assert!(entries.contains(&(
             "VIBELINK_APP_FLAVOR".to_string(),
             paths::app_flavor().to_string()
         )));
-        assert!(!entries.contains(&("VIBELINK_APP_EXE".to_string(), "wrong.exe".to_string())));
+        assert!(!entries.iter().any(|(key, _)| key == "VIBELINK_APP_EXE"));
+        assert!(!entries.contains(&("VIBELINK_CLI_EXE".to_string(), "wrong-cli.exe".to_string())));
     }
 
     #[test]

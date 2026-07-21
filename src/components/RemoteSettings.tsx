@@ -8,6 +8,7 @@ type RemoteStatus = {
   enabled: boolean
   running: boolean
   port: number
+  lanEnabled: boolean
   fingerprint: string
   hosts: string[]
   devices: RemoteDevice[]
@@ -66,7 +67,7 @@ export function RemoteSettings() {
     const next = await invoke<RemoteStatus>('remote_set_enabled', { enabled: enabling })
     setStatus(next)
     setPort(String(next.port))
-    if (enabling) await ensureFirewall()
+    if (enabling && next.lanEnabled) await ensureFirewall()
   })
 
   const savePort = () => void run(async () => {
@@ -75,16 +76,24 @@ export function RemoteSettings() {
     setStatus(next)
     setPort(String(next.port))
   })
+  const toggleLan = () => void run(async () => {
+    const next = await invoke<RemoteStatus>('remote_set_lan_enabled', { lanEnabled: !status?.lanEnabled })
+    setStatus(next)
+    setPort(String(next.port))
+    if (next.lanEnabled) await ensureFirewall()
+  })
 
-  const createPairing = () => void run(async () => {
+
+  const createPairing = (legacy = false) => void run(async () => {
     let current = status
+    if (!current?.lanEnabled) throw new Error('Enable LAN/VPN access before creating a pairing code.')
     if (!current?.running) {
       current = await invoke<RemoteStatus>('remote_set_enabled', { enabled: true })
       setStatus(current)
       setPort(String(current.port))
       await ensureFirewall()
     }
-    const next = await invoke<PairingPayload>('remote_create_pairing')
+    const next = await invoke<PairingPayload>(legacy ? 'remote_create_pairing' : 'remote_create_pairing_v2')
     setPairing(next)
     setNow(Date.now())
     // margin 4 = the QR spec's minimum quiet zone; the dense multi-host JSON
@@ -112,7 +121,7 @@ export function RemoteSettings() {
       <div className="settings-section-heading">
         <div>
           <h2>Remote access</h2>
-          <p>TLS와 인증서 고정으로 Android 기기에서 현재 VibeLink 워크스페이스에 연결합니다.</p>
+          <p>Remote v2는 TLS 인증서 고정과 Noise 종단간 암호화로 모바일, 브라우저, 오케스트레이션을 연결합니다.</p>
         </div>
         <span className={`remote-state remote-state-${status?.running ? 'running' : 'stopped'}`}>
           {status?.running ? 'running' : 'stopped'}
@@ -121,20 +130,22 @@ export function RemoteSettings() {
 
       <div className="remote-status-grid">
         <div><span>Server</span><strong>{status?.enabled ? 'Enabled' : 'Disabled'}</strong></div>
-        <div><span>Hosts</span><strong>{status?.hosts.length ? status.hosts.join(', ') : 'No LAN address'}</strong></div>
+        <div><span>Scope</span><strong>{status?.lanEnabled ? 'LAN / VPN' : 'This PC only'}</strong></div>
         <div><span>Fingerprint</span><code title={status?.fingerprint}>{status?.fingerprint ? `${status.fingerprint.slice(0, 18)}…` : 'Loading…'}</code></div>
       </div>
 
       <div className="remote-actions">
         <button type="button" disabled={busy || !status} onClick={toggleEnabled}><Wifi size={14} /> {status?.enabled ? 'Disable remote' : 'Enable remote'}</button>
+        <button type="button" disabled={busy || !status} onClick={toggleLan}>{status?.lanEnabled ? 'Disable LAN/VPN' : 'Enable LAN/VPN'}</button>
         <label>Port<input aria-label="Remote port" type="number" min="1024" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label>
         <button type="button" disabled={busy || Number(port) === status?.port} onClick={savePort}>Apply port</button>
         <button type="button" title="Refresh status" disabled={busy} onClick={() => void run(refresh)}><RefreshCw size={14} /> Refresh</button>
       </div>
 
       <div className="remote-pairing-panel">
-        <button type="button" disabled={busy || !status} onClick={createPairing}><Smartphone size={14} /> 페어링 QR 표시</button>
-        {!status?.running ? <p className="vibelink-settings-note">서버가 꺼져 있으면 QR 생성 시 자동으로 켜집니다.</p> : null}
+        <button type="button" disabled={busy || !status || !status.lanEnabled} onClick={() => createPairing(false)}><Smartphone size={14} /> Remote v2 QR</button>
+        <button type="button" disabled={busy || !status || !status.lanEnabled} onClick={() => createPairing(true)}>Legacy v1 QR</button>
+        {!status?.lanEnabled ? <p className="vibelink-settings-note">LAN/VPN access is off by default. Enable it explicitly before pairing a phone.</p> : !status.running ? <p className="vibelink-settings-note">서버가 꺼져 있으면 QR 생성 시 자동으로 켜집니다.</p> : null}
         {pairing ? (
           <div className="remote-pairing-content">
             {qrUrl ? <img src={qrUrl} width={360} height={360} alt="VibeLink Mobile pairing QR" /> : null}
@@ -154,12 +165,12 @@ export function RemoteSettings() {
       </div>
 
       <button type="button" className="remote-danger" disabled={busy} onClick={regenerate}><ShieldAlert size={14} /> 인증서 재생성</button>
-      <div className="remote-firewall-row">
+      {status?.lanEnabled ? <div className="remote-firewall-row">
         {firewallReady ? <span className="remote-firewall-ok"><ShieldCheck size={14} /> Windows 방화벽 인바운드 규칙이 설정되어 있습니다.</span> : <>
           <span className="remote-firewall-warn"><ShieldAlert size={14} /> Windows 방화벽에서 포트 {status?.port ?? port} 인바운드 허용이 필요합니다.</span>
           <button type="button" disabled={busy} onClick={setupFirewall}>방화벽 자동 설정</button>
         </>}
-      </div>
+      </div> : null}
       <div className="remote-hints">
         <span>방화벽 자동 설정은 관리자 승인(UAC) 창을 한 번 표시합니다.</span>
         <span>원격 접속은 VibeLink 실행 중에만 동작합니다.</span>

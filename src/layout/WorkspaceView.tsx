@@ -37,6 +37,7 @@ import { ProLockedPanel } from '../components/ProLockedPanel'
 import { requiresProWindow } from '../state/licenseGate'
 import { useRemotePaneLeaseStore } from '../remote/paneLease'
 import { hideRemoteLeasedPane, paneIdsForSession, restoreRemoteLeasedPane, type RemotePaneVisibilityState } from './remotePaneVisibility'
+import { BrowserDockPanel } from '../browser/BrowserDockPanel'
 
 
 type WorkspaceViewProps = {
@@ -78,6 +79,8 @@ const components = {
   gitWindow: GitWindowPanel,
   explorerWindow: ExplorerWindowPanel,
   todo: TodoWindowPanel,
+  browserWindow: BrowserWindowPanel,
+  computerWindow: ComputerWindowPanel,
   placeholder: PlaceholderPanel,
 }
 
@@ -177,6 +180,19 @@ function DiffWindowPanel(props: IDockviewPanelProps) {
       <ProPanelBoundary feature="Task diff"><ErrorBoundary label="Diff panel"><TaskDiffView /></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
+}
+
+function BrowserWindowPanel(props: IDockviewPanelProps) {
+  const actions = useContext(WorkspaceWindowActionsContext)
+  return (
+    <WindowPanelShell panelId={props.api.id} className="workspace-window-browser">
+      <ProPanelBoundary feature="Browser"><ErrorBoundary label="Browser panel"><BrowserDockPanel onOpenAgent={() => { void actions?.openWindow('agent') }} onOpenTerminal={() => { void actions?.openWindow('terminal') }} /></ErrorBoundary></ProPanelBoundary>
+    </WindowPanelShell>
+  )
+}
+
+function ComputerWindowPanel() {
+  return null
 }
 
 function GitWindowPanel(props: IDockviewPanelProps) {
@@ -662,6 +678,7 @@ export function WorkspaceView({ onApiReady, onActionsReady, onChromeStateChange,
       if (storedLayout?.topLayout && shouldRestoreWorkspaceDockviewLayout(JSON.stringify(storedLayout.topLayout), paneIds)) {
         try {
           api.fromJSON(storedLayout.topLayout as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
+          api.getPanel(workspaceWindowDescriptors.computer.panelId)?.api.close()
           if (api.totalPanels === 0) {
             api.clear()
             buildFallbackLayout(api, pageId)

@@ -1,0 +1,24 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "VibeLink Dev",
+  "identifier": "com.vibelink.desktop.dev",
+  "build": {
+    "beforeDevCommand": "pnpm exec vite --port 1421 --strictPort",
+    "devUrl": "http://localhost:1421"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "VibeLink Dev",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "decorations": false,
+        "fullscreen": false,
+        "devtools": false,
+        "backgroundColor": "#0d0f12",
+        "dragDropEnabled": false
+      }
+    ]
+  }
+}

@@ -1,4 +1,3 @@
-use crate::app::board::{board_task_done_native, board_task_note_native};
 use crate::protocol::{
     read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req, TaskSignal,
 };
@@ -502,6 +501,11 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
             DaemonToClient::Output { pane_id, data } => {
                 broadcast_output(shared, &pane_id.to_string(), &data);
             }
+            DaemonToClient::RemotePaneLease { event } => {
+                if let Some(app_handle) = &shared.app_handle {
+                    let _ = app_handle.emit("remote://pane-lease", event);
+                }
+            }
             other => {
                 if let Err(err) = forward_terminal_event(shared, other) {
                     warn!(?err, "dropping terminal event");
@@ -596,38 +600,17 @@ fn fail_pending(shared: &ClientShared, message: String) {
 fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<()> {
     if let DaemonToClient::TaskEvent { session_id, event } = msg {
         let session_id_text = session_id.to_string();
-        match &event {
-            TaskSignal::Done {
-                task_id,
-                commit_msg,
-                result_summary,
-                ..
-            } => {
-                board_task_done_native(
-                    &session_id_text,
-                    task_id,
-                    commit_msg.clone(),
-                    result_summary.clone(),
+        if let TaskSignal::AgentPrompt { prompt } = &event {
+            if let Some(app_handle) = &shared.app_handle {
+                app_handle.emit(
+                    "vibelink://agent-prompt",
+                    AgentPromptEvent {
+                        session_id: session_id_text,
+                        prompt: prompt.clone(),
+                    },
                 )?;
             }
-            TaskSignal::AgentPrompt { prompt } => {
-                if let Some(app_handle) = &shared.app_handle {
-                    app_handle.emit(
-                        "vibelink://agent-prompt",
-                        AgentPromptEvent {
-                            session_id: session_id_text,
-                            prompt: prompt.clone(),
-                        },
-                    )?;
-                }
-                return Ok(());
-            }
-            TaskSignal::Note {
-                task_id, message, ..
-            } => {
-                board_task_note_native(&session_id_text, task_id, message)?;
-            }
-            TaskSignal::BoardChanged {} | TaskSignal::PaneConfigured { .. } => {}
+            return Ok(());
         }
         send_terminal_event(
             shared,
@@ -690,6 +673,7 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
         | DaemonToClient::PaneExited { .. }
         | DaemonToClient::PaneResized { .. }
         | DaemonToClient::SessionChanged { .. }
+        | DaemonToClient::RemotePaneLease { .. }
         | DaemonToClient::TaskEvent { .. } => None,
     }
 }

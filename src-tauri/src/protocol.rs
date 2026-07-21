@@ -25,6 +25,13 @@ pub enum ClientToDaemon {
     Hello {
         client_id: Uuid,
     },
+    Authenticate {
+        req: Req,
+        client_id: Uuid,
+        boot_token: String,
+        process_id: u32,
+        user_sid: String,
+    },
     Ping {
         req: Req,
     },
@@ -118,6 +125,31 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         event: TaskSignal,
     },
+    Control {
+        req: Req,
+        operation_id: Uuid,
+        command_json: String,
+    },
+    Orchestration {
+        req: Req,
+        operation_id: Uuid,
+        method: String,
+        payload_json: String,
+    },
+    Cli {
+        req: Req,
+        operation_id: Uuid,
+        request_json: String,
+    },
+    Computer {
+        req: Req,
+        operation_id: Uuid,
+        request_json: String,
+    },
+    Remote {
+        req: Req,
+        request_json: String,
+    },
     ResourceSnapshot {
         req: Req,
     },
@@ -156,6 +188,9 @@ pub enum DaemonToClient {
     TaskEvent {
         session_id: Uuid,
         event: TaskSignal,
+    },
+    RemotePaneLease {
+        event: serde_json::Value,
     },
 }
 
@@ -202,6 +237,11 @@ pub enum ReplyResult {
     PaneSpawned(PaneMeta),
     ScrollbackData(Vec<u8>),
     Ok,
+    Control(String),
+    Orchestration(String),
+    Cli(String),
+    Computer(String),
+    Remote(String),
     ResourceSnapshot(ResourceSnapshotData),
 }
 
@@ -416,6 +456,53 @@ mod tests {
 
         let decoded: DaemonToClient = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
 
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_control_json_reply() {
+        let response = crate::control_plane::ControlResponse::Task(crate::control_plane::Task {
+            id: "task-1".to_string(),
+            session_id: Uuid::new_v4().to_string(),
+            title: "Control".to_string(),
+            description: String::new(),
+            status: crate::control_plane::TaskStatus::Pending,
+            status_timestamps: std::collections::HashMap::from([(
+                crate::control_plane::TaskStatus::Pending,
+                123,
+            )]),
+            assigned_pane_id: None,
+            assigned_role: None,
+            baseline_ref: None,
+            worktree_path: None,
+            commit_message: None,
+            result_summary: None,
+            created_at: 123,
+            updated_at: 123,
+        });
+        let message = DaemonToClient::Reply {
+            req: 10,
+            result: ReplyResult::Control(serde_json::to_string(&response).expect("control JSON")),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode control frame");
+        let decoded: DaemonToClient =
+            read_frame(&mut Cursor::new(bytes)).expect("decode control frame");
+        assert_eq!(decoded, message);
+    }
+    #[test]
+    fn frame_roundtrip_preserves_daemon_authentication() {
+        let message = ClientToDaemon::Authenticate {
+            req: 42,
+            client_id: Uuid::new_v4(),
+            boot_token: "a".repeat(64),
+            process_id: 1234,
+            user_sid: "S-1-5-21-1000".to_string(),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode authentication frame");
+        let decoded: ClientToDaemon =
+            read_frame(&mut Cursor::new(bytes)).expect("decode authentication frame");
         assert_eq!(decoded, message);
     }
 

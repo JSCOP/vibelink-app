@@ -1,0 +1,23 @@
+.android-device-lab { display: grid; gap: 12px; min-width: 0; }
+.android-device-lab > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.android-device-lab h3, .android-device-lab h4 { margin: 0; }
+.android-device-lab header p { margin: 4px 0 0; color: var(--vibelink-text-muted); font-size: 12px; }
+.android-device-lab-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 10px; }
+.android-device-lab label { display: grid; gap: 5px; color: var(--vibelink-text-muted); font-size: 12px; }
+.android-device-lab input, .android-device-lab select { min-width: 0; border: 1px solid var(--vibelink-border); border-radius: 6px; background: var(--vibelink-input); color: var(--vibelink-text); padding: 7px 9px; font: inherit; }
+.android-device-lab button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--vibelink-border); border-radius: 6px; background: var(--vibelink-panel-2); color: var(--vibelink-text); padding: 6px 9px; cursor: pointer; white-space: nowrap; }
+.android-device-lab button:disabled { cursor: default; opacity: .55; }
+.android-device-lab-row, .android-device-lab-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.android-device-lab-row select { flex: 1 1 auto; }
+.android-device-lab-status { display: grid; gap: 3px; min-width: 0; border: 1px solid var(--vibelink-border-soft); border-radius: 7px; padding: 8px 10px; color: var(--vibelink-text-muted); font-size: 11px; }
+.android-device-lab-status[data-available] { border-color: color-mix(in srgb, var(--vibelink-success) 55%, var(--vibelink-border)); }
+.android-device-lab-status strong { color: var(--vibelink-text); font-size: 12px; }
+.android-device-lab-status span, .android-device-lab-status small { overflow: hidden; text-overflow: ellipsis; }
+.android-device-lab-app-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+.android-device-lab-permissions { grid-template-columns: minmax(0, 1fr) auto; }
+.android-device-lab-processes { display: grid; gap: 6px; }
+.android-device-lab-processes > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 1px solid var(--vibelink-border-soft); border-radius: 7px; padding: 7px; font-size: 11px; }
+.android-device-lab-processes code { overflow: hidden; color: var(--vibelink-text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.android-device-lab-logcat { max-height: 260px; margin: 0; overflow: auto; border: 1px solid var(--vibelink-border-soft); border-radius: 7px; background: var(--vibelink-input-strong); padding: 9px; color: var(--vibelink-text); font: 11px/1.45 var(--vibelink-mono, monospace); white-space: pre-wrap; }
+.android-device-lab-message { border-left: 3px solid var(--vibelink-accent); padding: 7px 9px; background: var(--vibelink-panel-2); color: var(--vibelink-text-muted); font-size: 12px; }
+@media (max-width: 760px) { .android-device-lab-grid, .android-device-lab-app-controls, .android-device-lab-permissions { grid-template-columns: 1fr; } .android-device-lab-processes > div { grid-template-columns: 1fr; } }

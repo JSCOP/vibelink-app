@@ -15,10 +15,24 @@ const GITHUB_OAUTH_CLIENT_ID: Option<&str> = option_env!("VIBELINK_GITHUB_CLIENT
 static DEVICE_FLOWS: LazyLock<Mutex<HashMap<String, PendingDeviceFlow>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredToken {
     kind: String,
     token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScopedToken {
+    pub credential_id: String,
+    pub provider: String,
+    pub scopes: Vec<String>,
+    pub token: String,
 }
 
 #[derive(Clone)]
@@ -51,18 +65,47 @@ pub(crate) fn set_token(host: &str, token: &str) -> Result<()> {
     if token.is_empty() {
         return Err(anyhow!("personal access token is empty"));
     }
-    let secret = serde_json::to_string(&StoredToken {
-        kind: "pat".to_string(),
-        token: token.to_string(),
-    })
-    .context("serialize Git hosting credential")?;
-    let entry = credential_entry(&host)?;
-    entry.set_password(&secret).map_err(|error| {
-        anyhow!(redact(
-            &format!("write Windows Credential Manager Git hosting entry: {error}"),
-            Some(token),
-        ))
-    })
+    let existing = read_stored_token(&host).ok().flatten();
+    write_stored_token(
+        &host,
+        StoredToken {
+            kind: "pat".to_string(),
+            token: token.to_string(),
+            credential_id: existing
+                .as_ref()
+                .and_then(|stored| stored.credential_id.clone()),
+            provider: existing.as_ref().and_then(|stored| stored.provider.clone()),
+            scopes: existing.map(|stored| stored.scopes).unwrap_or_default(),
+        },
+    )
+}
+
+pub(crate) fn set_scoped_token(
+    host: &str,
+    token: &str,
+    credential_id: &str,
+    provider: &str,
+    scopes: &[String],
+) -> Result<()> {
+    let host = normalize_host(host)?;
+    let token = token.trim();
+    if token.is_empty()
+        || credential_id.trim().is_empty()
+        || provider.trim().is_empty()
+        || scopes.is_empty()
+    {
+        return Err(anyhow!("scoped provider credential is incomplete"));
+    }
+    write_stored_token(
+        &host,
+        StoredToken {
+            kind: "pat".to_string(),
+            token: token.to_string(),
+            credential_id: Some(credential_id.to_string()),
+            provider: Some(provider.to_string()),
+            scopes: scopes.to_vec(),
+        },
+    )
 }
 
 pub(crate) fn clear_token(host: &str) -> Result<()> {
@@ -82,18 +125,28 @@ pub(crate) fn token_status(host: &str) -> Result<bool> {
 }
 
 pub(crate) fn read_token(host: &str) -> Result<Option<String>> {
-    let host = normalize_host(host)?;
-    let entry = credential_entry(&host)?;
-    let json = match entry.get_password() {
-        Ok(json) => json,
-        Err(keyring::Error::NoEntry) => return Ok(None),
-        Err(error) => {
-            return Err(anyhow!(
-                "read Windows Credential Manager Git hosting entry: {error}"
-            ))
-        }
+    Ok(read_stored_token(host)?.map(|stored| stored.token))
+}
+
+pub(crate) fn read_scoped_token(host: &str) -> Result<Option<ScopedToken>> {
+    let Some(stored) = read_stored_token(host)? else {
+        return Ok(None);
     };
-    parse_stored_token(&json).map(Some)
+    let Some(credential_id) = stored.credential_id else {
+        return Ok(None);
+    };
+    let Some(provider) = stored.provider else {
+        return Ok(None);
+    };
+    if stored.scopes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ScopedToken {
+        credential_id,
+        provider,
+        scopes: stored.scopes,
+        token: stored.token,
+    }))
 }
 
 pub(crate) fn redact(error: &str, token: Option<&str>) -> String {
@@ -123,7 +176,9 @@ pub(crate) fn github_device_start() -> Result<DeviceCodeInfo> {
         || response.verification_uri.is_empty()
         || response.expires_in == 0
     {
-        return Err(anyhow!("GitHub returned an invalid device authorization response"));
+        return Err(anyhow!(
+            "GitHub returned an invalid device authorization response"
+        ));
     }
 
     let interval_secs = response.interval.unwrap_or(5).max(1);
@@ -238,9 +293,7 @@ pub(crate) fn normalize_host(host: &str) -> Result<String> {
     let mut host_and_port = host.split(':');
     let hostname = host_and_port.next().unwrap_or_default();
     if let Some(port) = host_and_port.next() {
-        if host_and_port.next().is_some()
-            || !matches!(port.parse::<u16>(), Ok(1..=u16::MAX))
-        {
+        if host_and_port.next().is_some() || !matches!(port.parse::<u16>(), Ok(1..=u16::MAX)) {
             return Err(anyhow!("invalid Git hosting host"));
         }
     }
@@ -270,13 +323,45 @@ fn credential_entry(host: &str) -> Result<Entry> {
         .context("open Windows Credential Manager Git hosting entry")
 }
 
-fn parse_stored_token(json: &str) -> Result<String> {
+fn read_stored_token(host: &str) -> Result<Option<StoredToken>> {
+    let host = normalize_host(host)?;
+    let entry = credential_entry(&host)?;
+    let json = match entry.get_password() {
+        Ok(json) => json,
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(error) => {
+            return Err(anyhow!(
+                "read Windows Credential Manager Git hosting entry: {error}"
+            ))
+        }
+    };
+    parse_stored_token_record(&json).map(Some)
+}
+
+fn write_stored_token(host: &str, stored: StoredToken) -> Result<()> {
+    let token = stored.token.clone();
+    let secret = serde_json::to_string(&stored).context("serialize Git hosting credential")?;
+    credential_entry(host)?
+        .set_password(&secret)
+        .map_err(|error| {
+            anyhow!(redact(
+                &format!("write Windows Credential Manager Git hosting entry: {error}"),
+                Some(&token),
+            ))
+        })
+}
+
+fn parse_stored_token_record(json: &str) -> Result<StoredToken> {
     let stored: StoredToken =
         serde_json::from_str(json).context("parse stored Git hosting credential")?;
     if stored.kind != "pat" || stored.token.is_empty() {
         return Err(anyhow!("stored Git hosting credential is invalid"));
     }
-    Ok(stored.token)
+    Ok(stored)
+}
+
+fn parse_stored_token(json: &str) -> Result<String> {
+    Ok(parse_stored_token_record(json)?.token)
 }
 
 fn github_client_id() -> Result<&'static str> {
@@ -322,6 +407,9 @@ mod tests {
         let json = serde_json::to_string(&StoredToken {
             kind: "pat".to_string(),
             token: token.to_string(),
+            credential_id: None,
+            provider: None,
+            scopes: Vec::new(),
         })
         .expect("serialize token");
         assert_eq!(parse_stored_token(&json).expect("parse token"), token);
@@ -347,9 +435,29 @@ mod tests {
     }
 
     #[test]
+    fn scoped_token_metadata_round_trips_without_changing_secret_reads() {
+        let json = serde_json::to_string(&StoredToken {
+            kind: "pat".to_string(),
+            token: "secret".to_string(),
+            credential_id: Some("credential-1".to_string()),
+            provider: Some("github".to_string()),
+            scopes: vec!["repositories:read".to_string()],
+        })
+        .expect("serialize scoped token");
+        let stored = parse_stored_token_record(&json).expect("parse scoped token");
+        assert_eq!(stored.credential_id.as_deref(), Some("credential-1"));
+        assert_eq!(stored.provider.as_deref(), Some("github"));
+        assert_eq!(stored.scopes, vec!["repositories:read"]);
+        assert_eq!(parse_stored_token(&json).expect("read token"), "secret");
+    }
+
+    #[test]
     fn host_normalization_rejects_credential_account_injection() {
         assert_eq!(normalize_host(" GitHub.COM. ").unwrap(), "github.com");
-        assert_eq!(normalize_host("Git.Example:8443").unwrap(), "git.example:8443");
+        assert_eq!(
+            normalize_host("Git.Example:8443").unwrap(),
+            "git.example:8443"
+        );
         for invalid in [
             "",
             "https://github.com",
@@ -373,7 +481,6 @@ mod tests {
         };
         assert_eq!(credential_service(), expected);
     }
-
 
     #[test]
     fn missing_device_client_id_has_pat_only_error() {

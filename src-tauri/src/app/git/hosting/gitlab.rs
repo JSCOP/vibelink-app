@@ -25,12 +25,7 @@ impl GitlabClient {
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .trim_end_matches('/');
-        Self::with_base_url(
-            format!("https://{host}/api/v4"),
-            owner,
-            repo,
-            token,
-        )
+        Self::with_base_url(format!("https://{host}/api/v4"), owner, repo, token)
     }
 
     pub(crate) fn with_base_url(
@@ -339,8 +334,13 @@ pub(crate) fn parse_gitlab_ci(body: &str) -> Result<CiStatus> {
 fn normalize_gitlab_ci_state(status: &str) -> &'static str {
     match status {
         "success" | "skipped" => "success",
-        "created" | "waiting_for_resource" | "preparing" | "pending" | "running"
-        | "scheduled" | "manual" => "pending",
+        "created"
+        | "waiting_for_resource"
+        | "preparing"
+        | "pending"
+        | "running"
+        | "scheduled"
+        | "manual" => "pending",
         "" => "none",
         _ => "failure",
     }
@@ -472,7 +472,10 @@ mod tests {
 
     #[test]
     fn encodes_nested_project_paths_and_query_refs() {
-        assert_eq!(percent_encode("group/subgroup/repo"), "group%2Fsubgroup%2Frepo");
+        assert_eq!(
+            percent_encode("group/subgroup/repo"),
+            "group%2Fsubgroup%2Frepo"
+        );
         assert_eq!(percent_encode("feature/a b"), "feature%2Fa%20b");
     }
 

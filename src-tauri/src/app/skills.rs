@@ -40,6 +40,10 @@ pub struct SkillEntry {
     pub read_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,6 +64,8 @@ pub struct SkillApplyInput {
     pub session_id: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,32 +79,34 @@ struct SkillMetadata {
     enabled: bool,
     #[serde(alias = "updated_at")]
     updated_at: u64,
+    #[serde(default)]
+    required_capabilities: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
-struct BuiltinSkill {
+struct LegacyBuiltinSkill {
     id: &'static str,
     category: &'static str,
     description: &'static str,
 }
 
-const BUILTIN_SKILLS: &[BuiltinSkill] = &[
-    BuiltinSkill {
+const LEGACY_BUILTIN_SKILLS: &[LegacyBuiltinSkill] = &[
+    LegacyBuiltinSkill {
         id: "vibelink-terminal",
         category: "Workspace",
         description: "List, read, write, launch panes, and configure agent pane titles/roles through the VibeLink MCP bridge.",
     },
-    BuiltinSkill {
+    LegacyBuiltinSkill {
         id: "kanban-board",
         category: "Planning",
         description: "Create, assign, update, and complete tasks on AI agent panes only.",
     },
-    BuiltinSkill {
+    LegacyBuiltinSkill {
         id: "diff-review",
         category: "Review",
         description: "Inspect task baselines and changed files from the Diff window.",
     },
-    BuiltinSkill {
+    LegacyBuiltinSkill {
         id: "native-hermes",
         category: "Agent",
         description: "Uses native Hermes provider, auth, model, and session storage.",
@@ -170,19 +178,61 @@ pub fn delete_skill(id: &str, session_id: Option<&str>, scope: Option<SkillScope
 }
 
 pub fn augment_prompt_with_enabled_skills(session_id: &str, text: &str) -> Result<String> {
-    let Some(context) = enabled_skill_context(Some(session_id))? else {
+    augment_prompt_with_enabled_skills_for_capabilities(
+        session_id,
+        text,
+        std::iter::empty::<&str>(),
+    )
+}
+
+pub fn augment_prompt_with_enabled_skills_for_capabilities<'a>(
+    session_id: &str,
+    text: &str,
+    granted_capabilities: impl IntoIterator<Item = &'a str>,
+) -> Result<String> {
+    let Some(context) =
+        enabled_skill_context_for_capabilities(Some(session_id), granted_capabilities)?
+    else {
         return Ok(text.to_string());
     };
-    Ok(format!("{context}\n\nUser request:\n{text}"))
+    Ok(format!(
+        "{context}\n\n[VIBELINK_USER_REQUEST bytes={}]\n{text}\n[END_VIBELINK_USER_REQUEST]",
+        text.len()
+    ))
 }
 
 pub fn enabled_skill_context(session_id: Option<&str>) -> Result<Option<String>> {
+    enabled_skill_context_for_capabilities(session_id, std::iter::empty::<&str>())
+}
+
+pub fn enabled_skill_context_for_capabilities<'a>(
+    session_id: Option<&str>,
+    granted_capabilities: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<String>> {
     let data_dir = crate::daemon::paths::daemon_paths()?.data_dir;
-    enabled_skill_context_at(&data_dir, session_id)
+    enabled_skill_context_with_capabilities_at(&data_dir, session_id, granted_capabilities)
 }
 
 fn enabled_skill_context_at(data_dir: &Path, session_id: Option<&str>) -> Result<Option<String>> {
-    let mut entries = read_scope_entries(&global_skills_dir(data_dir), SkillScope::Global, true)?;
+    enabled_skill_context_with_capabilities_at(data_dir, session_id, std::iter::empty::<&str>())
+}
+
+fn enabled_skill_context_with_capabilities_at<'a>(
+    data_dir: &Path,
+    session_id: Option<&str>,
+    granted_capabilities: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<String>> {
+    let granted = granted_capabilities
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut entries = builtin_skill_entries(true);
+    for entry in read_scope_entries(&global_skills_dir(data_dir), SkillScope::Global, true)? {
+        if let Some(index) = entries.iter().position(|existing| existing.id == entry.id) {
+            entries.remove(index);
+        }
+        entries.push(entry);
+    }
     if let Some(session_id) = optional_session_id(session_id)? {
         for entry in read_scope_entries(
             &workspace_skills_dir(data_dir, &session_id),
@@ -198,11 +248,14 @@ fn enabled_skill_context_at(data_dir: &Path, session_id: Option<&str>) -> Result
 
     entries.retain(|entry| {
         entry.enabled
-            && !entry.read_only
             && entry
                 .content
                 .as_ref()
                 .is_some_and(|content| !content.trim().is_empty())
+            && entry
+                .required_capabilities
+                .iter()
+                .all(|capability| granted.contains(capability))
     });
     if entries.is_empty() {
         return Ok(None);
@@ -211,22 +264,25 @@ fn enabled_skill_context_at(data_dir: &Path, session_id: Option<&str>) -> Result
         (scope_rank(left.scope), &left.id).cmp(&(scope_rank(right.scope), &right.id))
     });
 
-    let mut context = String::from("VibeLink active skills are user-installed instructions. Follow them when relevant; workspace skills override global skills with the same id.\n");
+    let mut context = String::from("[VIBELINK_SKILL_CONTEXT]\nSkills below are explicitly installed or bundled VibeLink instructions. Workspace skills override global skills with the same id. Capability-gated guides appear only when every declared capability is granted.\n");
     for entry in entries {
         let content = entry.content.unwrap_or_default();
-        context.push_str("\n## VibeLink skill: ");
+        context.push_str("\n[VIBELINK_SKILL id=");
         context.push_str(&entry.id);
-        context.push_str("\nName: ");
-        context.push_str(&entry.name.replace('\n', " "));
-        context.push_str("\nScope: ");
+        context.push_str(" scope=");
         context.push_str(match entry.scope {
             SkillScope::Global => "global",
             SkillScope::Workspace => "workspace",
         });
-        context.push_str("\nInstructions:\n");
+        context.push_str(" bytes=");
+        context.push_str(&content.len().to_string());
+        context.push_str("]\n");
         context.push_str(content.trim());
-        context.push('\n');
+        context.push_str("\n[END_VIBELINK_SKILL id=");
+        context.push_str(&entry.id);
+        context.push_str("]\n");
     }
+    context.push_str("[END_VIBELINK_SKILL_CONTEXT]");
     Ok(Some(context))
 }
 
@@ -301,6 +357,7 @@ fn apply_skill_at(data_dir: &Path, input: SkillApplyInput) -> Result<SkillEntry>
         }
     };
 
+    let required_capabilities = normalize_capabilities(input.required_capabilities)?;
     let metadata = SkillMetadata {
         name: clean_text(input.name.as_deref()).unwrap_or_else(|| id.clone()),
         category: clean_text(input.category.as_deref())
@@ -310,6 +367,7 @@ fn apply_skill_at(data_dir: &Path, input: SkillApplyInput) -> Result<SkillEntry>
         enabled: input.enabled.unwrap_or(true),
         updated_at: current_time_millis()?,
         id,
+        required_capabilities,
     };
 
     write_skill_dir(&dir, &metadata, &input.content)?;
@@ -459,6 +517,8 @@ fn metadata_to_entry(
         path: dir.join(SKILL_FILE).to_string_lossy().to_string(),
         read_only,
         content,
+        version: None,
+        required_capabilities: metadata.required_capabilities,
     })
 }
 
@@ -530,21 +590,31 @@ fn replace_skill_dir(stage: &Path, target: &Path) -> Result<()> {
 }
 
 fn builtin_skill_entries(include_content: bool) -> Vec<SkillEntry> {
-    BUILTIN_SKILLS
+    let mut entries = LEGACY_BUILTIN_SKILLS
         .iter()
-        .map(|skill| builtin_to_entry(*skill, include_content))
-        .collect()
+        .map(|skill| legacy_builtin_to_entry(*skill, include_content))
+        .collect::<Vec<_>>();
+    entries.extend(
+        crate::dedicated_cli::builtin_skills()
+            .iter()
+            .map(|skill| dedicated_builtin_to_entry(skill, include_content)),
+    );
+    entries
 }
 
 fn builtin_skill_entry(id: &str, include_content: bool) -> Option<SkillEntry> {
-    BUILTIN_SKILLS
+    LEGACY_BUILTIN_SKILLS
         .iter()
         .copied()
         .find(|skill| skill.id == id)
-        .map(|skill| builtin_to_entry(skill, include_content))
+        .map(|skill| legacy_builtin_to_entry(skill, include_content))
+        .or_else(|| {
+            crate::dedicated_cli::builtin_skill(id)
+                .map(|skill| dedicated_builtin_to_entry(skill, include_content))
+        })
 }
 
-fn builtin_to_entry(skill: BuiltinSkill, include_content: bool) -> SkillEntry {
+fn legacy_builtin_to_entry(skill: LegacyBuiltinSkill, include_content: bool) -> SkillEntry {
     SkillEntry {
         id: skill.id.to_string(),
         name: skill.id.to_string(),
@@ -555,16 +625,40 @@ fn builtin_to_entry(skill: BuiltinSkill, include_content: bool) -> SkillEntry {
         updated_at: 0,
         path: format!("builtin://{}", skill.id),
         read_only: true,
-        content: include_content.then(|| builtin_content(skill)),
+        content: include_content.then(|| format!("# {}\n\n{}\n", skill.id, skill.description)),
+        version: None,
+        required_capabilities: vec!["legacy.skills".to_string()],
     }
 }
 
-fn builtin_content(skill: BuiltinSkill) -> String {
-    format!("# {}\n\n{}\n", skill.id, skill.description)
+fn dedicated_builtin_to_entry(
+    skill: &crate::dedicated_cli::BuiltinSkillDefinition,
+    include_content: bool,
+) -> SkillEntry {
+    SkillEntry {
+        id: skill.id.to_string(),
+        name: skill.name.to_string(),
+        category: skill.category.to_string(),
+        description: skill.description.to_string(),
+        scope: SkillScope::Global,
+        enabled: true,
+        updated_at: 0,
+        path: format!("builtin://{}@{}", skill.id, skill.version),
+        read_only: true,
+        content: include_content.then(|| skill.content.to_string()),
+        version: Some(skill.version.to_string()),
+        required_capabilities: skill
+            .required_capabilities
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+    }
 }
 
 fn ensure_not_builtin(id: &str) -> Result<()> {
-    if BUILTIN_SKILLS.iter().any(|skill| skill.id == id) {
+    if LEGACY_BUILTIN_SKILLS.iter().any(|skill| skill.id == id)
+        || crate::dedicated_cli::builtin_skill(id).is_some()
+    {
         bail!("built-in skill '{id}' is read-only");
     }
     Ok(())
@@ -652,6 +746,27 @@ fn clean_text(value: Option<&str>) -> Option<String> {
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
 }
+fn normalize_capabilities(capabilities: Vec<String>) -> Result<Vec<String>> {
+    if capabilities.len() > 64 {
+        bail!("a skill may declare at most 64 capabilities");
+    }
+    let mut normalized = std::collections::BTreeSet::new();
+    for capability in capabilities {
+        let capability = capability.trim().to_ascii_lowercase();
+        let valid = !capability.is_empty()
+            && capability.len() <= 128
+            && capability.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+            });
+        if !valid {
+            bail!("invalid skill capability '{capability}'");
+        }
+        normalized.insert(capability);
+    }
+    Ok(normalized.into_iter().collect())
+}
 
 fn global_skills_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(SKILL_ROOT).join(GLOBAL_SCOPE_DIR)
@@ -712,7 +827,10 @@ mod tests {
     fn lists_builtin_fallback_skills() {
         let root = temp_root("skill-builtins");
         let skills = list_skills_at(&root, None).expect("list skills");
-        assert_eq!(skills.len(), 4);
+        assert_eq!(
+            skills.len(),
+            LEGACY_BUILTIN_SKILLS.len() + crate::dedicated_cli::builtin_skills().len()
+        );
         assert!(skills.iter().all(|skill| skill.read_only));
         assert!(skills.iter().any(|skill| skill.id == "vibelink-terminal"));
         cleanup_root(root);
@@ -732,6 +850,7 @@ mod tests {
                 scope: SkillScope::Global,
                 session_id: None,
                 enabled: Some(false),
+                required_capabilities: Vec::new(),
             },
         )
         .expect("apply skill");
@@ -776,6 +895,7 @@ mod tests {
                 scope: SkillScope::Workspace,
                 session_id: Some("Session::{ABC}".to_string()),
                 enabled: None,
+                required_capabilities: Vec::new(),
             },
         )
         .expect("apply workspace skill");
@@ -806,6 +926,7 @@ mod tests {
                 scope: SkillScope::Global,
                 session_id: None,
                 enabled: None,
+                required_capabilities: Vec::new(),
             },
         )
         .expect_err("built-in apply should fail");
@@ -847,6 +968,8 @@ mod tests {
             path: "builtin://entry-skill".to_string(),
             read_only: true,
             content: None,
+            version: None,
+            required_capabilities: Vec::new(),
         })
         .expect("serialize entry");
 
@@ -871,6 +994,7 @@ mod tests {
                 scope: SkillScope::Global,
                 session_id: None,
                 enabled: Some(false),
+                required_capabilities: Vec::new(),
             },
         )
         .expect("apply first skill");
@@ -886,6 +1010,7 @@ mod tests {
                 scope: SkillScope::Global,
                 session_id: None,
                 enabled: Some(true),
+                required_capabilities: Vec::new(),
             },
         )
         .expect("replace skill");
@@ -913,6 +1038,7 @@ mod tests {
                 scope: SkillScope::Workspace,
                 session_id: Some("Session::{CTX}".to_string()),
                 enabled: Some(true),
+                required_capabilities: vec!["orchestration.view".to_string()],
             },
         )
         .expect("apply context skill");
@@ -927,6 +1053,7 @@ mod tests {
                 scope: SkillScope::Workspace,
                 session_id: Some("Session::{CTX}".to_string()),
                 enabled: Some(false),
+                required_capabilities: Vec::new(),
             },
         )
         .expect("apply disabled skill");
@@ -934,9 +1061,20 @@ mod tests {
         let context = enabled_skill_context_at(&root, Some("Session::{CTX}"))
             .expect("build context")
             .expect("context exists");
-        assert!(context.contains("## VibeLink skill: context-skill"));
-        assert!(context.contains("Always mention context."));
         assert!(!context.contains("disabled-skill"));
+        assert!(
+            !context.contains("context-skill"),
+            "capability-gated skill must not be injected without a grant"
+        );
+        let granted = enabled_skill_context_with_capabilities_at(
+            &root,
+            Some("Session::{CTX}"),
+            ["orchestration.view"],
+        )
+        .expect("build granted context")
+        .expect("granted context exists");
+        assert!(granted.contains("context-skill"));
+        assert!(granted.contains("Always mention context."));
         cleanup_root(root);
     }
 
@@ -954,15 +1092,18 @@ mod tests {
                 scope: SkillScope::Global,
                 session_id: None,
                 enabled: Some(true),
+                required_capabilities: Vec::new(),
             },
         )
         .expect("apply global skill");
         let context = enabled_skill_context_at(&root, Some("Session::{CTX}"))
             .expect("build context")
             .expect("context exists");
-        let prompt = format!("{context}\n\nUser request:\n{}", "Do work");
+        let prompt = format!(
+            "{context}\n\n[VIBELINK_USER_REQUEST bytes=7]\nDo work\n[END_VIBELINK_USER_REQUEST]"
+        );
         assert!(prompt.contains("# Global Context"));
-        assert!(prompt.ends_with("User request:\nDo work"));
+        assert!(prompt.ends_with("[END_VIBELINK_USER_REQUEST]"));
         cleanup_root(root);
     }
 

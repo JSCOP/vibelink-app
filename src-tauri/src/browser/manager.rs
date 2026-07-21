@@ -1,0 +1,1764 @@
+use super::{
+    error::{BrowserError, BrowserErrorCode, BrowserResult},
+    policy::BrowserPolicy,
+    provider::BrowserProvider,
+    types::{
+        ArtifactDescriptor, BrowserCaptureState, BrowserDeviceMetrics, BrowserDialogKind,
+        BrowserDialogRequest, BrowserDownloadRecord, BrowserFrame, BrowserLifecycleEvent,
+        BrowserLifecycleEventKind, BrowserLoadState, BrowserPage, BrowserProfile, BrowserRef,
+        BrowserSnapshot, CertificateDecision, CertificateRequest, ChildWebViewCreate,
+        PermissionDecision, PermissionRequest, PhysicalBounds, ProfileKind, RecoveryCandidate,
+        ResolvedBrowserRef, SnapshotNodeInput, SnapshotNodeRecord, VisibilityLeaseToken,
+    },
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use uuid::Uuid;
+
+const DEFAULT_URL: &str = "about:blank";
+const DEFAULT_FRAME_QUEUE_CAPACITY: usize = 2;
+const MAX_BROWSER_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SNAPSHOT_NODES: usize = 5_000;
+const BROWSER_RESTORE_VERSION: u8 = 1;
+const MAX_BROWSER_RESTORE_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+struct StoredSnapshot {
+    public: BrowserSnapshot,
+    recovery_attempted: HashSet<BrowserRef>,
+}
+
+#[derive(Clone, Debug)]
+struct PageState {
+    public: BrowserPage,
+    visibility_leases: HashMap<VisibilityLeaseToken, String>,
+    snapshot_sequence: u64,
+    snapshot: Option<StoredSnapshot>,
+    frames: LatestFrameQueue,
+}
+
+#[derive(Clone, Debug)]
+struct ProfileState {
+    public: BrowserProfile,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserRestoreDocument {
+    version: u8,
+    profiles: Vec<RestoreProfile>,
+    pages: Vec<RestorePage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreProfile {
+    id: String,
+    kind: ProfileKind,
+    workspace_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestorePage {
+    id: String,
+    workspace_id: String,
+    profile_id: String,
+    url: String,
+    title: String,
+    bounds: PhysicalBounds,
+    device_metrics: Option<BrowserDeviceMetrics>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativePermissionDetail {
+    request_id: String,
+    permission: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeCertificateDetail {
+    request_id: String,
+    error_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDialogDetail {
+    request_id: String,
+    kind: BrowserDialogKind,
+    message: String,
+    default_text: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LatestFrameQueue {
+    page_id: String,
+    capacity: usize,
+    max_frame_bytes: usize,
+    frames: VecDeque<BrowserFrame>,
+    dropped_frames: u64,
+}
+
+impl LatestFrameQueue {
+    pub fn new(
+        page_id: impl Into<String>,
+        capacity: usize,
+        max_frame_bytes: usize,
+    ) -> BrowserResult<Self> {
+        if capacity == 0 || capacity > 8 {
+            return Err(BrowserError::invalid(
+                "browser frame capacity must be between 1 and 8",
+            ));
+        }
+        if max_frame_bytes == 0 {
+            return Err(BrowserError::invalid(
+                "browser frame byte limit must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            page_id: page_id.into(),
+            capacity,
+            max_frame_bytes,
+            frames: VecDeque::with_capacity(capacity),
+            dropped_frames: 0,
+        })
+    }
+
+    pub fn push(&mut self, frame: BrowserFrame) -> BrowserResult<BrowserCaptureState> {
+        if frame.page_id != self.page_id {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser frame page identity does not match its queue",
+            ));
+        }
+        if frame.width == 0 || frame.height == 0 || frame.bytes.is_empty() {
+            return Err(BrowserError::invalid("browser frame is empty"));
+        }
+        if frame.bytes.len() > self.max_frame_bytes {
+            return Err(BrowserError::new(
+                BrowserErrorCode::DeniedCapability,
+                "browser frame exceeds the bounded capture size",
+            ));
+        }
+        if self
+            .frames
+            .back()
+            .is_some_and(|current| frame.sequence <= current.sequence)
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Conflict,
+                "browser frame sequence must increase monotonically",
+            ));
+        }
+        while self.frames.len() >= self.capacity {
+            self.frames.pop_front();
+            self.dropped_frames = self.dropped_frames.saturating_add(1);
+        }
+        self.frames.push_back(frame);
+        Ok(self.status())
+    }
+
+    pub fn take_latest(&mut self) -> Option<BrowserFrame> {
+        let latest = self.frames.pop_back();
+        self.dropped_frames = self.dropped_frames.saturating_add(self.frames.len() as u64);
+        self.frames.clear();
+        latest
+    }
+
+    pub fn status(&self) -> BrowserCaptureState {
+        BrowserCaptureState {
+            page_id: self.page_id.clone(),
+            pending_frames: self.frames.len(),
+            dropped_frames: self.dropped_frames,
+            latest_sequence: self.frames.back().map(|frame| frame.sequence),
+            latest_bytes: self.frames.back().map(|frame| frame.bytes.len() as u64),
+        }
+    }
+}
+
+struct ManagerState {
+    profiles: HashMap<String, ProfileState>,
+    pages: HashMap<String, PageState>,
+    permissions: VecDeque<PermissionRequest>,
+    certificates: VecDeque<CertificateRequest>,
+    dialogs: VecDeque<BrowserDialogRequest>,
+    downloads: VecDeque<BrowserDownloadRecord>,
+    events: VecDeque<BrowserLifecycleEvent>,
+    event_sequence: u64,
+}
+
+impl Default for ManagerState {
+    fn default() -> Self {
+        Self {
+            profiles: HashMap::new(),
+            pages: HashMap::new(),
+            permissions: VecDeque::new(),
+            certificates: VecDeque::new(),
+            dialogs: VecDeque::new(),
+            downloads: VecDeque::new(),
+            events: VecDeque::new(),
+            event_sequence: 0,
+        }
+    }
+}
+
+pub struct BrowserManager<P: BrowserProvider> {
+    provider: Arc<P>,
+    policy: BrowserPolicy,
+    profile_root: PathBuf,
+    restore_path: PathBuf,
+    restored_workspaces: Mutex<HashSet<String>>,
+    persistence: Mutex<()>,
+    state: Mutex<ManagerState>,
+    page_mutations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl<P: BrowserProvider> BrowserManager<P> {
+    pub fn new(provider: Arc<P>, policy: BrowserPolicy, profile_root: PathBuf) -> Self {
+        let restore_path = profile_root
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("state.json");
+        Self {
+            provider,
+            policy,
+            profile_root,
+            restore_path,
+            restored_workspaces: Mutex::new(HashSet::new()),
+            persistence: Mutex::new(()),
+            state: Mutex::new(ManagerState::default()),
+            page_mutations: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn create_profile(
+        &self,
+        id: impl Into<String>,
+        kind: ProfileKind,
+        workspace_id: Option<String>,
+    ) -> BrowserResult<BrowserProfile> {
+        let id = id.into();
+        validate_identifier("profile", &id)?;
+        if kind == ProfileKind::Workspace && workspace_id.as_deref().unwrap_or_default().is_empty()
+        {
+            return Err(BrowserError::invalid(
+                "workspace profiles require a workspace id",
+            ));
+        }
+        let user_data_dir = match kind {
+            ProfileKind::Incognito => None,
+            ProfileKind::Persistent | ProfileKind::Workspace => Some(self.profile_root.join(&id)),
+        };
+        let profile = BrowserProfile {
+            id: id.clone(),
+            kind,
+            workspace_id,
+            user_data_dir,
+            page_ids: Vec::new(),
+        };
+        let mut state = lock(&self.state)?;
+        if state.profiles.contains_key(&id) {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Conflict,
+                format!("profile already exists: {id}"),
+            ));
+        }
+        state.profiles.insert(
+            id,
+            ProfileState {
+                public: profile.clone(),
+            },
+        );
+        Ok(profile)
+    }
+
+    pub fn profiles(&self) -> BrowserResult<Vec<BrowserProfile>> {
+        let state = lock(&self.state)?;
+        let mut profiles = state
+            .profiles
+            .values()
+            .map(|profile| profile.public.clone())
+            .collect::<Vec<_>>();
+        profiles.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(profiles)
+    }
+
+    pub fn create_page(
+        &self,
+        page_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        profile_id: &str,
+        bounds: PhysicalBounds,
+    ) -> BrowserResult<BrowserPage> {
+        let page_id = page_id.into();
+        let workspace_id = workspace_id.into();
+        validate_identifier("page", &page_id)?;
+        validate_identifier("workspace", &workspace_id)?;
+        if !bounds.validate() {
+            return Err(BrowserError::invalid(
+                "child WebView bounds must be non-zero physical pixels",
+            ));
+        }
+
+        let mut state = lock(&self.state)?;
+        if state.pages.contains_key(&page_id) {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Conflict,
+                format!("page already exists: {page_id}"),
+            ));
+        }
+        let profile = state
+            .profiles
+            .get(profile_id)
+            .ok_or_else(|| BrowserError::not_found(profile_id))?;
+        if let Some(profile_workspace) = profile.public.workspace_id.as_deref() {
+            if profile_workspace != workspace_id {
+                return Err(BrowserError::new(
+                    BrowserErrorCode::DeniedCapability,
+                    "workspace profile cannot be shared across workspaces",
+                ));
+            }
+        }
+        let create = ChildWebViewCreate {
+            page_id: page_id.clone(),
+            label: format!("browser-guest-{page_id}"),
+            profile_id: profile_id.to_string(),
+            workspace_id: workspace_id.clone(),
+            user_data_dir: profile.public.user_data_dir.clone(),
+            initial_url: DEFAULT_URL.to_string(),
+            bounds,
+            external_guest: true,
+            tauri_ipc_allowed: false,
+            app_initialization_allowed: false,
+        };
+        self.provider.create_child_webview(&create)?;
+
+        let page = BrowserPage {
+            id: page_id.clone(),
+            workspace_id,
+            profile_id: profile_id.to_string(),
+            url: DEFAULT_URL.to_string(),
+            title: "New Tab".to_string(),
+            navigation_generation: 0,
+            current_snapshot_id: None,
+            bounds,
+            requested_visible: true,
+            effective_visible: true,
+            focused: false,
+            visibility_lease_count: 0,
+            load_state: BrowserLoadState::Idle,
+            can_go_back: false,
+            can_go_forward: false,
+            last_error: None,
+            device_metrics: None,
+            dropped_frame_count: 0,
+            latest_frame_sequence: None,
+        };
+        state.pages.insert(
+            page_id.clone(),
+            PageState {
+                public: page.clone(),
+                visibility_leases: HashMap::new(),
+                snapshot_sequence: 0,
+                snapshot: None,
+                frames: LatestFrameQueue::new(
+                    page_id.clone(),
+                    DEFAULT_FRAME_QUEUE_CAPACITY,
+                    MAX_BROWSER_FRAME_BYTES,
+                )?,
+            },
+        );
+        state
+            .profiles
+            .get_mut(profile_id)
+            .expect("profile checked before provider creation")
+            .public
+            .page_ids
+            .push(page_id.clone());
+        push_event_locked(
+            &mut state,
+            &page_id,
+            0,
+            BrowserLifecycleEventKind::PageCreated,
+            Some(DEFAULT_URL.to_string()),
+            Some(profile_id.to_string()),
+        );
+        lock(&self.page_mutations)?.insert(page_id, Arc::new(Mutex::new(())));
+        Ok(page)
+    }
+
+    pub fn page(&self, page_id: &str) -> BrowserResult<BrowserPage> {
+        let state = lock(&self.state)?;
+        state
+            .pages
+            .get(page_id)
+            .map(|page| page.public.clone())
+            .ok_or_else(|| BrowserError::not_found(page_id))
+    }
+
+    pub fn pages(&self) -> BrowserResult<Vec<BrowserPage>> {
+        let state = lock(&self.state)?;
+        let mut pages = state
+            .pages
+            .values()
+            .map(|page| page.public.clone())
+            .collect::<Vec<_>>();
+        pages.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(pages)
+    }
+
+    pub fn select_page(
+        &self,
+        workspace_id: &str,
+        page_id: &str,
+    ) -> BrowserResult<Vec<BrowserPage>> {
+        let page_ids = {
+            let state = lock(&self.state)?;
+            let selected = state
+                .pages
+                .get(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            if selected.public.workspace_id != workspace_id {
+                return Err(BrowserError::new(
+                    BrowserErrorCode::DeniedCapability,
+                    "selected browser page belongs to another workspace",
+                ));
+            }
+            state
+                .pages
+                .values()
+                .filter(|page| page.public.workspace_id == workspace_id)
+                .map(|page| page.public.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for candidate in &page_ids {
+            let selected = candidate == page_id;
+            self.set_visible(candidate, selected)?;
+            self.set_focus(candidate, selected)?;
+        }
+        let state = lock(&self.state)?;
+        Ok(page_ids
+            .iter()
+            .filter_map(|candidate| state.pages.get(candidate).map(|page| page.public.clone()))
+            .collect())
+    }
+
+    pub fn navigate(&self, page_id: &str, input: &str) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let url = self.policy.normalize_navigation(input)?;
+        let next_generation = {
+            let state = lock(&self.state)?;
+            state
+                .pages
+                .get(page_id)
+                .map(|page| page.public.navigation_generation + 1)
+                .ok_or_else(|| BrowserError::not_found(page_id))?
+        };
+        self.provider.navigate(page_id, &url, next_generation)?;
+        let mut state = lock(&self.state)?;
+        let result = {
+            let page = state
+                .pages
+                .get_mut(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            page.public.url = url.clone();
+            page.public.navigation_generation = next_generation;
+            page.public.current_snapshot_id = None;
+            page.public.load_state = BrowserLoadState::Loading;
+            page.public.last_error = None;
+            page.snapshot = None;
+            page.public.clone()
+        };
+        push_event_locked(
+            &mut state,
+            page_id,
+            next_generation,
+            BrowserLifecycleEventKind::NavigationStarted,
+            Some(url),
+            None,
+        );
+        Ok(result)
+    }
+
+    pub fn go_back(&self, page_id: &str) -> BrowserResult<BrowserPage> {
+        self.history_mutation(page_id, |provider| provider.go_back(page_id))
+    }
+
+    pub fn go_forward(&self, page_id: &str) -> BrowserResult<BrowserPage> {
+        self.history_mutation(page_id, |provider| provider.go_forward(page_id))
+    }
+
+    pub fn reload(&self, page_id: &str) -> BrowserResult<BrowserPage> {
+        self.history_mutation(page_id, |provider| provider.reload(page_id))
+    }
+
+    pub fn set_design_mode(&self, page_id: &str, enabled: bool) -> BrowserResult<()> {
+        self.provider.set_design_mode(page_id, enabled)
+    }
+
+    pub fn set_device_metrics(
+        &self,
+        page_id: &str,
+        metrics: BrowserDeviceMetrics,
+    ) -> BrowserResult<BrowserPage> {
+        if !metrics.validate() {
+            return Err(BrowserError::invalid("invalid browser device metrics"));
+        }
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.provider.set_device_metrics(page_id, metrics)?;
+        let mut state = lock(&self.state)?;
+        let generation = state
+            .pages
+            .get(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?
+            .public
+            .navigation_generation;
+        let result = {
+            let page = state
+                .pages
+                .get_mut(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            page.public.device_metrics = Some(metrics);
+            page.public.clone()
+        };
+        push_event_locked(
+            &mut state,
+            page_id,
+            generation,
+            BrowserLifecycleEventKind::DeviceMetricsChanged,
+            None,
+            Some(format!(
+                "{}x{}@{} mobile={}",
+                metrics.width, metrics.height, metrics.device_scale_factor, metrics.mobile
+            )),
+        );
+        Ok(result)
+    }
+
+    pub fn clear_device_metrics(&self, page_id: &str) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.provider.clear_device_metrics(page_id)?;
+        let mut state = lock(&self.state)?;
+        let generation = state
+            .pages
+            .get(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?
+            .public
+            .navigation_generation;
+        let result = {
+            let page = state
+                .pages
+                .get_mut(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            page.public.device_metrics = None;
+            page.public.clone()
+        };
+        push_event_locked(
+            &mut state,
+            page_id,
+            generation,
+            BrowserLifecycleEventKind::DeviceMetricsChanged,
+            None,
+            Some("restored desktop viewport".to_string()),
+        );
+        Ok(result)
+    }
+
+    fn history_mutation(
+        &self,
+        page_id: &str,
+        action: impl FnOnce(&P) -> BrowserResult<()>,
+    ) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let (current_generation, next_generation) = {
+            let state = lock(&self.state)?;
+            let current = state
+                .pages
+                .get(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?
+                .public
+                .navigation_generation;
+            let next = current.checked_add(1).ok_or_else(|| {
+                BrowserError::new(
+                    BrowserErrorCode::Internal,
+                    "navigation generation exhausted",
+                )
+            })?;
+            (current, next)
+        };
+        self.provider
+            .set_navigation_generation(page_id, next_generation)?;
+        if let Err(error) = action(&self.provider) {
+            let _ = self
+                .provider
+                .set_navigation_generation(page_id, current_generation);
+            return Err(error);
+        }
+        let mut state = lock(&self.state)?;
+        let (generation, url, result) = {
+            let page = state
+                .pages
+                .get_mut(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            page.public.navigation_generation = next_generation;
+            page.public.current_snapshot_id = None;
+            page.public.load_state = BrowserLoadState::Loading;
+            page.public.last_error = None;
+            page.snapshot = None;
+            (
+                page.public.navigation_generation,
+                page.public.url.clone(),
+                page.public.clone(),
+            )
+        };
+        push_event_locked(
+            &mut state,
+            page_id,
+            generation,
+            BrowserLifecycleEventKind::NavigationStarted,
+            Some(url),
+            None,
+        );
+        Ok(result)
+    }
+
+    pub fn set_bounds(&self, page_id: &str, bounds: PhysicalBounds) -> BrowserResult<BrowserPage> {
+        if !bounds.validate() {
+            return Err(BrowserError::invalid(
+                "child WebView bounds must be non-zero physical pixels",
+            ));
+        }
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.provider.set_bounds(page_id, bounds)?;
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        page.public.bounds = bounds;
+        Ok(page.public.clone())
+    }
+
+    pub fn set_visible(&self, page_id: &str, visible: bool) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let (current, next) = {
+            let state = lock(&self.state)?;
+            let page = state
+                .pages
+                .get(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            (
+                page.public.effective_visible,
+                visible || !page.visibility_leases.is_empty(),
+            )
+        };
+        if current != next {
+            self.provider.set_visible(page_id, next)?;
+        }
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        page.public.requested_visible = visible;
+        page.public.effective_visible = next;
+        Ok(page.public.clone())
+    }
+
+    pub fn set_focus(&self, page_id: &str, focused: bool) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.provider.set_focus(page_id, focused)?;
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        page.public.focused = focused;
+        Ok(page.public.clone())
+    }
+
+    pub fn acquire_visibility_lease(
+        &self,
+        page_id: &str,
+        reason: impl Into<String>,
+    ) -> BrowserResult<VisibilityLeaseToken> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(BrowserError::invalid("visibility lease reason is empty"));
+        }
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let token = Uuid::new_v4().to_string();
+        let should_show = {
+            let state = lock(&self.state)?;
+            let page = state
+                .pages
+                .get(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            !page.public.effective_visible
+        };
+        if should_show {
+            self.provider.set_visible(page_id, true)?;
+        }
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        page.visibility_leases.insert(token.clone(), reason);
+        page.public.visibility_lease_count = page.visibility_leases.len();
+        page.public.effective_visible = true;
+        Ok(token)
+    }
+
+    pub fn release_visibility_lease(
+        &self,
+        page_id: &str,
+        token: &str,
+    ) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let should_hide = {
+            let state = lock(&self.state)?;
+            let page = state
+                .pages
+                .get(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            if !page.visibility_leases.contains_key(token) {
+                return Err(BrowserError::not_found(token));
+            }
+            !page.public.requested_visible && page.visibility_leases.len() == 1
+        };
+        if should_hide {
+            self.provider.set_visible(page_id, false)?;
+        }
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        page.visibility_leases.remove(token);
+        page.public.visibility_lease_count = page.visibility_leases.len();
+        page.public.effective_visible =
+            page.public.requested_visible || !page.visibility_leases.is_empty();
+        Ok(page.public.clone())
+    }
+
+    pub fn record_snapshot(
+        &self,
+        page_id: &str,
+        navigation_generation: u64,
+        nodes: Vec<SnapshotNodeInput>,
+    ) -> BrowserResult<BrowserSnapshot> {
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        if page.public.navigation_generation != navigation_generation {
+            return Err(BrowserError::stale_ref(
+                "snapshot belongs to an obsolete navigation generation",
+            ));
+        }
+        page.snapshot_sequence += 1;
+        let snapshot_id = format!(
+            "{}:{}:{}",
+            page_id, navigation_generation, page.snapshot_sequence
+        );
+        let truncated = nodes.len() > MAX_SNAPSHOT_NODES;
+        let mut duplicates: HashMap<(String, String), u32> = HashMap::new();
+        let records = nodes
+            .into_iter()
+            .take(MAX_SNAPSHOT_NODES)
+            .enumerate()
+            .map(|(index, node)| {
+                let ordinal = duplicates
+                    .entry((node.role.clone(), node.name.clone()))
+                    .or_insert(0);
+                let duplicate_ordinal = *ordinal;
+                *ordinal += 1;
+                SnapshotNodeRecord {
+                    browser_ref: format!("ref:{}:{}", snapshot_id, index),
+                    role: node.role,
+                    name: node.name,
+                    duplicate_ordinal,
+                    backend_dom_id: node.backend_dom_id,
+                    frame_id: node.frame_id,
+                    session_id: node.session_id,
+                    bounds: node.bounds,
+                    supported_actions: node.supported_actions,
+                    source: node.source,
+                }
+            })
+            .collect::<Vec<_>>();
+        let snapshot = BrowserSnapshot {
+            page_id: page_id.to_string(),
+            navigation_generation,
+            snapshot_id: snapshot_id.clone(),
+            nodes: records,
+            truncated,
+        };
+        page.public.current_snapshot_id = Some(snapshot_id);
+        page.snapshot = Some(StoredSnapshot {
+            public: snapshot.clone(),
+            recovery_attempted: HashSet::new(),
+        });
+        Ok(snapshot)
+    }
+
+    pub fn resolve_ref(
+        &self,
+        page_id: &str,
+        navigation_generation: u64,
+        snapshot_id: &str,
+        browser_ref: &str,
+        live_nodes: &[RecoveryCandidate],
+    ) -> BrowserResult<ResolvedBrowserRef> {
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        if page.public.navigation_generation != navigation_generation {
+            return Err(BrowserError::stale_ref(
+                "ref navigation generation is stale; take a new snapshot",
+            ));
+        }
+        let stored = page
+            .snapshot
+            .as_mut()
+            .ok_or_else(|| BrowserError::stale_ref("page has no current snapshot"))?;
+        if stored.public.snapshot_id != snapshot_id
+            || page.public.current_snapshot_id.as_deref() != Some(snapshot_id)
+        {
+            return Err(BrowserError::stale_ref(
+                "ref snapshot is stale; take a new snapshot",
+            ));
+        }
+        let record_index = stored
+            .public
+            .nodes
+            .iter()
+            .position(|node| node.browser_ref == browser_ref)
+            .ok_or_else(|| BrowserError::stale_ref("ref does not exist in the current snapshot"))?;
+        let original = stored.public.nodes[record_index].clone();
+
+        if let Some(live) = live_nodes
+            .iter()
+            .find(|node| node.backend_dom_id == original.backend_dom_id)
+        {
+            return Ok(ResolvedBrowserRef {
+                page_id: page_id.to_string(),
+                browser_ref: browser_ref.to_string(),
+                backend_dom_id: live.backend_dom_id,
+                frame_id: live.frame_id.clone(),
+                session_id: live.session_id.clone(),
+                recovered: false,
+            });
+        }
+        if !stored.recovery_attempted.insert(browser_ref.to_string()) {
+            return Err(BrowserError::stale_ref(
+                "backend node stayed stale after the single recovery attempt",
+            ));
+        }
+        let matches = live_nodes
+            .iter()
+            .filter(|candidate| {
+                candidate.role == original.role
+                    && candidate.name == original.name
+                    && candidate.duplicate_ordinal == original.duplicate_ordinal
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(BrowserError::stale_ref(
+                "backend node recovery was not unique; take a new snapshot",
+            ));
+        }
+        let recovered = matches[0];
+        let record = &mut stored.public.nodes[record_index];
+        record.backend_dom_id = recovered.backend_dom_id;
+        record.frame_id = recovered.frame_id.clone();
+        record.session_id = recovered.session_id.clone();
+        Ok(ResolvedBrowserRef {
+            page_id: page_id.to_string(),
+            browser_ref: browser_ref.to_string(),
+            backend_dom_id: recovered.backend_dom_id,
+            frame_id: recovered.frame_id.clone(),
+            session_id: recovered.session_id.clone(),
+            recovered: true,
+        })
+    }
+
+    pub fn queue_permission(
+        &self,
+        page_id: &str,
+        origin: impl Into<String>,
+        permission: impl Into<String>,
+    ) -> BrowserResult<PermissionRequest> {
+        let request = PermissionRequest {
+            id: Uuid::new_v4().to_string(),
+            page_id: page_id.to_string(),
+            origin: origin.into(),
+            permission: permission.into(),
+            requested_at_ms: now_ms(),
+        };
+        let mut state = lock(&self.state)?;
+        let generation = state
+            .pages
+            .get(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?
+            .public
+            .navigation_generation;
+        state.permissions.push_back(request.clone());
+        push_event_locked(
+            &mut state,
+            page_id,
+            generation,
+            BrowserLifecycleEventKind::PermissionRequested,
+            Some(request.origin.clone()),
+            Some(request.permission.clone()),
+        );
+        Ok(request)
+    }
+
+    pub fn pending_permissions(&self) -> BrowserResult<Vec<PermissionRequest>> {
+        Ok(lock(&self.state)?.permissions.iter().cloned().collect())
+    }
+
+    pub fn resolve_permission(
+        &self,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> BrowserResult<(PermissionRequest, PermissionDecision)> {
+        let request = {
+            let state = lock(&self.state)?;
+            state
+                .permissions
+                .iter()
+                .find(|request| request.id == request_id)
+                .cloned()
+                .ok_or_else(|| {
+                    BrowserError::new(
+                        BrowserErrorCode::PermissionNotFound,
+                        format!("permission request not found: {request_id}"),
+                    )
+                })?
+        };
+        self.provider.resolve_permission(request_id, decision)?;
+        let mut state = lock(&self.state)?;
+        state
+            .permissions
+            .retain(|candidate| candidate.id != request_id);
+        Ok((request, decision))
+    }
+
+    pub fn queue_certificate(
+        &self,
+        page_id: &str,
+        origin: impl Into<String>,
+        error_code: impl Into<String>,
+    ) -> BrowserResult<CertificateRequest> {
+        let request = CertificateRequest {
+            id: Uuid::new_v4().to_string(),
+            page_id: page_id.to_string(),
+            origin: origin.into(),
+            error_code: error_code.into(),
+            requested_at_ms: now_ms(),
+        };
+        let mut state = lock(&self.state)?;
+        let generation = state
+            .pages
+            .get(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?
+            .public
+            .navigation_generation;
+        state.certificates.push_back(request.clone());
+        push_event_locked(
+            &mut state,
+            page_id,
+            generation,
+            BrowserLifecycleEventKind::CertificateError,
+            Some(request.origin.clone()),
+            Some(request.error_code.clone()),
+        );
+        Ok(request)
+    }
+
+    pub fn pending_certificates(&self) -> BrowserResult<Vec<CertificateRequest>> {
+        Ok(lock(&self.state)?.certificates.iter().cloned().collect())
+    }
+
+    pub fn resolve_certificate(
+        &self,
+        request_id: &str,
+        decision: CertificateDecision,
+    ) -> BrowserResult<(CertificateRequest, CertificateDecision)> {
+        let request = {
+            let state = lock(&self.state)?;
+            state
+                .certificates
+                .iter()
+                .find(|request| request.id == request_id)
+                .cloned()
+                .ok_or_else(|| {
+                    BrowserError::new(
+                        BrowserErrorCode::CertificateNotFound,
+                        format!("certificate request not found: {request_id}"),
+                    )
+                })?
+        };
+        self.provider.resolve_certificate(request_id, decision)?;
+        let mut state = lock(&self.state)?;
+        state
+            .certificates
+            .retain(|candidate| candidate.id != request_id);
+        Ok((request, decision))
+    }
+
+    pub fn queue_dialog(
+        &self,
+        page_id: &str,
+        origin: impl Into<String>,
+        kind: BrowserDialogKind,
+        message: impl Into<String>,
+        default_text: Option<String>,
+    ) -> BrowserResult<BrowserDialogRequest> {
+        let request = BrowserDialogRequest {
+            id: Uuid::new_v4().to_string(),
+            page_id: page_id.to_string(),
+            origin: origin.into(),
+            kind,
+            message: message.into(),
+            default_text,
+            requested_at_ms: now_ms(),
+        };
+        let mut state = lock(&self.state)?;
+        let generation = state
+            .pages
+            .get(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?
+            .public
+            .navigation_generation;
+        state.dialogs.push_back(request.clone());
+        push_event_locked(
+            &mut state,
+            page_id,
+            generation,
+            BrowserLifecycleEventKind::DialogRequested,
+            Some(request.origin.clone()),
+            Some(request.message.clone()),
+        );
+        Ok(request)
+    }
+
+    pub fn pending_dialogs(&self) -> BrowserResult<Vec<BrowserDialogRequest>> {
+        Ok(lock(&self.state)?.dialogs.iter().cloned().collect())
+    }
+
+    pub fn resolve_dialog(
+        &self,
+        request_id: &str,
+        accept: bool,
+    ) -> BrowserResult<BrowserDialogRequest> {
+        let request = {
+            let state = lock(&self.state)?;
+            state
+                .dialogs
+                .iter()
+                .find(|request| request.id == request_id)
+                .cloned()
+                .ok_or_else(|| BrowserError::not_found(request_id))?
+        };
+        self.provider.resolve_dialog(request_id, accept)?;
+        let mut state = lock(&self.state)?;
+        state.dialogs.retain(|candidate| candidate.id != request_id);
+        Ok(request)
+    }
+
+    pub fn push_frame(&self, frame: BrowserFrame) -> BrowserResult<BrowserCaptureState> {
+        let page_id = frame.page_id.clone();
+        let mut state = lock(&self.state)?;
+        let (generation, status) = {
+            let page = state
+                .pages
+                .get_mut(&page_id)
+                .ok_or_else(|| BrowserError::not_found(&page_id))?;
+            if frame.navigation_generation != page.public.navigation_generation {
+                return Err(BrowserError::stale_ref(
+                    "browser frame belongs to an obsolete navigation generation",
+                ));
+            }
+            let status = page.frames.push(frame)?;
+            page.public.dropped_frame_count = status.dropped_frames;
+            page.public.latest_frame_sequence = status.latest_sequence;
+            (page.public.navigation_generation, status)
+        };
+        push_event_locked(
+            &mut state,
+            &page_id,
+            generation,
+            BrowserLifecycleEventKind::CaptureUpdated,
+            None,
+            Some(format!(
+                "pending={} dropped={}",
+                status.pending_frames, status.dropped_frames
+            )),
+        );
+        Ok(status)
+    }
+
+    pub fn capture_page(&self, page_id: &str) -> BrowserResult<BrowserCaptureState> {
+        let (sequence, generation) = {
+            let state = lock(&self.state)?;
+            let page = state
+                .pages
+                .get(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            (
+                page.public
+                    .latest_frame_sequence
+                    .unwrap_or_default()
+                    .saturating_add(1),
+                page.public.navigation_generation,
+            )
+        };
+        let frame = self.provider.capture_frame(page_id, sequence, generation)?;
+        self.push_frame(frame)
+    }
+
+    pub fn capture_crop(
+        &self,
+        page_id: &str,
+        bounds: PhysicalBounds,
+    ) -> BrowserResult<ArtifactDescriptor> {
+        if !bounds.validate() || bounds.width > 10_000 || bounds.height > 10_000 {
+            return Err(BrowserError::invalid("invalid browser capture clip"));
+        }
+        {
+            let state = lock(&self.state)?;
+            if !state.pages.contains_key(page_id) {
+                return Err(BrowserError::not_found(page_id));
+            }
+        }
+        let bytes = self.provider.capture_crop(page_id, bounds)?;
+        if bytes.is_empty() || bytes.len() as u64 > self.policy.max_artifact_bytes() {
+            return Err(BrowserError::new(
+                BrowserErrorCode::InvalidArgument,
+                "browser capture exceeds the bounded artifact size",
+            ));
+        }
+        fs::create_dir_all(self.policy.artifact_root()).map_err(|error| {
+            BrowserError::new(
+                BrowserErrorCode::Internal,
+                format!("create browser artifact root: {error}"),
+            )
+        })?;
+        let path = self
+            .policy
+            .artifact_root()
+            .join(format!("design-crop-{}.png", Uuid::new_v4()));
+        fs::write(&path, bytes).map_err(|error| {
+            BrowserError::new(
+                BrowserErrorCode::Internal,
+                format!("write browser design crop: {error}"),
+            )
+        })?;
+        let expires_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default()
+            .saturating_add(10 * 60 * 1_000);
+        self.policy
+            .describe_artifact(&path, "image/png", expires_at_ms)
+    }
+
+    pub fn take_latest_frame(&self, page_id: &str) -> BrowserResult<Option<BrowserFrame>> {
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .get_mut(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        let frame = page.frames.take_latest();
+        let status = page.frames.status();
+        page.public.dropped_frame_count = status.dropped_frames;
+        page.public.latest_frame_sequence = frame.as_ref().map(|value| value.sequence);
+        Ok(frame)
+    }
+
+    pub fn capture_state(&self, page_id: &str) -> BrowserResult<BrowserCaptureState> {
+        let state = lock(&self.state)?;
+        state
+            .pages
+            .get(page_id)
+            .map(|page| page.frames.status())
+            .ok_or_else(|| BrowserError::not_found(page_id))
+    }
+
+    pub fn sync_provider_events(&self) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
+        let incoming = self.provider.drain_events()?;
+        if incoming.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut state = lock(&self.state)?;
+        let mut accepted = Vec::with_capacity(incoming.len());
+        for event in incoming {
+            let Some(current_generation) = state
+                .pages
+                .get(&event.page_id)
+                .map(|page| page.public.navigation_generation)
+            else {
+                continue;
+            };
+            if event.navigation_generation != current_generation
+                && !matches!(
+                    event.kind,
+                    BrowserLifecycleEventKind::PageCreated | BrowserLifecycleEventKind::PageClosed
+                )
+            {
+                continue;
+            }
+            match event.kind {
+                BrowserLifecycleEventKind::NavigationCommitted => {
+                    let page = state.pages.get_mut(&event.page_id).expect("page checked");
+                    if let Some(url) = &event.url {
+                        page.public.url = url.clone();
+                    }
+                    page.public.load_state = BrowserLoadState::Loading;
+                    page.public.last_error = None;
+                }
+                BrowserLifecycleEventKind::NavigationFinished => {
+                    let page = state.pages.get_mut(&event.page_id).expect("page checked");
+                    if let Some(url) = &event.url {
+                        page.public.url = url.clone();
+                    }
+                    page.public.load_state = BrowserLoadState::Loaded;
+                    page.public.last_error = None;
+                    page.public.can_go_back = page.public.navigation_generation > 0;
+                }
+                BrowserLifecycleEventKind::NavigationFailed => {
+                    let page = state.pages.get_mut(&event.page_id).expect("page checked");
+                    page.public.load_state = BrowserLoadState::Failed;
+                    page.public.last_error = event.detail.clone();
+                }
+                BrowserLifecycleEventKind::TitleChanged => {
+                    if let (Some(page), Some(title)) =
+                        (state.pages.get_mut(&event.page_id), &event.detail)
+                    {
+                        page.public.title = title.clone();
+                    }
+                }
+                BrowserLifecycleEventKind::DownloadRequested => {
+                    state.downloads.push_back(BrowserDownloadRecord {
+                        id: Uuid::new_v4().to_string(),
+                        page_id: event.page_id.clone(),
+                        url: event.url.clone().unwrap_or_default(),
+                        path: event.detail.as_ref().map(PathBuf::from),
+                        success: None,
+                        error: None,
+                        updated_at_ms: event.timestamp_ms,
+                    });
+                }
+                BrowserLifecycleEventKind::DownloadFinished => {
+                    let success = event
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.starts_with("completed:"));
+                    if let Some(download) = state.downloads.iter_mut().rev().find(|download| {
+                        download.page_id == event.page_id
+                            && download.url == event.url.clone().unwrap_or_default()
+                            && download.success.is_none()
+                    }) {
+                        download.success = Some(success);
+                        download.error = (!success).then(|| {
+                            event
+                                .detail
+                                .clone()
+                                .unwrap_or_else(|| "download failed".to_string())
+                        });
+                        download.updated_at_ms = event.timestamp_ms;
+                    }
+                }
+                BrowserLifecycleEventKind::PermissionRequested => {
+                    let detail = event.detail.as_deref().and_then(|value| {
+                        serde_json::from_str::<NativePermissionDetail>(value).ok()
+                    });
+                    state.permissions.push_back(PermissionRequest {
+                        id: detail
+                            .as_ref()
+                            .map(|value| value.request_id.clone())
+                            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                        page_id: event.page_id.clone(),
+                        origin: event.url.clone().unwrap_or_default(),
+                        permission: detail
+                            .map(|value| value.permission)
+                            .or_else(|| event.detail.clone())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        requested_at_ms: event.timestamp_ms,
+                    });
+                }
+                BrowserLifecycleEventKind::CertificateError => {
+                    let detail = event.detail.as_deref().and_then(|value| {
+                        serde_json::from_str::<NativeCertificateDetail>(value).ok()
+                    });
+                    state.certificates.push_back(CertificateRequest {
+                        id: detail
+                            .as_ref()
+                            .map(|value| value.request_id.clone())
+                            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                        page_id: event.page_id.clone(),
+                        origin: event.url.clone().unwrap_or_default(),
+                        error_code: detail
+                            .map(|value| value.error_code)
+                            .or_else(|| event.detail.clone())
+                            .unwrap_or_else(|| "certificate_error".to_string()),
+                        requested_at_ms: event.timestamp_ms,
+                    });
+                }
+                BrowserLifecycleEventKind::DialogRequested => {
+                    let detail = event
+                        .detail
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<NativeDialogDetail>(value).ok());
+                    state.dialogs.push_back(BrowserDialogRequest {
+                        id: detail
+                            .as_ref()
+                            .map(|value| value.request_id.clone())
+                            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                        page_id: event.page_id.clone(),
+                        origin: event.url.clone().unwrap_or_default(),
+                        kind: detail
+                            .as_ref()
+                            .map(|value| value.kind)
+                            .unwrap_or(BrowserDialogKind::Alert),
+                        message: detail
+                            .as_ref()
+                            .map(|value| value.message.clone())
+                            .or_else(|| event.detail.clone())
+                            .unwrap_or_default(),
+                        default_text: detail.and_then(|value| value.default_text),
+                        requested_at_ms: event.timestamp_ms,
+                    });
+                }
+                _ => {}
+            }
+            let normalized = push_event_locked(
+                &mut state,
+                &event.page_id,
+                event.navigation_generation,
+                event.kind,
+                event.url,
+                event.detail,
+            );
+            accepted.push(normalized);
+        }
+        Ok(accepted)
+    }
+
+    pub fn lifecycle_events_since(
+        &self,
+        after_sequence: u64,
+    ) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
+        self.sync_provider_events()?;
+        Ok(lock(&self.state)?
+            .events
+            .iter()
+            .filter(|event| event.sequence > after_sequence)
+            .cloned()
+            .collect())
+    }
+
+    pub fn downloads(&self) -> BrowserResult<Vec<BrowserDownloadRecord>> {
+        Ok(lock(&self.state)?.downloads.iter().cloned().collect())
+    }
+
+    pub fn close_page(&self, page_id: &str) -> BrowserResult<()> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.provider.close(page_id)?;
+        let mut state = lock(&self.state)?;
+        let page = state
+            .pages
+            .remove(page_id)
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        if let Some(profile) = state.profiles.get_mut(&page.public.profile_id) {
+            profile
+                .public
+                .page_ids
+                .retain(|candidate| candidate != page_id);
+        }
+        state
+            .permissions
+            .retain(|request| request.page_id != page_id);
+        state
+            .certificates
+            .retain(|request| request.page_id != page_id);
+        state.dialogs.retain(|request| request.page_id != page_id);
+        push_event_locked(
+            &mut state,
+            page_id,
+            page.public.navigation_generation,
+            BrowserLifecycleEventKind::PageClosed,
+            Some(page.public.url),
+            None,
+        );
+        lock(&self.page_mutations)?.remove(page_id);
+        Ok(())
+    }
+
+    pub fn close_profile(&self, profile_id: &str) -> BrowserResult<()> {
+        let pages = {
+            let state = lock(&self.state)?;
+            state
+                .profiles
+                .get(profile_id)
+                .map(|profile| profile.public.page_ids.clone())
+                .ok_or_else(|| BrowserError::not_found(profile_id))?
+        };
+        for page_id in pages {
+            self.close_page(&page_id)?;
+        }
+        lock(&self.state)?.profiles.remove(profile_id);
+        Ok(())
+    }
+
+    pub fn cleanup_workspace(&self, workspace_id: &str) -> BrowserResult<()> {
+        let profiles = {
+            let state = lock(&self.state)?;
+            state
+                .profiles
+                .values()
+                .filter(|profile| profile.public.workspace_id.as_deref() == Some(workspace_id))
+                .map(|profile| profile.public.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for profile_id in profiles {
+            self.close_profile(&profile_id)?;
+        }
+        let remaining_pages = {
+            let state = lock(&self.state)?;
+            state
+                .pages
+                .values()
+                .filter(|page| page.public.workspace_id == workspace_id)
+                .map(|page| page.public.id.clone())
+                .collect::<Vec<_>>()
+        };
+        for page_id in remaining_pages {
+            self.close_page(&page_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn save_state(&self) -> BrowserResult<()> {
+        let _persistence = lock(&self.persistence)?;
+        let document = {
+            let state = lock(&self.state)?;
+            let persistent_profiles = state
+                .profiles
+                .values()
+                .filter(|profile| profile.public.kind != ProfileKind::Incognito)
+                .map(|profile| RestoreProfile {
+                    id: profile.public.id.clone(),
+                    kind: profile.public.kind,
+                    workspace_id: profile.public.workspace_id.clone(),
+                })
+                .collect::<Vec<_>>();
+            let persistent_ids = persistent_profiles
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<HashSet<_>>();
+            let pages = state
+                .pages
+                .values()
+                .filter(|page| persistent_ids.contains(page.public.profile_id.as_str()))
+                .map(|page| RestorePage {
+                    id: page.public.id.clone(),
+                    workspace_id: page.public.workspace_id.clone(),
+                    profile_id: page.public.profile_id.clone(),
+                    url: page.public.url.clone(),
+                    title: page.public.title.clone(),
+                    bounds: page.public.bounds,
+                    device_metrics: page.public.device_metrics,
+                })
+                .collect::<Vec<_>>();
+            BrowserRestoreDocument {
+                version: BROWSER_RESTORE_VERSION,
+                profiles: persistent_profiles,
+                pages,
+            }
+        };
+        let bytes = serde_json::to_vec(&document).map_err(internal_error)?;
+        if bytes.len() as u64 > MAX_BROWSER_RESTORE_BYTES {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Internal,
+                "browser restore state exceeds the bounded size",
+            ));
+        }
+        if let Some(parent) = self.restore_path.parent() {
+            fs::create_dir_all(parent).map_err(internal_error)?;
+        }
+        let temporary = self.restore_path.with_extension("json.tmp");
+        let backup = self.restore_path.with_extension("json.bak");
+        fs::write(&temporary, bytes).map_err(internal_error)?;
+        if self.restore_path.exists() {
+            let _ = fs::copy(&self.restore_path, &backup);
+            fs::remove_file(&self.restore_path).map_err(internal_error)?;
+        }
+        fs::rename(&temporary, &self.restore_path).map_err(internal_error)
+    }
+
+    pub fn restore_workspace(
+        &self,
+        workspace_id: &str,
+        fallback_bounds: PhysicalBounds,
+    ) -> BrowserResult<Vec<BrowserPage>> {
+        validate_identifier("workspace", workspace_id)?;
+        if !fallback_bounds.validate() {
+            return Err(BrowserError::invalid("invalid browser restore bounds"));
+        }
+        {
+            let mut restored = lock(&self.restored_workspaces)?;
+            if !restored.insert(workspace_id.to_string()) {
+                return Ok(self
+                    .pages()?
+                    .into_iter()
+                    .filter(|page| page.workspace_id == workspace_id)
+                    .collect());
+            }
+        }
+        let Some(document) = self.load_restore_document()? else {
+            return Ok(Vec::new());
+        };
+        let restored_pages = document
+            .pages
+            .into_iter()
+            .filter(|page| page.workspace_id == workspace_id)
+            .collect::<Vec<_>>();
+        let needed_profiles = restored_pages
+            .iter()
+            .map(|page| page.profile_id.as_str())
+            .collect::<HashSet<_>>();
+        let existing_profiles = self
+            .profiles()?
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect::<HashSet<_>>();
+        for profile in document.profiles {
+            if needed_profiles.contains(profile.id.as_str())
+                && !existing_profiles.contains(&profile.id)
+            {
+                self.create_profile(profile.id, profile.kind, profile.workspace_id)?;
+            }
+        }
+        for restored in restored_pages {
+            if self.page(&restored.id).is_ok() {
+                continue;
+            }
+            let bounds = if restored.bounds.validate() {
+                restored.bounds
+            } else {
+                fallback_bounds
+            };
+            let page = match self.create_page(
+                restored.id.clone(),
+                restored.workspace_id.clone(),
+                &restored.profile_id,
+                bounds,
+            ) {
+                Ok(page) => page,
+                Err(error) if error.code == BrowserErrorCode::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if restored.url != DEFAULT_URL {
+                self.navigate(&page.id, &restored.url)?;
+            }
+            if let Some(metrics) = restored.device_metrics {
+                let _ = self.set_device_metrics(&page.id, metrics);
+            }
+            self.set_visible(&page.id, false)?;
+            let mut state = lock(&self.state)?;
+            let generation = {
+                let stored = state
+                    .pages
+                    .get_mut(&page.id)
+                    .ok_or_else(|| BrowserError::not_found(&page.id))?;
+                stored.public.title = restored.title;
+                stored.public.navigation_generation
+            };
+            push_event_locked(
+                &mut state,
+                &page.id,
+                generation,
+                BrowserLifecycleEventKind::Restored,
+                Some(restored.url),
+                None,
+            );
+        }
+        Ok(self
+            .pages()?
+            .into_iter()
+            .filter(|page| page.workspace_id == workspace_id)
+            .collect())
+    }
+
+    fn load_restore_document(&self) -> BrowserResult<Option<BrowserRestoreDocument>> {
+        let _persistence = lock(&self.persistence)?;
+        let backup = self.restore_path.with_extension("json.bak");
+        for (path, quarantine) in [(&self.restore_path, true), (&backup, false)] {
+            if !path.exists() {
+                continue;
+            }
+            let result = read_restore_document(path).and_then(|document| {
+                validate_restore_document(&document)?;
+                for page in &document.pages {
+                    self.policy.normalize_navigation(&page.url)?;
+                }
+                Ok(document)
+            });
+            match result {
+                Ok(document) => return Ok(Some(document)),
+                Err(_) if quarantine => {
+                    let corrupt = self
+                        .restore_path
+                        .with_extension(format!("corrupt-{}", now_ms()));
+                    let _ = fs::rename(path, corrupt);
+                }
+                Err(_) => continue,
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn policy(&self) -> &BrowserPolicy {
+        &self.policy
+    }
+
+    fn mutation_lock(&self, page_id: &str) -> BrowserResult<Arc<Mutex<()>>> {
+        lock(&self.page_mutations)?
+            .get(page_id)
+            .cloned()
+            .ok_or_else(|| BrowserError::not_found(page_id))
+    }
+}
+
+fn read_restore_document(path: &Path) -> BrowserResult<BrowserRestoreDocument> {
+    let metadata = fs::metadata(path).map_err(internal_error)?;
+    if metadata.len() > MAX_BROWSER_RESTORE_BYTES {
+        return Err(BrowserError::new(
+            BrowserErrorCode::Internal,
+            "browser restore file exceeds the bounded size",
+        ));
+    }
+    serde_json::from_slice(&fs::read(path).map_err(internal_error)?).map_err(internal_error)
+}
+
+fn validate_restore_document(document: &BrowserRestoreDocument) -> BrowserResult<()> {
+    if document.version != BROWSER_RESTORE_VERSION
+        || document.profiles.len() > 256
+        || document.pages.len() > 4_096
+    {
+        return Err(BrowserError::new(
+            BrowserErrorCode::Internal,
+            "invalid browser restore document header",
+        ));
+    }
+    let mut profiles = HashSet::new();
+    for profile in &document.profiles {
+        validate_identifier("profile", &profile.id)?;
+        if profile.kind == ProfileKind::Incognito || !profiles.insert(profile.id.as_str()) {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Internal,
+                "invalid browser restore profile",
+            ));
+        }
+        if let Some(workspace_id) = profile.workspace_id.as_deref() {
+            validate_identifier("workspace", workspace_id)?;
+        }
+    }
+    let mut pages = HashSet::new();
+    for page in &document.pages {
+        validate_identifier("page", &page.id)?;
+        validate_identifier("workspace", &page.workspace_id)?;
+        validate_identifier("profile", &page.profile_id)?;
+        if !profiles.contains(page.profile_id.as_str())
+            || !pages.insert(page.id.as_str())
+            || !page.bounds.validate()
+            || page
+                .device_metrics
+                .is_some_and(|metrics| !metrics.validate())
+        {
+            return Err(BrowserError::new(
+                BrowserErrorCode::Internal,
+                "invalid browser restore page",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn internal_error(error: impl std::fmt::Display) -> BrowserError {
+    BrowserError::new(BrowserErrorCode::Internal, error.to_string())
+}
+
+fn push_event_locked(
+    state: &mut ManagerState,
+    page_id: &str,
+    navigation_generation: u64,
+    kind: BrowserLifecycleEventKind,
+    url: Option<String>,
+    detail: Option<String>,
+) -> BrowserLifecycleEvent {
+    state.event_sequence = state.event_sequence.saturating_add(1);
+    let event = BrowserLifecycleEvent {
+        sequence: state.event_sequence,
+        page_id: page_id.to_string(),
+        navigation_generation,
+        kind,
+        url,
+        detail,
+        timestamp_ms: now_ms(),
+    };
+    state.events.push_back(event.clone());
+    event
+}
+
+fn validate_identifier(kind: &str, value: &str) -> BrowserResult<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(BrowserError::invalid(format!("invalid {kind} id")));
+    }
+    Ok(())
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> BrowserResult<MutexGuard<'_, T>> {
+    mutex.lock().map_err(|_| {
+        BrowserError::new(BrowserErrorCode::Internal, "browser state lock is poisoned")
+    })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}

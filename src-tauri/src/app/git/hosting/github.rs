@@ -72,12 +72,10 @@ impl GithubClient {
 
     fn ci_for_ref(&self, ref_name: &str) -> Result<CiStatus> {
         let encoded_ref = percent_encode_segment(ref_name);
-        let check_runs = self.get(&self.repo_url(&format!(
-            "/commits/{encoded_ref}/check-runs?per_page=100"
-        )))?;
-        let commit_status = self.get(&self.repo_url(&format!(
-            "/commits/{encoded_ref}/status?per_page=100"
-        )))?;
+        let check_runs =
+            self.get(&self.repo_url(&format!("/commits/{encoded_ref}/check-runs?per_page=100")))?;
+        let commit_status =
+            self.get(&self.repo_url(&format!("/commits/{encoded_ref}/status?per_page=100")))?;
         parse_github_ci(&check_runs, &commit_status)
     }
 }
@@ -316,7 +314,8 @@ pub(crate) fn parse_github_ci(check_runs_body: &str, commit_status_body: &str) -
     let commit_statuses: GithubCommitStatuses =
         serde_json::from_str(commit_status_body).context("parse GitHub commit statuses")?;
 
-    let mut checks = Vec::with_capacity(check_runs.check_runs.len() + commit_statuses.statuses.len());
+    let mut checks =
+        Vec::with_capacity(check_runs.check_runs.len() + commit_statuses.statuses.len());
     for check in check_runs.check_runs {
         checks.push(CiCheck {
             name: check.name,
@@ -459,8 +458,8 @@ mod tests {
         .expect("parse successful CI");
         assert_eq!(success.state, "success");
 
-        let none = parse_github_ci(r#"{"check_runs":[]}"#, r#"{"statuses":[]}"#)
-            .expect("parse empty CI");
+        let none =
+            parse_github_ci(r#"{"check_runs":[]}"#, r#"{"statuses":[]}"#).expect("parse empty CI");
         assert_eq!(none.state, "none");
     }
 
@@ -488,13 +487,8 @@ mod tests {
         let default = GithubClient::new("acme", "widget", "token");
         assert_eq!(default.base_url, GITHUB_API_URL);
 
-        let fixture = GithubClient::with_base_url(
-            "http://127.0.0.1:1234/",
-            "acme",
-            "widget",
-            "token",
-        );
+        let fixture =
+            GithubClient::with_base_url("http://127.0.0.1:1234/", "acme", "widget", "token");
         assert_eq!(fixture.base_url, "http://127.0.0.1:1234");
     }
-
 }

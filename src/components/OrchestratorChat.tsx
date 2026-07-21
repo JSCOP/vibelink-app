@@ -9,6 +9,7 @@ import { composeWorkspaceDigestPrompt, tasksForSession } from '../state/kanban'
 import { HermesMessage } from './HermesMessage'
 import { HermesPermissionPrompt } from './HermesPermissionPrompt'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
+import { subscribeAgentDraft } from '../browser/agentContext'
 
 type AgentSection = 'chat' | 'skills' | 'messaging' | 'artifacts'
 
@@ -78,6 +79,11 @@ export function OrchestratorChat() {
         : status === 'error'
           ? 'Error (chat still available)'
           : 'Idle — type to start'
+
+  useEffect(() => subscribeAgentDraft((draft) => {
+    setAgentSection('chat')
+    setMessage((current) => current.trim() ? `${current.trim()}\n\n${draft}` : draft)
+  }), [])
 
   useEffect(() => {
     let cancelled = false
