@@ -20,6 +20,7 @@ import {
   type IDockviewPanel,
   type IDockviewPanelProps,
 } from 'dockview-react'
+import { getGridLocation, type AddPanelOptions } from 'dockview-core'
 import { Bot, FileCode2, FolderTree, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, MoreHorizontal, Plus, SquareTerminal } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
 import { QuickPick } from '../components/QuickPick'
@@ -88,6 +89,7 @@ import {
   planTerminalArrangement,
 } from './workspaceLayoutModel'
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
+import { finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 
 type WorkspaceContentPanelProps = IDockviewPanelProps<WorkspaceContentParams>
 type TerminalContentParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
@@ -527,7 +529,13 @@ export function WorkspaceView({
     }
     const targetGroup = options.targetGroupId ? api.groups.find((group) => group.id === options.targetGroupId) : undefined
     const referencePanel = options.referencePanelId ? api.getPanel(options.referencePanelId) : undefined
-    return api.addPanel({
+    const localSplit = referencePanel && options.direction && referencePanel.group.api.location.type === 'grid'
+      ? {
+          initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), options.direction),
+          referenceSize: options.direction === 'right' ? referencePanel.group.api.width : referencePanel.group.api.height,
+        }
+      : null
+    const panelOptions = {
       id: panelId,
       component: params.kind,
       tabComponent: 'workspaceContentTab',
@@ -542,7 +550,16 @@ export function WorkspaceView({
           : api.activeGroup
             ? { referenceGroup: api.activeGroup }
             : undefined,
-    })
+      ...(localSplit?.initialSize ?? {}),
+    }
+    // Dockview 6.6.1 accepts its public Sizing.Split value at this boundary,
+    // but AddPanelOptions narrows initialWidth/initialHeight to number. Keep the
+    // compatibility cast contained here so ordinary panel creation stays typed.
+    const panel = api.addPanel(panelOptions as AddPanelOptions<WorkspaceContentParams>)
+    if (referencePanel && options.direction && localSplit) {
+      finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+    }
+    return panel
   }, [])
 
   const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: AddContentOptions & { profileId?: string | null } = {}) => {
