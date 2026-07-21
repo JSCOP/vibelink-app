@@ -3320,6 +3320,28 @@ fn dispatch_message(
             lock_state(&state).attach_pane(client_id, session_id, pane_id)?;
             Ok(())
         }
+        ClientToDaemon::SubscribePane {
+            req,
+            session_id,
+            pane_id,
+        } => {
+            info!(%client_id, %session_id, %pane_id, "subscribing pane atomically");
+            let snapshot = lock_state(&state).subscribe_pane(client_id, session_id, pane_id)?;
+            send(
+                tx,
+                DaemonToClient::Reply {
+                    req,
+                    result: ReplyResult::TerminalSnapshot(snapshot),
+                },
+            )
+        }
+        ClientToDaemon::DetachPane {
+            session_id,
+            pane_id,
+        } => {
+            lock_state(&state).detach_pane(client_id, session_id, pane_id)?;
+            Ok(())
+        }
         ClientToDaemon::WritePane {
             session_id,
             pane_id,
@@ -3723,6 +3745,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::DeleteSession { req, .. }
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
+        | ClientToDaemon::SubscribePane { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
         | ClientToDaemon::SetPaneRole { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
@@ -3746,6 +3769,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::DetachSession { .. }
         | ClientToDaemon::SaveLayout { .. }
         | ClientToDaemon::AttachPane { .. }
+        | ClientToDaemon::DetachPane { .. }
         | ClientToDaemon::WritePane { .. }
         | ClientToDaemon::ResizePane { .. }
         | ClientToDaemon::NotifySessionChanged { .. } => None,
@@ -4233,6 +4257,28 @@ mod tests {
         };
 
         assert_eq!(request_id(&msg), Some(42));
+    }
+
+    #[test]
+    fn request_id_tracks_subscribe_but_not_detach_pane() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+
+        assert_eq!(
+            request_id(&ClientToDaemon::SubscribePane {
+                req: 43,
+                session_id,
+                pane_id,
+            }),
+            Some(43)
+        );
+        assert_eq!(
+            request_id(&ClientToDaemon::DetachPane {
+                session_id,
+                pane_id,
+            }),
+            None
+        );
     }
 
     #[test]

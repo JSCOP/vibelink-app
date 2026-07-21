@@ -8,6 +8,19 @@ pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 pub const REMOTE_PANE_LEASE_TTL_MS: u64 = 15_000;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSnapshot {
+    pub session_id: Uuid,
+    pub pane_id: Uuid,
+    pub pane_generation: u64,
+    pub output_sequence: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub alive: bool,
+    pub data: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -292,6 +305,15 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         pane_id: Uuid,
     },
+    SubscribePane {
+        req: Req,
+        session_id: Uuid,
+        pane_id: Uuid,
+    },
+    DetachPane {
+        session_id: Uuid,
+        pane_id: Uuid,
+    },
     WritePane {
         session_id: Uuid,
         pane_id: Uuid,
@@ -479,6 +501,7 @@ pub enum ReplyResult {
     },
     PaneSpawned(PaneMeta),
     ScrollbackData(Vec<u8>),
+    TerminalSnapshot(TerminalSnapshot),
     Ok,
     Control(String),
     Orchestration(String),

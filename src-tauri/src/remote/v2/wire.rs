@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use thiserror::Error;
 
 pub const BINARY_HEADER_BYTES: usize = 28;
 pub const MAX_BINARY_PAYLOAD_BYTES: usize = 60 * 1024;
@@ -209,6 +210,278 @@ impl BinaryStreamQueue {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalBackpressureReason {
+    PerStream,
+    Connection,
+    ResyncRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalRecordDecision {
+    Recorded,
+    Backpressured { reason: TerminalBackpressureReason },
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum TerminalFlowError {
+    #[error("remote-v2 terminal stream id must be non-zero")]
+    InvalidStreamId,
+    #[error("remote-v2 terminal flow stream limit {max_streams} exceeded")]
+    StreamLimitExceeded { max_streams: usize },
+    #[error(
+        "remote-v2 terminal sequence {received} is not above highest sent sequence {highest_sent} for stream {stream_id}"
+    )]
+    SequenceNotIncreasing {
+        stream_id: u64,
+        highest_sent: u64,
+        received: u64,
+    },
+    #[error(
+        "remote-v2 terminal ack {received} is ahead of highest sent sequence {highest_sent} for stream {stream_id}"
+    )]
+    AckAhead {
+        stream_id: u64,
+        highest_sent: u64,
+        received: u64,
+    },
+    #[error(
+        "remote-v2 terminal ack {received} is behind last acknowledged sequence {last_acknowledged} for stream {stream_id}"
+    )]
+    AckBehind {
+        stream_id: u64,
+        last_acknowledged: u64,
+        received: u64,
+    },
+}
+
+#[derive(Default)]
+struct TerminalAckStream {
+    sent: VecDeque<(u64, usize)>,
+    last_acknowledged_sequence: u64,
+    highest_sent_sequence: u64,
+    unacked_bytes: usize,
+    requires_resync: bool,
+}
+
+pub struct TerminalAckWindow {
+    max_unacked_bytes_per_stream: usize,
+    max_unacked_bytes_per_connection: usize,
+    connection_unacked_bytes: usize,
+    streams: HashMap<u64, TerminalAckStream>,
+}
+
+impl TerminalAckWindow {
+    pub fn new(
+        max_unacked_bytes_per_stream: usize,
+        max_unacked_bytes_per_connection: usize,
+    ) -> Result<Self> {
+        if max_unacked_bytes_per_stream == 0 || max_unacked_bytes_per_connection == 0 {
+            bail!("remote-v2 terminal flow bounds must be non-zero");
+        }
+        Ok(Self {
+            max_unacked_bytes_per_stream,
+            max_unacked_bytes_per_connection,
+            connection_unacked_bytes: 0,
+            streams: HashMap::new(),
+        })
+    }
+
+    pub fn record_sent(
+        &mut self,
+        stream_id: u64,
+        sequence: u64,
+        bytes: usize,
+    ) -> std::result::Result<TerminalRecordDecision, TerminalFlowError> {
+        if stream_id == 0 {
+            return Err(TerminalFlowError::InvalidStreamId);
+        }
+        let highest_sent = self
+            .streams
+            .get(&stream_id)
+            .map_or(0, |stream| stream.highest_sent_sequence);
+        if sequence == 0 || sequence <= highest_sent {
+            return Err(TerminalFlowError::SequenceNotIncreasing {
+                stream_id,
+                highest_sent,
+                received: sequence,
+            });
+        }
+
+        let max_unacked_bytes_per_stream = self.max_unacked_bytes_per_stream;
+        let max_unacked_bytes_per_connection = self.max_unacked_bytes_per_connection;
+        let connection_unacked_bytes = self.connection_unacked_bytes;
+        let stream = self.ensure_stream(stream_id)?;
+        if stream.requires_resync && bytes > 0 {
+            return Ok(TerminalRecordDecision::Backpressured {
+                reason: TerminalBackpressureReason::ResyncRequired,
+            });
+        }
+
+        let reason = if bytes > max_unacked_bytes_per_stream.saturating_sub(stream.unacked_bytes) {
+            Some(TerminalBackpressureReason::PerStream)
+        } else if bytes > max_unacked_bytes_per_connection.saturating_sub(connection_unacked_bytes)
+        {
+            Some(TerminalBackpressureReason::Connection)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            stream.requires_resync = true;
+            return Ok(TerminalRecordDecision::Backpressured { reason });
+        }
+
+        stream.highest_sent_sequence = sequence;
+        stream.unacked_bytes += bytes;
+        if bytes > 0 {
+            stream.sent.push_back((sequence, bytes));
+        }
+        self.connection_unacked_bytes += bytes;
+        Ok(TerminalRecordDecision::Recorded)
+    }
+
+    pub fn ack(
+        &mut self,
+        stream_id: u64,
+        sequence: u64,
+    ) -> std::result::Result<usize, TerminalFlowError> {
+        if stream_id == 0 {
+            return Err(TerminalFlowError::InvalidStreamId);
+        }
+        let (highest_sent, last_acknowledged) = self
+            .streams
+            .get(&stream_id)
+            .map(|stream| {
+                (
+                    stream.highest_sent_sequence,
+                    stream.last_acknowledged_sequence,
+                )
+            })
+            .unwrap_or((0, 0));
+        if sequence > highest_sent {
+            return Err(TerminalFlowError::AckAhead {
+                stream_id,
+                highest_sent,
+                received: sequence,
+            });
+        }
+        if sequence < last_acknowledged {
+            return Err(TerminalFlowError::AckBehind {
+                stream_id,
+                last_acknowledged,
+                received: sequence,
+            });
+        }
+        if sequence == last_acknowledged {
+            return Ok(0);
+        }
+
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
+            .expect("a positive valid terminal ack has sent history");
+        let mut released = 0;
+        while stream
+            .sent
+            .front()
+            .is_some_and(|(sent_sequence, _)| *sent_sequence <= sequence)
+        {
+            let (_, bytes) = stream.sent.pop_front().expect("front was present");
+            released += bytes;
+        }
+        stream.last_acknowledged_sequence = sequence;
+        stream.unacked_bytes -= released;
+        self.connection_unacked_bytes -= released;
+        Ok(released)
+    }
+
+    pub fn mark_gap(&mut self, stream_id: u64) -> std::result::Result<usize, TerminalFlowError> {
+        let stream = self.ensure_stream(stream_id)?;
+        let released = stream.unacked_bytes;
+        stream.sent.clear();
+        stream.unacked_bytes = 0;
+        stream.requires_resync = true;
+        self.connection_unacked_bytes -= released;
+        Ok(released)
+    }
+
+    pub fn remove_stream(
+        &mut self,
+        stream_id: u64,
+    ) -> std::result::Result<usize, TerminalFlowError> {
+        if stream_id == 0 {
+            return Err(TerminalFlowError::InvalidStreamId);
+        }
+        let Some(stream) = self.streams.remove(&stream_id) else {
+            return Ok(0);
+        };
+        self.connection_unacked_bytes -= stream.unacked_bytes;
+        Ok(stream.unacked_bytes)
+    }
+
+    pub fn complete_resync(&mut self, stream_id: u64) -> bool {
+        let Some(stream) = self.streams.get_mut(&stream_id) else {
+            return false;
+        };
+        let was_required = stream.requires_resync;
+        stream.requires_resync = false;
+        was_required
+    }
+
+    pub fn requires_resync(&self, stream_id: u64) -> bool {
+        self.streams
+            .get(&stream_id)
+            .is_some_and(|stream| stream.requires_resync)
+    }
+
+    pub fn stream_unacked_bytes(&self, stream_id: u64) -> usize {
+        self.streams
+            .get(&stream_id)
+            .map_or(0, |stream| stream.unacked_bytes)
+    }
+
+    pub fn connection_unacked_bytes(&self) -> usize {
+        self.connection_unacked_bytes
+    }
+
+    pub fn last_acknowledged_sequence(&self, stream_id: u64) -> u64 {
+        self.streams
+            .get(&stream_id)
+            .map_or(0, |stream| stream.last_acknowledged_sequence)
+    }
+
+    pub fn highest_sent_sequence(&self, stream_id: u64) -> u64 {
+        self.streams
+            .get(&stream_id)
+            .map_or(0, |stream| stream.highest_sent_sequence)
+    }
+
+    pub fn tracked_streams(&self) -> usize {
+        self.streams.len()
+    }
+
+    fn ensure_stream(
+        &mut self,
+        stream_id: u64,
+    ) -> std::result::Result<&mut TerminalAckStream, TerminalFlowError> {
+        if stream_id == 0 {
+            return Err(TerminalFlowError::InvalidStreamId);
+        }
+        if !self.streams.contains_key(&stream_id) {
+            if self.streams.len() >= MAX_SEQUENCE_DOMAINS {
+                return Err(TerminalFlowError::StreamLimitExceeded {
+                    max_streams: MAX_SEQUENCE_DOMAINS,
+                });
+            }
+            self.streams.insert(stream_id, TerminalAckStream::default());
+        }
+        Ok(self
+            .streams
+            .get_mut(&stream_id)
+            .expect("terminal stream was inserted"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SequenceError {
     Replay { expected: u64, received: u64 },
@@ -227,15 +500,7 @@ impl DomainSequenceValidator {
         domain: &str,
         sequence: u64,
     ) -> std::result::Result<(), SequenceError> {
-        if domain.is_empty()
-            || domain.len() > 64
-            || !domain
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        {
-            return Err(SequenceError::InvalidDomain);
-        }
-        if !self.expected.contains_key(domain) && self.expected.len() >= MAX_SEQUENCE_DOMAINS {
+        if !self.accepts_domain(domain) {
             return Err(SequenceError::InvalidDomain);
         }
         let expected = self.expected.entry(domain.to_string()).or_insert(1);
@@ -256,12 +521,24 @@ impl DomainSequenceValidator {
     }
 
     pub fn resync(&mut self, domain: &str, next_sequence: u64) -> Result<()> {
+        if !self.accepts_domain(domain) {
+            bail!("invalid remote-v2 sequence domain");
+        }
         let current = *self.expected.get(domain).unwrap_or(&1);
         if next_sequence < current || next_sequence.saturating_sub(current) > MAX_RESYNC_ADVANCE {
             bail!("remote-v2 resync is outside the allowed replay window");
         }
         self.expected.insert(domain.to_string(), next_sequence);
         Ok(())
+    }
+
+    fn accepts_domain(&self, domain: &str) -> bool {
+        !domain.is_empty()
+            && domain.len() <= 64
+            && domain
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+            && (self.expected.contains_key(domain) || self.expected.len() < MAX_SEQUENCE_DOMAINS)
     }
 
     pub fn expected(&self, domain: &str) -> u64 {
@@ -496,6 +773,174 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ack_window_rejects_zero_bounds_and_enforces_stream_ceiling() {
+        assert!(TerminalAckWindow::new(0, 1).is_err());
+        assert!(TerminalAckWindow::new(1, 0).is_err());
+
+        let mut window = TerminalAckWindow::new(1, MAX_SEQUENCE_DOMAINS).unwrap();
+        for stream_id in 1..=MAX_SEQUENCE_DOMAINS as u64 {
+            assert_eq!(
+                window.record_sent(stream_id, 1, 0).unwrap(),
+                TerminalRecordDecision::Recorded
+            );
+        }
+        assert_eq!(window.tracked_streams(), MAX_SEQUENCE_DOMAINS);
+        assert_eq!(
+            window.record_sent(MAX_SEQUENCE_DOMAINS as u64 + 1, 1, 0),
+            Err(TerminalFlowError::StreamLimitExceeded {
+                max_streams: MAX_SEQUENCE_DOMAINS
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_ack_window_applies_per_stream_ceiling_without_growing_accounting() {
+        let mut window = TerminalAckWindow::new(5, 20).unwrap();
+        assert_eq!(
+            window.record_sent(1, 1, 3).unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        assert_eq!(
+            window.record_sent(1, 2, 2).unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        assert_eq!(
+            window.record_sent(1, 3, 1).unwrap(),
+            TerminalRecordDecision::Backpressured {
+                reason: TerminalBackpressureReason::PerStream
+            }
+        );
+        assert!(window.requires_resync(1));
+        assert_eq!(window.stream_unacked_bytes(1), 5);
+        assert_eq!(window.connection_unacked_bytes(), 5);
+        assert_eq!(window.highest_sent_sequence(1), 2);
+        assert_eq!(
+            window.record_sent(1, 4, 0).unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        assert_eq!(window.highest_sent_sequence(1), 4);
+        assert_eq!(window.ack(1, 4).unwrap(), 5);
+        assert_eq!(window.last_acknowledged_sequence(1), 4);
+        assert!(window.requires_resync(1));
+        assert!(window.complete_resync(1));
+        assert_eq!(
+            window.record_sent(1, 5, 5).unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        assert_eq!(window.highest_sent_sequence(1), 5);
+        assert_eq!(window.last_acknowledged_sequence(1), 4);
+    }
+
+    #[test]
+    fn terminal_ack_window_applies_connection_ceiling_to_only_attempted_stream() {
+        let mut window = TerminalAckWindow::new(8, 8).unwrap();
+        window.record_sent(1, 1, 4).unwrap();
+        window.record_sent(2, 1, 4).unwrap();
+        assert_eq!(
+            window.record_sent(3, 1, 1).unwrap(),
+            TerminalRecordDecision::Backpressured {
+                reason: TerminalBackpressureReason::Connection
+            }
+        );
+        assert_eq!(window.connection_unacked_bytes(), 8);
+        assert_eq!(window.stream_unacked_bytes(3), 0);
+        assert!(!window.requires_resync(1));
+        assert!(!window.requires_resync(2));
+        assert!(window.requires_resync(3));
+    }
+
+    #[test]
+    fn terminal_ack_window_removal_releases_bytes_and_frees_stream_capacity() {
+        let mut window = TerminalAckWindow::new(8, 64).unwrap();
+        window.record_sent(1, 1, 7).unwrap();
+        for stream_id in 2..=MAX_SEQUENCE_DOMAINS as u64 {
+            window.record_sent(stream_id, 1, 0).unwrap();
+        }
+        assert_eq!(window.tracked_streams(), MAX_SEQUENCE_DOMAINS);
+        assert_eq!(window.connection_unacked_bytes(), 7);
+        assert_eq!(window.remove_stream(1).unwrap(), 7);
+        assert_eq!(window.connection_unacked_bytes(), 0);
+        assert_eq!(window.tracked_streams(), MAX_SEQUENCE_DOMAINS - 1);
+        assert_eq!(window.remove_stream(1).unwrap(), 0);
+        assert_eq!(
+            window
+                .record_sent(MAX_SEQUENCE_DOMAINS as u64 + 1, 1, 0)
+                .unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        assert_eq!(window.tracked_streams(), MAX_SEQUENCE_DOMAINS);
+        assert_eq!(
+            window.remove_stream(0),
+            Err(TerminalFlowError::InvalidStreamId)
+        );
+    }
+
+    #[test]
+    fn terminal_ack_window_releases_bytes_through_ack_and_rejects_invalid_acks() {
+        let mut window = TerminalAckWindow::new(20, 20).unwrap();
+        window.record_sent(1, 1, 3).unwrap();
+        window.record_sent(1, 3, 4).unwrap();
+        window.record_sent(1, 5, 2).unwrap();
+
+        assert_eq!(window.ack(1, 3).unwrap(), 7);
+        assert_eq!(window.stream_unacked_bytes(1), 2);
+        assert_eq!(window.connection_unacked_bytes(), 2);
+        assert_eq!(window.last_acknowledged_sequence(1), 3);
+        assert_eq!(window.ack(1, 3).unwrap(), 0);
+        assert_eq!(
+            window.ack(1, 6),
+            Err(TerminalFlowError::AckAhead {
+                stream_id: 1,
+                highest_sent: 5,
+                received: 6
+            })
+        );
+        assert_eq!(
+            window.ack(1, 2),
+            Err(TerminalFlowError::AckBehind {
+                stream_id: 1,
+                last_acknowledged: 3,
+                received: 2
+            })
+        );
+        assert_eq!(window.ack(1, 5).unwrap(), 2);
+        assert_eq!(window.connection_unacked_bytes(), 0);
+    }
+
+    #[test]
+    fn terminal_ack_window_gap_is_isolated_and_resync_preserves_sequence_history() {
+        let mut window = TerminalAckWindow::new(6, 12).unwrap();
+        window.record_sent(1, 2, 4).unwrap();
+        window.record_sent(2, 1, 5).unwrap();
+        assert_eq!(window.mark_gap(1).unwrap(), 4);
+        assert!(window.requires_resync(1));
+        assert!(!window.requires_resync(2));
+        assert_eq!(window.stream_unacked_bytes(1), 0);
+        assert_eq!(window.stream_unacked_bytes(2), 5);
+        assert_eq!(window.connection_unacked_bytes(), 5);
+
+        assert!(window.complete_resync(1));
+        assert!(!window.requires_resync(1));
+        assert_eq!(window.highest_sent_sequence(1), 2);
+        assert_eq!(window.last_acknowledged_sequence(1), 0);
+        assert_eq!(
+            window.record_sent(1, 2, 1),
+            Err(TerminalFlowError::SequenceNotIncreasing {
+                stream_id: 1,
+                highest_sent: 2,
+                received: 2
+            })
+        );
+        assert_eq!(
+            window.record_sent(1, 3, 6).unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        assert_eq!(window.ack(1, 3).unwrap(), 6);
+        assert_eq!(window.last_acknowledged_sequence(1), 3);
+        assert_eq!(window.connection_unacked_bytes(), 5);
+    }
+
+    #[test]
     fn domain_sequences_reject_duplicate_and_gap_until_explicit_resync() {
         let mut sequences = DomainSequenceValidator::default();
         sequences.validate("terminal", 1).unwrap();
@@ -516,6 +961,21 @@ mod tests {
         sequences.resync("terminal", 4).unwrap();
         sequences.validate("terminal", 4).unwrap();
         assert_eq!(sequences.expected("terminal"), 5);
+    }
+
+    #[test]
+    fn domain_resync_rejects_invalid_and_over_limit_domains() {
+        let mut sequences = DomainSequenceValidator::default();
+        assert!(sequences.resync("", 1).is_err());
+        assert!(sequences.resync("terminal/output", 1).is_err());
+        assert!(sequences.resync(&"x".repeat(65), 1).is_err());
+
+        for index in 0..MAX_SEQUENCE_DOMAINS {
+            sequences.resync(&format!("domain-{index}"), 1).unwrap();
+        }
+        assert!(sequences.resync("domain-0", 2).is_ok());
+        assert!(sequences.resync("one-too-many", 1).is_err());
+        assert_eq!(sequences.expected("one-too-many"), 1);
     }
 
     #[test]

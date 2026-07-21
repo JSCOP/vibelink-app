@@ -6,7 +6,7 @@ use crate::protocol::{
     RemotePaneLeaseEventKind, RemotePaneLeaseEventReason, RemotePaneLeaseReleaseOutcome,
     RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest, RemotePaneLeaseRestoration,
     RemotePaneLeaseRestorationStatus, RemotePaneLeaseResult, RemotePaneLeaseStaleReason,
-    RemotePaneLeaseStatusRequest, SessionMeta, REMOTE_PANE_LEASE_TTL_MS,
+    RemotePaneLeaseStatusRequest, SessionMeta, TerminalSnapshot, REMOTE_PANE_LEASE_TTL_MS,
 };
 use crossbeam_channel::Sender;
 use indexmap::IndexMap;
@@ -845,6 +845,47 @@ impl DaemonState {
         Ok(removed)
     }
 
+    pub fn subscribe_pane(
+        &mut self,
+        client_id: Uuid,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<TerminalSnapshot> {
+        let snapshot = {
+            let pane = self.pane_in_session(session_id, pane_id)?;
+            let (pane_generation, output_sequence) = pane.output_cursor();
+            TerminalSnapshot {
+                session_id,
+                pane_id,
+                pane_generation,
+                output_sequence,
+                cols: pane.config.cols,
+                rows: pane.config.rows,
+                alive: pane.alive,
+                data: pane.scrollback_snapshot(),
+            }
+        };
+        self.attach_client_to_pane(client_id, pane_id);
+        Ok(snapshot)
+    }
+
+    pub fn detach_pane(
+        &mut self,
+        client_id: Uuid,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<()> {
+        self.pane_in_session(session_id, pane_id)?;
+        let remove_entry = self.pane_clients.get_mut(&pane_id).is_some_and(|clients| {
+            clients.remove(&client_id);
+            clients.is_empty()
+        });
+        if remove_entry {
+            self.pane_clients.remove(&pane_id);
+        }
+        Ok(())
+    }
+
     pub fn attach_pane(
         &mut self,
         client_id: Uuid,
@@ -1498,6 +1539,162 @@ mod tests {
     }
 
     #[test]
+    fn subscribe_pane_returns_existing_bytes_once_and_routes_later_output() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = unbounded();
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        assert!(state
+            .record_output_and_push(pane_id, b"before subscribe")
+            .is_empty());
+
+        let snapshot = state
+            .subscribe_pane(client_id, workspace.id, pane_id)
+            .expect("subscribe pane");
+
+        assert_eq!(snapshot.data, b"before subscribe");
+        assert!(
+            rx.try_recv().is_err(),
+            "atomic subscription must not enqueue a legacy snapshot Output"
+        );
+
+        let senders = state.record_output_and_push(pane_id, b"after subscribe");
+        assert_eq!(senders.len(), 1);
+        senders[0]
+            .send(DaemonToClient::Output {
+                pane_id,
+                data: b"after subscribe".to_vec(),
+            })
+            .expect("send live output");
+        assert_eq!(
+            rx.recv().expect("live output"),
+            DaemonToClient::Output {
+                pane_id,
+                data: b"after subscribe".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn subscribe_pane_returns_exact_cursor_generation_and_geometry() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, _rx) = unbounded();
+        let mut config = test_config(pane_id);
+        config.cols = 137;
+        config.rows = 43;
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(config, true))
+            .expect("insert pane");
+        state.record_output_and_push(pane_id, b"first");
+        state.record_output_and_push(pane_id, b"second");
+
+        let snapshot = state
+            .subscribe_pane(client_id, workspace.id, pane_id)
+            .expect("subscribe pane");
+
+        assert_eq!(snapshot.session_id, workspace.id);
+        assert_eq!(snapshot.pane_id, pane_id);
+        assert_eq!(snapshot.pane_generation, 1);
+        assert_eq!(snapshot.output_sequence, 2);
+        assert_eq!((snapshot.cols, snapshot.rows), (137, 43));
+        assert!(snapshot.alive);
+        assert_eq!(snapshot.data, b"firstsecond");
+    }
+
+    #[test]
+    fn detach_pane_removes_only_the_requested_live_route() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_a = Uuid::new_v4();
+        let pane_b = Uuid::new_v4();
+        let client_a = Uuid::new_v4();
+        let client_b = Uuid::new_v4();
+        let (tx_a, rx_a) = unbounded();
+        let (tx_b, rx_b) = unbounded();
+        state.add_client(client_a, tx_a);
+        state.add_client(client_b, tx_b);
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_a), true))
+            .expect("insert pane a");
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_b), true))
+            .expect("insert pane b");
+        state
+            .subscribe_pane(client_a, workspace.id, pane_a)
+            .expect("subscribe client a to pane a");
+        state
+            .subscribe_pane(client_a, workspace.id, pane_b)
+            .expect("subscribe client a to pane b");
+        state
+            .subscribe_pane(client_b, workspace.id, pane_a)
+            .expect("subscribe client b to pane a");
+
+        state
+            .detach_pane(client_a, workspace.id, pane_a)
+            .expect("detach client a from pane a");
+
+        assert_eq!(state.attached_clients(pane_a), vec![client_b]);
+        assert_eq!(state.attached_clients(pane_b), vec![client_a]);
+        let senders = state.record_output_and_push(pane_a, b"live");
+        assert_eq!(senders.len(), 1);
+        senders[0]
+            .send(DaemonToClient::Output {
+                pane_id: pane_a,
+                data: b"live".to_vec(),
+            })
+            .expect("send remaining route");
+        assert!(rx_a.try_recv().is_err());
+        assert_eq!(
+            rx_b.recv().expect("client b live output"),
+            DaemonToClient::Output {
+                pane_id: pane_a,
+                data: b"live".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn subscribe_pane_preserves_dead_pane_metadata() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = unbounded();
+        let mut config = test_config(pane_id);
+        config.cols = 91;
+        config.rows = 27;
+        state.add_client(client_id, tx);
+        state
+            .insert_pane(workspace.id, Pane::for_test(config, false))
+            .expect("insert dead pane");
+        state.record_output_and_push(pane_id, b"final output");
+
+        let snapshot = state
+            .subscribe_pane(client_id, workspace.id, pane_id)
+            .expect("subscribe dead pane");
+
+        assert_eq!(snapshot.pane_generation, 1);
+        assert_eq!(snapshot.output_sequence, 1);
+        assert_eq!((snapshot.cols, snapshot.rows), (91, 27));
+        assert!(!snapshot.alive);
+        assert_eq!(snapshot.data, b"final output");
+        assert_eq!(state.attached_clients(pane_id), vec![client_id]);
+        assert!(
+            rx.try_recv().is_err(),
+            "dead metadata belongs in the snapshot reply, not a side event"
+        );
+    }
+
+    #[test]
     fn attach_pane_skips_replay_for_already_attached_clients() {
         let mut state = DaemonState::new();
         let workspace = state.create_session("Workspace".to_string(), None);
@@ -1799,42 +1996,32 @@ mod tests {
         );
         assert_eq!(claimed.effects.len(), 2);
 
-        let expired = &claimed.effects[0];
-        let restored = expired
-            .resize
+        let expired = claimed.effects[0]
+            .event
             .as_ref()
-            .expect("expired lease restoration resize");
-        assert_eq!((restored.cols, restored.rows), (80, 24));
-        match expired.event.as_ref().expect("expired lease lost event") {
-            RemotePaneLeaseEvent {
-                kind: RemotePaneLeaseEventKind::Lost,
-                reason: RemotePaneLeaseEventReason::Expired,
-                lease_id,
-                owner_connection_id,
-                restoration: Some(restoration),
-                ..
-            } => {
-                assert_eq!(*lease_id, first_lease.lease_id);
-                assert_eq!(*owner_connection_id, first_lease.owner_connection_id);
-                assert_eq!(
-                    restoration.status,
-                    RemotePaneLeaseRestorationStatus::Restored
-                );
-            }
-            event => panic!("unexpected expired lease event: {event:?}"),
-        }
+            .expect("expired lease lost event");
+        assert_eq!(expired.kind, RemotePaneLeaseEventKind::Lost);
+        assert_eq!(expired.reason, RemotePaneLeaseEventReason::Expired);
+        assert_eq!(expired.lease_id, first_lease.lease_id);
+        assert_eq!(expired.owner_connection_id, first_lease.owner_connection_id);
+        let restoration = expired
+            .restoration
+            .as_ref()
+            .expect("expired lease restoration outcome");
+        assert_eq!(
+            restoration.status,
+            RemotePaneLeaseRestorationStatus::Restored
+        );
+        assert_eq!((restoration.cols, restoration.rows), (80, 24));
 
-        let current = &claimed.effects[1];
-        let resized = current.resize.as_ref().expect("new lease target resize");
-        assert_eq!((resized.cols, resized.rows), (120, 40));
-        assert!(matches!(
-            current.event.as_ref(),
-            Some(RemotePaneLeaseEvent {
-                kind: RemotePaneLeaseEventKind::Claimed,
-                reason: RemotePaneLeaseEventReason::Claimed,
-                ..
-            })
-        ));
+        let current = claimed.effects[1]
+            .event
+            .as_ref()
+            .expect("new lease claimed event");
+        assert_eq!(current.kind, RemotePaneLeaseEventKind::Claimed);
+        assert_eq!(current.reason, RemotePaneLeaseEventReason::Claimed);
+        assert_eq!(current.owner_connection_id, next_owner_connection_id);
+        assert_eq!((current.target_cols, current.target_rows), (120, 40));
         assert_eq!(pane_geometry(&state, session_id, pane_id), (120, 40));
     }
 
@@ -1889,11 +2076,15 @@ mod tests {
         );
 
         assert_eq!(claimed.effects.len(), 2);
-        assert!(claimed.effects[0].resize.is_none());
-        let restoration = claimed.effects[0]
+        let expired = claimed.effects[0]
             .event
             .as_ref()
-            .and_then(|event| event.restoration.as_ref())
+            .expect("expired lease lost event");
+        assert_eq!(expired.kind, RemotePaneLeaseEventKind::Lost);
+        assert_eq!(expired.reason, RemotePaneLeaseEventReason::Expired);
+        let restoration = expired
+            .restoration
+            .as_ref()
             .expect("expired restoration outcome");
         assert_eq!(
             restoration.status,
@@ -1904,11 +2095,14 @@ mod tests {
             (next_lease.original_cols, next_lease.original_rows),
             (90, 25)
         );
-        let new_resize = claimed.effects[1]
-            .resize
+        assert_eq!((next_lease.target_cols, next_lease.target_rows), (120, 40));
+        let current = claimed.effects[1]
+            .event
             .as_ref()
-            .expect("new claim resize");
-        assert_eq!((new_resize.cols, new_resize.rows), (120, 40));
+            .expect("new lease claimed event");
+        assert_eq!(current.kind, RemotePaneLeaseEventKind::Claimed);
+        assert_eq!(current.reason, RemotePaneLeaseEventReason::Claimed);
+        assert_eq!((current.target_cols, current.target_rows), (120, 40));
         assert_eq!(pane_geometry(&state, session_id, pane_id), (120, 40));
     }
 

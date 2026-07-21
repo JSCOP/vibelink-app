@@ -74,17 +74,58 @@ struct Runtime {
     handle: JoinHandle<()>,
 }
 
+struct ActiveClientCapacity {
+    active: AtomicUsize,
+    limit: usize,
+}
+
+impl ActiveClientCapacity {
+    fn new(limit: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn try_reserve(self: &Arc<Self>) -> Option<ActiveClientPermit> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                if active < self.limit {
+                    Some(active + 1)
+                } else {
+                    None
+                }
+            })
+            .ok()
+            .map(|_| ActiveClientPermit {
+                capacity: Arc::clone(self),
+            })
+    }
+}
+
+struct ActiveClientPermit {
+    capacity: Arc<ActiveClientCapacity>,
+}
+
+impl Drop for ActiveClientPermit {
+    fn drop(&mut self) {
+        let previous = self.capacity.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "active client permit count underflow");
+    }
+}
+
 pub(crate) struct RemoteShared {
     pub devices: Mutex<DeviceStore>,
     pub appearance: RwLock<Value>,
     pub workspace_order: RwLock<Vec<String>>,
     pub workspace_alerts: RwLock<HashMap<String, usize>>,
     pub client_senders: Mutex<HashMap<Uuid, Sender<Message>>>,
+    pub client_close_requests: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
     pub client_devices: Mutex<HashMap<Uuid, String>>,
     pub v2_clients: Mutex<HashSet<Uuid>>,
     pub v2_operation_ids: Mutex<HashMap<String, OperationReplayWindow>>,
     pub v2_identity: Arc<DeviceIdentity>,
-    pub active_clients: AtomicUsize,
+    active_clients: Arc<ActiveClientCapacity>,
 }
 
 pub struct RemoteServer {
@@ -119,11 +160,12 @@ impl RemoteServer {
                 workspace_order: RwLock::new(Vec::new()),
                 workspace_alerts: RwLock::new(HashMap::new()),
                 client_senders: Mutex::new(HashMap::new()),
+                client_close_requests: Mutex::new(HashMap::new()),
                 client_devices: Mutex::new(HashMap::new()),
                 v2_clients: Mutex::new(HashSet::new()),
                 v2_operation_ids: Mutex::new(HashMap::new()),
                 v2_identity,
-                active_clients: AtomicUsize::new(0),
+                active_clients: Arc::new(ActiveClientCapacity::new(MAX_CLIENTS)),
             }),
         })
     }
@@ -162,21 +204,29 @@ impl RemoteServer {
             while !thread_shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, address)) => {
-                        if shared.active_clients.load(Ordering::Acquire) >= MAX_CLIENTS {
+                        let Some(client_permit) = shared.active_clients.try_reserve() else {
                             tracing::warn!(%address, "rejecting remote client: capacity reached");
                             continue;
-                        }
+                        };
                         let connection_shared = Arc::clone(&shared);
                         let connection_tls = Arc::clone(&tls_config);
-                        let _ = thread::Builder::new().name("vibelink-remote-client".to_string()).spawn(move || {
-                            connection_shared.active_clients.fetch_add(1, Ordering::AcqRel);
-                            if let Err(error) = bridge::handle_connection(stream, connection_tls, Arc::clone(&connection_shared)) {
-                                tracing::warn!(?error, %address, "remote client disconnected");
-                                #[cfg(debug_assertions)]
-                                eprintln!("remote client {address} disconnected: {error:#}");
-                            }
-                            connection_shared.active_clients.fetch_sub(1, Ordering::AcqRel);
-                        });
+                        if let Err(error) = thread::Builder::new()
+                            .name("vibelink-remote-client".to_string())
+                            .spawn(move || {
+                                let _client_permit = client_permit;
+                                if let Err(error) = bridge::handle_connection(
+                                    stream,
+                                    connection_tls,
+                                    Arc::clone(&connection_shared),
+                                ) {
+                                    tracing::warn!(?error, %address, "remote client disconnected");
+                                    #[cfg(debug_assertions)]
+                                    eprintln!("remote client {address} disconnected: {error:#}");
+                                }
+                            })
+                        {
+                            tracing::warn!(?error, %address, "failed to spawn remote client thread");
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(30)),
                     Err(error) => { tracing::warn!(?error, "remote accept failed"); thread::sleep(Duration::from_millis(100)); }
@@ -189,19 +239,31 @@ impl RemoteServer {
 
     pub fn stop(&self) {
         let runtime = self.runtime.lock().expect("remote runtime mutex").take();
-        if let Some(runtime) = runtime {
+        if let Some(runtime) = runtime.as_ref() {
             runtime.shutdown.store(true, Ordering::Release);
-            let senders: Vec<_> = self
+        }
+        {
+            let close_requests = self
                 .shared
-                .client_senders
+                .client_close_requests
                 .lock()
-                .expect("remote clients mutex")
-                .values()
-                .cloned()
-                .collect();
-            for sender in senders {
-                let _ = sender.try_send(Message::Close(None));
+                .expect("remote client close requests mutex");
+            for close_requested in close_requests.values() {
+                close_requested.store(true, Ordering::Release);
             }
+        }
+        let senders: Vec<_> = self
+            .shared
+            .client_senders
+            .lock()
+            .expect("remote clients mutex")
+            .values()
+            .cloned()
+            .collect();
+        for sender in senders {
+            let _ = sender.try_send(Message::Close(None));
+        }
+        if let Some(runtime) = runtime {
             let _ = runtime.handle.join();
         }
     }
@@ -375,15 +437,31 @@ impl RemoteServer {
                 (active_device_id == device_id).then_some(*client_key)
             })
             .collect::<Vec<_>>();
-        let senders = self
-            .shared
-            .client_senders
-            .lock()
-            .expect("remote clients mutex");
-        for client_key in client_keys {
-            if let Some(sender) = senders.get(&client_key) {
-                let _ = sender.send_timeout(Message::Close(None), Duration::from_secs(1));
+        {
+            let close_requests = self
+                .shared
+                .client_close_requests
+                .lock()
+                .expect("remote client close requests mutex");
+            for client_key in &client_keys {
+                if let Some(close_requested) = close_requests.get(client_key) {
+                    close_requested.store(true, Ordering::Release);
+                }
             }
+        }
+        let senders = {
+            let senders = self
+                .shared
+                .client_senders
+                .lock()
+                .expect("remote clients mutex");
+            client_keys
+                .iter()
+                .filter_map(|client_key| senders.get(client_key).cloned())
+                .collect::<Vec<_>>()
+        };
+        for sender in senders {
+            let _ = sender.try_send(Message::Close(None));
         }
     }
 
@@ -485,7 +563,129 @@ pub(crate) fn local_hosts() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpStream;
+    use std::{
+        net::TcpStream,
+        sync::{mpsc, Barrier},
+    };
+
+    #[test]
+    fn active_client_capacity_is_atomic_under_contention() {
+        let capacity = Arc::new(ActiveClientCapacity::new(MAX_CLIENTS));
+        let contender_count = MAX_CLIENTS * 4;
+        let start = Arc::new(Barrier::new(contender_count + 1));
+        let release = Arc::new(Barrier::new(contender_count + 1));
+        let (sender, receiver) = mpsc::channel();
+        let mut threads = Vec::with_capacity(contender_count);
+
+        for _ in 0..contender_count {
+            let capacity = Arc::clone(&capacity);
+            let start = Arc::clone(&start);
+            let release = Arc::clone(&release);
+            let sender = sender.clone();
+            threads.push(thread::spawn(move || {
+                start.wait();
+                let permit = capacity.try_reserve();
+                sender.send(permit.is_some()).expect("report reservation");
+                release.wait();
+                drop(permit);
+            }));
+        }
+        drop(sender);
+
+        start.wait();
+        let reservation_count = (0..contender_count)
+            .filter(|_| receiver.recv().expect("reservation result"))
+            .count();
+        let next_reservation_failed = capacity.try_reserve().is_none();
+
+        release.wait();
+        for thread in threads {
+            thread.join().expect("reservation thread");
+        }
+
+        assert_eq!(reservation_count, MAX_CLIENTS);
+        assert!(next_reservation_failed);
+    }
+
+    #[test]
+    fn dropping_active_client_permit_restores_capacity() {
+        let capacity = Arc::new(ActiveClientCapacity::new(1));
+        let permit = capacity.try_reserve().expect("reserve client slot");
+
+        assert!(capacity.try_reserve().is_none());
+        drop(permit);
+        assert!(capacity.try_reserve().is_some());
+    }
+
+    #[test]
+    fn stop_signals_close_request_when_push_queue_is_full() {
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-remote-stop-{}", Uuid::new_v4()));
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let client_key = Uuid::new_v4();
+        let close_requested = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        sender
+            .try_send(Message::Ping(Vec::new().into()))
+            .expect("fill client push queue");
+        server
+            .shared
+            .client_senders
+            .lock()
+            .expect("remote clients mutex")
+            .insert(client_key, sender);
+        server
+            .shared
+            .client_close_requests
+            .lock()
+            .expect("remote client close requests mutex")
+            .insert(client_key, Arc::clone(&close_requested));
+
+        server.stop();
+
+        assert!(close_requested.load(Ordering::Acquire));
+        assert!(matches!(receiver.try_recv().unwrap(), Message::Ping(_)));
+        assert!(receiver.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn device_close_signals_request_when_push_queue_is_full() {
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-remote-close-{}", Uuid::new_v4()));
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let client_key = Uuid::new_v4();
+        let close_requested = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        sender
+            .try_send(Message::Ping(Vec::new().into()))
+            .expect("fill client push queue");
+        server
+            .shared
+            .client_senders
+            .lock()
+            .expect("remote clients mutex")
+            .insert(client_key, sender);
+        server
+            .shared
+            .client_devices
+            .lock()
+            .expect("remote client devices mutex")
+            .insert(client_key, "device-a".to_string());
+        server
+            .shared
+            .client_close_requests
+            .lock()
+            .expect("remote client close requests mutex")
+            .insert(client_key, Arc::clone(&close_requested));
+
+        server.close_device_connections("device-a");
+
+        assert!(close_requested.load(Ordering::Acquire));
+        assert!(matches!(receiver.try_recv().unwrap(), Message::Ping(_)));
+        assert!(receiver.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn server_binds_configured_port_and_reports_running() {

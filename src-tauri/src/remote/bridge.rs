@@ -1,13 +1,15 @@
 use super::v2::{
     generated::{
-        TerminalInputParams, TerminalLeaseClaimParams, TerminalLeaseRecord,
+        TerminalAckParams, TerminalInputParams, TerminalLeaseClaimParams, TerminalLeaseRecord,
         TerminalLeaseReleaseParams, TerminalLeaseStatusParams, TerminalSnapshotParams,
-        TerminalSubscribeParams, TerminalUnsubscribeParams,
+        TerminalSnapshotResult, TerminalSubscribeParams, TerminalSubscribeResult,
+        TerminalUnsubscribeParams,
     },
     secure::{SecureFrameKind, SecureHandshake, SecureTransport},
     wire::{
         BinaryChannel, BinaryFrame, DomainSequenceValidator, OperationReplayWindow, SequenceError,
-        FLAG_FINAL, FLAG_RESYNC, MAX_BINARY_PAYLOAD_BYTES,
+        TerminalAckWindow, TerminalFlowError, TerminalRecordDecision, FLAG_FINAL, FLAG_RESYNC,
+        MAX_BINARY_PAYLOAD_BYTES, MAX_SEQUENCE_DOMAINS,
     },
     CONTRACT_SHA256 as V2_CONTRACT_SHA256, PROTOCOL_VERSION as V2_PROTOCOL_VERSION,
     SUBPROTOCOL as V2_SUBPROTOCOL,
@@ -34,7 +36,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError, TrySendError};
 use interprocess::local_socket::prelude::*;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
@@ -45,7 +47,10 @@ use std::{
     net::TcpStream,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -56,18 +61,55 @@ use tungstenite::{
 use uuid::Uuid;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_TIMEOUT: Duration = Duration::from_millis(30);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
-const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(60);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(45);
+const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const REMOTE_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_OUTPUT_QUEUE_CAPACITY: usize = 1024;
+const DAEMON_OUTPUT_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const PUSH_QUEUE_CAPACITY: usize = 1024;
-const MAX_OUTPUT_FRAMES_PER_LOOP: usize = 32;
+const MAX_CONTROL_FRAMES_PER_LOOP: usize = 32;
+const MAX_PUSH_FRAMES_PER_LOOP: usize = 32;
+const MAX_OUTPUT_FRAMES_PER_LOOP: usize = 1;
+const MAX_OUTPUT_BYTES_PER_LOOP: usize = 48 * 1024;
+const MAX_TERMINAL_COALESCE_BYTES: usize = 48 * 1024;
+const TERMINAL_MAX_UNACKED_BYTES_PER_STREAM: usize = 512 * 1024;
+const TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION: usize = 2 * 1024 * 1024;
 const MAX_REMOTE_MESSAGE_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug)]
 struct V2Subscription {
     workspace_id: Uuid,
     pane_id: Uuid,
+    stream_id: u64,
+}
+
+struct PendingTerminalOutput {
+    pane_id: Uuid,
+    data: Vec<u8>,
+    offset: usize,
+}
+
+#[derive(Default)]
+struct V2OutputPump {
+    pending: Option<PendingTerminalOutput>,
+    buffers: HashMap<u64, Vec<u8>>,
+    order: VecDeque<u64>,
+}
+
+impl V2OutputPump {
+    fn purge(&mut self, pane_id: Uuid, stream_id: u64) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.pane_id == pane_id)
+        {
+            self.pending = None;
+        }
+        self.buffers.remove(&stream_id);
+        self.order.retain(|candidate| *candidate != stream_id);
+    }
 }
 
 #[derive(Default)]
@@ -95,15 +137,22 @@ const MAX_REMOTE_FRAME_BYTES: usize = 1024 * 1024;
 
 type RemoteSocket = WebSocket<StreamOwned<ServerConnection, TcpStream>>;
 
+struct QueuedDaemonOutput {
+    message: DaemonToClient,
+    reserved_bytes: usize,
+}
+
 struct DaemonSenders {
     control: Sender<DaemonToClient>,
-    output: Sender<DaemonToClient>,
+    output: Sender<QueuedDaemonOutput>,
+    output_bytes: Arc<AtomicUsize>,
     dropped_output: Arc<Mutex<HashMap<Uuid, u64>>>,
 }
 
 struct DaemonInbox {
     control: Receiver<DaemonToClient>,
-    output: Receiver<DaemonToClient>,
+    output: Receiver<QueuedDaemonOutput>,
+    output_bytes: Arc<AtomicUsize>,
     dropped_output: Arc<Mutex<HashMap<Uuid, u64>>>,
     deferred_control: VecDeque<DaemonToClient>,
 }
@@ -134,34 +183,47 @@ impl DaemonInbox {
 
     fn try_output(&self) -> Result<Option<DaemonToClient>> {
         match self.output.try_recv() {
-            Ok(message) => Ok(Some(message)),
+            Ok(output) => {
+                self.output_bytes
+                    .fetch_sub(output.reserved_bytes, Ordering::AcqRel);
+                Ok(Some(output.message))
+            }
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => bail!("remote daemon connection closed"),
         }
     }
 
-    fn take_output_drops(&self, pane_id: Uuid) -> u64 {
-        self.dropped_output
-            .lock()
-            .expect("remote output drops mutex")
-            .remove(&pane_id)
-            .unwrap_or(0)
+    #[cfg(test)]
+    fn queued_output_bytes(&self) -> usize {
+        self.output_bytes.load(Ordering::Acquire)
+    }
+
+    fn take_all_output_drops(&self) -> HashMap<Uuid, u64> {
+        std::mem::take(
+            &mut *self
+                .dropped_output
+                .lock()
+                .expect("remote output drops mutex"),
+        )
     }
 }
 
 fn daemon_channels(output_capacity: usize) -> (DaemonSenders, DaemonInbox) {
     let (control_tx, control_rx) = unbounded();
     let (output_tx, output_rx) = bounded(output_capacity);
+    let output_bytes = Arc::new(AtomicUsize::new(0));
     let dropped_output = Arc::new(Mutex::new(HashMap::new()));
     (
         DaemonSenders {
             control: control_tx,
             output: output_tx,
+            output_bytes: Arc::clone(&output_bytes),
             dropped_output: Arc::clone(&dropped_output),
         },
         DaemonInbox {
             control: control_rx,
             output: output_rx,
+            output_bytes,
             deferred_control: VecDeque::new(),
             dropped_output,
         },
@@ -170,18 +232,36 @@ fn daemon_channels(output_capacity: usize) -> (DaemonSenders, DaemonInbox) {
 
 fn route_daemon_message(senders: &DaemonSenders, message: DaemonToClient) -> bool {
     match message {
-        output @ DaemonToClient::Output { pane_id, .. } => {
-            if senders.output.try_send(output).is_ok() {
-                true
-            } else {
-                let mut drops = senders
-                    .dropped_output
-                    .lock()
-                    .expect("remote output drops mutex");
-                let count = drops.entry(pane_id).or_default();
-                *count = count.saturating_add(1);
-                false
+        DaemonToClient::Output { pane_id, data } => {
+            let bytes = data.len();
+            let reserved = senders
+                .output_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    (bytes <= DAEMON_OUTPUT_QUEUE_MAX_BYTES.saturating_sub(current))
+                        .then_some(current + bytes)
+                })
+                .is_ok();
+            if reserved {
+                match senders.output.try_send(QueuedDaemonOutput {
+                    message: DaemonToClient::Output { pane_id, data },
+                    reserved_bytes: bytes,
+                }) {
+                    Ok(()) => return true,
+                    Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                        senders.output_bytes.fetch_sub(bytes, Ordering::AcqRel);
+                    }
+                }
             }
+            let mut drops = senders
+                .dropped_output
+                .lock()
+                .expect("remote output drops mutex");
+            let skipped = u64::try_from(bytes.div_ceil(MAX_TERMINAL_COALESCE_BYTES))
+                .unwrap_or(u64::MAX)
+                .max(1);
+            let count = drops.entry(pane_id).or_default();
+            *count = count.saturating_add(skipped);
+            false
         }
         control => senders.control.send(control).is_ok(),
     }
@@ -194,7 +274,7 @@ pub fn handle_connection(
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
     let tls = StreamOwned::new(ServerConnection::new(tls_config)?, stream);
     let websocket_config = tungstenite::protocol::WebSocketConfig::default()
         .read_buffer_size(32 * 1024)
@@ -261,6 +341,12 @@ pub fn handle_connection(
     let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let client_key = Uuid::new_v4();
     let (push_tx, push_rx) = bounded(PUSH_QUEUE_CAPACITY);
+    let close_requested = Arc::new(AtomicBool::new(false));
+    shared
+        .client_close_requests
+        .lock()
+        .expect("remote close requests mutex")
+        .insert(client_key, Arc::clone(&close_requested));
     shared
         .client_senders
         .lock()
@@ -277,6 +363,7 @@ pub fn handle_connection(
         &mut daemon_writer,
         &mut daemon_inbox,
         &push_rx,
+        &close_requested,
         &shared,
         client_key,
         &device_id,
@@ -291,6 +378,11 @@ pub fn handle_connection(
         .client_senders
         .lock()
         .expect("remote clients mutex")
+        .remove(&client_key);
+    shared
+        .client_close_requests
+        .lock()
+        .expect("remote close requests mutex")
         .remove(&client_key);
     shared
         .client_devices
@@ -468,8 +560,15 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
     ))?;
     ws.get_mut().sock.set_read_timeout(Some(POLL_TIMEOUT))?;
 
+    let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let client_key = Uuid::new_v4();
     let (push_tx, push_rx) = bounded(PUSH_QUEUE_CAPACITY);
+    let close_requested = Arc::new(AtomicBool::new(false));
+    shared
+        .client_close_requests
+        .lock()
+        .expect("remote close requests mutex")
+        .insert(client_key, Arc::clone(&close_requested));
     shared
         .client_senders
         .lock()
@@ -486,7 +585,6 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
         .expect("remote v2 clients mutex")
         .insert(client_key);
 
-    let (mut daemon_writer, mut daemon_inbox) = open_daemon_connection()?;
     let result = run_v2_authenticated(
         &mut ws,
         &mut transport,
@@ -494,6 +592,7 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
         &mut daemon_inbox,
         &shared,
         &push_rx,
+        &close_requested,
         client_key,
         &device_id,
         &peer_fingerprint,
@@ -508,6 +607,11 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
         .client_senders
         .lock()
         .expect("remote clients mutex")
+        .remove(&client_key);
+    shared
+        .client_close_requests
+        .lock()
+        .expect("remote close requests mutex")
         .remove(&client_key);
     shared
         .client_devices
@@ -529,6 +633,7 @@ fn run_v2_authenticated(
     daemon_inbox: &mut DaemonInbox,
     shared: &RemoteShared,
     push_rx: &Receiver<Message>,
+    close_requested: &AtomicBool,
     owner_connection_id: Uuid,
     device_id: &str,
     peer_fingerprint: &str,
@@ -539,7 +644,18 @@ fn run_v2_authenticated(
     let mut binary_sequences: HashMap<(BinaryChannel, u64), u64> = HashMap::new();
     let mut subscriptions: HashMap<String, V2Subscription> = HashMap::new();
     let mut leases = RemoteLeaseProjection::default();
+    let mut acknowledgements = TerminalAckWindow::new(
+        TERMINAL_MAX_UNACKED_BYTES_PER_STREAM,
+        TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION,
+    )?;
+    let mut output_pump = V2OutputPump::default();
+    let mut last_ping = Instant::now();
+    let mut last_peer_activity = Instant::now();
     loop {
+        if close_requested.load(Ordering::Acquire) {
+            let _ = ws.send(Message::Close(None));
+            break;
+        }
         match push_rx.try_recv() {
             Ok(Message::Close(_)) | Err(TryRecvError::Disconnected) => {
                 let _ = ws.send(Message::Close(None));
@@ -548,7 +664,10 @@ fn run_v2_authenticated(
             Ok(_) | Err(TryRecvError::Empty) => {}
         }
 
-        while let Some(message) = daemon_inbox.try_control()? {
+        for _ in 0..MAX_CONTROL_FRAMES_PER_LOOP {
+            let Some(message) = daemon_inbox.try_control()? else {
+                break;
+            };
             if let DaemonToClient::RemotePaneLease { event } = message {
                 apply_lease_event(&mut leases, &event);
                 if event.owner_connection_id == owner_connection_id {
@@ -589,11 +708,13 @@ fn run_v2_authenticated(
             Ok(Message::Binary(ciphertext)) => {
                 let frame = transport.open(&ciphertext)?;
                 if frame.kind != SecureFrameKind::Control {
-                    continue;
+                    bail!("unexpected encrypted remote-v2 frame kind");
                 }
+                last_peer_activity = Instant::now();
                 let request: V2Envelope =
                     serde_json::from_slice(&frame.payload).context("parse remote-v2 envelope")?;
                 let mut binary_after_response = Vec::new();
+                let mut complete_resync_after_response = None;
                 let response = if request.version != V2_PROTOCOL_VERSION {
                     v2_error(
                         &request,
@@ -675,8 +796,9 @@ fn run_v2_authenticated(
                                             &mut binary_sequences,
                                         )
                                     })
-                                    .map(|(payload, frames)| {
+                                    .map(|(payload, frames, stream_id)| {
                                         binary_after_response = frames;
+                                        complete_resync_after_response = Some(stream_id);
                                         payload
                                     })
                             } else if request.domain == "terminal" && request.method == "subscribe"
@@ -707,6 +829,9 @@ fn run_v2_authenticated(
                                     &mut next_req,
                                     &mut subscriptions,
                                     &mut leases,
+                                    &mut acknowledgements,
+                                    &mut output_pump,
+                                    &mut binary_sequences,
                                 )
                             };
                             match result {
@@ -735,15 +860,23 @@ fn run_v2_authenticated(
                 for frame in binary_after_response {
                     send_v2_binary(ws, transport, frame)?;
                 }
+                if let Some(stream_id) = complete_resync_after_response {
+                    acknowledgements.complete_resync(stream_id);
+                }
             }
-            Ok(Message::Ping(payload)) => ws.send(Message::Pong(payload))?,
+            Ok(Message::Pong(_)) => last_peer_activity = Instant::now(),
+            Ok(Message::Ping(payload)) => {
+                last_peer_activity = Instant::now();
+                ws.send(Message::Pong(payload))?;
+            }
             Ok(Message::Close(_)) => break,
-            Ok(_) => {}
+            Ok(_) => bail!("unexpected remote websocket message kind"),
             Err(tungstenite::Error::Io(error))
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
             Err(error) => return Err(error.into()),
         }
         if authorization
@@ -751,28 +884,38 @@ fn run_v2_authenticated(
             .iter()
             .any(|grant| grant == TERMINAL_VIEW_GRANT || grant == "admin")
         {
-            for _ in 0..MAX_OUTPUT_FRAMES_PER_LOOP {
-                let Some(message) = daemon_inbox.try_output()? else {
-                    break;
-                };
-                if let DaemonToClient::Output { pane_id, data } = message {
-                    if !subscriptions
-                        .values()
-                        .any(|subscription| subscription.pane_id == pane_id)
-                    {
-                        continue;
-                    }
-                    let dropped = daemon_inbox.take_output_drops(pane_id);
-                    send_v2_terminal_output(
+            for (pane_id, skipped_sequences) in daemon_inbox.take_all_output_drops() {
+                if let Some(stream_id) = subscriptions
+                    .values()
+                    .find(|subscription| subscription.pane_id == pane_id)
+                    .map(|subscription| subscription.stream_id)
+                {
+                    mark_v2_terminal_gap(
                         ws,
                         transport,
-                        pane_id,
-                        &data,
-                        dropped,
+                        stream_id,
+                        skipped_sequences,
                         &mut binary_sequences,
+                        &mut acknowledgements,
                     )?;
                 }
             }
+            pump_v2_terminal_output(
+                ws,
+                transport,
+                daemon_inbox,
+                &subscriptions,
+                &mut output_pump,
+                &mut binary_sequences,
+                &mut acknowledgements,
+            )?;
+        }
+        if last_ping.elapsed() >= KEEPALIVE_INTERVAL {
+            if last_peer_activity.elapsed() >= KEEPALIVE_DEADLINE {
+                bail!("remote-v2 keepalive timed out");
+            }
+            ws.send(Message::Ping(Vec::new().into()))?;
+            last_ping = Instant::now();
         }
     }
     Ok(())
@@ -791,6 +934,26 @@ fn record_v2_operation(shared: &RemoteShared, device_id: &str, operation_id: &st
         .expect("inserted remote v2 replay window")
         .record(operation_id))
 }
+
+fn validate_v2_subscription_target(
+    subscriptions: &HashMap<String, V2Subscription>,
+    pane_id: Uuid,
+    stream_id: u64,
+) -> Result<()> {
+    if subscriptions
+        .values()
+        .any(|subscription| subscription.pane_id == pane_id)
+    {
+        bail!("conflict: terminal pane already has a live subscription");
+    }
+    if subscriptions
+        .values()
+        .any(|subscription| subscription.stream_id == stream_id)
+    {
+        bail!("conflict: terminal stream id collides with another pane");
+    }
+    Ok(())
+}
 fn v2_terminal_subscribe(
     request: &V2Envelope,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
@@ -804,17 +967,23 @@ fn v2_terminal_subscribe(
     let workspace_id =
         Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
     let pane_id = Uuid::parse_str(&params.pane_id).context("paneId must be a UUID")?;
-    let (_, panes) = attach_session(daemon_writer, daemon_inbox, next_req, workspace_id)?;
-    let pane = panes
-        .into_iter()
-        .find(|pane| pane.id == pane_id)
-        .context("terminal subscription pane not found")?;
-    write_frame(
+    let stream_id = v2_stream_id(pane_id);
+    validate_v2_subscription_target(subscriptions, pane_id, stream_id)?;
+    ensure_binary_sequence_capacity(
+        sequences,
+        &[
+            (BinaryChannel::TerminalOutput, stream_id),
+            (BinaryChannel::TerminalSnapshot, stream_id),
+        ],
+    )?;
+    let (snapshot, frames, first_live_sequence) = v2_atomic_snapshot(
         daemon_writer,
-        &ClientToDaemon::AttachPane {
-            session_id: workspace_id,
-            pane_id,
-        },
+        daemon_inbox,
+        next_req,
+        workspace_id,
+        pane_id,
+        stream_id,
+        sequences,
     )?;
     let subscription_id = Uuid::new_v4().to_string();
     subscriptions.insert(
@@ -822,30 +991,21 @@ fn v2_terminal_subscribe(
         V2Subscription {
             workspace_id,
             pane_id,
+            stream_id,
         },
     );
-    let (data, frames, stream_id, first_live_sequence) = v2_snapshot_data(
-        daemon_writer,
-        daemon_inbox,
-        next_req,
-        workspace_id,
-        pane_id,
-        sequences,
-    )?;
-    Ok((
-        json!({
-            "subscriptionId": subscription_id,
-            "streamId": stream_id,
-            "paneGeneration": 1,
-            "cols": pane.config.cols,
-            "rows": pane.config.rows,
-            "alive": true,
-            "firstLiveSequence": first_live_sequence,
-            "snapshotBytes": data.len(),
-            "snapshotChunks": frames.len(),
-        }),
-        frames,
-    ))
+    let result = TerminalSubscribeResult {
+        alive: snapshot.alive,
+        cols: snapshot.cols,
+        first_live_sequence,
+        pane_generation: snapshot.pane_generation,
+        rows: snapshot.rows,
+        snapshot_bytes: u64::try_from(snapshot.data.len()).context("snapshot byte count")?,
+        snapshot_chunks: u32::try_from(frames.len()).context("snapshot chunk count")?,
+        stream_id,
+        subscription_id,
+    };
+    Ok((serde_json::to_value(result)?, frames))
 }
 
 fn v2_terminal_snapshot(
@@ -855,94 +1015,340 @@ fn v2_terminal_snapshot(
     next_req: &mut u64,
     subscriptions: &HashMap<String, V2Subscription>,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
-) -> Result<(Value, Vec<BinaryFrame>)> {
+) -> Result<(Value, Vec<BinaryFrame>, u64)> {
     let params: TerminalSnapshotParams = serde_json::from_value(request.payload.clone())
         .context("parse terminal.snapshot payload")?;
     let subscription = subscriptions
         .get(&params.subscription_id)
         .context("terminal subscription not found")?;
-    let (data, frames, stream_id, first_live_sequence) = v2_snapshot_data(
+    let (snapshot, frames, first_live_sequence) = v2_atomic_snapshot(
         daemon_writer,
         daemon_inbox,
         next_req,
         subscription.workspace_id,
         subscription.pane_id,
+        subscription.stream_id,
         sequences,
     )?;
+    let result = TerminalSnapshotResult {
+        first_live_sequence,
+        pane_generation: snapshot.pane_generation,
+        snapshot_bytes: u64::try_from(snapshot.data.len()).context("snapshot byte count")?,
+        snapshot_chunks: u32::try_from(frames.len()).context("snapshot chunk count")?,
+        stream_id: subscription.stream_id,
+        subscription_id: params.subscription_id,
+    };
     Ok((
-        json!({
-            "subscriptionId": params.subscription_id,
-            "streamId": stream_id,
-            "paneGeneration": 1,
-            "firstLiveSequence": first_live_sequence,
-            "snapshotBytes": data.len(),
-            "snapshotChunks": frames.len(),
-        }),
+        serde_json::to_value(result)?,
         frames,
+        subscription.stream_id,
     ))
 }
 
-fn v2_snapshot_data(
+fn v2_atomic_snapshot(
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     next_req: &mut u64,
     session_id: Uuid,
     pane_id: Uuid,
+    stream_id: u64,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
-) -> Result<(Vec<u8>, Vec<BinaryFrame>, u64, u64)> {
+) -> Result<(crate::protocol::TerminalSnapshot, Vec<BinaryFrame>, u64)> {
     let req = take_req(next_req);
-    let data = match request_reply(
+    let snapshot = match request_reply(
         daemon_writer,
         daemon_inbox,
         req,
-        ClientToDaemon::GetScrollback {
+        ClientToDaemon::SubscribePane {
             req,
             session_id,
             pane_id,
         },
     )? {
-        ReplyResult::ScrollbackData(data) => data,
+        ReplyResult::TerminalSnapshot(snapshot) => snapshot,
         other => bail!("unexpected terminal snapshot reply: {other:?}"),
     };
-    let stream_id = v2_stream_id(pane_id);
-    let first_live_sequence = sequences
-        .get(&(BinaryChannel::TerminalOutput, stream_id))
-        .copied()
-        .unwrap_or(1);
+    if snapshot.session_id != session_id || snapshot.pane_id != pane_id {
+        bail!("stale_target: daemon returned a different terminal snapshot");
+    }
+    let first_live_sequence =
+        peek_binary_sequence(sequences, BinaryChannel::TerminalOutput, stream_id)?;
     let frames = v2_binary_chunks(
         BinaryChannel::TerminalSnapshot,
         stream_id,
-        &data,
+        &snapshot.data,
         0,
         sequences,
     )?;
-    Ok((data, frames, stream_id, first_live_sequence))
+    Ok((snapshot, frames, first_live_sequence))
 }
 
-fn send_v2_terminal_output(
+fn v2_terminal_ack(
+    request: &V2Envelope,
+    subscriptions: &HashMap<String, V2Subscription>,
+    acknowledgements: &mut TerminalAckWindow,
+) -> Result<Value> {
+    let params: TerminalAckParams =
+        serde_json::from_value(request.payload.clone()).context("parse terminal.ack payload")?;
+    let subscription = subscriptions
+        .get(&params.subscription_id)
+        .context("terminal subscription not found")?;
+    acknowledgements
+        .ack(subscription.stream_id, params.sequence)
+        .map_err(map_terminal_ack_error)?;
+    Ok(json!({}))
+}
+
+fn map_terminal_ack_error(error: TerminalFlowError) -> anyhow::Error {
+    match error {
+        TerminalFlowError::AckBehind { .. } => anyhow!("stale_ref: {error}"),
+        TerminalFlowError::InvalidStreamId
+        | TerminalFlowError::StreamLimitExceeded { .. }
+        | TerminalFlowError::SequenceNotIncreasing { .. }
+        | TerminalFlowError::AckAhead { .. } => anyhow!("invalid_argument: {error}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum V2TerminalFrameDisposition {
+    Send,
+    EmitResync,
+    Suppress,
+}
+
+fn record_v2_terminal_frame(
+    acknowledgements: &mut TerminalAckWindow,
+    stream_id: u64,
+    sequence: u64,
+    bytes: usize,
+) -> Result<V2TerminalFrameDisposition> {
+    if acknowledgements.requires_resync(stream_id) {
+        return Ok(V2TerminalFrameDisposition::Suppress);
+    }
+    match acknowledgements.record_sent(stream_id, sequence, bytes)? {
+        TerminalRecordDecision::Recorded => Ok(V2TerminalFrameDisposition::Send),
+        TerminalRecordDecision::Backpressured { .. } => Ok(V2TerminalFrameDisposition::EmitResync),
+    }
+}
+
+fn fence_v2_terminal_gap(acknowledgements: &mut TerminalAckWindow, stream_id: u64) -> Result<bool> {
+    if acknowledgements.requires_resync(stream_id) {
+        return Ok(false);
+    }
+    acknowledgements.mark_gap(stream_id)?;
+    Ok(true)
+}
+
+fn mark_v2_terminal_gap(
     ws: &mut RemoteSocket,
     transport: &mut SecureTransport,
-    pane_id: Uuid,
-    data: &[u8],
-    dropped_frames: u64,
+    stream_id: u64,
+    skipped_sequences: u64,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    acknowledgements: &mut TerminalAckWindow,
 ) -> Result<()> {
-    let stream_id = v2_stream_id(pane_id);
-    if dropped_frames > 0 {
-        let next = sequences
-            .entry((BinaryChannel::TerminalOutput, stream_id))
-            .or_insert(1);
-        *next = next.saturating_add(dropped_frames);
-    }
-    let flags = if dropped_frames > 0 { FLAG_RESYNC } else { 0 };
-    for frame in v2_binary_chunks(
+    advance_binary_sequence(
+        sequences,
         BinaryChannel::TerminalOutput,
         stream_id,
-        data,
-        flags,
-        sequences,
-    )? {
-        send_v2_binary(ws, transport, frame)?;
+        skipped_sequences,
+    )?;
+    if !fence_v2_terminal_gap(acknowledgements, stream_id)? {
+        return Ok(());
+    }
+    send_v2_resync_marker(ws, transport, stream_id, sequences, acknowledgements)
+}
+
+fn send_v2_terminal_payload(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    stream_id: u64,
+    payload: Vec<u8>,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    acknowledgements: &mut TerminalAckWindow,
+) -> Result<bool> {
+    let sequence = take_binary_sequence(sequences, BinaryChannel::TerminalOutput, stream_id)?;
+    match record_v2_terminal_frame(acknowledgements, stream_id, sequence, payload.len())? {
+        V2TerminalFrameDisposition::Send => {
+            send_v2_binary(
+                ws,
+                transport,
+                BinaryFrame {
+                    channel: BinaryChannel::TerminalOutput,
+                    flags: FLAG_FINAL,
+                    stream_id,
+                    sequence,
+                    dropped_before: 0,
+                    payload,
+                },
+            )?;
+            Ok(true)
+        }
+        V2TerminalFrameDisposition::EmitResync => {
+            acknowledgements.mark_gap(stream_id)?;
+            send_v2_resync_marker(ws, transport, stream_id, sequences, acknowledgements)?;
+            Ok(false)
+        }
+        V2TerminalFrameDisposition::Suppress => Ok(false),
+    }
+}
+
+fn record_v2_resync_marker(
+    acknowledgements: &mut TerminalAckWindow,
+    stream_id: u64,
+    sequence: u64,
+) -> Result<()> {
+    match acknowledgements.record_sent(stream_id, sequence, 0)? {
+        TerminalRecordDecision::Recorded => Ok(()),
+        TerminalRecordDecision::Backpressured { reason } => {
+            bail!("resync marker was unexpectedly backpressured: {reason:?}")
+        }
+    }
+}
+
+fn send_v2_resync_marker(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    stream_id: u64,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    acknowledgements: &mut TerminalAckWindow,
+) -> Result<()> {
+    let sequence = take_binary_sequence(sequences, BinaryChannel::TerminalOutput, stream_id)?;
+    record_v2_resync_marker(acknowledgements, stream_id, sequence)?;
+    send_v2_binary(
+        ws,
+        transport,
+        BinaryFrame {
+            channel: BinaryChannel::TerminalOutput,
+            flags: FLAG_RESYNC | FLAG_FINAL,
+            stream_id,
+            sequence,
+            dropped_before: 0,
+            payload: Vec::new(),
+        },
+    )
+}
+
+fn pump_v2_terminal_output(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    daemon_inbox: &DaemonInbox,
+    subscriptions: &HashMap<String, V2Subscription>,
+    pump: &mut V2OutputPump,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    acknowledgements: &mut TerminalAckWindow,
+) -> Result<()> {
+    let mut consumed_bytes = 0_usize;
+    let mut sent_frames = 0_usize;
+    let mut dequeued_frames = 0_usize;
+    loop {
+        if consumed_bytes >= MAX_OUTPUT_BYTES_PER_LOOP
+            || sent_frames + pump.buffers.len() >= MAX_OUTPUT_FRAMES_PER_LOOP
+            || daemon_inbox.has_pending_control()
+        {
+            break;
+        }
+        let mut pending = if let Some(pending) = pump.pending.take() {
+            pending
+        } else {
+            if dequeued_frames >= MAX_OUTPUT_FRAMES_PER_LOOP {
+                break;
+            }
+            let Some(message) = daemon_inbox.try_output()? else {
+                break;
+            };
+            dequeued_frames += 1;
+            let DaemonToClient::Output { pane_id, data } = message else {
+                continue;
+            };
+            PendingTerminalOutput {
+                pane_id,
+                data,
+                offset: 0,
+            }
+        };
+        let Some(stream_id) = subscriptions
+            .values()
+            .find(|subscription| subscription.pane_id == pending.pane_id)
+            .map(|subscription| subscription.stream_id)
+        else {
+            continue;
+        };
+        let remaining = pending.data.len().saturating_sub(pending.offset);
+        if acknowledgements.requires_resync(stream_id) {
+            let skipped = u64::try_from(remaining.div_ceil(MAX_TERMINAL_COALESCE_BYTES))
+                .unwrap_or(u64::MAX)
+                .max(1);
+            advance_binary_sequence(sequences, BinaryChannel::TerminalOutput, stream_id, skipped)?;
+            continue;
+        }
+        if !pump.buffers.contains_key(&stream_id) {
+            pump.buffers
+                .insert(stream_id, Vec::with_capacity(MAX_TERMINAL_COALESCE_BYTES));
+            pump.order.push_back(stream_id);
+        }
+        let budget = MAX_OUTPUT_BYTES_PER_LOOP.saturating_sub(consumed_bytes);
+        if budget == 0 {
+            pump.pending = Some(pending);
+            break;
+        }
+        let (taken, full) = {
+            let buffer = pump
+                .buffers
+                .get_mut(&stream_id)
+                .expect("terminal coalescing buffer was inserted");
+            let take = remaining
+                .min(MAX_TERMINAL_COALESCE_BYTES.saturating_sub(buffer.len()))
+                .min(budget);
+            buffer.extend_from_slice(&pending.data[pending.offset..pending.offset + take]);
+            (take, buffer.len() == MAX_TERMINAL_COALESCE_BYTES)
+        };
+        pending.offset += taken;
+        consumed_bytes += taken;
+        if full {
+            let payload = pump
+                .buffers
+                .remove(&stream_id)
+                .expect("full terminal coalescing buffer exists");
+            pump.order.retain(|candidate| *candidate != stream_id);
+            send_v2_terminal_payload(
+                ws,
+                transport,
+                stream_id,
+                payload,
+                sequences,
+                acknowledgements,
+            )?;
+            sent_frames += 1;
+        }
+        if pending.offset < pending.data.len() {
+            pump.pending = Some(pending);
+        }
+    }
+
+    while sent_frames < MAX_OUTPUT_FRAMES_PER_LOOP {
+        let Some(stream_id) = pump.order.pop_front() else {
+            break;
+        };
+        let Some(payload) = pump.buffers.remove(&stream_id) else {
+            continue;
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        if acknowledgements.requires_resync(stream_id) {
+            advance_binary_sequence(sequences, BinaryChannel::TerminalOutput, stream_id, 1)?;
+        } else {
+            send_v2_terminal_payload(
+                ws,
+                transport,
+                stream_id,
+                payload,
+                sequences,
+                acknowledgements,
+            )?;
+        }
+        sent_frames += 1;
     }
     Ok(())
 }
@@ -954,34 +1360,71 @@ fn v2_binary_chunks(
     first_flags: u16,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
 ) -> Result<Vec<BinaryFrame>> {
-    let chunks = data.chunks(MAX_BINARY_PAYLOAD_BYTES).collect::<Vec<_>>();
-    if chunks.is_empty() {
-        let sequence = take_binary_sequence(sequences, channel, stream_id)?;
+    if data.is_empty() {
         return Ok(vec![BinaryFrame {
             channel,
             flags: first_flags | FLAG_FINAL,
             stream_id,
-            sequence,
+            sequence: take_binary_sequence(sequences, channel, stream_id)?,
             dropped_before: 0,
             payload: Vec::new(),
         }]);
     }
-    let last = chunks.len() - 1;
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            Ok(BinaryFrame {
-                channel,
-                flags: (if index == 0 { first_flags } else { 0 })
-                    | if index == last { FLAG_FINAL } else { 0 },
-                stream_id,
-                sequence: take_binary_sequence(sequences, channel, stream_id)?,
-                dropped_before: 0,
-                payload: chunk.to_vec(),
-            })
-        })
-        .collect()
+    let chunk_count = data.len().div_ceil(MAX_BINARY_PAYLOAD_BYTES);
+    let mut frames = Vec::with_capacity(chunk_count);
+    for (index, chunk) in data.chunks(MAX_BINARY_PAYLOAD_BYTES).enumerate() {
+        frames.push(BinaryFrame {
+            channel,
+            flags: (if index == 0 { first_flags } else { 0 })
+                | if index + 1 == chunk_count {
+                    FLAG_FINAL
+                } else {
+                    0
+                },
+            stream_id,
+            sequence: take_binary_sequence(sequences, channel, stream_id)?,
+            dropped_before: 0,
+            payload: chunk.to_vec(),
+        });
+    }
+    Ok(frames)
+}
+
+fn ensure_binary_sequence_capacity(
+    sequences: &HashMap<(BinaryChannel, u64), u64>,
+    keys: &[(BinaryChannel, u64)],
+) -> Result<()> {
+    let missing = keys
+        .iter()
+        .filter(|key| !sequences.contains_key(key))
+        .count();
+    if missing > MAX_SEQUENCE_DOMAINS.saturating_sub(sequences.len()) {
+        bail!("invalid_argument: remote-v2 binary stream limit reached");
+    }
+    Ok(())
+}
+
+fn peek_binary_sequence(
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    channel: BinaryChannel,
+    stream_id: u64,
+) -> Result<u64> {
+    ensure_binary_sequence_capacity(sequences, &[(channel, stream_id)])?;
+    Ok(*sequences.entry((channel, stream_id)).or_insert(1))
+}
+
+fn advance_binary_sequence(
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    channel: BinaryChannel,
+    stream_id: u64,
+    count: u64,
+) -> Result<()> {
+    let next = peek_binary_sequence(sequences, channel, stream_id)?;
+    let advanced = next
+        .checked_add(count)
+        .context("remote-v2 binary sequence exhausted")?;
+    sequences.insert((channel, stream_id), advanced);
+    Ok(())
 }
 
 fn take_binary_sequence(
@@ -989,11 +1432,11 @@ fn take_binary_sequence(
     channel: BinaryChannel,
     stream_id: u64,
 ) -> Result<u64> {
-    let next = sequences.entry((channel, stream_id)).or_insert(1);
-    let sequence = *next;
-    *next = next
+    let sequence = peek_binary_sequence(sequences, channel, stream_id)?;
+    let next = sequence
         .checked_add(1)
         .context("remote-v2 binary sequence exhausted")?;
+    sequences.insert((channel, stream_id), next);
     Ok(sequence)
 }
 
@@ -1211,6 +1654,19 @@ fn map_v2_terminal_input(
     })
 }
 
+fn release_v2_subscription_state(
+    subscription: &V2Subscription,
+    output_pump: &mut V2OutputPump,
+    acknowledgements: &mut TerminalAckWindow,
+    sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+) -> Result<()> {
+    output_pump.purge(subscription.pane_id, subscription.stream_id);
+    acknowledgements.remove_stream(subscription.stream_id)?;
+    sequences.remove(&(BinaryChannel::TerminalOutput, subscription.stream_id));
+    sequences.remove(&(BinaryChannel::TerminalSnapshot, subscription.stream_id));
+    Ok(())
+}
+
 fn handle_v2_request(
     request: &V2Envelope,
     grants: &[String],
@@ -1221,6 +1677,9 @@ fn handle_v2_request(
     next_req: &mut u64,
     subscriptions: &mut HashMap<String, V2Subscription>,
     leases: &mut RemoteLeaseProjection,
+    acknowledgements: &mut TerminalAckWindow,
+    output_pump: &mut V2OutputPump,
+    binary_sequences: &mut HashMap<(BinaryChannel, u64), u64>,
 ) -> Result<Value> {
     match (request.domain.as_str(), request.method.as_str()) {
         ("system", "status") => Ok(json!({
@@ -1267,7 +1726,22 @@ fn handle_v2_request(
                 take_req(next_req),
             )?;
             leases.by_pane.clear();
-            subscriptions.retain(|_, subscription| subscription.workspace_id != workspace_id);
+            let removed_ids = subscriptions
+                .iter()
+                .filter_map(|(id, subscription)| {
+                    (subscription.workspace_id == workspace_id).then_some(id.clone())
+                })
+                .collect::<Vec<_>>();
+            for id in removed_ids {
+                if let Some(subscription) = subscriptions.remove(&id) {
+                    release_v2_subscription_state(
+                        &subscription,
+                        output_pump,
+                        acknowledgements,
+                        binary_sequences,
+                    )?;
+                }
+            }
             write_frame(
                 daemon_writer,
                 &ClientToDaemon::DetachSession {
@@ -1276,13 +1750,35 @@ fn handle_v2_request(
             )?;
             Ok(json!({}))
         }
+        ("terminal", "ack") => {
+            require_grant(grants, TERMINAL_VIEW_GRANT)?;
+            v2_terminal_ack(request, subscriptions, acknowledgements)
+        }
         ("terminal", "unsubscribe") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
             let params: TerminalUnsubscribeParams = serde_json::from_value(request.payload.clone())
                 .context("parse terminal.unsubscribe payload")?;
-            subscriptions
+            let subscription = subscriptions
                 .remove(&params.subscription_id)
                 .context("terminal subscription not found")?;
+            if !subscriptions
+                .values()
+                .any(|candidate| candidate.pane_id == subscription.pane_id)
+            {
+                write_frame(
+                    daemon_writer,
+                    &ClientToDaemon::DetachPane {
+                        session_id: subscription.workspace_id,
+                        pane_id: subscription.pane_id,
+                    },
+                )?;
+            }
+            release_v2_subscription_state(
+                &subscription,
+                output_pump,
+                acknowledgements,
+                binary_sequences,
+            )?;
             Ok(json!({}))
         }
         ("terminal", "input") => {
@@ -1854,6 +2350,7 @@ fn run_authenticated(
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     push_rx: &Receiver<Message>,
+    close_requested: &AtomicBool,
     shared: &RemoteShared,
     client_key: Uuid,
     device_id: &str,
@@ -1903,9 +2400,16 @@ fn run_authenticated(
 
     let mut last_ping = Instant::now();
     let mut last_lease_renewal = Instant::now();
-    let mut last_pong = Instant::now();
+    let mut last_peer_activity = Instant::now();
     loop {
-        while let Some(message) = daemon_inbox.try_control()? {
+        if close_requested.load(Ordering::Acquire) {
+            let _ = ws.send(Message::Close(None));
+            return Ok(());
+        }
+        for _ in 0..MAX_CONTROL_FRAMES_PER_LOOP {
+            let Some(message) = daemon_inbox.try_control()? else {
+                break;
+            };
             handle_daemon_control(
                 ws,
                 daemon_writer,
@@ -1920,17 +2424,22 @@ fn run_authenticated(
                 message,
             )?;
         }
-        while let Ok(message) = push_rx.try_recv() {
+        for _ in 0..MAX_PUSH_FRAMES_PER_LOOP {
+            let Ok(message) = push_rx.try_recv() else {
+                break;
+            };
             ws.send(message)?;
         }
+        let mut output_bytes = 0_usize;
         for _ in 0..MAX_OUTPUT_FRAMES_PER_LOOP {
-            if daemon_inbox.has_pending_control() {
+            if daemon_inbox.has_pending_control() || output_bytes >= MAX_OUTPUT_BYTES_PER_LOOP {
                 break;
             }
             let Some(message) = daemon_inbox.try_output()? else {
                 break;
             };
             if let DaemonToClient::Output { pane_id, data } = message {
+                output_bytes = output_bytes.saturating_add(data.len());
                 if attached_panes.contains(&pane_id) {
                     ws.send(Message::Binary(
                         frame_pane_output(&pane_id.to_string(), &data).into(),
@@ -1941,6 +2450,7 @@ fn run_authenticated(
 
         match ws.read() {
             Ok(Message::Text(text)) => {
+                last_peer_activity = Instant::now();
                 let message: ClientMessage =
                     serde_json::from_str(text.as_ref()).context("parse remote message")?;
                 handle_client_message(
@@ -1959,12 +2469,13 @@ fn run_authenticated(
                     message,
                 )?;
             }
-            Ok(Message::Pong(_)) => last_pong = Instant::now(),
+            Ok(Message::Pong(_)) => last_peer_activity = Instant::now(),
             Ok(Message::Ping(data)) => {
+                last_peer_activity = Instant::now();
                 ws.send(Message::Pong(data))?;
             }
             Ok(Message::Close(_)) => return Ok(()),
-            Ok(_) => {}
+            Ok(_) => bail!("unexpected remote websocket message kind"),
             Err(tungstenite::Error::Io(error))
                 if matches!(
                     error.kind(),
@@ -1988,7 +2499,7 @@ fn run_authenticated(
         }
 
         if last_ping.elapsed() >= KEEPALIVE_INTERVAL {
-            if last_pong.elapsed() >= KEEPALIVE_DEADLINE {
+            if last_peer_activity.elapsed() >= KEEPALIVE_DEADLINE {
                 bail!("remote keepalive timed out");
             }
             ws.send(Message::Ping(Vec::new().into()))?;
@@ -2498,7 +3009,7 @@ fn request_reply(
     message: ClientToDaemon,
 ) -> Result<ReplyResult> {
     write_frame(writer, &message)?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + DAEMON_REPLY_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -2614,75 +3125,99 @@ mod tests {
     }
 
     #[test]
-    fn full_output_queue_drops_output_but_not_control() {
-        let (senders, mut inbox) = daemon_channels(1);
-        let pane_id = Uuid::new_v4();
-        let session_id = Uuid::new_v4();
+    fn byte_saturated_output_queue_marks_one_pane_gap_but_control_survives() {
+        let (senders, mut inbox) = daemon_channels(8);
+        let buffered_pane = Uuid::new_v4();
+        let gapped_pane = Uuid::new_v4();
 
         assert!(route_daemon_message(
             &senders,
             DaemonToClient::Output {
-                pane_id,
-                data: vec![1]
+                pane_id: buffered_pane,
+                data: vec![1; DAEMON_OUTPUT_QUEUE_MAX_BYTES],
             }
         ));
+        assert_eq!(inbox.queued_output_bytes(), DAEMON_OUTPUT_QUEUE_MAX_BYTES);
         assert!(!route_daemon_message(
             &senders,
             DaemonToClient::Output {
-                pane_id,
-                data: vec![2]
+                pane_id: gapped_pane,
+                data: vec![2],
             }
         ));
-        assert_eq!(inbox.take_output_drops(pane_id), 1);
-        assert!(route_daemon_message(
-            &senders,
-            DaemonToClient::SessionChanged { session_id }
-        ));
+        let gaps = inbox.take_all_output_drops();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps.get(&gapped_pane), Some(&1));
+        assert!(!gaps.contains_key(&buffered_pane));
+
         assert!(route_daemon_message(
             &senders,
             DaemonToClient::Reply {
                 req: 7,
-                result: ReplyResult::Ok
+                result: ReplyResult::Ok,
             }
         ));
-        assert!(route_daemon_message(
-            &senders,
-            DaemonToClient::PaneResized {
-                session_id,
-                pane_id,
-                cols: 80,
-                rows: 24
-            }
-        ));
-
-        assert_eq!(
-            inbox.try_control().expect("session control"),
-            Some(DaemonToClient::SessionChanged { session_id })
-        );
         assert_eq!(
             inbox.try_control().expect("reply control"),
             Some(DaemonToClient::Reply {
                 req: 7,
-                result: ReplyResult::Ok
+                result: ReplyResult::Ok,
             })
         );
+        match inbox.try_output().expect("output receive") {
+            Some(DaemonToClient::Output { pane_id, data }) => {
+                assert_eq!(pane_id, buffered_pane);
+                assert_eq!(data.len(), DAEMON_OUTPUT_QUEUE_MAX_BYTES);
+            }
+            other => panic!("unexpected queued output: {other:?}"),
+        }
+        assert_eq!(inbox.queued_output_bytes(), 0);
+    }
+
+    #[test]
+    fn five_mib_two_hundred_frame_queue_stays_within_both_bounds() {
+        let frame_capacity = 80;
+        let (senders, mut inbox) = daemon_channels(frame_capacity);
+        let pane_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let frame_bytes = 26_215;
+        let mut accepted = 0;
+        for _ in 0..200 {
+            if route_daemon_message(
+                &senders,
+                DaemonToClient::Output {
+                    pane_id,
+                    data: vec![3; frame_bytes],
+                },
+            ) {
+                accepted += 1;
+            }
+        }
+        assert!(accepted <= frame_capacity);
+        assert!(accepted < 200);
+        assert!(inbox.queued_output_bytes() <= DAEMON_OUTPUT_QUEUE_MAX_BYTES);
+        assert!(
+            inbox
+                .take_all_output_drops()
+                .get(&pane_id)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(route_daemon_message(
+            &senders,
+            DaemonToClient::SessionChanged { session_id }
+        ));
         assert_eq!(
-            inbox.try_control().expect("resize control"),
-            Some(DaemonToClient::PaneResized {
-                session_id,
-                pane_id,
-                cols: 80,
-                rows: 24
-            })
+            inbox.try_control().expect("control survives saturation"),
+            Some(DaemonToClient::SessionChanged { session_id })
         );
-        assert_eq!(
-            inbox.try_output().expect("output receive"),
-            Some(DaemonToClient::Output {
-                pane_id,
-                data: vec![1]
-            })
-        );
-        assert_eq!(inbox.try_output().expect("empty output queue"), None);
+        let mut drained = 0;
+        while inbox.try_output().expect("drain queued output").is_some() {
+            drained += 1;
+        }
+        assert_eq!(drained, accepted);
+        assert_eq!(inbox.queued_output_bytes(), 0);
     }
 
     #[test]
@@ -2734,6 +3269,7 @@ mod tests {
             V2Subscription {
                 workspace_id: session_id,
                 pane_id,
+                stream_id: v2_stream_id(pane_id),
             },
         );
         let mut leases = RemoteLeaseProjection::default();
@@ -2795,6 +3331,161 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ack_releases_capacity_and_rejects_aliases() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let stream_id = v2_stream_id(pane_id);
+        let subscription_id = "subscription-ack".to_string();
+        let subscriptions = HashMap::from([(
+            subscription_id.clone(),
+            V2Subscription {
+                workspace_id: session_id,
+                pane_id,
+                stream_id,
+            },
+        )]);
+        let mut acknowledgements = TerminalAckWindow::new(
+            TERMINAL_MAX_UNACKED_BYTES_PER_STREAM,
+            TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION,
+        )
+        .unwrap();
+        assert_eq!(
+            acknowledgements.record_sent(stream_id, 1, 4096).unwrap(),
+            TerminalRecordDecision::Recorded
+        );
+        let request = V2Envelope {
+            version: V2_PROTOCOL_VERSION,
+            request_id: "request-ack".to_string(),
+            domain: "terminal".to_string(),
+            method: "ack".to_string(),
+            operation_id: Uuid::new_v4().to_string(),
+            sequence: 1,
+            revocation_epoch: 1,
+            payload: json!({
+                "subscriptionId": subscription_id,
+                "sequence": 1,
+            }),
+        };
+        assert_eq!(
+            v2_terminal_ack(&request, &subscriptions, &mut acknowledgements).unwrap(),
+            json!({})
+        );
+        assert_eq!(acknowledgements.stream_unacked_bytes(stream_id), 0);
+        assert_eq!(acknowledgements.connection_unacked_bytes(), 0);
+        assert!(serde_json::from_value::<TerminalAckParams>(json!({
+            "subscription_id": "subscription-ack",
+            "sequence": 1,
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<TerminalAckParams>(json!({
+            "subscriptionId": "subscription-ack",
+            "sequence": 1,
+            "streamId": stream_id,
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn five_mib_flow_emits_one_resync_and_resumes_only_after_snapshot() {
+        let stream_id = 41;
+        let mut acknowledgements = TerminalAckWindow::new(
+            TERMINAL_MAX_UNACKED_BYTES_PER_STREAM,
+            TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION,
+        )
+        .unwrap();
+        let frame_bytes = 26_215;
+        let mut sequence = 1;
+        let mut sent = 0;
+        let mut resync_markers = 0;
+        let mut suppressed = 0;
+        for _ in 0..200 {
+            match record_v2_terminal_frame(&mut acknowledgements, stream_id, sequence, frame_bytes)
+                .unwrap()
+            {
+                V2TerminalFrameDisposition::Send => sent += 1,
+                V2TerminalFrameDisposition::EmitResync => {
+                    acknowledgements.mark_gap(stream_id).unwrap();
+                    resync_markers += 1;
+                }
+                V2TerminalFrameDisposition::Suppress => suppressed += 1,
+            }
+            sequence += 1;
+        }
+        assert!(sent > 0);
+        assert_eq!(resync_markers, 1);
+        assert!(suppressed > 0);
+        assert!(acknowledgements.requires_resync(stream_id));
+        assert_eq!(acknowledgements.stream_unacked_bytes(stream_id), 0);
+        assert!(
+            acknowledgements.connection_unacked_bytes()
+                <= TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION
+        );
+        assert_eq!(
+            record_v2_terminal_frame(&mut acknowledgements, stream_id, sequence, 1).unwrap(),
+            V2TerminalFrameDisposition::Suppress
+        );
+        let highest_sent = acknowledgements.highest_sent_sequence(stream_id);
+        acknowledgements.ack(stream_id, highest_sent).unwrap();
+        assert!(acknowledgements.requires_resync(stream_id));
+        assert!(acknowledgements.complete_resync(stream_id));
+        assert_eq!(
+            record_v2_terminal_frame(&mut acknowledgements, stream_id, sequence + 1, 1).unwrap(),
+            V2TerminalFrameDisposition::Send
+        );
+    }
+
+    #[test]
+    fn terminal_gap_is_isolated_between_streams() {
+        let mut acknowledgements = TerminalAckWindow::new(
+            TERMINAL_MAX_UNACKED_BYTES_PER_STREAM,
+            TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION,
+        )
+        .unwrap();
+        assert_eq!(
+            record_v2_terminal_frame(&mut acknowledgements, 11, 1, 1024).unwrap(),
+            V2TerminalFrameDisposition::Send
+        );
+        assert_eq!(
+            record_v2_terminal_frame(&mut acknowledgements, 22, 1, 1024).unwrap(),
+            V2TerminalFrameDisposition::Send
+        );
+        assert!(fence_v2_terminal_gap(&mut acknowledgements, 11).unwrap());
+        assert!(acknowledgements.requires_resync(11));
+        assert!(!acknowledgements.requires_resync(22));
+        assert_eq!(acknowledgements.stream_unacked_bytes(11), 0);
+        assert_eq!(acknowledgements.stream_unacked_bytes(22), 1024);
+        assert_eq!(
+            record_v2_terminal_frame(&mut acknowledgements, 22, 2, 1024).unwrap(),
+            V2TerminalFrameDisposition::Send
+        );
+        assert!(!fence_v2_terminal_gap(&mut acknowledgements, 11).unwrap());
+    }
+
+    #[test]
+    fn duplicate_pane_subscription_is_rejected_deterministically() {
+        let workspace_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let stream_id = v2_stream_id(pane_id);
+        let subscriptions = HashMap::from([(
+            "subscription-existing".to_string(),
+            V2Subscription {
+                workspace_id,
+                pane_id,
+                stream_id,
+            },
+        )]);
+        let duplicate = validate_v2_subscription_target(&subscriptions, pane_id, stream_id)
+            .expect_err("duplicate pane must be rejected");
+        assert!(duplicate
+            .to_string()
+            .contains("already has a live subscription"));
+        let colliding_pane = Uuid::new_v4();
+        let collision = validate_v2_subscription_target(&subscriptions, colliding_pane, stream_id)
+            .expect_err("stream collision must be rejected");
+        assert!(collision.to_string().contains("stream id collides"));
+    }
+
+    #[test]
     fn v1_claim_maps_to_typed_daemon_request_with_generated_revision_handles() {
         let owner_connection_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
@@ -2848,6 +3539,14 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|frame| frame.payload.len() <= MAX_BINARY_PAYLOAD_BYTES));
+    }
+
+    #[test]
+    fn remote_socket_deadline_constants_match_streaming_contract() {
+        assert_eq!(HELLO_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(SOCKET_WRITE_TIMEOUT, Duration::from_millis(250));
+        assert_eq!(KEEPALIVE_INTERVAL, Duration::from_secs(15));
+        assert_eq!(KEEPALIVE_DEADLINE, Duration::from_secs(45));
     }
 
     #[test]
