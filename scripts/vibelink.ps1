@@ -65,6 +65,12 @@ function Assert-ReleaseLicenseApiUrl {
   }
 }
 
+function Reset-ReleaseBuildArtifacts {
+  Assert-Tool 'cargo'
+  Write-Host 'Clearing app release artifacts so Tauri embeds the current frontend assets.' -ForegroundColor DarkGray
+  Invoke-Checked 'cargo' @('clean', '--release', '--package', 'app', '--manifest-path', $CargoToml)
+}
+
 function Enter-RepoRoot {
   Set-Location -LiteralPath $RepoRoot
 }
@@ -229,6 +235,7 @@ function Invoke-ReleaseBuild {
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
   Assert-ReleaseLicenseApiUrl
+  Reset-ReleaseBuildArtifacts
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--no-bundle')
   Write-Host 'Release build complete: src-tauri\target\release\app.exe' -ForegroundColor Green
 }
@@ -278,6 +285,7 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Assert-LocalTauriCli
   Assert-ReleaseLicenseApiUrl
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
+  Reset-ReleaseBuildArtifacts
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
   Show-Bundles 'release'
 }
@@ -294,6 +302,7 @@ function Invoke-CiInstaller {
   if ($packageVersion -ne $cargoVersion -or $packageVersion -ne $tauriVersion) {
     throw "Version mismatch: package.json=$packageVersion, Cargo.toml=$cargoVersion, tauri.conf.json=$tauriVersion"
   }
+  Reset-ReleaseBuildArtifacts
   # Pass the flag explicitly: some runners export CI=1, which Tauri's boolean
   # environment parser rejects even though the CLI flag itself is valid.
   $arguments = @('exec', 'tauri', 'build', '--ci', '--bundles', 'msi', 'nsis')
@@ -350,6 +359,10 @@ Release licensing:
   Release actions default VIBELINK_LICENSE_API_URL to
   https://vibelink.moobang.net when it is not already set.
   Any explicitly supplied value must still be exactly that HTTPS origin.
+
+Embedded frontend assets:
+  Production build actions clean only the app package's release artifacts first,
+  preventing Cargo incremental state from pairing a fresh index.html with stale JavaScript.
 
 Safety:
   This script does not broad-kill processes. Dev run/build only delegates to
