@@ -1,10 +1,10 @@
-export const SIDEBAR_PIN_STORAGE_KEY = 'vibelink:sidebarPinned'
+export const SIDEBAR_PIN_STORAGE_KEY = 'vibelink:sidebarPinned:v2'
 
 export function loadSidebarPinned(storage: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage): boolean {
   try {
-    return storage?.getItem(SIDEBAR_PIN_STORAGE_KEY) === '1'
+    return storage?.getItem(SIDEBAR_PIN_STORAGE_KEY) !== '0'
   } catch {
-    return false
+    return true
   }
 }
 
