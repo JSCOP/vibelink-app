@@ -1571,7 +1571,13 @@ export function WorkspaceView({
         ref={dockRef}
         className="workspace-dock dockview-theme-vibelink"
         onPointerDownCapture={(event) => {
-          const shell = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-content-panel-id]')
+          const target = event.target as HTMLElement | null
+          // Dockview owns edge-rail tab expand/collapse toggling. Intercepting
+          // the pointerdown here activates and expands the edge group before
+          // Dockview's click handler runs, which then toggles the now-active
+          // group straight back to collapsed, so the sidebar never opens.
+          if (target?.closest('.workspace-edge-rail-tab')) return
+          const shell = target?.closest<HTMLElement>('[data-content-panel-id]')
           const panelId = shell?.dataset.contentPanelId
           if (!panelId) return
           const params = getContentParams(panelId)

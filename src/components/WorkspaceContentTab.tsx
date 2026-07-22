@@ -104,7 +104,6 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
         tabIndex={0}
         aria-selected={isActive}
         aria-label={accessibleTitle}
-        onPointerDown={() => actions.activateContent(api.id)}
         onKeyDown={onRootKeyDown}
       >
         <span className="workspace-edge-rail-icon" aria-hidden="true"><ProfileIcon name={content?.icon} size={16} /></span>

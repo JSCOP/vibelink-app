@@ -5925,7 +5925,25 @@ button.git-window-primary-action,
   width: 38px;
 }
 
-.workspace-dock .dv-edge-group .dv-tabs-container-vertical,
+.workspace-dock .dv-edge-group .dv-tabs-container-vertical {
+  /* Stack every activity-bar tab (Explorer, Source Control, Git History,
+     Branches) vertically. Clamping this container to a single 38px tab
+     clips the rest and leaves only the active tab clickable. */
+  height: auto;
+  max-height: 100%;
+  min-height: 0;
+  width: 38px;
+}
+
+.workspace-dock .dv-edge-group .dv-scrollable {
+  /* The activity bar is a fixed, non-scrolling rail. Dockview sizes this
+     scroll wrapper to the active tab only, which clips the stacked rail
+     when the edge group is collapsed. Let it grow to hold every tab. */
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+
 .workspace-dock .dv-edge-group .dv-tab,
 .workspace-dock .dv-edge-group .dv-react-part {
   height: 38px;
