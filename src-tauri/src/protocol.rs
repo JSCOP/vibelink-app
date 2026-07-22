@@ -21,6 +21,61 @@ pub struct TerminalSnapshot {
     pub data: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSelection {
+    pub workspace_id: Option<Uuid>,
+    pub pane_id: Option<Uuid>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemotePaneActivity {
+    Idle,
+    Running,
+    Waiting,
+    Done,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceProjectionWorkspace {
+    pub id: String,
+    pub name: String,
+    pub pane_count: u32,
+    pub workspace_folder: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceProjectionPane {
+    pub activity: RemotePaneActivity,
+    pub alive: bool,
+    pub cols: u16,
+    pub desktop_active: bool,
+    pub group_id: String,
+    pub group_order: u32,
+    pub id: String,
+    pub last_output_at: u64,
+    pub order: u32,
+    pub pane_generation: u64,
+    pub role: String,
+    pub rows: u16,
+    pub tab_order: u32,
+    pub title: String,
+    pub unread_count: u32,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceProjection {
+    pub workspaces: Vec<RemoteWorkspaceProjectionWorkspace>,
+    pub attached_workspace_id: Option<String>,
+    pub panes: Vec<RemoteWorkspaceProjectionPane>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -249,6 +304,23 @@ pub enum FrameError {
 pub type FrameResult<T> = Result<T, FrameError>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteBrowserHostRequest {
+    pub request_id: Uuid,
+    pub operation_id: Uuid,
+    pub method: String,
+    pub payload_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteBrowserHostResponse {
+    pub request_id: Uuid,
+    pub result_json: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientToDaemon {
     Hello {
         client_id: Uuid,
@@ -260,11 +332,20 @@ pub enum ClientToDaemon {
         process_id: u32,
         user_sid: String,
     },
+    RegisterBrowserHost,
     Ping {
         req: Req,
     },
     ListSessions {
         req: Req,
+    },
+    RemoteWorkspaceProjection {
+        req: Req,
+        workspace_id: Option<Uuid>,
+    },
+    SetDesktopSelection {
+        req: Req,
+        selection: DesktopSelection,
     },
     CreateSession {
         req: Req,
@@ -391,6 +472,15 @@ pub enum ClientToDaemon {
         req: Req,
         request_json: String,
     },
+    RemoteBrowser {
+        req: Req,
+        operation_id: Uuid,
+        method: String,
+        payload_json: String,
+    },
+    RemoteBrowserResponse {
+        response: RemoteBrowserHostResponse,
+    },
     RemotePaneLeaseClaim {
         req: Req,
         request: RemotePaneLeaseClaimRequest,
@@ -457,6 +547,9 @@ pub enum DaemonToClient {
     RemotePaneLease {
         event: RemotePaneLeaseEvent,
     },
+    RemoteBrowserRequest {
+        request: RemoteBrowserHostRequest,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -500,6 +593,7 @@ pub enum ReplyResult {
         panes: Vec<PaneMeta>,
     },
     PaneSpawned(PaneMeta),
+    RemoteWorkspaceProjection(RemoteWorkspaceProjection),
     ScrollbackData(Vec<u8>),
     TerminalSnapshot(TerminalSnapshot),
     Ok,
@@ -508,6 +602,7 @@ pub enum ReplyResult {
     Cli(String),
     Computer(String),
     Remote(String),
+    Browser(String),
     RemotePaneLease(RemotePaneLeaseResult),
     ResourceSnapshot(ResourceSnapshotData),
 }
@@ -773,6 +868,38 @@ mod tests {
         assert_eq!(decoded, message);
     }
 
+    #[test]
+    fn frame_roundtrip_preserves_typed_browser_host_messages() {
+        let request = RemoteBrowserHostRequest {
+            request_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            method: "navigate".to_string(),
+            payload_json: serde_json::json!({
+                "workspaceId": Uuid::new_v4().to_string(),
+                "pageId": Uuid::new_v4().to_string(),
+                "url": "https://example.test"
+            })
+            .to_string(),
+        };
+        let message = ClientToDaemon::RemoteBrowser {
+            req: 43,
+            operation_id: request.operation_id,
+            method: request.method.clone(),
+            payload_json: request.payload_json.clone(),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode browser host request");
+        let decoded: ClientToDaemon =
+            read_frame(&mut Cursor::new(bytes)).expect("decode browser host request");
+        assert_eq!(decoded, message);
+
+        let response = DaemonToClient::RemoteBrowserRequest { request };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &response).expect("encode browser host dispatch");
+        let decoded: DaemonToClient =
+            read_frame(&mut Cursor::new(bytes)).expect("decode browser host dispatch");
+        assert_eq!(decoded, response);
+    }
     #[test]
     fn read_frame_rejects_frames_larger_than_cap() {
         let mut bytes = ((MAX_FRAME_LEN as u32) + 1).to_be_bytes().to_vec();

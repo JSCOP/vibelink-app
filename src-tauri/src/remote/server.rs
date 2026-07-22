@@ -1,4 +1,8 @@
-use super::v2::{secure::DeviceIdentity, wire::OperationReplayWindow};
+use super::v2::{
+    generated::{AppearanceChangedEvent, AppearanceProjection, CursorStyle, TerminalTheme},
+    secure::DeviceIdentity,
+    wire::OperationReplayWindow,
+};
 use super::{
     bridge,
     config::RemoteConfig,
@@ -12,11 +16,11 @@ use local_ip_address::list_afinet_netifas;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, TcpListener},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
     },
     thread::{self, JoinHandle},
@@ -53,8 +57,10 @@ pub struct PairingPayload {
 pub struct RemotePaneLeaseStatus {
     pub session_id: String,
     pub pane_id: String,
+    pub device_id: String,
     pub cols: u16,
     pub rows: u16,
+    pub expires_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -114,12 +120,79 @@ impl Drop for ActiveClientPermit {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum RemotePush {
+    WebSocket(Message),
+    AppearanceChanged(AppearanceChangedEvent),
+}
+
+fn default_appearance_projection() -> AppearanceProjection {
+    AppearanceProjection {
+        alarm_highlight_color: "#7ee787".to_string(),
+        cursor_style: CursorStyle::Bar,
+        cursor_width: 1.0,
+        font_family: "Cascadia Mono".to_string(),
+        font_size: 11.0,
+        font_weight: "400".to_string(),
+        font_weight_bold: "700".to_string(),
+        reviewed_pane_highlight_color: "#58a6ff".to_string(),
+        scrollback: 5_000,
+        selected_pane_highlight_color: "#ff9f1a".to_string(),
+        terminal: TerminalTheme {
+            background: "#0b0f14".to_string(),
+            black: "#0b0f14".to_string(),
+            blue: "#79c0ff".to_string(),
+            bright_black: "#5c6773".to_string(),
+            bright_blue: "#9ecbff".to_string(),
+            bright_cyan: "#9af0f5".to_string(),
+            bright_green: "#9ff5b7".to_string(),
+            bright_magenta: "#e2c5ff".to_string(),
+            bright_red: "#ff8f8f".to_string(),
+            bright_white: "#ffffff".to_string(),
+            bright_yellow: "#f7dc84".to_string(),
+            cursor: "#7ee787".to_string(),
+            cursor_accent: "#0b0f14".to_string(),
+            cyan: "#76e3ea".to_string(),
+            foreground: "#d6deeb".to_string(),
+            green: "#7ee787".to_string(),
+            magenta: "#d2a8ff".to_string(),
+            red: "#ff6b6b".to_string(),
+            selection_background: "#264f78".to_string(),
+            white: "#d6deeb".to_string(),
+            yellow: "#f2cc60".to_string(),
+        },
+        theme_id: "abyss".to_string(),
+        theme_name: "Abyss".to_string(),
+        ui_vars: BTreeMap::from([
+            ("--vibelink-terminal-bg".to_string(), "#0b0f14".to_string()),
+            ("--vibelink-terminal-fg".to_string(), "#d6deeb".to_string()),
+            ("--vibelink-bg".to_string(), "#0d0f12".to_string()),
+        ]),
+    }
+}
+
+pub(crate) fn legacy_appearance_payload(
+    appearance: &AppearanceProjection,
+    workspace_alerts: &HashMap<String, usize>,
+) -> Value {
+    let mut payload = serde_json::to_value(appearance).expect("serialize appearance projection");
+    payload
+        .as_object_mut()
+        .expect("appearance projection must serialize as an object")
+        .insert(
+            "workspaceAlerts".to_string(),
+            serde_json::to_value(workspace_alerts).expect("serialize workspace alerts"),
+        );
+    payload
+}
+
 pub(crate) struct RemoteShared {
     pub devices: Mutex<DeviceStore>,
-    pub appearance: RwLock<Value>,
+    pub appearance: RwLock<AppearanceProjection>,
+    pub appearance_generation: AtomicU64,
     pub workspace_order: RwLock<Vec<String>>,
     pub workspace_alerts: RwLock<HashMap<String, usize>>,
-    pub client_senders: Mutex<HashMap<Uuid, Sender<Message>>>,
+    pub client_senders: Mutex<HashMap<Uuid, Sender<RemotePush>>>,
     pub client_close_requests: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
     pub client_devices: Mutex<HashMap<Uuid, String>>,
     pub v2_clients: Mutex<HashSet<Uuid>>,
@@ -156,7 +229,8 @@ impl RemoteServer {
             runtime: Mutex::new(None),
             shared: Arc::new(RemoteShared {
                 devices: Mutex::new(devices),
-                appearance: RwLock::new(Value::Object(Default::default())),
+                appearance: RwLock::new(default_appearance_projection()),
+                appearance_generation: AtomicU64::new(0),
                 workspace_order: RwLock::new(Vec::new()),
                 workspace_alerts: RwLock::new(HashMap::new()),
                 client_senders: Mutex::new(HashMap::new()),
@@ -261,7 +335,7 @@ impl RemoteServer {
             .cloned()
             .collect();
         for sender in senders {
-            let _ = sender.try_send(Message::Close(None));
+            let _ = sender.try_send(RemotePush::WebSocket(Message::Close(None)));
         }
         if let Some(runtime) = runtime {
             let _ = runtime.handle.join();
@@ -461,7 +535,7 @@ impl RemoteServer {
                 .collect::<Vec<_>>()
         };
         for sender in senders {
-            let _ = sender.try_send(Message::Close(None));
+            let _ = sender.try_send(RemotePush::WebSocket(Message::Close(None)));
         }
     }
 
@@ -491,6 +565,17 @@ impl RemoteServer {
         workspace_order: Vec<String>,
         workspace_alerts: HashMap<String, usize>,
     ) {
+        let appearance = match serde_json::from_value::<AppearanceProjection>(appearance) {
+            Ok(appearance) => appearance,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "rejected non-canonical remote appearance projection"
+                );
+                return;
+            }
+        };
+        let legacy_payload = legacy_appearance_payload(&appearance, &workspace_alerts);
         *self
             .shared
             .appearance
@@ -506,28 +591,43 @@ impl RemoteServer {
             .workspace_alerts
             .write()
             .expect("remote workspace alerts lock") = workspace_alerts;
-        let message = serde_json::to_string(&ServerMessage::Appearance {
-            payload: appearance,
+        let view_generation = self
+            .shared
+            .appearance_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                generation.checked_add(1)
+            })
+            .expect("remote appearance generation exhausted")
+            + 1;
+        let legacy_message = serde_json::to_string(&ServerMessage::Appearance {
+            payload: legacy_payload,
         })
-        .expect("serialize appearance");
+        .expect("serialize legacy appearance");
+        let v2_event = AppearanceChangedEvent {
+            appearance,
+            view_generation,
+        };
         let v2_clients = self
             .shared
             .v2_clients
             .lock()
             .expect("remote v2 clients mutex")
             .clone();
-        let senders: Vec<_> = self
+        let senders = self
             .shared
             .client_senders
             .lock()
             .expect("remote clients mutex")
             .iter()
-            .filter_map(|(client_key, sender)| {
-                (!v2_clients.contains(client_key)).then_some(sender.clone())
-            })
-            .collect();
-        for sender in senders {
-            let _ = sender.try_send(Message::Text(message.clone().into()));
+            .map(|(client_key, sender)| (*client_key, sender.clone()))
+            .collect::<Vec<_>>();
+        for (client_key, sender) in senders {
+            let push = if v2_clients.contains(&client_key) {
+                RemotePush::AppearanceChanged(v2_event.clone())
+            } else {
+                RemotePush::WebSocket(Message::Text(legacy_message.clone().into()))
+            };
+            let _ = sender.try_send(push);
         }
     }
 }
@@ -626,7 +726,7 @@ mod tests {
         let close_requested = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = crossbeam_channel::bounded(1);
         sender
-            .try_send(Message::Ping(Vec::new().into()))
+            .try_send(RemotePush::WebSocket(Message::Ping(Vec::new().into())))
             .expect("fill client push queue");
         server
             .shared
@@ -644,7 +744,10 @@ mod tests {
         server.stop();
 
         assert!(close_requested.load(Ordering::Acquire));
-        assert!(matches!(receiver.try_recv().unwrap(), Message::Ping(_)));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            RemotePush::WebSocket(Message::Ping(_))
+        ));
         assert!(receiver.try_recv().is_err());
         let _ = std::fs::remove_dir_all(directory);
     }
@@ -658,7 +761,7 @@ mod tests {
         let close_requested = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = crossbeam_channel::bounded(1);
         sender
-            .try_send(Message::Ping(Vec::new().into()))
+            .try_send(RemotePush::WebSocket(Message::Ping(Vec::new().into())))
             .expect("fill client push queue");
         server
             .shared
@@ -682,7 +785,10 @@ mod tests {
         server.close_device_connections("device-a");
 
         assert!(close_requested.load(Ordering::Acquire));
-        assert!(matches!(receiver.try_recv().unwrap(), Message::Ping(_)));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            RemotePush::WebSocket(Message::Ping(_))
+        ));
         assert!(receiver.try_recv().is_err());
         let _ = std::fs::remove_dir_all(directory);
     }
@@ -750,7 +856,7 @@ mod tests {
             receiver
                 .recv_timeout(Duration::from_secs(1))
                 .expect("close frame"),
-            Message::Close(_)
+            RemotePush::WebSocket(Message::Close(_))
         ));
         assert!(started.elapsed() < Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(directory);
@@ -797,20 +903,44 @@ mod tests {
         assert_eq!(epoch, 2);
         assert!(matches!(
             receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Message::Close(_)
+            RemotePush::WebSocket(Message::Close(_))
         ));
         let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn plaintext_v1_pushes_are_never_sent_to_v2_connections() {
+    fn default_appearance_is_a_canonical_projection() {
+        let directory = std::env::temp_dir().join(format!(
+            "vibelink-remote-default-appearance-{}",
+            Uuid::new_v4()
+        ));
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let appearance = server
+            .shared
+            .appearance
+            .read()
+            .expect("remote appearance lock")
+            .clone();
+        let serialized = serde_json::to_value(&appearance).expect("serialize default appearance");
+
+        assert_eq!(
+            serde_json::from_value::<AppearanceProjection>(serialized).unwrap(),
+            appearance
+        );
+        assert_eq!(appearance.theme_id, "abyss");
+        assert_eq!(appearance.scrollback, 5_000);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn appearance_pushes_legacy_alerts_and_canonical_monotonic_v2_events() {
         let directory =
-            std::env::temp_dir().join(format!("vibelink-remote-encryption-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("vibelink-remote-appearance-{}", Uuid::new_v4()));
         let server = RemoteServer::new(directory.clone()).expect("create remote server");
         let v1_key = Uuid::new_v4();
         let v2_key = Uuid::new_v4();
-        let (v1_sender, v1_receiver) = crossbeam_channel::bounded(1);
-        let (v2_sender, v2_receiver) = crossbeam_channel::bounded(1);
+        let (v1_sender, v1_receiver) = crossbeam_channel::bounded(4);
+        let (v2_sender, v2_receiver) = crossbeam_channel::bounded(4);
         {
             let mut senders = server
                 .shared
@@ -826,17 +956,74 @@ mod tests {
             .lock()
             .expect("remote v2 clients mutex")
             .insert(v2_key);
+        let mut appearance = server
+            .shared
+            .appearance
+            .read()
+            .expect("remote appearance lock")
+            .clone();
+        appearance.theme_name = "Updated Abyss".to_string();
+        let alerts = HashMap::from([("workspace-a".to_string(), 2_usize)]);
 
         server.set_appearance(
-            serde_json::json!({"theme": "dark"}),
+            serde_json::to_value(&appearance).unwrap(),
+            Vec::new(),
+            alerts.clone(),
+        );
+
+        let RemotePush::WebSocket(Message::Text(legacy)) =
+            v1_receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("v1 client did not receive a plaintext appearance message");
+        };
+        let legacy: Value = serde_json::from_str(legacy.as_ref()).unwrap();
+        assert_eq!(legacy["type"], "appearance");
+        assert_eq!(legacy["payload"]["workspaceAlerts"]["workspace-a"], 2);
+        assert_eq!(legacy["payload"]["themeName"], "Updated Abyss");
+
+        let RemotePush::AppearanceChanged(first) =
+            v2_receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("v2 client did not receive a canonical appearance event");
+        };
+        assert_eq!(first.view_generation, 1);
+        assert_eq!(first.appearance, appearance);
+        let mut forbidden = serde_json::to_value(&first.appearance).unwrap();
+        forbidden.as_object_mut().unwrap().insert(
+            "workspaceAlerts".to_string(),
+            serde_json::to_value(&alerts).unwrap(),
+        );
+        assert!(serde_json::from_value::<AppearanceProjection>(forbidden).is_err());
+
+        server.set_appearance(
+            serde_json::to_value(&appearance).unwrap(),
             Vec::new(),
             HashMap::new(),
         );
+        let RemotePush::AppearanceChanged(second) =
+            v2_receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("v2 client did not receive the second appearance event");
+        };
+        assert_eq!(second.view_generation, 2);
+        let RemotePush::WebSocket(Message::Text(legacy)) =
+            v1_receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("v1 client did not receive the second appearance message");
+        };
+        let legacy: Value = serde_json::from_str(legacy.as_ref()).unwrap();
+        assert_eq!(legacy["payload"]["workspaceAlerts"], serde_json::json!({}));
 
-        assert!(matches!(
-            v1_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Message::Text(_)
-        ));
+        server.set_appearance(
+            serde_json::json!({ "themeId": "invalid", "workspaceAlerts": {} }),
+            Vec::new(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            server.shared.appearance_generation.load(Ordering::Acquire),
+            2
+        );
+        assert!(v1_receiver.try_recv().is_err());
         assert!(v2_receiver.try_recv().is_err());
         let _ = std::fs::remove_dir_all(directory);
     }

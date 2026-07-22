@@ -37,8 +37,8 @@ use crate::orchestration::{
 };
 use crate::protocol::{
     read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneConfig,
-    RemoteConnectionCleanupRequest, RemotePaneLeaseResult, RemotePaneLeaseStatusRequest,
-    ReplyResult, Req,
+    RemoteBrowserHostRequest, RemoteBrowserHostResponse, RemoteConnectionCleanupRequest,
+    RemotePaneLeaseResult, RemotePaneLeaseStatusRequest, ReplyResult, Req,
 };
 use crate::remote::{RemotePaneLeaseStatus, RemoteServer};
 use anyhow::{Context, Result};
@@ -47,6 +47,7 @@ use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions}
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -76,6 +77,103 @@ static PERSISTENCE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static DEBOUNCED_PERSISTER: LazyLock<Mutex<Option<DebouncedPersister>>> =
     LazyLock::new(|| Mutex::new(None));
 static ORCHESTRATION_LAUNCH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static BROWSER_HOST_ROUTER: LazyLock<Mutex<BrowserHostRouter>> =
+    LazyLock::new(|| Mutex::new(BrowserHostRouter::default()));
+
+#[derive(Default)]
+struct BrowserHostRouter {
+    host: Option<(Uuid, Sender<DaemonToClient>)>,
+    pending: HashMap<Uuid, Sender<RemoteBrowserHostResponse>>,
+}
+
+fn register_browser_host(client_id: Uuid, sender: Sender<DaemonToClient>) {
+    lock_mutex(&BROWSER_HOST_ROUTER).host = Some((client_id, sender));
+}
+
+fn unregister_browser_host(client_id: Uuid) {
+    let mut router = lock_mutex(&BROWSER_HOST_ROUTER);
+    if router
+        .host
+        .as_ref()
+        .is_some_and(|(host_id, _)| *host_id == client_id)
+    {
+        router.host = None;
+        router.pending.clear();
+    }
+}
+
+fn dispatch_browser_host_request(
+    operation_id: Uuid,
+    method: String,
+    payload_json: String,
+) -> Result<String> {
+    let request_id = Uuid::new_v4();
+    let (response_tx, response_rx) = bounded(1);
+    let host = {
+        let mut router = lock_mutex(&BROWSER_HOST_ROUTER);
+        let host = router
+            .host
+            .as_ref()
+            .map(|(_, sender)| sender.clone())
+            .context("browser_unavailable: desktop browser host is not connected")?;
+        router.pending.insert(request_id, response_tx);
+        host
+    };
+    let request = RemoteBrowserHostRequest {
+        request_id,
+        operation_id,
+        method,
+        payload_json,
+    };
+    if host
+        .send(DaemonToClient::RemoteBrowserRequest { request })
+        .is_err()
+    {
+        lock_mutex(&BROWSER_HOST_ROUTER).pending.remove(&request_id);
+        anyhow::bail!("browser_unavailable: desktop browser host disconnected");
+    }
+    let response = match response_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(response) => response,
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            lock_mutex(&BROWSER_HOST_ROUTER).pending.remove(&request_id);
+            anyhow::bail!("browser_unavailable: desktop browser host timed out");
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            lock_mutex(&BROWSER_HOST_ROUTER).pending.remove(&request_id);
+            anyhow::bail!("browser_unavailable: desktop browser host disconnected");
+        }
+    };
+    if response.request_id != request_id {
+        anyhow::bail!("conflict: browser host response identity mismatch");
+    }
+    if let Some(error) = response.error {
+        anyhow::bail!(error);
+    }
+    response
+        .result_json
+        .context("browser host returned no result")
+}
+
+fn resolve_browser_host_response(
+    client_id: Uuid,
+    response: RemoteBrowserHostResponse,
+) -> Result<()> {
+    let sender = {
+        let mut router = lock_mutex(&BROWSER_HOST_ROUTER);
+        if !router
+            .host
+            .as_ref()
+            .is_some_and(|(host_id, _)| *host_id == client_id)
+        {
+            anyhow::bail!("capability_denied: client is not the registered browser host");
+        }
+        router.pending.remove(&response.request_id)
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(response);
+    }
+    Ok(())
+}
 
 struct DebouncedPersister {
     dirty: Arc<AtomicBool>,
@@ -538,15 +636,25 @@ fn cleanup_dispatch_target(
                     ));
                 } else {
                     if live_root.is_some() {
-                        match lock_state(state).close_pane(session_id, pane_id) {
-                            Ok(Some(mut pane)) => {
-                                if let Err(error) = pane.kill() {
+                        let (pane, lease_transition) = {
+                            let mut guard = lock_state(state);
+                            match guard.close_pane(session_id, pane_id) {
+                                Ok(pane) => {
+                                    let lease = guard.cleanup_remote_pane_lease_on_exit(pane_id);
+                                    (pane, lease)
+                                }
+                                Err(error) => {
                                     errors.push(format!("pane {pane_id} cleanup failed: {error}"));
+                                    (None, None)
                                 }
                             }
-                            Ok(None) => {}
-                            Err(error) => {
-                                errors.push(format!("pane {pane_id} cleanup failed: {error}"))
+                        };
+                        if let Some(transition) = lease_transition {
+                            process_pane_lease_transition(state, transition);
+                        }
+                        if let Some(mut pane) = pane {
+                            if let Err(error) = pane.kill() {
+                                errors.push(format!("pane {pane_id} cleanup failed: {error}"));
                             }
                         }
                     } else if let (Some(root_pid), Some(started_at)) =
@@ -907,6 +1015,7 @@ fn handle_connection(
         })
     };
     process_pane_lease_transitions(&state, lease_transitions);
+    unregister_browser_host(client_id);
     drop(tx);
     if let Ok(writer_thread) = writer_thread {
         let _ = writer_thread.join();
@@ -985,11 +1094,16 @@ fn orchestration_rpc_response(
         payload_json,
     );
     let envelope = match result {
-        Ok(data) => OrchestrationRpcEnvelope {
-            ok: true,
-            data: Some(data),
-            error: None,
-        },
+        Ok(data) => {
+            if !orchestration_method_is_read_only(method) {
+                notify_all_sessions_changed(state);
+            }
+            OrchestrationRpcEnvelope {
+                ok: true,
+                data: Some(data),
+                error: None,
+            }
+        }
         Err(error) => OrchestrationRpcEnvelope {
             ok: false,
             data: None,
@@ -997,6 +1111,23 @@ fn orchestration_rpc_response(
         },
     };
     serde_json::to_string(&envelope).expect("serialize orchestration RPC envelope")
+}
+
+fn orchestration_method_is_read_only(method: &str) -> bool {
+    matches!(
+        method,
+        "runs.list"
+            | "run.get"
+            | "tasks.list"
+            | "dispatches.list"
+            | "messages.list"
+            | "gates.list"
+            | "gate.get"
+            | "merge.authorization"
+            | "agents.list"
+            | "events.catchup"
+            | "notifications.catchup"
+    )
 }
 
 fn dispatch_orchestration_rpc(
@@ -2006,7 +2137,14 @@ fn dispatch_cli_request(
             WorkspaceAction::Delete => {
                 let session_id =
                     resolve_cli_session(state, command.selectors.workspace.as_deref())?;
-                let mut panes = lock_state(state).delete_session(session_id)?;
+                let (mut panes, lease_transitions) = {
+                    let mut guard = lock_state(state);
+                    let panes = guard.delete_session(session_id)?;
+                    let lease_transitions =
+                        guard.cleanup_remote_pane_leases_on_exit(panes.iter().map(|pane| pane.id));
+                    (panes, lease_transitions)
+                };
+                process_pane_lease_transitions(state, lease_transitions);
                 persist_state(state, sessions_path)?;
                 for pane in &mut panes {
                     pane.kill()?;
@@ -2035,11 +2173,14 @@ fn dispatch_cli_request(
             WorkspaceAction::Sleep => {
                 let session_id =
                     resolve_cli_session(state, command.selectors.workspace.as_deref())?;
-                let (mut panes, senders) = {
+                let (mut panes, senders, lease_transitions) = {
                     let mut state = lock_state(state);
                     let panes = state.sleep_session(session_id)?;
-                    (panes, state.all_senders())
+                    let lease_transitions =
+                        state.cleanup_remote_pane_leases_on_exit(panes.iter().map(|pane| pane.id));
+                    (panes, state.all_senders(), lease_transitions)
                 };
+                process_pane_lease_transitions(state, lease_transitions);
                 for pane in &mut panes {
                     pane.kill()?;
                 }
@@ -2139,7 +2280,16 @@ fn dispatch_cli_request(
                 TerminalAction::Close => {
                     let (_, panes) = lock_state(state).attach_session(session_id)?;
                     let pane_id = resolve_cli_pane(&panes, command.selectors.pane.as_deref())?;
-                    if let Some(mut pane) = lock_state(state).close_pane(session_id, pane_id)? {
+                    let (pane, lease_transition) = {
+                        let mut guard = lock_state(state);
+                        let pane = guard.close_pane(session_id, pane_id)?;
+                        let lease = guard.cleanup_remote_pane_lease_on_exit(pane_id);
+                        (pane, lease)
+                    };
+                    if let Some(transition) = lease_transition {
+                        process_pane_lease_transition(state, transition);
+                    }
+                    if let Some(mut pane) = pane {
                         pane.kill()?;
                     }
                     persist_state(state, sessions_path)?;
@@ -3213,6 +3363,10 @@ fn dispatch_message(
                 result: ReplyResult::Ok,
             },
         ),
+        ClientToDaemon::RegisterBrowserHost => {
+            register_browser_host(client_id, tx.clone());
+            Ok(())
+        }
         ClientToDaemon::Ping { req } => send(tx, DaemonToClient::Pong { req }),
         ClientToDaemon::ListSessions { req } => {
             let sessions = lock_state(&state).list_sessions();
@@ -3224,12 +3378,50 @@ fn dispatch_message(
                 },
             )
         }
+        ClientToDaemon::RemoteWorkspaceProjection { req, workspace_id } => {
+            let pane_ids = workspace_id
+                .map(|workspace_id| {
+                    lock_state(&state).pane_metas(workspace_id).map(|panes| {
+                        panes
+                            .into_iter()
+                            .map(|pane| pane.id.to_string())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let pane_states = coordinator.pane_projection_states(&pane_ids)?;
+            let projection = {
+                let mut guard = lock_state(&state);
+                let projection = guard.remote_workspace_projection(workspace_id, &pane_states)?;
+                if let Some(workspace_id) = workspace_id {
+                    guard.attach_client_to_session(client_id, workspace_id);
+                }
+                projection
+            };
+            send(
+                tx,
+                DaemonToClient::Reply {
+                    req,
+                    result: ReplyResult::RemoteWorkspaceProjection(projection),
+                },
+            )
+        }
+        ClientToDaemon::SetDesktopSelection { req, selection } => {
+            let affected = lock_state(&state).set_desktop_selection(selection)?;
+            send_ok(tx, req)?;
+            for session_id in affected {
+                notify_session_changed(&state, session_id)?;
+            }
+            Ok(())
+        }
         ClientToDaemon::CreateSession {
             req,
             name,
             workspace_folder,
         } => {
             let meta = lock_state(&state).create_session(name, workspace_folder);
+            let session_id = meta.id;
             persist_state(&state, sessions_path)?;
             send(
                 tx,
@@ -3237,7 +3429,8 @@ fn dispatch_message(
                     req,
                     result: ReplyResult::SessionCreated(meta),
                 },
-            )
+            )?;
+            notify_session_changed(&state, session_id)
         }
         ClientToDaemon::RenameSession {
             req,
@@ -3246,12 +3439,21 @@ fn dispatch_message(
         } => {
             lock_state(&state).rename_session(session_id, name)?;
             persist_state(&state, sessions_path)?;
-            send_ok(tx, req)
+            send_ok(tx, req)?;
+            notify_session_changed(&state, session_id)
         }
         ClientToDaemon::DeleteSession { req, session_id } => {
-            let panes = lock_state(&state).delete_session(session_id)?;
+            let (panes, lease_transitions) = {
+                let mut guard = lock_state(&state);
+                let panes = guard.delete_session(session_id)?;
+                let lease_transitions =
+                    guard.cleanup_remote_pane_leases_on_exit(panes.iter().map(|pane| pane.id));
+                (panes, lease_transitions)
+            };
+            process_pane_lease_transitions(&state, lease_transitions);
             persist_state(&state, sessions_path)?;
             send_ok(tx, req)?;
+            notify_session_changed(&state, session_id)?;
             for mut pane in panes {
                 let pane_id = pane.id;
                 thread::Builder::new()
@@ -3288,7 +3490,8 @@ fn dispatch_message(
             layout_json,
         } => {
             lock_state(&state).save_layout(session_id, layout_json)?;
-            debounce_persist_state(&state, sessions_path)
+            debounce_persist_state(&state, sessions_path)?;
+            notify_session_changed(&state, session_id)
         }
         ClientToDaemon::SpawnPane {
             req,
@@ -3310,7 +3513,8 @@ fn dispatch_message(
                     req,
                     result: ReplyResult::PaneSpawned(meta),
                 },
-            )
+            )?;
+            notify_session_changed(&state, session_id)
         }
         ClientToDaemon::AttachPane {
             session_id,
@@ -3372,7 +3576,8 @@ fn dispatch_message(
         } => {
             lock_state(&state).set_pane_title(session_id, pane_id, title)?;
             debounce_persist_state(&state, sessions_path)?;
-            send_ok(tx, req)
+            send_ok(tx, req)?;
+            notify_session_changed(&state, session_id)
         }
         ClientToDaemon::SetPaneRole {
             req,
@@ -3382,15 +3587,25 @@ fn dispatch_message(
         } => {
             lock_state(&state).set_pane_role(session_id, pane_id, role)?;
             debounce_persist_state(&state, sessions_path)?;
-            send_ok(tx, req)
+            send_ok(tx, req)?;
+            notify_session_changed(&state, session_id)
         }
         ClientToDaemon::ClosePane {
             req,
             session_id,
             pane_id,
         } => {
-            let pane = lock_state(&state).close_pane(session_id, pane_id)?;
+            let (pane, lease_transition) = {
+                let mut guard = lock_state(&state);
+                let pane = guard.close_pane(session_id, pane_id)?;
+                let lease = guard.cleanup_remote_pane_lease_on_exit(pane_id);
+                (pane, lease)
+            };
+            if let Some(transition) = lease_transition {
+                process_pane_lease_transition(&state, transition);
+            }
             persist_state(&state, sessions_path)?;
+            notify_session_changed(&state, session_id)?;
             send_ok(tx, req)?;
             if let Some(mut pane) = pane {
                 thread::Builder::new()
@@ -3404,8 +3619,16 @@ fn dispatch_message(
             Ok(())
         }
         ClientToDaemon::ClearSession { req, session_id } => {
-            let panes = lock_state(&state).close_session_panes(session_id)?;
+            let (panes, lease_transitions) = {
+                let mut guard = lock_state(&state);
+                let panes = guard.close_session_panes(session_id)?;
+                let lease_transitions =
+                    guard.cleanup_remote_pane_leases_on_exit(panes.iter().map(|pane| pane.id));
+                (panes, lease_transitions)
+            };
+            process_pane_lease_transitions(&state, lease_transitions);
             persist_state(&state, sessions_path)?;
+            notify_session_changed(&state, session_id)?;
             send_ok(tx, req)?;
             for mut pane in panes {
                 let pane_id = pane.id;
@@ -3547,6 +3770,24 @@ fn dispatch_message(
                     result: ReplyResult::Remote(serde_json::to_string(&response)?),
                 },
             )
+        }
+        ClientToDaemon::RemoteBrowser {
+            req,
+            operation_id,
+            method,
+            payload_json,
+        } => {
+            let response = dispatch_browser_host_request(operation_id, method, payload_json)?;
+            send(
+                tx,
+                DaemonToClient::Reply {
+                    req,
+                    result: ReplyResult::Browser(response),
+                },
+            )
+        }
+        ClientToDaemon::RemoteBrowserResponse { response } => {
+            resolve_browser_host_response(client_id, response)
         }
         ClientToDaemon::RemotePaneLeaseClaim { req, request } => {
             let transition = lock_state(&state)
@@ -3728,8 +3969,10 @@ fn remote_pane_lease_status_response(
         RemotePaneLeaseResult::Status { lease } => Ok(lease.map(|lease| RemotePaneLeaseStatus {
             session_id: lease.session_id.to_string(),
             pane_id: lease.pane_id.to_string(),
+            device_id: lease.device_id,
             cols: lease.target_cols,
             rows: lease.target_rows,
+            expires_at: lease.expires_at,
         })),
         other => anyhow::bail!("unexpected remote pane lease status result: {other:?}"),
     }
@@ -3740,6 +3983,8 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         ClientToDaemon::Authenticate { req, .. }
         | ClientToDaemon::Ping { req }
         | ClientToDaemon::ListSessions { req }
+        | ClientToDaemon::RemoteWorkspaceProjection { req, .. }
+        | ClientToDaemon::SetDesktopSelection { req, .. }
         | ClientToDaemon::CreateSession { req, .. }
         | ClientToDaemon::RenameSession { req, .. }
         | ClientToDaemon::DeleteSession { req, .. }
@@ -3757,6 +4002,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::Cli { req, .. }
         | ClientToDaemon::Computer { req, .. }
         | ClientToDaemon::Remote { req, .. }
+        | ClientToDaemon::RemoteBrowser { req, .. }
         | ClientToDaemon::RemotePaneLeaseClaim { req, .. }
         | ClientToDaemon::RemotePaneLeaseRenew { req, .. }
         | ClientToDaemon::RemotePaneLeaseRelease { req, .. }
@@ -3766,6 +4012,8 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::ResourceSnapshot { req }
         | ClientToDaemon::Shutdown { req } => Some(*req),
         ClientToDaemon::Hello { .. }
+        | ClientToDaemon::RegisterBrowserHost
+        | ClientToDaemon::RemoteBrowserResponse { .. }
         | ClientToDaemon::DetachSession { .. }
         | ClientToDaemon::SaveLayout { .. }
         | ClientToDaemon::AttachPane { .. }
@@ -3918,11 +4166,7 @@ fn read_pane_loop(
         let _ = sender.send(DaemonToClient::PaneExited { pane_id, exit_code });
     }
     if let Some(transition) = lease {
-        for effect in transition.effects {
-            if let Some(event) = effect.event {
-                broadcast_pane_lease_event(&state, event);
-            }
-        }
+        process_pane_lease_transition(&state, transition);
     }
     if let Some(coordinator) = coordinator {
         if let Err(error) = coordinator.record_pane_exit(
@@ -4113,11 +4357,23 @@ fn send_remote_connection_cleanup(
 }
 
 fn notify_session_changed(state: &SharedState, session_id: Uuid) -> Result<()> {
-    let senders = lock_state(state).senders_for_session(session_id);
+    let senders = lock_state(state).all_senders();
     for sender in senders {
         let _ = sender.send(DaemonToClient::SessionChanged { session_id });
     }
     Ok(())
+}
+
+fn notify_all_sessions_changed(state: &SharedState) {
+    let (session_ids, senders) = {
+        let guard = lock_state(state);
+        (guard.session_ids(), guard.all_senders())
+    };
+    for session_id in session_ids {
+        for sender in &senders {
+            let _ = sender.send(DaemonToClient::SessionChanged { session_id });
+        }
+    }
 }
 
 fn kill_all_panes(state: &SharedState) {
@@ -4159,6 +4415,38 @@ fn kill_all_panes(state: &SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state_with_test_pane(cols: u16, rows: u16) -> (SharedState, Uuid, Uuid) {
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let session_id;
+        let pane_id = Uuid::new_v4();
+        {
+            let mut guard = lock_state(&state);
+            session_id = guard.create_session("Workspace".to_string(), None).id;
+            guard
+                .insert_pane(
+                    session_id,
+                    Pane::for_test(
+                        PaneConfig {
+                            pane_id,
+                            shell: None,
+                            args: Vec::new(),
+                            cwd: None,
+                            env: Vec::new(),
+                            title: Some("lease test".to_string()),
+                            icon: None,
+                            profile_id: None,
+                            role: None,
+                            cols,
+                            rows,
+                        },
+                        true,
+                    ),
+                )
+                .expect("insert test pane");
+        }
+        (state, session_id, pane_id)
+    }
 
     #[test]
     fn ping_reply_can_be_sent() {
@@ -4376,7 +4664,274 @@ mod tests {
 
         assert_eq!(status.session_id, session_id.to_string());
         assert_eq!(status.pane_id, pane_id.to_string());
+        assert_eq!(status.device_id, "device");
         assert_eq!((status.cols, status.rows), (52, 31));
+        assert_eq!(status.expires_at, 100);
+    }
+
+    #[test]
+    fn pane_dispatch_rejects_desktop_and_accepts_matching_remote_origin() {
+        let (state, session_id, pane_id) = state_with_test_pane(120, 40);
+        let owner_connection_id = Uuid::new_v4();
+        write_pane_authorized(
+            &state,
+            session_id,
+            pane_id,
+            b"desktop before lease",
+            &PaneCommandOrigin::Desktop,
+        )
+        .expect("desktop write without lease");
+        write_pane_authorized(
+            &state,
+            session_id,
+            pane_id,
+            b"shared remote before lease",
+            &PaneCommandOrigin::Remote {
+                owner_connection_id,
+                device_id: "mobile".to_string(),
+                lease_id: None,
+                revision: None,
+            },
+        )
+        .expect("shared remote write without lease");
+        let transition = lock_state(&state)
+            .claim_or_update_remote_pane_lease(
+                crate::protocol::RemotePaneLeaseClaimRequest {
+                    owner_connection_id,
+                    device_id: "mobile".to_string(),
+                    session_id,
+                    pane_id,
+                    cols: 52,
+                    rows: 31,
+                    viewport_revision: 1,
+                    lease_id: None,
+                    revision: None,
+                },
+                orchestration_now_millis(),
+            )
+            .expect("claim lease");
+        let lease = match &transition.result {
+            RemotePaneLeaseResult::Claimed { lease } => lease.clone(),
+            other => panic!("unexpected claim result: {other:?}"),
+        };
+        process_pane_lease_transition(&state, transition);
+
+        assert!(write_pane_authorized(
+            &state,
+            session_id,
+            pane_id,
+            b"desktop",
+            &PaneCommandOrigin::Desktop,
+        )
+        .is_err());
+        assert!(resize_pane_authorized(
+            &state,
+            session_id,
+            pane_id,
+            120,
+            40,
+            &PaneCommandOrigin::Desktop,
+        )
+        .is_err());
+
+        let remote_origin = PaneCommandOrigin::Remote {
+            owner_connection_id,
+            device_id: "mobile".to_string(),
+            lease_id: Some(lease.lease_id),
+            revision: Some(lease.revision),
+        };
+        write_pane_authorized(&state, session_id, pane_id, b"remote", &remote_origin)
+            .expect("matching remote write");
+        resize_pane_authorized(&state, session_id, pane_id, 52, 31, &remote_origin)
+            .expect("matching remote resize");
+    }
+
+    #[test]
+    fn expiry_transition_restores_geometry_and_broadcasts_lost_event() {
+        let (state, session_id, pane_id) = state_with_test_pane(120, 40);
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = bounded(16);
+        {
+            let mut guard = lock_state(&state);
+            guard.add_client(client_id, tx);
+            guard.attach_client_to_pane(client_id, pane_id);
+        }
+        let transition = lock_state(&state)
+            .claim_or_update_remote_pane_lease(
+                crate::protocol::RemotePaneLeaseClaimRequest {
+                    owner_connection_id: Uuid::new_v4(),
+                    device_id: "mobile".to_string(),
+                    session_id,
+                    pane_id,
+                    cols: 52,
+                    rows: 31,
+                    viewport_revision: 1,
+                    lease_id: None,
+                    revision: None,
+                },
+                1_000,
+            )
+            .expect("claim lease");
+        let expires_at = match &transition.result {
+            RemotePaneLeaseResult::Claimed { lease } => lease.expires_at,
+            other => panic!("unexpected claim result: {other:?}"),
+        };
+        process_pane_lease_transition(&state, transition);
+        let _ = rx.try_iter().collect::<Vec<_>>();
+
+        let transitions = lock_state(&state).expire_remote_pane_leases(expires_at);
+        process_pane_lease_transitions(&state, transitions);
+
+        let pane = lock_state(&state)
+            .pane_metas(session_id)
+            .expect("pane metadata")
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("live pane");
+        assert_eq!((pane.config.cols, pane.config.rows), (120, 40));
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            DaemonToClient::PaneResized {
+                cols: 120,
+                rows: 40,
+                ..
+            }
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            DaemonToClient::RemotePaneLease { event }
+                if event.kind == crate::protocol::RemotePaneLeaseEventKind::Lost
+                    && event.reason == crate::protocol::RemotePaneLeaseEventReason::Expired
+                    && event.restoration.as_ref().is_some_and(|restoration|
+                        restoration.status == crate::protocol::RemotePaneLeaseRestorationStatus::Restored)
+        )));
+    }
+
+    #[test]
+    fn admin_reclaim_transition_restores_geometry_and_broadcasts_lost_event() {
+        let (state, session_id, pane_id) = state_with_test_pane(120, 40);
+        let client_id = Uuid::new_v4();
+        let (tx, rx) = bounded(16);
+        {
+            let mut guard = lock_state(&state);
+            guard.add_client(client_id, tx);
+            guard.attach_client_to_pane(client_id, pane_id);
+        }
+        let transition = lock_state(&state)
+            .claim_or_update_remote_pane_lease(
+                crate::protocol::RemotePaneLeaseClaimRequest {
+                    owner_connection_id: Uuid::new_v4(),
+                    device_id: "mobile".to_string(),
+                    session_id,
+                    pane_id,
+                    cols: 52,
+                    rows: 31,
+                    viewport_revision: 1,
+                    lease_id: None,
+                    revision: None,
+                },
+                orchestration_now_millis(),
+            )
+            .expect("claim lease");
+        process_pane_lease_transition(&state, transition);
+        let _ = rx.try_iter().collect::<Vec<_>>();
+
+        let transition = lock_state(&state)
+            .admin_reclaim_remote_pane_lease(crate::protocol::RemotePaneLeaseAdminReclaimRequest {
+                session_id,
+                pane_id,
+            })
+            .expect("admin reclaim");
+        process_pane_lease_transition(&state, transition);
+
+        let pane = lock_state(&state)
+            .pane_metas(session_id)
+            .expect("pane metadata")
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("live pane");
+        assert_eq!((pane.config.cols, pane.config.rows), (120, 40));
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            DaemonToClient::PaneResized {
+                cols: 120,
+                rows: 40,
+                ..
+            }
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            DaemonToClient::RemotePaneLease { event }
+                if event.kind == crate::protocol::RemotePaneLeaseEventKind::Lost
+                    && event.reason == crate::protocol::RemotePaneLeaseEventReason::AdminReclaimed
+                    && event.restoration.as_ref().is_some_and(|restoration|
+                        restoration.status == crate::protocol::RemotePaneLeaseRestorationStatus::Restored)
+        )));
+    }
+
+    #[test]
+    fn connection_cleanup_restores_geometry_and_emits_disconnect_loss() {
+        let (state, session_id, pane_id) = state_with_test_pane(120, 40);
+        let owner_connection_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let (event_tx, event_rx) = bounded(16);
+        {
+            let mut guard = lock_state(&state);
+            guard.add_client(client_id, event_tx);
+            guard.attach_client_to_pane(client_id, pane_id);
+        }
+        let transition = lock_state(&state)
+            .claim_or_update_remote_pane_lease(
+                crate::protocol::RemotePaneLeaseClaimRequest {
+                    owner_connection_id,
+                    device_id: "mobile".to_string(),
+                    session_id,
+                    pane_id,
+                    cols: 52,
+                    rows: 31,
+                    viewport_revision: 1,
+                    lease_id: None,
+                    revision: None,
+                },
+                orchestration_now_millis(),
+            )
+            .expect("claim lease");
+        process_pane_lease_transition(&state, transition);
+        let _ = event_rx.try_iter().collect::<Vec<_>>();
+
+        let transitions =
+            lock_state(&state).cleanup_remote_connection_leases(RemoteConnectionCleanupRequest {
+                owner_connection_id,
+            });
+        let (reply_tx, reply_rx) = bounded(1);
+        send_remote_connection_cleanup(&state, &reply_tx, 91, transitions)
+            .expect("send disconnect cleanup");
+
+        assert!(matches!(
+            reply_rx.recv().expect("cleanup reply"),
+            DaemonToClient::Reply {
+                req: 91,
+                result: ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Cleanup { .. })
+            }
+        ));
+        let pane = lock_state(&state)
+            .pane_metas(session_id)
+            .expect("pane metadata")
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("live pane");
+        assert_eq!((pane.config.cols, pane.config.rows), (120, 40));
+        let messages = event_rx.try_iter().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            DaemonToClient::RemotePaneLease { event }
+                if event.kind == crate::protocol::RemotePaneLeaseEventKind::Lost
+                    && event.reason == crate::protocol::RemotePaneLeaseEventReason::ConnectionClosed
+                    && event.restoration.as_ref().is_some_and(|restoration|
+                        restoration.status == crate::protocol::RemotePaneLeaseRestorationStatus::Restored)
+        )));
     }
 
     #[test]

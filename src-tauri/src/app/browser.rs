@@ -1,11 +1,23 @@
 use crate::browser::{
     ArtifactDescriptor, BrowserAnnotation, BrowserAnnotationInput, BrowserCaptureState,
     BrowserCookieImportInput, BrowserCookieImportResult, BrowserCookieImportSource,
-    BrowserDeviceMetrics, BrowserDialogRequest, BrowserDownloadRecord, BrowserErrorCode,
-    BrowserLifecycleEvent, BrowserManager, BrowserPage, BrowserProfile, CertificateDecision,
-    CertificateRequest, NativeBrowserProvider, PermissionDecision, PermissionRequest,
-    PhysicalBounds, ProfileKind,
+    BrowserDeviceMetrics, BrowserDialogRequest, BrowserDownloadRecord, BrowserError,
+    BrowserErrorCode, BrowserLifecycleEvent, BrowserManager, BrowserPage, BrowserProfile,
+    CertificateDecision, CertificateRequest, NativeBrowserProvider, PermissionDecision,
+    PermissionRequest, PhysicalBounds, ProfileKind,
 };
+use crate::dedicated_cli::browser_cdp::{
+    BrowserJpegCaptureOptions, BrowserKeyInput as CdpKeyInput, BrowserPageScale,
+    BrowserPointerInput as CdpPointerInput, BrowserViewport,
+};
+use crate::remote::v2::generated::{
+    BrowserInspectParams, BrowserInspectResult, BrowserKeyParams, BrowserKeyType,
+    BrowserNavigateParams, BrowserPageParams, BrowserPointerParams, BrowserPointerType,
+    BrowserScreenshotParams, BrowserScreenshotResult, BrowserTab, BrowserTabCloseParams,
+    BrowserTabCloseResult, BrowserTabOpenParams, BrowserTabResult, BrowserTabsParams,
+    BrowserTabsResult, BrowserViewportMode, BrowserViewportSetParams,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -637,6 +649,451 @@ fn collect_command_ports(
     }
 }
 
+pub(crate) fn handle_remote_browser_request(
+    manager: &ManagedBrowser,
+    method: &str,
+    payload_json: &str,
+) -> Result<Value, String> {
+    if payload_json.len() > 64 * 1024 {
+        return Err("invalid_argument: browser request exceeds the bounded size".to_string());
+    }
+    match method {
+        "tabs" => {
+            let params: BrowserTabsParams = parse_remote_payload(payload_json)?;
+            validate_remote_id("workspaceId", &params.workspace_id)?;
+            manager
+                .sync_provider_events()
+                .map_err(remote_browser_error)?;
+            let tabs = manager
+                .pages()
+                .map_err(remote_browser_error)?
+                .into_iter()
+                .filter(|page| page.workspace_id == params.workspace_id)
+                .map(remote_browser_tab)
+                .collect();
+            serde_json::to_value(BrowserTabsResult { tabs }).map_err(|error| error.to_string())
+        }
+        "tab.open" => {
+            let params: BrowserTabOpenParams = parse_remote_payload(payload_json)?;
+            validate_remote_id("workspaceId", &params.workspace_id)?;
+            let page =
+                create_remote_browser_tab(manager, &params.workspace_id, params.url.as_deref())?;
+            serde_json::to_value(BrowserTabResult {
+                tab: remote_browser_tab(page),
+            })
+            .map_err(|error| error.to_string())
+        }
+        "tab.close" => {
+            let params: BrowserTabCloseParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            manager
+                .close_page_durable(&params.workspace_id, &params.page_id)
+                .map_err(remote_browser_error)?;
+            serde_json::to_value(BrowserTabCloseResult { closed: true })
+                .map_err(|error| error.to_string())
+        }
+        "navigate" => {
+            let params: BrowserNavigateParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            validate_remote_text("url", &params.url, 8 * 1024)?;
+            let page = manager
+                .navigate(&params.page_id, &params.url)
+                .map_err(remote_browser_error)?;
+            manager.save_state().map_err(remote_browser_error)?;
+            browser_tab_result(page)
+        }
+        "reload" | "back" | "forward" => {
+            let params: BrowserPageParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            let page = match method {
+                "reload" => manager.reload(&params.page_id),
+                "back" => manager.go_back(&params.page_id),
+                _ => manager.go_forward(&params.page_id),
+            }
+            .map_err(remote_browser_error)?;
+            manager.save_state().map_err(remote_browser_error)?;
+            browser_tab_result(page)
+        }
+        "inspect" => {
+            let params: BrowserInspectParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            let snapshot = manager
+                .inspect_page(&params.page_id, params.x, params.y)
+                .map_err(remote_browser_error)?;
+            serde_json::to_value(BrowserInspectResult {
+                snapshot_json: snapshot.snapshot_json,
+                truncated: snapshot.truncated,
+            })
+            .map_err(|error| error.to_string())
+        }
+        "input.pointer" => {
+            let params: BrowserPointerParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            let input = remote_pointer_input(params.input)?;
+            manager
+                .dispatch_pointer(&params.page_id, input)
+                .map_err(remote_browser_error)?;
+            Ok(serde_json::json!({}))
+        }
+        "input.key" => {
+            let params: BrowserKeyParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            let input = remote_key_input(params.input)?;
+            manager
+                .dispatch_key(&params.page_id, input)
+                .map_err(remote_browser_error)?;
+            Ok(serde_json::json!({}))
+        }
+        "screenshot" => {
+            let params: BrowserScreenshotParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            let quality = remote_jpeg_quality(params.quality)?;
+            let (frame, generation) = manager
+                .capture_jpeg(&params.page_id, BrowserJpegCaptureOptions { quality })
+                .map_err(remote_browser_error)?;
+            serde_json::to_value(BrowserScreenshotResult {
+                data_base64: BASE64_STANDARD.encode(frame.bytes),
+                width: frame.viewport_width,
+                height: frame.viewport_height,
+                view_generation: generation.saturating_add(1),
+            })
+            .map_err(|error| error.to_string())
+        }
+        "viewport.set" => {
+            let params: BrowserViewportSetParams = parse_remote_payload(payload_json)?;
+            owned_remote_page(manager, &params.workspace_id, &params.page_id)?;
+            let viewport = remote_viewport(&params)?;
+            let page_scale = remote_page_scale(&params)?;
+            match viewport {
+                BrowserViewport::Web => {
+                    manager
+                        .clear_device_metrics(&params.page_id)
+                        .map_err(remote_browser_error)?;
+                }
+                BrowserViewport::Mobile {
+                    width,
+                    height,
+                    device_scale_factor,
+                } => {
+                    manager
+                        .set_device_metrics(
+                            &params.page_id,
+                            BrowserDeviceMetrics {
+                                width,
+                                height,
+                                device_scale_factor,
+                                mobile: true,
+                            },
+                        )
+                        .map_err(remote_browser_error)?;
+                }
+            }
+            if let Some(scale) = page_scale {
+                manager
+                    .set_page_scale(&params.page_id, scale)
+                    .map_err(remote_browser_error)?;
+            }
+            manager.save_state().map_err(remote_browser_error)?;
+            Ok(serde_json::json!({}))
+        }
+        _ => Err(format!(
+            "invalid_argument: unsupported browser method {method}"
+        )),
+    }
+}
+
+fn parse_remote_payload<T: serde::de::DeserializeOwned>(payload_json: &str) -> Result<T, String> {
+    serde_json::from_str(payload_json).map_err(|error| format!("invalid_argument: {error}"))
+}
+
+fn validate_remote_id(name: &str, value: &str) -> Result<(), String> {
+    if value.len() > 64 || Uuid::parse_str(value).is_err() {
+        return Err(format!("invalid_argument: {name} must be a UUID"));
+    }
+    Ok(())
+}
+
+fn validate_remote_text(name: &str, value: &str, max_bytes: usize) -> Result<(), String> {
+    if value.is_empty() || value.len() > max_bytes || value.contains('\0') {
+        return Err(format!(
+            "invalid_argument: {name} is empty or exceeds the bounded size"
+        ));
+    }
+    Ok(())
+}
+
+fn owned_remote_page<P: crate::browser::BrowserProvider>(
+    manager: &BrowserManager<P>,
+    workspace_id: &str,
+    page_id: &str,
+) -> Result<BrowserPage, String> {
+    validate_remote_id("workspaceId", workspace_id)?;
+    validate_remote_id("pageId", page_id)?;
+    let page = manager
+        .page(page_id)
+        .map_err(|_| "stale_target: browser page is not active".to_string())?;
+    if page.workspace_id != workspace_id {
+        return Err("stale_target: browser page belongs to a different workspace".to_string());
+    }
+    Ok(page)
+}
+
+fn create_remote_browser_tab<P: crate::browser::BrowserProvider>(
+    manager: &BrowserManager<P>,
+    workspace_id: &str,
+    url: Option<&str>,
+) -> Result<BrowserPage, String> {
+    if let Some(url) = url {
+        validate_remote_text("url", url, 8 * 1024)?;
+    }
+    let profile_id = format!("workspace-{workspace_id}");
+    let mut created_profile = false;
+    if !manager
+        .profiles()
+        .map_err(remote_browser_error)?
+        .iter()
+        .any(|profile| profile.id == profile_id)
+    {
+        match manager.create_profile(
+            profile_id.clone(),
+            ProfileKind::Workspace,
+            Some(workspace_id.to_string()),
+        ) {
+            Ok(_) => created_profile = true,
+            Err(error) if error.code == BrowserErrorCode::Conflict => {}
+            Err(error) => return Err(remote_browser_error(error)),
+        }
+    }
+    let page = match manager.create_page(
+        Uuid::new_v4().to_string(),
+        workspace_id.to_string(),
+        &profile_id,
+        hidden_bounds(),
+    ) {
+        Ok(page) => page,
+        Err(error) => {
+            if created_profile {
+                let _ = manager.rollback_empty_profile(&profile_id);
+            }
+            return Err(remote_browser_error(error));
+        }
+    };
+    let result = if let Some(url) = url {
+        manager.navigate(&page.id, url)
+    } else {
+        manager.page(&page.id)
+    };
+    let page = match result {
+        Ok(page) => page,
+        Err(error) => {
+            let _ = manager.close_page(&page.id);
+            if created_profile {
+                let _ = manager.rollback_empty_profile(&profile_id);
+            }
+            return Err(remote_browser_error(error));
+        }
+    };
+    if let Err(error) = manager.save_state() {
+        let _ = manager.close_page(&page.id);
+        if created_profile {
+            let _ = manager.rollback_empty_profile(&profile_id);
+        }
+        return Err(remote_browser_error(error));
+    }
+    Ok(page)
+}
+
+fn remote_browser_tab(page: BrowserPage) -> BrowserTab {
+    BrowserTab {
+        id: page.id,
+        title: page.title,
+        url: page.url,
+        workspace_id: page.workspace_id,
+    }
+}
+
+fn browser_tab_result(page: BrowserPage) -> Result<Value, String> {
+    serde_json::to_value(BrowserTabResult {
+        tab: remote_browser_tab(page),
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn remote_pointer_input(
+    input: crate::remote::v2::generated::BrowserPointerInput,
+) -> Result<CdpPointerInput, String> {
+    match input.r#type {
+        BrowserPointerType::Tap => match (
+            input.x,
+            input.y,
+            input.from_x,
+            input.from_y,
+            input.to_x,
+            input.to_y,
+            input.delta_x,
+            input.delta_y,
+        ) {
+            (Some(x), Some(y), None, None, None, None, None, None) => {
+                Ok(CdpPointerInput::Tap { x, y })
+            }
+            _ => Err("invalid_argument: tap requires only x and y".to_string()),
+        },
+        BrowserPointerType::Drag => match (
+            input.x,
+            input.y,
+            input.from_x,
+            input.from_y,
+            input.to_x,
+            input.to_y,
+            input.delta_x,
+            input.delta_y,
+        ) {
+            (None, None, Some(from_x), Some(from_y), Some(to_x), Some(to_y), None, None) => {
+                Ok(CdpPointerInput::Drag {
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                })
+            }
+            _ => Err("invalid_argument: drag requires only fromX, fromY, toX, and toY".to_string()),
+        },
+        BrowserPointerType::Scroll => match (
+            input.x,
+            input.y,
+            input.from_x,
+            input.from_y,
+            input.to_x,
+            input.to_y,
+            input.delta_x,
+            input.delta_y,
+        ) {
+            (Some(x), Some(y), None, None, None, None, Some(delta_x), Some(delta_y)) => {
+                Ok(CdpPointerInput::Scroll {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                })
+            }
+            _ => Err("invalid_argument: scroll requires only x, y, deltaX, and deltaY".to_string()),
+        },
+    }
+}
+
+fn remote_key_input(
+    input: crate::remote::v2::generated::BrowserKeyInput,
+) -> Result<CdpKeyInput, String> {
+    match input.r#type {
+        BrowserKeyType::Text => match (input.text, input.key) {
+            (Some(text), None) => {
+                validate_remote_text("text", &text, 16 * 1024)?;
+                Ok(CdpKeyInput::Text { text })
+            }
+            _ => Err("invalid_argument: text input requires only text".to_string()),
+        },
+        BrowserKeyType::Key => match (input.text, input.key) {
+            (None, Some(key)) => {
+                validate_remote_text("key", &key, 64)?;
+                if key.chars().any(char::is_control) {
+                    return Err("invalid_argument: key contains control characters".to_string());
+                }
+                Ok(CdpKeyInput::Key { key })
+            }
+            _ => Err("invalid_argument: key input requires only key".to_string()),
+        },
+    }
+}
+
+fn remote_jpeg_quality(quality: Option<u16>) -> Result<u8, String> {
+    let quality = quality.unwrap_or(80);
+    if !(1..=100).contains(&quality) {
+        return Err("invalid_argument: JPEG quality must be between 1 and 100".to_string());
+    }
+    Ok(quality as u8)
+}
+
+fn remote_page_scale(
+    params: &BrowserViewportSetParams,
+) -> Result<Option<BrowserPageScale>, String> {
+    let scale = match params.page_scale {
+        Some(scale) => BrowserPageScale {
+            scale,
+            center_x: params.center_x,
+            center_y: params.center_y,
+        },
+        None if params.center_x.is_none() && params.center_y.is_none() => return Ok(None),
+        None => return Err("invalid_argument: viewport center requires pageScale".to_string()),
+    };
+    scale
+        .validate()
+        .map_err(|error| format!("invalid_argument: {error}"))?;
+    Ok(Some(scale))
+}
+
+fn remote_viewport(params: &BrowserViewportSetParams) -> Result<BrowserViewport, String> {
+    match params.mode {
+        BrowserViewportMode::Web => {
+            if params.width.is_some()
+                || params.height.is_some()
+                || params.device_scale_factor.is_some()
+            {
+                return Err(
+                    "invalid_argument: web viewport does not accept mobile metrics".to_string(),
+                );
+            }
+            Ok(BrowserViewport::Web)
+        }
+        BrowserViewportMode::Mobile => {
+            match (params.width, params.height, params.device_scale_factor) {
+                (None, None, None) => Ok(BrowserViewport::mobile_default()),
+                (Some(width), Some(height), Some(device_scale_factor)) => {
+                    let metrics = BrowserDeviceMetrics {
+                        width,
+                        height,
+                        device_scale_factor,
+                        mobile: true,
+                    };
+                    if !metrics.validate() {
+                        return Err(
+                            "invalid_argument: mobile viewport metrics are out of bounds"
+                                .to_string(),
+                        );
+                    }
+                    Ok(BrowserViewport::Mobile {
+                        width,
+                        height,
+                        device_scale_factor,
+                    })
+                }
+                _ => Err(
+                    "invalid_argument: mobile viewport metrics must be supplied together"
+                        .to_string(),
+                ),
+            }
+        }
+    }
+}
+
+fn remote_browser_error(error: BrowserError) -> String {
+    let code = match error.code {
+        BrowserErrorCode::InvalidArgument
+        | BrowserErrorCode::UnsafeUrl
+        | BrowserErrorCode::LocalFileDenied
+        | BrowserErrorCode::DownloadDenied
+        | BrowserErrorCode::Unsupported => "invalid_argument",
+        BrowserErrorCode::NotFound => "stale_target",
+        BrowserErrorCode::StaleRef => "stale_ref",
+        BrowserErrorCode::DeniedCapability
+        | BrowserErrorCode::PermissionNotFound
+        | BrowserErrorCode::CertificateNotFound => "capability_denied",
+        BrowserErrorCode::Conflict => "conflict",
+        BrowserErrorCode::Timeout => "timeout",
+        BrowserErrorCode::RuntimeUnavailable | BrowserErrorCode::Internal => "internal",
+    };
+    format!("{code}: {}", error.message)
+}
+
 async fn off_main<T, F>(action: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -790,5 +1247,154 @@ mod tests {
             .iter()
             .any(|target| { target.port == 1420 && target.label == "Tauri dev server" }));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    struct RemoteTestProvider;
+
+    impl crate::browser::BrowserProvider for RemoteTestProvider {
+        fn create_child_webview(
+            &self,
+            _request: &crate::browser::ChildWebViewCreate,
+        ) -> crate::browser::BrowserResult<()> {
+            Ok(())
+        }
+
+        fn set_bounds(
+            &self,
+            _page_id: &str,
+            _bounds: PhysicalBounds,
+        ) -> crate::browser::BrowserResult<()> {
+            Ok(())
+        }
+
+        fn set_visible(&self, _page_id: &str, _visible: bool) -> crate::browser::BrowserResult<()> {
+            Ok(())
+        }
+
+        fn set_focus(&self, _page_id: &str, _focused: bool) -> crate::browser::BrowserResult<()> {
+            Ok(())
+        }
+
+        fn navigate(
+            &self,
+            _page_id: &str,
+            _url: &str,
+            _navigation_generation: u64,
+        ) -> crate::browser::BrowserResult<()> {
+            Ok(())
+        }
+
+        fn close(&self, _page_id: &str) -> crate::browser::BrowserResult<()> {
+            Ok(())
+        }
+
+        fn state(
+            &self,
+            _page_id: &str,
+        ) -> crate::browser::BrowserResult<crate::browser::ChildWebViewState> {
+            Err(BrowserError::unsupported("test state"))
+        }
+    }
+
+    #[test]
+    fn typed_browser_payloads_reject_legacy_args() {
+        let workspace_id = Uuid::new_v4().to_string();
+        let error = parse_remote_payload::<BrowserTabsParams>(
+            &serde_json::json!({ "workspaceId": workspace_id, "args": [] }).to_string(),
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown field"));
+
+        let error = remote_pointer_input(
+            serde_json::from_value(serde_json::json!({
+                "type": "tap",
+                "x": 12.0,
+                "y": 14.0,
+                "deltaX": 1.0
+            }))
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.contains("tap requires only x and y"));
+    }
+
+    #[test]
+    fn remote_browser_page_ownership_rejects_cross_workspace_targets() {
+        let root = std::env::temp_dir().join(format!("vibelink-remote-browser-{}", Uuid::new_v4()));
+        let workspace_id = Uuid::new_v4().to_string();
+        let other_workspace_id = Uuid::new_v4().to_string();
+        let page_id = Uuid::new_v4().to_string();
+        let profile_id = format!("workspace-{workspace_id}");
+        let manager = BrowserManager::new(
+            Arc::new(RemoteTestProvider),
+            crate::browser::BrowserPolicy::new(
+                false,
+                Vec::new(),
+                root.join("downloads"),
+                root.join("artifacts"),
+                64 * 1024 * 1024,
+            )
+            .unwrap(),
+            root.join("profiles"),
+        );
+        manager
+            .create_profile(
+                profile_id.clone(),
+                ProfileKind::Workspace,
+                Some(workspace_id.clone()),
+            )
+            .unwrap();
+        manager
+            .create_page(
+                page_id.clone(),
+                workspace_id.clone(),
+                &profile_id,
+                hidden_bounds(),
+            )
+            .unwrap();
+
+        assert!(owned_remote_page(&manager, &workspace_id, &page_id).is_ok());
+        let error = owned_remote_page(&manager, &other_workspace_id, &page_id).unwrap_err();
+        assert!(error.contains("different workspace"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_tab_open_and_close_update_authoritative_persisted_state() {
+        let root = std::env::temp_dir().join(format!("vibelink-remote-tab-{}", Uuid::new_v4()));
+        let workspace_id = Uuid::new_v4().to_string();
+        let manager = BrowserManager::new(
+            Arc::new(RemoteTestProvider),
+            crate::browser::BrowserPolicy::new(
+                false,
+                Vec::new(),
+                root.join("downloads"),
+                root.join("artifacts"),
+                64 * 1024 * 1024,
+            )
+            .unwrap(),
+            root.join("profiles"),
+        );
+        let page = create_remote_browser_tab(&manager, &workspace_id, None).unwrap();
+        assert_eq!(manager.page(&page.id).unwrap().workspace_id, workspace_id);
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(root.join("state.json")).unwrap()).unwrap();
+        assert!(persisted["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == page.id));
+
+        manager.close_page_durable(&workspace_id, &page.id).unwrap();
+        assert!(manager.page(&page.id).is_err());
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(root.join("state.json")).unwrap()).unwrap();
+        assert!(!persisted["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == page.id));
+        let _ = fs::remove_dir_all(root);
     }
 }

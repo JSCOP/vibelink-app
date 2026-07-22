@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 pub const GENERATED_CONTRACT_VERSION: u32 = 3;
 pub const GENERATED_PROTOCOL_VERSION: u16 = 2;
 pub const GENERATED_SUBPROTOCOL: &str = "vibelink-remote-v2";
-pub const GENERATED_CONTRACT_SHA256: &str = "225e243f08b4d3cfc8ee083b58e9502a22918f10cf0aad664da263b3ef28149e";
+pub const GENERATED_CONTRACT_SHA256: &str = "fec50581f1410af5361da5f0c98a1b999f48364908335fd440cb226b7b7c2cd4";
 
 pub const REMOTE_V2_METHODS: &[(&str, &[&str])] = &[
     ("account", &["summary", "usage"]),
     ("appearance", &["get"]),
-    ("browser", &["dialog.resolve", "input.key", "input.pointer", "permission.resolve", "screencast.start", "screencast.stop", "tabs", "viewport.set"]),
+    ("browser", &["back", "forward", "input.key", "input.pointer", "inspect", "navigate", "reload", "screencast.start", "screencast.stop", "screenshot", "tab.close", "tab.open", "tabs", "viewport.set"]),
     ("dictation", &["transcribe"]),
     ("files", &["attachment.upload", "diff", "list", "read"]),
     ("git", &["commit", "review.comment", "stage", "status", "unstage", "worktree.create"]),
@@ -24,12 +24,18 @@ pub const REMOTE_V2_METHOD_NAMES: &[&str] = &[
     "account.summary",
     "account.usage",
     "appearance.get",
-    "browser.dialog.resolve",
+    "browser.back",
+    "browser.forward",
     "browser.input.key",
     "browser.input.pointer",
-    "browser.permission.resolve",
+    "browser.inspect",
+    "browser.navigate",
+    "browser.reload",
     "browser.screencast.start",
     "browser.screencast.stop",
+    "browser.screenshot",
+    "browser.tab.close",
+    "browser.tab.open",
     "browser.tabs",
     "browser.viewport.set",
     "dictation.transcribe",
@@ -121,6 +127,225 @@ pub struct AppearanceProjection {
     pub theme_id: String,
     pub theme_name: String,
     pub ui_vars: StringMap,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserInspectParams {
+    pub page_id: String,
+    pub workspace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserInspectResult {
+    pub snapshot_json: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserKeyInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub r#type: BrowserKeyType,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserKeyParams {
+    pub input: BrowserKeyInput,
+    pub page_id: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum BrowserKeyType {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "key")]
+    Key,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserNavigateParams {
+    pub page_id: String,
+    pub url: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserPageParams {
+    pub page_id: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserPointerInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_y: Option<f64>,
+    pub r#type: BrowserPointerType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserPointerParams {
+    pub input: BrowserPointerInput,
+    pub page_id: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum BrowserPointerType {
+    #[serde(rename = "tap")]
+    Tap,
+    #[serde(rename = "drag")]
+    Drag,
+    #[serde(rename = "scroll")]
+    Scroll,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserScreencastStartParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fps: Option<u16>,
+    pub page_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<u16>,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserScreencastStartResult {
+    pub height: u32,
+    pub stream_id: u64,
+    pub view_generation: u64,
+    pub width: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserScreencastStopParams {
+    pub stream_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserScreenshotParams {
+    pub page_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<u16>,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserScreenshotResult {
+    pub data_base64: String,
+    pub height: u32,
+    pub view_generation: u64,
+    pub width: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTab {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTabCloseParams {
+    pub page_id: String,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTabCloseResult {
+    pub closed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTabOpenParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTabResult {
+    pub tab: BrowserTab,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTabsParams {
+    pub workspace_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTabsResult {
+    pub tabs: Vec<BrowserTab>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum BrowserViewportMode {
+    #[serde(rename = "web")]
+    Web,
+    #[serde(rename = "mobile")]
+    Mobile,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserViewportSetParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center_y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_scale_factor: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    pub mode: BrowserViewportMode,
+    pub page_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    pub workspace_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -224,6 +449,7 @@ pub struct TerminalLeaseLostEvent {
     pub lease_revision: u64,
     pub pane_id: String,
     pub reason: String,
+    pub view_generation: u64,
     pub workspace_id: String,
 }
 
@@ -387,22 +613,20 @@ pub type AccountSummaryResult = OpaqueObject;
 pub type AccountUsageParams = OpaqueObject;
 pub type AccountUsageResult = OpaqueObject;
 pub type AppearanceGetResult = AppearanceProjection;
-pub type BrowserDialogResolveParams = OpaqueObject;
-pub type BrowserDialogResolveResult = OpaqueObject;
-pub type BrowserInputKeyParams = OpaqueObject;
-pub type BrowserInputKeyResult = OpaqueObject;
-pub type BrowserInputPointerParams = OpaqueObject;
-pub type BrowserInputPointerResult = OpaqueObject;
-pub type BrowserPermissionResolveParams = OpaqueObject;
-pub type BrowserPermissionResolveResult = OpaqueObject;
-pub type BrowserScreencastStartParams = OpaqueObject;
-pub type BrowserScreencastStartResult = OpaqueObject;
-pub type BrowserScreencastStopParams = OpaqueObject;
-pub type BrowserScreencastStopResult = OpaqueObject;
-pub type BrowserTabsParams = OpaqueObject;
-pub type BrowserTabsResult = OpaqueObject;
-pub type BrowserViewportSetParams = OpaqueObject;
-pub type BrowserViewportSetResult = OpaqueObject;
+pub type BrowserBackParams = BrowserPageParams;
+pub type BrowserBackResult = BrowserTabResult;
+pub type BrowserForwardParams = BrowserPageParams;
+pub type BrowserForwardResult = BrowserTabResult;
+pub type BrowserInputKeyParams = BrowserKeyParams;
+pub type BrowserInputKeyResult = Empty;
+pub type BrowserInputPointerParams = BrowserPointerParams;
+pub type BrowserInputPointerResult = Empty;
+pub type BrowserNavigateResult = BrowserTabResult;
+pub type BrowserReloadParams = BrowserPageParams;
+pub type BrowserReloadResult = BrowserTabResult;
+pub type BrowserScreencastStopResult = Empty;
+pub type BrowserTabOpenResult = BrowserTabResult;
+pub type BrowserViewportSetResult = Empty;
 pub type DictationTranscribeParams = OpaqueObject;
 pub type DictationTranscribeResult = OpaqueObject;
 pub type FilesAttachmentUploadParams = OpaqueObject;

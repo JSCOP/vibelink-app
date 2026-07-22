@@ -49,7 +49,6 @@
       "system",
       "notifications",
       "orchestration",
-      "browser",
       "files",
       "git",
       "account",
@@ -312,7 +311,8 @@
         "streamId": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       },
       "required": [
@@ -442,7 +442,8 @@
         "streamId": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "paneGeneration": {
           "type": "integer",
@@ -528,7 +529,8 @@
         "streamId": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "paneGeneration": {
           "type": "integer",
@@ -972,6 +974,469 @@
       ],
       "additionalProperties": false
     },
+    "BrowserTab": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "workspaceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "url",
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserTabsParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserTabsResult": {
+      "type": "object",
+      "properties": {
+        "tabs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/BrowserTab"
+          }
+        }
+      },
+      "required": [
+        "tabs"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserTabOpenParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserTabResult": {
+      "type": "object",
+      "properties": {
+        "tab": {
+          "$ref": "#/types/BrowserTab"
+        }
+      },
+      "required": [
+        "tab"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserTabCloseParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserTabCloseResult": {
+      "type": "object",
+      "properties": {
+        "closed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "closed"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserPageParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserNavigateParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserInspectParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserInspectResult": {
+      "type": "object",
+      "properties": {
+        "snapshotJson": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "snapshotJson",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserPointerType": {
+      "type": "string",
+      "enum": [
+        "tap",
+        "drag",
+        "scroll"
+      ]
+    },
+    "BrowserPointerInput": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/types/BrowserPointerType"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "fromX": {
+          "type": "number"
+        },
+        "fromY": {
+          "type": "number"
+        },
+        "toX": {
+          "type": "number"
+        },
+        "toY": {
+          "type": "number"
+        },
+        "deltaX": {
+          "type": "number"
+        },
+        "deltaY": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserPointerParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/types/BrowserPointerInput"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId",
+        "input"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserKeyType": {
+      "type": "string",
+      "enum": [
+        "text",
+        "key"
+      ]
+    },
+    "BrowserKeyInput": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/types/BrowserKeyType"
+        },
+        "text": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserKeyParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/types/BrowserKeyInput"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId",
+        "input"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserScreenshotParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "quality": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserScreenshotResult": {
+      "type": "object",
+      "properties": {
+        "dataBase64": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "dataBase64",
+        "width",
+        "height",
+        "viewGeneration"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserScreencastStartParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "quality": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        },
+        "maxFps": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserScreencastStartResult": {
+      "type": "object",
+      "properties": {
+        "streamId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "width": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "streamId",
+        "width",
+        "height",
+        "viewGeneration"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserScreencastStopParams": {
+      "type": "object",
+      "properties": {
+        "streamId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "streamId"
+      ],
+      "additionalProperties": false
+    },
+    "BrowserViewportMode": {
+      "type": "string",
+      "enum": [
+        "web",
+        "mobile"
+      ]
+    },
+    "BrowserViewportSetParams": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "pageId": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/types/BrowserViewportMode"
+        },
+        "width": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "deviceScaleFactor": {
+          "type": "number"
+        },
+        "pageScale": {
+          "type": "number"
+        },
+        "centerX": {
+          "type": "number"
+        },
+        "centerY": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "pageId",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
     "TerminalLeaseChangedEvent": {
       "type": "object",
       "properties": {
@@ -993,6 +1458,11 @@
     "TerminalLeaseLostEvent": {
       "type": "object",
       "properties": {
+        "viewGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
         "workspaceId": {
           "type": "string"
         },
@@ -1012,6 +1482,7 @@
         }
       },
       "required": [
+        "viewGeneration",
         "workspaceId",
         "paneId",
         "leaseId",
@@ -1255,66 +1726,114 @@
     "browser": {
       "tabs": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserTabsParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserTabsResult"
         }
       },
-      "screencast.start": {
+      "tab.open": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserTabOpenParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserTabResult"
         }
       },
-      "screencast.stop": {
+      "tab.close": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserTabCloseParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserTabCloseResult"
+        }
+      },
+      "navigate": {
+        "params": {
+          "$ref": "#/types/BrowserNavigateParams"
+        },
+        "result": {
+          "$ref": "#/types/BrowserTabResult"
+        }
+      },
+      "reload": {
+        "params": {
+          "$ref": "#/types/BrowserPageParams"
+        },
+        "result": {
+          "$ref": "#/types/BrowserTabResult"
+        }
+      },
+      "back": {
+        "params": {
+          "$ref": "#/types/BrowserPageParams"
+        },
+        "result": {
+          "$ref": "#/types/BrowserTabResult"
+        }
+      },
+      "forward": {
+        "params": {
+          "$ref": "#/types/BrowserPageParams"
+        },
+        "result": {
+          "$ref": "#/types/BrowserTabResult"
+        }
+      },
+      "inspect": {
+        "params": {
+          "$ref": "#/types/BrowserInspectParams"
+        },
+        "result": {
+          "$ref": "#/types/BrowserInspectResult"
         }
       },
       "input.pointer": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserPointerParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/Empty"
         }
       },
       "input.key": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserKeyParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/Empty"
         }
       },
-      "dialog.resolve": {
+      "screenshot": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserScreenshotParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserScreenshotResult"
         }
       },
-      "permission.resolve": {
+      "screencast.start": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserScreencastStartParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserScreencastStartResult"
+        }
+      },
+      "screencast.stop": {
+        "params": {
+          "$ref": "#/types/BrowserScreencastStopParams"
+        },
+        "result": {
+          "$ref": "#/types/Empty"
         }
       },
       "viewport.set": {
         "params": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/BrowserViewportSetParams"
         },
         "result": {
-          "$ref": "#/types/OpaqueObject"
+          "$ref": "#/types/Empty"
         }
       }
     },

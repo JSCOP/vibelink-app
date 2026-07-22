@@ -13,6 +13,10 @@ use super::{
         SnapshotNodeRecord, VisibilityLeaseToken,
     },
 };
+use crate::dedicated_cli::browser_cdp::{
+    BrowserInspectSnapshot, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
+    BrowserPageScale, BrowserPointerInput,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -683,26 +687,37 @@ impl<P: BrowserProvider> BrowserManager<P> {
         }
         let mutation = self.mutation_lock(page_id)?;
         let _serial = lock(&mutation)?;
-        self.provider.set_device_metrics(page_id, metrics)?;
+        let current_generation = self.page(page_id)?.navigation_generation;
+        let next_generation = current_generation.checked_add(1).ok_or_else(|| {
+            BrowserError::new(
+                BrowserErrorCode::Internal,
+                "browser view generation exhausted",
+            )
+        })?;
+        self.provider
+            .set_navigation_generation(page_id, next_generation)?;
+        if let Err(error) = self.provider.set_device_metrics(page_id, metrics) {
+            let _ = self
+                .provider
+                .set_navigation_generation(page_id, current_generation);
+            return Err(error);
+        }
         let mut state = lock(&self.state)?;
-        let generation = state
-            .pages
-            .get(page_id)
-            .ok_or_else(|| BrowserError::not_found(page_id))?
-            .public
-            .navigation_generation;
         let result = {
             let page = state
                 .pages
                 .get_mut(page_id)
                 .ok_or_else(|| BrowserError::not_found(page_id))?;
             page.public.device_metrics = Some(metrics);
+            page.public.navigation_generation = next_generation;
+            page.public.current_snapshot_id = None;
+            page.snapshot = None;
             page.public.clone()
         };
         push_event_locked(
             &mut state,
             page_id,
-            generation,
+            next_generation,
             BrowserLifecycleEventKind::DeviceMetricsChanged,
             None,
             Some(format!(
@@ -712,35 +727,138 @@ impl<P: BrowserProvider> BrowserManager<P> {
         );
         Ok(result)
     }
-
     pub fn clear_device_metrics(&self, page_id: &str) -> BrowserResult<BrowserPage> {
         let mutation = self.mutation_lock(page_id)?;
         let _serial = lock(&mutation)?;
-        self.provider.clear_device_metrics(page_id)?;
+        let current_generation = self.page(page_id)?.navigation_generation;
+        let next_generation = current_generation.checked_add(1).ok_or_else(|| {
+            BrowserError::new(
+                BrowserErrorCode::Internal,
+                "browser view generation exhausted",
+            )
+        })?;
+        self.provider
+            .set_navigation_generation(page_id, next_generation)?;
+        if let Err(error) = self.provider.clear_device_metrics(page_id) {
+            let _ = self
+                .provider
+                .set_navigation_generation(page_id, current_generation);
+            return Err(error);
+        }
         let mut state = lock(&self.state)?;
-        let generation = state
-            .pages
-            .get(page_id)
-            .ok_or_else(|| BrowserError::not_found(page_id))?
-            .public
-            .navigation_generation;
         let result = {
             let page = state
                 .pages
                 .get_mut(page_id)
                 .ok_or_else(|| BrowserError::not_found(page_id))?;
             page.public.device_metrics = None;
+            page.public.navigation_generation = next_generation;
+            page.public.current_snapshot_id = None;
+            page.snapshot = None;
             page.public.clone()
         };
         push_event_locked(
             &mut state,
             page_id,
-            generation,
+            next_generation,
             BrowserLifecycleEventKind::DeviceMetricsChanged,
             None,
             Some("restored desktop viewport".to_string()),
         );
         Ok(result)
+    }
+
+    pub fn set_page_scale(
+        &self,
+        page_id: &str,
+        scale: BrowserPageScale,
+    ) -> BrowserResult<BrowserPage> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        let current_generation = self.page(page_id)?.navigation_generation;
+        let next_generation = current_generation.checked_add(1).ok_or_else(|| {
+            BrowserError::new(
+                BrowserErrorCode::Internal,
+                "browser view generation exhausted",
+            )
+        })?;
+        self.provider
+            .set_navigation_generation(page_id, next_generation)?;
+        if let Err(error) = self.provider.set_page_scale(page_id, scale) {
+            let _ = self
+                .provider
+                .set_navigation_generation(page_id, current_generation);
+            return Err(error);
+        }
+        let mut state = lock(&self.state)?;
+        let result = {
+            let page = state
+                .pages
+                .get_mut(page_id)
+                .ok_or_else(|| BrowserError::not_found(page_id))?;
+            page.public.navigation_generation = next_generation;
+            page.public.current_snapshot_id = None;
+            page.snapshot = None;
+            page.public.clone()
+        };
+        push_event_locked(
+            &mut state,
+            page_id,
+            next_generation,
+            BrowserLifecycleEventKind::DeviceMetricsChanged,
+            None,
+            Some(format!("page scale {}", scale.scale)),
+        );
+        Ok(result)
+    }
+
+    pub fn inspect_page(
+        &self,
+        page_id: &str,
+        x: Option<f64>,
+        y: Option<f64>,
+    ) -> BrowserResult<BrowserInspectSnapshot> {
+        self.sync_provider_events()?;
+        let generation = self.page(page_id)?.navigation_generation;
+        let snapshot = self.provider.inspect_page(page_id, x, y)?;
+        self.sync_provider_events()?;
+        if self.page(page_id)?.navigation_generation != generation {
+            return Err(BrowserError::stale_ref(
+                "browser inspection became stale while the view changed",
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    pub fn dispatch_pointer(&self, page_id: &str, input: BrowserPointerInput) -> BrowserResult<()> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.page(page_id)?;
+        self.provider.dispatch_pointer(page_id, input)
+    }
+
+    pub fn dispatch_key(&self, page_id: &str, input: BrowserKeyInput) -> BrowserResult<()> {
+        let mutation = self.mutation_lock(page_id)?;
+        let _serial = lock(&mutation)?;
+        self.page(page_id)?;
+        self.provider.dispatch_key(page_id, input)
+    }
+
+    pub fn capture_jpeg(
+        &self,
+        page_id: &str,
+        options: BrowserJpegCaptureOptions,
+    ) -> BrowserResult<(BrowserJpegFrame, u64)> {
+        self.sync_provider_events()?;
+        let generation = self.page(page_id)?.navigation_generation;
+        let frame = self.provider.capture_jpeg(page_id, options)?;
+        self.sync_provider_events()?;
+        if self.page(page_id)?.navigation_generation != generation {
+            return Err(BrowserError::stale_ref(
+                "browser screenshot became stale while the view changed",
+            ));
+        }
+        Ok((frame, generation))
     }
 
     fn history_mutation(

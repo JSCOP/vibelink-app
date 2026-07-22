@@ -2,7 +2,7 @@ pub mod adapters;
 mod durable;
 pub use durable::*;
 
-use crate::control_plane::ControlPlane;
+use crate::{control_plane::ControlPlane, protocol::RemotePaneActivity};
 use adapters::AgentProvider;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -353,6 +353,12 @@ pub struct LifecycleIdentity {
     pub process_generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneProjectionState {
+    pub activity: RemotePaneActivity,
+    pub unread_count: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRunRequest {
@@ -684,6 +690,73 @@ pub struct CoordinatorService {
 impl CoordinatorService {
     pub fn new(control: Arc<ControlPlane>) -> Self {
         Self { control }
+    }
+
+    pub fn pane_projection_states(
+        &self,
+        pane_ids: &[String],
+    ) -> CoordinatorResult<HashMap<String, PaneProjectionState>> {
+        let mut unique = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for pane_id in pane_ids {
+            if seen.insert(pane_id.as_str()) {
+                unique.push(pane_id.as_str());
+            }
+        }
+        if unique.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let values = std::iter::repeat_n("(?)", unique.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "WITH requested(pane_id) AS (VALUES {values}),
+             ranked AS (
+               SELECT d.id AS dispatch_id,d.task_id,d.agent_instance_id,d.pane_id,
+                      d.status AS dispatch_status,t.status AS task_status,a.status AS agent_status,
+                      ROW_NUMBER() OVER (PARTITION BY d.pane_id ORDER BY d.updated_at DESC,d.attempt DESC,d.id DESC) AS rank
+               FROM dispatches d
+               JOIN orchestration_tasks t ON t.id=d.task_id
+               LEFT JOIN agent_instances a ON a.id=d.agent_instance_id
+               WHERE d.pane_id IN (SELECT pane_id FROM requested)
+             ), current AS (
+               SELECT dispatch_id,task_id,agent_instance_id,pane_id,dispatch_status,task_status,agent_status
+               FROM ranked WHERE rank=1
+             )
+             SELECT r.pane_id,c.dispatch_status,c.task_status,c.agent_status,
+                    EXISTS(SELECT 1 FROM decision_gates g WHERE g.status='pending' AND (g.dispatch_id=c.dispatch_id OR g.task_id=c.task_id)),
+                    (SELECT COUNT(*) FROM messages m WHERE m.unread=1 AND (m.dispatch_id=c.dispatch_id OR m.task_id=c.task_id)),
+                    (SELECT COUNT(*) FROM notifications n WHERE n.unread=1 AND n.entity_id IN (c.dispatch_id,c.task_id,c.agent_instance_id))
+             FROM requested r LEFT JOIN current c ON c.pane_id=r.pane_id"
+        );
+        self.control.with_connection(|connection| {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(unique), |row| {
+                let pane_id: String = row.get(0)?;
+                let dispatch_status: Option<String> = row.get(1)?;
+                let task_status: Option<String> = row.get(2)?;
+                let agent_status: Option<String> = row.get(3)?;
+                let pending_gate = row.get::<_, i64>(4)? != 0;
+                let unread_messages = row.get::<_, i64>(5)?.max(0) as u64;
+                let unread_notifications = row.get::<_, i64>(6)?.max(0) as u64;
+                let unread_count = unread_messages
+                    .saturating_add(unread_notifications)
+                    .min(u64::from(u32::MAX)) as u32;
+                Ok((
+                    pane_id,
+                    PaneProjectionState {
+                        activity: pane_activity(
+                            dispatch_status.as_deref(),
+                            task_status.as_deref(),
+                            agent_status.as_deref(),
+                            pending_gate,
+                        ),
+                        unread_count,
+                    },
+                ))
+            })?;
+            Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+        })
     }
 
     pub fn create_run(
@@ -3034,6 +3107,42 @@ fn read_gate(connection: &Connection, gate_id: &str) -> CoordinatorResult<Decisi
         })
 }
 
+fn pane_activity(
+    dispatch_status: Option<&str>,
+    task_status: Option<&str>,
+    agent_status: Option<&str>,
+    pending_gate: bool,
+) -> RemotePaneActivity {
+    if matches!(dispatch_status, Some("failed" | "circuit_broken"))
+        || matches!(task_status, Some("failed" | "blocked"))
+        || matches!(agent_status, Some("failed" | "lost"))
+    {
+        return RemotePaneActivity::Error;
+    }
+    if matches!(dispatch_status, Some("cancelled"))
+        || matches!(task_status, Some("cancelled"))
+        || matches!(agent_status, Some("cancelled"))
+    {
+        return RemotePaneActivity::Idle;
+    }
+    if pending_gate || dispatch_status == Some("waiting") || agent_status == Some("waiting") {
+        return RemotePaneActivity::Waiting;
+    }
+    if matches!(dispatch_status, Some("dispatched" | "running"))
+        || task_status == Some("dispatched")
+        || matches!(agent_status, Some("starting" | "running" | "reconciling"))
+    {
+        return RemotePaneActivity::Running;
+    }
+    if dispatch_status == Some("completed")
+        || task_status == Some("completed")
+        || matches!(agent_status, Some("completed" | "stopped"))
+    {
+        return RemotePaneActivity::Done;
+    }
+    RemotePaneActivity::Idle
+}
+
 fn run_status_text(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Queued => "queued",
@@ -4102,5 +4211,124 @@ mod tests {
             .expect_err("conflict");
         assert_eq!(error.code(), "conflict");
         assert_eq!(fixture.service.run(&first.id).expect("run").revision, 0);
+    }
+
+    #[test]
+    fn pane_activity_mapping_matches_remote_contract() {
+        assert_eq!(
+            pane_activity(Some("failed"), None, None, false),
+            RemotePaneActivity::Error
+        );
+        assert_eq!(
+            pane_activity(None, Some("blocked"), None, false),
+            RemotePaneActivity::Error
+        );
+        assert_eq!(
+            pane_activity(None, None, Some("lost"), false),
+            RemotePaneActivity::Error
+        );
+        assert_eq!(
+            pane_activity(Some("running"), None, None, true),
+            RemotePaneActivity::Waiting
+        );
+        assert_eq!(
+            pane_activity(Some("waiting"), None, None, false),
+            RemotePaneActivity::Waiting
+        );
+        assert_eq!(
+            pane_activity(Some("dispatched"), None, None, false),
+            RemotePaneActivity::Running
+        );
+        assert_eq!(
+            pane_activity(None, None, Some("reconciling"), false),
+            RemotePaneActivity::Running
+        );
+        assert_eq!(
+            pane_activity(Some("completed"), None, None, false),
+            RemotePaneActivity::Done
+        );
+        assert_eq!(
+            pane_activity(Some("running"), None, Some("cancelled"), false),
+            RemotePaneActivity::Idle
+        );
+        assert_eq!(
+            pane_activity(Some("cancelled"), None, Some("cancelled"), false),
+            RemotePaneActivity::Idle
+        );
+        assert_eq!(
+            pane_activity(None, None, None, false),
+            RemotePaneActivity::Idle
+        );
+    }
+
+    #[test]
+    fn pane_projection_states_batches_latest_binding_gates_and_unread() {
+        let fixture = Fixture::new();
+        let run_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4().to_string();
+        let agent_id = Uuid::new_v4().to_string();
+        let old_dispatch_id = Uuid::new_v4().to_string();
+        let dispatch_id = Uuid::new_v4().to_string();
+        let pane_id = Uuid::new_v4().to_string();
+        let idle_pane_id = Uuid::new_v4().to_string();
+        fixture
+            .service
+            .control
+            .with_connection(|connection| -> rusqlite::Result<()> {
+                connection.execute(
+                    "INSERT INTO orchestration_runs(id,session_id,goal,status,revision,policy_json,created_at,updated_at) VALUES(?1,?2,'goal','running',0,'{}',1,1)",
+                    rusqlite::params![run_id, Uuid::new_v4().to_string()],
+                )?;
+                connection.execute(
+                    "INSERT INTO orchestration_tasks(id,run_id,title,description,status,revision,position,created_at,updated_at) VALUES(?1,?2,'task','','dispatched',0,0,1,2)",
+                    rusqlite::params![task_id, run_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO agent_instances(id,provider,workspace_path,status,resumable,generation,created_at,updated_at) VALUES(?1,'pty_cli','C:/workspace','running',0,1,1,2)",
+                    rusqlite::params![agent_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO dispatches(id,task_id,attempt,agent_instance_id,status,pane_id,created_at,updated_at) VALUES(?1,?2,1,?3,'failed',?4,1,1)",
+                    rusqlite::params![old_dispatch_id, task_id, agent_id, pane_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO dispatches(id,task_id,attempt,agent_instance_id,status,pane_id,created_at,updated_at) VALUES(?1,?2,2,?3,'running',?4,2,2)",
+                    rusqlite::params![dispatch_id, task_id, agent_id, pane_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO decision_gates(id,run_id,task_id,dispatch_id,status,gate_type,prompt,options_json,created_at,updated_at) VALUES(?1,?2,?3,?4,'pending','approval','Continue?','[]',2,2)",
+                    rusqlite::params![Uuid::new_v4().to_string(), run_id, task_id, dispatch_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO messages(id,run_id,task_id,dispatch_id,sender_kind,message_type,payload_json,unread,created_at) VALUES(?1,?2,?3,?4,'agent','status','{}',1,2)",
+                    rusqlite::params![Uuid::new_v4().to_string(), run_id, task_id, dispatch_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO notifications(id,sequence,kind,entity_id,unread,payload_json,created_at) VALUES(?1,1,'agent',?2,1,'{}',2)",
+                    rusqlite::params![Uuid::new_v4().to_string(), agent_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let states = fixture
+            .service
+            .pane_projection_states(&[pane_id.clone(), idle_pane_id.clone(), pane_id.clone()])
+            .unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(
+            states.get(&pane_id),
+            Some(&PaneProjectionState {
+                activity: RemotePaneActivity::Waiting,
+                unread_count: 2,
+            })
+        );
+        assert_eq!(
+            states.get(&idle_pane_id),
+            Some(&PaneProjectionState {
+                activity: RemotePaneActivity::Idle,
+                unread_count: 0,
+            })
+        );
     }
 }

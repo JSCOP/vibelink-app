@@ -965,6 +965,87 @@ button {
   padding: 5px;
 }
 
+.remote-pane-lease-cover {
+  align-items: center;
+  backdrop-filter: blur(5px);
+  background: color-mix(in srgb, var(--vibelink-terminal-bg) 82%, transparent);
+  display: flex;
+  inset: 5px;
+  justify-content: center;
+  padding: 18px;
+  position: absolute;
+  z-index: 6;
+}
+
+.remote-pane-lease-card {
+  align-items: center;
+  background: color-mix(in srgb, var(--vibelink-dialog) 94%, transparent);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 10px;
+  box-shadow: 0 16px 42px color-mix(in srgb, #000 48%, transparent);
+  color: var(--vibelink-text);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 360px;
+  padding: 20px 24px;
+  text-align: center;
+  width: min(100%, 360px);
+}
+
+.remote-pane-lease-card strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.remote-pane-lease-state {
+  align-items: center;
+  color: var(--vibelink-text-muted);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 7px;
+}
+
+.remote-pane-lease-state > span {
+  background: var(--vibelink-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vibelink-accent) 18%, transparent);
+  height: 7px;
+  width: 7px;
+}
+
+.remote-pane-lease-geometry {
+  color: var(--vibelink-text-muted);
+  font-size: 12px;
+}
+
+.remote-pane-lease-card button {
+  background: var(--vibelink-accent);
+  border: 1px solid var(--vibelink-accent-border);
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  min-height: 32px;
+  padding: 0 14px;
+}
+
+.remote-pane-lease-card button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.remote-pane-lease-card button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.remote-pane-lease-error {
+  color: var(--vibelink-danger);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .terminal-panel-shell[data-active='true']::before,
 .terminal-panel-shell[data-pane-reviewed='true']::before {
   content: '';

@@ -8,6 +8,7 @@ import { pathFromTerminalSelection } from '../terminal/selectionPath'
 import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
 import type { WorkspaceContentParams } from './workspaceContentModel'
+import { reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
 
 type TerminalPanelParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
 
@@ -38,9 +39,12 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const hermesCommand = useWorkspaceStore((state) => state.settings?.hermesCommand ?? '')
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
   const paneTitle = useWorkspaceStore((state) => paneId ? state.panes[paneId]?.config.title : undefined)
+  const remoteLease = useRemotePaneLeaseStore((state) => paneId ? state.leases[paneId] : undefined)
   const actions = useWorkspaceContentActions()
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [hermesDetected, setHermesDetected] = useState(false)
+  const [reclaimingLease, setReclaimingLease] = useState(false)
+  const [reclaimError, setReclaimError] = useState<string | null>(null)
   const onTitleChange = useCallback((title: string) => {
     if (!paneId) return
     void applyTerminalTitle(paneId, title)
@@ -57,6 +61,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     if (!paneId) return
     event.preventDefault()
     event.stopPropagation()
+    if (remoteLease) return
     const selection = TerminalManager.getSelection(paneId)
     setContextMenu({
       x: Math.min(event.clientX, window.innerWidth - CONTEXT_MENU_WIDTH),
@@ -133,6 +138,21 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     void actions.requestCloseContent(props.api.id)
   }
 
+  const takeBackControl = async () => {
+    if (!paneId || !remoteLease || reclaimingLease) return
+    setReclaimingLease(true)
+    setReclaimError(null)
+    try {
+      await reclaimRemotePaneLease(remoteLease.sessionId, paneId)
+      TerminalManager.setRemotePaneLease(paneId, null)
+      TerminalManager.focus(paneId)
+    } catch (error) {
+      setReclaimError(String(error))
+    } finally {
+      setReclaimingLease(false)
+    }
+  }
+
   useEffect(() => {
     if (!contextMenu) return
     const onKeyDown = (event: KeyboardEvent) => {
@@ -188,7 +208,24 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   return (
     <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onContextMenu={onContextMenu}>
       <div ref={hostRef} className="dock-terminal-host" />
-      {contextMenu ? (
+      {remoteLease ? (
+        <div
+          className="remote-pane-lease-cover"
+          aria-label="Remote terminal control"
+          onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}
+        >
+          <div className="remote-pane-lease-card">
+            <span className="remote-pane-lease-state"><span aria-hidden="true" /> Remote connection active</span>
+            <strong>Controlled from {shortRemoteDeviceId(remoteLease.deviceId)}</strong>
+            <span className="remote-pane-lease-geometry">Terminal size {remoteLease.cols} × {remoteLease.rows}</span>
+            <button type="button" disabled={reclaimingLease} onClick={() => void takeBackControl()}>
+              {reclaimingLease ? 'Taking Back Control…' : 'Take Back Control'}
+            </button>
+            {reclaimError ? <span className="remote-pane-lease-error" role="alert">Could not take back control: {reclaimError}</span> : null}
+          </div>
+        </div>
+      ) : null}
+      {!remoteLease && contextMenu ? (
         <>
           <div className="terminal-context-backdrop" onMouseDown={closeContextMenu} onContextMenu={(event) => { event.preventDefault(); closeContextMenu() }} />
           <div className="terminal-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
@@ -240,6 +277,13 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     </div>
   )
 })
+
+function shortRemoteDeviceId(deviceId: string): string {
+  const safe = deviceId.trim().replace(/[^a-zA-Z0-9_-]/g, '')
+  if (!safe) return 'Remote device'
+  if (safe.length <= 14) return safe
+  return `${safe.slice(0, 8)}…${safe.slice(-4)}`
+}
 
 function limitUtf8Tail(value: string, maxBytes: number): string {
   const bytes = new TextEncoder().encode(value)

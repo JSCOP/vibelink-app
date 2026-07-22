@@ -4,16 +4,20 @@ import { create } from 'zustand'
 export type RemotePaneLeaseStatus = {
   sessionId: string
   paneId: string
+  deviceId: string
   cols: number
   rows: number
+  expiresAt: number
 }
 
 export type RemotePaneLeaseEvent = {
   sessionId: string
   paneId: string
+  deviceId: string
   leased: boolean
   cols?: number
   rows?: number
+  expiresAt: number
 }
 
 type RemotePaneLeaseState = {
@@ -34,7 +38,14 @@ export const useRemotePaneLeaseStore = create<RemotePaneLeaseState>((set) => ({
 
 export function applyRemotePaneLeaseEvent(event: RemotePaneLeaseEvent): RemotePaneLeaseStatus | null {
   const lease = event.leased && event.cols !== undefined && event.rows !== undefined
-    ? { sessionId: event.sessionId, paneId: event.paneId, cols: event.cols, rows: event.rows }
+    ? {
+        sessionId: event.sessionId,
+        paneId: event.paneId,
+        deviceId: event.deviceId,
+        cols: event.cols,
+        rows: event.rows,
+        expiresAt: event.expiresAt,
+      }
     : null
   useRemotePaneLeaseStore.getState().setLease(event.paneId, lease)
   return lease
@@ -44,4 +55,9 @@ export async function refreshRemotePaneLease(paneId: string): Promise<RemotePane
   const lease = await invoke<RemotePaneLeaseStatus | null>('remote_get_pane_lease', { paneId })
   useRemotePaneLeaseStore.getState().setLease(paneId, lease)
   return lease
+}
+
+export async function reclaimRemotePaneLease(sessionId: string, paneId: string): Promise<void> {
+  await invoke('remote_reclaim_pane_lease', { sessionId, paneId })
+  useRemotePaneLeaseStore.getState().setLease(paneId, null)
 }

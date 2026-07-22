@@ -18,5 +18,6 @@ describe('buildRemoteAppearance', () => {
     expect(payload.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(payload.alarmHighlightColor).toBe('#7ee787')
     expect(payload.reviewedPaneHighlightColor).toBe('#58a6ff')
+    expect(payload).not.toHaveProperty('workspaceAlerts')
   })
 })

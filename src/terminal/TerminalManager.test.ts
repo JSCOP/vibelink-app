@@ -19,6 +19,8 @@ vi.mock('@xterm/xterm', () => {
     buffer = { active: { type: 'normal', viewportY: 0, baseY: 0, length: 0 } }
     dataHandler: ((data: string) => void) | undefined
     resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined
+    focusCalls = 0
+    writes: unknown[] = []
     loadAddon(addon: { activate?: (terminal: MockTerminal) => void }): void { addon.activate?.(this) }
     attachCustomKeyEventHandler(): void {}
     attachCustomWheelEventHandler(): void {}
@@ -40,10 +42,10 @@ vi.mock('@xterm/xterm', () => {
       this.element = document.createElement('div')
       container.appendChild(this.element)
     }
-    focus(): void {}
+    focus(): void { this.focusCalls += 1 }
     refresh(): void {}
     scrollToBottom(): void {}
-    write(): void {}
+    write(data: unknown, callback?: () => void): void { this.writes.push(data); callback?.() }
     hasSelection(): boolean { return false }
 
     resize(cols: number, rows: number): void {
@@ -82,6 +84,7 @@ vi.mock('@xterm/addon-search', () => ({ SearchAddon: class {} }))
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: class {} }))
 
 import { TerminalManager } from './TerminalManager'
+import { useRemotePaneLeaseStore } from '../remote/paneLease'
 
 type TerminalWithDataHandler = {
   dataHandler: ((data: string) => void) | undefined
@@ -103,6 +106,7 @@ function makeContainer(): HTMLElement {
 beforeEach(() => {
   invokeMock.mockReset()
   invokeMock.mockResolvedValue(undefined)
+  useRemotePaneLeaseStore.setState({ leases: {} })
 })
 
 class StubResizeObserver {
@@ -194,23 +198,52 @@ describe('TerminalManager remote pane leases', () => {
     TerminalManager.dispose(paneId)
   })
 
-  it('keeps leased remote geometry without fitting or syncing it back', async () => {
-    const paneId = 'pane-leased-resize'
-    invokeMock.mockImplementation(async (command) => command === 'remote_get_pane_lease'
-      ? { sessionId: 'session-mobile', paneId, cols: 48, rows: 27 }
-      : undefined)
+  it('suppresses desktop input, focus, fit, and resize while leased, preserves output, then restores desktop control', () => {
+    const paneId = 'pane-leased-control'
     const container = makeContainer()
     TerminalManager.attach(paneId, container, { sessionId: 'session-mobile' })
     const manager = TerminalManager as unknown as {
-      entries: Map<string, { term: { cols: number; rows: number } }>
+      entries: Map<string, { term: {
+        cols: number
+        rows: number
+        focusCalls: number
+        writes: unknown[]
+        resize(cols: number, rows: number): void
+      } }>
     }
     const entry = manager.entries.get(paneId)
-    if (!entry) throw new Error('missing leased resize entry')
+    if (!entry) throw new Error('missing leased control entry')
     invokeMock.mockClear()
 
-    TerminalManager.adoptRemoteResize(paneId, 48, 27)
-    await vi.waitFor(() => expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 48, rows: 27 }))
-    expect(invokeMock.mock.calls.some(([command]) => command === 'resize_pane')).toBe(false)
+    TerminalManager.setRemotePaneLease(paneId, {
+      sessionId: 'session-mobile',
+      paneId,
+      deviceId: 'device-mobile',
+      cols: 48,
+      rows: 27,
+      expiresAt: 1_800_000_000_000,
+    })
+    emitTerminalData(paneId, 'blocked input')
+    entry.term.resize(52, 30)
+    TerminalManager.focus(paneId)
+    TerminalManager.reflow(paneId)
+    TerminalManager.syncPtySize(paneId)
+    TerminalManager.write(paneId, new TextEncoder().encode('remote output'))
+
+    expect(invokeMock.mock.calls.some(([command]) => command === 'write_pane' || command === 'resize_pane')).toBe(false)
+    expect(entry.term.focusCalls).toBe(0)
+    expect(entry.term.writes).toHaveLength(1)
+
+    TerminalManager.setRemotePaneLease(paneId, null)
+    TerminalManager.focus(paneId)
+    emitTerminalData(paneId, 'restored input')
+
+    expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 80, rows: 24 })
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
+      ['resize_pane', { sessionId: 'session-mobile', paneId, cols: 80, rows: 24 }],
+    ])
+    expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-mobile', paneId, data: 'restored input' })
+    expect(entry.term.focusCalls).toBe(1)
     TerminalManager.dispose(paneId)
   })
 })

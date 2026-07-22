@@ -7,6 +7,7 @@ import { TerminalPanePanel } from './TerminalPanePanel'
 const mockStore = vi.hoisted(() => ({
   activePaneId: undefined as string | undefined,
   reviewedPaneId: undefined as string | undefined,
+  lease: undefined as undefined | { sessionId: string; paneId: string; deviceId: string; cols: number; rows: number; expiresAt: number },
 }))
 
 vi.mock('../state/store', () => ({
@@ -37,6 +38,13 @@ vi.mock('../state/store', () => ({
 
 vi.mock('../terminal/TerminalManager', () => ({
   TerminalManager: {},
+}))
+
+vi.mock('../remote/paneLease', () => ({
+  reclaimRemotePaneLease: vi.fn(async () => undefined),
+  useRemotePaneLeaseStore: (selector: (state: { leases: Record<string, unknown> }) => unknown) => selector({
+    leases: mockStore.lease ? { [mockStore.lease.paneId]: mockStore.lease } : {},
+  }),
 }))
 
 const actions: WorkspaceContentActions = {
@@ -70,6 +78,7 @@ describe('TerminalPanePanel', () => {
   beforeEach(() => {
     mockStore.activePaneId = undefined
     mockStore.reviewedPaneId = undefined
+    mockStore.lease = undefined
   })
 
   test('marks only the selected terminal pane as active', () => {
@@ -90,5 +99,25 @@ describe('TerminalPanePanel', () => {
 
     expect(reviewedPane).toContain('data-pane-reviewed="true"')
     expect(reviewedPane).not.toContain('data-active=')
+  })
+
+  test('keeps the terminal mounted beneath an actionable remote lease cover', () => {
+    mockStore.lease = {
+      sessionId: 'session-1',
+      paneId: 'pane-leased',
+      deviceId: 'device-mobile',
+      cols: 48,
+      rows: 27,
+      expiresAt: 1_800_000_000_000,
+    }
+
+    const leasedPane = renderTerminalPane('pane-leased')
+
+    expect(leasedPane).toContain('class="dock-terminal-host"')
+    expect(leasedPane).toContain('class="remote-pane-lease-cover"')
+    expect(leasedPane).toContain('Remote connection active')
+    expect(leasedPane).toContain('Controlled from device-mobile')
+    expect(leasedPane).toContain('Terminal size 48 × 27')
+    expect(leasedPane).toContain('Take Back Control')
   })
 })

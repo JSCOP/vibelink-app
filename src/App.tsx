@@ -35,6 +35,7 @@ import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { isAppLocked } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
+import { desktopSelectionPayload } from './remote/desktopSelection'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -98,6 +99,7 @@ function App() {
   const globalShortcutOperationRef = useRef<Promise<void>>(Promise.resolve())
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const activePaneId = useWorkspaceStore((state) => state.activePaneId)
   const paneCompletionHighlights = useWorkspaceStore((state) => state.paneCompletionHighlights)
   const status = useWorkspaceStore((state) => state.status)
   const error = useWorkspaceStore((state) => state.error)
@@ -144,13 +146,19 @@ function App() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void invoke('set_remote_appearance', {
-        appearance: { ...buildRemoteAppearance(settings), workspaceAlerts: completionCounts },
+        appearance: buildRemoteAppearance(settings),
         workspaceOrder: settings.workspaceOrder,
         workspaceAlerts: completionCounts,
       }).catch((caught) => console.warn('Failed to update remote appearance', caught))
     }, 300)
     return () => window.clearTimeout(timer)
   }, [completionCounts, settings])
+
+  useEffect(() => {
+    if (status !== 'ready') return
+    void invoke('set_desktop_selection', desktopSelectionPayload(activeSessionId, activePaneId))
+      .catch((caught) => console.warn('Failed to update desktop selection', caught))
+  }, [activePaneId, activeSessionId, status])
 
   useEffect(() => {
     void invoke('set_keep_terminals_alive_on_close', { value: settings.keepTerminalsAliveOnClose }).catch(() => {})

@@ -1,13 +1,17 @@
 use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
+use crate::orchestration::PaneProjectionState;
 use crate::protocol::{
-    DaemonToClient, PaneCommandOrigin, PaneMeta, RemoteConnectionCleanupRequest, RemotePaneLease,
-    RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseClaimRequest, RemotePaneLeaseEvent,
-    RemotePaneLeaseEventKind, RemotePaneLeaseEventReason, RemotePaneLeaseReleaseOutcome,
-    RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest, RemotePaneLeaseRestoration,
-    RemotePaneLeaseRestorationStatus, RemotePaneLeaseResult, RemotePaneLeaseStaleReason,
-    RemotePaneLeaseStatusRequest, SessionMeta, TerminalSnapshot, REMOTE_PANE_LEASE_TTL_MS,
+    DaemonToClient, DesktopSelection, PaneCommandOrigin, PaneMeta, RemoteConnectionCleanupRequest,
+    RemotePaneLease, RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseClaimRequest,
+    RemotePaneLeaseEvent, RemotePaneLeaseEventKind, RemotePaneLeaseEventReason,
+    RemotePaneLeaseReleaseOutcome, RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest,
+    RemotePaneLeaseRestoration, RemotePaneLeaseRestorationStatus, RemotePaneLeaseResult,
+    RemotePaneLeaseStaleReason, RemotePaneLeaseStatusRequest, RemoteWorkspaceProjection,
+    RemoteWorkspaceProjectionPane, RemoteWorkspaceProjectionWorkspace, SessionMeta,
+    TerminalSnapshot, REMOTE_PANE_LEASE_TTL_MS,
 };
+use crate::remote::layout_order::pane_layout_positions;
 use crossbeam_channel::Sender;
 use indexmap::IndexMap;
 use std::{
@@ -54,7 +58,9 @@ pub struct DaemonState {
     pane_clients: HashMap<Uuid, HashSet<Uuid>>,
     session_clients: HashMap<Uuid, HashSet<Uuid>>,
     pane_leases: HashMap<Uuid, RemotePaneLease>,
+    next_pane_generation: u64,
     next_pane_lease_revision: u64,
+    desktop_selection: DesktopSelection,
 }
 
 impl DaemonState {
@@ -65,7 +71,12 @@ impl DaemonState {
             pane_clients: HashMap::new(),
             session_clients: HashMap::new(),
             pane_leases: HashMap::new(),
+            next_pane_generation: 1,
             next_pane_lease_revision: 1,
+            desktop_selection: DesktopSelection {
+                workspace_id: None,
+                pane_id: None,
+            },
         }
     }
 
@@ -139,6 +150,109 @@ impl DaemonState {
         sessions
     }
 
+    pub fn remote_workspace_projection(
+        &self,
+        workspace_id: Option<Uuid>,
+        pane_states: &HashMap<String, PaneProjectionState>,
+    ) -> anyhow::Result<RemoteWorkspaceProjection> {
+        let workspaces = self
+            .list_sessions()
+            .into_iter()
+            .map(|session| RemoteWorkspaceProjectionWorkspace {
+                id: session.id.to_string(),
+                name: session.name,
+                pane_count: u32::try_from(session.pane_count).unwrap_or(u32::MAX),
+                workspace_folder: session.workspace_folder,
+            })
+            .collect();
+        let Some(workspace_id) = workspace_id else {
+            return Ok(RemoteWorkspaceProjection {
+                workspaces,
+                attached_workspace_id: None,
+                panes: Vec::new(),
+            });
+        };
+        let session = self.session(workspace_id)?;
+        let metas = session.panes.values().map(Pane::meta).collect::<Vec<_>>();
+        let positions = pane_layout_positions(session.layout_json.as_deref(), &metas);
+        let mut panes = session
+            .panes
+            .values()
+            .map(|pane| {
+                let position = positions
+                    .get(&pane.id)
+                    .expect("layout projection covers every live pane");
+                let state = pane_states.get(&pane.id.to_string());
+                RemoteWorkspaceProjectionPane {
+                    activity: state
+                        .map(|state| state.activity)
+                        .unwrap_or(crate::protocol::RemotePaneActivity::Idle),
+                    alive: pane.alive,
+                    cols: pane.config.cols,
+                    desktop_active: self.desktop_selection.workspace_id == Some(workspace_id)
+                        && self.desktop_selection.pane_id == Some(pane.id),
+                    group_id: position.group_id.clone(),
+                    group_order: position.group_order,
+                    id: pane.id.to_string(),
+                    last_output_at: pane.last_output_at(),
+                    order: position.order,
+                    pane_generation: pane.output_cursor().0,
+                    role: pane.config.role.clone().unwrap_or_default(),
+                    rows: pane.config.rows,
+                    tab_order: position.tab_order,
+                    title: pane
+                        .config
+                        .title
+                        .clone()
+                        .or_else(|| pane.config.shell.clone())
+                        .unwrap_or_else(|| "Shell".to_string()),
+                    unread_count: state.map(|state| state.unread_count).unwrap_or(0),
+                    workspace_id: workspace_id.to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        panes.sort_by_key(|pane| pane.order);
+        Ok(RemoteWorkspaceProjection {
+            workspaces,
+            attached_workspace_id: Some(workspace_id.to_string()),
+            panes,
+        })
+    }
+
+    pub fn set_desktop_selection(
+        &mut self,
+        selection: DesktopSelection,
+    ) -> anyhow::Result<Vec<Uuid>> {
+        if selection.pane_id.is_some() && selection.workspace_id.is_none() {
+            anyhow::bail!("desktop pane selection requires a workspace");
+        }
+        if let Some(workspace_id) = selection.workspace_id {
+            self.session(workspace_id)?;
+            if let Some(pane_id) = selection.pane_id {
+                self.pane_in_session(workspace_id, pane_id)?;
+            }
+        }
+        if selection == self.desktop_selection {
+            return Ok(Vec::new());
+        }
+        let mut affected = Vec::new();
+        if let Some(workspace_id) = self.desktop_selection.workspace_id {
+            affected.push(workspace_id);
+        }
+        if let Some(workspace_id) = selection.workspace_id {
+            if !affected.contains(&workspace_id) {
+                affected.push(workspace_id);
+            }
+        }
+        self.desktop_selection = selection;
+        Ok(affected)
+    }
+
+    #[cfg(test)]
+    pub fn desktop_selection(&self) -> DesktopSelection {
+        self.desktop_selection.clone()
+    }
+
     pub fn resource_targets(&self) -> Vec<(Uuid, Uuid, Option<u32>)> {
         let mut out = Vec::new();
         for (session_id, session) in &self.sessions {
@@ -165,6 +279,12 @@ impl DaemonState {
             self.pane_clients.remove(pane_id);
         }
         self.session_clients.remove(&session_id);
+        if self.desktop_selection.workspace_id == Some(session_id) {
+            self.desktop_selection = DesktopSelection {
+                workspace_id: None,
+                pane_id: None,
+            };
+        }
         Ok(session.panes.drain(..).map(|(_, pane)| pane).collect())
     }
 
@@ -230,12 +350,17 @@ impl DaemonState {
     pub fn insert_pane_or_recover(
         &mut self,
         session_id: Uuid,
-        pane: Pane,
+        mut pane: Pane,
     ) -> std::result::Result<PaneMeta, (anyhow::Error, Pane)> {
-        let Some(session) = self.sessions.get_mut(&session_id) else {
+        if !self.sessions.contains_key(&session_id) {
             return Err((anyhow::anyhow!("unknown session {session_id}"), pane));
-        };
+        }
+        pane.assign_output_generation(self.take_pane_generation());
         let meta = pane.meta();
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .expect("session existence checked before pane insertion");
         session.panes.insert(meta.id, pane);
         session.meta.pane_count = session.panes.len();
         Ok(meta)
@@ -272,6 +397,11 @@ impl DaemonState {
         let pane = session.panes.shift_remove(&pane_id);
         session.meta.pane_count = session.panes.len();
         self.pane_clients.remove(&pane_id);
+        if self.desktop_selection.workspace_id == Some(session_id)
+            && self.desktop_selection.pane_id == Some(pane_id)
+        {
+            self.desktop_selection.pane_id = None;
+        }
         pane
     }
 
@@ -664,6 +794,15 @@ impl DaemonState {
         }
     }
 
+    fn take_pane_generation(&mut self) -> u64 {
+        let generation = self.next_pane_generation;
+        self.next_pane_generation = self
+            .next_pane_generation
+            .checked_add(1)
+            .expect("pane generation exhausted");
+        generation
+    }
+
     fn take_pane_lease_revision(&mut self) -> u64 {
         let revision = self.next_pane_lease_revision;
         self.next_pane_lease_revision = self
@@ -783,7 +922,7 @@ impl DaemonState {
             return Ok(Vec::new());
         }
         pane.resize(cols, rows)?;
-        Ok(self.senders_for_pane(pane_id))
+        Ok(self.senders_for_pane_or_session(session_id, pane_id))
     }
 
     pub fn set_pane_title(
@@ -967,9 +1106,12 @@ impl DaemonState {
     }
 
     pub fn mark_exited(&mut self, pane_id: Uuid) -> PaneExitEffect {
-        let senders = self.senders_for_pane(pane_id);
+        let owner = self.find_pane(pane_id).map(|(session_id, _)| session_id);
+        let senders = owner
+            .map(|session_id| self.senders_for_pane_or_session(session_id, pane_id))
+            .unwrap_or_else(|| self.senders_for_pane(pane_id));
         let lease = self.cleanup_remote_pane_lease_on_exit(pane_id);
-        if let Some((session_id, _)) = self.find_pane(pane_id) {
+        if let Some(session_id) = owner {
             self.remove_pane(session_id, pane_id);
         } else {
             self.pane_clients.remove(&pane_id);
@@ -1022,6 +1164,26 @@ impl DaemonState {
             .filter_map(|client_id| self.clients.get(client_id))
             .cloned()
             .collect()
+    }
+
+    pub fn senders_for_pane_or_session(
+        &self,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> Vec<Sender<DaemonToClient>> {
+        let mut client_ids = self.pane_clients.get(&pane_id).cloned().unwrap_or_default();
+        if let Some(session_clients) = self.session_clients.get(&session_id) {
+            client_ids.extend(session_clients.iter().copied());
+        }
+        client_ids
+            .into_iter()
+            .filter_map(|client_id| self.clients.get(&client_id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn session_ids(&self) -> Vec<Uuid> {
+        self.sessions.keys().copied().collect()
     }
 
     pub fn all_senders(&self) -> Vec<Sender<DaemonToClient>> {
@@ -2056,11 +2218,7 @@ mod tests {
             .expect("replacement pane")
             .output_cursor()
             .0;
-        state
-            .pane_leases
-            .get_mut(&pane_id)
-            .expect("lease")
-            .pane_generation = replacement_generation.saturating_add(1);
+        assert!(replacement_generation > first_lease.pane_generation);
 
         let claimed = claim_lease(
             &mut state,
@@ -2228,11 +2386,12 @@ mod tests {
         state
             .insert_pane(session_id, Pane::for_test(replacement_config, true))
             .expect("insert replacement");
-        state
-            .pane_leases
-            .get_mut(&pane_id)
-            .expect("lease")
-            .pane_generation = lease.pane_generation.saturating_add(1);
+        let replacement_generation = state
+            .pane_in_session(session_id, pane_id)
+            .expect("replacement pane")
+            .output_cursor()
+            .0;
+        assert!(replacement_generation > lease.pane_generation);
 
         let released = state
             .release_remote_pane_lease(release_request(&lease))
@@ -2367,6 +2526,87 @@ mod tests {
             .find(|pane| pane.id == pane_id)
             .expect("pane");
         (pane.config.cols, pane.config.rows)
+    }
+
+    #[test]
+    fn desktop_selection_validates_membership_and_clears_previous_selection() {
+        let mut state = DaemonState::new();
+        let first = state.create_session("First".to_string(), None);
+        let second = state.create_session("Second".to_string(), None);
+        let first_pane = Uuid::new_v4();
+        let second_pane = Uuid::new_v4();
+        state
+            .insert_pane(first.id, Pane::for_test(test_config(first_pane), true))
+            .unwrap();
+        state
+            .insert_pane(second.id, Pane::for_test(test_config(second_pane), true))
+            .unwrap();
+
+        assert_eq!(
+            state
+                .set_desktop_selection(DesktopSelection {
+                    workspace_id: Some(first.id),
+                    pane_id: Some(first_pane),
+                })
+                .unwrap(),
+            vec![first.id]
+        );
+        assert!(state
+            .set_desktop_selection(DesktopSelection {
+                workspace_id: Some(first.id),
+                pane_id: Some(second_pane),
+            })
+            .is_err());
+        assert_eq!(
+            state.desktop_selection(),
+            DesktopSelection {
+                workspace_id: Some(first.id),
+                pane_id: Some(first_pane),
+            }
+        );
+        assert_eq!(
+            state
+                .set_desktop_selection(DesktopSelection {
+                    workspace_id: None,
+                    pane_id: None,
+                })
+                .unwrap(),
+            vec![first.id]
+        );
+        assert_eq!(
+            state.desktop_selection(),
+            DesktopSelection {
+                workspace_id: None,
+                pane_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn remote_projection_uses_pty_generation_and_real_last_output_timestamp() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        let mut config = test_config(pane_id);
+        config.cols = 132;
+        config.rows = 41;
+        config.title = Some("Build".to_string());
+        config.role = Some("implementation".to_string());
+        state
+            .insert_pane(workspace.id, Pane::for_test(config, true))
+            .unwrap();
+        state.record_output_and_push(pane_id, b"output");
+
+        let projection = state
+            .remote_workspace_projection(Some(workspace.id), &HashMap::new())
+            .unwrap();
+        let pane = &projection.panes[0];
+        assert_eq!(pane.pane_generation, 1);
+        assert!(pane.last_output_at > 0);
+        assert_eq!((pane.cols, pane.rows), (132, 41));
+        assert!(pane.alive);
+        assert_eq!(pane.title, "Build");
+        assert_eq!(pane.role, "implementation");
     }
 
     fn test_config(pane_id: Uuid) -> crate::protocol::PaneConfig {

@@ -1,5 +1,6 @@
 use crate::protocol::{
-    read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, Req, TaskSignal,
+    read_frame, write_frame, ClientToDaemon, DaemonToClient, RemoteBrowserHostRequest,
+    RemoteBrowserHostResponse, ReplyResult, Req, TaskSignal,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{bounded, Sender, TrySendError};
@@ -16,7 +17,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{ipc::Channel, AppHandle, Emitter};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager as _};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -201,6 +202,7 @@ impl DaemonClient {
     }
 
     fn new_inner(stream: DaemonStream, app_handle: Option<AppHandle>) -> Self {
+        let register_browser_host = app_handle.is_some();
         let (reader, writer) = split_daemon_stream(stream);
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind terminal ws listener");
@@ -221,7 +223,11 @@ impl DaemonClient {
         spawn_ws_accept_loop(listener, Arc::clone(&shared));
         spawn_reader_loop(reader, Arc::clone(&shared), 0);
 
-        Self { shared }
+        let client = Self { shared };
+        if register_browser_host {
+            let _ = client.send(ClientToDaemon::RegisterBrowserHost);
+        }
+        client
     }
 
     pub fn set_output_channel(&self, channel: Channel<TerminalEvent>) {
@@ -309,6 +315,9 @@ impl DaemonClient {
                 .fetch_add(1, Ordering::AcqRel)
                 + 1;
             spawn_reader_loop(reader, Arc::clone(&self.shared), generation);
+            if self.shared.app_handle.is_some() {
+                self.send(ClientToDaemon::RegisterBrowserHost)?;
+            }
             Ok(())
         })();
 
@@ -420,6 +429,12 @@ fn reconnect(shared: &Arc<ClientShared>) -> Option<(LocalSocketRecvHalf, u64)> {
                 let (reader, writer) = split_daemon_stream(stream);
                 *shared.writer.lock().expect("daemon writer mutex poisoned") = writer;
                 let generation = shared.connection_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                if shared.app_handle.is_some() {
+                    let mut writer = shared.writer.lock().expect("daemon writer mutex poisoned");
+                    if write_frame(&mut *writer, &ClientToDaemon::RegisterBrowserHost).is_err() {
+                        return None;
+                    }
+                }
                 return Some((reader, generation));
             }
             Err(err) => {
@@ -506,6 +521,9 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
                     let _ = app_handle.emit("remote://pane-lease", event);
                 }
             }
+            DaemonToClient::RemoteBrowserRequest { request } => {
+                handle_remote_browser_request(shared, request);
+            }
             other => {
                 if let Err(err) = forward_terminal_event(shared, other) {
                     warn!(?err, "dropping terminal event");
@@ -513,6 +531,48 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
             }
         }
     }
+}
+
+fn handle_remote_browser_request(shared: &Arc<ClientShared>, request: RemoteBrowserHostRequest) {
+    let shared = Arc::clone(shared);
+    let _ = thread::Builder::new()
+        .name("vibelink-browser-host-request".to_string())
+        .spawn(move || {
+            let result = shared
+                .app_handle
+                .as_ref()
+                .ok_or_else(|| {
+                    "browser_unavailable: desktop browser host is unavailable".to_string()
+                })
+                .and_then(|app| {
+                    let manager = app
+                        .state::<super::browser::ManagedBrowser>()
+                        .inner()
+                        .clone();
+                    super::browser::handle_remote_browser_request(
+                        &manager,
+                        &request.method,
+                        &request.payload_json,
+                    )
+                });
+            let response = match result {
+                Ok(value) => RemoteBrowserHostResponse {
+                    request_id: request.request_id,
+                    result_json: serde_json::to_string(&value).ok(),
+                    error: None,
+                },
+                Err(error) => RemoteBrowserHostResponse {
+                    request_id: request.request_id,
+                    result_json: None,
+                    error: Some(error),
+                },
+            };
+            let mut writer = shared.writer.lock().expect("daemon writer mutex poisoned");
+            let _ = write_frame(
+                &mut *writer,
+                &ClientToDaemon::RemoteBrowserResponse { response },
+            );
+        });
 }
 
 fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShared>) {
@@ -674,6 +734,7 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
         | DaemonToClient::PaneResized { .. }
         | DaemonToClient::SessionChanged { .. }
         | DaemonToClient::RemotePaneLease { .. }
+        | DaemonToClient::RemoteBrowserRequest { .. }
         | DaemonToClient::TaskEvent { .. } => None,
     }
 }

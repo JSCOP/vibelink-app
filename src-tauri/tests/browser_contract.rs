@@ -1,12 +1,10 @@
-#[path = "../src/browser/mod.rs"]
-mod browser;
-
-use browser::{
+use app_lib::browser::{
     BrowserAnnotationInput, BrowserCookieImportInput, BrowserCookieImportResult,
-    BrowserDeviceMetrics, BrowserDialogKind, BrowserErrorCode, BrowserFrame, BrowserLifecycleEvent,
-    BrowserLifecycleEventKind, BrowserManager, BrowserPolicy, BrowserProvider, BrowserResult,
-    CertificateDecision, ChildWebViewCreate, ChildWebViewState, PermissionDecision, PhysicalBounds,
-    ProfileKind, RecoveryCandidate, SnapshotNodeInput, SnapshotSource,
+    BrowserDeviceMetrics, BrowserDialogKind, BrowserError, BrowserErrorCode, BrowserFrame,
+    BrowserLifecycleEvent, BrowserLifecycleEventKind, BrowserManager, BrowserPolicy,
+    BrowserProvider, BrowserResult, CertificateDecision, ChildWebViewCreate, ChildWebViewState,
+    PermissionDecision, PhysicalBounds, ProfileKind, RecoveryCandidate, SnapshotNodeInput,
+    SnapshotSource,
 };
 use std::{
     collections::HashMap,
@@ -172,7 +170,7 @@ impl BrowserProvider for ContractProvider {
             .lock()
             .unwrap()
             .clone()
-            .unwrap_or_else(|| Err(browser::BrowserError::unsupported("import_cookies")))
+            .unwrap_or_else(|| Err(BrowserError::unsupported("import_cookies")))
     }
     fn resolve_permission(
         &self,
@@ -217,7 +215,7 @@ impl BrowserProvider for ContractProvider {
             .unwrap()
             .get(page_id)
             .cloned()
-            .ok_or_else(|| browser::BrowserError::not_found(page_id))
+            .ok_or_else(|| BrowserError::not_found(page_id))
     }
 }
 
@@ -424,7 +422,7 @@ fn cookie_import_crash_marker_restores_the_profile_quarantined() {
     manager
         .create_page("page-a", "workspace-a", "imported-a", bounds())
         .unwrap();
-    *provider.cookie_import_result.lock().unwrap() = Some(Err(browser::BrowserError::new(
+    *provider.cookie_import_result.lock().unwrap() = Some(Err(BrowserError::new(
         BrowserErrorCode::RuntimeUnavailable,
         "simulated crash after mutation began",
     )));

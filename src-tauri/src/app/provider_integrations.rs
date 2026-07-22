@@ -9,9 +9,9 @@ use zeroize::Zeroize;
 
 use crate::app::license::LicenseService;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
 #[cfg(windows)]
 use tauri::Manager;
+use tauri::{AppHandle, State};
 
 const MAX_DISCOVERY_RESULTS: usize = 100;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;
@@ -521,9 +521,8 @@ fn prompt_for_provider_secret(
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{ERROR_CANCELLED, ERROR_SUCCESS, HWND};
     use windows_sys::Win32::Security::Credentials::{
-        CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI,
-        CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
-        CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
+        CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI, CREDUI_FLAGS_DO_NOT_PERSIST,
+        CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
     };
 
     const USERNAME_CAPACITY: usize = 513;
@@ -590,9 +589,13 @@ fn prompt_for_provider_secret(
         .unwrap_or(secret_buffer.len());
     let decoded = String::from_utf16(&secret_buffer[..secret_len]);
     secret_buffer.zeroize();
-    decoded
-        .map(CapturedSecret)
-        .map_err(|_| ProviderFailure::new("credential_capture_failed", "Windows returned an invalid credential", false))
+    decoded.map(CapturedSecret).map_err(|_| {
+        ProviderFailure::new(
+            "credential_capture_failed",
+            "Windows returned an invalid credential",
+            false,
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -629,11 +632,7 @@ fn wide_null_terminated(value: &str) -> Vec<u16> {
 #[cfg(windows)]
 fn copy_wide_to_buffer(value: &str, buffer: &mut [u16]) {
     let capacity = buffer.len().saturating_sub(1);
-    for (target, source) in buffer
-        .iter_mut()
-        .take(capacity)
-        .zip(value.encode_utf16())
-    {
+    for (target, source) in buffer.iter_mut().take(capacity).zip(value.encode_utf16()) {
         *target = source;
     }
 }
@@ -765,14 +764,22 @@ fn assigned_github(
     } else {
         format!("https://{}/api/v3", credential.account)
     };
-    let mut result = AssignedProviderResult { items: Vec::new(), failures: Vec::new() };
+    let mut result = AssignedProviderResult {
+        items: Vec::new(),
+        failures: Vec::new(),
+    };
 
     if credential.scopes.iter().any(|scope| scope == "issues:read") {
         collect_assigned_source(
             &mut result,
             "githubAssignedIssue",
-            github_get(credential, &format!("{base}/issues?filter=assigned&state=open&per_page={limit}"))
-                .and_then(|body| parse_github_assigned(&body, credential, "githubAssignedIssue", "issue")),
+            github_get(
+                credential,
+                &format!("{base}/issues?filter=assigned&state=open&per_page={limit}"),
+            )
+            .and_then(|body| {
+                parse_github_assigned(&body, credential, "githubAssignedIssue", "issue")
+            }),
         );
     } else {
         result.failures.push(AssignedProviderFailure {
@@ -781,10 +788,17 @@ fn assigned_github(
         });
     }
 
-    if credential.scopes.iter().any(|scope| scope == "reviews:read") {
+    if credential
+        .scopes
+        .iter()
+        .any(|scope| scope == "reviews:read")
+    {
         for (source, query) in [
             ("githubAuthoredReview", "is:pr is:open author:@me"),
-            ("githubReviewRequested", "is:pr is:open review-requested:@me"),
+            (
+                "githubReviewRequested",
+                "is:pr is:open review-requested:@me",
+            ),
         ] {
             let url = format!(
                 "{base}/search/issues?q={}&per_page={limit}",
@@ -811,13 +825,21 @@ fn assigned_gitlab(
     limit: usize,
 ) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
     let base = format!("https://{}/api/v4", credential.account);
-    let mut result = AssignedProviderResult { items: Vec::new(), failures: Vec::new() };
+    let mut result = AssignedProviderResult {
+        items: Vec::new(),
+        failures: Vec::new(),
+    };
     if credential.scopes.iter().any(|scope| scope == "issues:read") {
         collect_assigned_source(
             &mut result,
             "gitlabAssignedIssue",
-            gitlab_get(credential, &format!("{base}/issues?scope=assigned_to_me&state=opened&per_page={limit}"))
-                .and_then(|body| parse_gitlab_assigned(&body, credential, "gitlabAssignedIssue", "issue")),
+            gitlab_get(
+                credential,
+                &format!("{base}/issues?scope=assigned_to_me&state=opened&per_page={limit}"),
+            )
+            .and_then(|body| {
+                parse_gitlab_assigned(&body, credential, "gitlabAssignedIssue", "issue")
+            }),
         );
     } else {
         result.failures.push(AssignedProviderFailure {
@@ -825,12 +847,23 @@ fn assigned_gitlab(
             failure: ProviderFailure::scope("issues:read"),
         });
     }
-    if credential.scopes.iter().any(|scope| scope == "reviews:read") {
+    if credential
+        .scopes
+        .iter()
+        .any(|scope| scope == "reviews:read")
+    {
         collect_assigned_source(
             &mut result,
             "gitlabAssignedReview",
-            gitlab_get(credential, &format!("{base}/merge_requests?scope=assigned_to_me&state=opened&per_page={limit}"))
-                .and_then(|body| parse_gitlab_assigned(&body, credential, "gitlabAssignedReview", "review")),
+            gitlab_get(
+                credential,
+                &format!(
+                    "{base}/merge_requests?scope=assigned_to_me&state=opened&per_page={limit}"
+                ),
+            )
+            .and_then(|body| {
+                parse_gitlab_assigned(&body, credential, "gitlabAssignedReview", "review")
+            }),
         );
     } else {
         result.failures.push(AssignedProviderFailure {
@@ -853,7 +886,10 @@ fn assigned_linear(
             "variables": {"first": limit},
         }),
     );
-    let mut result = AssignedProviderResult { items: Vec::new(), failures: Vec::new() };
+    let mut result = AssignedProviderResult {
+        items: Vec::new(),
+        failures: Vec::new(),
+    };
     collect_assigned_source(
         &mut result,
         "linearAssignedIssue",
@@ -869,7 +905,10 @@ fn collect_assigned_source(
 ) {
     match next {
         Ok(mut items) => result.items.append(&mut items),
-        Err(failure) => result.failures.push(AssignedProviderFailure { source: source.into(), failure }),
+        Err(failure) => result.failures.push(AssignedProviderFailure {
+            source: source.into(),
+            failure,
+        }),
     }
 }
 
@@ -879,43 +918,77 @@ fn parse_github_assigned(
     source: &str,
     kind: &str,
 ) -> std::result::Result<Vec<AssignedProviderItem>, ProviderFailure> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|error| parse_failure("GitHub", error.into()))?;
-    let values = value.get("items").and_then(Value::as_array).or_else(|| value.as_array())
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| parse_failure("GitHub", error.into()))?;
+    let values = value
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
         .ok_or_else(|| parse_failure("GitHub", anyhow!("expected an item array")))?;
     let mut items = Vec::new();
     for value in values {
         let is_review = value.get("pull_request").is_some();
-        if (kind == "issue" && is_review) || (kind == "review" && !is_review) { continue; }
+        if (kind == "issue" && is_review) || (kind == "review" && !is_review) {
+            continue;
+        }
         let repository_api = required_string(value, "repository_url")
             .map_err(|error| parse_failure("GitHub", error))?;
-        let repository = repository_api.split("/repos/").nth(1).unwrap_or_default().trim_matches('/').to_string();
-        let number = required_u64(value, "number").map_err(|error| parse_failure("GitHub", error))?;
-        let identifier = if kind == "review" { format!("PR #{number}") } else { format!("#{number}") };
-        let title = required_string(value, "title").map_err(|error| parse_failure("GitHub", error))?;
-        let web_url = required_string(value, "html_url").map_err(|error| parse_failure("GitHub", error))?;
+        let repository = repository_api
+            .split("/repos/")
+            .nth(1)
+            .unwrap_or_default()
+            .trim_matches('/')
+            .to_string();
+        let number =
+            required_u64(value, "number").map_err(|error| parse_failure("GitHub", error))?;
+        let identifier = if kind == "review" {
+            format!("PR #{number}")
+        } else {
+            format!("#{number}")
+        };
+        let title =
+            required_string(value, "title").map_err(|error| parse_failure("GitHub", error))?;
+        let web_url =
+            required_string(value, "html_url").map_err(|error| parse_failure("GitHub", error))?;
         let provider_item = if kind == "review" {
             ProviderItem::Review {
-                id: value.get("id").map(value_id).unwrap_or_else(|| number.to_string()),
-                identifier: identifier.clone(), title: title.clone(),
+                id: value
+                    .get("id")
+                    .map(value_id)
+                    .unwrap_or_else(|| number.to_string()),
+                identifier: identifier.clone(),
+                title: title.clone(),
                 state: optional_string(value, "state").unwrap_or_else(|| "open".into()),
-                web_url: web_url.clone(), repository: repository.clone(),
+                web_url: web_url.clone(),
+                repository: repository.clone(),
                 clone_url: Some(format!("https://{}/{repository}.git", credential.account)),
             }
         } else {
             ProviderItem::Issue {
-                id: value.get("id").map(value_id).unwrap_or_else(|| number.to_string()),
-                identifier: identifier.clone(), title: title.clone(),
+                id: value
+                    .get("id")
+                    .map(value_id)
+                    .unwrap_or_else(|| number.to_string()),
+                identifier: identifier.clone(),
+                title: title.clone(),
                 state: optional_string(value, "state").unwrap_or_else(|| "open".into()),
-                web_url: web_url.clone(), repository: Some(repository.clone()),
+                web_url: web_url.clone(),
+                repository: Some(repository.clone()),
                 clone_url: Some(format!("https://{}/{repository}.git", credential.account)),
             }
         };
         items.push(assigned_from_provider_item(
-            credential.provider, source, kind, identifier, title,
+            credential.provider,
+            source,
+            kind,
+            identifier,
+            title,
             optional_string(value, "state").unwrap_or_else(|| "open".into()),
-            Some(repository.clone()), Some(repository), web_url,
-            optional_string(value, "updated_at"), provider_item,
+            Some(repository.clone()),
+            Some(repository),
+            web_url,
+            optional_string(value, "updated_at"),
+            provider_item,
         ));
     }
     Ok(items)
@@ -927,57 +1000,131 @@ fn parse_gitlab_assigned(
     source: &str,
     kind: &str,
 ) -> std::result::Result<Vec<AssignedProviderItem>, ProviderFailure> {
-    let values: Vec<Value> = serde_json::from_str(body)
-        .map_err(|error| parse_failure("GitLab", error.into()))?;
-    values.into_iter().map(|value| {
-        let provider_item = if kind == "review" {
-            parse_gitlab_review(&value).map_err(|error| parse_failure("GitLab", error))?
-        } else {
-            parse_gitlab_issue(&value).map_err(|error| parse_failure("GitLab", error))?
-        };
-        let (identifier, title, state, web_url, repository) = match &provider_item {
-            ProviderItem::Issue { identifier, title, state, web_url, repository, .. } =>
-                (identifier.clone(), title.clone(), state.clone(), web_url.clone(), repository.clone()),
-            ProviderItem::Review { identifier, title, state, web_url, repository, .. } =>
-                (identifier.clone(), title.clone(), state.clone(), web_url.clone(), Some(repository.clone())),
-            ProviderItem::Repository { .. } => unreachable!(),
-        };
-        Ok(assigned_from_provider_item(
-            credential.provider, source, kind, identifier, title, state,
-            repository.clone(), repository, web_url, optional_string(&value, "updated_at"), provider_item,
-        ))
-    }).collect()
+    let values: Vec<Value> =
+        serde_json::from_str(body).map_err(|error| parse_failure("GitLab", error.into()))?;
+    values
+        .into_iter()
+        .map(|value| {
+            let provider_item = if kind == "review" {
+                parse_gitlab_review(&value).map_err(|error| parse_failure("GitLab", error))?
+            } else {
+                parse_gitlab_issue(&value).map_err(|error| parse_failure("GitLab", error))?
+            };
+            let (identifier, title, state, web_url, repository) = match &provider_item {
+                ProviderItem::Issue {
+                    identifier,
+                    title,
+                    state,
+                    web_url,
+                    repository,
+                    ..
+                } => (
+                    identifier.clone(),
+                    title.clone(),
+                    state.clone(),
+                    web_url.clone(),
+                    repository.clone(),
+                ),
+                ProviderItem::Review {
+                    identifier,
+                    title,
+                    state,
+                    web_url,
+                    repository,
+                    ..
+                } => (
+                    identifier.clone(),
+                    title.clone(),
+                    state.clone(),
+                    web_url.clone(),
+                    Some(repository.clone()),
+                ),
+                ProviderItem::Repository { .. } => unreachable!(),
+            };
+            Ok(assigned_from_provider_item(
+                credential.provider,
+                source,
+                kind,
+                identifier,
+                title,
+                state,
+                repository.clone(),
+                repository,
+                web_url,
+                optional_string(&value, "updated_at"),
+                provider_item,
+            ))
+        })
+        .collect()
 }
 
 fn parse_linear_assigned(
     body: &str,
     credential: &StoredCredential,
 ) -> std::result::Result<Vec<AssignedProviderItem>, ProviderFailure> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|error| parse_failure("Linear", error.into()))?;
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| parse_failure("Linear", error.into()))?;
     if let Some(errors) = value.get("errors").and_then(Value::as_array) {
-        let message = errors.iter().filter_map(|error| error.get("message").and_then(Value::as_str)).collect::<Vec<_>>().join("; ");
-        return Err(ProviderFailure::new("provider_request_failed", message, false));
+        let message = errors
+            .iter()
+            .filter_map(|error| error.get("message").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(ProviderFailure::new(
+            "provider_request_failed",
+            message,
+            false,
+        ));
     }
-    let nodes = value.pointer("/data/viewer/assignedIssues/nodes").and_then(Value::as_array)
+    let nodes = value
+        .pointer("/data/viewer/assignedIssues/nodes")
+        .and_then(Value::as_array)
         .ok_or_else(|| parse_failure("Linear", anyhow!("response omitted assigned issues")))?;
-    nodes.iter().map(|value| {
-        let id = required_string(value, "id").map_err(|error| parse_failure("Linear", error))?;
-        let identifier = required_string(value, "identifier").map_err(|error| parse_failure("Linear", error))?;
-        let title = required_string(value, "title").map_err(|error| parse_failure("Linear", error))?;
-        let web_url = required_string(value, "url").map_err(|error| parse_failure("Linear", error))?;
-        let state = value.pointer("/state/name").and_then(Value::as_str).unwrap_or("open").to_string();
-        let project = value.pointer("/project/name").and_then(Value::as_str)
-            .or_else(|| value.pointer("/team/name").and_then(Value::as_str)).map(ToOwned::to_owned);
-        let provider_item = ProviderItem::Issue {
-            id: id.clone(), identifier: identifier.clone(), title: title.clone(), state: state.clone(),
-            web_url: web_url.clone(), repository: None, clone_url: None,
-        };
-        Ok(assigned_from_provider_item(
-            credential.provider, "linearAssignedIssue", "issue", identifier, title, state,
-            None, project, web_url, optional_string(value, "updatedAt"), provider_item,
-        ))
-    }).collect()
+    nodes
+        .iter()
+        .map(|value| {
+            let id =
+                required_string(value, "id").map_err(|error| parse_failure("Linear", error))?;
+            let identifier = required_string(value, "identifier")
+                .map_err(|error| parse_failure("Linear", error))?;
+            let title =
+                required_string(value, "title").map_err(|error| parse_failure("Linear", error))?;
+            let web_url =
+                required_string(value, "url").map_err(|error| parse_failure("Linear", error))?;
+            let state = value
+                .pointer("/state/name")
+                .and_then(Value::as_str)
+                .unwrap_or("open")
+                .to_string();
+            let project = value
+                .pointer("/project/name")
+                .and_then(Value::as_str)
+                .or_else(|| value.pointer("/team/name").and_then(Value::as_str))
+                .map(ToOwned::to_owned);
+            let provider_item = ProviderItem::Issue {
+                id: id.clone(),
+                identifier: identifier.clone(),
+                title: title.clone(),
+                state: state.clone(),
+                web_url: web_url.clone(),
+                repository: None,
+                clone_url: None,
+            };
+            Ok(assigned_from_provider_item(
+                credential.provider,
+                "linearAssignedIssue",
+                "issue",
+                identifier,
+                title,
+                state,
+                None,
+                project,
+                web_url,
+                optional_string(value, "updatedAt"),
+                provider_item,
+            ))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -995,11 +1142,23 @@ fn assigned_from_provider_item(
     workspace_item: ProviderItem,
 ) -> AssignedProviderItem {
     let provider_id = match &workspace_item {
-        ProviderItem::Repository { id, .. } | ProviderItem::Issue { id, .. } | ProviderItem::Review { id, .. } => id.clone(),
+        ProviderItem::Repository { id, .. }
+        | ProviderItem::Issue { id, .. }
+        | ProviderItem::Review { id, .. } => id.clone(),
     };
     AssignedProviderItem {
-        provider_id, provider, source: source.into(), kind: kind.into(), identifier, title, state,
-        repository, project, web_url, updated_at, workspace_input_capable: true,
+        provider_id,
+        provider,
+        source: source.into(),
+        kind: kind.into(),
+        identifier,
+        title,
+        state,
+        repository,
+        project,
+        web_url,
+        updated_at,
+        workspace_input_capable: true,
         workspace_item: Some(workspace_item),
     }
 }

@@ -211,6 +211,7 @@ class TerminalManagerImpl {
 
     if (!entry.dataWired) {
       entry.term.onData((data) => {
+        if (entry.remoteLease) return
         if (shouldTrackAgentInput(entry.term.buffer.active.type)) agentActivityTracker.noteUserInput(paneId, data)
         else agentActivityTracker.clear(paneId)
         const sessionId = entry.sessionId
@@ -225,6 +226,7 @@ class TerminalManagerImpl {
         if (entry.pendingInput.length < MAX_PENDING_INPUT_CHUNKS) entry.pendingInput.push(data)
       })
       entry.term.onResize(({ cols, rows }) => {
+        if (entry.remoteLease) return
         const sessionId = entry.sessionId
         if (!sessionId || (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows)) return
         entry.lastSentPtyCols = cols
@@ -317,6 +319,7 @@ class TerminalManagerImpl {
       this.redrawAfterNextFrame(entry)
       return
     }
+    this.flushPendingInput(entry)
     this.restoreDesktopFit(entry)
   }
 
@@ -325,6 +328,7 @@ class TerminalManagerImpl {
    *  Chunks stay in emission order; the CPR reply to ConPTY's startup DSR
    *  must reach the PTY or the child shell never starts. */
   private flushPendingInput(entry: Entry): void {
+    if (entry.remoteLease) return
     const sessionId = entry.sessionId
     const pending = entry.pendingInput
     if (!sessionId || !pending?.length) return
@@ -434,7 +438,7 @@ class TerminalManagerImpl {
    *  host container is not yet measurable. */
   measureForSpawn(paneId: string): { cols: number; rows: number } | null {
     const entry = this.entries.get(paneId)
-    if (!entry?.opened) return null
+    if (!entry?.opened || entry.remoteLease) return null
     try {
       if (!this.safeFit(entry)) return null
     } catch {
@@ -446,6 +450,7 @@ class TerminalManagerImpl {
   focus(paneId: string): void {
     const entry = this.entries.get(paneId)
     if (!entry) return
+    if (entry.remoteLease) return
     entry.term.focus()
     this.scheduleLayoutPass({ paneIds: [paneId] })
   }
@@ -512,7 +517,8 @@ class TerminalManagerImpl {
   scheduleLayoutPass(options: { paneIds?: string[]; syncPty?: boolean; force?: boolean; clearWebglTextureAtlas?: boolean } = {}): void {
     const paneIds = options.paneIds ?? [...this.entries.keys()]
     for (const paneId of paneIds) {
-      if (!this.entries.has(paneId)) continue
+      const entry = this.entries.get(paneId)
+      if (!entry || entry.remoteLease) continue
       const pending = this.pendingPass.get(paneId)
       this.pendingPass.set(paneId, {
         fit: true,
@@ -528,7 +534,7 @@ class TerminalManagerImpl {
       this.pendingPass = new Map()
       for (const [paneId, pass] of pending) {
         const entry = this.entries.get(paneId)
-        if (!entry?.opened || !pass.fit) continue
+        if (!entry?.opened || entry.remoteLease || !pass.fit) continue
         const rect = entry.container?.getBoundingClientRect()
         const measurement = this.observeMeasureState(entry, rect)
         if (!rect || !measurement.measurable) continue

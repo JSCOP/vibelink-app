@@ -1,15 +1,21 @@
 use super::v2::{
     generated::{
-        TerminalAckParams, TerminalInputParams, TerminalLeaseClaimParams, TerminalLeaseRecord,
-        TerminalLeaseReleaseParams, TerminalLeaseStatusParams, TerminalSnapshotParams,
+        Activity, AppearanceChangedEvent, AppearanceGetParams, BrowserScreencastStartParams,
+        BrowserScreencastStartResult, BrowserScreencastStopParams, BrowserScreenshotParams,
+        BrowserScreenshotResult, PaneStateEvent, RemotePane, RemoteWorkspace, TerminalAckParams,
+        TerminalInputParams, TerminalLeaseChangedEvent, TerminalLeaseClaimParams,
+        TerminalLeaseLostEvent, TerminalLeaseRecord, TerminalLeaseReleaseParams,
+        TerminalLeaseStatusParams, TerminalResizedEvent, TerminalSnapshotParams,
         TerminalSnapshotResult, TerminalSubscribeParams, TerminalSubscribeResult,
-        TerminalUnsubscribeParams,
+        TerminalUnsubscribeParams, WorkspaceAttachParams, WorkspaceAttachResult,
+        WorkspaceChangedEvent, WorkspaceDetachParams, WorkspaceListParams, WorkspaceListResult,
     },
     secure::{SecureFrameKind, SecureHandshake, SecureTransport},
     wire::{
-        BinaryChannel, BinaryFrame, DomainSequenceValidator, OperationReplayWindow, SequenceError,
-        TerminalAckWindow, TerminalFlowError, TerminalRecordDecision, FLAG_FINAL, FLAG_RESYNC,
-        MAX_BINARY_PAYLOAD_BYTES, MAX_SEQUENCE_DOMAINS,
+        BinaryChannel, BinaryFrame, BinaryStreamQueue, DomainSequenceValidator,
+        OperationReplayWindow, SequenceError, TerminalAckWindow, TerminalFlowError,
+        TerminalRecordDecision, FLAG_FINAL, FLAG_KEYFRAME, FLAG_RESYNC, MAX_BINARY_PAYLOAD_BYTES,
+        MAX_SEQUENCE_DOMAINS,
     },
     CONTRACT_SHA256 as V2_CONTRACT_SHA256, PROTOCOL_VERSION as V2_PROTOCOL_VERSION,
     SUBPROTOCOL as V2_SUBPROTOCOL,
@@ -21,17 +27,18 @@ use super::{
         encode_buffer, frame_pane_output, AuthRequest, ClientMessage, PaneDto, ServerMessage,
         WorkspaceDto, PROTOCOL_VERSION, SUBPROTOCOL,
     },
-    server::{desktop_name, RemoteShared},
+    server::{desktop_name, legacy_appearance_payload, RemotePush, RemoteShared},
 };
 use crate::dedicated_cli::{parse_args as parse_cli_args, CliControlRequest};
 use crate::{
     app::spawn_daemon,
     protocol::{
         read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneMeta,
-        RemoteConnectionCleanupRequest, RemotePaneLease, RemotePaneLeaseClaimRequest,
-        RemotePaneLeaseEvent, RemotePaneLeaseEventKind, RemotePaneLeaseEventReason,
-        RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest, RemotePaneLeaseResult,
-        RemotePaneLeaseStatusRequest, ReplyResult, SessionMeta,
+        RemoteConnectionCleanupRequest, RemotePaneActivity, RemotePaneLease,
+        RemotePaneLeaseClaimRequest, RemotePaneLeaseEvent, RemotePaneLeaseEventKind,
+        RemotePaneLeaseEventReason, RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest,
+        RemotePaneLeaseResult, RemotePaneLeaseStatusRequest, RemoteWorkspaceProjection,
+        RemoteWorkspaceProjectionPane, ReplyResult, SessionMeta,
     },
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -62,7 +69,7 @@ use uuid::Uuid;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-const POLL_TIMEOUT: Duration = Duration::from_millis(30);
+const POLL_TIMEOUT: Duration = Duration::from_millis(10);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_DEADLINE: Duration = Duration::from_secs(45);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -74,15 +81,178 @@ const MAX_CONTROL_FRAMES_PER_LOOP: usize = 32;
 const MAX_PUSH_FRAMES_PER_LOOP: usize = 32;
 const MAX_OUTPUT_FRAMES_PER_LOOP: usize = 1;
 const MAX_OUTPUT_BYTES_PER_LOOP: usize = 48 * 1024;
+const MAX_RESYNC_DEQUEUE_FRAMES_PER_LOOP: usize = DAEMON_OUTPUT_QUEUE_CAPACITY;
 const MAX_TERMINAL_COALESCE_BYTES: usize = 48 * 1024;
 const TERMINAL_MAX_UNACKED_BYTES_PER_STREAM: usize = 512 * 1024;
 const TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION: usize = 2 * 1024 * 1024;
 const MAX_REMOTE_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_BROWSER_SCREENCASTS_PER_CONNECTION: usize = 2;
+const MAX_BROWSER_SCREENCAST_FPS: u16 = 30;
+const DEFAULT_BROWSER_SCREENCAST_FPS: u16 = 12;
+const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 #[derive(Clone, Debug)]
 struct V2Subscription {
     workspace_id: Uuid,
     pane_id: Uuid,
     stream_id: u64,
+}
+
+#[derive(Default)]
+struct V2WorkspaceProjectionState {
+    snapshot: Option<RemoteWorkspaceProjection>,
+    view_generation: u64,
+}
+
+struct V2ProjectionDelta {
+    changed: bool,
+    workspace_changed: bool,
+    changed_panes: Vec<RemotePane>,
+}
+
+impl V2WorkspaceProjectionState {
+    fn view_generation(&self) -> u64 {
+        self.view_generation.max(1)
+    }
+
+    fn attached_workspace_id(&self) -> Result<Option<Uuid>> {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.attached_workspace_id.as_deref())
+            .map(Uuid::parse_str)
+            .transpose()
+            .context("daemon projection attachedWorkspaceId must be a UUID")
+    }
+
+    fn replace_for_request(&mut self, snapshot: RemoteWorkspaceProjection) -> Result<()> {
+        if self.snapshot.as_ref() != Some(&snapshot) {
+            if self.snapshot.is_some() {
+                self.view_generation = self
+                    .view_generation()
+                    .checked_add(1)
+                    .context("remote-v2 view generation exhausted")?;
+            } else {
+                self.view_generation = 1;
+            }
+            self.snapshot = Some(snapshot);
+        } else if self.view_generation == 0 {
+            self.view_generation = 1;
+        }
+        Ok(())
+    }
+
+    fn refresh(&mut self, snapshot: RemoteWorkspaceProjection) -> Result<V2ProjectionDelta> {
+        let Some(previous) = self.snapshot.as_ref() else {
+            self.snapshot = Some(snapshot);
+            self.view_generation = 1;
+            return Ok(V2ProjectionDelta {
+                changed: false,
+                workspace_changed: false,
+                changed_panes: Vec::new(),
+            });
+        };
+        if previous == &snapshot {
+            return Ok(V2ProjectionDelta {
+                changed: false,
+                workspace_changed: false,
+                changed_panes: Vec::new(),
+            });
+        }
+        let previous_panes = previous
+            .panes
+            .iter()
+            .map(|pane| (pane.id.as_str(), pane))
+            .collect::<HashMap<_, _>>();
+        let changed_panes = snapshot
+            .panes
+            .iter()
+            .filter(|pane| previous_panes.get(pane.id.as_str()).copied() != Some(*pane))
+            .map(remote_pane)
+            .collect::<Result<Vec<_>>>()?;
+        let removed_pane = previous.panes.iter().any(|pane| {
+            !snapshot
+                .panes
+                .iter()
+                .any(|candidate| candidate.id == pane.id)
+        });
+        let workspace_changed = previous.workspaces != snapshot.workspaces || removed_pane;
+        self.view_generation = self
+            .view_generation()
+            .checked_add(1)
+            .context("remote-v2 view generation exhausted")?;
+        self.snapshot = Some(snapshot);
+        Ok(V2ProjectionDelta {
+            changed: true,
+            workspace_changed,
+            changed_panes,
+        })
+    }
+
+    fn workspaces(&self) -> Result<Vec<RemoteWorkspace>> {
+        self.snapshot
+            .as_ref()
+            .context("remote-v2 workspace projection is unavailable")?
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                Ok(RemoteWorkspace {
+                    id: workspace.id.clone(),
+                    name: workspace.name.clone(),
+                    pane_count: workspace.pane_count,
+                    workspace_folder: workspace.workspace_folder.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn panes(&self) -> Result<Vec<RemotePane>> {
+        self.snapshot
+            .as_ref()
+            .context("remote-v2 workspace projection is unavailable")?
+            .panes
+            .iter()
+            .map(remote_pane)
+            .collect()
+    }
+
+    fn pane(&self, pane_id: Uuid) -> Result<Option<RemotePane>> {
+        self.snapshot
+            .as_ref()
+            .context("remote-v2 workspace projection is unavailable")?
+            .panes
+            .iter()
+            .find(|pane| pane.id == pane_id.to_string())
+            .map(remote_pane)
+            .transpose()
+    }
+}
+
+fn remote_pane(pane: &RemoteWorkspaceProjectionPane) -> Result<RemotePane> {
+    let pane_id = Uuid::parse_str(&pane.id).context("daemon projection pane id must be a UUID")?;
+    Ok(RemotePane {
+        activity: match pane.activity {
+            RemotePaneActivity::Idle => Activity::Idle,
+            RemotePaneActivity::Running => Activity::Running,
+            RemotePaneActivity::Waiting => Activity::Waiting,
+            RemotePaneActivity::Done => Activity::Done,
+            RemotePaneActivity::Error => Activity::Error,
+        },
+        alive: pane.alive,
+        cols: pane.cols,
+        desktop_active: pane.desktop_active,
+        group_id: pane.group_id.clone(),
+        group_order: pane.group_order,
+        id: pane.id.clone(),
+        last_output_at: pane.last_output_at,
+        order: pane.order,
+        pane_generation: pane.pane_generation,
+        role: pane.role.clone(),
+        rows: pane.rows,
+        stream_id: Some(v2_stream_id(pane_id)),
+        tab_order: pane.tab_order,
+        title: pane.title.clone(),
+        unread_count: pane.unread_count,
+        workspace_id: pane.workspace_id.clone(),
+    })
 }
 
 struct PendingTerminalOutput {
@@ -109,6 +279,50 @@ impl V2OutputPump {
         }
         self.buffers.remove(&stream_id);
         self.order.retain(|candidate| *candidate != stream_id);
+    }
+}
+
+struct V2BrowserScreencast {
+    page_id: String,
+    view_generation: u64,
+    queue: Arc<Mutex<BinaryStreamQueue>>,
+    stop: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct V2BrowserScreencasts {
+    streams: HashMap<u64, V2BrowserScreencast>,
+}
+
+impl V2BrowserScreencasts {
+    fn stop_stream(&mut self, stream_id: u64) -> Result<()> {
+        let stream = self
+            .streams
+            .remove(&stream_id)
+            .context("stale_ref: browser screencast stream is not active")?;
+        stream.stop.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn stop_page(&mut self, page_id: &str) {
+        let stream_ids = self
+            .streams
+            .iter()
+            .filter_map(|(stream_id, stream)| (stream.page_id == page_id).then_some(*stream_id))
+            .collect::<Vec<_>>();
+        for stream_id in stream_ids {
+            if let Some(stream) = self.streams.remove(&stream_id) {
+                stream.stop.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+impl Drop for V2BrowserScreencasts {
+    fn drop(&mut self) {
+        for stream in self.streams.values() {
+            stream.stop.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -484,6 +698,31 @@ struct V2Response<'a> {
     error: Option<Value>,
 }
 
+fn v2_auth_failure_response() -> Value {
+    json!({
+        "version": V2_PROTOCOL_VERSION,
+        "requestId": "auth",
+        "domain": "system",
+        "method": "authentication",
+        "operationId": Uuid::new_v4().to_string(),
+        "sequence": 0,
+        "revocationEpoch": 0,
+        "payload": {},
+        "error": {
+            "code": "authentication_failed",
+            "message": "remote-v2 authentication failed",
+        },
+    })
+}
+
+fn send_v2_auth_failure(ws: &mut RemoteSocket, transport: &mut SecureTransport) -> Result<()> {
+    let response = serde_json::to_vec(&v2_auth_failure_response())?;
+    ws.send(Message::Binary(
+        transport.seal(SecureFrameKind::Control, &response)?.into(),
+    ))?;
+    Ok(())
+}
+
 fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Result<()> {
     let mut handshake = SecureHandshake::responder(&shared.v2_identity)?;
     let first = read_binary(&mut ws, "remote-v2 handshake message one")?;
@@ -499,9 +738,9 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
     let auth_payload = handshake.read(&third)?;
     let auth: V2AuthRequest =
         serde_json::from_slice(&auth_payload).context("parse remote-v2 auth")?;
-    let transport = handshake.finish(None)?;
+    let mut transport = handshake.finish(None)?;
     let peer_fingerprint = transport.peer_fingerprint().to_string();
-    let (device_id, grants, revocation_epoch) = {
+    let authorization = (|| -> Result<(String, Vec<String>, u64)> {
         let mut devices = shared.devices.lock().expect("remote devices mutex");
         match auth.mode.as_str() {
             "pair" => {
@@ -514,7 +753,7 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
                         &peer_fingerprint,
                     )
                     .map_err(|_| anyhow!("remote-v2 pairing failed"))?;
-                (record.id, record.grants, record.revocation_epoch)
+                Ok((record.id, record.grants, record.revocation_epoch))
             }
             "resume" => {
                 let device_id = auth.device_id.context("device id is required")?;
@@ -527,16 +766,22 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
                 if auth.revocation_epoch != Some(authorization.revocation_epoch) {
                     bail!("remote-v2 stale revocation epoch");
                 }
-                (
+                Ok((
                     device_id,
                     authorization.grants,
                     authorization.revocation_epoch,
-                )
+                ))
             }
             _ => bail!("unsupported remote-v2 auth mode"),
         }
+    })();
+    let (device_id, grants, revocation_epoch) = match authorization {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            let _ = send_v2_auth_failure(&mut ws, &mut transport);
+            return Err(error);
+        }
     };
-    let mut transport = transport;
     let auth_response = serde_json::to_vec(&json!({
         "version": V2_PROTOCOL_VERSION,
         "requestId": "auth",
@@ -632,7 +877,7 @@ fn run_v2_authenticated(
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     shared: &RemoteShared,
-    push_rx: &Receiver<Message>,
+    push_rx: &Receiver<RemotePush>,
     close_requested: &AtomicBool,
     owner_connection_id: Uuid,
     device_id: &str,
@@ -648,7 +893,10 @@ fn run_v2_authenticated(
         TERMINAL_MAX_UNACKED_BYTES_PER_STREAM,
         TERMINAL_MAX_UNACKED_BYTES_PER_CONNECTION,
     )?;
+    let mut browser_screencasts = V2BrowserScreencasts::default();
+    let mut next_browser_stream_id = 1_u64;
     let mut output_pump = V2OutputPump::default();
+    let mut projection = V2WorkspaceProjectionState::default();
     let mut last_ping = Instant::now();
     let mut last_peer_activity = Instant::now();
     loop {
@@ -656,24 +904,52 @@ fn run_v2_authenticated(
             let _ = ws.send(Message::Close(None));
             break;
         }
-        match push_rx.try_recv() {
-            Ok(Message::Close(_)) | Err(TryRecvError::Disconnected) => {
-                let _ = ws.send(Message::Close(None));
-                break;
-            }
-            Ok(_) | Err(TryRecvError::Empty) => {}
-        }
 
+        let mut refresh_projection = false;
+        let mut resized = Vec::new();
         for _ in 0..MAX_CONTROL_FRAMES_PER_LOOP {
             let Some(message) = daemon_inbox.try_control()? else {
                 break;
             };
-            if let DaemonToClient::RemotePaneLease { event } = message {
-                apply_lease_event(&mut leases, &event);
-                if event.owner_connection_id == owner_connection_id {
-                    send_v2_lease_event(ws, transport, session_epoch, &event)?;
+            match message {
+                DaemonToClient::RemotePaneLease { event } => {
+                    apply_lease_event(&mut leases, &event);
+                    if event.owner_connection_id == owner_connection_id {
+                        send_v2_lease_event(
+                            ws,
+                            transport,
+                            session_epoch,
+                            projection.view_generation(),
+                            &event,
+                        )?;
+                    }
                 }
+                DaemonToClient::SessionChanged { .. } | DaemonToClient::PaneExited { .. } => {
+                    refresh_projection = true;
+                }
+                DaemonToClient::PaneResized {
+                    session_id,
+                    pane_id,
+                    cols,
+                    rows,
+                } => {
+                    refresh_projection = true;
+                    resized.push((session_id, pane_id, cols, rows));
+                }
+                _ => {}
             }
+        }
+        if refresh_projection {
+            refresh_and_emit_v2_projection(
+                ws,
+                transport,
+                session_epoch,
+                daemon_writer,
+                daemon_inbox,
+                &mut next_req,
+                &mut projection,
+                &resized,
+            )?;
         }
 
         let authorization = shared
@@ -702,6 +978,25 @@ fn run_v2_authenticated(
             )?;
             let _ = ws.send(Message::Close(None));
             break;
+        }
+
+        for _ in 0..MAX_PUSH_FRAMES_PER_LOOP {
+            match push_rx.try_recv() {
+                Ok(RemotePush::WebSocket(Message::Close(_))) | Err(TryRecvError::Disconnected) => {
+                    let _ = ws.send(Message::Close(None));
+                    return Ok(());
+                }
+                Ok(RemotePush::AppearanceChanged(event)) => {
+                    let ciphertext = seal_v2_appearance_changed_event(
+                        transport,
+                        authorization.revocation_epoch,
+                        &event,
+                    )?;
+                    ws.send(Message::Binary(ciphertext.into()))?;
+                }
+                Ok(RemotePush::WebSocket(_)) => {}
+                Err(TryRecvError::Empty) => break,
+            }
         }
 
         match ws.read() {
@@ -810,6 +1105,7 @@ fn run_v2_authenticated(
                                             daemon_writer,
                                             daemon_inbox,
                                             &mut next_req,
+                                            &projection,
                                             &mut subscriptions,
                                             &mut binary_sequences,
                                         )
@@ -822,12 +1118,16 @@ fn run_v2_authenticated(
                                 handle_v2_request(
                                     &request,
                                     &authorization.grants,
+                                    shared,
                                     owner_connection_id,
                                     device_id,
                                     daemon_writer,
                                     daemon_inbox,
                                     &mut next_req,
+                                    &mut projection,
                                     &mut subscriptions,
+                                    &mut browser_screencasts,
+                                    &mut next_browser_stream_id,
                                     &mut leases,
                                     &mut acknowledgements,
                                     &mut output_pump,
@@ -910,6 +1210,7 @@ fn run_v2_authenticated(
                 &mut acknowledgements,
             )?;
         }
+        pump_v2_browser_screencasts(ws, transport, &mut browser_screencasts)?;
         if last_ping.elapsed() >= KEEPALIVE_INTERVAL {
             if last_peer_activity.elapsed() >= KEEPALIVE_DEADLINE {
                 bail!("remote-v2 keepalive timed out");
@@ -954,11 +1255,40 @@ fn validate_v2_subscription_target(
     }
     Ok(())
 }
+
+fn validate_v2_projection_subscription(
+    projection: &V2WorkspaceProjectionState,
+    workspace_id: Uuid,
+    pane_id: Uuid,
+    view_generation: u64,
+) -> Result<()> {
+    let current_view_generation = projection.view_generation();
+    if view_generation == 0 || view_generation > current_view_generation {
+        bail!("stale_ref: terminal viewGeneration is not available in the current projection");
+    }
+    if projection.attached_workspace_id()? != Some(workspace_id) {
+        bail!("stale_ref: terminal workspaceId is not the attached workspace");
+    }
+    let snapshot = projection
+        .snapshot
+        .as_ref()
+        .context("stale_ref: workspace projection is unavailable")?;
+    if !snapshot
+        .panes
+        .iter()
+        .any(|pane| pane.id == pane_id.to_string() && pane.workspace_id == workspace_id.to_string())
+    {
+        bail!("stale_ref: terminal pane is not in the attached workspace projection");
+    }
+    Ok(())
+}
+
 fn v2_terminal_subscribe(
     request: &V2Envelope,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     next_req: &mut u64,
+    projection: &V2WorkspaceProjectionState,
     subscriptions: &mut HashMap<String, V2Subscription>,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
 ) -> Result<(Value, Vec<BinaryFrame>)> {
@@ -967,6 +1297,7 @@ fn v2_terminal_subscribe(
     let workspace_id =
         Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
     let pane_id = Uuid::parse_str(&params.pane_id).context("paneId must be a UUID")?;
+    validate_v2_projection_subscription(projection, workspace_id, pane_id, params.view_generation)?;
     let stream_id = v2_stream_id(pane_id);
     validate_v2_subscription_target(subscriptions, pane_id, stream_id)?;
     ensure_binary_sequence_capacity(
@@ -983,6 +1314,7 @@ fn v2_terminal_subscribe(
         workspace_id,
         pane_id,
         stream_id,
+        FLAG_KEYFRAME,
         sequences,
     )?;
     let subscription_id = Uuid::new_v4().to_string();
@@ -1028,6 +1360,7 @@ fn v2_terminal_snapshot(
         subscription.workspace_id,
         subscription.pane_id,
         subscription.stream_id,
+        FLAG_KEYFRAME | FLAG_RESYNC,
         sequences,
     )?;
     let result = TerminalSnapshotResult {
@@ -1052,6 +1385,7 @@ fn v2_atomic_snapshot(
     session_id: Uuid,
     pane_id: Uuid,
     stream_id: u64,
+    first_flags: u16,
     sequences: &mut HashMap<(BinaryChannel, u64), u64>,
 ) -> Result<(crate::protocol::TerminalSnapshot, Vec<BinaryFrame>, u64)> {
     let req = take_req(next_req);
@@ -1077,7 +1411,7 @@ fn v2_atomic_snapshot(
         BinaryChannel::TerminalSnapshot,
         stream_id,
         &snapshot.data,
-        0,
+        first_flags,
         sequences,
     )?;
     Ok((snapshot, frames, first_live_sequence))
@@ -1251,7 +1585,7 @@ fn pump_v2_terminal_output(
         let mut pending = if let Some(pending) = pump.pending.take() {
             pending
         } else {
-            if dequeued_frames >= MAX_OUTPUT_FRAMES_PER_LOOP {
+            if dequeued_frames >= MAX_RESYNC_DEQUEUE_FRAMES_PER_LOOP {
                 break;
             }
             let Some(message) = daemon_inbox.try_output()? else {
@@ -1455,7 +1789,7 @@ fn send_v2_binary(
 fn v2_stream_id(pane_id: Uuid) -> u64 {
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&pane_id.as_bytes()[..8]);
-    u64::from_be_bytes(bytes).max(1)
+    (u64::from_be_bytes(bytes) & MAX_JAVASCRIPT_SAFE_INTEGER).max(1)
 }
 
 fn send_v2_session_error(
@@ -1479,6 +1813,153 @@ fn send_v2_session_error(
     ws.send(Message::Binary(
         transport.seal(SecureFrameKind::Control, &payload)?.into(),
     ))?;
+    Ok(())
+}
+
+fn v2_appearance_changed_envelope(
+    revocation_epoch: u64,
+    event: &AppearanceChangedEvent,
+) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&json!({
+        "version": V2_PROTOCOL_VERSION,
+        "requestId": "event",
+        "domain": "appearance",
+        "method": "changed",
+        "operationId": Uuid::new_v4(),
+        "sequence": 0,
+        "revocationEpoch": revocation_epoch,
+        "payload": event,
+        "error": null,
+    }))?)
+}
+
+fn seal_v2_appearance_changed_event(
+    transport: &mut SecureTransport,
+    revocation_epoch: u64,
+    event: &AppearanceChangedEvent,
+) -> Result<Vec<u8>> {
+    let envelope = v2_appearance_changed_envelope(revocation_epoch, event)?;
+    transport.seal(SecureFrameKind::Control, &envelope)
+}
+
+fn v2_projection_event_envelope<T: Serialize>(
+    revocation_epoch: u64,
+    domain: &str,
+    method: &str,
+    event: &T,
+) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&json!({
+        "version": V2_PROTOCOL_VERSION,
+        "requestId": "event",
+        "domain": domain,
+        "method": method,
+        "operationId": Uuid::new_v4(),
+        "sequence": 0,
+        "revocationEpoch": revocation_epoch,
+        "payload": event,
+        "error": null,
+    }))?)
+}
+
+fn seal_v2_projection_event<T: Serialize>(
+    transport: &mut SecureTransport,
+    revocation_epoch: u64,
+    domain: &str,
+    method: &str,
+    event: &T,
+) -> Result<Vec<u8>> {
+    let envelope = v2_projection_event_envelope(revocation_epoch, domain, method, event)?;
+    transport.seal(SecureFrameKind::Control, &envelope)
+}
+
+fn send_v2_projection_event<T: Serialize>(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    revocation_epoch: u64,
+    domain: &str,
+    method: &str,
+    event: &T,
+) -> Result<()> {
+    let ciphertext = seal_v2_projection_event(transport, revocation_epoch, domain, method, event)?;
+    ws.send(Message::Binary(ciphertext.into()))?;
+    Ok(())
+}
+
+fn refresh_and_emit_v2_projection(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    revocation_epoch: u64,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    projection: &mut V2WorkspaceProjectionState,
+    resized: &[(Uuid, Uuid, u16, u16)],
+) -> Result<()> {
+    let workspace_id = projection.attached_workspace_id()?;
+    let snapshot =
+        request_v2_workspace_projection(daemon_writer, daemon_inbox, next_req, workspace_id)?;
+    let delta = projection.refresh(snapshot)?;
+    if !delta.changed {
+        return Ok(());
+    }
+    let view_generation = projection.view_generation();
+    if delta.workspace_changed {
+        send_v2_projection_event(
+            ws,
+            transport,
+            revocation_epoch,
+            "workspace",
+            "changed",
+            &WorkspaceChangedEvent {
+                view_generation,
+                workspaces: projection.workspaces()?,
+            },
+        )?;
+    }
+    let changed_ids = delta
+        .changed_panes
+        .iter()
+        .map(|pane| pane.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for pane in delta.changed_panes {
+        send_v2_projection_event(
+            ws,
+            transport,
+            revocation_epoch,
+            "pane",
+            "state",
+            &PaneStateEvent {
+                pane,
+                view_generation,
+            },
+        )?;
+    }
+    for (workspace_id, pane_id, _, _) in resized {
+        if !changed_ids.contains(&pane_id.to_string()) {
+            continue;
+        }
+        let Some(pane) = projection.pane(*pane_id)? else {
+            continue;
+        };
+        if pane.workspace_id != workspace_id.to_string() {
+            continue;
+        }
+        send_v2_projection_event(
+            ws,
+            transport,
+            revocation_epoch,
+            "terminal",
+            "resized",
+            &TerminalResizedEvent {
+                cols: pane.cols,
+                pane_generation: pane.pane_generation,
+                pane_id: pane.id,
+                rows: pane.rows,
+                view_generation,
+                workspace_id: pane.workspace_id,
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -1568,42 +2049,47 @@ fn send_v2_lease_event(
     ws: &mut RemoteSocket,
     transport: &mut SecureTransport,
     revocation_epoch: u64,
+    view_generation: u64,
     event: &RemotePaneLeaseEvent,
 ) -> Result<()> {
-    let (method, payload) = match event.kind {
-        RemotePaneLeaseEventKind::Claimed | RemotePaneLeaseEventKind::Updated => (
-            "lease.changed",
-            json!({
-                "viewGeneration": event.pane_generation.max(1),
-                "lease": v2_lease_record(&lease_from_event(event)),
-            }),
-        ),
-        RemotePaneLeaseEventKind::Released | RemotePaneLeaseEventKind::Lost => (
-            "lease.lost",
-            json!({
-                "workspaceId": event.session_id,
-                "paneId": event.pane_id,
-                "leaseId": event.lease_id,
-                "leaseRevision": event.revision,
-                "reason": v2_lease_lost_reason(event.reason),
-            }),
-        ),
-    };
-    let payload = serde_json::to_vec(&json!({
-        "version": V2_PROTOCOL_VERSION,
-        "requestId": "event",
-        "domain": "terminal",
-        "method": method,
-        "operationId": Uuid::new_v4(),
-        "sequence": 0,
-        "revocationEpoch": revocation_epoch,
-        "payload": payload,
-        "error": null,
-    }))?;
-    ws.send(Message::Binary(
-        transport.seal(SecureFrameKind::Control, &payload)?.into(),
-    ))?;
-    Ok(())
+    match event.kind {
+        RemotePaneLeaseEventKind::Claimed | RemotePaneLeaseEventKind::Updated => {
+            send_v2_projection_event(
+                ws,
+                transport,
+                revocation_epoch,
+                "terminal",
+                "lease.changed",
+                &TerminalLeaseChangedEvent {
+                    lease: v2_lease_record(&lease_from_event(event)),
+                    view_generation,
+                },
+            )
+        }
+        RemotePaneLeaseEventKind::Released | RemotePaneLeaseEventKind::Lost => {
+            send_v2_projection_event(
+                ws,
+                transport,
+                revocation_epoch,
+                "terminal",
+                "lease.lost",
+                &v2_lease_lost_event(event, view_generation),
+            )
+        }
+    }
+}
+fn v2_lease_lost_event(
+    event: &RemotePaneLeaseEvent,
+    view_generation: u64,
+) -> TerminalLeaseLostEvent {
+    TerminalLeaseLostEvent {
+        lease_id: event.lease_id.to_string(),
+        lease_revision: event.revision,
+        pane_id: event.pane_id.to_string(),
+        reason: v2_lease_lost_reason(event.reason).to_string(),
+        view_generation,
+        workspace_id: event.session_id.to_string(),
+    }
 }
 
 fn v2_lease_lost_reason(reason: RemotePaneLeaseEventReason) -> &'static str {
@@ -1667,15 +2153,49 @@ fn release_v2_subscription_state(
     Ok(())
 }
 
+fn v2_appearance_get(shared: &RemoteShared, payload: Value) -> Result<Value> {
+    let _: AppearanceGetParams =
+        serde_json::from_value(payload).context("parse appearance.get payload")?;
+    Ok(serde_json::to_value(
+        shared
+            .appearance
+            .read()
+            .expect("remote appearance lock")
+            .clone(),
+    )?)
+}
+
+fn request_v2_workspace_projection(
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    workspace_id: Option<Uuid>,
+) -> Result<RemoteWorkspaceProjection> {
+    let req = take_req(next_req);
+    match request_reply(
+        daemon_writer,
+        daemon_inbox,
+        req,
+        ClientToDaemon::RemoteWorkspaceProjection { req, workspace_id },
+    )? {
+        ReplyResult::RemoteWorkspaceProjection(projection) => Ok(projection),
+        other => bail!("unexpected daemon workspace projection reply: {other:?}"),
+    }
+}
+
 fn handle_v2_request(
     request: &V2Envelope,
     grants: &[String],
+    shared: &RemoteShared,
     owner_connection_id: Uuid,
     device_id: &str,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
     next_req: &mut u64,
+    projection: &mut V2WorkspaceProjectionState,
     subscriptions: &mut HashMap<String, V2Subscription>,
+    browser_screencasts: &mut V2BrowserScreencasts,
+    next_browser_stream_id: &mut u64,
     leases: &mut RemoteLeaseProjection,
     acknowledgements: &mut TerminalAckWindow,
     output_pump: &mut V2OutputPump,
@@ -1687,38 +2207,55 @@ fn handle_v2_request(
             "contractSha256": V2_CONTRACT_SHA256,
             "capabilities": grants,
         })),
+        ("appearance", "get") => v2_appearance_get(shared, request.payload.clone()),
         ("workspace", "list") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
-            Ok(serde_json::to_value(list_sessions(
+            let _: WorkspaceListParams = serde_json::from_value(request.payload.clone())
+                .context("parse workspace.list payload")?;
+            let workspace_id = projection.attached_workspace_id()?;
+            let snapshot = request_v2_workspace_projection(
                 daemon_writer,
                 daemon_inbox,
                 next_req,
-            )?)?)
+                workspace_id,
+            )?;
+            projection.replace_for_request(snapshot)?;
+            Ok(serde_json::to_value(WorkspaceListResult {
+                view_generation: projection.view_generation(),
+                workspaces: projection.workspaces()?,
+            })?)
         }
         ("workspace", "attach") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
-            let session_id = v2_uuid(&request.payload, "workspaceId")?;
-            let (layout_json, panes) =
-                attach_session(daemon_writer, daemon_inbox, next_req, session_id)?;
-            let panes = panes
-                .iter()
-                .map(|pane| {
-                    let mut value = serde_json::to_value(PaneDto::from(pane))?;
-                    value
-                        .as_object_mut()
-                        .context("pane projection must be an object")?
-                        .insert(
-                            "terminalOutputStreamId".to_string(),
-                            json!(v2_stream_id(pane.id)),
-                        );
-                    Ok(value)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(json!({ "layoutJson": layout_json, "panes": panes }))
+            let params: WorkspaceAttachParams = serde_json::from_value(request.payload.clone())
+                .context("parse workspace.attach payload")?;
+            let workspace_id =
+                Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
+            let snapshot = request_v2_workspace_projection(
+                daemon_writer,
+                daemon_inbox,
+                next_req,
+                Some(workspace_id),
+            )?;
+            if snapshot.attached_workspace_id.as_deref() != Some(params.workspace_id.as_str()) {
+                bail!("stale_ref: daemon attached a different workspace projection");
+            }
+            projection.replace_for_request(snapshot)?;
+            Ok(serde_json::to_value(WorkspaceAttachResult {
+                panes: projection.panes()?,
+                view_generation: projection.view_generation(),
+                workspace_id: params.workspace_id,
+            })?)
         }
         ("workspace", "detach") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
-            let workspace_id = v2_uuid(&request.payload, "workspaceId")?;
+            let params: WorkspaceDetachParams = serde_json::from_value(request.payload.clone())
+                .context("parse workspace.detach payload")?;
+            let workspace_id =
+                Uuid::parse_str(&params.workspace_id).context("workspaceId must be a UUID")?;
+            if projection.attached_workspace_id()? != Some(workspace_id) {
+                bail!("stale_ref: workspace is not attached");
+            }
             cleanup_remote_connection(
                 daemon_writer,
                 daemon_inbox,
@@ -1748,6 +2285,9 @@ fn handle_v2_request(
                     session_id: workspace_id,
                 },
             )?;
+            let snapshot =
+                request_v2_workspace_projection(daemon_writer, daemon_inbox, next_req, None)?;
+            projection.replace_for_request(snapshot)?;
             Ok(json!({}))
         }
         ("terminal", "ack") => {
@@ -1946,6 +2486,47 @@ fn handle_v2_request(
             )?;
             handle_v2_git(request, method, daemon_writer, daemon_inbox, next_req)
         }
+        ("notifications", "catchup") => {
+            let records = v2_orchestration_call(
+                daemon_writer,
+                daemon_inbox,
+                next_req,
+                Uuid::parse_str(&request.operation_id)?,
+                "notifications.catchup",
+                &request.payload,
+            )?;
+            v2_notification_records(device_id, records)
+        }
+        ("notifications", "ack") => {
+            let notification_id = request
+                .payload
+                .get("notificationId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("notificationId is required")?;
+            let global_sequence = request
+                .payload
+                .get("globalSequence")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .context("globalSequence must be positive")?;
+            let record = v2_orchestration_call(
+                daemon_writer,
+                daemon_inbox,
+                next_req,
+                Uuid::parse_str(&request.operation_id)?,
+                "notification.acknowledge",
+                &json!({ "id": notification_id }),
+            )?;
+            let projected = v2_notification_record(device_id, record)?;
+            if projected.get("sequence").and_then(Value::as_u64) != Some(global_sequence) {
+                bail!("stale_ref: notification sequence changed");
+            }
+            Ok(projected)
+        }
+        ("notifications", "register") => {
+            bail!("relay_unavailable: push registration requires an active managed relay")
+        }
         ("orchestration", method) => {
             require_grant(grants, "orchestration.view")?;
             if !matches!(
@@ -1954,44 +2535,63 @@ fn handle_v2_request(
             ) {
                 require_grant(grants, "orchestration.control")?;
             }
-            let req = take_req(next_req);
-            let operation_id = Uuid::parse_str(&request.operation_id)?;
-            match request_reply(
+            v2_orchestration_call(
                 daemon_writer,
                 daemon_inbox,
-                req,
-                ClientToDaemon::Orchestration {
-                    req,
-                    operation_id,
-                    method: method.to_string(),
-                    payload_json: request.payload.to_string(),
-                },
-            )? {
-                ReplyResult::Orchestration(response) => Ok(serde_json::from_str(&response)?),
-                other => bail!("unexpected orchestration reply: {other:?}"),
-            }
+                next_req,
+                Uuid::parse_str(&request.operation_id)?,
+                method,
+                &request.payload,
+            )
         }
-        (domain @ ("browser" | "computer" | "automation" | "skill" | "remote"), method) => {
-            let grant = match domain {
-                "browser"
+        ("browser", method) => {
+            let read_only = matches!(
+                method,
+                "tabs" | "inspect" | "screenshot" | "screencast.start" | "screencast.stop"
+            );
+            require_grant(
+                grants,
+                if read_only {
+                    "browser.view"
+                } else {
+                    "browser.control"
+                },
+            )?;
+            match method {
+                "screencast.start" => v2_browser_screencast_start(
+                    request,
+                    daemon_writer,
+                    daemon_inbox,
+                    next_req,
+                    browser_screencasts,
+                    next_browser_stream_id,
+                ),
+                "screencast.stop" => {
+                    let params: BrowserScreencastStopParams =
+                        serde_json::from_value(request.payload.clone())
+                            .context("parse browser.screencast.stop payload")?;
+                    if params.stream_id == 0 {
+                        bail!("invalid_argument: browser screencast streamId must be positive");
+                    }
+                    browser_screencasts.stop_stream(params.stream_id)?;
+                    Ok(json!({}))
+                }
+                _ => {
                     if matches!(
                         method,
-                        "tabs"
-                            | "profiles"
-                            | "snapshot"
-                            | "screenshot"
-                            | "full-screenshot"
-                            | "get"
-                            | "is"
-                            | "console"
-                            | "network"
-                            | "cookies"
-                            | "storage"
-                    ) =>
-                {
-                    "browser.view"
+                        "tab.close" | "navigate" | "reload" | "back" | "forward" | "viewport.set"
+                    ) {
+                        if let Some(page_id) = request.payload.get("pageId").and_then(Value::as_str)
+                        {
+                            browser_screencasts.stop_page(page_id);
+                        }
+                    }
+                    dispatch_v2_browser(request, method, daemon_writer, daemon_inbox, next_req)
                 }
-                "browser" => "browser.control",
+            }
+        }
+        (domain @ ("computer" | "automation" | "skill" | "remote"), method) => {
+            let grant = match domain {
                 "computer"
                     if matches!(
                         method,
@@ -2020,6 +2620,396 @@ fn handle_v2_request(
             request.method
         ),
     }
+}
+
+fn v2_orchestration_call(
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    operation_id: Uuid,
+    method: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let req = take_req(next_req);
+    match request_reply(
+        daemon_writer,
+        daemon_inbox,
+        req,
+        ClientToDaemon::Orchestration {
+            req,
+            operation_id,
+            method: method.to_string(),
+            payload_json: payload.to_string(),
+        },
+    )? {
+        ReplyResult::Orchestration(response) => parse_v2_orchestration_response(&response),
+        other => bail!("unexpected orchestration reply: {other:?}"),
+    }
+}
+
+fn parse_v2_orchestration_response(response: &str) -> Result<Value> {
+    let envelope: Value = serde_json::from_str(response).context("parse orchestration response")?;
+    if envelope.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(envelope.get("data").cloned().unwrap_or(Value::Null));
+    }
+    let code = envelope
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("internal");
+    let message = envelope
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("orchestration request failed");
+    bail!("{code}: {message}")
+}
+
+fn v2_notification_records(device_id: &str, records: Value) -> Result<Value> {
+    let records = records
+        .as_array()
+        .context("notifications.catchup result must be an array")?;
+    Ok(Value::Array(
+        records
+            .iter()
+            .cloned()
+            .map(|record| v2_notification_record(device_id, record))
+            .collect::<Result<Vec<_>>>()?,
+    ))
+}
+
+fn v2_notification_record(device_id: &str, record: Value) -> Result<Value> {
+    let record = record
+        .as_object()
+        .context("notification record must be an object")?;
+    let id = record
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("notification id is missing")?;
+    let sequence = record
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .context("notification sequence is invalid")?;
+    let kind = record
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("notification kind is missing")?;
+    let created_at = record
+        .get("createdAt")
+        .and_then(Value::as_u64)
+        .context("notification createdAt is invalid")?;
+    let category = match kind.split('.').next().unwrap_or_default() {
+        "automation" | "orchestration" | "agent" => "orchestration",
+        "terminal" => "terminal",
+        "browser" => "browser",
+        "git" => "git",
+        _ => "system",
+    };
+    let mut route = json!({ "deviceId": device_id });
+    if let Some(workspace_id) = record
+        .get("payload")
+        .and_then(Value::as_object)
+        .and_then(|payload| payload.get("workspaceId"))
+        .and_then(Value::as_str)
+        .filter(|value| Uuid::parse_str(value).is_ok())
+    {
+        route["workspaceId"] = json!(workspace_id);
+    }
+    if category == "orchestration" {
+        if let Some(run_id) = record
+            .get("entityId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            route["runId"] = json!(run_id);
+        }
+    }
+    Ok(json!({
+        "id": id,
+        "sequence": sequence,
+        "category": category,
+        "createdAt": created_at,
+        "acknowledged": !record.get("unread").and_then(Value::as_bool).unwrap_or(true),
+        "route": route,
+    }))
+}
+
+fn dispatch_v2_browser(
+    request: &V2Envelope,
+    method: &str,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<Value> {
+    remote_browser_host_call(
+        daemon_writer,
+        daemon_inbox,
+        next_req,
+        Uuid::parse_str(&request.operation_id)?,
+        method,
+        &request.payload,
+    )
+}
+
+fn remote_browser_host_call(
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    operation_id: Uuid,
+    method: &str,
+    payload: &Value,
+) -> Result<Value> {
+    let req = take_req(next_req);
+    match request_reply(
+        daemon_writer,
+        daemon_inbox,
+        req,
+        ClientToDaemon::RemoteBrowser {
+            req,
+            operation_id,
+            method: method.to_string(),
+            payload_json: serde_json::to_string(payload)?,
+        },
+    )? {
+        ReplyResult::Browser(response) => {
+            serde_json::from_str(&response).context("parse remote browser host result")
+        }
+        other => bail!("unexpected remote browser reply: {other:?}"),
+    }
+}
+
+fn v2_browser_screencast_start(
+    request: &V2Envelope,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    screencasts: &mut V2BrowserScreencasts,
+    next_stream_id: &mut u64,
+) -> Result<Value> {
+    if screencasts.streams.len() >= MAX_BROWSER_SCREENCASTS_PER_CONNECTION {
+        bail!("conflict: browser screencast connection limit reached");
+    }
+    let params: BrowserScreencastStartParams = serde_json::from_value(request.payload.clone())
+        .context("parse browser.screencast.start payload")?;
+    let quality = params.quality.unwrap_or(75);
+    if !(1..=100).contains(&quality) {
+        bail!("invalid_argument: browser screencast quality must be between 1 and 100");
+    }
+    let max_fps = params.max_fps.unwrap_or(DEFAULT_BROWSER_SCREENCAST_FPS);
+    if !(1..=MAX_BROWSER_SCREENCAST_FPS).contains(&max_fps) {
+        bail!(
+            "invalid_argument: browser screencast maxFps must be between 1 and {MAX_BROWSER_SCREENCAST_FPS}"
+        );
+    }
+    let screenshot_payload = serde_json::to_value(BrowserScreenshotParams {
+        page_id: params.page_id.clone(),
+        quality: Some(quality),
+        workspace_id: params.workspace_id.clone(),
+    })?;
+    let screenshot: BrowserScreenshotResult = serde_json::from_value(remote_browser_host_call(
+        daemon_writer,
+        daemon_inbox,
+        next_req,
+        Uuid::parse_str(&request.operation_id)?,
+        "screenshot",
+        &screenshot_payload,
+    )?)?;
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(&screenshot.data_base64)
+        .context("decode browser screencast JPEG")?;
+    if jpeg.is_empty() || jpeg.len() > MAX_BINARY_PAYLOAD_BYTES {
+        bail!("browser screencast JPEG exceeds the binary frame bound");
+    }
+    if *next_stream_id > MAX_JAVASCRIPT_SAFE_INTEGER {
+        bail!("browser screencast stream id exhausted");
+    }
+
+    let stream_id = *next_stream_id;
+    *next_stream_id = next_stream_id
+        .checked_add(1)
+        .context("browser screencast stream id exhausted")?;
+    let queue = Arc::new(Mutex::new(BinaryStreamQueue::new(
+        1,
+        MAX_BINARY_PAYLOAD_BYTES,
+    )?));
+    queue
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .enqueue(BinaryFrame {
+            channel: BinaryChannel::BrowserScreencast,
+            flags: FLAG_KEYFRAME,
+            stream_id,
+            sequence: 1,
+            dropped_before: 0,
+            payload: jpeg,
+        })?;
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_v2_browser_capture_worker(
+        stream_id,
+        params.workspace_id,
+        params.page_id.clone(),
+        quality,
+        max_fps,
+        screenshot.view_generation,
+        Arc::clone(&queue),
+        Arc::clone(&stop),
+    )?;
+    screencasts.streams.insert(
+        stream_id,
+        V2BrowserScreencast {
+            page_id: params.page_id,
+            view_generation: screenshot.view_generation,
+            queue,
+            stop,
+        },
+    );
+    Ok(serde_json::to_value(BrowserScreencastStartResult {
+        height: screenshot.height,
+        stream_id,
+        view_generation: screenshot.view_generation,
+        width: screenshot.width,
+    })?)
+}
+
+fn browser_screencast_frame(
+    stream_id: u64,
+    sequence: u64,
+    view_generation: u64,
+    screenshot: &BrowserScreenshotResult,
+) -> Result<Option<BinaryFrame>> {
+    if screenshot.view_generation != view_generation {
+        return Ok(None);
+    }
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(&screenshot.data_base64)
+        .context("decode browser screencast JPEG")?;
+    if jpeg.is_empty() || jpeg.len() > MAX_BINARY_PAYLOAD_BYTES {
+        bail!("browser screencast JPEG exceeds the binary frame bound");
+    }
+    Ok(Some(BinaryFrame {
+        channel: BinaryChannel::BrowserScreencast,
+        flags: FLAG_KEYFRAME,
+        stream_id,
+        sequence,
+        dropped_before: 0,
+        payload: jpeg,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_v2_browser_capture_worker(
+    stream_id: u64,
+    workspace_id: String,
+    page_id: String,
+    quality: u16,
+    max_fps: u16,
+    view_generation: u64,
+    queue: Arc<Mutex<BinaryStreamQueue>>,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name(format!("vibelink-browser-cast-{stream_id}"))
+        .spawn(move || {
+            let Ok((mut daemon_writer, mut daemon_inbox)) = open_daemon_connection() else {
+                stop.store(true, Ordering::Release);
+                return;
+            };
+            let interval = Duration::from_millis((1000_u64 / u64::from(max_fps)).max(1));
+            let payload = match serde_json::to_value(BrowserScreenshotParams {
+                page_id,
+                quality: Some(quality),
+                workspace_id,
+            }) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    stop.store(true, Ordering::Release);
+                    return;
+                }
+            };
+            let mut next_req = 1_u64;
+            let mut sequence = 2_u64;
+            while !stop.load(Ordering::Acquire) {
+                thread::sleep(interval);
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let screenshot = remote_browser_host_call(
+                    &mut daemon_writer,
+                    &mut daemon_inbox,
+                    &mut next_req,
+                    Uuid::new_v4(),
+                    "screenshot",
+                    &payload,
+                )
+                .and_then(|value| {
+                    serde_json::from_value::<BrowserScreenshotResult>(value).map_err(Into::into)
+                });
+                let Ok(screenshot) = screenshot else {
+                    stop.store(true, Ordering::Release);
+                    break;
+                };
+                let frame = match browser_screencast_frame(
+                    stream_id,
+                    sequence,
+                    view_generation,
+                    &screenshot,
+                ) {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) | Err(_) => {
+                        stop.store(true, Ordering::Release);
+                        break;
+                    }
+                };
+                if queue
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .enqueue(frame)
+                    .is_err()
+                {
+                    stop.store(true, Ordering::Release);
+                    break;
+                }
+                let Some(next) = sequence.checked_add(1) else {
+                    stop.store(true, Ordering::Release);
+                    break;
+                };
+                sequence = next;
+            }
+        })?;
+    Ok(())
+}
+
+fn pump_v2_browser_screencasts(
+    ws: &mut RemoteSocket,
+    transport: &mut SecureTransport,
+    screencasts: &mut V2BrowserScreencasts,
+) -> Result<()> {
+    let mut stream_ids = screencasts.streams.keys().copied().collect::<Vec<_>>();
+    stream_ids.sort_unstable();
+    for stream_id in stream_ids {
+        let Some(stream) = screencasts.streams.get(&stream_id) else {
+            continue;
+        };
+        let _view_generation = stream.view_generation;
+        if stream.stop.load(Ordering::Acquire) {
+            screencasts.streams.remove(&stream_id);
+            continue;
+        }
+        let frame = stream
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop(BinaryChannel::BrowserScreencast, stream_id);
+        if stream.stop.load(Ordering::Acquire) {
+            screencasts.streams.remove(&stream_id);
+            continue;
+        }
+        if let Some(frame) = frame {
+            send_v2_binary(ws, transport, frame)?;
+        }
+    }
+    Ok(())
 }
 
 fn dispatch_v2_cli(
@@ -2271,6 +3261,8 @@ fn v2_error_code(error: &anyhow::Error) -> &'static str {
         "stale_target"
     } else if message.contains("stale_ref") {
         "stale_ref"
+    } else if message.contains("relay_unavailable") {
+        "relay_unavailable"
     } else if message.contains("unsupported") {
         "unsupported"
     } else if message.contains("not found") || message.contains("not_found") {
@@ -2349,7 +3341,7 @@ fn run_authenticated(
     ws: &mut RemoteSocket,
     daemon_writer: &mut interprocess::local_socket::SendHalf,
     daemon_inbox: &mut DaemonInbox,
-    push_rx: &Receiver<Message>,
+    push_rx: &Receiver<RemotePush>,
     close_requested: &AtomicBool,
     shared: &RemoteShared,
     client_key: Uuid,
@@ -2375,6 +3367,13 @@ fn run_authenticated(
         .read()
         .expect("remote appearance lock")
         .clone();
+    let appearance = legacy_appearance_payload(
+        &appearance,
+        &shared
+            .workspace_alerts
+            .read()
+            .expect("remote workspace alerts lock"),
+    );
     send_json(
         ws,
         &ServerMessage::Appearance {
@@ -2425,10 +3424,12 @@ fn run_authenticated(
             )?;
         }
         for _ in 0..MAX_PUSH_FRAMES_PER_LOOP {
-            let Ok(message) = push_rx.try_recv() else {
-                break;
-            };
-            ws.send(message)?;
+            match push_rx.try_recv() {
+                Ok(RemotePush::WebSocket(message)) => ws.send(message)?,
+                Ok(RemotePush::AppearanceChanged(_)) => {}
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return Ok(()),
+            }
         }
         let mut output_bytes = 0_usize;
         for _ in 0..MAX_OUTPUT_FRAMES_PER_LOOP {
@@ -3090,6 +4091,238 @@ fn take_req(next_req: &mut u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_stream_ids_fit_javascript_safe_integers() {
+        assert_eq!(
+            v2_stream_id(Uuid::from_bytes([u8::MAX; 16])),
+            9_007_199_254_740_991
+        );
+        assert_eq!(v2_stream_id(Uuid::nil()), 1);
+    }
+
+    #[test]
+    fn v2_auth_failure_response_is_generic_and_envelope_shaped() {
+        let response = v2_auth_failure_response();
+        assert_eq!(response["method"], "authentication");
+        assert_eq!(response["error"]["code"], "authentication_failed");
+        assert_eq!(response["payload"], json!({}));
+        assert!(Uuid::parse_str(response["operationId"].as_str().unwrap()).is_ok());
+        assert!(!response.to_string().contains("revoked"));
+    }
+
+    fn sample_projection(workspace_id: Uuid, pane_id: Uuid) -> RemoteWorkspaceProjection {
+        RemoteWorkspaceProjection {
+            workspaces: vec![crate::protocol::RemoteWorkspaceProjectionWorkspace {
+                id: workspace_id.to_string(),
+                name: "Workspace".to_string(),
+                pane_count: 1,
+                workspace_folder: Some("C:/workspace".to_string()),
+            }],
+            attached_workspace_id: Some(workspace_id.to_string()),
+            panes: vec![RemoteWorkspaceProjectionPane {
+                activity: RemotePaneActivity::Running,
+                alive: true,
+                cols: 120,
+                desktop_active: true,
+                group_id: "group-1".to_string(),
+                group_order: 2,
+                id: pane_id.to_string(),
+                last_output_at: 1234,
+                order: 3,
+                pane_generation: 7,
+                role: "implementation".to_string(),
+                rows: 40,
+                tab_order: 1,
+                title: "Terminal".to_string(),
+                unread_count: 5,
+                workspace_id: workspace_id.to_string(),
+            }],
+        }
+    }
+
+    fn secure_transport_pair() -> (SecureTransport, SecureTransport) {
+        use super::super::v2::secure::DeviceIdentity;
+
+        let initiator_identity = DeviceIdentity::generate().expect("initiator identity");
+        let responder_identity = DeviceIdentity::generate().expect("responder identity");
+        let mut initiator = SecureHandshake::initiator(&initiator_identity).expect("initiator");
+        let mut responder = SecureHandshake::responder(&responder_identity).expect("responder");
+        responder
+            .read(&initiator.write(b"").expect("message one"))
+            .expect("read message one");
+        initiator
+            .read(&responder.write(b"").expect("message two"))
+            .expect("read message two");
+        responder
+            .read(&initiator.write(b"").expect("message three"))
+            .expect("read message three");
+        (
+            initiator
+                .finish(Some(&responder_identity.fingerprint()))
+                .expect("receiving transport"),
+            responder
+                .finish(Some(&initiator_identity.fingerprint()))
+                .expect("sending transport"),
+        )
+    }
+
+    #[test]
+    fn canonical_workspace_results_have_exact_generated_keys() {
+        let workspace_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let mut projection = V2WorkspaceProjectionState::default();
+        projection
+            .replace_for_request(sample_projection(workspace_id, pane_id))
+            .unwrap();
+        let list = serde_json::to_value(WorkspaceListResult {
+            view_generation: projection.view_generation(),
+            workspaces: projection.workspaces().unwrap(),
+        })
+        .unwrap();
+        assert_eq!(
+            list.as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["viewGeneration".to_string(), "workspaces".to_string()]
+        );
+        let attach = serde_json::to_value(WorkspaceAttachResult {
+            panes: projection.panes().unwrap(),
+            view_generation: projection.view_generation(),
+            workspace_id: workspace_id.to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            attach
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "panes".to_string(),
+                "viewGeneration".to_string(),
+                "workspaceId".to_string(),
+            ]
+        );
+        let pane = &attach["panes"][0];
+        assert_eq!(pane["streamId"], json!(v2_stream_id(pane_id)));
+        assert!(pane.get("terminalOutputStreamId").is_none());
+        assert_eq!(pane["paneGeneration"], 7);
+        assert_eq!(pane["lastOutputAt"], 1234);
+    }
+
+    #[test]
+    fn projection_generation_changes_only_with_content_and_fences_subscribe() {
+        let workspace_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let initial = sample_projection(workspace_id, pane_id);
+        let mut projection = V2WorkspaceProjectionState::default();
+        projection.replace_for_request(initial.clone()).unwrap();
+        assert_eq!(projection.view_generation(), 1);
+        validate_v2_projection_subscription(&projection, workspace_id, pane_id, 1).unwrap();
+        assert!(
+            validate_v2_projection_subscription(&projection, workspace_id, pane_id, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("viewGeneration")
+        );
+
+        let unchanged = projection.refresh(initial.clone()).unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(projection.view_generation(), 1);
+
+        let mut changed = initial.clone();
+        changed.panes[0].title = "Renamed".to_string();
+        let delta = projection.refresh(changed.clone()).unwrap();
+        assert!(delta.changed);
+        assert!(!delta.workspace_changed);
+        assert_eq!(delta.changed_panes.len(), 1);
+        assert_eq!(projection.view_generation(), 2);
+        validate_v2_projection_subscription(&projection, workspace_id, pane_id, 2).unwrap();
+        validate_v2_projection_subscription(&projection, workspace_id, pane_id, 1).unwrap();
+        assert!(
+            validate_v2_projection_subscription(&projection, workspace_id, pane_id, 3).is_err()
+        );
+        assert!(
+            validate_v2_projection_subscription(&projection, Uuid::new_v4(), pane_id, 2,).is_err()
+        );
+
+        let unchanged = projection.refresh(changed.clone()).unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(projection.view_generation(), 2);
+
+        changed.panes.clear();
+        changed.workspaces[0].pane_count = 0;
+        let removed = projection.refresh(changed).unwrap();
+        assert!(removed.changed);
+        assert!(removed.workspace_changed);
+        assert!(removed.changed_panes.is_empty());
+        assert_eq!(projection.view_generation(), 3);
+    }
+
+    #[test]
+    fn canonical_projection_events_are_encrypted_and_keep_both_generations() {
+        let workspace_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let pane = remote_pane(&sample_projection(workspace_id, pane_id).panes[0]).unwrap();
+        let (mut receiving, mut sending) = secure_transport_pair();
+        let pane_event = PaneStateEvent {
+            pane: pane.clone(),
+            view_generation: 11,
+        };
+        let ciphertext =
+            seal_v2_projection_event(&mut sending, 4, "pane", "state", &pane_event).unwrap();
+        assert!(!ciphertext
+            .windows(b"Terminal".len())
+            .any(|window| window == b"Terminal"));
+        let frame = receiving.open(&ciphertext).unwrap();
+        let envelope: V2Envelope = serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(envelope.domain, "pane");
+        assert_eq!(envelope.method, "state");
+        assert_eq!(
+            serde_json::from_value::<PaneStateEvent>(envelope.payload).unwrap(),
+            pane_event
+        );
+
+        let workspace_event = WorkspaceChangedEvent {
+            view_generation: 12,
+            workspaces: vec![RemoteWorkspace {
+                id: workspace_id.to_string(),
+                name: "Workspace".to_string(),
+                pane_count: 1,
+                workspace_folder: None,
+            }],
+        };
+        let ciphertext =
+            seal_v2_projection_event(&mut sending, 4, "workspace", "changed", &workspace_event)
+                .unwrap();
+        let frame = receiving.open(&ciphertext).unwrap();
+        let envelope: V2Envelope = serde_json::from_slice(&frame.payload).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkspaceChangedEvent>(envelope.payload).unwrap(),
+            workspace_event
+        );
+
+        let resized_event = TerminalResizedEvent {
+            cols: pane.cols,
+            pane_generation: pane.pane_generation,
+            pane_id: pane.id,
+            rows: pane.rows,
+            view_generation: 12,
+            workspace_id: pane.workspace_id,
+        };
+        let ciphertext =
+            seal_v2_projection_event(&mut sending, 4, "terminal", "resized", &resized_event)
+                .unwrap();
+        let frame = receiving.open(&ciphertext).unwrap();
+        let envelope: V2Envelope = serde_json::from_slice(&frame.payload).unwrap();
+        let decoded = serde_json::from_value::<TerminalResizedEvent>(envelope.payload).unwrap();
+        assert_eq!(decoded, resized_event);
+        assert_eq!(decoded.view_generation, 12);
+        assert_eq!(decoded.pane_generation, 7);
+    }
 
     #[test]
     fn saved_workspace_order_precedes_unsaved_sessions() {
@@ -3195,6 +4428,7 @@ mod tests {
         }
         assert!(accepted <= frame_capacity);
         assert!(accepted < 200);
+        assert!(accepted <= MAX_RESYNC_DEQUEUE_FRAMES_PER_LOOP);
         assert!(inbox.queued_output_bytes() <= DAEMON_OUTPUT_QUEUE_MAX_BYTES);
         assert!(
             inbox
@@ -3539,6 +4773,254 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|frame| frame.payload.len() <= MAX_BINARY_PAYLOAD_BYTES));
+    }
+
+    #[test]
+    fn appearance_get_returns_exact_canonical_projection_without_browser_grant() {
+        use super::super::{server::RemoteServer, v2::generated::AppearanceProjection};
+
+        let directory =
+            std::env::temp_dir().join(format!("vibelink-remote-appearance-get-{}", Uuid::new_v4()));
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let mut expected = server
+            .shared
+            .appearance
+            .read()
+            .expect("remote appearance lock")
+            .clone();
+        let result = v2_appearance_get(&server.shared, json!({})).expect("default appearance.get");
+        assert_eq!(
+            serde_json::from_value::<AppearanceProjection>(result).unwrap(),
+            expected
+        );
+        expected.theme_name = "Current Appearance".to_string();
+        server.set_appearance(
+            serde_json::to_value(&expected).unwrap(),
+            Vec::new(),
+            HashMap::new(),
+        );
+        let result = v2_appearance_get(&server.shared, json!({})).expect("current appearance.get");
+        assert_eq!(
+            serde_json::from_value::<AppearanceProjection>(result).unwrap(),
+            expected
+        );
+        assert!(v2_appearance_get(&server.shared, json!({ "browserView": true })).is_err());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn appearance_changed_is_sealed_as_encrypted_control() {
+        use super::super::{
+            server::RemoteServer,
+            v2::{generated::AppearanceChangedEvent, secure::DeviceIdentity},
+        };
+
+        let initiator_identity = DeviceIdentity::generate().expect("initiator identity");
+        let responder_identity = DeviceIdentity::generate().expect("responder identity");
+        let mut initiator = SecureHandshake::initiator(&initiator_identity).expect("initiator");
+        let mut responder = SecureHandshake::responder(&responder_identity).expect("responder");
+        responder
+            .read(&initiator.write(b"").expect("message one"))
+            .expect("read message one");
+        initiator
+            .read(&responder.write(b"").expect("message two"))
+            .expect("read message two");
+        responder
+            .read(&initiator.write(b"").expect("message three"))
+            .expect("read message three");
+        let mut receiving = initiator
+            .finish(Some(&responder_identity.fingerprint()))
+            .expect("receiving transport");
+        let mut sending = responder
+            .finish(Some(&initiator_identity.fingerprint()))
+            .expect("sending transport");
+        let directory = std::env::temp_dir().join(format!(
+            "vibelink-remote-appearance-seal-{}",
+            Uuid::new_v4()
+        ));
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        let mut appearance = server
+            .shared
+            .appearance
+            .read()
+            .expect("remote appearance lock")
+            .clone();
+        appearance.theme_name = "Encrypted Appearance".to_string();
+        let event = AppearanceChangedEvent {
+            appearance,
+            view_generation: 9,
+        };
+
+        let ciphertext =
+            seal_v2_appearance_changed_event(&mut sending, 7, &event).expect("seal event");
+        assert!(!ciphertext
+            .windows(b"Encrypted Appearance".len())
+            .any(|window| window == b"Encrypted Appearance"));
+        let frame = receiving.open(&ciphertext).expect("decrypt event");
+        assert_eq!(frame.kind, SecureFrameKind::Control);
+        let envelope: V2Envelope = serde_json::from_slice(&frame.payload).expect("parse event");
+        assert_eq!(envelope.domain, "appearance");
+        assert_eq!(envelope.method, "changed");
+
+        assert_eq!(envelope.revocation_epoch, 7);
+        assert_eq!(
+            serde_json::from_value::<AppearanceChangedEvent>(envelope.payload).unwrap(),
+            event
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn lease_lost_event_carries_current_view_generation() {
+        let workspace_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let lease_id = Uuid::new_v4();
+        let event = RemotePaneLeaseEvent {
+            kind: RemotePaneLeaseEventKind::Lost,
+            reason: RemotePaneLeaseEventReason::Expired,
+            session_id: workspace_id,
+            pane_id,
+            leased: false,
+            cols: None,
+            rows: None,
+            lease_id,
+            owner_connection_id: Uuid::new_v4(),
+            device_id: "mobile".to_string(),
+            pane_generation: 2,
+            revision: 7,
+            original_cols: 120,
+            original_rows: 40,
+            target_cols: 80,
+            target_rows: 24,
+            viewport_revision: 3,
+            expires_at: 0,
+            restoration: None,
+        };
+        let lost = v2_lease_lost_event(&event, 11);
+        assert_eq!(lost.workspace_id, workspace_id.to_string());
+        assert_eq!(lost.pane_id, pane_id.to_string());
+        assert_eq!(lost.lease_id, lease_id.to_string());
+        assert_eq!(lost.lease_revision, 7);
+        assert_eq!(lost.view_generation, 11);
+        assert_eq!(lost.reason, "expired");
+    }
+
+    #[test]
+    fn browser_screencast_latest_frame_counts_exact_replacements() {
+        let mut queue = BinaryStreamQueue::new(1, MAX_BINARY_PAYLOAD_BYTES).unwrap();
+        for sequence in 1..=3 {
+            let screenshot = BrowserScreenshotResult {
+                data_base64: base64::engine::general_purpose::STANDARD.encode([sequence as u8]),
+                height: 844,
+                view_generation: 4,
+                width: 390,
+            };
+            let frame = browser_screencast_frame(7, sequence, 4, &screenshot)
+                .unwrap()
+                .unwrap();
+            queue.enqueue(frame).unwrap();
+        }
+
+        let latest = queue
+            .pop(BinaryChannel::BrowserScreencast, 7)
+            .expect("latest frame");
+        assert_eq!(latest.sequence, 3);
+        assert_eq!(latest.payload, vec![3]);
+        assert_eq!(latest.dropped_before, 2);
+        assert_ne!(
+            latest.flags & crate::remote::v2::wire::FLAG_DROPPED_BEFORE,
+            0
+        );
+    }
+
+    #[test]
+    fn browser_screencast_rejects_stale_generation_and_stops_cleanly() {
+        let screenshot = BrowserScreenshotResult {
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"jpeg"),
+            height: 844,
+            view_generation: 8,
+            width: 390,
+        };
+        assert!(browser_screencast_frame(9, 1, 7, &screenshot)
+            .unwrap()
+            .is_none());
+
+        let queue = Arc::new(Mutex::new(
+            BinaryStreamQueue::new(1, MAX_BINARY_PAYLOAD_BYTES).unwrap(),
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut screencasts = V2BrowserScreencasts::default();
+        screencasts.streams.insert(
+            9,
+            V2BrowserScreencast {
+                page_id: "page-a".to_string(),
+                view_generation: 7,
+                queue,
+                stop: Arc::clone(&stop),
+            },
+        );
+        screencasts.stop_stream(9).unwrap();
+        assert!(stop.load(Ordering::Acquire));
+        assert!(screencasts.streams.is_empty());
+
+        let disconnect_stop = Arc::new(AtomicBool::new(false));
+        screencasts.streams.insert(
+            10,
+            V2BrowserScreencast {
+                page_id: "page-b".to_string(),
+                view_generation: 7,
+                queue: Arc::new(Mutex::new(
+                    BinaryStreamQueue::new(1, MAX_BINARY_PAYLOAD_BYTES).unwrap(),
+                )),
+                stop: Arc::clone(&disconnect_stop),
+            },
+        );
+        drop(screencasts);
+        assert!(disconnect_stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn notification_projection_is_metadata_only_and_routable() {
+        let workspace_id = Uuid::new_v4();
+        let projected = v2_notification_records(
+            "device-1",
+            json!([{
+                "id": "notification-1",
+                "sequence": 7,
+                "kind": "automation.completed",
+                "entityId": "run-1",
+                "unread": true,
+                "acknowledgedAt": null,
+                "payload": { "workspaceId": workspace_id, "prompt": "must not cross the wire" },
+                "createdAt": 1234
+            }]),
+        )
+        .unwrap();
+        assert_eq!(
+            projected,
+            json!([{
+                "id": "notification-1",
+                "sequence": 7,
+                "category": "orchestration",
+                "createdAt": 1234,
+                "acknowledged": false,
+                "route": { "deviceId": "device-1", "workspaceId": workspace_id, "runId": "run-1" }
+            }])
+        );
+        assert!(!projected.to_string().contains("must not cross the wire"));
+    }
+
+    #[test]
+    fn orchestration_response_is_unwrapped_and_preserves_error_code() {
+        assert_eq!(
+            parse_v2_orchestration_response(r#"{"ok":true,"data":[{"id":"run-1"}]}"#).unwrap(),
+            json!([{"id": "run-1"}])
+        );
+        let error = parse_v2_orchestration_response(
+            r#"{"ok":false,"error":{"code":"not_found","message":"missing"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "not_found: missing");
     }
 
     #[test]

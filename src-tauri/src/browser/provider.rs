@@ -7,6 +7,10 @@ use super::{
         PermissionDecision, PhysicalBounds,
     },
 };
+use crate::dedicated_cli::browser_cdp::{
+    BrowserInspectSnapshot, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
+    BrowserPageScale, BrowserPointerInput,
+};
 
 pub trait BrowserProvider: Send + Sync + 'static {
     fn create_child_webview(&self, request: &ChildWebViewCreate) -> BrowserResult<()>;
@@ -52,6 +56,30 @@ pub trait BrowserProvider: Send + Sync + 'static {
     }
     fn clear_device_metrics(&self, _page_id: &str) -> BrowserResult<()> {
         Err(BrowserError::unsupported("clear_device_metrics"))
+    }
+    fn set_page_scale(&self, _page_id: &str, _scale: BrowserPageScale) -> BrowserResult<()> {
+        Err(BrowserError::unsupported("page_scale"))
+    }
+    fn inspect_page(
+        &self,
+        _page_id: &str,
+        _x: Option<f64>,
+        _y: Option<f64>,
+    ) -> BrowserResult<BrowserInspectSnapshot> {
+        Err(BrowserError::unsupported("inspect_page"))
+    }
+    fn dispatch_pointer(&self, _page_id: &str, _input: BrowserPointerInput) -> BrowserResult<()> {
+        Err(BrowserError::unsupported("pointer_input"))
+    }
+    fn dispatch_key(&self, _page_id: &str, _input: BrowserKeyInput) -> BrowserResult<()> {
+        Err(BrowserError::unsupported("key_input"))
+    }
+    fn capture_jpeg(
+        &self,
+        _page_id: &str,
+        _options: BrowserJpegCaptureOptions,
+    ) -> BrowserResult<BrowserJpegFrame> {
+        Err(BrowserError::unsupported("capture_jpeg"))
     }
     fn drain_events(&self) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
         Ok(Vec::new())
@@ -1125,6 +1153,62 @@ impl BrowserProvider for NativeBrowserProvider {
             &self.registry_path,
             page_id,
             None,
+        )
+        .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
+    }
+
+    #[cfg(not(test))]
+    fn set_page_scale(&self, page_id: &str, scale: BrowserPageScale) -> BrowserResult<()> {
+        crate::dedicated_cli::browser_cdp::set_page_scale_for_page(
+            &self.registry_path,
+            page_id,
+            scale,
+        )
+        .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
+    }
+
+    #[cfg(not(test))]
+    fn inspect_page(
+        &self,
+        page_id: &str,
+        x: Option<f64>,
+        y: Option<f64>,
+    ) -> BrowserResult<BrowserInspectSnapshot> {
+        crate::dedicated_cli::browser_cdp::inspect_page(&self.registry_path, page_id, x, y).map_err(
+            |error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()),
+        )
+    }
+
+    #[cfg(not(test))]
+    fn dispatch_pointer(&self, page_id: &str, input: BrowserPointerInput) -> BrowserResult<()> {
+        crate::dedicated_cli::browser_cdp::dispatch_pointer_for_page(
+            &self.registry_path,
+            page_id,
+            input,
+        )
+        .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
+    }
+
+    #[cfg(not(test))]
+    fn dispatch_key(&self, page_id: &str, input: BrowserKeyInput) -> BrowserResult<()> {
+        crate::dedicated_cli::browser_cdp::dispatch_key_input_for_page(
+            &self.registry_path,
+            page_id,
+            input,
+        )
+        .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
+    }
+
+    #[cfg(not(test))]
+    fn capture_jpeg(
+        &self,
+        page_id: &str,
+        options: BrowserJpegCaptureOptions,
+    ) -> BrowserResult<BrowserJpegFrame> {
+        crate::dedicated_cli::browser_cdp::capture_jpeg_for_page(
+            &self.registry_path,
+            page_id,
+            options,
         )
         .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
     }

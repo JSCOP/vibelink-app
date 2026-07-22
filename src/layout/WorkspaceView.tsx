@@ -65,7 +65,6 @@ import {
   isWorkspaceInitialPanePending,
   useWorkspaceStore,
 } from '../state/store'
-import { useRemotePaneLeaseStore } from '../remote/paneLease'
 import {
   WorkspaceContentActionsContext,
   type OpenContentRequest,
@@ -81,7 +80,6 @@ import { expandGridRowsForPaneCount } from './paneGridPlan'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { withSuppressedPanelRemoval } from './suppression'
-import { hideRemoteLeasedPane, paneIdsForSession, restoreRemoteLeasedPane, type RemotePaneVisibilityState } from './remotePaneVisibility'
 import {
   isStructuralWorkspaceContentKind,
   normalizeWorkspaceRelativePath,
@@ -89,7 +87,6 @@ import {
   serializeWorkspaceLayoutEnvelope,
   workspaceContentPanelId,
   workspaceContentResourceKey,
-  type SerializedDockview,
   type WorkspaceContentKind,
   type WorkspaceContentParams,
 } from './workspaceContentModel'
@@ -547,8 +544,6 @@ export function WorkspaceView({
   const applyingArrangeRequestRef = useRef<number | null>(null)
   const applyingContentRequestRef = useRef<number | null>(null)
   const applyingSaveRequestRef = useRef<number | null>(null)
-  const remotePaneVisibilityRef = useRef<RemotePaneVisibilityState[]>([])
-  const remoteUnleasedLayoutRef = useRef<SerializedDockview | null>(null)
   const pendingTerminalPaneIdsRef = useRef(new Set<string>())
   const lastMainGroupIdRef = useRef<string | null>(null)
   const [currentMainGroupId, setCurrentMainGroupId] = useState<string | null>(null)
@@ -572,8 +567,6 @@ export function WorkspaceView({
   const closePaneInStore = useWorkspaceStore((state) => state.closePane)
   const saveLayout = useWorkspaceStore((state) => state.saveLayout)
   const renamePaneTitle = useWorkspaceStore((state) => state.renamePaneTitle)
-  const remotePaneLeases = useRemotePaneLeaseStore((state) => state.leases)
-  const remoteLeasedPaneIds = useMemo(() => paneIdsForSession(remotePaneLeases, activeSessionId), [activeSessionId, remotePaneLeases])
   const setWorkspaceOverlayOpen = useCallback((overlayId: string, open: boolean) => {
     setWorkspaceOverlayIds((current) => {
       if (open === current.has(overlayId)) return current
@@ -672,16 +665,14 @@ export function WorkspaceView({
   const serializeCurrentLayout = useCallback(() => {
     const api = apiRef.current
     if (!api) return null
-    const dockview = remoteLeasedPaneIds.length > 0 && remoteUnleasedLayoutRef.current
-      ? remoteUnleasedLayoutRef.current
-      : api.toJSON()
+    const dockview = api.toJSON()
     const serialized = serializeWorkspaceLayoutEnvelope({ version: 3, dockview })
     return normalizeWorkspaceLayoutState(serialized).dockview ? serialized : null
-  }, [remoteLeasedPaneIds.length])
+  }, [])
 
   const persistLayoutNow = useCallback(async () => {
     const owner = currentLayoutOwner()
-    if (!owner || remoteLeasedPaneIds.length > 0 || suppressPanelRemovalRef.current || pendingTerminalPaneIdsRef.current.size > 0 || !isDockElementMeasurable(dockRef.current)) return
+    if (!owner || suppressPanelRemovalRef.current || pendingTerminalPaneIdsRef.current.size > 0 || !isDockElementMeasurable(dockRef.current)) return
     const serialized = serializeCurrentLayout()
     if (!serialized) return
     loadedSessionRef.current = owner.sessionId
@@ -690,7 +681,7 @@ export function WorkspaceView({
     loadedSessionEpochRef.current = owner.sessionEpoch
     await saveLayout(owner.sessionId, serialized)
     if (!ownsLayout(owner)) return
-  }, [currentLayoutOwner, ownsLayout, remoteLeasedPaneIds.length, saveLayout, serializeCurrentLayout])
+  }, [currentLayoutOwner, ownsLayout, saveLayout, serializeCurrentLayout])
 
   const persistLayoutSoon = useCallback(() => {
     if (saveTimerRef.current !== undefined) window.clearTimeout(saveTimerRef.current)
@@ -846,7 +837,7 @@ export function WorkspaceView({
 
   const arrangeTerminals = useCallback(async (requestedGrid?: GridSize | null, persist = true, owner?: WorkspaceLayoutOwner) => {
     const api = owner?.api ?? apiRef.current
-    if (!api || remoteLeasedPaneIds.length > 0 || (owner && !ownsLayout(owner))) return
+    if (!api || (owner && !ownsLayout(owner))) return
     const terminalIds = paneIdsInReadingOrder(
       api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').map((panel) => panel.id),
       getContentRect,
@@ -869,7 +860,7 @@ export function WorkspaceView({
     if (owner && !ownsLayout(owner)) return
     await settleLayout({ syncPty: true }, owner)
     if ((!owner || ownsLayout(owner)) && persist) persistLayoutSoon()
-  }, [ownsLayout, persistLayoutSoon, remoteLeasedPaneIds.length, settleLayout])
+  }, [ownsLayout, persistLayoutSoon, settleLayout])
 
   const openContent = useCallback(async (request: OpenContentRequest): Promise<string> => {
     const currentEpoch = getWorkspaceSessionEpoch()
@@ -1234,7 +1225,7 @@ export function WorkspaceView({
         && getWorkspaceSessionReadyEpoch() === owner.sessionEpoch
         && getWorkspaceSessionTargetId() === sessionId
         && useWorkspaceStore.getState().activeSessionId === sessionId
-      if (loadedSessionRef.current && loadedSessionRef.current !== sessionId && !suppressPanelRemovalRef.current && remotePaneVisibilityRef.current.length === 0) {
+      if (loadedSessionRef.current && loadedSessionRef.current !== sessionId && !suppressPanelRemovalRef.current) {
         const previous = serializeCurrentLayout()
         if (previous) void saveLayout(loadedSessionRef.current, previous).catch(() => undefined)
       }
@@ -1271,8 +1262,6 @@ export function WorkspaceView({
         : api.groups.find((group) => group.api.location.type === 'grid' && group.api.isVisible)
       lastMainGroupIdRef.current = mainGroup?.id ?? null
       setCurrentMainGroupId(mainGroup?.id ?? null)
-      remotePaneVisibilityRef.current = []
-      remoteUnleasedLayoutRef.current = null
       await reconcileTerminalPanels(api, suppressPanelRemovalRef, addContentPanel, () => undefined)
       if (!ownsLayout(owner)) return
       await reconcileRestoredBrowserPanels(api, sessionId, suppressPanelRemovalRef, addContentPanel, () => ownsLayout(owner))
@@ -1458,26 +1447,6 @@ export function WorkspaceView({
     return () => observer.disconnect()
   }, [apiVersion, requestLiveWorkspaceResize])
 
-  useEffect(() => {
-    const api = apiRef.current
-    if (!api || loadedSessionRef.current !== activeSessionId) return
-    void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      for (const state of [...remotePaneVisibilityRef.current].reverse()) restoreRemoteLeasedPane(api, state)
-      remotePaneVisibilityRef.current = []
-      if (remoteLeasedPaneIds.length === 0) {
-        remoteUnleasedLayoutRef.current = null
-        return
-      }
-      remoteUnleasedLayoutRef.current = api.toJSON()
-      for (const paneId of remoteLeasedPaneIds) {
-        const state = hideRemoteLeasedPane(api, workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
-        if (state) remotePaneVisibilityRef.current.push(state)
-      }
-    }).then(() => {
-      void settleLayout({ syncPty: true })
-      if (remoteLeasedPaneIds.length === 0) persistLayoutSoon()
-    }).catch((error) => useWorkspaceStore.getState().setError(String(error)))
-  }, [activeSessionId, apiVersion, persistLayoutSoon, remoteLeasedPaneIds, settleLayout])
 
   useEffect(() => {
     const api = apiRef.current

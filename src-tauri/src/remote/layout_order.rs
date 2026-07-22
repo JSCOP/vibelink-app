@@ -3,19 +3,56 @@ use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneLayoutPosition {
+    pub group_id: String,
+    pub group_order: u32,
+    pub tab_order: u32,
+    pub order: u32,
+}
+
 /// Return terminal panes in one-tree v3 Dockview reading order. Persisted UI
 /// state is only authoritative when it describes every live daemon pane once;
 /// any legacy, malformed, duplicate, stale, or incomplete state falls back to
-/// the daemon's insertion order.
-pub fn pane_order(layout_json: Option<&str>, panes: &[PaneMeta]) -> Vec<Uuid> {
-    let fallback: Vec<_> = panes.iter().map(|pane| pane.id).collect();
+/// explicit unavailable group metadata and daemon insertion order.
+pub fn pane_layout_positions(
+    layout_json: Option<&str>,
+    panes: &[PaneMeta],
+) -> HashMap<Uuid, PaneLayoutPosition> {
+    let fallback = fallback_positions(panes);
     let Some(raw) = layout_json else {
         return fallback;
     };
-    parse_v3_order(raw, &fallback).unwrap_or(fallback)
+    parse_v3_positions(raw, panes).unwrap_or(fallback)
 }
 
-fn parse_v3_order(raw: &str, live_panes: &[Uuid]) -> Option<Vec<Uuid>> {
+pub fn pane_order(layout_json: Option<&str>, panes: &[PaneMeta]) -> Vec<Uuid> {
+    let positions = pane_layout_positions(layout_json, panes);
+    let mut ordered = panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+    ordered.sort_by_key(|pane_id| positions.get(pane_id).map(|position| position.order));
+    ordered
+}
+
+fn fallback_positions(panes: &[PaneMeta]) -> HashMap<Uuid, PaneLayoutPosition> {
+    panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| {
+            let order = u32::try_from(index).unwrap_or(u32::MAX);
+            (
+                pane.id,
+                PaneLayoutPosition {
+                    group_id: String::new(),
+                    group_order: order,
+                    tab_order: 0,
+                    order,
+                },
+            )
+        })
+        .collect()
+}
+
+fn parse_v3_positions(raw: &str, panes: &[PaneMeta]) -> Option<HashMap<Uuid, PaneLayoutPosition>> {
     let envelope: Value = serde_json::from_str(raw).ok()?;
     if envelope.get("version").and_then(Value::as_u64) != Some(3) {
         return None;
@@ -27,9 +64,7 @@ fn parse_v3_order(raw: &str, live_panes: &[Uuid]) -> Option<Vec<Uuid>> {
     let mut terminal_panels = HashMap::new();
     let mut terminal_panes = HashSet::new();
     for (panel_id, panel) in panels {
-        let Some(panel) = panel.as_object() else {
-            return None;
-        };
+        let panel = panel.as_object()?;
         let content_component = panel.get("contentComponent").and_then(Value::as_str);
         let params_kind = panel
             .get("params")
@@ -46,32 +81,51 @@ fn parse_v3_order(raw: &str, live_panes: &[Uuid]) -> Option<Vec<Uuid>> {
         terminal_panels.insert(panel_id.as_str(), pane_id);
     }
 
-    let mut view_ids = Vec::new();
-    traverse_views(root, &mut view_ids)?;
+    let mut groups = Vec::new();
+    traverse_groups(root, &mut groups)?;
+    let mut seen_groups = HashSet::new();
     let mut seen_views = HashSet::new();
-    let mut ordered = Vec::new();
-    let mut ordered_panes = HashSet::new();
-    for view_id in view_ids {
-        if !seen_views.insert(view_id) || !panels.contains_key(view_id) {
+    let mut positions = HashMap::new();
+    let mut global_order = 0_u32;
+    for (group_index, group) in groups.into_iter().enumerate() {
+        if !seen_groups.insert(group.id) {
             return None;
         }
-        let Some(pane_id) = terminal_panels.get(view_id).copied() else {
-            continue;
-        };
-        if !ordered_panes.insert(pane_id) {
-            return None;
+        let group_order = u32::try_from(group_index).ok()?;
+        for (tab_index, view_id) in group.views.iter().enumerate() {
+            if !seen_views.insert(*view_id) || !panels.contains_key(*view_id) {
+                return None;
+            }
+            let Some(pane_id) = terminal_panels.get(view_id).copied() else {
+                continue;
+            };
+            let tab_order = u32::try_from(tab_index).ok()?;
+            if positions
+                .insert(
+                    pane_id,
+                    PaneLayoutPosition {
+                        group_id: group.id.to_string(),
+                        group_order,
+                        tab_order,
+                        order: global_order,
+                    },
+                )
+                .is_some()
+            {
+                return None;
+            }
+            global_order = global_order.checked_add(1)?;
         }
-        ordered.push(pane_id);
     }
 
-    let live: HashSet<_> = live_panes.iter().copied().collect();
-    if live.len() != live_panes.len()
-        || ordered_panes != live
-        || terminal_panes.len() != live.len()
-    {
+    let live = panes.iter().map(|pane| pane.id).collect::<HashSet<_>>();
+    if live.len() != panes.len() || positions.keys().copied().collect::<HashSet<_>>() != live {
         return None;
     }
-    Some(ordered)
+    if terminal_panels.len() != live.len() {
+        return None;
+    }
+    Some(positions)
 }
 
 fn exact_terminal_pane_id(panel_id: &str, panel: &Map<String, Value>) -> Option<Uuid> {
@@ -85,7 +139,9 @@ fn exact_terminal_pane_id(panel_id: &str, panel: &Map<String, Value>) -> Option<
     let exact_keys: HashSet<_> = ["schema", "kind", "instanceId", "title", "icon", "paneId"]
         .into_iter()
         .collect();
-    if params.len() != exact_keys.len() || params.keys().any(|key| !exact_keys.contains(key.as_str())) {
+    if params.len() != exact_keys.len()
+        || params.keys().any(|key| !exact_keys.contains(key.as_str()))
+    {
         return None;
     }
     if params.get("schema").and_then(Value::as_u64) != Some(1)
@@ -112,7 +168,12 @@ fn non_empty_string(value: &Value) -> Option<&str> {
     }
 }
 
-fn traverse_views<'a>(node: &'a Value, output: &mut Vec<&'a str>) -> Option<()> {
+struct DockGroup<'a> {
+    id: &'a str,
+    views: Vec<&'a str>,
+}
+
+fn traverse_groups<'a>(node: &'a Value, output: &mut Vec<DockGroup<'a>>) -> Option<()> {
     match node.get("type")?.as_str()? {
         "branch" => {
             let children = node.get("data")?.as_array()?;
@@ -120,18 +181,22 @@ fn traverse_views<'a>(node: &'a Value, output: &mut Vec<&'a str>) -> Option<()> 
                 return None;
             }
             for child in children {
-                traverse_views(child, output)?;
+                traverse_groups(child, output)?;
             }
             Some(())
         }
         "leaf" => {
-            let views = node.get("data")?.get("views")?.as_array()?;
+            let data = node.get("data")?.as_object()?;
+            let id = non_empty_string(data.get("id")?)?;
+            let views = data.get("views")?.as_array()?;
             if views.is_empty() {
                 return None;
             }
-            for view in views {
-                output.push(view.as_str()?);
-            }
+            let views = views
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            output.push(DockGroup { id, views });
             Some(())
         }
         _ => None,
@@ -188,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_dockview_uses_depth_first_leaf_and_views_order() {
+    fn mixed_dockview_projects_real_group_tab_and_global_order() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
         let c = Uuid::new_v4();
@@ -206,47 +271,82 @@ mod tests {
                 }
             }),
             serde_json::json!({"type":"branch","data":[
-                {"type":"leaf","data":{"views":["content:explorer:explorer", b_id]}},
+                {"type":"leaf","data":{"id":"group-b","views":["content:explorer:explorer", b_id]}},
                 {"type":"branch","data":[
-                    {"type":"leaf","data":{"views":[a_id]}},
-                    {"type":"leaf","data":{"views":[c_id]}}
+                    {"type":"leaf","data":{"id":"group-a","views":[a_id]}},
+                    {"type":"leaf","data":{"id":"group-c","views":[c_id]}}
                 ]}
             ]}),
         );
-        assert_eq!(pane_order(Some(&layout), &[pane(a), pane(b), pane(c)]), vec![b, a, c]);
+        let positions = pane_layout_positions(Some(&layout), &[pane(a), pane(b), pane(c)]);
+        assert_eq!(
+            positions.get(&b),
+            Some(&PaneLayoutPosition {
+                group_id: "group-b".into(),
+                group_order: 0,
+                tab_order: 1,
+                order: 0,
+            })
+        );
+        assert_eq!(positions.get(&a).unwrap().group_order, 1);
+        assert_eq!(positions.get(&a).unwrap().tab_order, 0);
+        assert_eq!(positions.get(&a).unwrap().order, 1);
+        assert_eq!(positions.get(&c).unwrap().group_order, 2);
+        assert_eq!(positions.get(&c).unwrap().order, 2);
+        assert_eq!(
+            pane_order(Some(&layout), &[pane(a), pane(b), pane(c)]),
+            vec![b, a, c]
+        );
     }
 
     #[test]
-    fn legacy_v2_falls_back_to_daemon_insertion_order() {
+    fn invalid_or_incomplete_layout_uses_explicit_unavailable_fallback() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
-        let legacy = serde_json::json!({"version":2,"pages":[]}).to_string();
-        assert_eq!(pane_order(Some(&legacy), &[pane(a), pane(b)]), vec![a, b]);
+        let a_id = format!("content:terminal:{a}");
+        let incomplete = v3(
+            serde_json::json!({(a_id.clone()):terminal_panel(a)}),
+            serde_json::json!({"type":"leaf","data":{"id":"fabricated-ui-group","views":[a_id]}}),
+        );
+        for raw in [
+            Some(incomplete.as_str()),
+            Some(r#"{"version":2,"pages":[]}"#),
+            None,
+        ] {
+            let positions = pane_layout_positions(raw, &[pane(a), pane(b)]);
+            assert_eq!(
+                positions.get(&a),
+                Some(&PaneLayoutPosition {
+                    group_id: String::new(),
+                    group_order: 0,
+                    tab_order: 0,
+                    order: 0,
+                })
+            );
+            assert_eq!(positions.get(&b).unwrap().group_id, "");
+            assert_eq!(positions.get(&b).unwrap().group_order, 1);
+            assert_eq!(positions.get(&b).unwrap().tab_order, 0);
+            assert_eq!(positions.get(&b).unwrap().order, 1);
+        }
     }
 
     #[test]
-    fn duplicate_terminal_view_falls_back() {
+    fn duplicate_group_or_view_falls_back() {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
         let a_id = format!("content:terminal:{a}");
         let b_id = format!("content:terminal:{b}");
-        let layout = v3(
+        let duplicate = v3(
             serde_json::json!({(a_id.clone()):terminal_panel(a),(b_id.clone()):terminal_panel(b)}),
-            serde_json::json!({"type":"leaf","data":{"views":[b_id.clone(),b_id,a_id]}}),
+            serde_json::json!({"type":"branch","data":[
+                {"type":"leaf","data":{"id":"same","views":[a_id]}},
+                {"type":"leaf","data":{"id":"same","views":[b_id]}}
+            ]}),
         );
-        assert_eq!(pane_order(Some(&layout), &[pane(a), pane(b)]), vec![a, b]);
-    }
-
-    #[test]
-    fn incomplete_terminal_coverage_falls_back() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        let a_id = format!("content:terminal:{a}");
-        let layout = v3(
-            serde_json::json!({(a_id.clone()):terminal_panel(a)}),
-            serde_json::json!({"type":"leaf","data":{"views":[a_id]}}),
-        );
-        assert_eq!(pane_order(Some(&layout), &[pane(a), pane(b)]), vec![a, b]);
+        let positions = pane_layout_positions(Some(&duplicate), &[pane(a), pane(b)]);
+        assert!(positions
+            .values()
+            .all(|position| position.group_id.is_empty()));
     }
 
     #[test]
@@ -259,7 +359,7 @@ mod tests {
         panel["params"]["extra"] = Value::Bool(true);
         let layout = v3(
             serde_json::json!({(a_id.clone()):panel,(b_id.clone()):terminal_panel(b)}),
-            serde_json::json!({"type":"leaf","data":{"views":[b_id,a_id]}}),
+            serde_json::json!({"type":"leaf","data":{"id":"group","views":[b_id,a_id]}}),
         );
         assert_eq!(pane_order(Some(&layout), &[pane(a), pane(b)]), vec![a, b]);
     }

@@ -1,7 +1,8 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use super::license::LicenseService;
 use crate::protocol::{
-    ClientToDaemon, PaneCommandOrigin, PaneConfig, PaneMeta, ReplyResult, SessionMeta,
+    ClientToDaemon, DesktopSelection, PaneCommandOrigin, PaneConfig, PaneMeta,
+    RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseResult, ReplyResult, SessionMeta,
 };
 use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
 use serde::de::DeserializeOwned;
@@ -85,6 +86,31 @@ pub fn remote_get_pane_lease(
     pane_id: String,
 ) -> Result<Option<RemotePaneLeaseStatus>, String> {
     remote_request(&client, json!({ "action": "paneLease", "paneId": pane_id }))
+}
+
+#[tauri::command]
+pub fn remote_reclaim_pane_lease(
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    pane_id: String,
+) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    match client
+        .request_reply(|req| ClientToDaemon::RemotePaneLeaseAdminReclaim {
+            req,
+            request: RemotePaneLeaseAdminReclaimRequest {
+                session_id,
+                pane_id,
+            },
+        })
+        .map_err(to_string)?
+    {
+        ReplyResult::RemotePaneLease(RemotePaneLeaseResult::Reclaimed { .. }) => Ok(()),
+        other => Err(format!(
+            "unexpected daemon response to remote pane lease reclaim: {other:?}"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -176,6 +202,33 @@ pub async fn set_remote_appearance(
             "appearance": appearance,
             "workspaceOrder": workspace_order,
             "workspaceAlerts": workspace_alerts,
+        }),
+    )
+}
+
+#[tauri::command]
+pub async fn set_desktop_selection(
+    client: State<'_, DaemonClient>,
+    workspace_id: Option<String>,
+    pane_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_id = workspace_id
+        .as_deref()
+        .map(parse_uuid)
+        .transpose()
+        .map_err(to_string)?;
+    let pane_id = pane_id
+        .as_deref()
+        .map(parse_uuid)
+        .transpose()
+        .map_err(to_string)?;
+    expect_ok(
+        client.request_reply(|req| ClientToDaemon::SetDesktopSelection {
+            req,
+            selection: DesktopSelection {
+                workspace_id,
+                pane_id,
+            },
         }),
     )
 }

@@ -9,6 +9,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{Arc, LazyLock, Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -47,6 +48,7 @@ pub struct Pane {
     pub(crate) scrollback: Arc<Mutex<ScrollbackRing>>,
     output_generation: u64,
     output_sequence: u64,
+    last_output_at: u64,
 }
 
 impl Pane {
@@ -105,6 +107,7 @@ impl Pane {
                 scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
                 output_generation: 1,
                 output_sequence: 0,
+                last_output_at: 0,
             },
             reader,
         })
@@ -166,11 +169,25 @@ impl Pane {
     pub fn record_output(&mut self, bytes: &[u8]) -> u64 {
         lock_scrollback(&self.scrollback).push(bytes);
         self.output_sequence = self.output_sequence.saturating_add(1);
+        self.last_output_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
         self.output_sequence
+    }
+
+    pub fn last_output_at(&self) -> u64 {
+        self.last_output_at
     }
 
     pub fn output_cursor(&self) -> (u64, u64) {
         (self.output_generation, self.output_sequence)
+    }
+
+    pub(crate) fn assign_output_generation(&mut self, generation: u64) {
+        debug_assert_ne!(generation, 0);
+        self.output_generation = generation;
+        self.output_sequence = 0;
     }
 
     #[cfg(test)]
@@ -193,6 +210,7 @@ impl Pane {
             scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
             output_generation: 1,
             output_sequence: 0,
+            last_output_at: 0,
         }
     }
 }
@@ -711,6 +729,18 @@ mod tests {
         handle.join().expect("kill thread panicked");
 
         assert!(result.expect("kill blocked on child lock").is_ok());
+    }
+
+    #[test]
+    fn record_output_updates_real_timestamp_without_changing_pane_generation() {
+        let mut pane = Pane::for_test(test_config(None), true);
+        let generation = pane.output_cursor().0;
+        assert_eq!(pane.last_output_at(), 0);
+
+        pane.record_output(b"hello");
+
+        assert_eq!(pane.output_cursor(), (generation, 1));
+        assert!(pane.last_output_at() > 0);
     }
 
     fn test_config(shell: Option<&str>) -> PaneConfig {
