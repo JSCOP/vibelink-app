@@ -113,7 +113,7 @@ async function reloadSession(sessionId: string): Promise<void> {
     const state = useWorkspaceStore.getState()
     await state.refreshSessions()
     if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-      await useWorkspaceStore.getState().attachSession(sessionId)
+      await useWorkspaceStore.getState().refreshAttachedSession(sessionId)
     }
   } catch (caught) {
     useWorkspaceStore.getState().setError(String(caught))

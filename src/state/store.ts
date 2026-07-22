@@ -108,6 +108,7 @@ type WorkspaceState = {
   refreshSessions: () => Promise<void>
   openSession: (sessionId: string) => Promise<AttachedSession>
   attachSession: (sessionId: string, requestEpoch?: number) => Promise<AttachedSession>
+  refreshAttachedSession: (sessionId: string) => Promise<AttachedSession | null>
   createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
   renameSession: (sessionId: string, name: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
@@ -314,6 +315,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if (workspaceSessionEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return attached
       get().applyBoardSnapshot(sessionId, migratedJson)
     }
+    return attached
+  },
+
+  refreshAttachedSession: async (sessionId: string) => {
+    const epoch = workspaceSessionEpoch
+    if (workspaceSessionReadyEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return null
+    const attached = await invoke<AttachedSession>('attach_session', { sessionId })
+    if (workspaceSessionEpoch !== epoch || workspaceSessionReadyEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return null
+    const refreshedPanes = Object.fromEntries(attached.panes.map((pane) => [pane.id, pane]))
+    const refreshedLayoutJson = serializeWorkspaceLayoutState(normalizeWorkspaceLayoutState(attached.layoutJson))
+    set((state) => {
+      if (workspaceSessionEpoch !== epoch || workspaceSessionReadyEpoch !== epoch || workspaceSessionTargetId !== sessionId || state.activeSessionId !== sessionId) return state
+      const panesUnchanged = paneRecordsEqual(state.panes, refreshedPanes)
+      const panes = panesUnchanged ? state.panes : refreshedPanes
+      const activePaneId = state.activePaneId && panes[state.activePaneId]?.alive ? state.activePaneId : undefined
+      if (panesUnchanged && state.layoutJson === refreshedLayoutJson && activePaneId === state.activePaneId) return state
+      return {
+        panes,
+        activePaneId,
+        layoutJson: refreshedLayoutJson,
+        paneCompletionHighlights: panesUnchanged
+          ? state.paneCompletionHighlights
+          : reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
+        paneReviewMarkers: panesUnchanged
+          ? state.paneReviewMarkers
+          : reconcilePaneReviewMarkers(state.paneReviewMarkers, sessionId, panes),
+      }
+    })
     return attached
   },
 
@@ -1057,6 +1086,36 @@ function withoutPaneKeys<T>(record: Record<string, T>, paneIds: readonly string[
     delete next[paneId]
   }
   return next ?? record
+}
+
+function paneRecordsEqual(left: Record<string, PaneMeta>, right: Record<string, PaneMeta>): boolean {
+  const paneIds = Object.keys(left)
+  if (paneIds.length !== Object.keys(right).length) return false
+  for (const paneId of paneIds) {
+    const leftPane = left[paneId]
+    const rightPane = right[paneId]
+    if (!rightPane || leftPane.id !== rightPane.id || leftPane.alive !== rightPane.alive) return false
+    const leftConfig = leftPane.config
+    const rightConfig = rightPane.config
+    if (leftConfig.paneId !== rightConfig.paneId
+      || leftConfig.shell !== rightConfig.shell
+      || leftConfig.cwd !== rightConfig.cwd
+      || leftConfig.title !== rightConfig.title
+      || leftConfig.icon !== rightConfig.icon
+      || leftConfig.profileId !== rightConfig.profileId
+      || leftConfig.role !== rightConfig.role
+      || leftConfig.cols !== rightConfig.cols
+      || leftConfig.rows !== rightConfig.rows
+      || leftConfig.args.length !== rightConfig.args.length
+      || leftConfig.env.length !== rightConfig.env.length) return false
+    for (let index = 0; index < leftConfig.args.length; index += 1) {
+      if (leftConfig.args[index] !== rightConfig.args[index]) return false
+    }
+    for (let index = 0; index < leftConfig.env.length; index += 1) {
+      if (leftConfig.env[index][0] !== rightConfig.env[index]?.[0] || leftConfig.env[index][1] !== rightConfig.env[index]?.[1]) return false
+    }
+  }
+  return true
 }
 
 function reconcilePaneCompletionHighlights(

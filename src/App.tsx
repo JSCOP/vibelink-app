@@ -63,7 +63,6 @@ function hermesWarmupStatus(commandOverride: string | null): Promise<HermesRunti
 
 function App() {
   const contentActionsRef = useRef<WorkspaceContentActions | null>(null)
-  const allowWindowCloseRef = useRef(false)
   const windowClosePendingRef = useRef(false)
   const dirtyPromptActiveRef = useRef(false)
   const dirtyPromptQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -395,19 +394,21 @@ function App() {
     const appWindow = getCurrentWindow()
     let disposed = false
     let unlisten: (() => void) | undefined
-    void appWindow.onCloseRequested((event) => {
-      if (allowWindowCloseRef.current) return
-      event.preventDefault()
-      if (windowClosePendingRef.current) return
+    void appWindow.onCloseRequested(async (event) => {
+      if (windowClosePendingRef.current) {
+        event.preventDefault()
+        return
+      }
       windowClosePendingRef.current = true
-      void prepareDirtySessions(useWorkspaceStore.getState().sessions.map((session) => session.id), 'Close VibeLink?')
-        .then((ready) => {
-          if (!ready || disposed) return
-          allowWindowCloseRef.current = true
-          return appWindow.close()
-        })
-        .catch((caught) => useWorkspaceStore.getState().setError(String(caught)))
-        .finally(() => { windowClosePendingRef.current = false })
+      try {
+        const ready = await prepareDirtySessions(useWorkspaceStore.getState().sessions.map((session) => session.id), 'Close VibeLink?')
+        if (!ready || disposed) event.preventDefault()
+      } catch (caught) {
+        event.preventDefault()
+        useWorkspaceStore.getState().setError(String(caught))
+      } finally {
+        windowClosePendingRef.current = false
+      }
     }).then((dispose) => { if (disposed) dispose(); else unlisten = dispose })
     return () => { disposed = true; unlisten?.() }
   }, [prepareDirtySessions])
