@@ -1,9 +1,10 @@
 import { useCallback, useMemo, useState } from 'react'
-import { MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react'
+import { Bot, MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { useWorkspaceStore } from '../../state/store'
 import {
+  agentConversationLabel,
   agentSessionIsUnread,
   agentSessionLiveState,
   agentSessionTitle,
@@ -11,6 +12,7 @@ import {
   formatAgentSessionUpdatedAt,
   loadAgentSessionViews,
   saveAgentSessionViews,
+  visibleAgentConversations,
   visibleAgentSessions,
 } from './agentSessionsModel'
 import { useHermesSessionController } from './useHermesSessionController'
@@ -29,6 +31,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
   const [refreshing, setRefreshing] = useState(false)
   const [views, setViews] = useState<Record<string, Record<string, number>>>(() => loadAgentSessionViews(typeof window === 'undefined' ? null : window.localStorage))
   const shownSessions = useMemo(() => visibleAgentSessions(controller.sessions, search), [controller.sessions, search])
+  const shownConversations = useMemo(() => visibleAgentConversations(controller.conversations, search), [controller.conversations, search])
   const preferredSessionId = selection.workspaceId === controller.workspaceId ? selection.sessionId : null
   const selectedSession = controller.sessions.find((session) => session.id === preferredSessionId)
     ?? controller.sessions.find((session) => session.id === controller.currentSessionId)
@@ -155,44 +158,68 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
       onCollapse={onCollapse}
       collapsed={false}
       ariaLabel="Agent Sessions"
-      state={controller.workspaceId && controller.sessions.length === 0
-        ? { kind: refreshing ? 'loading' : 'empty', message: refreshing ? 'Loading agent sessions…' : 'No recent agent sessions' }
+      state={controller.workspaceId && controller.sessions.length === 0 && shownConversations.length === 0
+        ? { kind: refreshing || controller.conversationsLoading ? 'loading' : 'empty', message: refreshing || controller.conversationsLoading ? 'Loading agent sessions…' : 'No agent sessions yet' }
         : null}
       className="agent-sessions-sidebar"
     >
-      <div className="agent-session-list" role="listbox" aria-label="Recent agent sessions">
-        {shownSessions.map((session) => {
-          const isCurrent = session.id === controller.currentSessionId
-          const isSelected = session.id === selectedSessionId
-          const unread = agentSessionIsUnread(session, workspaceViews[session.id])
-          return (
-            <button
-              key={session.id}
-              type="button"
-              role="option"
-              aria-selected={isSelected}
-              className={`agent-session-row${isSelected ? ' selected' : ''}${unread ? ' unread' : ''}`}
-              onClick={() => selectSession(session.id)}
-              onDoubleClick={() => { selectSession(session.id); void openSelectedSession(session.id, isCurrent) }}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter') return
-                event.preventDefault()
-                void openSelectedSession(session.id, isCurrent)
-              }}
-            >
-              <span className="agent-session-row-title">
-                {isCurrent ? <span role="status" className={`agent-session-status agent-session-status-${liveState.tone}${liveState.pulse ? ' pulsing' : ''}`} aria-label={liveState.label} title={liveState.label} /> : null}
-                <strong>{agentSessionTitle(session)}</strong>
-                {isCurrent ? <small>Current</small> : null}
-              </span>
-              <span className="agent-session-row-meta">
-                <span title={session.cwd ?? undefined}>{compactAgentSessionCwd(session.cwd, controller.workspaceFolder)}</span>
-                <time dateTime={session.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(session.updatedAt)}</time>
-              </span>
-            </button>
-          )
-        })}
-      </div>
+      {shownSessions.length > 0 ? (
+        <>
+          <div className="agent-session-group-label">Live sessions</div>
+          <div className="agent-session-list" role="listbox" aria-label="Live agent sessions">
+            {shownSessions.map((session) => {
+              const isCurrent = session.id === controller.currentSessionId
+              const isSelected = session.id === selectedSessionId
+              const unread = agentSessionIsUnread(session, workspaceViews[session.id])
+              return (
+                <button
+                  key={session.id}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  className={`agent-session-row${isSelected ? ' selected' : ''}${unread ? ' unread' : ''}`}
+                  onClick={() => selectSession(session.id)}
+                  onDoubleClick={() => { selectSession(session.id); void openSelectedSession(session.id, isCurrent) }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return
+                    event.preventDefault()
+                    void openSelectedSession(session.id, isCurrent)
+                  }}
+                >
+                  <span className="agent-session-row-title">
+                    {isCurrent ? <span role="status" className={`agent-session-status agent-session-status-${liveState.tone}${liveState.pulse ? ' pulsing' : ''}`} aria-label={liveState.label} title={liveState.label} /> : null}
+                    <strong>{agentSessionTitle(session)}</strong>
+                    {isCurrent ? <small>Current</small> : null}
+                  </span>
+                  <span className="agent-session-row-meta">
+                    <span title={session.cwd ?? undefined}>{compactAgentSessionCwd(session.cwd, controller.workspaceFolder)}</span>
+                    <time dateTime={session.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(session.updatedAt)}</time>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </>
+      ) : null}
+      {shownConversations.length > 0 ? (
+        <>
+          <div className="agent-session-group-label">Recent conversations</div>
+          <div className="agent-session-list" role="list" aria-label="Recent agent conversations">
+            {shownConversations.map((conversation) => (
+              <div key={`${conversation.agent}:${conversation.path}`} className="agent-session-row agent-conversation-row" role="listitem" title={conversation.path}>
+                <span className="agent-session-row-title">
+                  <Bot size={12} aria-hidden="true" />
+                  <strong>{conversation.title}</strong>
+                </span>
+                <span className="agent-session-row-meta">
+                  <span className="agent-conversation-agent">{agentConversationLabel(conversation.agent)}</span>
+                  <time dateTime={conversation.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(conversation.updatedAt)}</time>
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
     </WorkspaceSidebarPanelShell>
   )
 

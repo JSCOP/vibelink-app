@@ -114,6 +114,33 @@
   flex: 0 0 auto;
 }
 
+.agent-session-group-label {
+  color: var(--vibelink-muted);
+  font: 600 10px/1 var(--vibelink-sans);
+  letter-spacing: 0.5px;
+  padding: 10px 4px 4px;
+  text-transform: uppercase;
+}
+
+.agent-session-list + .agent-session-group-label {
+  border-top: 1px solid var(--vibelink-border);
+  margin-top: 6px;
+}
+
+.agent-conversation-row {
+  cursor: default;
+}
+
+.agent-conversation-row .agent-session-row-title svg {
+  color: var(--vibelink-muted);
+  flex: 0 0 auto;
+}
+
+.agent-conversation-agent {
+  color: var(--vibelink-accent);
+  flex: 0 0 auto;
+}
+
 .agent-session-status {
   background: var(--vibelink-muted);
   border-radius: 50%;

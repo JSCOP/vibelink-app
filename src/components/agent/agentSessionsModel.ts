@@ -1,4 +1,5 @@
 import type { HermesSessionInfo, HermesStatus, PendingPermission } from '../../state/hermes'
+import type { AgentConversationInfo } from '../../ipc/agentHistory'
 
 const VIEWED_STORAGE_KEY = 'vibelink:agentSessionViews'
 const VIEWED_STORAGE_VERSION = 1
@@ -91,4 +92,22 @@ export function agentSessionIsUnread(session: HermesSessionInfo, viewedAt: numbe
   if (!session.updatedAt) return false
   const updatedAt = Date.parse(session.updatedAt)
   return Number.isFinite(updatedAt) && updatedAt > (viewedAt ?? 0)
+}
+
+const AGENT_LABEL_BY_ID: Record<string, string> = {
+  omp: 'Oh My Pi',
+  codex: 'Codex',
+  claude: 'Claude Code',
+  opencode: 'OpenCode',
+}
+
+export function agentConversationLabel(agent: string): string {
+  return AGENT_LABEL_BY_ID[agent] ?? agent
+}
+
+export function visibleAgentConversations(conversations: AgentConversationInfo[], search: string): AgentConversationInfo[] {
+  const needle = search.trim().toLocaleLowerCase()
+  if (!needle) return conversations
+  return conversations.filter((conversation) =>
+    `${conversation.title}\n${conversation.agent}\n${conversation.cwd ?? ''}`.toLocaleLowerCase().includes(needle))
 }

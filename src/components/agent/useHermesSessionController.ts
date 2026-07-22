@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   hermesNewSession,
   hermesRefreshSessions,
@@ -6,11 +6,13 @@ import {
   startHermesAgent,
   type StartHermesAgentInput,
 } from '../../ipc/hermes'
+import { listAgentConversations, type AgentConversationInfo } from '../../ipc/agentHistory'
 import type { HermesSessionInfo, HermesStatus, PendingPermission } from '../../state/hermes'
 import { useWorkspaceStore } from '../../state/store'
 
 const EMPTY_SESSIONS: HermesSessionInfo[] = []
 const EMPTY_PERMISSIONS: PendingPermission[] = []
+const EMPTY_CONVERSATIONS: AgentConversationInfo[] = []
 
 export type HermesSessionController = {
   workspaceId: string | null
@@ -22,6 +24,8 @@ export type HermesSessionController = {
   currentSessionId: string | null
   sessions: HermesSessionInfo[]
   permissions: PendingPermission[]
+  conversations: AgentConversationInfo[]
+  conversationsLoading: boolean
   actionsDisabled: boolean
   refreshSessions: () => Promise<boolean>
   newSession: () => Promise<string | null>
@@ -45,13 +49,47 @@ export function useHermesSessionController(): HermesSessionController {
     return [{ id: currentSessionId, title: null, updatedAt: null, cwd: workspaceFolder }, ...nativeSessions]
   }, [currentSessionId, nativeSessions, workspaceFolder])
 
+  const [conversations, setConversations] = useState<AgentConversationInfo[]>(EMPTY_CONVERSATIONS)
+  const [conversationsLoading, setConversationsLoading] = useState(false)
+
+  // Load past agent conversations (omp / Codex / Claude on-disk transcripts) for
+  // the active workspace so the panel shows a real history of prior sessions by
+  // title, not just the single live ACP session. Re-runs when the workspace
+  // changes or a new session is started/resumed (currentSessionId shifts).
+  useEffect(() => {
+    let cancelled = false
+    if (!workspaceFolder) {
+      // Resolve asynchronously so the effect body performs no synchronous state
+      // update (which would trigger a cascading re-render).
+      void Promise.resolve().then(() => { if (!cancelled) setConversations(EMPTY_CONVERSATIONS) })
+      return () => { cancelled = true }
+    }
+    void Promise.resolve()
+      .then(() => { if (!cancelled) setConversationsLoading(true) })
+      .then(() => listAgentConversations(workspaceFolder))
+      .then((list) => { if (!cancelled) setConversations(list) })
+      .finally(() => { if (!cancelled) setConversationsLoading(false) })
+    return () => { cancelled = true }
+  }, [workspaceFolder, currentSessionId])
+
   const startInput = useMemo<StartHermesAgentInput | null>(() => workspaceId ? ({
     sessionId: workspaceId,
     commandOverride,
     workspaceFolder,
   }) : null, [commandOverride, workspaceFolder, workspaceId])
 
+  const reloadConversations = useCallback(async () => {
+    if (!workspaceFolder) return
+    setConversationsLoading(true)
+    try {
+      setConversations(await listAgentConversations(workspaceFolder))
+    } finally {
+      setConversationsLoading(false)
+    }
+  }, [workspaceFolder])
+
   const refreshSessions = useCallback(async () => {
+    void reloadConversations()
     if (!startInput) return false
     try {
       if (status === 'idle' || status === 'error') await startHermesAgent(startInput)
@@ -61,7 +99,7 @@ export function useHermesSessionController(): HermesSessionController {
       setError(String(reason))
       return false
     }
-  }, [setError, startInput, status])
+  }, [reloadConversations, setError, startInput, status])
 
   const newSession = useCallback(async () => {
     if (!startInput || status === 'busy' || status === 'starting') return null
@@ -95,6 +133,8 @@ export function useHermesSessionController(): HermesSessionController {
     currentSessionId,
     sessions,
     permissions,
+    conversations,
+    conversationsLoading,
     actionsDisabled: status === 'busy' || status === 'starting',
     refreshSessions,
     newSession,

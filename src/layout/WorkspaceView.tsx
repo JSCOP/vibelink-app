@@ -1415,6 +1415,21 @@ export function WorkspaceView({
           )
         })
       }),
+      ...(['left', 'right'] as const).flatMap((position) => {
+        // Collapsing/expanding a structural edge sidebar resizes the center grid
+        // but does NOT emit onDidLayoutChange, so the terminal's absolutely
+        // positioned Dockview render overlay is never repositioned to the freed
+        // width. The pane then fits to the stale overlay (one toggle behind) and
+        // only corrects on a manual click. Route edge collapse through the same
+        // settle pipeline every other layout mutation uses: retry overlay
+        // reposition until it matches the owning group, then reflow + sync PTY.
+        const edge = event.api.getEdgeGroup(position)
+        if (!edge) return []
+        return [edge.onDidCollapsedChange(() => {
+          if (suppressPanelRemovalRef.current) return
+          void settleLayout({ syncPty: true })
+        })]
+      }),
     ]
     requestAnimationFrame(() => { void loadActiveSessionLayout() })
   }, [addContentPanel, loadActiveSessionLayout, onApiReady, ownsLayout, persistLayoutSoon, requestLiveWorkspaceResize, settleLayout, syncChromeState])

@@ -510,6 +510,14 @@
   overflow: auto;
 }
 
+/* Monaco-colorized diff line content. The colorizer emits inline color spans;
+   keep the wrapper inline so it flows inside react-diff-viewer's pre cell and
+   inherits its whitespace handling. */
+.git-diff-code {
+  display: inline;
+  white-space: inherit;
+}
+
 .task-diff-empty,
 .kanban-empty,
 .kanban-crash-panel {

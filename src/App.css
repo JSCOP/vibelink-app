@@ -5963,6 +5963,10 @@ button.git-window-primary-action,
   padding: 0;
   position: relative;
   width: 38px;
+  /* Dockview's vertical tab strip sets writing-mode: vertical-rl on the tabs
+     container; without resetting it here the rail icon, the "99+" change badge,
+     and the agent status dot inherit vertical text and render rotated. */
+  writing-mode: horizontal-tb;
 }
 
 .workspace-edge-rail-tab::before {

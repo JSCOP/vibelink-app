@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
       { id: 'no-time-acp', title: null, updatedAt: null, cwd: null },
     ],
     permissions: [{ requestId: 1, title: 'Allow edit', toolKind: 'edit', options: [] }],
+    conversations: [] as { id: string; title: string; agent: string; updatedAt: string | null; cwd: string | null; path: string }[],
+    conversationsLoading: false,
     actionsDisabled: false,
     refreshSessions: vi.fn(async () => true),
     newSession: vi.fn(async () => 'new-acp'),

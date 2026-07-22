@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react'
 import ReactDiffViewer from 'react-diff-viewer-continued'
 import type { ChangedFile, FileContents } from '../../ipc/types'
+import { buildDiffHighlightMap, type DiffHighlightMap } from './diffSyntaxHighlight'
 
 export type DiffPaneProps = {
   files: ChangedFile[]
@@ -21,6 +22,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
   const [listWidth, setListWidth] = useState(260)
   const [contentWidth, setContentWidth] = useState<number | null>(null)
   const contentRef = useRef<HTMLElement | null>(null)
+  const [highlightMap, setHighlightMap] = useState<DiffHighlightMap | null>(null)
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -57,6 +59,26 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
       new: contents.new.includes('\r') ? contents.new.replace(/\r\n?/g, '\n') : contents.new,
     }
   }, [contents])
+
+  useEffect(() => {
+    let cancelled = false
+    const old = normalizedContents && !normalizedContents.binary ? normalizedContents.old : ''
+    const next = normalizedContents && !normalizedContents.binary ? normalizedContents.new : ''
+    void buildDiffHighlightMap(selectedPath, old, next).then((map) => {
+      if (!cancelled) setHighlightMap(map)
+    })
+    return () => { cancelled = true }
+  }, [normalizedContents, selectedPath])
+
+  const renderContent = useMemo(() => {
+    if (!highlightMap) return undefined
+    return (source: string): ReactElement => {
+      const html = highlightMap.get(source)
+      return html !== undefined
+        ? <span className="git-diff-code" dangerouslySetInnerHTML={{ __html: html }} />
+        : <span className="git-diff-code">{source}</span>
+    }
+  }, [highlightMap])
 
   const effectiveSplitView = splitView && (contentWidth === null || contentWidth >= MIN_SPLIT_DIFF_WIDTH)
 
@@ -104,7 +126,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
         ) : null}
         {noContents ? <div className="task-diff-empty git-diff-empty">No diff available for this file.</div> : null}
         {!loading && normalizedContents && !normalizedContents.binary && !noDifferences ? (
-          <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} />
+          <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} renderContent={renderContent} />
         ) : null}
       </main>
     </div>

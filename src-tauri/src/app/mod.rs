@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod agent_history;
 pub mod android_device_lab;
 pub mod board;
 pub mod browser;
@@ -109,6 +110,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             agents::agent_cli_status,
+            agent_history::agent_conversations_list,
             board::board_read,
             board::board_write,
             board::board_task_create,
