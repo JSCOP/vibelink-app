@@ -112,11 +112,23 @@ describe('workspaceLayoutModel v3', () => {
     expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-a'])).toBe(false)
   })
 
-  it('plans a row-major native Dockview terminal arrangement', () => {
+  it('places later rows below the pane in the same column', () => {
     expect(planTerminalArrangement(['a', 'b', 'c', 'd'], { cols: 2, rows: 2 })).toEqual([
       { panelId: 'b', referencePanelId: 'a', position: 'right' },
       { panelId: 'c', referencePanelId: 'a', position: 'bottom' },
+      { panelId: 'd', referencePanelId: 'b', position: 'bottom' },
+    ])
+  })
+
+  it('plans a flat 4x2 grid instead of nesting the second row under column one', () => {
+    expect(planTerminalArrangement(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], { cols: 4, rows: 2 })).toEqual([
+      { panelId: 'b', referencePanelId: 'a', position: 'right' },
+      { panelId: 'c', referencePanelId: 'b', position: 'right' },
       { panelId: 'd', referencePanelId: 'c', position: 'right' },
+      { panelId: 'e', referencePanelId: 'a', position: 'bottom' },
+      { panelId: 'f', referencePanelId: 'b', position: 'bottom' },
+      { panelId: 'g', referencePanelId: 'c', position: 'bottom' },
+      { panelId: 'h', referencePanelId: 'd', position: 'bottom' },
     ])
   })
 })

@@ -838,6 +838,7 @@ export function WorkspaceView({
   const arrangeTerminals = useCallback(async (requestedGrid?: GridSize | null, persist = true, owner?: WorkspaceLayoutOwner) => {
     const api = owner?.api ?? apiRef.current
     if (!api || (owner && !ownsLayout(owner))) return
+    const activePanelId = api.activePanel?.id ?? null
     const terminalIds = paneIdsInReadingOrder(
       api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').map((panel) => panel.id),
       getContentRect,
@@ -849,13 +850,14 @@ export function WorkspaceView({
       const anchor = api.getPanel(terminalIds[0])
       if (!anchor) return
       if (anchor.group.panels.some((panel) => parseWorkspaceContentParams(panel.params)?.kind !== 'terminal')) {
-        anchor.api.moveTo({ group: anchor.group, position: 'right' })
+        anchor.api.moveTo({ group: anchor.group, position: 'right', skipSetActive: true })
       }
       for (const step of planTerminalArrangement(terminalIds, grid)) {
         const panel = api.getPanel(step.panelId)
         const reference = api.getPanel(step.referencePanelId)
-        if (panel && reference) panel.api.moveTo({ group: reference.group, position: step.position })
+        if (panel && reference) panel.api.moveTo({ group: reference.group, position: step.position, skipSetActive: true })
       }
+      if (activePanelId) api.getPanel(activePanelId)?.api.setActive()
     })
     if (owner && !ownsLayout(owner)) return
     await settleLayout({ syncPty: true }, owner)
@@ -885,9 +887,11 @@ export function WorkspaceView({
       for (const pane of pending) pendingTerminalPaneIdsRef.current.add(pane.id)
       const pendingPanelIds: string[] = []
       const spawnedPaneIds: string[] = []
-      let lastPanelId = parseWorkspaceContentParams(api.activePanel?.params)?.kind === 'terminal'
-        ? api.activePanel?.id ?? ''
-        : api.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')?.id ?? ''
+      const launchGroup = request.targetGroupId
+        ? api.groups.find((group) => group.id === request.targetGroupId)
+        : api.activeGroup
+      const restorePanelId = launchGroup?.activePanel?.id ?? api.activePanel?.id ?? ''
+      let createdPanelId = ''
       let committed = false
       try {
         for (const pane of pending) {
@@ -923,15 +927,16 @@ export function WorkspaceView({
             const params = createTerminalContentParams(spawned)
             panel.update({ params })
             panel.api.setTitle(params.title)
-            lastPanelId = panel.id
+            createdPanelId = panel.id
           }
         }
         if (!ownsLayout(owner)) return ''
-        if (lastPanelId) activateContent(lastPanelId)
+        const activationPanelId = restorePanelId && api.getPanel(restorePanelId) ? restorePanelId : createdPanelId
+        if (activationPanelId) activateContent(activationPanelId)
         reflowTerminalsAfterLayout({ syncPty: true })
         persistLayoutSoon()
         committed = true
-        return lastPanelId
+        return createdPanelId || restorePanelId
       } catch (error) {
         if (ownsLayout(owner)) useWorkspaceStore.getState().setError(String(error))
         return ''

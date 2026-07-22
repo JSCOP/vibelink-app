@@ -152,21 +152,22 @@ export type TerminalArrangementStep = {
 
 /**
  * Plans a row-major terminal grid using Dockview's native panel movement.
- * Moving only terminal panels lets Dockview retain every non-terminal tab
- * group and its active view while empty terminal-only groups collapse.
+ * The first row is built horizontally; every later pane is placed below the
+ * pane in the same column. Moving only terminal panels lets Dockview retain
+ * every non-terminal tab group while empty terminal-only groups collapse.
  */
 export function planTerminalArrangement(panelIds: readonly string[], grid: GridSize): TerminalArrangementStep[] {
   if (grid.cols <= 0 || grid.rows <= 0) return []
   const steps: TerminalArrangementStep[] = []
   for (let index = 1; index < panelIds.length; index += 1) {
-    const col = index % grid.cols
-    const referenceIndex = col === 0 ? index - grid.cols : index - 1
+    const row = Math.floor(index / grid.cols)
+    const referenceIndex = row === 0 ? index - 1 : index - grid.cols
     const referencePanelId = panelIds[referenceIndex]
     if (!referencePanelId) continue
     steps.push({
       panelId: panelIds[index],
       referencePanelId,
-      position: col === 0 ? 'bottom' : 'right',
+      position: row === 0 ? 'right' : 'bottom',
     })
   }
   return steps
