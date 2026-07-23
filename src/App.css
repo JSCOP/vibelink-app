@@ -5887,9 +5887,17 @@ button.git-window-primary-action,
   overflow: auto;
 }
 
-/* Direct panel content (Explorer window, Git window, etc.) fills the body so
-   its own background reaches the bottom instead of stopping at content height. */
+/* Flex children keep their natural height by default (flex-shrink:0) so a tall
+   change list or session list scrolls the body instead of compressing the
+   commit box / branch row / section labels into each other. The one region
+   that should absorb remaining space and scroll internally opts in per panel. */
 .workspace-sidebar-panel-body > * {
+  flex: 0 0 auto;
+}
+
+/* A single full-height content wrapper (Explorer/Git window) fills the body so
+   its own background reaches the bottom instead of stopping at content height. */
+.workspace-sidebar-panel-body > :only-child {
   flex: 1 1 auto;
   min-height: 0;
 }
