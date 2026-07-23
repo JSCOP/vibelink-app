@@ -138,7 +138,7 @@ describe('EditorContentPanel', () => {
     renderEditor()
     const editor = await screen.findByLabelText('Fake Monaco')
     await waitFor(() => expect(latestSurfaceProps?.language).toBe('typescript'))
-    expect(latestSurfaceProps?.options).toMatchObject({ wordWrap: 'on', minimap: { enabled: false }, renderWhitespace: 'selection' })
+    expect(latestSurfaceProps?.options).toMatchObject({ wordWrap: 'on', minimap: { enabled: false }, renderWhitespace: 'selection', disableLayerHinting: true })
     expect(screen.getByText('Ln 3, Col 7')).toBeTruthy()
     expect(screen.getByText('Spaces: 2')).toBeTruthy()
 

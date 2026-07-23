@@ -321,6 +321,7 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
               keepCurrentModel
               options={{
                 automaticLayout: true,
+                disableLayerHinting: true,
                 minimap: { enabled: editorMinimap },
                 scrollBeyondLastLine: false,
                 wordWrap: editorWordWrap ? 'on' : 'off',
