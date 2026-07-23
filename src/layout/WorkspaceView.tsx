@@ -1795,6 +1795,34 @@ async function runKeybindingAction(
     return null
   }
   const activePaneId = activeTerminalPaneId(content)
+  // Directional focus / move / tab-cycle operate on the ACTIVE terminal window's
+  // inner panes when a terminal window is focused (panes live in a nested
+  // Dockview, not the outer api). Otherwise they operate on outer panels.
+  const terminalWindowNavContext = (): { panelIds: string[]; activeId: string; api: DockviewApi; activate: (id: string) => void } => {
+    if (content?.kind === 'terminalWindow') {
+      const handle = getTerminalWindow(content.instanceId)
+      const innerApi = handle?.getInnerApi()
+      if (innerApi) {
+        const activePaneId = useWorkspaceStore.getState().activePaneId
+        const activeInnerId = activePaneId && handle?.paneIds().includes(activePaneId)
+          ? workspaceContentPanelId({ kind: 'terminal', instanceId: activePaneId })
+          : innerApi.activePanel?.id ?? ''
+        return {
+          panelIds: innerApi.panels.map((panel) => panel.id),
+          activeId: activeInnerId,
+          api: innerApi,
+          activate: (id) => {
+            const panel = innerApi.getPanel(id)
+            if (!panel) return
+            panel.api.setActive()
+            const paneContent = parseWorkspaceContentParams(panel.params)
+            if (paneContent?.kind === 'terminal') TerminalManager.focus(paneContent.paneId)
+          },
+        }
+      }
+    }
+    return { panelIds: api.panels.map((panel) => panel.id), activeId: active.id, api, activate: (id) => actions.activateContent(id) }
+  }
   switch (action) {
     case 'splitRight':
       if (activePaneId) await actions.splitTerminal(activePaneId, 'right')
@@ -1823,11 +1851,13 @@ async function runKeybindingAction(
       return
     case 'nextTab':
     case 'previousTab': {
-      const ordered = paneIdsInReadingOrder(api.panels.map((panel) => panel.id), getContentRect)
-      const index = ordered.indexOf(active.id)
+      // Inside a terminal window, cycle its panes; otherwise cycle outer panels.
+      const nav = terminalWindowNavContext()
+      const ordered = paneIdsInReadingOrder(nav.panelIds, getContentRect)
+      const index = ordered.indexOf(nav.activeId)
       const targetIndex = action === 'nextTab' ? index + 1 : index - 1
       const target = index >= 0 && targetIndex >= 0 && targetIndex < ordered.length ? ordered[targetIndex] : undefined
-      if (target) actions.activateContent(target)
+      if (target) nav.activate(target)
       return
     }
     case 'focusLeft':
@@ -1835,8 +1865,9 @@ async function runKeybindingAction(
     case 'focusUp':
     case 'focusDown': {
       const direction = directionForAction(action)
-      const target = direction ? nearestPaneIdInDirection(active.id, api.panels.map((panel) => panel.id), direction, getContentRect) : null
-      if (target) actions.activateContent(target)
+      const nav = terminalWindowNavContext()
+      const target = direction ? nearestPaneIdInDirection(nav.activeId, nav.panelIds, direction, getContentRect) : null
+      if (target) nav.activate(target)
       return
     }
     case 'moveLeft':
@@ -1844,11 +1875,14 @@ async function runKeybindingAction(
     case 'moveUp':
     case 'moveDown': {
       const direction = directionForAction(action)
-      const targetId = direction ? nearestPaneIdInDirection(active.id, api.panels.map((panel) => panel.id), direction, getContentRect) : null
-      const target = targetId ? api.getPanel(targetId) : undefined
-      if (!target) return
-      active.api.moveTo({ group: target.group, position: 'center' })
-      actions.activateContent(active.id)
+      const nav = terminalWindowNavContext()
+      const targetId = direction ? nearestPaneIdInDirection(nav.activeId, nav.panelIds, direction, getContentRect) : null
+      const moveApi = nav.api
+      const source = moveApi.getPanel(nav.activeId)
+      const target = targetId ? moveApi.getPanel(targetId) : undefined
+      if (!source || !target) return
+      source.api.moveTo({ group: target.group, position: 'center' })
+      nav.activate(nav.activeId)
       return
     }
     case 'copyTerminalContents':

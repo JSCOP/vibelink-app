@@ -205,6 +205,14 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     return () => { dims.dispose(); vis.dispose() }
   }, [outerApi, settleInner])
 
+  // Hiding/showing pane title bars collapses the inner tab strip via CSS, which
+  // does NOT emit a Dockview layout event, so the pane's absolutely-positioned
+  // render overlay stays one toggle behind and the terminal fits to the stale
+  // (shorter) height. Re-settle explicitly on the toggle.
+  useEffect(() => {
+    void settleInner()
+  }, [settleInner, titlesHidden])
+
   useEffect(() => () => {
     for (const disposable of innerDisposablesRef.current) disposable.dispose()
     innerDisposablesRef.current = []
