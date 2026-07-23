@@ -12,6 +12,51 @@ use crate::dedicated_cli::browser_cdp::{
     BrowserPageScale, BrowserPointerInput,
 };
 
+#[cfg(windows)]
+fn append_resolved_renderer_argument(arguments: &str) -> String {
+    append_software_renderer_argument(
+        arguments,
+        std::env::var("VIBELINK_WEBVIEW_RENDERER_RESOLVED").as_deref() == Ok("software"),
+    )
+}
+
+#[cfg(windows)]
+fn append_software_renderer_argument(arguments: &str, software: bool) -> String {
+    let trimmed = arguments.trim();
+    if !software || trimmed.split_whitespace().any(|item| item == "--disable-gpu") {
+        return trimmed.to_string();
+    }
+    if trimmed.is_empty() {
+        "--disable-gpu".to_string()
+    } else {
+        format!("{trimmed} --disable-gpu")
+    }
+}
+
+#[cfg(all(test, windows))]
+mod renderer_argument_tests {
+    use super::append_software_renderer_argument;
+
+    #[test]
+    fn child_webview_inherits_software_renderer_without_losing_existing_flags() {
+        assert_eq!(
+            append_software_renderer_argument("--remote-debugging-port=9333", true),
+            "--remote-debugging-port=9333 --disable-gpu"
+        );
+        assert_eq!(
+            append_software_renderer_argument(
+                "--remote-debugging-port=9333 --disable-gpu",
+                true,
+            ),
+            "--remote-debugging-port=9333 --disable-gpu"
+        );
+        assert_eq!(
+            append_software_renderer_argument("--remote-debugging-port=9333", false),
+            "--remote-debugging-port=9333"
+        );
+    }
+}
+
 pub trait BrowserProvider: Send + Sync + 'static {
     fn create_child_webview(&self, request: &ChildWebViewCreate) -> BrowserResult<()>;
     fn set_bounds(&self, page_id: &str, bounds: PhysicalBounds) -> BrowserResult<()>;
@@ -545,8 +590,10 @@ impl BrowserProvider for NativeBrowserProvider {
                 )
             })?;
         let cdp_port = self.profile_port(&request.profile_id)?;
-        let browser_arguments = format!(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --remote-debugging-port={cdp_port}"
+        let browser_arguments = append_resolved_renderer_argument(
+            &format!(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --remote-debugging-port={cdp_port}"
+            ),
         );
         let page_name = serde_json::to_string(&format!("vibelink-page:{}", request.page_id))
             .map_err(registry_error)?;

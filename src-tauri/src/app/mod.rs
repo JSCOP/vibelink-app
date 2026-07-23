@@ -19,6 +19,9 @@ pub mod provider_integrations;
 pub mod skills;
 pub mod spawn_daemon;
 #[cfg(windows)]
+mod webview_renderer;
+
+#[cfg(windows)]
 mod window_chrome;
 
 use crate::browser::{BrowserManager, BrowserPolicy, NativeBrowserProvider};
@@ -36,6 +39,8 @@ impl Default for KeepAlivePrefs {
 
 pub fn run() {
     configure_browser_cdp();
+    #[cfg(windows)]
+    webview_renderer::configure_main_webview();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
