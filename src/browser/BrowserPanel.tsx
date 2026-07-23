@@ -139,7 +139,9 @@ export function BrowserPanel({
   const page = state.page
   const pendingPromptCount: number = state.permissionQueue.length + state.certificateQueue.length + state.dialogQueue.length
   const navigationBlocked = navigationActionPending || page.loadState === 'loading'
-  const domSurfaceBlocker = overflowOpen || cookieImportOpen || pendingPromptCount > 0 || state.annotation !== null
+  // Annotation no longer hides the native page: the annotation UI is an in-page
+  // popover injected into the WebView itself, so the page must stay visible.
+  const domSurfaceBlocker = overflowOpen || cookieImportOpen || pendingPromptCount > 0
   const panelVisible = active
     && workspaceVisible
     && !nativeSurfacesSuspended
@@ -344,9 +346,15 @@ export function BrowserPanel({
     let unsubscribe: (() => void) | undefined
     void controller.subscribeDesignGrabs((grab) => {
       if (grab.pageId !== page.id || grab.navigationGeneration !== page.navigationGeneration) return
-      void controller.createAnnotation(page.id, grab, '')
+      // The in-page annotation popover already collected the comment and the
+      // user clicked "Send to Agent"; create the annotation with that comment
+      // and deliver it straight to the Agent panel. The native page stays
+      // visible throughout (annotation state is no longer a surface blocker).
+      const comment = grab.comment ?? ''
+      void controller.createAnnotation(page.id, grab, comment)
         .then((annotation) => {
-          if (!cancelled) dispatch({ type: 'annotationCreated', annotation })
+          if (cancelled) return
+          if (onDeliverAnnotation) void onDeliverAnnotation(annotation, { kind: 'agent' }).catch(reportError)
         })
         .catch(reportError)
     }).then((stop) => {
@@ -357,7 +365,7 @@ export function BrowserPanel({
       cancelled = true
       unsubscribe?.()
     }
-  }, [controller, page.id, page.navigationGeneration, reportError])
+  }, [controller, onDeliverAnnotation, page.id, page.navigationGeneration, reportError])
 
   const profileLabel = useMemo(() => {
     if (state.profile.kind === 'workspace') return 'Workspace'

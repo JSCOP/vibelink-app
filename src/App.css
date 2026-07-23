@@ -5880,9 +5880,18 @@ button.git-window-primary-action,
 }
 
 .workspace-sidebar-panel-body {
+  display: flex;
+  flex-direction: column;
   font: 12px/1.35 var(--vibelink-sans);
   min-height: 0;
   overflow: auto;
+}
+
+/* Direct panel content (Explorer window, Git window, etc.) fills the body so
+   its own background reaches the bottom instead of stopping at content height. */
+.workspace-sidebar-panel-body > * {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .workspace-sidebar-panel-footer {

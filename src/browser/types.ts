@@ -79,7 +79,7 @@ export type BrowserAnnotationDestination =
   | { kind: 'terminal'; paneId: string; title: string; role: string | null }
   | { kind: 'copy' }
 
-export type BrowserDesignGrab = Omit<BrowserAnnotation, 'id' | 'workspaceId' | 'url' | 'comment' | 'screenshot'>
+export type BrowserDesignGrab = Omit<BrowserAnnotation, 'id' | 'workspaceId' | 'url' | 'comment' | 'screenshot'> & { comment?: string }
 
 export type BrowserPermissionPrompt = {
   id: string

@@ -111,3 +111,24 @@ export function visibleAgentConversations(conversations: AgentConversationInfo[]
   return conversations.filter((conversation) =>
     `${conversation.title}\n${conversation.agent}\n${conversation.cwd ?? ''}`.toLocaleLowerCase().includes(needle))
 }
+
+/**
+ * Build the terminal command that resumes a past agent conversation by id.
+ * Each CLI resumes by session id: omp `-r`, codex `resume <id>`, claude `-r`.
+ * Runs through PowerShell so the agent process owns the pane after launch;
+ * returns null for agents without a known resume invocation.
+ */
+export function agentResumeLaunch(conversation: AgentConversationInfo): { shell: string; args: string[]; title: string } | null {
+  const RESUME_ARGV_BY_AGENT: Record<string, (id: string) => string[]> = {
+    omp: (id) => ['omp', '-r', id],
+    codex: (id) => ['codex', 'resume', id],
+    claude: (id) => ['claude', '-r', id],
+  }
+  const build = RESUME_ARGV_BY_AGENT[conversation.agent]
+  if (!build || !conversation.id) return null
+  const argv = build(conversation.id)
+  // PowerShell keeps the pane interactive and hosts the resumed agent process.
+  const command = argv.map((part) => (/^[\w./:@-]+$/.test(part) ? part : `'${part.replaceAll("'", "''")}'`)).join(' ')
+  const title = `${agentConversationLabel(conversation.agent)}: ${conversation.title}`
+  return { shell: 'pwsh.exe', args: ['-NoLogo', '-NoExit', '-Command', command], title }
+}

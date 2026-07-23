@@ -768,7 +768,7 @@ export function WorkspaceView({
     return panel
   }, [activateContent])
 
-  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: AddContentOptions & { profileId?: string | null; cwd?: string | null } = {}) => {
+  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: AddContentOptions & { profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
     if (!ownsLayout(owner)) return ''
     const profile = profileById(useWorkspaceStore.getState().settings, options.profileId)
     const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
@@ -787,7 +787,9 @@ export function WorkspaceView({
         paneId: pending.id,
         profileId: options.profileId,
         ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
-        title: pending.config.title ?? undefined,
+        ...(options.shell !== undefined ? { shell: options.shell } : {}),
+        ...(options.args !== undefined ? { args: options.args } : {}),
+        title: options.title ?? pending.config.title ?? undefined,
         cols: size?.cols,
         rows: size?.rows,
       })
@@ -875,7 +877,7 @@ export function WorkspaceView({
     if (!owner || !ownsLayout(owner)) return ''
     if (request.workspaceEpoch !== undefined && owner.sessionEpoch !== request.workspaceEpoch) return ''
     if (request.kind === 'terminal') {
-      return spawnTerminal(owner, { targetGroupId: request.targetGroupId, profileId: request.profileId, cwd: request.cwd, direction: request.split })
+      return spawnTerminal(owner, { targetGroupId: request.targetGroupId, profileId: request.profileId, cwd: request.cwd, direction: request.split, shell: request.shell, args: request.args, title: request.title })
     }
     if (request.kind === 'terminal-grid') {
       const api = owner.api

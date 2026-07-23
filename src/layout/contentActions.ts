@@ -15,7 +15,7 @@ export type WorkspaceContentOwnership = {
 }
 
 export type OpenContentRequest = WorkspaceContentOwnership & (
-  | { kind: 'terminal'; targetGroupId?: string; profileId?: string | null; cwd?: string | null; split?: 'right' | 'below' }
+  | { kind: 'terminal'; targetGroupId?: string; profileId?: string | null; cwd?: string | null; split?: 'right' | 'below'; shell?: string | null; args?: string[]; title?: string }
   | { kind: 'terminal-grid'; targetGroupId?: string; grid: TerminalGridLaunchRequest }
   | { kind: 'browser'; targetGroupId?: string; profileId?: string | null; private?: boolean }
   | { kind: 'editor'; targetGroupId?: string; relPath: string }

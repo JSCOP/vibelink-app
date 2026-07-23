@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
-import { CheckCircle2, Maximize2, Minimize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Maximize2, Minimize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useGitStore } from '../state/git'
-import { formatKeyChord } from '../state/keybindings'
 import { useWorkspaceContentActions } from '../layout/contentActions'
 import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
 import { workspaceAgentTabStatus } from './workspaceContentTabModel'
@@ -20,7 +19,6 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId ? Boolean(state.paneCompletionHighlights[paneId]) : false)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
-  const reviewShortcut = useWorkspaceStore((state) => formatKeyChord(state.settings.keybindings.togglePaneReviewed))
   const hermesStatus = useWorkspaceStore((state) => activeSessionId ? state.hermesStatus[activeSessionId] ?? 'idle' : 'idle')
   const hermesPendingPermissions = useWorkspaceStore((state) => activeSessionId ? state.hermesPermissions[activeSessionId]?.length ?? 0 : 0)
   const gitStatus = useGitStore((state) => {
@@ -123,9 +121,13 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       tabIndex={0}
       aria-selected={isActive}
       aria-label={accessibleTitle}
-      onPointerDown={() => actions.activateContent(api.id)}
       onKeyDown={onRootKeyDown}
     >
+      {/* No onPointerDown activation here: Dockview owns tab activation via its
+          own click handler AND owns pointer-based drag. Activating on pointerdown
+          triggered a layout settle that re-rendered the tab strip mid-drag,
+          cancelling Dockview's drag session — so dragging an INACTIVE pane tab
+          silently failed to move/split while an already-active one worked. */}
       <span aria-hidden="true"><ProfileIcon name={content?.icon} size={13} className="terminal-tab-icon" /></span>
       {displaysAgentStatus ? <span className={`workspace-agent-status-dot is-${agentStatus.tone}${agentStatus.pulsing ? ' is-pulsing' : ''}`} title={agentStatus.label} aria-label={agentStatus.label} /> : null}
       {paneId
@@ -158,9 +160,10 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       <div className="terminal-tab-actions" data-dockview-dnd-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
         {paneId ? (
           <>
-            <button type="button" className={reviewed ? 'terminal-tab-review-button-active' : undefined} aria-pressed={reviewed} aria-label={reviewed ? 'Mark terminal as not reviewed' : 'Mark terminal as reviewed'} title={reviewed ? `Mark as not reviewed (${reviewShortcut})` : `Mark as reviewed (${reviewShortcut})`} onClick={(event) => { activateAndStop(event); useWorkspaceStore.getState().togglePaneReviewed(paneId) }}>
-              <CheckCircle2 size={12} aria-hidden="true" />
-            </button>
+            {/* Terminal pane tab: only split + close. The tab body itself is the
+                Dockview drag handle for moving/splitting the pane; review and
+                maximize were window-level clutter that made pane tabs and window
+                content tabs indistinguishable. */}
             <button type="button" title="Split terminal right" aria-label="Split terminal right" onClick={(event) => { activateAndStop(event); void actions.splitTerminal(paneId, 'right') }}>
               <SplitSquareVertical size={12} aria-hidden="true" />
             </button>
@@ -168,10 +171,11 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
               <SplitSquareHorizontal size={12} aria-hidden="true" />
             </button>
           </>
-        ) : null}
-        <button type="button" title={isMaximized ? 'Restore content' : 'Maximize content'} aria-label={isMaximized ? 'Restore content' : 'Maximize content'} onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id); setIsMaximized(api.isMaximized()) }}>
-          {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
-        </button>
+        ) : (
+          <button type="button" title={isMaximized ? 'Restore content' : 'Maximize content'} aria-label={isMaximized ? 'Restore content' : 'Maximize content'} onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id); setIsMaximized(api.isMaximized()) }}>
+            {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
+          </button>
+        )}
         <button type="button" title={paneId ? 'Close terminal' : 'Close content'} aria-label={paneId ? 'Close terminal' : 'Close content'} onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
           <X size={12} aria-hidden="true" />
         </button>

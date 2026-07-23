@@ -128,7 +128,9 @@
 }
 
 .agent-conversation-row {
-  cursor: default;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
 }
 
 .agent-conversation-row .agent-session-row-title svg {

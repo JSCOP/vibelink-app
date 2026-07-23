@@ -26,6 +26,7 @@ export type MonacoEditorHandle = {
   getModel(): MonacoEditorTextModel | null
   getPosition(): { lineNumber: number; column: number } | null
   focus(): void
+  layout(dimension?: { width: number; height: number }): void
   updateOptions(options: Record<string, unknown>): void
   onDidChangeCursorPosition(listener: (event: { position: { lineNumber: number; column: number } }) => void): Disposable
   onDidChangeModelOptions(listener: () => void): Disposable
@@ -69,6 +70,7 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
   const [cursor, setCursor] = useState({ lineNumber: 1, column: 1 })
   const [indentation, setIndentation] = useState('Spaces: 4')
   const editorRef = useRef<MonacoEditorHandle | null>(null)
+  const surfaceRef = useRef<HTMLDivElement | null>(null)
   const editorListenersRef = useRef<Disposable[]>([])
 
   useEffect(() => {
@@ -113,6 +115,31 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
     for (const listener of editorListenersRef.current) listener.dispose()
     editorListenersRef.current = []
     editorRef.current = null
+  }, [])
+
+  // Dockview hides inactive content panels with `visibility: hidden` (and the
+  // overlay can be repositioned while hidden). Monaco's automaticLayout polls
+  // element SIZE, not visibility, so an editor reshown after a tab switch or a
+  // sidebar-toggle relayout can keep a stale render — glyphs from the previous
+  // geometry overlap the current ones. Force a fresh layout whenever the
+  // surface becomes visible or its box changes.
+  useEffect(() => {
+    const surface = surfaceRef.current
+    if (!surface || typeof IntersectionObserver === 'undefined') return
+    const relayout = () => {
+      if (surface.offsetParent === null) return
+      editorRef.current?.layout()
+    }
+    const intersection = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) requestAnimationFrame(relayout)
+    })
+    intersection.observe(surface)
+    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => requestAnimationFrame(relayout))
+    resize?.observe(surface)
+    return () => {
+      intersection.disconnect()
+      resize?.disconnect()
+    }
   }, [])
 
   useEffect(() => {
@@ -284,7 +311,7 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
       {compareVisible && document.conflict ? (
         <ConflictComparison document={document} />
       ) : (
-        <div className="editor-surface">
+        <div className="editor-surface" ref={surfaceRef}>
           {document.loading ? <div className="editor-loading">Loading document…</div> : (
             <MonacoEditor
               path={monacoPath}

@@ -3,8 +3,10 @@ import { Bot, MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { useWorkspaceStore } from '../../state/store'
+import type { AgentConversationInfo } from '../../ipc/agentHistory'
 import {
   agentConversationLabel,
+  agentResumeLaunch,
   agentSessionIsUnread,
   agentSessionLiveState,
   agentSessionTitle,
@@ -72,6 +74,26 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
       return false
     }
   }, [contentActions, markViewed, setError])
+
+  const resumeConversation = useCallback(async (conversation: AgentConversationInfo) => {
+    const launch = agentResumeLaunch(conversation)
+    if (!launch) {
+      setError(`Resuming ${agentConversationLabel(conversation.agent)} conversations is not supported.`)
+      return
+    }
+    try {
+      const panelId = await contentActions.openContent({
+        kind: 'terminal',
+        cwd: conversation.cwd,
+        shell: launch.shell,
+        args: launch.args,
+        title: launch.title,
+      })
+      if (panelId) contentActions.activateContent(panelId)
+    } catch (reason) {
+      setError(String(reason))
+    }
+  }, [contentActions, setError])
 
   const openSelected = async () => {
     if (!selectedSession) return
@@ -206,7 +228,14 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
           <div className="agent-session-group-label">Recent conversations</div>
           <div className="agent-session-list" role="list" aria-label="Recent agent conversations">
             {shownConversations.map((conversation) => (
-              <div key={`${conversation.agent}:${conversation.path}`} className="agent-session-row agent-conversation-row" role="listitem" title={conversation.path}>
+              <button
+                key={`${conversation.agent}:${conversation.path}`}
+                type="button"
+                className="agent-session-row agent-conversation-row"
+                role="listitem"
+                title={`Resume in a new terminal · ${conversation.path}`}
+                onClick={() => { void resumeConversation(conversation) }}
+              >
                 <span className="agent-session-row-title">
                   <Bot size={12} aria-hidden="true" />
                   <strong>{conversation.title}</strong>
@@ -215,7 +244,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
                   <span className="agent-conversation-agent">{agentConversationLabel(conversation.agent)}</span>
                   <time dateTime={conversation.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(conversation.updatedAt)}</time>
                 </span>
-              </div>
+              </button>
             ))}
           </div>
         </>

@@ -43,6 +43,7 @@ function FakeMonacoEditor(props: MonacoEditorSurfaceProps) {
     getModel: () => modelRef.current,
     getPosition: () => ({ lineNumber: 3, column: 7 }),
     focus: vi.fn(),
+    layout: vi.fn(),
     updateOptions: vi.fn(),
     onDidChangeCursorPosition: () => ({ dispose: vi.fn() }),
     onDidChangeModelOptions: () => ({ dispose: vi.fn() }),
