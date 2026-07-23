@@ -6,6 +6,7 @@ export const workspaceContentSchema = 1 as const
 
 export type WorkspaceContentKind =
   | 'terminal'
+  | 'terminalWindow'
   | 'browser'
   | 'editor'
   | 'preview'
@@ -23,6 +24,7 @@ export type WorkspaceContentKind =
 
 export type WorkspaceContentParams =
   | { schema: 1; kind: 'terminal'; instanceId: string; title: string; icon: string; paneId: string }
+  | { schema: 1; kind: 'terminalWindow'; instanceId: string; title: string; icon: string; inner: SerializedDockview | null; titlesHidden: boolean }
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
   | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
@@ -37,6 +39,7 @@ export type WorkspaceContentInstancePolicy = 'multi-resource' | 'one-per-resourc
 
 export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, WorkspaceContentInstancePolicy> = {
   terminal: 'one-per-resource',
+  terminalWindow: 'multi-resource',
   browser: 'one-per-resource',
   editor: 'one-per-resource',
   preview: 'singleton',
@@ -68,6 +71,7 @@ const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
 }
 const contentKinds: Record<WorkspaceContentKind, true> = {
   terminal: true,
+  terminalWindow: true,
   browser: true,
   editor: true,
   preview: true,
@@ -117,6 +121,7 @@ export function workspaceContentPanelId(params: Pick<WorkspaceContentParams, 'ki
 
 export function workspaceContentResourceKey(params: WorkspaceContentParams): string {
   if (params.kind === 'terminal') return `terminal:${params.paneId}`
+  if (params.kind === 'terminalWindow') return `terminalWindow:${params.instanceId}`
   if (params.kind === 'browser') return `browser:${params.pageId}`
   if (params.kind === 'editor') return `editor:${params.relPath}`
   if (params.kind === 'preview') return 'preview'
@@ -143,6 +148,15 @@ export function parseWorkspaceContentParams(value: unknown): WorkspaceContentPar
     if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon', 'paneId'])) return null
     const paneId = readIdentifier(value.paneId)
     return paneId && paneId === instanceId ? { schema: 1, kind, instanceId, title, icon, paneId } : null
+  }
+  if (kind === 'terminalWindow') {
+    if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon', 'inner', 'titlesHidden'])) return null
+    if (typeof value.titlesHidden !== 'boolean') return null
+    // Inner nested-Dockview layout is stored opaquely; TerminalWindowPanel
+    // rebuilds from live panes if it fails to rehydrate.
+    const inner = value.inner === null || isRecord(value.inner) ? (value.inner as SerializedDockview | null) : undefined
+    if (inner === undefined) return null
+    return { schema: 1, kind, instanceId, title, icon, inner, titlesHidden: value.titlesHidden }
   }
   if (kind === 'browser') {
     if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon', 'pageId', 'profileId'])) return null

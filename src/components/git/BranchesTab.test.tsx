@@ -16,7 +16,7 @@ import { BranchesTab } from './BranchesTab'
 import { GitBranchesSidebar } from './GitBranchesSidebar'
 import { GitWorkspaceProvider } from './GitWorkspaceProvider'
 
-const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
+const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
 const branch: BranchInfo = { name: 'feature', isHead: false, isRemote: false, upstream: null, ahead: 0, behind: 0, lastCommitSubject: 'Feature', lastCommitDate: '2026-07-18T00:00:00Z' }
 const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
 const status: WorkingStatus = { staged: [], unstaged: [{ path: 'src/local.ts', oldPath: null, changeType: 'modified' }], untracked: [], conflicted: [], truncated: false }

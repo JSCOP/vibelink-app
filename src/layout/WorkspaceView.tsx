@@ -22,9 +22,8 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react'
 import { getGridLocation, type AddPanelOptions } from 'dockview-core'
-import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, MoreHorizontal, SquareTerminal, Workflow } from 'lucide-react'
+import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, Plus, SquareTerminal, Workflow } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
-import { NewTerminalLauncher } from '../components/NewTerminalLauncher'
 import { QuickPick } from '../components/QuickPick'
 import type { PickerEntry } from '../components/pickerModel'
 import { KanbanBoard } from '../components/KanbanBoard'
@@ -57,7 +56,7 @@ import type { DirEntryInfo, PaneMeta } from '../ipc/types'
 import type { WorkspaceCreationInput } from '../ipc/providerIntegrations'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
-import { profileById, selectedProfileForWorkspace } from '../state/profiles'
+import { profileById } from '../state/profiles'
 import {
   getWorkspaceSessionEpoch,
   getWorkspaceSessionReadyEpoch,
@@ -73,10 +72,12 @@ import {
   type WorkspaceContentChromeState,
 } from './contentActions'
 import { TerminalPanePanel } from './TerminalPanePanel'
+import { TerminalWindowPanel } from './TerminalWindowPanel'
+import { getTerminalWindow, listTerminalWindows, allWindowedPaneIds, findTerminalWindowForPane, type TerminalWindowHandle } from './terminalWindowRegistry'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { nearestPaneIdInDirection, paneIdsInReadingOrder, type PaneDirection } from './paneSwap'
-import { expandGridRowsForPaneCount } from './paneGridPlan'
+import { expandGridRowsForPaneCount, occupiedGridForPaneCount } from './paneGridPlan'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { withSuppressedPanelRemoval } from './suppression'
@@ -95,6 +96,7 @@ import {
   createPreviewContentParams,
   createSingletonContentParams,
   createTerminalContentParams,
+  createTerminalWindowParams,
   normalizeWorkspaceLayoutState,
   planTerminalArrangement,
 } from './workspaceLayoutModel'
@@ -173,6 +175,13 @@ function TerminalContentPanel(props: WorkspaceContentPanelProps) {
 
 function TerminalPaneBoundary(props: IDockviewPanelProps<TerminalContentParams>) {
   return <ErrorBoundary label="Terminal pane"><TerminalPanePanel {...props} /></ErrorBoundary>
+}
+
+function TerminalWindowContentPanel(props: WorkspaceContentPanelProps) {
+  const params = parseWorkspaceContentParams(props.params)
+  return params?.kind === 'terminalWindow'
+    ? <ErrorBoundary label="Terminal window"><TerminalWindowPanel {...props} params={params} /></ErrorBoundary>
+    : <div className="placeholder-panel">Terminal window metadata is missing.</div>
 }
 
 function ProPanelBoundary({ feature, children }: { feature: string; children: ReactNode }) {
@@ -389,6 +398,7 @@ function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
 
 const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPanelComponent> = {
   terminal: TerminalContentPanel,
+  terminalWindow: TerminalWindowContentPanel,
   browser: BrowserWorkspaceContentPanel,
   editor: EditorWorkspaceContentPanel,
   preview: PreviewWorkspaceContentPanel,
@@ -416,81 +426,55 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
   const actions = useContext(WorkspaceContentActionsContext) ?? props.fallbackActions ?? null
   const integration = useContext(WorkspaceIntegrationContext)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
-  const settings = useWorkspaceStore((state) => state.settings)
-  const setDefaultProfile = useWorkspaceStore((state) => state.setDefaultProfile)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [launcherOpen, setLauncherOpen] = useState(false)
   const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null)
   const groupId = props.group.id
   const menuOverlayId = `group-menu:${groupId}`
-  const launcherOverlayId = `group-new:${groupId}`
   const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
   const open = (request: OpenContentRequest) => {
     setMenuOpen(false)
     void actions?.openContent({ ...request, targetGroupId: groupId })
   }
-  const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
-  const terminalCount = props.containerApi.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').length
   const isCurrentMainGroup = workspaceGroupShowsCreationControls(props.group.api.location.type, groupId, integration.currentMainGroupId)
 
   useEffect(() => {
     integration.setWorkspaceOverlayOpen?.(menuOverlayId, menuOpen)
-    integration.setWorkspaceOverlayOpen?.(launcherOverlayId, launcherOpen)
-    if (!menuOpen && !launcherOpen) return () => {
-      integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
-      integration.setWorkspaceOverlayOpen?.(launcherOverlayId, false)
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      setMenuOpen(false)
-      setLauncherOpen(false)
-    }
+    if (!menuOpen) return () => integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false) }
     window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
-      integration.setWorkspaceOverlayOpen?.(launcherOverlayId, false)
     }
-  }, [integration, launcherOpen, launcherOverlayId, menuOpen, menuOverlayId])
+  }, [integration, menuOpen, menuOverlayId])
 
   if (!isCurrentMainGroup) return null
 
+  // The + button lists WINDOW types to add as a sibling tab. Terminal opens a
+  // new terminal window (its panes live inside it); other kinds open as their
+  // own window tab.
   return (
     <div className="workspace-group-actions" onMouseDown={stop} onPointerDown={stop}>
-      <NewTerminalLauncher
-        isOpen={launcherOpen}
-        disabled={!actions || !activeSessionId}
-        existingPaneCount={terminalCount}
-        profiles={settings.profiles}
-        activeProfileId={activeProfile.id}
-        onToggle={() => { setMenuOpen(false); setLauncherOpen((openState) => !openState) }}
-        onClose={() => setLauncherOpen(false)}
-        onLaunch={(grid) => {
-          setLauncherOpen(false)
-          const profileId = grid.profileId?.trim()
-          if (profileId) setDefaultProfile(profileId)
-          void actions?.openContent({ kind: 'terminal-grid', targetGroupId: groupId, grid })
-        }}
-      />
       <button
         type="button"
-        title="Add workspace content"
-        aria-label="Add workspace content"
+        className="workspace-group-new"
+        title="Add window"
+        aria-label="Add window"
         aria-expanded={menuOpen}
+        disabled={!actions || !activeSessionId}
         onClick={(event) => {
           if (!menuOpen) {
             const rect = event.currentTarget.getBoundingClientRect()
             setMenuAnchor({ right: rect.right, bottom: rect.bottom })
           }
-          setLauncherOpen(false)
           setMenuOpen((value) => !value)
         }}
-      ><MoreHorizontal size={14} aria-hidden="true" /></button>
+      ><Plus size={14} aria-hidden="true" /><span className="workspace-group-new-label">New</span></button>
       {menuOpen && menuAnchor && typeof document !== 'undefined' ? createPortal(
         <>
           <div className="workspace-group-menu-backdrop" onMouseDown={() => setMenuOpen(false)} />
           <div className="workspace-group-menu" role="menu" style={{ right: Math.max(8, window.innerWidth - menuAnchor.right), top: menuAnchor.bottom + 2 }}>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'terminal' })}><SquareTerminal size={13} aria-hidden="true" /> Terminal</button>
+            <button type="button" role="menuitem" onClick={() => open({ kind: 'terminalWindow' })}><SquareTerminal size={13} aria-hidden="true" /> Terminal</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'browser' })}><Globe size={13} aria-hidden="true" /> Browser</button>
             <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); integration.openFilePicker?.(groupId) }}><FileCode2 size={13} aria-hidden="true" /> Editor</button>
             <button type="button" role="menuitem" onClick={() => open({ kind: 'agent' })}><Bot size={13} aria-hidden="true" /> VibeLink Agent</button>
@@ -768,20 +752,60 @@ export function WorkspaceView({
     return panel
   }, [activateContent])
 
-  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: AddContentOptions & { profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
+  const resolveTerminalWindowId = useCallback((api: DockviewApi, options: { windowId?: string; targetGroupId?: string }): string | null => {
+    if (options.windowId && api.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: options.windowId }))) return options.windowId
+    if (options.targetGroupId) {
+      const group = api.groups.find((candidate) => candidate.id === options.targetGroupId)
+      const windowed = group?.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminalWindow')
+      const params = parseWorkspaceContentParams(windowed?.params)
+      if (params?.kind === 'terminalWindow') return params.instanceId
+    }
+    const active = parseWorkspaceContentParams(api.activePanel?.params)
+    if (active?.kind === 'terminalWindow') return active.instanceId
+    const first = api.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminalWindow')
+    const firstParams = parseWorkspaceContentParams(first?.params)
+    return firstParams?.kind === 'terminalWindow' ? firstParams.instanceId : null
+  }, [])
+
+  const waitForTerminalWindow = useCallback(async (windowId: string, owner: WorkspaceLayoutOwner): Promise<TerminalWindowHandle | null> => {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const handle = getTerminalWindow(windowId)
+      if (handle && handle.getInnerApi()) return handle
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      if (!ownsLayout(owner)) return null
+    }
+    return null
+  }, [ownsLayout])
+
+  const ensureTerminalWindow = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNew?: boolean } = {}): Promise<TerminalWindowHandle | null> => {
+    const api = owner.api
+    let windowId = options.forceNew ? null : resolveTerminalWindowId(api, options)
+    if (!windowId) {
+      const params = createTerminalWindowParams(crypto.randomUUID(), [], { cols: 1, rows: 1 })
+      const panel = addContentPanel(params, { targetGroupId: options.targetGroupId }, api)
+      if (!panel || !ownsLayout(owner)) return null
+      windowId = params.instanceId
+      await settleLayout({}, owner)
+      if (!ownsLayout(owner)) return null
+    }
+    return waitForTerminalWindow(windowId, owner)
+  }, [addContentPanel, ownsLayout, resolveTerminalWindowId, settleLayout, waitForTerminalWindow])
+
+  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
     if (!ownsLayout(owner)) return ''
+    const handle = await ensureTerminalWindow(owner, { windowId: options.windowId, targetGroupId: options.targetGroupId, forceNew: options.forceNewWindow })
+    if (!handle || !ownsLayout(owner)) return ''
     const profile = profileById(useWorkspaceStore.getState().settings, options.profileId)
     const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
+    const panelId = workspaceContentPanelId({ kind: 'terminal', instanceId: pending.id })
     pendingTerminalPaneIdsRef.current.add(pending.id)
-    let panelId = ''
     let spawnedPaneId: string | null = null
     let committed = false
     try {
-      const panel = addContentPanel(createTerminalContentParams(pending), options, owner.api)
+      const panel = handle.addPane(createTerminalContentParams(pending), { referencePaneId: options.referencePaneId, direction: options.direction })
       if (!panel || !ownsLayout(owner)) return ''
-      panelId = panel.id
-      await settleLayout({}, owner)
-      if (!ownsLayout(owner) || !owner.api.getPanel(panel.id)) return ''
+      await handle.settle()
+      if (!ownsLayout(owner) || !handle.getInnerApi()?.getPanel(panelId)) return ''
       const size = await measuredSpawnSize(pending.id)
       const spawned = await spawnPane(owner.sessionId, {
         paneId: pending.id,
@@ -795,7 +819,7 @@ export function WorkspaceView({
       })
       spawnedPaneId = spawned.id
       if (!ownsLayout(owner)) return ''
-      const livePanel = owner.api.getPanel(panel.id)
+      const livePanel = handle.getInnerApi()?.getPanel(panelId)
       if (!livePanel) return ''
       const liveParams = createTerminalContentParams(spawned)
       livePanel.update({ params: liveParams })
@@ -803,26 +827,17 @@ export function WorkspaceView({
       useWorkspaceStore.getState().setActivePaneId(spawned.id)
       if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(spawned.id)
       reflowTerminalsAfterLayout({ syncPty: true, paneIds: [spawned.id] })
+      handle.persist()
       persistLayoutSoon()
       committed = true
-      return panel.id
+      return panelId
     } catch (error) {
       if (ownsLayout(owner)) useWorkspaceStore.getState().setError(String(error))
       return ''
     } finally {
       try {
         if (!committed) {
-          if (panelId) {
-            const panel = owner.api.getPanel(panelId)
-            if (panel) {
-              try {
-                if (ownsLayout(owner)) await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { panel.api.close() })
-                else panel.api.close()
-              } catch {
-                // Native resource cleanup below remains authoritative.
-              }
-            }
-          }
+          handle.removePane(pending.id)
           TerminalManager.dispose(pending.id)
           if (spawnedPaneId) await closePaneInStore(spawnedPaneId, owner.sessionId).catch(() => undefined)
         }
@@ -830,7 +845,7 @@ export function WorkspaceView({
         pendingTerminalPaneIdsRef.current.delete(pending.id)
       }
     }
-  }, [addContentPanel, closePaneInStore, ownsLayout, persistLayoutSoon, settleLayout, spawnPane])
+  }, [closePaneInStore, ensureTerminalWindow, ownsLayout, persistLayoutSoon, spawnPane])
 
   const findContentByResource = useCallback((params: WorkspaceContentParams, targetApi?: DockviewApi) => (targetApi ?? apiRef.current)?.panels.find((panel) => {
     const current = parseWorkspaceContentParams(panel.params)
@@ -838,33 +853,34 @@ export function WorkspaceView({
   }), [])
 
   const arrangeTerminals = useCallback(async (requestedGrid?: GridSize | null, persist = true, owner?: WorkspaceLayoutOwner) => {
-    const api = owner?.api ?? apiRef.current
-    if (!api || (owner && !ownsLayout(owner))) return
-    const activePanelId = api.activePanel?.id ?? null
+    const layoutOwner = owner ?? currentLayoutOwner()
+    if (!layoutOwner || !ownsLayout(layoutOwner)) return
+    // Arrange within the active/first terminal window's inner grid.
+    const api = layoutOwner.api
+    const activeWindow = parseWorkspaceContentParams(api.activePanel?.params)
+    const handle = activeWindow?.kind === 'terminalWindow'
+      ? getTerminalWindow(activeWindow.instanceId)
+      : listTerminalWindows()[0]
+    const innerApi = handle?.getInnerApi()
+    if (!handle || !innerApi) return
+    const activePanelId = innerApi.activePanel?.id ?? null
     const terminalIds = paneIdsInReadingOrder(
-      api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').map((panel) => panel.id),
+      innerApi.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').map((panel) => panel.id),
       getContentRect,
     )
     if (terminalIds.length < 2) return
     const preferred = requestedGrid ?? balancedGridForPaneCount(terminalIds.length, workspaceAspectRatio(dockRef.current))
     const grid = expandGridRowsForPaneCount(preferred, terminalIds.length)
-    await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      const anchor = api.getPanel(terminalIds[0])
-      if (!anchor) return
-      if (anchor.group.panels.some((panel) => parseWorkspaceContentParams(panel.params)?.kind !== 'terminal')) {
-        anchor.api.moveTo({ group: anchor.group, position: 'right', skipSetActive: true })
-      }
-      for (const step of planTerminalArrangement(terminalIds, grid)) {
-        const panel = api.getPanel(step.panelId)
-        const reference = api.getPanel(step.referencePanelId)
-        if (panel && reference) panel.api.moveTo({ group: reference.group, position: step.position, skipSetActive: true })
-      }
-      if (activePanelId) api.getPanel(activePanelId)?.api.setActive()
-    })
-    if (owner && !ownsLayout(owner)) return
-    await settleLayout({ syncPty: true }, owner)
-    if ((!owner || ownsLayout(owner)) && persist) persistLayoutSoon()
-  }, [ownsLayout, persistLayoutSoon, settleLayout])
+    for (const step of planTerminalArrangement(terminalIds, grid)) {
+      const panel = innerApi.getPanel(step.panelId)
+      const reference = innerApi.getPanel(step.referencePanelId)
+      if (panel && reference) panel.api.moveTo({ group: reference.group, position: step.position, skipSetActive: true })
+    }
+    if (activePanelId) innerApi.getPanel(activePanelId)?.api.setActive()
+    if (!ownsLayout(layoutOwner)) return
+    await handle.settle()
+    if (persist) { handle.persist(); persistLayoutSoon() }
+  }, [currentLayoutOwner, ownsLayout, persistLayoutSoon])
 
   const openContent = useCallback(async (request: OpenContentRequest): Promise<string> => {
     const currentEpoch = getWorkspaceSessionEpoch()
@@ -876,93 +892,26 @@ export function WorkspaceView({
     const owner = await waitForLayoutOwner(requestedSessionId)
     if (!owner || !ownsLayout(owner)) return ''
     if (request.workspaceEpoch !== undefined && owner.sessionEpoch !== request.workspaceEpoch) return ''
+    if (request.kind === 'terminalWindow') {
+      // Explicit new terminal window (from the + window-type menu).
+      return spawnTerminal(owner, { targetGroupId: request.targetGroupId, forceNewWindow: true })
+    }
     if (request.kind === 'terminal') {
-      return spawnTerminal(owner, { targetGroupId: request.targetGroupId, profileId: request.profileId, cwd: request.cwd, direction: request.split, shell: request.shell, args: request.args, title: request.title })
+      return spawnTerminal(owner, { windowId: request.windowId, targetGroupId: request.targetGroupId, profileId: request.profileId, cwd: request.cwd, referencePaneId: request.referencePaneId, direction: request.split, shell: request.shell, args: request.args, title: request.title })
     }
     if (request.kind === 'terminal-grid') {
-      const api = owner.api
-      const existing = api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').length
+      // Fill one terminal window with the requested pane count. Panes land in the
+      // window's inner grid via spawnTerminal; the window arranges them row-major.
       const targetCount = Math.max(1, request.grid.cols * request.grid.rows)
-      const missing = Math.max(0, targetCount - existing)
-      const profile = profileById(useWorkspaceStore.getState().settings, request.grid.profileId)
-      const pending = Array.from({ length: missing }, (_, index) => pendingPaneMeta(crypto.randomUUID(), `${profile.name} ${existing + index + 1}`, profile.icon))
-      for (const pane of pending) pendingTerminalPaneIdsRef.current.add(pane.id)
-      const pendingPanelIds: string[] = []
-      const spawnedPaneIds: string[] = []
-      const launchGroup = request.targetGroupId
-        ? api.groups.find((group) => group.id === request.targetGroupId)
-        : api.activeGroup
-      const restorePanelId = launchGroup?.activePanel?.id ?? api.activePanel?.id ?? ''
-      let createdPanelId = ''
-      let committed = false
-      try {
-        for (const pane of pending) {
-          if (!ownsLayout(owner)) return ''
-          const panel = addContentPanel(createTerminalContentParams(pane), { targetGroupId: request.targetGroupId, inactive: true }, api)
-          pendingPanelIds.push(panel?.id ?? '')
-        }
+      const handle = await ensureTerminalWindow(owner, { targetGroupId: request.targetGroupId })
+      if (!handle || !ownsLayout(owner)) return ''
+      const have = handle.paneIds().length
+      let lastPanelId = ''
+      for (let index = have; index < targetCount; index += 1) {
         if (!ownsLayout(owner)) return ''
-        const total = existing + pendingPanelIds.filter(Boolean).length
-        const requested = request.grid.occupiedGrid
-          ? { cols: request.grid.cols, rows: Math.max(request.grid.rows, request.grid.occupiedGrid.rows) }
-          : { cols: request.grid.cols, rows: request.grid.rows }
-        await arrangeTerminals(expandGridRowsForPaneCount(requested, total), false, owner)
-        if (!ownsLayout(owner)) return ''
-        await settleLayout({}, owner)
-        if (!ownsLayout(owner)) return ''
-        for (const [index, pane] of pending.entries()) {
-          const panelId = pendingPanelIds[index]
-          if (!panelId || !api.getPanel(panelId)) continue
-          const size = await measuredSpawnSize(pane.id)
-          if (!ownsLayout(owner)) return ''
-          const spawned = await spawnPane(owner.sessionId, {
-            paneId: pane.id,
-            profileId: request.grid.profileId,
-            title: pane.config.title ?? undefined,
-            cols: size?.cols,
-            rows: size?.rows,
-          })
-          spawnedPaneIds.push(spawned.id)
-          if (!ownsLayout(owner)) return ''
-          const panel = api.getPanel(panelId)
-          if (panel) {
-            const params = createTerminalContentParams(spawned)
-            panel.update({ params })
-            panel.api.setTitle(params.title)
-            createdPanelId = panel.id
-          }
-        }
-        if (!ownsLayout(owner)) return ''
-        const activationPanelId = restorePanelId && api.getPanel(restorePanelId) ? restorePanelId : createdPanelId
-        if (activationPanelId) activateContent(activationPanelId)
-        reflowTerminalsAfterLayout({ syncPty: true })
-        persistLayoutSoon()
-        committed = true
-        return createdPanelId || restorePanelId
-      } catch (error) {
-        if (ownsLayout(owner)) useWorkspaceStore.getState().setError(String(error))
-        return ''
-      } finally {
-        try {
-          if (!committed) {
-            const closePendingPanels = async () => {
-              for (const panelId of pendingPanelIds) {
-                if (panelId) api.getPanel(panelId)?.api.close()
-              }
-            }
-            try {
-              if (ownsLayout(owner)) await withSuppressedPanelRemoval(suppressPanelRemovalRef, closePendingPanels)
-              else await closePendingPanels()
-            } catch {
-              // Exact PTY cleanup below must still run for every created pane.
-            }
-            for (const pane of pending) TerminalManager.dispose(pane.id)
-            for (const paneId of spawnedPaneIds) await closePaneInStore(paneId, owner.sessionId).catch(() => undefined)
-          }
-        } finally {
-          for (const pane of pending) pendingTerminalPaneIdsRef.current.delete(pane.id)
-        }
+        lastPanelId = await spawnTerminal(owner, { windowId: handle.windowId, profileId: request.grid.profileId })
       }
+      return lastPanelId
     }
 
     if (request.kind === 'browser') {
@@ -1067,16 +1016,43 @@ export function WorkspaceView({
     }
     persistLayoutSoon()
     return panel.id
-  }, [activateContent, addContentPanel, arrangeTerminals, closePaneInStore, findContentByResource, ownsLayout, persistLayoutSoon, settleLayout, spawnPane, spawnTerminal, waitForLayoutOwner])
+  }, [activateContent, addContentPanel, ensureTerminalWindow, findContentByResource, ownsLayout, persistLayoutSoon, settleLayout, spawnTerminal, waitForLayoutOwner])
 
   const requestCloseContent = useCallback(async (panelId: string, ownership?: WorkspaceContentOwnership): Promise<'closed' | 'cancelled'> => {
     const owner = currentLayoutOwner()
     if (ownership?.workspaceId && owner?.sessionId !== ownership.workspaceId) return 'cancelled'
     if (ownership?.workspaceEpoch !== undefined && owner?.sessionEpoch !== ownership.workspaceEpoch) return 'cancelled'
     const api = owner?.api
-    const panel = api?.getPanel(panelId)
+    if (!owner || !api) return 'cancelled'
+
+    // Terminal panes live inside a window's inner Dockview, not the outer api.
+    // Route their close through the owning window; drop the whole window panel
+    // when its last pane closes.
+    if (panelId.startsWith('content:terminal:')) {
+      const paneId = panelId.slice('content:terminal:'.length)
+      const handle = findTerminalWindowForPane(paneId)
+      if (!handle) return 'cancelled'
+      try {
+        await closePaneInStore(paneId, owner.sessionId)
+      } catch (error) {
+        useWorkspaceStore.getState().setError(String(error))
+        return 'cancelled'
+      }
+      TerminalManager.dispose(paneId)
+      if (!ownsLayout(owner)) return 'closed'
+      handle.removePane(paneId)
+      handle.persist()
+      if (handle.paneIds().length === 0) {
+        const windowPanel = api.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: handle.windowId }))
+        if (windowPanel) await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { windowPanel.api.close() })
+      }
+      persistLayoutSoon()
+      return 'closed'
+    }
+
+    const panel = api.getPanel(panelId)
     const content = parseWorkspaceContentParams(panel?.params)
-    if (!owner || !api || !panel || !content) return 'cancelled'
+    if (!panel || !content) return 'cancelled'
     if (collapseStructuralWorkspacePanel(panel, content)) {
       persistLayoutSoon()
       return 'closed'
@@ -1099,16 +1075,13 @@ export function WorkspaceView({
         useWorkspaceStore.getState().setError(String(error))
         return 'cancelled'
       }
-    } else if (content.kind === 'terminal') {
-      try {
-        // Close native ownership first. A failed native close must leave its
-        // panel and renderer intact so the live PTY cannot become orphaned.
-        await closePaneInStore(content.paneId, owner.sessionId)
-      } catch (error) {
-        useWorkspaceStore.getState().setError(String(error))
-        return 'cancelled'
+    } else if (content.kind === 'terminalWindow') {
+      // Closing a whole terminal window disposes every pane it owns.
+      const handle = getTerminalWindow(content.instanceId)
+      for (const paneId of handle?.paneIds() ?? []) {
+        await closePaneInStore(paneId, owner.sessionId).catch(() => undefined)
+        TerminalManager.dispose(paneId)
       }
-      TerminalManager.dispose(content.paneId)
       if (!ownsLayout(owner)) return 'closed'
     }
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { api.getPanel(panelId)?.api.close() })
@@ -1120,19 +1093,15 @@ export function WorkspaceView({
   const splitTerminal = useCallback(async (paneId: string, direction: 'right' | 'below') => {
     const owner = currentLayoutOwner()
     if (!owner) return
-    const referencePanelId = workspaceContentPanelId({ kind: 'terminal', instanceId: paneId })
-    if (!owner.api.getPanel(referencePanelId)) return
-    await spawnTerminal(owner, { referencePanelId, direction })
+    const handle = findTerminalWindowForPane(paneId)
+    if (!handle) return
+    await spawnTerminal(owner, { windowId: handle.windowId, referencePaneId: paneId, direction })
   }, [currentLayoutOwner, spawnTerminal])
 
   const clearTerminals = useCallback(async () => {
-    const api = apiRef.current
-    if (!api) return
-    const terminalPanelIds = api.panels.flatMap((panel) => {
-      const params = parseWorkspaceContentParams(panel.params)
-      return params?.kind === 'terminal' ? [panel.id] : []
-    })
-    for (const panelId of terminalPanelIds) await requestCloseContent(panelId)
+    for (const handle of listTerminalWindows()) {
+      for (const paneId of handle.paneIds()) await requestCloseContent(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+    }
   }, [requestCloseContent])
 
   const toggleMaximizeContent = useCallback((panelId: string) => {
@@ -1143,14 +1112,24 @@ export function WorkspaceView({
     void settleLayout({ syncPty: true })
   }, [settleLayout])
 
+  const toggleTerminalWindowTitles = useCallback((windowId: string) => {
+    const panel = apiRef.current?.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: windowId }))
+    const params = parseWorkspaceContentParams(panel?.params)
+    if (!panel || params?.kind !== 'terminalWindow') return
+    panel.update({ params: { ...params, titlesHidden: !params.titlesHidden } })
+    getTerminalWindow(windowId)?.persist()
+    persistLayoutSoon()
+  }, [persistLayoutSoon])
+
   const renameTerminal = useCallback(async (paneId: string, title: string) => {
     await renamePaneTitle(paneId, title, 'manual')
-    const panel = apiRef.current?.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+    const handle = findTerminalWindowForPane(paneId)
+    const panel = handle?.getInnerApi()?.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
     const params = parseWorkspaceContentParams(panel?.params)
     if (!panel || params?.kind !== 'terminal') return
-    const next = { ...params, title }
-    panel.update({ params: next })
+    panel.update({ params: { ...params, title } })
     panel.api.setTitle(title)
+    handle?.persist()
     persistLayoutSoon()
   }, [persistLayoutSoon, renamePaneTitle])
 
@@ -1163,7 +1142,7 @@ export function WorkspaceView({
     const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
     const preservedContent = api.panels.flatMap((panel) => {
       const params = parseWorkspaceContentParams(panel.params)
-      return params && params.kind !== 'terminal' && !isStructuralWorkspaceContentKind(params.kind) ? [params] : []
+      return params && params.kind !== 'terminal' && params.kind !== 'terminalWindow' && !isStructuralWorkspaceContentKind(params.kind) ? [params] : []
     })
     const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
     await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
@@ -1200,10 +1179,11 @@ export function WorkspaceView({
     arrangeTerminals,
     clearTerminals,
     toggleMaximizeContent,
+    toggleTerminalWindowTitles,
     renameTerminal,
     resetLayout,
     getContentParams,
-  }), [activateContent, arrangeTerminals, clearTerminals, getContentParams, openContent, renameTerminal, requestCloseContent, resetLayout, splitTerminal, toggleMaximizeContent])
+  }), [activateContent, arrangeTerminals, clearTerminals, getContentParams, openContent, renameTerminal, requestCloseContent, resetLayout, splitTerminal, toggleMaximizeContent, toggleTerminalWindowTitles])
 
   const loadActiveSessionLayout = useCallback(() => {
     const run = async () => {
@@ -1475,29 +1455,58 @@ export function WorkspaceView({
     if (!api || loadedSessionRef.current !== activeSessionId || suppressPanelRemovalRef.current) return
     const livePanes = Object.values(panes).filter((pane) => pane.alive)
     const livePaneIds = new Set(livePanes.map((pane) => pane.id))
-    void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-      for (const pane of livePanes) {
-        const id = workspaceContentPanelId({ kind: 'terminal', instanceId: pane.id })
-        const panel = api.getPanel(id)
-        if (!panel) addContentPanel(createTerminalContentParams(pane), { inactive: true })
-        else {
+    const windows = listTerminalWindows()
+    if (windows.length === 0) {
+      // No registered window yet. If an outer terminalWindow panel exists it is
+      // still mounting — wait. If there is truly no window but live panes exist,
+      // seed one so the panes have a home.
+      const hasPanel = api.panels.some((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminalWindow')
+      if (!hasPanel && livePanes.length > 0 && !suppressPanelRemovalRef.current) {
+        const terminalParams = livePanes.map(createTerminalContentParams)
+        const grid = occupiedGridForPaneCount(terminalParams.length)
+        const windowParams = createTerminalWindowParams(crypto.randomUUID(), terminalParams, grid.cols > 0 ? grid : { cols: 1, rows: 1 })
+        void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { addContentPanel(windowParams, { inactive: false }) }).then(() => persistLayoutSoon())
+      }
+      return
+    }
+    // Refresh pane titles across windows and drop panes whose PTY died. Only
+    // touch what actually changed, and only persist/settle when something did —
+    // otherwise persist writes new params that re-run this effect in a loop.
+    const owned = allWindowedPaneIds()
+    let changed = false
+    for (const handle of windows) {
+      const innerApi = handle.getInnerApi()
+      if (!innerApi) continue
+      for (const paneId of handle.paneIds()) {
+        const pane = livePanes.find((candidate) => candidate.id === paneId)
+        const panel = innerApi.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+        if (!panel) continue
+        if (pane) {
           const params = createTerminalContentParams(pane)
-          panel.update({ params })
-          if (panel.api.title !== params.title) panel.api.setTitle(params.title)
+          if (panel.api.title !== params.title) {
+            panel.update({ params })
+            panel.api.setTitle(params.title)
+            changed = true
+          }
+        } else if (!livePaneIds.has(paneId) && !pendingTerminalPaneIdsRef.current.has(paneId)) {
+          TerminalManager.dispose(paneId)
+          panel.api.close()
+          changed = true
         }
       }
-      for (const panel of [...api.panels]) {
-        const params = parseWorkspaceContentParams(panel.params)
-        if (params?.kind !== 'terminal' || livePaneIds.has(params.paneId) || pendingTerminalPaneIdsRef.current.has(params.paneId)) continue
-        TerminalManager.dispose(params.paneId)
-        panel.api.close()
+    }
+    const firstWindow = windows[0]
+    if (firstWindow.getInnerApi()) {
+      for (const pane of livePanes) {
+        if (owned.has(pane.id) || pendingTerminalPaneIdsRef.current.has(pane.id)) continue
+        if (firstWindow.addPane(createTerminalContentParams(pane), { inactive: true })) changed = true
       }
-      ensureWorkspaceEdgeShell(api)
-    }).then(() => {
-      void settleLayout({ syncPty: true })
-      persistLayoutSoon()
-    }).catch(() => undefined)
-  }, [activeSessionId, addContentPanel, apiVersion, panes, persistLayoutSoon, settleLayout])
+    }
+    if (!changed) return
+    for (const handle of windows) handle.persist()
+    void firstWindow.settle()
+    persistLayoutSoon()
+  }, [activeSessionId, addContentPanel, apiVersion, panes, persistLayoutSoon])
 
   useEffect(() => {
     if (!arrangeRequestId || applyingArrangeRequestRef.current === arrangeRequestId) return
@@ -1597,6 +1606,13 @@ export function WorkspaceView({
           const shell = target?.closest<HTMLElement>('[data-content-panel-id]')
           const panelId = shell?.dataset.contentPanelId
           if (!panelId) return
+          // Inner terminal panes carry their own data-pane-id and are activated
+          // by the inner Dockview; only repair the renderer here.
+          const paneId = shell?.dataset.paneId
+          if (paneId) {
+            TerminalManager.repairAfterPointerActivation(paneId)
+            return
+          }
           const params = getContentParams(panelId)
           if (params?.kind === 'terminal') TerminalManager.repairAfterPointerActivation(params.paneId)
           activateContent(panelId)
@@ -1651,12 +1667,21 @@ async function reconcileTerminalPanels(
 ): Promise<void> {
   if (suppression.current) return
   const panes = useWorkspaceStore.getState().panes
-  await withSuppressedPanelRemoval(suppression, async () => {
-    for (const pane of Object.values(panes).filter((candidate) => candidate.alive)) {
-      const panelId = workspaceContentPanelId({ kind: 'terminal', instanceId: pane.id })
-      if (!api.getPanel(panelId)) addPanel(createTerminalContentParams(pane), { inactive: true })
-    }
-  })
+  const livePanes = Object.values(panes).filter((candidate) => candidate.alive)
+  if (livePanes.length === 0) return
+  const hasTerminalWindow = api.panels.some((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminalWindow')
+  if (hasTerminalWindow) {
+    // Windows rehydrate their own inner panes; the live-pane effect adds any
+    // pane not yet owned once the window has mounted. Nothing to do here.
+    persist()
+    return
+  }
+  // Live panes but no window (e.g. a v3 layout upgraded in place): seed a single
+  // terminal window pre-populated with every live pane.
+  const terminalParams = livePanes.map(createTerminalContentParams)
+  const grid = occupiedGridForPaneCount(terminalParams.length)
+  const windowParams = createTerminalWindowParams(crypto.randomUUID(), terminalParams, grid.cols > 0 ? grid : { cols: 1, rows: 1 })
+  await withSuppressedPanelRemoval(suppression, async () => { addPanel(windowParams, { inactive: false }) })
   persist()
 }
 
@@ -1755,15 +1780,16 @@ async function runKeybindingAction(
     if (value.endsWith('Down')) return 'down'
     return null
   }
+  const activePaneId = activeTerminalPaneId(content)
   switch (action) {
     case 'splitRight':
-      if (content?.kind === 'terminal') await actions.splitTerminal(content.paneId, 'right')
+      if (activePaneId) await actions.splitTerminal(activePaneId, 'right')
       return
     case 'splitDown':
-      if (content?.kind === 'terminal') await actions.splitTerminal(content.paneId, 'below')
+      if (activePaneId) await actions.splitTerminal(activePaneId, 'below')
       return
     case 'closePane':
-      await actions.requestCloseContent(active.id)
+      await actions.requestCloseContent(activePaneId ? workspaceContentPanelId({ kind: 'terminal', instanceId: activePaneId }) : active.id)
       return
     case 'closeWorkspace': {
       const sessionId = useWorkspaceStore.getState().activeSessionId
@@ -1776,7 +1802,7 @@ async function runKeybindingAction(
       actions.toggleMaximizeContent(active.id)
       return
     case 'togglePaneReviewed':
-      if (content?.kind === 'terminal') useWorkspaceStore.getState().togglePaneReviewed(content.paneId)
+      if (activePaneId) useWorkspaceStore.getState().togglePaneReviewed(activePaneId)
       return
     case 'arrangePanes':
       await actions.arrangeTerminals()
@@ -1812,16 +1838,27 @@ async function runKeybindingAction(
       return
     }
     case 'copyTerminalContents':
-      if (content?.kind === 'terminal') TerminalManager.copyContentsToClipboard(content.paneId)
+      if (activePaneId) TerminalManager.copyContentsToClipboard(activePaneId)
       return
     case 'copyTerminalSelection':
-      if (content?.kind === 'terminal') TerminalManager.copySelectionToClipboard(content.paneId)
+      if (activePaneId) TerminalManager.copySelectionToClipboard(activePaneId)
       return
     case 'captureImage':
     case 'captureQuickImage':
     case 'captureVideo':
       return
   }
+}
+
+/** The active terminal pane id: the store's active pane when the outer active
+ * panel is a terminal window, else the pane behind a direct terminal panel. */
+function activeTerminalPaneId(content: WorkspaceContentParams | null): string | null {
+  if (content?.kind === 'terminal') return content.paneId
+  if (content?.kind !== 'terminalWindow') return null
+  const activePaneId = useWorkspaceStore.getState().activePaneId
+  if (!activePaneId) return null
+  const handle = getTerminalWindow(content.instanceId)
+  return handle?.paneIds().includes(activePaneId) ? activePaneId : (handle?.paneIds()[0] ?? null)
 }
 
 function pendingPaneMeta(paneId: string, title: string | null, icon?: string | null): PaneMeta {

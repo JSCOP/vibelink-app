@@ -6,7 +6,7 @@ describe('workspace content descriptor icons', () => {
   it('resolves every built-in descriptor without falling back to the terminal icon', () => {
     for (const descriptor of Object.values(workspaceContentDescriptors)) {
       expect(profileIcons[descriptor.icon], `${descriptor.kind}:${descriptor.icon}`).toBeDefined()
-      if (descriptor.kind !== 'terminal') expect(descriptor.icon).not.toBe(defaultProfileIconName)
+      if (descriptor.kind !== 'terminal' && descriptor.kind !== 'terminalWindow') expect(descriptor.icon).not.toBe(defaultProfileIconName)
     }
   })
 })

@@ -12,6 +12,7 @@ const actions = {
   arrangeTerminals: vi.fn(async () => undefined),
   clearTerminals: vi.fn(async () => undefined),
   toggleMaximizeContent: vi.fn(),
+  toggleTerminalWindowTitles: vi.fn(),
   renameTerminal: vi.fn(async () => undefined),
   resetLayout: vi.fn(async () => undefined),
   getContentParams: vi.fn(() => null),

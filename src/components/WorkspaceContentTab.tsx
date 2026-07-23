@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
-import { Maximize2, Minimize2, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Maximize2, Minimize2, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useGitStore } from '../state/git'
@@ -169,6 +169,15 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
             </button>
             <button type="button" title="Split terminal below" aria-label="Split terminal below" onClick={(event) => { activateAndStop(event); void actions.splitTerminal(paneId, 'below') }}>
               <SplitSquareHorizontal size={12} aria-hidden="true" />
+            </button>
+          </>
+        ) : content?.kind === 'terminalWindow' ? (
+          <>
+            <button type="button" title={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} aria-label={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} onClick={(event) => { activateAndStop(event); actions.toggleTerminalWindowTitles(content.instanceId) }}>
+              {content.titlesHidden ? <PanelTop size={12} aria-hidden="true" /> : <PanelTopClose size={12} aria-hidden="true" />}
+            </button>
+            <button type="button" title={isMaximized ? 'Restore content' : 'Maximize content'} aria-label={isMaximized ? 'Restore content' : 'Maximize content'} onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id); setIsMaximized(api.isMaximized()) }}>
+              {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
             </button>
           </>
         ) : (

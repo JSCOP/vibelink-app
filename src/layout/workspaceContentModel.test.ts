@@ -79,6 +79,19 @@ describe('workspace content model', () => {
     expect(parseWorkspaceContentParams({ schema: 1, kind: 'workbench', instanceId: 'other', title: 'Workbench', icon: 'git-branch' })).toBeNull()
   })
 
+  it('parses terminalWindow params with an opaque inner layout and titlesHidden', () => {
+    const base = { schema: 1, kind: 'terminalWindow', instanceId: 'win-1', title: 'Terminal', icon: 'terminal' }
+    // Null inner (empty window) and a nested-object inner both round-trip.
+    expect(parseWorkspaceContentParams({ ...base, inner: null, titlesHidden: false })).toEqual({ ...base, inner: null, titlesHidden: false })
+    const withInner = { ...base, inner: { panels: {}, grid: { root: { type: 'branch', data: [], size: 100 }, width: 100, height: 100, orientation: 'HORIZONTAL' } }, titlesHidden: true }
+    expect(parseWorkspaceContentParams(withInner)).toEqual(withInner)
+    // titlesHidden must be a boolean; a non-record/non-null inner is rejected.
+    expect(parseWorkspaceContentParams({ ...base, inner: null })).toBeNull()
+    expect(parseWorkspaceContentParams({ ...base, inner: null, titlesHidden: 'yes' })).toBeNull()
+    expect(parseWorkspaceContentParams({ ...base, inner: 5, titlesHidden: false })).toBeNull()
+    expect(parseWorkspaceContentParams({ ...base, inner: null, titlesHidden: false, extra: 1 })).toBeNull()
+  })
+
   it('rejects duplicate structural singleton references across grid and edge groups', () => {
     const explorer: WorkspaceContentParams = { schema: 1, kind: 'explorer', instanceId: 'explorer', title: 'Explorer', icon: 'folder-tree' }
     const explorerId = workspaceContentPanelId(explorer)

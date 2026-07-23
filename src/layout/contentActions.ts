@@ -15,12 +15,13 @@ export type WorkspaceContentOwnership = {
 }
 
 export type OpenContentRequest = WorkspaceContentOwnership & (
-  | { kind: 'terminal'; targetGroupId?: string; profileId?: string | null; cwd?: string | null; split?: 'right' | 'below'; shell?: string | null; args?: string[]; title?: string }
+  | { kind: 'terminal'; targetGroupId?: string; windowId?: string; referencePaneId?: string; profileId?: string | null; cwd?: string | null; split?: 'right' | 'below'; shell?: string | null; args?: string[]; title?: string }
+  | { kind: 'terminalWindow'; targetGroupId?: string }
   | { kind: 'terminal-grid'; targetGroupId?: string; grid: TerminalGridLaunchRequest }
   | { kind: 'browser'; targetGroupId?: string; profileId?: string | null; private?: boolean }
   | { kind: 'editor'; targetGroupId?: string; relPath: string }
   | { kind: 'preview'; targetGroupId?: string; relPath: string; activate?: boolean }
-  | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'browser' | 'editor' | 'preview'>; targetGroupId?: string }
+  | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'terminalWindow' | 'browser' | 'editor' | 'preview'>; targetGroupId?: string }
 )
 
 export type WorkspaceContentActions = {
@@ -31,6 +32,7 @@ export type WorkspaceContentActions = {
   arrangeTerminals(grid?: GridSize | null): Promise<void>
   clearTerminals(): Promise<void>
   toggleMaximizeContent(panelId: string): void
+  toggleTerminalWindowTitles(windowId: string): void
   renameTerminal(paneId: string, title: string): Promise<void>
   resetLayout(): Promise<void>
   getContentParams(panelId: string): WorkspaceContentParams | null

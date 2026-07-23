@@ -14,7 +14,7 @@ import {
   workspaceLeftStructuralKinds,
   workspaceRightEdgeGroupId,
   workspaceRightStructuralKinds,
-  workspaceLayoutHasExactLiveTerminals,
+  createTerminalWindowParams,
 } from './workspaceLayoutModel'
 import { parseWorkspaceContentParams, workspaceContentPanelId, workspaceContentResourceKey } from './workspaceContentModel'
 
@@ -31,14 +31,24 @@ describe('workspaceLayoutModel v3', () => {
     expect(normalizeWorkspaceLayoutState(JSON.stringify({ version: 2, pages: [] }))).toEqual({ version: 3, dockview: null })
   })
 
-  it('creates central terminals plus exact fixed edge groups', () => {
+  it('wraps central terminals in one terminal window plus exact fixed edge groups', () => {
     const panes = [pane('pane-a', 'Alpha'), pane('pane-b', 'Beta')]
     const layout = createDefaultWorkspaceDockviewLayout(panes, 1600)
-    const terminalIds = panes.map((entry) => workspaceContentPanelId(createTerminalContentParams(entry)))
     const leftIds = workspaceLeftStructuralKinds.map((kind) => workspaceContentPanelId(createSingletonContentParams(kind)))
     const rightIds = workspaceRightStructuralKinds.map((kind) => workspaceContentPanelId(createSingletonContentParams(kind)))
 
-    expect(Object.keys(layout.panels)).toEqual([...leftIds, ...rightIds, ...terminalIds])
+    // Terminals no longer appear as top-level panels; they live inside a single
+    // terminalWindow panel's nested inner Dockview.
+    const panelIds = Object.keys(layout.panels)
+    expect(panelIds.slice(0, leftIds.length + rightIds.length)).toEqual([...leftIds, ...rightIds])
+    const windowIds = panelIds.filter((id) => id.startsWith('content:terminalWindow:'))
+    expect(windowIds).toHaveLength(1)
+    const windowPanel = layout.panels[windowIds[0]]
+    expect(windowPanel.contentComponent).toBe('terminalWindow')
+    const innerPanels = Object.values((windowPanel.params as { inner: { panels: Record<string, unknown> } }).inner.panels)
+    expect(innerPanels.map((p) => (p as { contentComponent: string }).contentComponent)).toEqual(['terminal', 'terminal'])
+    expect(innerPanels.map((p) => (p as { params: { paneId: string } }).params.paneId)).toEqual(['pane-a', 'pane-b'])
+
     expect(layout.edgeGroups).toEqual({
       left: {
         size: 300,
@@ -54,11 +64,10 @@ describe('workspaceLayoutModel v3', () => {
       },
     })
     const serializedRoot = JSON.stringify(layout.grid.root)
-    expect(serializedRoot).toContain(terminalIds[0])
+    expect(serializedRoot).toContain(windowIds[0])
     expect(serializedRoot).not.toContain(leftIds[0])
     expect(serializedRoot).not.toContain(rightIds[0])
     expect(layout.activeGroup).toMatch(/^content-group-/)
-    expect(JSON.stringify(layout)).not.toContain('vibelinkTerminalLayout')
   })
 
   it('uses deterministic width-sensitive default collapse without changing expanded sizes', () => {
@@ -69,23 +78,21 @@ describe('workspaceLayoutModel v3', () => {
     expect(createDefaultWorkspaceDockviewLayout([], 1100).edgeGroups?.right).toMatchObject({ size: 340, collapsed: true })
   })
 
-  it('round-trips an edge-only layout and later accepts a first central panel', () => {
-    const edgeOnly = createDefaultWorkspaceDockviewLayout([], 1600)
-    expect(edgeOnly.grid.root).toEqual({ type: 'branch', data: [], size: 640 })
-    expect(edgeOnly.activeGroup).toBeUndefined()
-
-    const normalizedEdgeOnly = normalizeWorkspaceLayoutState(JSON.stringify({ version: 3, dockview: edgeOnly }))
-    expect(normalizedEdgeOnly.dockview).toEqual(edgeOnly)
-    expect(workspaceLayoutHasExactLiveTerminals(normalizedEdgeOnly, [])).toBe(true)
+  it('round-trips a default terminal-window layout and an empty terminal window', () => {
+    const empty = createDefaultWorkspaceDockviewLayout([], 1600)
+    // Even with zero panes the central grid holds one (empty) terminal window.
+    const emptyWindowIds = Object.keys(empty.panels).filter((id) => id.startsWith('content:terminalWindow:'))
+    expect(emptyWindowIds).toHaveLength(1)
+    expect(empty.activeGroup).toMatch(/^content-group-/)
+    expect(normalizeWorkspaceLayoutState(JSON.stringify({ version: 3, dockview: empty })).dockview).toEqual(empty)
 
     const withTerminal = createDefaultWorkspaceDockviewLayout([pane('pane-a')], 1600)
     expect(normalizeWorkspaceLayoutState(JSON.stringify({ version: 3, dockview: withTerminal })).dockview).toEqual(withTerminal)
-    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: withTerminal }, ['pane-a'])).toBe(true)
   })
 
   it('defines every built-in content descriptor and Preview singleton identity', () => {
     expect(Object.keys(workspaceContentDescriptors)).toEqual([
-      'terminal', 'browser', 'editor', 'preview', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions',
+      'terminal', 'terminalWindow', 'browser', 'editor', 'preview', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions',
     ])
     expect(createSingletonContentParams('sourceControl')).toEqual({
       schema: 1,
@@ -102,14 +109,16 @@ describe('workspaceLayoutModel v3', () => {
     expect(() => createPreviewContentParams('../secret.txt')).toThrow(/workspace-relative/)
   })
 
-  it('preserves exact live terminal coverage when edge panels are present', () => {
-    const panes = [pane('pane-a'), pane('pane-b')]
-    const layout = createDefaultWorkspaceDockviewLayout(panes)
-
-    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-b'])).toBe(true)
-    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-b', 'pane-c'])).toBe(false)
-    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a'])).toBe(false)
-    expect(workspaceLayoutHasExactLiveTerminals({ version: 3, dockview: layout }, ['pane-a', 'pane-a'])).toBe(false)
+  it('builds a terminal window whose inner layout holds one leaf per pane', () => {
+    const paneParams = [createTerminalContentParams(pane('pane-a', 'Alpha')), createTerminalContentParams(pane('pane-b', 'Beta'))]
+    const params = createTerminalWindowParams('win-1', paneParams, { cols: 2, rows: 1 })
+    expect(params.kind).toBe('terminalWindow')
+    expect(params.titlesHidden).toBe(false)
+    expect(params.inner).not.toBeNull()
+    const innerPanels = Object.keys(params.inner?.panels ?? {})
+    expect(innerPanels).toEqual(['content:terminal:pane-a', 'content:terminal:pane-b'])
+    // An empty terminal window has a null inner layout (rebuilt from live panes).
+    expect(createTerminalWindowParams('win-2', [], { cols: 1, rows: 1 }).inner).toBeNull()
   })
 
   it('places later rows below the pane in the same column', () => {
