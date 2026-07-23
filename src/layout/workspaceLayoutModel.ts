@@ -1,6 +1,6 @@
 import { Orientation, type SerializedDockview } from 'dockview-core'
 import type { PaneMeta } from '../ipc/types'
-import { balancedGridForPaneCount, type GridSize } from './templatePlan'
+import type { GridSize } from './templatePlan'
 import {
   freshWorkspaceLayoutEnvelope,
   normalizeWorkspaceLayoutEnvelope,
@@ -101,10 +101,7 @@ export function createWorkspaceContentPanel(params: WorkspaceContentParams): Ser
 
 export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta, 'id' | 'config'>>, rootWidth = 1280): SerializedDockview {
   const terminalParams = panes.map(createTerminalContentParams)
-  const terminalGrid = terminalParams.length > 0
-    ? balancedGridForPaneCount(terminalParams.length, 16 / 9)
-    : { cols: 0, rows: 0 }
-  return createWorkspaceDockview(terminalParams, terminalGrid, rootWidth)
+  return createWorkspaceDockview(terminalParams, rootWidth)
 }
 
 export function workspaceLayoutHasExactLiveTerminals(envelope: WorkspaceLayoutEnvelope, livePaneIds: readonly string[]): boolean {
@@ -177,51 +174,37 @@ export function freshWorkspaceLayoutState(): WorkspaceLayoutState {
   return freshWorkspaceLayoutEnvelope()
 }
 
-function createWorkspaceDockview(terminalParams: WorkspaceContentParams[], grid: GridSize, rootWidth: number): SerializedDockview {
+function createWorkspaceDockview(terminalParams: WorkspaceContentParams[], rootWidth: number): SerializedDockview {
   const leftParams = workspaceLeftStructuralKinds.map(createSingletonContentParams)
   const rightParams = workspaceRightStructuralKinds.map(createSingletonContentParams)
   const structuralParams = [...leftParams, ...rightParams]
   const terminalIds = terminalParams.map((entry) => workspaceContentPanelId(entry))
-  const requestedColumns = Number.isFinite(grid.cols) ? Math.floor(grid.cols) : 1
-  const requestedRows = Number.isFinite(grid.rows) ? Math.floor(grid.rows) : 1
-  const terminalColumns = terminalIds.length > 0 ? Math.max(1, Math.min(requestedColumns, terminalIds.length)) : 0
-  const terminalRows = terminalIds.length > 0 ? Math.max(Math.ceil(terminalIds.length / terminalColumns), requestedRows, 1) : 0
-  const terminalColumnWidth = 500
-  const centerWidth = Math.max(workspaceMinimumCenterWidth, terminalColumns * terminalColumnWidth)
-  const height = Math.max(1, terminalRows) * 320
+  const terminalCount = terminalIds.length
+  const centerWidth = Math.max(workspaceMinimumCenterWidth, Math.min(terminalCount, 4) * 500)
+  const height = Math.max(1, Math.ceil(terminalCount / 2)) * 320
   const panels: SerializedDockview['panels'] = {}
   for (const entry of structuralParams) panels[workspaceContentPanelId(entry)] = createWorkspaceContentPanel(entry)
   for (const entry of terminalParams) panels[workspaceContentPanelId(entry)] = createWorkspaceContentPanel(entry)
 
   let groupIndex = 0
   let firstTerminalGroupId: string | null = null
-  const leaf = (panelId: string, size: number): SerializedDockview['grid']['root'] => {
+  const leaf = (panelIds: string[], size: number): SerializedDockview['grid']['root'] => {
     const groupId = `content-group-${groupIndex++}`
     if (firstTerminalGroupId === null) firstTerminalGroupId = groupId
     return {
       type: 'leaf',
-      data: { views: [panelId], activeView: panelId, id: groupId },
+      data: { views: panelIds, activeView: panelIds[0], id: groupId },
       size,
     }
   }
 
-  const columns: SerializedDockview['grid']['root'][] = []
-  for (let col = 0; col < terminalColumns; col += 1) {
-    const columnIds: string[] = []
-    for (let row = 0; row < terminalRows; row += 1) {
-      const panelId = terminalIds[row * terminalColumns + col]
-      if (panelId) columnIds.push(panelId)
-    }
-    if (columnIds.length === 0) continue
-    if (columnIds.length === 1) columns.push(leaf(columnIds[0], terminalColumnWidth))
-    else {
-      columns.push({
-        type: 'branch',
-        data: columnIds.map((panelId) => leaf(panelId, Math.max(1, Math.floor(height / columnIds.length)))),
-        size: terminalColumnWidth,
-      })
-    }
-  }
+  // All terminals default into ONE tabbed terminal window rather than spreading
+  // across separate column groups (which read as many disconnected "windows").
+  // Users split into side-by-side panes explicitly via split/arrange; a fresh
+  // workspace opens a single terminal window whose tab strip lists every pane.
+  const columns: SerializedDockview['grid']['root'][] = terminalIds.length > 0
+    ? [leaf(terminalIds, centerWidth)]
+    : []
 
   const collapsed = workspaceDefaultEdgeCollapse(rootWidth)
   const explorerId = workspaceContentPanelId(leftParams[0])
