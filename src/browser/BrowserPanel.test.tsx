@@ -125,4 +125,19 @@ describe('BrowserPanel', () => {
     await waitFor(() => expect(deliver).toHaveBeenNthCalledWith(1, annotation, { kind: 'agent' }))
     expect(deliver).toHaveBeenNthCalledWith(2, annotation, { kind: 'terminal', paneId: 'pane-codex', title: 'Codex', role: 'Reviewer' })
   })
+
+  it('calls a stable onTitleChange only when the title actually changes, never every render', async () => {
+    const controller = new RecordingController()
+    // A stable callback (the real fix keeps this identity constant). Re-rendering
+    // with unchanged props must NOT re-invoke it — an unstable callback here was
+    // what drove updateParameters → re-render → infinite "Maximum update depth".
+    const onTitleChange = vi.fn()
+    const { rerender } = render(<BrowserPanel controller={controller} initialState={state()} active focused workspaceVisible onTitleChange={onTitleChange} />)
+    await waitFor(() => expect(onTitleChange).toHaveBeenCalledWith('Example'))
+    const callsAfterMount = onTitleChange.mock.calls.length
+    rerender(<BrowserPanel controller={controller} initialState={state()} active focused workspaceVisible onTitleChange={onTitleChange} />)
+    rerender(<BrowserPanel controller={controller} initialState={state()} active={false} focused workspaceVisible onTitleChange={onTitleChange} />)
+    // Title never changed across re-renders, so no additional invocations.
+    expect(onTitleChange.mock.calls.length).toBe(callsAfterMount)
+  })
 })
