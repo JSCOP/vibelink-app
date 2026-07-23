@@ -1,4 +1,6 @@
 import { languageForPath } from '../../editor/languageForPath'
+import { registerVibeLinkMonacoThemes } from '../../editor/monacoTheme'
+import type { MonacoModule } from '../../editor/monacoTheme'
 
 /**
  * Per-line syntax highlighting for the Git diff view.
@@ -24,11 +26,8 @@ function stripTrailingNewline(value: string): string[] {
   return normalized.split('\n')
 }
 
-async function colorizeInto(map: DiffHighlightMap, text: string, languageId: string): Promise<void> {
+async function colorizeInto(map: DiffHighlightMap, text: string, languageId: string, monaco: MonacoModule): Promise<void> {
   if (!text) return
-  // Import Monaco lazily so the diff module (and its tests) don't eagerly pull
-  // in the full editor bundle, which fails to initialize outside a real DOM.
-  const { monaco } = await import('../../editor/monaco')
   const html = await monaco.editor.colorize(text, languageId, { tabSize: TAB_SIZE })
   const htmlLines = html.split('<br/>')
   const sourceLines = stripTrailingNewline(text)
@@ -51,14 +50,20 @@ export async function buildDiffHighlightMap(
   path: string | null,
   oldValue: string,
   newValue: string,
+  terminalThemeId: string,
 ): Promise<DiffHighlightMap | null> {
   if (!path) return null
   const languageId = languageForPath(path)
   if (languageId === 'plaintext') return null
   try {
+    // Monaco is intentionally lazy here: eager editor bootstrap breaks the
+    // diff module's non-DOM tests and loads the full editor in plain-text diffs.
+    const { monaco } = await import('../../editor/monaco')
+    const themeName = registerVibeLinkMonacoThemes(monaco, terminalThemeId)
+    monaco.editor.setTheme(themeName)
     const map: DiffHighlightMap = new Map()
-    await colorizeInto(map, oldValue, languageId)
-    await colorizeInto(map, newValue, languageId)
+    await colorizeInto(map, oldValue, languageId, monaco)
+    await colorizeInto(map, newValue, languageId, monaco)
     return map.size > 0 ? map : null
   } catch {
     return null

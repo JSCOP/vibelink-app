@@ -1055,6 +1055,7 @@ export function WorkspaceView({
       TerminalManager.dispose(paneId)
       if (!ownsLayout(owner)) return 'closed'
       handle.removePane(paneId)
+      await handle.settle()
       handle.persist()
       if (handle.paneIds().length === 0) {
         const windowPanel = api.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: handle.windowId }))
@@ -1488,6 +1489,7 @@ export function WorkspaceView({
     // otherwise persist writes new params that re-run this effect in a loop.
     const owned = allWindowedPaneIds()
     let changed = false
+    const layoutChangedWindows = new Set<TerminalWindowHandle>()
     for (const handle of windows) {
       const innerApi = handle.getInnerApi()
       if (!innerApi) continue
@@ -1504,7 +1506,8 @@ export function WorkspaceView({
           }
         } else if (!livePaneIds.has(paneId) && !pendingTerminalPaneIdsRef.current.has(paneId)) {
           TerminalManager.dispose(paneId)
-          panel.api.close()
+          handle.removePane(paneId)
+          layoutChangedWindows.add(handle)
           changed = true
         }
       }
@@ -1513,12 +1516,15 @@ export function WorkspaceView({
     if (firstWindow.getInnerApi()) {
       for (const pane of livePanes) {
         if (owned.has(pane.id) || pendingTerminalPaneIdsRef.current.has(pane.id)) continue
-        if (firstWindow.addPane(createTerminalContentParams(pane), { inactive: true })) changed = true
+        if (firstWindow.addPane(createTerminalContentParams(pane), { inactive: true })) {
+          layoutChangedWindows.add(firstWindow)
+          changed = true
+        }
       }
     }
     if (!changed) return
     for (const handle of windows) handle.persist()
-    void firstWindow.settle()
+    for (const handle of layoutChangedWindows) void handle.settle()
     persistLayoutSoon()
   }, [activeSessionId, addContentPanel, apiVersion, panes, persistLayoutSoon])
 

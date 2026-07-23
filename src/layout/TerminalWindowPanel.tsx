@@ -16,6 +16,7 @@ import { useWorkspaceStore } from '../state/store'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverlay'
 import { finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
+import { removePanelPreservingLayout } from './paneCloseLayout'
 import {
   parseWorkspaceContentParams,
   workspaceContentPanelId,
@@ -137,8 +138,22 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   }, [])
 
   const removePane = useCallback((paneId: string) => {
-    const panel = innerApiRef.current?.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
-    if (panel) panel.api.close()
+    const api = innerApiRef.current
+    if (!api) return
+    const panelId = workspaceContentPanelId({ kind: 'terminal', instanceId: paneId })
+    const panel = api.getPanel(panelId)
+    if (!panel) return
+    try {
+      const nextLayout = removePanelPreservingLayout(api.toJSON(), panelId)
+      if (nextLayout) {
+        api.fromJSON(nextLayout, { reuseExistingPanels: true })
+        return
+      }
+    } catch {
+      // Fall back to Dockview's native close if the live layout cannot be
+      // serialized. A single/invalid layout has no unrelated pane to preserve.
+    }
+    panel.api.close()
   }, [])
 
   const paneIds = useCallback((): string[] => {

@@ -111,4 +111,40 @@ describe('local terminal split sizing', () => {
     expect(first.group.api.width).toBeCloseTo(unrelatedWidths[0], 0)
     expect(last.group.api.width).toBeCloseTo(unrelatedWidths[1], 0)
   })
+  it('keeps four same-axis splits equal when each original pane is split once', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const api = createDockview(host, {
+      createComponent: () => ({
+        element: document.createElement('div'),
+        init: () => undefined,
+      }),
+    })
+    disposals.push(() => api.dispose())
+    api.layout(1200, 800)
+
+    const first = api.addPanel({ id: 'first', component: 'test' })
+    const second = api.addPanel({
+      id: 'second',
+      component: 'test',
+      position: { referencePanel: first, direction: 'right' },
+    })
+
+    const split = (reference: typeof first, id: string) => {
+      const originalWidth = reference.group.api.width
+      const created = api.addPanel({
+        id,
+        component: 'test',
+        position: { referencePanel: reference, direction: 'right' },
+        ...localSplitInitialSize(getGridLocation(reference.group.element), 'right'),
+      } as AddPanelOptions)
+      finalizeLocalSplitSize(reference.group, created.group, 'right', originalWidth)
+      return created
+    }
+
+    const third = split(first, 'third')
+    const fourth = split(second, 'fourth')
+    const widths = [first, third, second, fourth].map((panel) => panel.group.api.width)
+    for (const width of widths) expect(width).toBeCloseTo(300, 0)
+  })
 })
