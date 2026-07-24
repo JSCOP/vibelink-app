@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'dev-release', 'installers', 'open-installers', 'version-preview')]
+  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'dev-release', 'installers', 'open-installers', 'version-preview', 'version-bump')]
   [string]$Action = 'menu',
   [string]$Version = '',
   [string]$ConfigOverlay = ''
@@ -344,6 +344,7 @@ Actions:
   dev-release       Current-version local release installers without version bump or publication.
   open-installers    Open existing dev and release NSIS installer output folders.
   version-preview    Shows the next installer version without changing files.
+  version-bump       Promotes package.json/Cargo.toml/Cargo.lock/tauri.conf.json (patch bump, or -Version x.y.z) without building.
 
 Debug vs release:
   Debug/dev is for fast iteration and uses the Dev flavor/data directory.
@@ -384,6 +385,7 @@ function Invoke-Action([string]$Name) {
     'installers' { Invoke-AllInstallers }
     'open-installers' { Open-InstallerOutputs }
     'version-preview' { Invoke-InstallerVersionBump -DryRun }
+    'version-bump' { Invoke-InstallerVersionBump }
     default { throw "Unknown action: $Name" }
   }
 }
@@ -401,6 +403,7 @@ function Show-Menu {
     Write-Host '8. Open installer output folders'
     Write-Host '9. Create current-version dev release installers (no bump/publish)'
     Write-Host 'v. Preview next installer version without changing files'
+    Write-Host 'b. Promote version now (patch bump; pass -Version x.y.z to override)'
     Write-Host 'h. Help / debug vs release explanation'
     Write-Host 'q. Quit'
     $choice = Read-Host 'Select'
@@ -418,6 +421,8 @@ function Show-Menu {
         '9' { Invoke-CiInstaller }
         'v' { Invoke-InstallerVersionBump -DryRun }
         'version' { Invoke-InstallerVersionBump -DryRun }
+        'b' { Invoke-InstallerVersionBump }
+        'bump' { Invoke-InstallerVersionBump }
         'h' { Show-HelpText }
         'help' { Show-HelpText }
         'q' { return }
