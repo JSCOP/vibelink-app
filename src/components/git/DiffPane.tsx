@@ -18,6 +18,8 @@ export type DiffPaneProps = {
 }
 
 const MIN_SPLIT_DIFF_WIDTH = 900
+const MAX_RENDERED_DIFF_CHARACTERS = 512 * 1024
+const MAX_RENDERED_DIFF_LINES = 20_000
 
 export function DiffPane({ files, selectedPath, onSelect, contents, loading, splitView, title, error = null, onOpenInEditor = null, hideFileList = false }: DiffPaneProps) {
   const [listWidth, setListWidth] = useState(260)
@@ -61,6 +63,10 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
       new: contents.new.includes('\r') ? contents.new.replace(/\r\n?/g, '\n') : contents.new,
     }
   }, [contents])
+  const renderLimitExceeded = useMemo(
+    () => Boolean(normalizedContents && !normalizedContents.binary && diffExceedsRenderLimit(normalizedContents.old, normalizedContents.new)),
+    [normalizedContents],
+  )
   const highlightMap = highlightState
     && highlightState.contents === normalizedContents
     && highlightState.path === selectedPath
@@ -69,6 +75,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
     : null
 
   useEffect(() => {
+    if (renderLimitExceeded) return
     let cancelled = false
     const old = normalizedContents && !normalizedContents.binary ? normalizedContents.old : ''
     const next = normalizedContents && !normalizedContents.binary ? normalizedContents.new : ''
@@ -76,7 +83,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
       if (!cancelled) setHighlightState({ contents: normalizedContents, path: selectedPath, themeId: terminalThemeId, map })
     })
     return () => { cancelled = true }
-  }, [normalizedContents, selectedPath, terminalThemeId])
+  }, [normalizedContents, renderLimitExceeded, selectedPath, terminalThemeId])
 
   const renderContent = useMemo(() => {
     if (!highlightMap) return undefined
@@ -93,7 +100,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
   const showSelectHint = hideFileList && !selectedPath
   const noDifferences = Boolean(normalizedContents && !normalizedContents.binary && normalizedContents.old === normalizedContents.new)
   const noFiles = !hideFileList && files.length === 0 && !selectedPath
-  const noContents = !loading && !error && !contents && !showSelectHint && !noFiles
+  const noContents = !loading && !error && !contents && !showSelectHint && !noFiles && !renderLimitExceeded
 
   return (
     <div className="task-diff-view git-diff-pane" data-file-list-hidden={hideFileList || undefined} style={{ '--file-list-width': `${listWidth}px` } as CSSProperties}>
@@ -127,18 +134,36 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
             {onOpenInEditor ? <button type="button" onClick={onOpenInEditor}>Open in editor</button> : null}
           </div>
         ) : null}
+        {!loading && !error && renderLimitExceeded ? (
+          <div className="task-diff-empty git-diff-empty">
+            Diff is too large to render safely. Narrow the comparison or open the file from Explorer.
+            {onOpenInEditor ? <button type="button" onClick={onOpenInEditor}>Open in editor</button> : null}
+          </div>
+        ) : null}
         {!loading && !error && noDifferences ? <div className="task-diff-empty git-diff-empty">No differences to show.</div> : null}
         {!loading && !error && noFiles ? <div className="task-diff-empty git-diff-empty">No changed files.</div> : null}
         {!loading && !error && !contents && showSelectHint ? (
           <div className="task-diff-empty git-diff-empty">Select a file to view its diff.</div>
         ) : null}
         {noContents ? <div className="task-diff-empty git-diff-empty">No diff available for this file.</div> : null}
-        {!loading && normalizedContents && !normalizedContents.binary && !noDifferences ? (
+        {!loading && normalizedContents && !normalizedContents.binary && !noDifferences && !renderLimitExceeded ? (
           <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} renderContent={renderContent} />
         ) : null}
       </main>
     </div>
   )
+}
+
+function diffExceedsRenderLimit(oldValue: string, newValue: string): boolean {
+  if (oldValue.length + newValue.length > MAX_RENDERED_DIFF_CHARACTERS) return true
+  let lines = 2
+  for (let index = 0; index < oldValue.length; index += 1) {
+    if (oldValue.charCodeAt(index) === 10) lines += 1
+  }
+  for (let index = 0; index < newValue.length; index += 1) {
+    if (newValue.charCodeAt(index) === 10) lines += 1
+  }
+  return lines > MAX_RENDERED_DIFF_LINES
 }
 
 const diffStyles = {

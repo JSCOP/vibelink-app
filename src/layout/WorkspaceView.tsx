@@ -1633,6 +1633,7 @@ export function WorkspaceView({
   return (
     <WorkspaceIntegrationContext.Provider value={integration}>
       <WorkspaceContentActionsContext.Provider value={actions}>
+        <ErrorBoundary label="Workspace" resetKey={`${activeSessionId ?? 'none'}:${workspaceReadyEpoch}`}>
         <GitWorkspaceProvider>
         <div
         ref={dockRef}
@@ -1695,6 +1696,7 @@ export function WorkspaceView({
           ) : null}
         </div>
         </GitWorkspaceProvider>
+        </ErrorBoundary>
       </WorkspaceContentActionsContext.Provider>
     </WorkspaceIntegrationContext.Provider>
   )

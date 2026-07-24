@@ -6,7 +6,7 @@ import { removePanelPreservingLayout } from './paneCloseLayout'
 Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: class { observe() {} unobserve() {} disconnect() {} } })
 
 describe('terminal pane close sizing', () => {
-  it('gives the closed pane extent to one adjacent pane without resizing unrelated siblings', () => {
+  it('redistributes the closed pane extent without changing surviving sibling ratios', () => {
     const layout = horizontalLayout([
       leaf('pane-a', 'group-a', 300),
       leaf('pane-b', 'group-b', 200),
@@ -18,12 +18,31 @@ describe('terminal pane close sizing', () => {
     expect(next?.grid.root).toMatchObject({
       type: 'branch',
       data: [
-        { type: 'leaf', size: 500, data: { views: ['pane-a'] } },
-        { type: 'leaf', size: 100, data: { views: ['pane-c'] } },
+        { type: 'leaf', size: 450, data: { views: ['pane-a'] } },
+        { type: 'leaf', size: 150, data: { views: ['pane-c'] } },
       ],
     })
     expect(next?.panels).toEqual({ 'pane-a': { id: 'pane-a' }, 'pane-c': { id: 'pane-c' } })
     expect(next?.activeGroup).toBe('group-a')
+  })
+
+  it('balances the two equal panes left after closing the leading half-width pane', () => {
+    const layout = horizontalLayout([
+      leaf('pane-a', 'group-a', 300),
+      leaf('pane-b', 'group-b', 150),
+      leaf('pane-c', 'group-c', 150),
+    ], 'group-a')
+
+    const next = removePanelPreservingLayout(layout, 'pane-a')
+
+    expect(next?.grid.root).toMatchObject({
+      type: 'branch',
+      data: [
+        { type: 'leaf', size: 300, data: { views: ['pane-b'] } },
+        { type: 'leaf', size: 300, data: { views: ['pane-c'] } },
+      ],
+    })
+    expect(next?.activeGroup).toBe('group-b')
   })
 
   it('collapses a nested split locally while preserving the other column width', () => {
@@ -76,7 +95,7 @@ describe('terminal pane close sizing', () => {
     })
     expect(next?.activeGroup).toBe('group-tabs')
   })
-  it('applies the preserved sizes through Dockview panel reuse', () => {
+  it('applies proportional redistribution through Dockview panel reuse', () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     const api = createDockview(host, {
@@ -94,9 +113,9 @@ describe('terminal pane close sizing', () => {
       api.fromJSON(next!, { reuseExistingPanels: true })
       api.layout(600, 400, true)
 
-      expect(api.getPanel('pane-a')?.group.api.width).toBeCloseTo(300, 0)
-      expect(api.getPanel('pane-c')?.group.api.width).toBeCloseTo(150, 0)
-      expect(api.getPanel('pane-d')?.group.api.width).toBeCloseTo(150, 0)
+      expect(api.getPanel('pane-a')?.group.api.width).toBeCloseTo(200, 0)
+      expect(api.getPanel('pane-c')?.group.api.width).toBeCloseTo(200, 0)
+      expect(api.getPanel('pane-d')?.group.api.width).toBeCloseTo(200, 0)
     } finally {
       api.dispose()
       host.remove()

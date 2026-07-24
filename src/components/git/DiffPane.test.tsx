@@ -100,4 +100,22 @@ describe('DiffPane', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open in editor' }))
     expect(onOpenInEditor).toHaveBeenCalledOnce()
   })
+
+  it('avoids rendering pathological diffs that can exhaust the Workbench WebView', () => {
+    const oversized = 'line\n'.repeat(10_001)
+    render(
+      <DiffPane
+        files={[]}
+        selectedPath="large.ts"
+        onSelect={vi.fn()}
+        contents={{ old: oversized, new: oversized.replaceAll('line', 'changed'), binary: false }}
+        loading={false}
+        splitView
+        hideFileList
+      />,
+    )
+
+    expect(screen.getByText('Diff is too large to render safely. Narrow the comparison or open the file from Explorer.')).toBeTruthy()
+    expect(screen.queryByTestId('diff-viewer')).toBeNull()
+  })
 })

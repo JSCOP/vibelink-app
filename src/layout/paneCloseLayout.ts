@@ -35,10 +35,9 @@ type MutableDockview = Omit<SerializedDockview, 'grid' | 'panels'> & {
   panels: Record<string, unknown>
 }
 
-/** Remove one terminal panel without Dockview's default whole-branch
- * redistribution. The closed leaf's extent is assigned to its previous sibling
- * (or next sibling at the leading edge), while every unrelated sibling keeps
- * its exact serialized size. */
+/** Remove one terminal panel without Dockview's default equal-size rewrite.
+ * The closed leaf's extent is redistributed across the surviving siblings in
+ * the same branch, preserving their relative sizes and every unrelated branch. */
 export function removePanelPreservingLayout(layout: SerializedDockview, panelId: string): SerializedDockview | null {
   const next = structuredClone(layout) as MutableDockview
   const result = removePanelFromNode(next.grid.root, panelId, true)
@@ -83,19 +82,37 @@ function removePanelFromNode(node: MutableNode, panelId: string, isRoot: boolean
     node.data.splice(index, 1)
     if (node.data.length === 0) return { ...result, node: null }
 
-    const absorberIndex = index > 0 ? index - 1 : 0
-    const absorber = node.data[absorberIndex]
-    absorber.size += removedExtent
-    const fallbackGroupId = firstLeafGroupId(absorber)
+    const fallbackIndex = index > 0 ? index - 1 : 0
+    const fallbackGroupId = firstLeafGroupId(node.data[fallbackIndex])
 
     if (!isRoot && node.data.length === 1) {
-      absorber.size = node.size
-      return { ...result, node: absorber, fallbackGroupId }
+      const remaining = node.data[0]
+      remaining.size = node.size
+      return { ...result, node: remaining, fallbackGroupId }
     }
+    redistributeExtent(node.data, removedExtent)
     return { ...result, node, fallbackGroupId }
   }
 
   return { node, removed: false, removedGroupId: null, fallbackGroupId: null, removedLeaf: false }
+}
+
+function redistributeExtent(nodes: MutableNode[], removedExtent: number): void {
+  const survivingExtent = nodes.reduce((total, child) => total + child.size, 0)
+  const targetExtent = survivingExtent + removedExtent
+  if (!(survivingExtent > 0) || !(targetExtent > 0)) {
+    const equalExtent = targetExtent > 0 ? targetExtent / nodes.length : 0
+    for (const child of nodes) child.size = equalExtent
+    return
+  }
+
+  const scale = targetExtent / survivingExtent
+  let distributed = 0
+  for (let index = 0; index < nodes.length - 1; index += 1) {
+    nodes[index].size *= scale
+    distributed += nodes[index].size
+  }
+  nodes[nodes.length - 1].size = targetExtent - distributed
 }
 
 function removePanelFromTabGroups(group: MutableGroupState, panelId: string): void {
