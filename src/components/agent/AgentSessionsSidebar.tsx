@@ -75,20 +75,25 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
     }
   }, [contentActions, markViewed, setError])
 
-  const resumeConversation = useCallback(async (conversation: AgentConversationInfo) => {
+  const resumeConversation = useCallback(async (conversation: AgentConversationInfo, newWindow: boolean) => {
     const launch = agentResumeLaunch(conversation)
     if (!launch) {
       setError(`Resuming ${agentConversationLabel(conversation.agent)} conversations is not supported.`)
       return
     }
     try {
+      // Plain click resumes in the active terminal window (activating one from
+      // the tab list when none is on screen); Ctrl/Cmd+click opens a new window.
       const panelId = await contentActions.openContent({
         kind: 'terminal',
         cwd: conversation.cwd,
         shell: launch.shell,
         args: launch.args,
         title: launch.title,
+        newWindow,
       })
+      // Reveal the owning terminal window and focus the resumed pane so the user
+      // immediately sees the resumed agent instead of a hidden background pane.
       if (panelId) contentActions.activateContent(panelId)
     } catch (reason) {
       setError(String(reason))
@@ -233,8 +238,8 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
                 type="button"
                 className="agent-session-row agent-conversation-row"
                 role="listitem"
-                title={`Resume in a new terminal · ${conversation.path}`}
-                onClick={() => { void resumeConversation(conversation) }}
+                title={`Resume in the active terminal · Ctrl+click for a new window · ${conversation.path}`}
+                onClick={(event) => { void resumeConversation(conversation, event.ctrlKey || event.metaKey) }}
               >
                 <span className="agent-session-row-title">
                   <Bot size={12} aria-hidden="true" />

@@ -90,7 +90,7 @@ function themeData(theme: TerminalThemeDefinition): Monaco.editor.IStandaloneThe
       { token: 'invalid', foreground: hex(terminal.brightRed), fontStyle: 'underline' },
       { token: 'deprecated', foreground: hex(terminal.brightBlack), fontStyle: 'strikethrough' },
     ],
-    colors: {
+    colors: toMonacoColors({
       'editor.background': ui.panel,
       'editor.foreground': ui.text,
       'editorCursor.foreground': terminal.cursor,
@@ -118,10 +118,39 @@ function themeData(theme: TerminalThemeDefinition): Monaco.editor.IStandaloneThe
       'breadcrumb.background': ui.panel,
       'breadcrumb.foreground': ui.muted,
       'breadcrumb.focusForeground': ui.text,
-    },
+    }),
   }
 }
 
 function hex(color: string): string {
   return color.startsWith('#') ? color.slice(1) : color
+}
+
+/**
+ * Monaco's standalone theme loader parses every `colors` value with
+ * `Color.fromHex`, which returns opaque RED whenever the string is not a
+ * `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa` hex literal. Our palette emits `rgba(...)`
+ * strings (selection, line highlight, scrollbar thumb, borders), so those keys
+ * silently rendered red in every theme. Normalize each value to hex Monaco can
+ * parse; unknown formats pass through unchanged.
+ */
+function toMonacoColors(colors: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(colors)) result[key] = toMonacoColor(value)
+  return result
+}
+
+function toMonacoColor(value: string): string {
+  const trimmed = value.trim()
+  if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(trimmed)) return trimmed
+  const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(trimmed)
+  if (!rgba) return trimmed
+  const channels = `#${byteHex(rgba[1])}${byteHex(rgba[2])}${byteHex(rgba[3])}`
+  const alpha = rgba[4] === undefined ? 1 : Math.min(1, Math.max(0, Number(rgba[4])))
+  return alpha >= 1 ? channels : `${channels}${byteHex(String(Math.round(alpha * 255)))}`
+}
+
+function byteHex(value: string): string {
+  const byte = Math.min(255, Math.max(0, Math.round(Number(value) || 0)))
+  return byte.toString(16).padStart(2, '0')
 }

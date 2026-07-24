@@ -119,6 +119,8 @@ import { finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizin
 
 type WorkspaceContentPanelProps = IDockviewPanelProps<WorkspaceContentParams>
 type TerminalContentParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
+/** Outer-panel-id prefix for a terminal pane living in a nested window. */
+const TERMINAL_PANEL_ID_PREFIX = workspaceContentPanelId({ kind: 'terminal', instanceId: '' })
 
 export type WorkspaceContentPanelComponent = FunctionComponent<WorkspaceContentPanelProps>
 
@@ -707,16 +709,27 @@ export function WorkspaceView({
   const getContentParams = useCallback((panelId: string) => parseWorkspaceContentParams(apiRef.current?.getPanel(panelId)?.params), [])
 
   const activateContent = useCallback((panelId: string) => {
-    const panel = apiRef.current?.getPanel(panelId)
-    if (!panel) return
-    const content = parseWorkspaceContentParams(panel.params)
-    if (content && isStructuralWorkspaceContentKind(content.kind) && panel.group.api.location.type === 'edge') panel.group.api.expand()
-    panel.api.setActive()
-    if (content?.kind === 'terminal') {
-      useWorkspaceStore.getState().setActivePaneId(content.paneId)
-      useWorkspaceStore.getState().clearPaneCompletionHighlight(content.paneId)
-      if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(content.paneId)
+    const api = apiRef.current
+    if (!api) return
+    const panel = api.getPanel(panelId)
+    if (panel) {
+      const content = parseWorkspaceContentParams(panel.params)
+      if (content && isStructuralWorkspaceContentKind(content.kind) && panel.group.api.location.type === 'edge') panel.group.api.expand()
+      panel.api.setActive()
+      return
     }
+    // Terminal panes live in a nested terminal-window Dockview, not the outer
+    // api. Reveal one by bringing its owning window's outer panel to front,
+    // then focus the pane — so resuming an agent immediately shows its terminal.
+    if (!panelId.startsWith(TERMINAL_PANEL_ID_PREFIX)) return
+    const paneId = panelId.slice(TERMINAL_PANEL_ID_PREFIX.length)
+    const handle = findTerminalWindowForPane(paneId)
+    if (!handle) return
+    api.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: handle.windowId }))?.api.setActive()
+    handle.getInnerApi()?.getPanel(panelId)?.api.setActive()
+    useWorkspaceStore.getState().setActivePaneId(paneId)
+    useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId)
+    if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(paneId)
   }, [])
 
   const addContentPanel = useCallback((params: WorkspaceContentParams, options: AddContentOptions = {}, targetApi?: DockviewApi): IDockviewPanel | null => {
@@ -776,6 +789,14 @@ export function WorkspaceView({
     }
     const active = parseWorkspaceContentParams(api.activePanel?.params)
     if (active?.kind === 'terminalWindow') return active.instanceId
+    // No terminal window is on screen (e.g. an editor tab is active). Prefer the
+    // window that owns the last active terminal pane so resume/open reuses the
+    // user's real terminal focus instead of an arbitrary first window.
+    const activePaneId = useWorkspaceStore.getState().activePaneId
+    if (activePaneId) {
+      const owning = findTerminalWindowForPane(activePaneId)
+      if (owning && api.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: owning.windowId }))) return owning.windowId
+    }
     const first = api.panels.find((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminalWindow')
     const firstParams = parseWorkspaceContentParams(first?.params)
     return firstParams?.kind === 'terminalWindow' ? firstParams.instanceId : null
@@ -911,7 +932,7 @@ export function WorkspaceView({
       return spawnTerminal(owner, { targetGroupId: request.targetGroupId, forceNewWindow: true })
     }
     if (request.kind === 'terminal') {
-      return spawnTerminal(owner, { windowId: request.windowId, targetGroupId: request.targetGroupId, profileId: request.profileId, cwd: request.cwd, referencePaneId: request.referencePaneId, direction: request.split, shell: request.shell, args: request.args, title: request.title })
+      return spawnTerminal(owner, { windowId: request.windowId, targetGroupId: request.targetGroupId, forceNewWindow: request.newWindow, profileId: request.profileId, cwd: request.cwd, referencePaneId: request.referencePaneId, direction: request.split, shell: request.shell, args: request.args, title: request.title })
     }
     if (request.kind === 'terminal-grid') {
       // Fill one terminal window with the requested pane count. Panes land in the

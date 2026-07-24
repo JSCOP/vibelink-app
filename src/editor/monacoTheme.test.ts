@@ -51,4 +51,24 @@ describe('VibeLink Monaco themes', () => {
     const emphasis = dark.rules.find((rule) => rule.token === 'emphasis')
     expect(emphasis?.fontStyle).toContain('italic')
   })
+
+  test('emits only Monaco-parseable hex colors across every theme (no red fallback)', () => {
+    // Monaco's standalone loader parses `colors` with Color.fromHex, which
+    // returns opaque red for any non-hex string (e.g. an rgba() palette value).
+    // Regression guard: selection, line highlight, scrollbar, and borders must
+    // resolve to #rgb/#rgba/#rrggbb/#rrggbbaa so nothing renders red.
+    const hexColor = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+    const defineTheme = vi.fn()
+    const monaco = { editor: { defineTheme } } as never
+    for (const id of ['abyss', 'carbon', 'tokyoNight', 'oneHalfLight']) {
+      defineTheme.mockClear()
+      registerVibeLinkMonacoThemes(monaco, id)
+      const calls = defineTheme.mock.calls as [string, { colors: Record<string, string> }][]
+      for (const [, data] of calls) {
+        for (const [key, value] of Object.entries(data.colors)) {
+          expect(value, `${id} ${key}`).toMatch(hexColor)
+        }
+      }
+    }
+  })
 })

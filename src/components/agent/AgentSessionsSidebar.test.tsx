@@ -83,6 +83,7 @@ describe('AgentSessionsSidebar', () => {
       { id: 'newest-acp', title: 'Newest fix', updatedAt: '2026-07-22T12:00:00.000Z', cwd: 'E:/repo/src' },
       { id: 'no-time-acp', title: null, updatedAt: null, cwd: null },
     ]
+    mocks.controller.conversations = []
   })
 
   afterEach(cleanup)
@@ -168,5 +169,27 @@ describe('AgentSessionsSidebar', () => {
     const viewed = JSON.parse(window.localStorage.getItem('vibelink:agentSessionViews') || '{}')
     expect(viewed.workspaces['workspace-a']['current-acp']).toEqual(expect.any(Number))
     expect(viewed.workspaces['workspace-a']['new-acp']).toEqual(expect.any(Number))
+  })
+
+  test('resumes a recent conversation in the active terminal, or a new window on Ctrl+click', async () => {
+    mocks.controller.status = 'running'
+    mocks.controller.permissions = []
+    mocks.controller.conversations = [
+      { id: 'omp-1', title: 'Resumable omp', agent: 'omp', updatedAt: '2026-07-22T09:00:00.000Z', cwd: 'E:/repo', path: 'E:/repo/.omp/agent/sessions/x.jsonl' },
+    ]
+    openContent.mockResolvedValueOnce('content:terminal:pane-1')
+    renderSidebar()
+
+    const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
+    fireEvent.click(row)
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', newWindow: false, shell: 'pwsh.exe' })))
+    expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-1')
+
+    openContent.mockClear()
+    activateContent.mockClear()
+    openContent.mockResolvedValueOnce('content:terminal:pane-2')
+    fireEvent.click(row, { ctrlKey: true })
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', newWindow: true })))
+    expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-2')
   })
 })

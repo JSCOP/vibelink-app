@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
+import { getPanelData } from 'dockview-core'
 import { Maximize2, Minimize2, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useGitStore } from '../state/git'
 import { useWorkspaceContentActions } from '../layout/contentActions'
 import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
-import { workspaceAgentTabStatus } from './workspaceContentTabModel'
+import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceContentTabModel'
 
 type WorkspaceContentTabProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
 
@@ -85,6 +86,15 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
     event.stopPropagation()
     actions.activateContent(api.id)
   }
+  // While another window/pane tab is being dragged over this one, reveal this
+  // tab's content so the user can drop it to split beside a specific window.
+  // Dockview's pointer DnD hit-tests on the document (no pointer capture), so
+  // background tabs still receive pointer moves during a drag. Scope to this
+  // Dockview instance and never re-activate the dragged tab itself.
+  const revealOnDragOver = () => {
+    if (!shouldRevealTabForDrag(getPanelData(), { viewId: containerApi.id, panelId: api.id, isActive: api.isActive })) return
+    api.setActive()
+  }
   const agentStatus = workspaceAgentTabStatus(hermesStatus, hermesPendingPermissions)
   const displaysAgentStatus = content?.kind === 'agent' || content?.kind === 'agentSessions'
   const isEdge = location.type === 'edge'
@@ -122,6 +132,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       aria-selected={isActive}
       aria-label={accessibleTitle}
       onKeyDown={onRootKeyDown}
+      onPointerMove={revealOnDragOver}
     >
       {/* No onPointerDown activation here: Dockview owns tab activation via its
           own click handler AND owns pointer-based drag. Activating on pointerdown

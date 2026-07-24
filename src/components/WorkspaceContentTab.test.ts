@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { workspaceAgentTabStatus } from './workspaceContentTabModel'
+import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceContentTabModel'
 import { buildWorkspaceContentTabContextMenu } from '../layout/workspaceContentTabMenu'
 import { createSingletonContentParams, createTerminalContentParams } from '../layout/workspaceLayoutModel'
 import type { WorkspaceContentActions } from '../layout/contentActions'
@@ -55,5 +55,19 @@ describe('WorkspaceContentTab rail state', () => {
       'Maximize / restore content',
       'Close terminal',
     ])
+  })
+
+  it('reveals a hovered tab only for a same-instance drag onto a different inactive tab', () => {
+    const tab = { viewId: 'dock-1', panelId: 'content:terminalWindow:b', isActive: false }
+    // Live drag of another window in this instance → reveal.
+    expect(shouldRevealTabForDrag({ viewId: 'dock-1', panelId: 'content:terminalWindow:a' }, tab)).toBe(true)
+    // No active drag → nothing to reveal.
+    expect(shouldRevealTabForDrag(undefined, tab)).toBe(false)
+    // The dragged tab itself must not re-activate.
+    expect(shouldRevealTabForDrag({ viewId: 'dock-1', panelId: 'content:terminalWindow:b' }, tab)).toBe(false)
+    // A drag from a different Dockview instance (e.g. an inner pane grid) is ignored.
+    expect(shouldRevealTabForDrag({ viewId: 'dock-2', panelId: 'content:terminalWindow:a' }, tab)).toBe(false)
+    // An already-active tab needs no reveal.
+    expect(shouldRevealTabForDrag({ viewId: 'dock-1', panelId: 'content:terminalWindow:a' }, { ...tab, isActive: true })).toBe(false)
   })
 })
