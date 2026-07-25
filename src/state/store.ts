@@ -125,8 +125,9 @@ type WorkspaceState = {
   prepareSetupWizardRun: () => void
   updateSettings: (settings: Partial<Settings>) => void
   reorderWorkspaces: (orderedIds: string[]) => void
-  createWorkspaceGroup: (name: string) => WorkspaceGroup
+  createWorkspaceGroup: (name: string, rootFolder?: string | null) => WorkspaceGroup
   renameWorkspaceGroup: (groupId: string, name: string) => void
+  setWorkspaceGroupRootFolder: (groupId: string, rootFolder: string | null) => void
   deleteWorkspaceGroup: (groupId: string) => void
   setWorkspaceGroup: (sessionId: string, groupId: string | null) => void
   toggleWorkspaceGroupCollapsed: (groupId: string) => void
@@ -637,11 +638,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   reorderWorkspaces: (orderedIds: string[]) => {
     get().updateSettings({ workspaceOrder: orderedIds })
   },
-  createWorkspaceGroup: (name: string) => {
+  createWorkspaceGroup: (name: string, rootFolder?: string | null) => {
     const group: WorkspaceGroup = {
       id: crypto.randomUUID(),
       name: name.trim() || 'Workspace group',
       collapsed: false,
+      rootFolder: normalizeWorkspaceFolder(rootFolder),
     }
     get().updateSettings({ workspaceGroups: [...get().settings.workspaceGroups, group] })
     return group
@@ -652,6 +654,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     get().updateSettings({
       workspaceGroups: get().settings.workspaceGroups.map((group) =>
         group.id === groupId ? { ...group, name: normalizedName } : group,
+      ),
+    })
+  },
+  setWorkspaceGroupRootFolder: (groupId: string, rootFolder: string | null) => {
+    const normalizedRootFolder = normalizeWorkspaceFolder(rootFolder)
+    get().updateSettings({
+      workspaceGroups: get().settings.workspaceGroups.map((group) =>
+        group.id === groupId ? { ...group, rootFolder: normalizedRootFolder } : group,
       ),
     })
   },

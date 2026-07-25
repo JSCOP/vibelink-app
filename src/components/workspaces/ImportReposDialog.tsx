@@ -98,7 +98,7 @@ export function ImportReposDialog({ onClose }: ImportReposDialogProps) {
     try {
       const store = useWorkspaceStore.getState()
       const profileId = store.settings.defaultProfileId
-      const group = asGroup ? store.createWorkspaceGroup(groupName) : null
+      const group = asGroup ? store.createWorkspaceGroup(groupName, root) : null
       for (const repo of selectedRepos) {
         const session = await useWorkspaceStore.getState().createSession(pathBasename(repo.path), repo.path, profileId)
         if (group) useWorkspaceStore.getState().setWorkspaceGroup(session.id, group.id)

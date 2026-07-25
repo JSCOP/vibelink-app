@@ -26,7 +26,7 @@ const createSession = vi.fn(async (name?: string, workspaceFolder?: string | nul
   createdAt: 0,
   workspaceFolder,
 }))
-const createWorkspaceGroup = vi.fn(() => ({ id: 'group-1', name: 'mono', collapsed: false }))
+const createWorkspaceGroup = vi.fn(() => ({ id: 'group-1', name: 'mono', collapsed: false, rootFolder: 'E:\\code\\mono' }))
 const setWorkspaceGroup = vi.fn()
 const setError = vi.fn()
 
@@ -91,7 +91,7 @@ describe('ImportReposDialog', () => {
     })
 
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(3))
-    expect(createWorkspaceGroup).toHaveBeenCalledWith('mono')
+    expect(createWorkspaceGroup).toHaveBeenCalledWith('mono', 'E:\\code\\mono')
     expect(createSession.mock.calls).toEqual([
       ['repo-a', 'E:/code/mono/repo-a', 'codex'],
       ['repo-b', 'E:/code/mono/repo-b', 'codex'],

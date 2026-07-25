@@ -73,6 +73,7 @@ import {
   type WorkspaceContentOwnership,
   type WorkspaceContentChromeState,
 } from './contentActions'
+import { clearOpenContentSnapshot, publishOpenContentFromDockview } from './openContentRegistry'
 import { TerminalPanePanel } from './TerminalPanePanel'
 import { TerminalWindowPanel } from './TerminalWindowPanel'
 import { getTerminalWindow, listTerminalWindows, allWindowedPaneIds, findTerminalWindowForPane, type TerminalWindowHandle } from './terminalWindowRegistry'
@@ -80,7 +81,8 @@ import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { nearestPaneIdInDirection, paneIdsInReadingOrder, type PaneDirection } from './paneSwap'
 import { paneIdFromEventTarget } from './paneActivation'
-import { expandGridRowsForPaneCount, occupiedGridForPaneCount } from './paneGridPlan'
+import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
+import { arrangeTerminalPaneGrid } from './innerPaneLayout'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { withSuppressedPanelRemoval } from './suppression'
@@ -101,7 +103,6 @@ import {
   createTerminalContentParams,
   createTerminalWindowParams,
   normalizeWorkspaceLayoutState,
-  planTerminalArrangement,
 } from './workspaceLayoutModel'
 import {
   centralGridIsEmpty,
@@ -818,7 +819,7 @@ export function WorkspaceView({
     return waitForTerminalWindow(windowId, owner)
   }, [addContentPanel, ownsLayout, resolveTerminalWindowId, settleLayout, waitForTerminalWindow])
 
-  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
+  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; inactive?: boolean; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
     if (!ownsLayout(owner)) return ''
     const handle = await ensureTerminalWindow(owner, { windowId: options.windowId, targetGroupId: options.targetGroupId, forceNew: options.forceNewWindow })
     if (!handle || !ownsLayout(owner)) return ''
@@ -829,7 +830,7 @@ export function WorkspaceView({
     let spawnedPaneId: string | null = null
     let committed = false
     try {
-      const panel = handle.addPane(createTerminalContentParams(pending), { referencePaneId: options.referencePaneId, direction: options.direction })
+      const panel = handle.addPane(createTerminalContentParams(pending), { referencePaneId: options.referencePaneId, direction: options.direction, inactive: options.inactive })
       if (!panel || !ownsLayout(owner)) return ''
       await handle.settle()
       if (!ownsLayout(owner) || !handle.getInnerApi()?.getPanel(panelId)) return ''
@@ -851,8 +852,10 @@ export function WorkspaceView({
       const liveParams = createTerminalContentParams(spawned)
       livePanel.update({ params: liveParams })
       livePanel.api.setTitle(liveParams.title)
-      useWorkspaceStore.getState().setActivePaneId(spawned.id)
-      if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(spawned.id)
+      if (!options.inactive) {
+        useWorkspaceStore.getState().setActivePaneId(spawned.id)
+        if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(spawned.id)
+      }
       reflowTerminalsAfterLayout({ syncPty: true, paneIds: [spawned.id] })
       handle.persist()
       persistLayoutSoon()
@@ -901,12 +904,7 @@ export function WorkspaceView({
     if (terminalIds.length < 2) return
     const preferred = requestedGrid ?? balancedGridForPaneCount(terminalIds.length, workspaceAspectRatio(dockRef.current))
     const grid = expandGridRowsForPaneCount(preferred, terminalIds.length)
-    for (const step of planTerminalArrangement(terminalIds, grid)) {
-      const panel = innerApi.getPanel(step.panelId)
-      const reference = innerApi.getPanel(step.referencePanelId)
-      if (panel && reference) panel.api.moveTo({ group: reference.group, position: step.position, skipSetActive: true })
-    }
-    if (activePanelId) innerApi.getPanel(activePanelId)?.api.setActive()
+    arrangeTerminalPaneGrid(innerApi, terminalIds, grid, activePanelId)
     if (!ownsLayout(layoutOwner)) return
     await handle.settle()
     handle.persist()
@@ -931,19 +929,46 @@ export function WorkspaceView({
       return spawnTerminal(owner, { windowId: request.windowId, targetGroupId: request.targetGroupId, forceNewWindow: request.newWindow, profileId: request.profileId, cwd: request.cwd, referencePaneId: request.referencePaneId, direction: request.split, shell: request.shell, args: request.args, title: request.title })
     }
     if (request.kind === 'terminal-grid') {
-      // Fill one terminal window with the requested pane count. Panes land in the
-      // window's inner grid via spawnTerminal; the window arranges them row-major.
-      const targetCount = Math.max(1, request.grid.cols * request.grid.rows)
+      // `cols × rows` is the TOTAL target grid. Capture the existing visual
+      // order, create only the missing panes, then rebuild one flat row-major
+      // topology (first row rightward, later rows below the same column).
+      const requestedGrid = expandGridRowsForPaneCount({ cols: request.grid.cols, rows: request.grid.rows }, 0)
+      const targetCount = requestedGrid.cols * requestedGrid.rows
       const handle = request.grid.windowId
         ? getTerminalWindow(request.grid.windowId)
         : await ensureTerminalWindow(owner, { targetGroupId: request.targetGroupId })
-      if (!handle || !ownsLayout(owner)) return ''
-      const have = handle.paneIds().length
+      const innerApi = handle?.getInnerApi()
+      if (!handle || !innerApi || !ownsLayout(owner)) return ''
+      const activePanelId = innerApi.activePanel?.id ?? null
+      const existingPanelIds = paneIdsInReadingOrder(
+        innerApi.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').map((panel) => panel.id),
+        getContentRect,
+      )
+      const newPanelIds: string[] = []
       let lastPanelId = ''
-      for (let index = have; index < targetCount; index += 1) {
+      for (let index = existingPanelIds.length; index < targetCount; index += 1) {
         if (!ownsLayout(owner)) return ''
-        lastPanelId = await spawnTerminal(owner, { windowId: handle.windowId, profileId: request.grid.profileId })
+        const panelId = await spawnTerminal(owner, { windowId: handle.windowId, profileId: request.grid.profileId, inactive: true })
+        if (!ownsLayout(owner)) return ''
+        if (panelId) {
+          newPanelIds.push(panelId)
+          lastPanelId = panelId
+        }
       }
+      const occupied = occupiedGridForPaneCount(existingPanelIds.length, request.grid.occupiedGrid)
+      const orderedPanelIds = expandPaneIdsIntoGrid(existingPanelIds, newPanelIds, occupied, requestedGrid)
+      const includedPanelIds = new Set(orderedPanelIds)
+      for (const panelId of [...existingPanelIds, ...newPanelIds]) {
+        if (includedPanelIds.has(panelId)) continue
+        includedPanelIds.add(panelId)
+        orderedPanelIds.push(panelId)
+      }
+      const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
+      arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
+      if (!ownsLayout(owner)) return ''
+      await handle.settle()
+      handle.persist()
+      persistLayoutSoon()
       return lastPanelId
     }
 
@@ -1351,8 +1376,27 @@ export function WorkspaceView({
     return layoutLoadQueueRef.current
   }, [addContentPanel, ownsLayout, persistLayoutSoon, saveLayout, serializeCurrentLayout, settleLayout])
 
+  const syncOpenContentRegistry = useCallback(() => {
+    const api = apiRef.current
+    const state = useWorkspaceStore.getState()
+    const sessionId = state.activeSessionId
+    const sessionEpoch = getWorkspaceSessionEpoch()
+    if (!api
+      || !sessionId
+      || loadedSessionRef.current !== sessionId
+      || loadedApiRef.current !== api
+      || loadedSessionEpochRef.current !== sessionEpoch
+      || getWorkspaceSessionReadyEpoch() !== sessionEpoch
+      || getWorkspaceSessionTargetId() !== sessionId) {
+      clearOpenContentSnapshot()
+      return
+    }
+    publishOpenContentFromDockview(api)
+  }, [])
+
   const syncChromeState = useCallback(() => {
     const api = apiRef.current
+    syncOpenContentRegistry()
     const active = api?.activePanel
     const content = parseWorkspaceContentParams(active?.params)
     const next: WorkspaceContentChromeState = {
@@ -1364,7 +1408,7 @@ export function WorkspaceView({
     if (workspaceChromeStatesEqual(lastChromeStateRef.current, next)) return
     lastChromeStateRef.current = next
     onChromeStateChange?.(next)
-  }, [onChromeStateChange])
+  }, [onChromeStateChange, syncOpenContentRegistry])
 
   const runLiveWorkspaceResize = useCallback((rootWidth: number, shouldLayoutDockview: boolean) => {
     const api = apiRef.current
@@ -1436,6 +1480,7 @@ export function WorkspaceView({
     setLoadedLayoutOwner(null)
     apiRef.current = event.api
     lastChromeStateRef.current = null
+    clearOpenContentSnapshot()
     const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
     registerWorkspaceEdgeGroups(event.api, rootWidth)
     setApiVersion((value) => value + 1)
@@ -1443,12 +1488,18 @@ export function WorkspaceView({
     apiDisposablesRef.current = [
       event.api.onDidLayoutChange(() => {
         if (suppressPanelRemovalRef.current || resizeSettlingRef.current) return
+        syncChromeState()
         requestLiveWorkspaceResize(false)
       }),
       event.api.onDidMovePanel(() => {
         if (suppressPanelRemovalRef.current) return
+        syncChromeState()
         void settleLayout({ syncPty: true })
         persistLayoutSoon()
+      }),
+      event.api.onDidAddPanel(() => {
+        if (suppressPanelRemovalRef.current) return
+        syncChromeState()
       }),
       event.api.onDidActiveGroupChange((group) => {
         if (group?.api.location.type !== 'grid') return
@@ -1468,6 +1519,7 @@ export function WorkspaceView({
         // It is never resource-close authority. Reconciliation restores a live
         // resource if a UI-only removal escaped an explicit close request.
         if (suppressPanelRemovalRef.current) return
+        syncChromeState()
         const removed = parseWorkspaceContentParams(removedPanel.params)
         requestAnimationFrame(() => {
           const owner = layoutOwnerRef.current
@@ -1513,6 +1565,7 @@ export function WorkspaceView({
       || state.workspaceEpoch !== previousState.workspaceEpoch
       || state.workspaceReadyEpoch !== previousState.workspaceReadyEpoch) {
       layoutEpochRef.current += 1
+      clearOpenContentSnapshot()
       layoutOwnerRef.current = null
       setLoadedLayoutOwner(null)
       // Authored layouts belong to the workspace/epoch that produced them.
@@ -1522,13 +1575,33 @@ export function WorkspaceView({
       setCurrentMainGroupId(null)
       setWorkspaceOverlayIds(new Set())
       setFilePicker(null)
+      return
     }
-  }), [])
+    if (state.activePaneId !== previousState.activePaneId) syncOpenContentRegistry()
+  }), [syncOpenContentRegistry])
+
+  useEffect(() => {
+    const sync = () => syncOpenContentRegistry()
+    window.addEventListener('vibelink:terminal-window-persist', sync)
+    return () => {
+      window.removeEventListener('vibelink:terminal-window-persist', sync)
+      clearOpenContentSnapshot()
+    }
+  }, [syncOpenContentRegistry])
 
   useEffect(() => {
     if (!apiRef.current) return
     void loadActiveSessionLayout()
   }, [activeSessionId, apiVersion, layoutJson, loadActiveSessionLayout, panes, workspaceEpoch, workspaceReadyEpoch])
+
+  useEffect(() => {
+    if (!apiRef.current) {
+      clearOpenContentSnapshot()
+      return
+    }
+    const frame = requestAnimationFrame(syncChromeState)
+    return () => cancelAnimationFrame(frame)
+  }, [activeSessionId, apiVersion, panes, syncChromeState, workspaceEpoch, workspaceReadyEpoch])
 
   useEffect(() => {
     const root = dockRef.current
@@ -1679,7 +1752,10 @@ export function WorkspaceView({
   }, [])
 
   const getTabContextMenuItems = useCallback((params: GetTabContextMenuItemsParams) => buildWorkspaceContentTabContextMenu(params, actions), [actions])
-  const rightHeaderActionsComponent = useMemo(() => function HeaderActions(props: IDockviewHeaderActionsProps) {
+  // The `+` palette belongs immediately after the tab strip, not pinned to the
+  // far right of the header: Dockview appends `leftHeaderActions` right after
+  // the tabs and only then the flexible void spacer + right actions.
+  const leftHeaderActionsComponent = useMemo(() => function HeaderActions(props: IDockviewHeaderActionsProps) {
     return <WorkspaceGroupActionsWithContext {...props} fallbackActions={actions} />
   }, [actions])
 
@@ -1726,7 +1802,7 @@ export function WorkspaceView({
           components={components}
           tabComponents={{ workspaceContentTab: WorkspaceContentTab }}
           defaultTabComponent={WorkspaceContentTab}
-          rightHeaderActionsComponent={rightHeaderActionsComponent}
+          leftHeaderActionsComponent={leftHeaderActionsComponent}
           getTabContextMenuItems={getTabContextMenuItems}
           onReady={handleReady}
           defaultRenderer="always"

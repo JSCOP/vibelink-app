@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import type { SessionMeta } from '../../ipc/types'
+import type { WorkspaceGroup } from '../../state/workspaceGroups'
+import { clearOpenContentSnapshot, publishOpenContentSnapshot } from '../../layout/openContentRegistry'
+
+const { open } = vi.hoisted(() => ({ open: vi.fn() }))
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open }))
 
 const mocks = vi.hoisted(() => ({
   state: {
@@ -10,23 +17,32 @@ const mocks = vi.hoisted(() => ({
       { id: 'beta', name: 'Beta', paneCount: 1, createdAt: 2, workspaceFolder: 'E:/repos/beta' },
       { id: 'gamma', name: 'Gamma', paneCount: 3, createdAt: 3, workspaceFolder: 'E:/repos/gamma' },
       { id: 'delta', name: 'Delta', paneCount: 1, createdAt: 4, workspaceFolder: null },
-    ],
+    ] as SessionMeta[],
     activeSessionId: 'gamma',
     paneCompletionHighlights: {} as Record<string, { sessionId: string }>,
     settings: {
+      defaultProfileId: 'codex',
       workspaceGroups: [
         { id: 'core', name: 'Core', collapsed: false },
         { id: 'tools', name: 'Tools', collapsed: false },
-      ],
+      ] as WorkspaceGroup[],
       workspaceGroupIds: { alpha: 'tools', beta: 'core', gamma: 'core' } as Record<string, string>,
       workspaceOrder: ['gamma', 'alpha', 'delta', 'beta'],
     },
     openSession: vi.fn(async () => undefined),
+    createSession: vi.fn(async (name?: string, workspaceFolder?: string | null): Promise<SessionMeta> => ({
+      id: `created-${name}`,
+      name: name ?? '',
+      paneCount: 0,
+      createdAt: 0,
+      workspaceFolder,
+    })),
     renameSession: vi.fn(async () => undefined),
     reorderWorkspaces: vi.fn(),
     renameWorkspaceGroup: vi.fn(),
     deleteWorkspaceGroup: vi.fn(),
     setWorkspaceGroup: vi.fn(),
+    setWorkspaceGroupRootFolder: vi.fn(),
     toggleWorkspaceGroupCollapsed: vi.fn(),
     setError: vi.fn(),
   },
@@ -55,15 +71,35 @@ function renderSidebar() {
 
 describe('WorkspacesSidebar', () => {
   beforeEach(() => {
+    mocks.state.sessions = [
+      { id: 'alpha', name: 'Alpha', paneCount: 2, createdAt: 1, workspaceFolder: 'E:/repos/alpha' },
+      { id: 'beta', name: 'Beta', paneCount: 1, createdAt: 2, workspaceFolder: 'E:/repos/beta' },
+      { id: 'gamma', name: 'Gamma', paneCount: 3, createdAt: 3, workspaceFolder: 'E:/repos/gamma' },
+      { id: 'delta', name: 'Delta', paneCount: 1, createdAt: 4, workspaceFolder: null },
+    ]
     mocks.state.settings.workspaceGroups = [
       { id: 'core', name: 'Core', collapsed: false },
       { id: 'tools', name: 'Tools', collapsed: false },
     ]
     mocks.state.paneCompletionHighlights = {}
+    mocks.state.activeSessionId = 'gamma'
+    clearOpenContentSnapshot()
     vi.clearAllMocks()
+    open.mockReset().mockResolvedValue(null)
+    mocks.state.openSession.mockReset().mockResolvedValue(undefined)
+    mocks.state.createSession.mockReset().mockImplementation(async (name?: string, workspaceFolder?: string | null): Promise<SessionMeta> => ({
+      id: `created-${name}`,
+      name: name ?? '',
+      paneCount: 0,
+      createdAt: 0,
+      workspaceFolder,
+    }))
   })
 
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    clearOpenContentSnapshot()
+  })
 
   test('numbers workspaces from the flattened group order and labels the first nine shortcuts', () => {
     renderSidebar()
@@ -93,7 +129,7 @@ describe('WorkspacesSidebar', () => {
     expect(within(row).getByLabelText('2 AI coding agent panes need attention')).toHaveTextContent('2')
   })
 
-  test('nests group members and hides them when the group is collapsed', () => {
+  test('nests group members and keeps only the active one when the group is collapsed', () => {
     const view = renderSidebar()
 
     let coreGroup = screen.getByText('Core').closest('.workspaces-group') as HTMLElement
@@ -107,9 +143,101 @@ describe('WorkspacesSidebar', () => {
     ]
     view.rerender(<WorkspacesSidebar integration={integration} />)
 
+    // Collapsing hides the members you are not standing in; the ACTIVE
+    // workspace stays visible so the panel never loses your position.
+    coreGroup = screen.getByText('Core').closest('.workspaces-group') as HTMLElement
+    expect(within(coreGroup).getByText('Gamma')).toBeInTheDocument()
+    expect(within(coreGroup).queryByText('Beta')).not.toBeInTheDocument()
+    expect(screen.getByText('Delta')).toBeInTheDocument()
+
+    mocks.state.activeSessionId = 'delta'
+    view.rerender(<WorkspacesSidebar integration={integration} />)
+
     coreGroup = screen.getByText('Core').closest('.workspaces-group') as HTMLElement
     expect(within(coreGroup).queryByText('Gamma')).not.toBeInTheDocument()
     expect(within(coreGroup).queryByText('Beta')).not.toBeInTheDocument()
-    expect(screen.getByText('Delta')).toBeInTheDocument()
+  })
+
+  test('expands the open content list under the active workspace only', () => {
+    publishOpenContentSnapshot([
+      { panelId: 'content:browser:page-1', kind: 'browser', title: 'Docs', icon: 'globe', active: false },
+      { panelId: 'content:agent:agent', kind: 'agent', title: 'Agent chat', icon: 'bot', active: true },
+    ])
+    renderSidebar()
+
+    const activeRow = screen.getByText('Gamma').closest('[data-session-id]') as HTMLElement
+    expect(within(activeRow).getByRole('list', { name: 'Open workspace items' })).toBeInTheDocument()
+    expect(within(activeRow).getByText('Docs')).toBeInTheDocument()
+    expect(within(activeRow).getByText('Agent chat')).toBeInTheDocument()
+
+    const inactiveRow = screen.getByText('Beta').closest('[data-session-id]') as HTMLElement
+    expect(within(inactiveRow).queryByRole('list', { name: 'Open workspace items' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('list', { name: 'Open workspace items' })).toHaveLength(1)
+  })
+
+  test('creates, groups, and opens a root workspace once during a fast double click', async () => {
+    mocks.state.settings.workspaceGroups = [
+      { id: 'core', name: 'Core', collapsed: false, rootFolder: 'E:/repos/core-root' },
+      { id: 'tools', name: 'Tools', collapsed: false, rootFolder: null },
+    ]
+    let releaseCreation!: (session: SessionMeta) => void
+    mocks.state.createSession.mockImplementationOnce(() => new Promise<SessionMeta>((resolve) => { releaseCreation = resolve }))
+    renderSidebar()
+
+    const row = screen.getByText('Core').closest('[data-workspace-group-row]') as HTMLElement
+    expect(within(row).getByTitle('E:/repos/core-root')).toHaveTextContent('core-root')
+    fireEvent.click(row)
+    fireEvent.click(row)
+
+    await waitFor(() => expect(mocks.state.createSession).toHaveBeenCalledOnce())
+    expect(mocks.state.createSession).toHaveBeenCalledWith('Core', 'E:/repos/core-root', 'codex')
+    expect(mocks.state.openSession).not.toHaveBeenCalled()
+    releaseCreation({ id: 'core-root-session', name: 'Core', paneCount: 0, createdAt: 5, workspaceFolder: 'E:/repos/core-root' })
+
+    await waitFor(() => expect(mocks.state.openSession).toHaveBeenCalledWith('core-root-session'))
+    expect(mocks.state.setWorkspaceGroup).toHaveBeenCalledExactlyOnceWith('core-root-session', 'core')
+  })
+
+  test('opens an existing root workspace instead of creating a duplicate', async () => {
+    mocks.state.settings.workspaceGroups = [
+      { id: 'core', name: 'Core', collapsed: false, rootFolder: 'E:\\repos\\beta\\' },
+      { id: 'tools', name: 'Tools', collapsed: false, rootFolder: null },
+    ]
+    renderSidebar()
+
+    fireEvent.click(screen.getByText('Core').closest('[data-workspace-group-row]') as HTMLElement)
+
+    await waitFor(() => expect(mocks.state.openSession).toHaveBeenCalledExactlyOnceWith('beta'))
+    expect(mocks.state.createSession).not.toHaveBeenCalled()
+    expect(mocks.state.setWorkspaceGroup).not.toHaveBeenCalled()
+  })
+
+  test('uses the chevron only for collapse without opening the group root', () => {
+    mocks.state.settings.workspaceGroups = [
+      { id: 'core', name: 'Core', collapsed: false, rootFolder: 'E:/repos/core-root' },
+      { id: 'tools', name: 'Tools', collapsed: false, rootFolder: null },
+    ]
+    renderSidebar()
+
+    const row = screen.getByText('Core').closest('[data-workspace-group-row]') as HTMLElement
+    fireEvent.click(within(row).getByTitle('Collapse Core group'))
+
+    expect(mocks.state.toggleWorkspaceGroupCollapsed).toHaveBeenCalledExactlyOnceWith('core')
+    expect(mocks.state.openSession).not.toHaveBeenCalled()
+    expect(mocks.state.createSession).not.toHaveBeenCalled()
+  })
+
+  test('keeps a rootless group collapse-only and lets the user pick its root folder', async () => {
+    open.mockResolvedValue('E:/repos/core-root')
+    renderSidebar()
+
+    const row = screen.getByText('Core').closest('[data-workspace-group-row]') as HTMLElement
+    fireEvent.click(row)
+    fireEvent.click(within(row).getByRole('button', { name: 'Set root folder for Core group' }))
+
+    expect(mocks.state.toggleWorkspaceGroupCollapsed).toHaveBeenCalledExactlyOnceWith('core')
+    expect(mocks.state.openSession).not.toHaveBeenCalled()
+    await waitFor(() => expect(open).toHaveBeenCalledWith({ directory: true, multiple: false, title: 'Select workspace group root folder' }))
+    expect(mocks.state.setWorkspaceGroupRootFolder).toHaveBeenCalledExactlyOnceWith('core', 'E:/repos/core-root')
   })
 })

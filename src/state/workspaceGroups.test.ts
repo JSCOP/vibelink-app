@@ -51,13 +51,17 @@ describe('workspace groups', () => {
     expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['member-a', 'member-b', 'ungrouped'])
   })
 
-  test('settings round-trip preserves groups and drops assignments to unknown groups', () => {
+  test('settings round-trip preserves normalized group roots and drops malformed groups and assignments', () => {
     const normalized = normalizeSettings({
       ...defaultSettings,
       workspaceGroups: [
-        { id: ' group-a ', name: ' Monorepo ', collapsed: true },
-        { id: 'group-a', name: 'Duplicate', collapsed: false },
-        { id: 42, name: 'Invalid', collapsed: false },
+        { id: ' group-a ', name: ' Monorepo ', collapsed: true, rootFolder: ' E:/code/mono ' },
+        { id: 'group-a', name: 'Duplicate', collapsed: false, rootFolder: 'E:/duplicate' },
+        { id: 'group-b', name: 'Blank root', rootFolder: '   ' },
+        { id: 'group-c', name: 'Missing root' },
+        { id: 'group-d', name: 'Invalid root type', rootFolder: 42 },
+        { id: 'group-invalid', name: '   ', rootFolder: 'E:/invalid' },
+        { id: 42, name: 'Invalid', collapsed: false, rootFolder: 'E:/invalid' },
       ],
       workspaceGroupIds: {
         ' session-a ': ' group-a ',
@@ -66,7 +70,12 @@ describe('workspace groups', () => {
       },
     })
 
-    expect(normalized.workspaceGroups).toEqual([{ id: 'group-a', name: 'Monorepo', collapsed: true }])
+    expect(normalized.workspaceGroups).toEqual([
+      { id: 'group-a', name: 'Monorepo', collapsed: true, rootFolder: 'E:/code/mono' },
+      { id: 'group-b', name: 'Blank root', collapsed: false, rootFolder: null },
+      { id: 'group-c', name: 'Missing root', collapsed: false, rootFolder: null },
+      { id: 'group-d', name: 'Invalid root type', collapsed: false, rootFolder: null },
+    ])
     expect(normalized.workspaceGroupIds).toEqual({ 'session-a': 'group-a' })
 
     const roundTripped = normalizeSettings(JSON.parse(JSON.stringify(normalized)))
@@ -84,9 +93,9 @@ describe('workspace groups', () => {
     })
 
     try {
-      const created = useWorkspaceStore.getState().createWorkspaceGroup('  Monorepo  ')
+      const created = useWorkspaceStore.getState().createWorkspaceGroup('  Monorepo  ', '  E:/code/mono  ')
       expect(created.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
-      expect(created).toMatchObject({ name: 'Monorepo', collapsed: false })
+      expect(created).toMatchObject({ name: 'Monorepo', collapsed: false, rootFolder: 'E:/code/mono' })
 
       useWorkspaceStore.getState().setWorkspaceGroup(assignedSession.id, created.id)
       useWorkspaceStore.getState().setWorkspaceGroup(assignedSession.id, null)
@@ -94,9 +103,12 @@ describe('workspace groups', () => {
       useWorkspaceStore.getState().setWorkspaceGroup(assignedSession.id, created.id)
       useWorkspaceStore.getState().renameWorkspaceGroup(created.id, '  Related repositories  ')
       useWorkspaceStore.getState().toggleWorkspaceGroupCollapsed(created.id)
+      useWorkspaceStore.getState().setWorkspaceGroupRootFolder(created.id, '  E:/code/root  ')
+      expect(useWorkspaceStore.getState().settings.workspaceGroups[0]?.rootFolder).toBe('E:/code/root')
+      useWorkspaceStore.getState().setWorkspaceGroupRootFolder(created.id, null)
 
       expect(useWorkspaceStore.getState().settings.workspaceGroups).toEqual([
-        { id: created.id, name: 'Related repositories', collapsed: true },
+        { id: created.id, name: 'Related repositories', collapsed: true, rootFolder: null },
       ])
       expect(useWorkspaceStore.getState().settings.workspaceGroupIds).toEqual({ [assignedSession.id]: created.id })
 

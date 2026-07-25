@@ -5,6 +5,7 @@ export type WorkspaceGroup = {
   id: string
   name: string
   collapsed: boolean
+  rootFolder?: string | null
 }
 
 export type WorkspaceRow =

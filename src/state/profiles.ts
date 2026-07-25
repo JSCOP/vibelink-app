@@ -513,7 +513,8 @@ function normalizeWorkspaceGroups(value: unknown): WorkspaceGroup[] {
     const name = entry.name.trim()
     if (id.length === 0 || name.length === 0 || seen.has(id)) continue
     seen.add(id)
-    groups.push({ id, name, collapsed: typeof entry.collapsed === 'boolean' ? entry.collapsed : false })
+    const rootFolder = typeof entry.rootFolder === 'string' ? entry.rootFolder.trim() || null : null
+    groups.push({ id, name, collapsed: typeof entry.collapsed === 'boolean' ? entry.collapsed : false, rootFolder })
   }
   return groups
 }

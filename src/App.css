@@ -1160,6 +1160,14 @@ button {
   height: 100%;
 }
 
+/* Dockview ships no rules for the left-actions slot (it only styles the right
+   one). The `+` palette lives there so it sits immediately after the tab strip;
+   without an explicit flex box it would be squeezed away as tabs accumulate. */
+.workspace-dock .dv-left-actions-container {
+  display: flex;
+  flex-shrink: 0;
+}
+
 .workspace-group-actions {
   align-items: center;
   display: flex;
@@ -6482,6 +6490,10 @@ button.git-window-primary-action,
   transition: opacity 100ms ease;
 }
 
+.workspaces-sidebar .session-row > .workspaces-row-actions {
+  top: 21px;
+}
+
 .workspaces-group-row:hover .workspaces-row-actions,
 .workspaces-group-row:focus-within .workspaces-row-actions,
 .workspaces-sidebar .session-row:hover .workspaces-row-actions,
@@ -6500,6 +6512,81 @@ button.git-window-primary-action,
 .workspaces-sidebar .session-row:focus-within .session-completion-badge,
 .workspaces-sidebar .session-row:focus-within .session-badge {
   opacity: 0;
+}
+
+.workspace-open-content-list {
+  border-left: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 1px;
+  margin: 0 5px 5px 34px;
+  min-width: 0;
+  padding: 1px 0 1px 6px;
+}
+
+.workspace-open-content-item {
+  align-items: center;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+  display: grid;
+  font: 11px/1.25 var(--vibelink-sans);
+  gap: 6px;
+  grid-template-columns: 15px minmax(0, 1fr) 7px;
+  justify-content: start;
+  justify-items: stretch;
+  min-height: 25px;
+  min-width: 0;
+  padding: 3px 5px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-open-content-item.is-terminal-pane {
+  padding-left: 11px;
+}
+
+.workspace-open-content-item:hover,
+.workspace-open-content-item:focus-visible {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-item.is-active {
+  background: color-mix(in srgb, var(--vibelink-accent) 10%, transparent);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-icon {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.workspace-open-content-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-open-content-status {
+  background: var(--vibelink-muted);
+  border-radius: 50%;
+  height: 5px;
+  justify-self: center;
+  opacity: 0.35;
+  width: 5px;
+}
+
+.workspace-open-content-status.is-active {
+  background: var(--vibelink-success, #3fb950);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-complete {
+  background: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
+  opacity: 1;
 }
 
 /* Terminal window tab controls + add menu */

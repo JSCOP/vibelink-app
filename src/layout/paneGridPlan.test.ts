@@ -14,6 +14,15 @@ describe('pane grid planning', () => {
     ])
   })
 
+  it('extends two occupied panes into one total 4x2 target grid', () => {
+    const added = Array.from({ length: 6 }, (_, index) => `new-${index + 1}`)
+
+    expect(expandPaneIdsIntoGrid(['old-1', 'old-2'], added, { cols: 2, rows: 1 }, { cols: 4, rows: 2 })).toEqual([
+      'old-1', 'old-2', 'new-1', 'new-2',
+      'new-3', 'new-4', 'new-5', 'new-6',
+    ])
+  })
+
   it('chooses compact occupied dimensions for current panes', () => {
     expect(occupiedGridForPaneCount(9)).toEqual({ cols: 3, rows: 3 })
   })

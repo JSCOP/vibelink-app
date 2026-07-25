@@ -1,9 +1,11 @@
+import { open } from '@tauri-apps/plugin-dialog'
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderPlus, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta } from '../../ipc/types'
 import { paneCompletionCountsBySession, useWorkspaceStore } from '../../state/store'
 import { flattenWorkspaceRows, workspaceRows, type WorkspaceGroup } from '../../state/workspaceGroups'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
+import { OpenWorkspaceItems } from './OpenWorkspaceItems'
 
 export type WorkspacesSidebarIntegration = {
   onCreateWorkspaceRequested?: () => void
@@ -88,12 +90,15 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const groups = useWorkspaceStore((state) => state.settings.workspaceGroups)
   const groupIds = useWorkspaceStore((state) => state.settings.workspaceGroupIds)
   const order = useWorkspaceStore((state) => state.settings.workspaceOrder)
+  const defaultProfileId = useWorkspaceStore((state) => state.settings.defaultProfileId)
   const openSession = useWorkspaceStore((state) => state.openSession)
+  const createSession = useWorkspaceStore((state) => state.createSession)
   const renameSession = useWorkspaceStore((state) => state.renameSession)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const renameWorkspaceGroup = useWorkspaceStore((state) => state.renameWorkspaceGroup)
   const deleteWorkspaceGroup = useWorkspaceStore((state) => state.deleteWorkspaceGroup)
   const setWorkspaceGroup = useWorkspaceStore((state) => state.setWorkspaceGroup)
+  const setWorkspaceGroupRootFolder = useWorkspaceStore((state) => state.setWorkspaceGroupRootFolder)
   const toggleWorkspaceGroupCollapsed = useWorkspaceStore((state) => state.toggleWorkspaceGroupCollapsed)
   const setError = useWorkspaceStore((state) => state.setError)
   const rows = useMemo(() => workspaceRows(sessions, groups, groupIds, order), [groupIds, groups, order, sessions])
@@ -104,6 +109,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const ungroupedSessions = rows.flatMap((row) => row.kind === 'session' ? [row.session] : [])
   const listRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragState | null>(null)
+  const openingGroupIdsRef = useRef(new Set<string>())
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [membershipDropTarget, setMembershipDropTarget] = useState<MembershipDropTarget | null>(null)
@@ -167,6 +173,40 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     setDraggingId(null)
     setDropTarget(null)
     setMembershipDropTarget(null)
+  }
+
+  const openGroupRoot = async (group: WorkspaceGroup) => {
+    const rootFolder = group.rootFolder?.trim()
+    if (!rootFolder || openingGroupIdsRef.current.has(group.id)) return
+    openingGroupIdsRef.current.add(group.id)
+    try {
+      const normalizedRootFolder = rootFolder.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      const existing = sessions.find((session) => {
+        const workspaceFolder = session.workspaceFolder
+        if (typeof workspaceFolder !== 'string') return false
+        return workspaceFolder.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === normalizedRootFolder
+      })
+      if (existing) {
+        await openSession(existing.id)
+        return
+      }
+      const created = await createSession(group.name, rootFolder, defaultProfileId)
+      setWorkspaceGroup(created.id, group.id)
+      await openSession(created.id)
+    } catch (caught) {
+      setError(String(caught))
+    } finally {
+      openingGroupIdsRef.current.delete(group.id)
+    }
+  }
+
+  const chooseGroupRoot = async (group: WorkspaceGroup) => {
+    try {
+      const selected = await open({ directory: true, multiple: false, title: 'Select workspace group root folder' })
+      if (typeof selected === 'string') setWorkspaceGroupRootFolder(group.id, selected)
+    } catch (caught) {
+      setError(String(caught))
+    }
   }
 
   const renameGroup = (group: WorkspaceGroup) => {
@@ -239,6 +279,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
             <Trash2 size={13} aria-hidden="true" />
           </button>
         </div>
+        {session.id === activeSessionId ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
       </div>
     )
   }
@@ -269,6 +310,8 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
       <div className="workspaces-list session-list" ref={listRef}>
         {groupedRows.map(({ group, sessions: groupSessions }) => {
           const dropInside = membershipDropTarget?.kind === 'group' && membershipDropTarget.groupId === group.id
+          const rootFolder = group.rootFolder?.trim() || null
+          const rootFolderName = workspaceFolderBasename(rootFolder)
           return (
             <div key={group.id} className={`workspaces-group${dropInside ? ' is-drop-target' : ''}`}>
               <div
@@ -277,17 +320,37 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
                 role="button"
                 tabIndex={0}
                 aria-expanded={!group.collapsed}
-                onClick={() => toggleWorkspaceGroupCollapsed(group.id)}
+                onClick={() => {
+                  if (rootFolder) void openGroupRoot(group)
+                  else toggleWorkspaceGroupCollapsed(group.id)
+                }}
                 onKeyDown={(event) => {
                   if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
                   event.preventDefault()
                   toggleWorkspaceGroupCollapsed(group.id)
                 }}
               >
-                <span className="workspaces-group-chevron" aria-hidden="true">{group.collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</span>
+                <span
+                  className="workspaces-group-chevron"
+                  title={`${group.collapsed ? 'Expand' : 'Collapse'} ${group.name} group`}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    toggleWorkspaceGroupCollapsed(group.id)
+                  }}
+                >
+                  {group.collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                </span>
                 <Folder size={14} strokeWidth={1.7} aria-hidden="true" />
-                <strong>{group.name}</strong>
+                <span className="workspaces-session-copy">
+                  <strong className="session-name">{group.name}</strong>
+                  {rootFolderName ? <span className="workspaces-session-folder" title={rootFolder ?? undefined}>{rootFolderName}</span> : null}
+                </span>
                 <div className="workspaces-row-actions">
+                  {!rootFolder ? (
+                    <button type="button" title="Set group root folder" aria-label={`Set root folder for ${group.name} group`} className="session-small-action" onClick={(event) => { event.stopPropagation(); void chooseGroupRoot(group) }}>
+                      <FolderPlus size={12} strokeWidth={1.7} aria-hidden="true" />
+                    </button>
+                  ) : null}
                   <button type="button" title="Rename group" aria-label={`Rename ${group.name} group`} className="session-small-action" onClick={(event) => { event.stopPropagation(); renameGroup(group) }}>
                     <Pencil size={12} strokeWidth={1.7} aria-hidden="true" />
                   </button>
@@ -296,7 +359,16 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
                   </button>
                 </div>
               </div>
-              {!group.collapsed ? <div className="workspaces-group-members" role="group" aria-label={`${group.name} workspaces`}>{groupSessions.map(renderSession)}</div> : null}
+              {(() => {
+                // Collapsing hides a group's members, but never the workspace
+                // you are standing in: otherwise the active row and its open
+                // items vanish and the panel cannot say where you are.
+                const visible = group.collapsed
+                  ? groupSessions.filter((session) => session.id === activeSessionId)
+                  : groupSessions
+                if (visible.length === 0) return null
+                return <div className="workspaces-group-members" role="group" aria-label={`${group.name} workspaces`}>{visible.map(renderSession)}</div>
+              })()}
             </div>
           )
         })}

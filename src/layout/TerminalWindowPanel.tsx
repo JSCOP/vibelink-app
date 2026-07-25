@@ -18,6 +18,11 @@ import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverl
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { removePanelPreservingLayout } from './paneCloseLayout'
 import {
+  defaultTerminalPaneSplitDirection,
+  preventTerminalPaneStackDrop,
+  unstackSerializedDockview,
+} from './innerPaneLayout'
+import {
   parseWorkspaceContentParams,
   workspaceContentPanelId,
   type SerializedDockview,
@@ -49,6 +54,8 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const persistTimerRef = useRef<number | undefined>(undefined)
   const innerDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
+  const repairingInnerLayoutRef = useRef(false)
+  const invariantCheckPendingRef = useRef(false)
   const titlesHidden = Boolean(props.params.titlesHidden)
 
   const paneIdsFromParams = useMemo(() => collectInnerPaneIds(props.params.inner), [props.params.inner])
@@ -110,6 +117,27 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     }, 120)
   }, [captureInnerLayout, outerApi])
 
+  const repairStackedInnerLayout = useCallback((api: DockviewApi): boolean => {
+    if (repairingInnerLayoutRef.current) return false
+    let current: SerializedDockview
+    try {
+      current = api.toJSON()
+    } catch {
+      return false
+    }
+    const repaired = unstackSerializedDockview(current)
+    if (repaired === current) return false
+    repairingInnerLayoutRef.current = true
+    try {
+      api.fromJSON(repaired, { reuseExistingPanels: true })
+      return true
+    } catch {
+      return false
+    } finally {
+      repairingInnerLayoutRef.current = false
+    }
+  }, [])
+
   const addPane = useCallback((paneParams: TerminalPaneParams, options: TerminalWindowAddOptions = {}): IDockviewPanel | null => {
     const api = innerApiRef.current
     if (!api) return null
@@ -119,14 +147,23 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       if (!options.inactive) existing.api.setActive()
       return existing
     }
-    const referencePanel = options.referencePaneId
+    const requestedReference = options.referencePaneId
       ? api.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: options.referencePaneId }))
       : undefined
-    const localSplit = referencePanel && options.direction
+    const referencePanel = requestedReference ?? api.activePanel ?? api.panels.at(-1)
+    let direction = options.direction
+    if (referencePanel && !direction) {
+      try {
+        direction = defaultTerminalPaneSplitDirection(api.toJSON())
+      } catch {
+        direction = 'right'
+      }
+    }
+    const localSplit = referencePanel && direction
       ? {
           beforeLayout: api.toJSON(),
-          initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), options.direction),
-          referenceSize: options.direction === 'right' ? referencePanel.group.api.width : referencePanel.group.api.height,
+          initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), direction),
+          referenceSize: direction === 'right' ? referencePanel.group.api.width : referencePanel.group.api.height,
         }
       : null
     const panelOptions = {
@@ -137,13 +174,13 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       params: paneParams,
       renderer: 'always',
       inactive: options.inactive,
-      position: referencePanel ? { referencePanel, direction: options.direction ?? 'right' } : undefined,
+      position: referencePanel && direction ? { referencePanel, direction } : undefined,
       ...(localSplit?.initialSize ?? {}),
     }
     const panel = api.addPanel(panelOptions as AddPanelOptions<TerminalPaneParams>)
-    if (referencePanel && options.direction && localSplit) {
-      if (!finalizeLocalSplitLayout(api, localSplit.beforeLayout, referencePanel.id, panel.id, options.direction)) {
-        finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+    if (referencePanel && direction && localSplit) {
+      if (!finalizeLocalSplitLayout(api, localSplit.beforeLayout, referencePanel.id, panel.id, direction)) {
+        finalizeLocalSplitSize(referencePanel.group, panel.group, direction, localSplit.referenceSize)
       }
     }
     if (!options.inactive) panel.api.setActive()
@@ -159,7 +196,7 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     try {
       const nextLayout = removePanelPreservingLayout(api.toJSON(), panelId)
       if (nextLayout) {
-        api.fromJSON(nextLayout, { reuseExistingPanels: true })
+        api.fromJSON(unstackSerializedDockview(nextLayout), { reuseExistingPanels: true })
         return
       }
     } catch {
@@ -167,7 +204,8 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       // serialized. A single/invalid layout has no unrelated pane to preserve.
     }
     panel.api.close()
-  }, [])
+    repairStackedInnerLayout(api)
+  }, [repairStackedInnerLayout])
 
   const paneIds = useCallback((): string[] => {
     const api = innerApiRef.current
@@ -183,13 +221,29 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     if (first) TerminalManager.focus(first)
   }, [paneIds])
 
+  const scheduleInnerInvariantCheck = useCallback(() => {
+    if (invariantCheckPendingRef.current) return
+    invariantCheckPendingRef.current = true
+    queueMicrotask(() => {
+      invariantCheckPendingRef.current = false
+      const api = innerApiRef.current
+      if (!api) return
+      repairStackedInnerLayout(api)
+      void settleInner()
+      persistInner()
+    })
+  }, [persistInner, repairStackedInnerLayout, settleInner])
+
   const handleInnerReady = useCallback((event: DockviewReadyEvent) => {
     innerApiRef.current = event.api
     const inner = props.params.inner
     let restored = false
+    let repairedRestore = false
     if (inner) {
       try {
-        event.api.fromJSON(inner as Parameters<DockviewApi['fromJSON']>[0])
+        const repaired = unstackSerializedDockview(inner)
+        repairedRestore = repaired !== inner
+        event.api.fromJSON(repaired)
         restored = event.api.panels.length > 0
       } catch {
         restored = false
@@ -197,8 +251,12 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     }
     if (!restored) event.api.clear()
     innerDisposablesRef.current = [
+      event.api.onWillShowOverlay((event) => {
+        if (preventTerminalPaneStackDrop(event.kind, event.position)) event.preventDefault()
+      }),
       event.api.onDidLayoutChange(() => persistInner()),
-      event.api.onDidMovePanel(() => { void settleInner(); persistInner() }),
+      event.api.onDidMovePanel(() => scheduleInnerInvariantCheck()),
+      event.api.onDidDrop(() => scheduleInnerInvariantCheck()),
       event.api.onDidRemovePanel(() => persistInner()),
       event.api.onDidActivePanelChange((panel) => {
         const content = parseWorkspaceContentParams(panel?.params)
@@ -206,10 +264,11 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       }),
     ]
     void settleInner()
+    if (repairedRestore) persistInner()
   // props.params.inner is captured once at mount; later inner changes are driven
   // through the registry handle, not by re-running ready.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [persistInner, settleInner])
+  }, [persistInner, scheduleInnerInvariantCheck, settleInner])
 
   // Register the window handle so WorkspaceView actions can target this window.
   useEffect(() => {
@@ -242,6 +301,8 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   }, [settleInner, titlesHidden])
 
   useEffect(() => () => {
+    innerApiRef.current = null
+    invariantCheckPendingRef.current = false
     for (const disposable of innerDisposablesRef.current) disposable.dispose()
     innerDisposablesRef.current = []
     if (persistTimerRef.current !== undefined) window.clearTimeout(persistTimerRef.current)
@@ -260,6 +321,7 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
         defaultTabComponent={TerminalPaneTitleBar}
         onReady={handleInnerReady}
         defaultRenderer="always"
+        disableFloatingGroups
         dndStrategy="pointer"
         hideBorders
         theme={vibelinkDockviewTheme}
