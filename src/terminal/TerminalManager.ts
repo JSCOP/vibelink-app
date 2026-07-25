@@ -15,6 +15,7 @@ import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLink
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
 import { agentActivityTracker, shouldTrackAgentInput, type AgentActivityActions } from './agentActivity'
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
+import { beginInteractiveResize, endInteractiveResize, type InteractiveResizeKind } from '../layout/interactiveResize'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
@@ -141,14 +142,14 @@ class TerminalManagerImpl {
   private handlePointerDown = (event: PointerEvent): void => {
     const target = event.target
     if (!(target instanceof Element) || !target.closest(SASH_SELECTOR)) return
-    this.beginInteraction()
+    this.beginInteraction('divider')
     // Mirror the exact set of end triggers Dockview's own sash uses, so this
     // interaction can never outlive the drag it is throttling.
     const end = () => {
       document.removeEventListener('pointerup', end, true)
       document.removeEventListener('pointercancel', end, true)
       document.removeEventListener('contextmenu', end, true)
-      this.endInteraction()
+      this.endInteraction('divider')
     }
     document.addEventListener('pointerup', end, true)
     document.addEventListener('pointercancel', end, true)
@@ -162,25 +163,30 @@ class TerminalManagerImpl {
     // Minimizing collapses the webview to a degenerate viewport; refitting every
     // pane to that and back on restore is the blank-then-rebuild flash.
     if (!viable) return
-    if (this.windowResizeTimer === undefined) this.beginInteraction()
+    if (this.windowResizeTimer === undefined) this.beginInteraction('window')
     else window.clearTimeout(this.windowResizeTimer)
     this.windowResizeTimer = window.setTimeout(() => {
       this.windowResizeTimer = undefined
-      this.endInteraction()
+      this.endInteraction('window')
     }, WINDOW_RESIZE_SETTLE_MS)
     // Restore from minimize: the panes were held back at a degenerate viewport
     // and may hold nothing paintable, so this resume does repaint.
     if (becameViable) this.settleLayout({ repaint: true })
   }
 
-  private beginInteraction(): void {
+  private beginInteraction(kind: InteractiveResizeKind): void {
+    beginInteractiveResize(kind)
     this.interactionDepth += 1
     if (this.interactionDepth === 1) this.markInteracting(true)
   }
 
-  private endInteraction(): void {
+  private endInteraction(kind: InteractiveResizeKind): void {
     if (this.interactionDepth === 0) return
     this.interactionDepth -= 1
+    // Publish the end BEFORE the settle pass: layout owners re-run the
+    // reposition/persist work they withheld during the drag, and the pass
+    // scheduled below then fits terminals to that final geometry.
+    endInteractiveResize(kind)
     if (this.interactionDepth > 0) return
     this.markInteracting(false)
     this.settleLayout()

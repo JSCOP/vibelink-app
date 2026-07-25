@@ -85,6 +85,7 @@ import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneC
 import { arrangeTerminalPaneGrid } from './innerPaneLayout'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
+import { isDividerResizeActive, isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
 import { withSuppressedPanelRemoval } from './suppression'
 import {
   isStructuralWorkspaceContentKind,
@@ -520,6 +521,8 @@ export function WorkspaceView({
   const resizeEpochRef = useRef(0)
   const resizeSettlingRef = useRef(false)
   const resizeSettlePendingRef = useRef(false)
+  // Set when the quiet timer wanted to settle while a drag was still running.
+  const resizeSettleDeferredRef = useRef(false)
   const layoutLoadQueueRef = useRef<Promise<void>>(Promise.resolve())
   const layoutEpochRef = useRef(0)
   const layoutOwnerRef = useRef<WorkspaceLayoutOwner | null>(null)
@@ -1414,7 +1417,14 @@ export function WorkspaceView({
     const api = apiRef.current
     if (!api || !isDockElementMeasurable(dockRef.current)) return
     collapseWorkspaceEdgesForCenterWidth(api, rootWidth)
-    if (shouldLayoutDockview) layoutDockview(api)
+    // A divider drag is Dockview's OWN gesture: its pointermove already resized
+    // the splitview and repositioned every view this frame. Re-running the
+    // forced layout here re-applies the proportions saved at the previous
+    // sash end, which snaps every pane back to its pre-drag size before the
+    // next pointermove drags it out again — the divider visibly lags the
+    // pointer. A window drag-resize genuinely changed the container, so it
+    // still needs the layout.
+    if (shouldLayoutDockview && !isDividerResizeActive()) layoutDockview(api)
     forceOverlayReposition(api)
     TerminalManager.scheduleLayoutPass()
   }, [layoutDockview])
@@ -1425,6 +1435,14 @@ export function WorkspaceView({
     const sessionId = useWorkspaceStore.getState().activeSessionId
     const sessionEpoch = getWorkspaceSessionEpoch()
     if (!api || !sessionId || !isDockElementMeasurable(root)) return
+    // The quiet timer fires ~140 ms into a still-running drag. Settling there
+    // forces a layout mid-gesture, which re-applies the pre-drag proportions
+    // and snaps the panes back. The drag end publishes an interaction-end
+    // event that runs this settle once, on the geometry the drag landed on.
+    if (isInteractiveResizeActive()) {
+      resizeSettleDeferredRef.current = true
+      return
+    }
     const hasLoadedSessionLayout = loadedSessionRef.current === sessionId
       && loadedApiRef.current === api
       && loadedSessionEpochRef.current === sessionEpoch
@@ -1472,6 +1490,15 @@ export function WorkspaceView({
       if (resizeCoordinatorRef.current === coordinator) resizeCoordinatorRef.current = null
     }
   }, [finishLiveWorkspaceResize, runLiveWorkspaceResize])
+
+  // A drag end is the only moment the geometry is final. Run the settle the
+  // quiet timer deferred, so overlays, terminal fits, and PTY sizes land once
+  // on the size the drag actually finished at.
+  useEffect(() => onInteractiveResizeEnd(() => {
+    if (!resizeSettleDeferredRef.current) return
+    resizeSettleDeferredRef.current = false
+    finishLiveWorkspaceResize()
+  }), [finishLiveWorkspaceResize])
 
   const handleReady = useCallback((event: DockviewReadyEvent) => {
     for (const disposable of apiDisposablesRef.current) disposable.dispose()

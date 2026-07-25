@@ -15,6 +15,7 @@ import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
 import { settleDockviewOverlayLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverlay'
+import { isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { removePanelPreservingLayout } from './paneCloseLayout'
 import {
@@ -56,6 +57,8 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   const innerDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
   const repairingInnerLayoutRef = useRef(false)
   const invariantCheckPendingRef = useRef(false)
+  // Set when a persist was requested while a drag was still running.
+  const persistDeferredRef = useRef(false)
   const titlesHidden = Boolean(props.params.titlesHidden)
 
   const paneIdsFromParams = useMemo(() => collectInnerPaneIds(props.params.inner), [props.params.inner])
@@ -72,6 +75,12 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   const settleInner = useCallback(async () => {
     const api = innerApiRef.current
     if (!api) return
+    // A divider drag re-enters here through the outer panel's dimension events.
+    // Skip it: `layoutInner` would re-apply the proportions saved at the
+    // previous sash end and snap every pane back to its pre-drag size, and the
+    // loop runs up to 12 forced-layout + overlay-reposition rounds per call.
+    // The drag-end hook runs one settle on the final geometry instead.
+    if (isInteractiveResizeActive()) return
     // Dockview applies a maximize/restore to its grid over the following
     // frames and never repositions `renderer: 'always'` overlays for it (it
     // only does so on move / fromJSON). Sampling immediately would compare the
@@ -106,11 +115,18 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     if (persistTimerRef.current !== undefined) window.clearTimeout(persistTimerRef.current)
     persistTimerRef.current = window.setTimeout(() => {
       persistTimerRef.current = undefined
+      // updateParameters re-renders this panel and rewrites the OUTER layout.
+      // Doing that mid-drag reconciles the whole terminal window while the
+      // pointer is still moving, so hold the write until the drag ends; the
+      // interaction-end handler re-runs it on the final geometry.
+      if (isInteractiveResizeActive()) {
+        persistDeferredRef.current = true
+        return
+      }
       const inner = captureInnerLayout()
       const current = outerApi.getParameters<TerminalWindowParams>()
-      // updateParameters re-renders this panel and rewrites the OUTER layout,
-      // which is persisted in turn. Writing an unchanged inner layout therefore
-      // feeds the save/restore cycle for free, so only write a real change.
+      // Writing an unchanged inner layout feeds the save/restore cycle for
+      // free, so only write a real change.
       if (JSON.stringify(current.inner) === JSON.stringify(inner)) return
       outerApi.updateParameters({ ...current, inner })
       window.dispatchEvent(new CustomEvent('vibelink:terminal-window-persist'))
@@ -291,6 +307,17 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     const vis = outerApi.onDidVisibilityChange(({ isVisible }) => { if (isVisible) void settleInner() })
     return () => { dims.dispose(); vis.dispose() }
   }, [outerApi, settleInner])
+
+  // A drag end is the only point the geometry is final: re-settle so the inner
+  // overlays/terminals fit the size the drag landed on, and flush the persist
+  // that was withheld to keep updateParameters out of the gesture.
+  useEffect(() => onInteractiveResizeEnd(() => {
+    if (!innerApiRef.current) return
+    void settleInner()
+    if (!persistDeferredRef.current) return
+    persistDeferredRef.current = false
+    persistInner()
+  }), [persistInner, settleInner])
 
   // Hiding/showing pane title bars collapses the inner tab strip via CSS, which
   // does NOT emit a Dockview layout event, so the pane's absolutely-positioned
