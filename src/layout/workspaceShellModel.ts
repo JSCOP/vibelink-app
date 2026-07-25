@@ -36,6 +36,28 @@ export type WorkspaceResizeCoordinator = {
   dispose: () => void
 }
 
+/**
+ * Bounded history of layout strings the workspace view saved itself.
+ *
+ * `save_layout` round-trips back into the store, and several persists can be in
+ * flight at once, so "the store's layout changed" does not mean "someone else
+ * changed the layout". Without this history the view rebuilds the whole dock
+ * from its own (sometimes older) write, which drops live pane titles back to the
+ * persisted copy, persists again, and flickers in a loop.
+ */
+export const authoredWorkspaceLayoutHistoryLimit = 12
+
+export function rememberAuthoredLayout(history: Set<string>, layoutJson: string): void {
+  // Re-insert so the most recently authored layout is the newest entry.
+  history.delete(layoutJson)
+  history.add(layoutJson)
+  while (history.size > authoredWorkspaceLayoutHistoryLimit) {
+    const oldest = history.values().next().value
+    if (oldest === undefined) break
+    history.delete(oldest)
+  }
+}
+
 type WorkspaceResizeCoordinatorCallbacks = {
   onLive: (width: number, layoutDockview: boolean) => void
   onSettled: () => void

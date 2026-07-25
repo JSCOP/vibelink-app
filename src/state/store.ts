@@ -325,17 +325,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const attached = await invoke<AttachedSession>('attach_session', { sessionId })
     if (workspaceSessionEpoch !== epoch || workspaceSessionReadyEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return null
     const refreshedPanes = Object.fromEntries(attached.panes.map((pane) => [pane.id, pane]))
-    const refreshedLayoutJson = serializeWorkspaceLayoutState(normalizeWorkspaceLayoutState(attached.layoutJson))
     set((state) => {
       if (workspaceSessionEpoch !== epoch || workspaceSessionReadyEpoch !== epoch || workspaceSessionTargetId !== sessionId || state.activeSessionId !== sessionId) return state
       const panesUnchanged = paneRecordsEqual(state.panes, refreshedPanes)
       const panes = panesUnchanged ? state.panes : refreshedPanes
       const activePaneId = state.activePaneId && panes[state.activePaneId]?.alive ? state.activePaneId : undefined
-      if (panesUnchanged && state.layoutJson === refreshedLayoutJson && activePaneId === state.activePaneId) return state
+      if (panesUnchanged && activePaneId === state.activePaneId) return state
+      // NEVER adopt the daemon's layout copy here. This runs from the daemon's
+      // SessionChanged snapshot, and `save_layout` itself emits SessionChanged:
+      // adopting the snapshot replays a layout the frontend just wrote (often a
+      // racing/older copy), which makes WorkspaceView clear + fromJSON the whole
+      // dock, re-serialize, save again, and flicker in a loop. The attached
+      // frontend is the only author of the layout, so its own copy is current.
       return {
         panes,
         activePaneId,
-        layoutJson: refreshedLayoutJson,
         paneCompletionHighlights: panesUnchanged
           ? state.paneCompletionHighlights
           : reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),

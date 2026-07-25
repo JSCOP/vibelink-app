@@ -2,6 +2,8 @@ import { describe, expect, it, vi, type Mock } from 'vitest'
 import type { DockviewApi, IDockviewPanel } from 'dockview-react'
 
 import {
+  authoredWorkspaceLayoutHistoryLimit,
+  rememberAuthoredLayout,
   collapseStructuralWorkspacePanel,
   collapseWorkspaceEdgesForCenterWidth,
   ensureWorkspaceEdgeShell,
@@ -299,5 +301,44 @@ describe('WorkspaceView shell primitives', () => {
 
     collapseWorkspaceEdgesForCenterWidth(api, 700)
     expect(left.api.collapse).toHaveBeenCalledOnce()
+  })
+})
+
+describe('authored layout history', () => {
+  it('recognises any recent self-authored layout, not only the newest', () => {
+    // Several persists can be in flight, so save_layout can echo back an older
+    // one. Treating that echo as an external change rebuilt the whole dock.
+    const history = new Set<string>()
+    rememberAuthoredLayout(history, 'layout-a')
+    rememberAuthoredLayout(history, 'layout-b')
+    rememberAuthoredLayout(history, 'layout-c')
+
+    expect(history.has('layout-a')).toBe(true)
+    expect(history.has('layout-b')).toBe(true)
+    expect(history.has('layout-c')).toBe(true)
+    expect(history.has('layout-from-another-view')).toBe(false)
+  })
+
+  it('stays bounded and keeps the most recent entries', () => {
+    const history = new Set<string>()
+    for (let index = 0; index < authoredWorkspaceLayoutHistoryLimit + 5; index += 1) {
+      rememberAuthoredLayout(history, `layout-${index}`)
+    }
+
+    expect(history.size).toBe(authoredWorkspaceLayoutHistoryLimit)
+    expect(history.has('layout-0')).toBe(false)
+    expect(history.has(`layout-${authoredWorkspaceLayoutHistoryLimit + 4}`)).toBe(true)
+  })
+
+  it('refreshes an existing entry instead of letting it age out early', () => {
+    const history = new Set<string>()
+    rememberAuthoredLayout(history, 'sticky')
+    for (let index = 0; index < authoredWorkspaceLayoutHistoryLimit - 1; index += 1) {
+      rememberAuthoredLayout(history, `layout-${index}`)
+      rememberAuthoredLayout(history, 'sticky')
+    }
+    rememberAuthoredLayout(history, 'newest')
+
+    expect(history.has('sticky')).toBe(true)
   })
 })

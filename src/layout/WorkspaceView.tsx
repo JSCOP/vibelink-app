@@ -109,6 +109,7 @@ import {
   collapseWorkspaceEdgesForCenterWidth,
   ensureWorkspaceEdgeShell,
   registerWorkspaceEdgeGroups,
+  rememberAuthoredLayout,
   resetWorkspaceEdgeDefaults,
   resolveWorkspaceContentGroup,
   updateOpenPreviewPanel,
@@ -532,6 +533,14 @@ export function WorkspaceView({
   const loadedLayoutJsonRef = useRef<string | null>(null)
   const loadedApiRef = useRef<DockviewApi | null>(null)
   const loadedSessionEpochRef = useRef<number | null>(null)
+  // Layout strings this view authored for the session it currently owns. The
+  // store's layoutJson is written back by our own save_layout round trip, and
+  // several persists can be in flight at once, so `loadedLayoutJsonRef` alone
+  // cannot tell "someone else changed the layout" from "my own save landed out
+  // of order". Rebuilding the dock for our own write is what made a workspace
+  // open flicker: restore -> persist -> store update -> clear + fromJSON of the
+  // older copy -> stale pane titles -> persist again, forever.
+  const authoredLayoutsRef = useRef(new Set<string>())
   const suppressPanelRemovalRef = useRef(false)
   const saveTimerRef = useRef<number | undefined>()
   const apiDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
@@ -678,9 +687,14 @@ export function WorkspaceView({
     const serialized = serializeCurrentLayout()
     if (!serialized) return
     loadedSessionRef.current = owner.sessionId
-    loadedLayoutJsonRef.current = serialized
     loadedApiRef.current = owner.api
     loadedSessionEpochRef.current = owner.sessionEpoch
+    // Record what we are about to write, but do NOT claim it as the loaded
+    // layout yet: save_layout is async, so until it lands the store still holds
+    // the previous string. Overwriting the ref here makes the very next render
+    // see loaded != store and rebuild the dock from the older copy. The store's
+    // echo is recognised through the authored history instead.
+    rememberAuthoredLayout(authoredLayoutsRef.current, serialized)
     await saveLayout(owner.sessionId, serialized)
     if (!ownsLayout(owner)) return
   }, [currentLayoutOwner, ownsLayout, saveLayout, serializeCurrentLayout])
@@ -1238,8 +1252,18 @@ export function WorkspaceView({
       const envelope = normalizeWorkspaceLayoutState(raw)
       const requiresFirstTerminalLayout = livePanes.length > 0 && centralGridIsEmpty(api)
       if (!envelope.dockview && livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) return
+      // A layout this view authored is already on screen — the store only echoed
+      // our own save back (possibly an older in-flight one). Adopt the string and
+      // skip the rebuild; clearing + restoring here would drop live pane titles
+      // back to the persisted copy and start the save/restore flicker loop.
+      const selfAuthored = loadedSessionRef.current === sessionId
+        && loadedApiRef.current === api
+        && loadedSessionEpochRef.current === sessionEpoch
+        && typeof raw === 'string'
+        && authoredLayoutsRef.current.has(raw)
+      if (selfAuthored) loadedLayoutJsonRef.current = raw
       if (loadedSessionRef.current === sessionId
-        && loadedLayoutJsonRef.current === raw
+        && (loadedLayoutJsonRef.current === raw || selfAuthored)
         && loadedApiRef.current === api
         && loadedSessionEpochRef.current === sessionEpoch
         && !requiresFirstTerminalLayout) return
@@ -1469,6 +1493,8 @@ export function WorkspaceView({
       layoutEpochRef.current += 1
       layoutOwnerRef.current = null
       setLoadedLayoutOwner(null)
+      // Authored layouts belong to the workspace/epoch that produced them.
+      authoredLayoutsRef.current.clear()
       lastChromeStateRef.current = null
       lastMainGroupIdRef.current = null
       setCurrentMainGroupId(null)

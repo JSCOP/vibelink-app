@@ -296,6 +296,30 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
   })
 
+  test('refreshAttachedSession keeps the frontend layout and only reconciles panes', async () => {
+    // save_layout itself makes the daemon emit SessionChanged, which lands here.
+    // Adopting the daemon copy replayed a layout the view had just written, so
+    // WorkspaceView cleared and restored the whole dock and flickered in a loop.
+    const staleDaemonLayout = JSON.stringify({ version: 3, dockview: null })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: null, panes: [nonAgentPane] }
+      return null
+    })
+    useWorkspaceStore.setState({ sessions: [createdSession] })
+    await useWorkspaceStore.getState().attachSession(createdSession.id)
+    const authoredByView = JSON.stringify({ version: 3, dockview: null, authored: true })
+    useWorkspaceStore.setState({ layoutJson: authoredByView })
+
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: staleDaemonLayout, panes: [nonAgentPane, spawnedPane] }
+      return null
+    })
+    await useWorkspaceStore.getState().refreshAttachedSession(createdSession.id)
+
+    expect(useWorkspaceStore.getState().layoutJson).toBe(authoredByView)
+    expect(Object.keys(useWorkspaceStore.getState().panes).sort()).toEqual([nonAgentPane.id, spawnedPane.id].sort())
+  })
+
   test('attachSession detaches the previously active workspace', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'attach_session') return { layoutJson: null, panes: [nonAgentPane] }

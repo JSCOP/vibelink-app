@@ -95,6 +95,10 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       persistTimerRef.current = undefined
       const inner = captureInnerLayout()
       const current = outerApi.getParameters<TerminalWindowParams>()
+      // updateParameters re-renders this panel and rewrites the OUTER layout,
+      // which is persisted in turn. Writing an unchanged inner layout therefore
+      // feeds the save/restore cycle for free, so only write a real change.
+      if (JSON.stringify(current.inner) === JSON.stringify(inner)) return
       outerApi.updateParameters({ ...current, inner })
       window.dispatchEvent(new CustomEvent('vibelink:terminal-window-persist'))
     }, 120)
