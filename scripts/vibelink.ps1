@@ -42,9 +42,30 @@ function Assert-Tool([string]$Name) {
 
 function Assert-LocalTauriCli {
   $tauriCommand = Join-Path $RepoRoot 'node_modules\.bin\tauri.cmd'
-  if (-not (Test-Path -LiteralPath $tauriCommand -PathType Leaf)) {
-    throw 'Local Tauri CLI is missing. Run "pnpm install --frozen-lockfile" from the repository root, then retry.'
+  if (Test-Path -LiteralPath $tauriCommand -PathType Leaf) { return }
+
+  Assert-Tool 'pnpm'
+  Write-Host 'Local Tauri CLI is missing; installing node dependencies with pnpm.' -ForegroundColor Yellow
+  Push-Location -LiteralPath $RepoRoot
+  try {
+    & pnpm install --frozen-lockfile
+    $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
+    if ($exitCode -ne 0) {
+      Write-Host 'Frozen-lockfile install failed; retrying with a lockfile update.' -ForegroundColor Yellow
+      & pnpm install
+      $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
+    }
+  } finally {
+    Pop-Location
   }
+
+  if ($exitCode -ne 0) {
+    throw "pnpm install failed with exit code $exitCode. Run it manually from $RepoRoot, then retry."
+  }
+  if (-not (Test-Path -LiteralPath $tauriCommand -PathType Leaf)) {
+    throw "pnpm install completed but $tauriCommand is still missing. Check that @tauri-apps/cli is in devDependencies."
+  }
+  Write-Host 'Node dependencies installed.' -ForegroundColor Green
 }
 
 function Assert-ReleaseLicenseApiUrl {
