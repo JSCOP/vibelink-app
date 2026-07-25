@@ -6128,3 +6128,13 @@ button.git-window-primary-action,
     transform: none;
   }
 }
+
+/* While a divider or window drag is in flight the pointer belongs to the sash,
+ * not to a terminal. xterm's mousemove handler measures its screen element to
+ * map the pointer to a cell, and a horizontal divider drag sweeps the pointer
+ * straight across every pane — that forced measurement showed up as a
+ * top-three cost in the drag profile. Take the panes out of hit-testing for
+ * the duration; TerminalManager owns the class. */
+.vibelink-interacting .xterm {
+  pointer-events: none;
+}

@@ -9,6 +9,7 @@ import { terminalThemeById } from '../state/terminalThemes'
 import { terminalFontStack } from '../state/fonts'
 import { createTerminalOptions, defaultTerminalSettings, terminalLetterSpacing, terminalLineHeight, type TerminalVisualSettings } from './options'
 import { terminalHostBecameMeasurable, terminalHostMeasureState, type TerminalHostMeasureState } from './geometry'
+import { interactivePassDelay, isViewportViable, shouldRedrawAfterFit, shouldSyncPtyNow } from './layoutPassPolicy'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
@@ -48,6 +49,14 @@ const MAX_PENDING_INPUT_CHUNKS = 256
 // of an Alt+Z maximize/restore cycle without moving Dockview geometry.
 const CLICK_REPAIR_COOLDOWN_MS = 250
 const CLICK_REPAIR_PTY_SETTLE_MS = 64
+// A native window drag-resize emits a stream of `resize` events with no end
+// event. Treat the interaction as finished once the stream goes quiet for this
+// long, then run the settle pass. Divider drags end on pointerup instead.
+const WINDOW_RESIZE_SETTLE_MS = 160
+// Dockview's splitview builds its dividers as `.dv-sash` and drives them from a
+// document-level pointermove, so a capture-phase pointerdown is the only place
+// the drag can be observed before the layout storm starts.
+const SASH_SELECTOR = '.dv-sash'
 
 
 
@@ -77,6 +86,9 @@ type Entry = {
   forceFitOnNextMeasure?: boolean
   rendererResetPending?: boolean
   lastFitRect?: { width: number; height: number }
+  /** Last size reported by this pane's ResizeObserver, so the layout pass does
+   *  not have to force a synchronous layout to re-measure it. */
+  observedSize?: { width: number; height: number }
   lastSentPtyCols?: number
   lastSentPtyRows?: number
   remoteLease?: boolean
@@ -97,16 +109,97 @@ class TerminalManagerImpl {
   private linkActions: CaptureLinkActions = { onOpenPath: () => {}, resolveMarker: () => undefined }
   private pendingPass = new Map<string, { fit: boolean; syncPty: boolean; force: boolean; clearWebglTextureAtlas: boolean }>()
   private passFrame: number | undefined
+  private passTimer: number | undefined
+  private lastPassAt: number | undefined
+  // Non-zero while a divider drag or a native window drag-resize is in flight.
+  private interactionDepth = 0
+  private windowResizeTimer: number | undefined
+  private viewportViable = true
 
   constructor() {
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') this.resumeRendering()
+        // Returning from hidden re-measures against geometry that may have
+        // changed while we were not painting, so this one is a forced settle.
+        if (document.visibilityState === 'visible') this.settleLayout()
       })
+      document.addEventListener('pointerdown', this.handlePointerDown, true)
     }
     if (typeof window !== 'undefined') {
-      window.addEventListener('focus', () => this.resumeRendering())
+      // A plain focus regain must NOT force a refit + full repaint of every
+      // pane: nothing has resized, and the forced pass was visible as a flash
+      // on every window switch. Let the ordinary rect guards decide.
+      window.addEventListener('focus', () => this.reflowAll())
+      window.addEventListener('resize', this.handleWindowResize)
     }
+  }
+
+  /** Dockview drives its sash from a document-level pointermove, so the drag is
+   *  observed here rather than through a Dockview API. */
+  private handlePointerDown = (event: PointerEvent): void => {
+    const target = event.target
+    if (!(target instanceof Element) || !target.closest(SASH_SELECTOR)) return
+    this.beginInteraction()
+    // Mirror the exact set of end triggers Dockview's own sash uses, so this
+    // interaction can never outlive the drag it is throttling.
+    const end = () => {
+      document.removeEventListener('pointerup', end, true)
+      document.removeEventListener('pointercancel', end, true)
+      document.removeEventListener('contextmenu', end, true)
+      this.endInteraction()
+    }
+    document.addEventListener('pointerup', end, true)
+    document.addEventListener('pointercancel', end, true)
+    document.addEventListener('contextmenu', end, true)
+  }
+
+  private handleWindowResize = (): void => {
+    const viable = isViewportViable({ width: window.innerWidth, height: window.innerHeight })
+    const becameViable = viable && !this.viewportViable
+    this.viewportViable = viable
+    // Minimizing collapses the webview to a degenerate viewport; refitting every
+    // pane to that and back on restore is the blank-then-rebuild flash.
+    if (!viable) return
+    if (this.windowResizeTimer === undefined) this.beginInteraction()
+    else window.clearTimeout(this.windowResizeTimer)
+    this.windowResizeTimer = window.setTimeout(() => {
+      this.windowResizeTimer = undefined
+      this.endInteraction()
+    }, WINDOW_RESIZE_SETTLE_MS)
+    if (becameViable) this.settleLayout()
+  }
+
+  private beginInteraction(): void {
+    this.interactionDepth += 1
+    if (this.interactionDepth === 1) this.markInteracting(true)
+  }
+
+  private endInteraction(): void {
+    if (this.interactionDepth === 0) return
+    this.interactionDepth -= 1
+    if (this.interactionDepth > 0) return
+    this.markInteracting(false)
+    this.settleLayout()
+  }
+
+  /** Terminals stop taking pointer events for the duration of the interaction.
+   *  xterm's own mousemove handler measures the screen element to map the
+   *  pointer to a cell, and a divider drag sweeps the pointer straight across
+   *  the panes — that measurement was a top-three cost in the drag profile and
+   *  buys nothing while the pointer belongs to the sash. */
+  private markInteracting(active: boolean): void {
+    if (typeof document === 'undefined') return
+    document.documentElement.classList.toggle('vibelink-interacting', active)
+  }
+
+  private get interactive(): boolean {
+    return this.interactionDepth > 0
+  }
+
+  /** One authoritative pass after an interaction ends: force the fit and send
+   *  the PTY size that was held back while the pointer was down. */
+  private settleLayout(): void {
+    this.scheduleLayoutPass({ force: true, syncPty: true })
   }
 
   setLinkActions(actions: CaptureLinkActions): void {
@@ -195,6 +288,9 @@ class TerminalManagerImpl {
     const entry = this.getOrCreate(paneId)
     const previousSessionId = entry.sessionId
     entry.sessionId = options.sessionId
+    // Dockview re-parents panes on maximize/restore and pane swaps; a size
+    // observed against the old container must not survive into the new one.
+    if (entry.container !== container) entry.observedSize = undefined
     entry.container = container
     entry.term.options.theme = terminalThemeById(this.settings.terminalThemeId)
     this.applyScrollbarVisibility(entry)
@@ -229,6 +325,12 @@ class TerminalManagerImpl {
         if (entry.remoteLease) return
         const sessionId = entry.sessionId
         if (!sessionId || (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows)) return
+        // A divider drag walks the grid through every intermediate size. Each
+        // resize_pane is an IPC round trip that SIGWINCHes the child, so a full
+        // -screen agent repaints its whole screen per step. Leave lastSentPty*
+        // untouched so the settle pass still sees a difference and sends the
+        // size the drag actually landed on.
+        if (this.interactive) return
         entry.lastSentPtyCols = cols
         entry.lastSentPtyRows = rows
         void invoke('resize_pane', { sessionId, paneId, cols, rows })
@@ -254,7 +356,11 @@ class TerminalManagerImpl {
     if (options.sessionId) this.flushPendingInput(entry)
 
     entry.observer?.disconnect()
-    entry.observer = new ResizeObserver(() => this.scheduleLayoutPass({ paneIds: [paneId] }))
+    entry.observer = new ResizeObserver((observed) => {
+      const box = observed[observed.length - 1]?.contentRect
+      if (box) entry.observedSize = { width: box.width, height: box.height }
+      this.scheduleLayoutPass({ paneIds: [paneId] })
+    })
     entry.observer.observe(container)
     // Output held while the terminal was unopened parses now, after the
     // synchronous fit above sized the grid to the real host.
@@ -479,9 +585,6 @@ class TerminalManagerImpl {
     this.scheduleLayoutPass({ syncPty: true })
   }
 
-  resumeRendering(): void {
-    this.scheduleLayoutPass({ force: true, syncPty: true })
-  }
   repairAfterPointerActivation(paneId: string): void {
     const entry = this.entries.get(paneId)
     if (!entry?.opened || !entry.container) return
@@ -527,39 +630,78 @@ class TerminalManagerImpl {
         clearWebglTextureAtlas: Boolean(pending?.clearWebglTextureAtlas || options.clearWebglTextureAtlas),
       })
     }
-    if (this.passFrame !== undefined || this.pendingPass.size === 0) return
+    this.requestPassFlush()
+  }
+
+  /** Queue the animation-frame flush, honouring the interaction throttle. While
+   *  a divider or window drag is in flight the pass runs at most every
+   *  INTERACTIVE_FIT_INTERVAL_MS instead of once per pointermove frame. */
+  private requestPassFlush(): void {
+    if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
+    // While the window is minimized the webview reports a degenerate viewport.
+    // Hold the requests: handleWindowResize settles once the window is back.
+    if (!this.viewportViable) return
+    const delay = interactivePassDelay({
+      interactive: this.interactive,
+      now: Date.now(),
+      lastPassAt: this.lastPassAt,
+    })
+    if (delay > 0) {
+      this.passTimer = window.setTimeout(() => {
+        this.passTimer = undefined
+        this.requestPassFlush()
+      }, delay)
+      return
+    }
     this.passFrame = requestAnimationFrame(() => {
       this.passFrame = undefined
-      const pending = this.pendingPass
-      this.pendingPass = new Map()
-      for (const [paneId, pass] of pending) {
-        const entry = this.entries.get(paneId)
-        if (!entry?.opened || entry.remoteLease || !pass.fit) continue
-        const rect = entry.container?.getBoundingClientRect()
-        const measurement = this.observeMeasureState(entry, rect)
-        if (!rect || !measurement.measurable) continue
-        const lastRect = entry.lastFitRect
-        const rectUnchanged = lastRect !== undefined
-          && Math.abs(lastRect.width - rect.width) <= 1
-          && Math.abs(lastRect.height - rect.height) <= 1
-        if (!pass.force && !entry.rendererResetPending && rectUnchanged) continue
+      this.lastPassAt = Date.now()
+      this.flushLayoutPass()
+    })
+  }
 
-        if (entry.rendererResetPending) {
-          if (!this.forceFitAndRepaint(entry)) continue
-        } else {
-          const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
-          if (!this.safeFit(entry, pass.force || measurement.forceFitForMeasure)) {
-            entry.forceFitOnNextMeasure = true
-            continue
-          }
-          if (wasAtBottom) entry.term.scrollToBottom()
-          entry.forceFitOnNextMeasure = false
+  private flushLayoutPass(): void {
+    const pending = this.pendingPass
+    this.pendingPass = new Map()
+    const interactive = this.interactive
+    for (const [paneId, pass] of pending) {
+      const entry = this.entries.get(paneId)
+      if (!entry?.opened || entry.remoteLease || !pass.fit) continue
+      // Prefer the size the ResizeObserver already measured: calling
+      // getBoundingClientRect() here forces a synchronous layout in the middle
+      // of a frame that also writes (fit/resize/refresh), which was the single
+      // largest JS cost during a divider drag.
+      const rect = entry.observedSize ?? entry.container?.getBoundingClientRect()
+      const measurement = this.observeMeasureState(entry, rect)
+      if (!rect || !measurement.measurable) continue
+      const lastRect = entry.lastFitRect
+      const rectUnchanged = lastRect !== undefined
+        && Math.abs(lastRect.width - rect.width) <= 1
+        && Math.abs(lastRect.height - rect.height) <= 1
+      if (!pass.force && !entry.rendererResetPending && rectUnchanged) continue
+
+      if (entry.rendererResetPending) {
+        if (!this.forceFitAndRepaint(entry)) continue
+      } else {
+        const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
+        const previousCols = entry.term.cols
+        const previousRows = entry.term.rows
+        if (!this.safeFit(entry, pass.force || measurement.forceFitForMeasure)) {
+          entry.forceFitOnNextMeasure = true
+          continue
+        }
+        const gridChanged = entry.term.cols !== previousCols || entry.term.rows !== previousRows
+        if (wasAtBottom) entry.term.scrollToBottom()
+        entry.forceFitOnNextMeasure = false
+        if (shouldRedrawAfterFit({ gridChanged, force: pass.force })) {
           this.redraw(entry, { clearWebglTextureAtlas: pass.clearWebglTextureAtlas && entry.webgl !== undefined })
         }
-        entry.lastFitRect = { width: rect.width, height: rect.height }
-        if (pass.syncPty) this.syncEntryPtySize(entry)
       }
-    })
+      entry.lastFitRect = { width: rect.width, height: rect.height }
+      // A PTY resize held back during an interaction is sent by the settle pass
+      // that endInteraction() schedules, so nothing is lost by skipping it here.
+      if (shouldSyncPtyNow({ interactive, syncPtyRequested: pass.syncPty })) this.syncEntryPtySize(entry)
+    }
   }
 
   containsEventTarget(paneId: string, target: EventTarget | null): boolean {
