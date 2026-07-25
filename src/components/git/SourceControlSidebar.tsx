@@ -1,8 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Check, ChevronRight, CloudDownload, CloudUpload, FileDiff, FolderGit2, GitBranch, GitCommit, GitCompareArrows, MoreHorizontal, RefreshCw, RotateCcw } from 'lucide-react'
+import { memo, useMemo, useRef } from 'react'
 import type { ChangeType } from '../../ipc/types'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { useGitWorkspace } from './GitWorkspaceProvider'
+import { flattenGitChangeRows, gitChangeRowHeight } from './gitChangeRows'
 import type { GitChangeItem } from './gitWorkspaceModel'
 
 export type SourceControlSidebarProps = {
@@ -23,6 +26,20 @@ const CHANGE_LABEL: Record<ChangeType, string> = {
 
 export function SourceControlSidebar({ active = true, collapsed = false, onCollapse }: SourceControlSidebarProps) {
   const git = useGitWorkspace()
+  const changeScrollRef = useRef<HTMLDivElement | null>(null)
+  // A dirty repository can hold thousands of entries. Rendering one row per
+  // change put ~19k elements (79% of the whole app DOM) behind every React
+  // pass, so unrelated work like splitting a pane paid for reconciling the
+  // entire list. Flatten group headers + rows into one list and virtualize it.
+  const changeRows = useMemo(() => flattenGitChangeRows(git.groups), [git.groups])
+  // TanStack Virtual intentionally exposes non-memoizable functions; this component is not compiler-memoized.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const changeVirtualizer = useVirtualizer({
+    count: changeRows.length,
+    getScrollElement: () => changeScrollRef.current,
+    estimateSize: (index) => gitChangeRowHeight(changeRows[index]),
+    overscan: 12,
+  })
   const repoInfo = git.repoInfo
   const repositoryDescription = git.activeRepoRoot ? `nested repository ${git.activeRepoRoot}` : 'workspace repository'
   const shellState = !git.workspaceFolder
@@ -61,7 +78,34 @@ export function SourceControlSidebar({ active = true, collapsed = false, onColla
         {git.status.truncated ? <div className="git-window-warning">Showing the first 5,000 status entries.</div> : null}
         <div className="git-sidebar-commit-box"><textarea aria-label="Commit message" placeholder="Message (Ctrl+Enter to commit)" value={git.commitMessage} onChange={(event) => git.setCommitMessage(event.target.value)} onKeyDown={(event) => { if (event.ctrlKey && event.key === 'Enter' && !git.primaryAction?.disabled && git.primaryAction?.id === 'commit') git.commit() }} /><div><label><input type="checkbox" checked={git.amend} onChange={(event) => git.setAmend(event.target.checked)} /> Amend</label><button type="button" onClick={git.commit} disabled={!git.commitMessage.trim() || (!git.amend && git.status.staged.length === 0)}><GitCommit size={12} aria-hidden="true" /> Commit</button></div></div>
         {git.remoteComparisonActive ? <div className="git-sidebar-remote-banner"><span>Remote comparison</span><button type="button" onClick={git.showWorkingChanges}><RotateCcw size={12} aria-hidden="true" /> Working changes</button></div> : null}
-        <div className="git-sidebar-change-groups">{git.groups.filter((group) => group.count > 0).map((group) => <section key={group.id} data-change-group={group.id}><header><h3>{group.title} <span>{group.count}</span></h3><div>{group.actions.map((action) => <button key={action.id} type="button" title={action.label} data-danger={action.danger || undefined} onClick={action.onClick}>{action.label}</button>)}</div></header><div>{group.items.map((item) => <ChangeRow key={`${item.area}:${item.path}`} item={item} selected={git.selectedPath === item.path && git.selectedArea === item.area} onSelect={() => git.selectChange(item)} onStage={() => git.stagePaths([item.path])} onUnstage={() => git.unstagePaths([item.path])} onDiscard={() => git.discardPaths([item.path], group.id === 'untracked')} />)}</div></section>)}</div>
+        <div className="git-sidebar-change-groups" ref={changeScrollRef}>
+          <div className="git-sidebar-change-viewport" style={{ height: changeVirtualizer.getTotalSize() }}>
+            {changeVirtualizer.getVirtualItems().map((virtualRow) => {
+              const row = changeRows[virtualRow.index]
+              if (!row) return null
+              return (
+                <div key={row.key} className="git-sidebar-change-slot" style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}>
+                  {row.kind === 'header' ? (
+                    <header className="git-sidebar-change-group-header" data-change-group={row.group.id}>
+                      <h3>{row.group.title} <span>{row.group.count}</span></h3>
+                      <div>{row.group.actions.map((action) => <button key={action.id} type="button" title={action.label} data-danger={action.danger || undefined} onClick={action.onClick}>{action.label}</button>)}</div>
+                    </header>
+                  ) : (
+                    <ChangeRow
+                      item={row.item}
+                      untracked={row.untracked}
+                      selected={git.selectedPath === row.item.path && git.selectedArea === row.item.area}
+                      onSelect={git.selectChange}
+                      onStage={git.stagePaths}
+                      onUnstage={git.unstagePaths}
+                      onDiscard={git.discardPaths}
+                    />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
         {git.groups.every((group) => group.count === 0) ? <div className="git-sidebar-clean"><Check size={14} aria-hidden="true" /> No changes</div> : null}
         <div className="git-sidebar-sync-actions"><button type="button" onClick={git.fetch}><CloudDownload size={12} aria-hidden="true" /> Fetch</button><button type="button" onClick={git.pull}><RotateCcw size={12} aria-hidden="true" /> Pull</button><button type="button" onClick={git.push}><CloudUpload size={12} aria-hidden="true" /> Push</button></div>
       </> : null}
@@ -69,14 +113,26 @@ export function SourceControlSidebar({ active = true, collapsed = false, onColla
   )
 }
 
-function ChangeRow({ item, selected, onSelect, onStage, onUnstage, onDiscard }: { item: GitChangeItem; selected: boolean; onSelect: () => void; onStage: () => void; onUnstage: () => void; onDiscard: () => void }) {
+type ChangeRowProps = {
+  item: GitChangeItem
+  selected: boolean
+  untracked: boolean
+  onSelect: (item: GitChangeItem) => void
+  onStage: (paths: string[]) => void
+  onUnstage: (paths: string[]) => void
+  onDiscard: (paths: string[], untracked: boolean) => void
+}
+
+// Memoized against the controller's stable callbacks: the per-row closures are
+// built inside so a re-render of the sidebar does not invalidate every row.
+const ChangeRow = memo(function ChangeRow({ item, selected, untracked, onSelect, onStage, onUnstage, onDiscard }: ChangeRowProps) {
   const slash = item.path.lastIndexOf('/')
   const basename = slash >= 0 ? item.path.slice(slash + 1) : item.path
   const parent = slash >= 0 ? item.path.slice(0, slash) : ''
   return (
     <div className="git-sidebar-change-row" data-selected={selected || undefined}>
-      <button type="button" className="git-sidebar-change-main" aria-label={`${item.area}: ${item.path}`} onClick={onSelect}><span data-change-type={item.changeType}>{CHANGE_LABEL[item.changeType]}</span><FileDiff size={12} aria-hidden="true" /><strong>{basename}</strong>{parent ? <small>{parent}</small> : null}</button>
-      <details><summary role="button" aria-label={`Actions for ${item.path}`}><MoreHorizontal size={13} aria-hidden="true" /></summary><div role="menu">{item.area === 'staged' ? <button type="button" role="menuitem" onClick={onUnstage}>Unstage</button> : item.area !== 'remote' ? <button type="button" role="menuitem" onClick={onStage}>Stage</button> : null}{item.area !== 'remote' ? <button type="button" role="menuitem" data-danger onClick={onDiscard}>Discard…</button> : null}</div></details>
+      <button type="button" className="git-sidebar-change-main" aria-label={`${item.area}: ${item.path}`} onClick={() => onSelect(item)}><span data-change-type={item.changeType}>{CHANGE_LABEL[item.changeType]}</span><FileDiff size={12} aria-hidden="true" /><strong>{basename}</strong>{parent ? <small>{parent}</small> : null}</button>
+      <details><summary role="button" aria-label={`Actions for ${item.path}`}><MoreHorizontal size={13} aria-hidden="true" /></summary><div role="menu">{item.area === 'staged' ? <button type="button" role="menuitem" onClick={() => onUnstage([item.path])}>Unstage</button> : item.area !== 'remote' ? <button type="button" role="menuitem" onClick={() => onStage([item.path])}>Stage</button> : null}{item.area !== 'remote' ? <button type="button" role="menuitem" data-danger onClick={() => onDiscard([item.path], untracked)}>Discard…</button> : null}</div></details>
     </div>
   )
-}
+})

@@ -12,6 +12,23 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
+// jsdom gives every scroll container zero height, so the real virtualizer would
+// render no rows. Render the whole list here so these projection assertions keep
+// exercising the actual change rows.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count, estimateSize }: { count: number; estimateSize: (index: number) => number }) => ({
+    getTotalSize: () => Array.from({ length: count }, (_, index) => estimateSize(index)).reduce((total, size) => total + size, 0),
+    getVirtualItems: () => {
+      let start = 0
+      return Array.from({ length: count }, (_, index) => {
+        const size = estimateSize(index)
+        const item = { index, key: index, start, size }
+        start += size
+        return item
+      })
+    },
+  }),
+}))
 vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
 
 vi.mock('./AssignedTab', () => ({ AssignedTab: () => <div>Assigned projection</div> }))

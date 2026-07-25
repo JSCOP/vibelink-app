@@ -256,20 +256,41 @@
   gap: 4px;
 }
 
+/* The change list is the one region of the panel body that absorbs the leftover
+   height and scrolls internally (the body itself is `overflow: hidden`). Without
+   this it grew to its full content height — 29,000px for a dirty repository —
+   so the list could not be scrolled AND every row stayed mounted. */
+.git-sidebar .workspace-sidebar-panel-body > .git-sidebar-change-groups {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .git-sidebar-change-groups {
   overflow: auto;
 }
 
-.git-sidebar-change-groups > section > header {
+/* Virtualized rows are absolutely positioned inside a spacer sized to the whole
+   list, so only the visible window exists in the DOM. */
+.git-sidebar-change-viewport {
+  position: relative;
+  width: 100%;
+}
+
+.git-sidebar-change-slot {
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.git-sidebar-change-group-header {
   align-items: center;
   background: color-mix(in srgb, var(--vibelink-panel) 75%, var(--vibelink-bg));
   display: flex;
+  height: 100%;
   justify-content: space-between;
   min-height: 25px;
   padding: 0 6px 0 8px;
-  position: sticky;
-  top: 0;
-  z-index: 1;
 }
 
 .git-sidebar-change-groups h3 {
@@ -313,6 +334,7 @@
   border-left: 2px solid transparent;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 24px;
+  height: 100%;
 }
 
 .git-sidebar-change-row:hover {
