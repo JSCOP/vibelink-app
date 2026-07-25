@@ -44,10 +44,19 @@ export function isViewportViable(size: TerminalHostSize | null | undefined): boo
 
 /** `term.refresh(0, rows - 1)` marks every visible row dirty and makes the
  *  renderer re-upload the whole model, so it must not run on passes where the
- *  fit left the grid untouched. Forced passes still repaint: the renderer
- *  repair paths (maximize/restore, pointer activation) depend on it. */
-export function shouldRedrawAfterFit(args: { gridChanged: boolean; force: boolean }): boolean {
-  return args.gridChanged || args.force
+ *  fit left the grid untouched.
+ *
+ *  `force` and `repaint` are deliberately SEPARATE intents. `force` only means
+ *  "re-fit even though the observed rect looks unchanged" — the settle pipeline
+ *  needs that after a split, because a pane's Dockview render overlay can still
+ *  report its pre-split box. Repainting on those passes as well is what made a
+ *  single split blink: the settle loop runs many frames, and every one of them
+ *  repainted EVERY pane (measured: 147 `term.refresh` calls over ~21 whole-grid
+ *  repaints for one split). Only a real grid change or an explicit repair
+ *  request (`repaint`, which the renderer-recovery and pointer-activation paths
+ *  set) may redraw. */
+export function shouldRedrawAfterFit(args: { gridChanged: boolean; repaint: boolean }): boolean {
+  return args.gridChanged || args.repaint
 }
 
 /** PTY resizes are held back for the duration of an interactive resize: each one

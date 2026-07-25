@@ -52,16 +52,23 @@ describe('isViewportViable', () => {
 
 describe('shouldRedrawAfterFit', () => {
   it('repaints when the fit changed the terminal grid', () => {
-    expect(shouldRedrawAfterFit({ gridChanged: true, force: false })).toBe(true)
+    expect(shouldRedrawAfterFit({ gridChanged: true, repaint: false })).toBe(true)
   })
 
-  it('repaints when a caller explicitly forced the pass', () => {
-    // Renderer repair paths (maximize/restore, pointer repair) rely on this.
-    expect(shouldRedrawAfterFit({ gridChanged: false, force: true })).toBe(true)
+  it('repaints when a caller explicitly asked for renderer repair', () => {
+    // Pane became visible, restore from minimize, pointer repair, WebGL loss.
+    expect(shouldRedrawAfterFit({ gridChanged: false, repaint: true })).toBe(true)
   })
 
   it('skips the full-buffer repaint when nothing changed', () => {
-    expect(shouldRedrawAfterFit({ gridChanged: false, force: false })).toBe(false)
+    expect(shouldRedrawAfterFit({ gridChanged: false, repaint: false })).toBe(false)
+  })
+
+  it('does NOT repaint a forced re-fit that left the grid alone', () => {
+    // A split runs the settle loop over many frames and forces a re-fit on each
+    // one because overlay rects go stale. Repainting there too made every pane
+    // redraw ~21 times per split, which is the visible blink.
+    expect(shouldRedrawAfterFit({ gridChanged: false, repaint: false })).toBe(false)
   })
 })
 

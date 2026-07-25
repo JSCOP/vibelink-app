@@ -107,7 +107,7 @@ class TerminalManagerImpl {
   private entries = new Map<string, Entry>()
   private settings: TerminalVisualSettings = defaultTerminalSettings
   private linkActions: CaptureLinkActions = { onOpenPath: () => {}, resolveMarker: () => undefined }
-  private pendingPass = new Map<string, { fit: boolean; syncPty: boolean; force: boolean; clearWebglTextureAtlas: boolean }>()
+  private pendingPass = new Map<string, { fit: boolean; syncPty: boolean; force: boolean; repaint: boolean; clearWebglTextureAtlas: boolean }>()
   private passFrame: number | undefined
   private passTimer: number | undefined
   private lastPassAt: number | undefined
@@ -121,7 +121,7 @@ class TerminalManagerImpl {
       document.addEventListener('visibilitychange', () => {
         // Returning from hidden re-measures against geometry that may have
         // changed while we were not painting, so this one is a forced settle.
-        if (document.visibilityState === 'visible') this.settleLayout()
+        if (document.visibilityState === 'visible') this.settleLayout({ repaint: true })
       })
       document.addEventListener('pointerdown', this.handlePointerDown, true)
     }
@@ -166,7 +166,9 @@ class TerminalManagerImpl {
       this.windowResizeTimer = undefined
       this.endInteraction()
     }, WINDOW_RESIZE_SETTLE_MS)
-    if (becameViable) this.settleLayout()
+    // Restore from minimize: the panes were held back at a degenerate viewport
+    // and may hold nothing paintable, so this resume does repaint.
+    if (becameViable) this.settleLayout({ repaint: true })
   }
 
   private beginInteraction(): void {
@@ -197,9 +199,12 @@ class TerminalManagerImpl {
   }
 
   /** One authoritative pass after an interaction ends: force the fit and send
-   *  the PTY size that was held back while the pointer was down. */
-  private settleLayout(): void {
-    this.scheduleLayoutPass({ force: true, syncPty: true })
+   *  the PTY size that was held back while the pointer was down. `repaint` is
+   *  reserved for the resumes where the panes may have missed draws entirely
+   *  (tab hidden, window minimized); a drag end only needs the fit, because a
+   *  drag that changed anything also changed the grid. */
+  private settleLayout(options: { repaint?: boolean } = {}): void {
+    this.scheduleLayoutPass({ force: true, repaint: options.repaint, syncPty: true })
   }
 
   setLinkActions(actions: CaptureLinkActions): void {
@@ -566,11 +571,13 @@ class TerminalManagerImpl {
   }
 
   notifyPaneVisible(paneId: string): void {
-    this.scheduleLayoutPass({ paneIds: [paneId], force: true, syncPty: true })
+    // A pane that was hidden may have missed output-driven draws entirely, so
+    // becoming visible is one of the few genuine repaint triggers.
+    this.scheduleLayoutPass({ paneIds: [paneId], force: true, repaint: true, syncPty: true })
   }
 
   recoverAllVisiblePanes(): void {
-    this.scheduleLayoutPass({ force: true, syncPty: true })
+    this.scheduleLayoutPass({ force: true, repaint: true, syncPty: true })
   }
 
   reflowAll(forceFit = false): void {
@@ -617,7 +624,10 @@ class TerminalManagerImpl {
   }
 
 
-  scheduleLayoutPass(options: { paneIds?: string[]; syncPty?: boolean; force?: boolean; clearWebglTextureAtlas?: boolean } = {}): void {
+  /** `force` re-fits a pane whose observed rect looks unchanged; `repaint` is the
+   *  separate, much more expensive request to redraw the whole buffer. Layout
+   *  settle passes want the former only — see `shouldRedrawAfterFit`. */
+  scheduleLayoutPass(options: { paneIds?: string[]; syncPty?: boolean; force?: boolean; repaint?: boolean; clearWebglTextureAtlas?: boolean } = {}): void {
     const paneIds = options.paneIds ?? [...this.entries.keys()]
     for (const paneId of paneIds) {
       const entry = this.entries.get(paneId)
@@ -627,6 +637,7 @@ class TerminalManagerImpl {
         fit: true,
         syncPty: Boolean(pending?.syncPty || options.syncPty),
         force: Boolean(pending?.force || options.force),
+        repaint: Boolean(pending?.repaint || options.repaint),
         clearWebglTextureAtlas: Boolean(pending?.clearWebglTextureAtlas || options.clearWebglTextureAtlas),
       })
     }
@@ -693,7 +704,9 @@ class TerminalManagerImpl {
         const gridChanged = entry.term.cols !== previousCols || entry.term.rows !== previousRows
         if (wasAtBottom) entry.term.scrollToBottom()
         entry.forceFitOnNextMeasure = false
-        if (shouldRedrawAfterFit({ gridChanged, force: pass.force })) {
+        // Clearing the shared-free atlas is itself a repair request, so it
+        // implies a redraw even when the caller did not spell one out.
+        if (shouldRedrawAfterFit({ gridChanged, repaint: pass.repaint || pass.clearWebglTextureAtlas })) {
           this.redraw(entry, { clearWebglTextureAtlas: pass.clearWebglTextureAtlas && entry.webgl !== undefined })
         }
       }
@@ -763,7 +776,7 @@ class TerminalManagerImpl {
         // renderer repaints once the pane is measurable again.
         entry.forceFitOnNextMeasure = true
         entry.rendererResetPending = true
-        this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, syncPty: true })
+        this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, repaint: true, syncPty: true })
       })
       entry.term.loadAddon(addon)
       entry.webgl = addon
