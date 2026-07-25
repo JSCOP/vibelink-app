@@ -10,7 +10,7 @@ type ClosestElement = {
 
 export function paneIdFromEventTarget(target: EventTarget | null): string | null {
   if (!hasClosest(target)) return null
-  return target.closest('[data-pane-id]')?.dataset?.paneId ?? null
+  return target.closest('.terminal-panel-shell[data-pane-id]')?.dataset?.paneId ?? null
 }
 
 function hasClosest(target: EventTarget | null): target is EventTarget & ClosestElement {

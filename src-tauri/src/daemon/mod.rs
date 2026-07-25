@@ -3442,6 +3442,16 @@ fn dispatch_message(
             send_ok(tx, req)?;
             notify_session_changed(&state, session_id)
         }
+        ClientToDaemon::SetSessionWorkspaceFolder {
+            req,
+            session_id,
+            workspace_folder,
+        } => {
+            lock_state(&state).set_session_workspace_folder(session_id, workspace_folder)?;
+            persist_state(&state, sessions_path)?;
+            send_ok(tx, req)?;
+            notify_session_changed(&state, session_id)
+        }
         ClientToDaemon::DeleteSession { req, session_id } => {
             let (panes, lease_transitions) = {
                 let mut guard = lock_state(&state);
@@ -3987,6 +3997,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::SetDesktopSelection { req, .. }
         | ClientToDaemon::CreateSession { req, .. }
         | ClientToDaemon::RenameSession { req, .. }
+        | ClientToDaemon::SetSessionWorkspaceFolder { req, .. }
         | ClientToDaemon::DeleteSession { req, .. }
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }

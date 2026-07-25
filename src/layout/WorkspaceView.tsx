@@ -39,6 +39,7 @@ import { AgentSessionsSidebar } from '../components/agent/AgentSessionsSidebar'
 import { OrchestratorChat } from '../components/OrchestratorChat'
 import { OrchestrationWorkspacePanel } from '../components/OrchestrationWorkspacePanel'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
+import { WorkspaceFolderPrompt } from '../components/WorkspaceFolderPrompt'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { ProLockedPanel } from '../components/ProLockedPanel'
 import { BrowserContentPanel as NativeBrowserContentPanel } from '../browser/BrowserDockPanel'
@@ -77,6 +78,7 @@ import { getTerminalWindow, listTerminalWindows, allWindowedPaneIds, findTermina
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { nearestPaneIdInDirection, paneIdsInReadingOrder, type PaneDirection } from './paneSwap'
+import { paneIdFromEventTarget } from './paneActivation'
 import { expandGridRowsForPaneCount, occupiedGridForPaneCount } from './paneGridPlan'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
@@ -115,7 +117,7 @@ import {
   type WorkspaceResizeCoordinator,
 } from './workspaceShellModel'
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
-import { finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
+import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 
 type WorkspaceContentPanelProps = IDockviewPanelProps<WorkspaceContentParams>
 type TerminalContentParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
@@ -387,7 +389,7 @@ function ExplorerContentPanel(props: WorkspaceContentPanelProps) {
   } : null, [actions, ownership])
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-explorer">
-      <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><ExplorerSidebarPanel sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : <div className="placeholder-panel">Select a local workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
+      <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><ExplorerSidebarPanel sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">Select a workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -747,6 +749,7 @@ export function WorkspaceView({
     const referencePanel = !structural && options.referencePanelId ? api.getPanel(options.referencePanelId) : undefined
     const localSplit = referencePanel && options.direction && referencePanel.group.api.location.type === 'grid'
       ? {
+          beforeLayout: api.toJSON(),
           initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), options.direction),
           referenceSize: options.direction === 'right' ? referencePanel.group.api.width : referencePanel.group.api.height,
         }
@@ -769,7 +772,9 @@ export function WorkspaceView({
     // compatibility cast contained here so ordinary panel creation stays typed.
     const panel = api.addPanel(panelOptions as AddPanelOptions<WorkspaceContentParams>)
     if (referencePanel && options.direction && localSplit) {
-      finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+      if (!finalizeLocalSplitLayout(api, localSplit.beforeLayout, referencePanel.id, panel.id, options.direction)) {
+        finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+      }
     }
     if (panel.group.api.location.type === 'grid' && (!options.inactive || !lastMainGroupIdRef.current)) {
       lastMainGroupIdRef.current = panel.group.id
@@ -1645,6 +1650,15 @@ export function WorkspaceView({
           // Dockview's click handler runs, which then toggles the now-active
           // group straight back to collapsed, so the sidebar never opens.
           if (target?.closest('.workspace-edge-rail-tab')) return
+          const terminalBodyPaneId = paneIdFromEventTarget(event.target)
+          if (terminalBodyPaneId) {
+            // Renderer overlays sit outside Dockview's ordinary group content
+            // activation path. Explicitly activate the nested pane before
+            // repairing/focusing it so body clicks behave like title clicks.
+            activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: terminalBodyPaneId }))
+            TerminalManager.repairAfterPointerActivation(terminalBodyPaneId)
+            return
+          }
           const shell = target?.closest<HTMLElement>('[data-content-panel-id]')
           const panelId = shell?.dataset.contentPanelId
           if (!panelId) return

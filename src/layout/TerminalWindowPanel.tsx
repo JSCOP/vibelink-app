@@ -15,7 +15,7 @@ import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
 import { settleDockviewOverlayLayout } from './splitOverlayLayout'
 import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverlay'
-import { finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
+import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { removePanelPreservingLayout } from './paneCloseLayout'
 import {
   parseWorkspaceContentParams,
@@ -114,6 +114,7 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       : undefined
     const localSplit = referencePanel && options.direction
       ? {
+          beforeLayout: api.toJSON(),
           initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), options.direction),
           referenceSize: options.direction === 'right' ? referencePanel.group.api.width : referencePanel.group.api.height,
         }
@@ -131,7 +132,9 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     }
     const panel = api.addPanel(panelOptions as AddPanelOptions<TerminalPaneParams>)
     if (referencePanel && options.direction && localSplit) {
-      finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+      if (!finalizeLocalSplitLayout(api, localSplit.beforeLayout, referencePanel.id, panel.id, options.direction)) {
+        finalizeLocalSplitSize(referencePanel.group, panel.group, options.direction, localSplit.referenceSize)
+      }
     }
     if (!options.inactive) panel.api.setActive()
     return panel

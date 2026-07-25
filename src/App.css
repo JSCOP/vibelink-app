@@ -831,6 +831,23 @@ button {
   justify-content: center;
 }
 
+.workspace-folder-prompt {
+  flex-direction: column;
+  gap: 9px;
+  padding: 20px;
+  text-align: center;
+}
+
+.workspace-folder-prompt strong {
+  color: var(--vibelink-text);
+  font: 650 13px/1.3 var(--vibelink-sans);
+}
+
+.workspace-folder-prompt span {
+  line-height: 1.45;
+  max-width: 280px;
+}
+
 .workspace-view {
   display: grid;
   flex: 1 1 auto;

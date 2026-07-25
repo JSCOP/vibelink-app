@@ -295,6 +295,7 @@ pub fn run() {
             commands::list_sessions,
             commands::ping,
             commands::rename_session,
+            commands::set_session_workspace_folder,
             commands::resource_snapshot,
             commands::set_pane_role,
             commands::restart_daemon,

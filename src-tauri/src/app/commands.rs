@@ -348,6 +348,31 @@ pub async fn rename_session(
 }
 
 #[tauri::command]
+pub async fn set_session_workspace_folder(
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    workspace_folder: String,
+) -> Result<(), String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    let workspace_folder = workspace_folder.trim().to_string();
+    if workspace_folder.is_empty() {
+        return Err("workspace folder is required".to_string());
+    }
+    if !std::path::Path::new(&workspace_folder).is_dir() {
+        return Err(format!(
+            "workspace folder does not exist: {workspace_folder}"
+        ));
+    }
+    expect_ok(
+        client.request_reply(|req| ClientToDaemon::SetSessionWorkspaceFolder {
+            req,
+            session_id,
+            workspace_folder,
+        }),
+    )
+}
+
+#[tauri::command]
 pub async fn delete_session(
     client: State<'_, DaemonClient>,
     session_id: String,

@@ -2,7 +2,7 @@
 
 import { createDockview, getGridLocation, type AddPanelOptions } from 'dockview-core'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { finalizeLocalSplitSize, localSplitInitialSize, localSplitSiblingIndex } from './localSplitSizing'
+import { finalizeLocalSplitLayout, localSplitInitialSize, localSplitSiblingIndex } from './localSplitSizing'
 
 const disposals: Array<() => void> = []
 
@@ -55,6 +55,7 @@ describe('local terminal split sizing', () => {
     const secondSize = direction === 'right' ? second.group.api.width : second.group.api.height
     expect(originalSize).toBeCloseTo(secondSize, 0)
 
+    const beforeLayout = api.toJSON()
     const createdOptions = {
       id: 'created',
       component: 'test',
@@ -62,7 +63,7 @@ describe('local terminal split sizing', () => {
       ...localSplitInitialSize(getGridLocation(first.group.element), direction),
     }
     const created = api.addPanel(createdOptions as AddPanelOptions)
-    finalizeLocalSplitSize(first.group, created.group, direction, originalSize)
+    expect(finalizeLocalSplitLayout(api, beforeLayout, first.id, created.id, direction)).toBe(true)
 
     const finalFirstSize = direction === 'right' ? first.group.api.width : first.group.api.height
     const finalCreatedSize = direction === 'right' ? created.group.api.width : created.group.api.height
@@ -98,13 +99,14 @@ describe('local terminal split sizing', () => {
     const middleWidth = middle.group.api.width
     const unrelatedWidths = [first.group.api.width, last.group.api.width]
 
+    const beforeLayout = api.toJSON()
     const created = api.addPanel({
       id: 'created',
       component: 'test',
       position: { referencePanel: middle, direction: 'right' },
       ...localSplitInitialSize(getGridLocation(middle.group.element), 'right'),
     } as AddPanelOptions)
-    finalizeLocalSplitSize(middle.group, created.group, 'right', middleWidth)
+    expect(finalizeLocalSplitLayout(api, beforeLayout, middle.id, created.id, 'right')).toBe(true)
 
     expect(middle.group.api.width).toBeCloseTo(middleWidth / 2, 0)
     expect(created.group.api.width).toBeCloseTo(middleWidth / 2, 0)
@@ -132,13 +134,15 @@ describe('local terminal split sizing', () => {
 
     const split = (reference: typeof first, id: string) => {
       const originalWidth = reference.group.api.width
+      const beforeLayout = api.toJSON()
       const created = api.addPanel({
         id,
         component: 'test',
         position: { referencePanel: reference, direction: 'right' },
         ...localSplitInitialSize(getGridLocation(reference.group.element), 'right'),
       } as AddPanelOptions)
-      finalizeLocalSplitSize(reference.group, created.group, 'right', originalWidth)
+      expect(finalizeLocalSplitLayout(api, beforeLayout, reference.id, created.id, 'right')).toBe(true)
+      expect(reference.group.api.width).toBeCloseTo(originalWidth / 2, 0)
       return created
     }
 
@@ -146,5 +150,44 @@ describe('local terminal split sizing', () => {
     const fourth = split(second, 'fourth')
     const widths = [first, third, second, fourth].map((panel) => panel.group.api.width)
     for (const width of widths) expect(width).toBeCloseTo(300, 0)
+  })
+
+  it('keeps four same-axis splits equal when the trailing original pane is split first', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const api = createDockview(host, {
+      createComponent: () => ({
+        element: document.createElement('div'),
+        init: () => undefined,
+      }),
+    })
+    disposals.push(() => api.dispose())
+    api.layout(1200, 800)
+
+    const first = api.addPanel({ id: 'first', component: 'test' })
+    const second = api.addPanel({
+      id: 'second',
+      component: 'test',
+      position: { referencePanel: first, direction: 'right' },
+    })
+
+    const split = (reference: typeof first, id: string) => {
+      const originalWidth = reference.group.api.width
+      const beforeLayout = api.toJSON()
+      const created = api.addPanel({
+        id,
+        component: 'test',
+        position: { referencePanel: reference, direction: 'right' },
+        ...localSplitInitialSize(getGridLocation(reference.group.element), 'right'),
+      } as AddPanelOptions)
+      expect(finalizeLocalSplitLayout(api, beforeLayout, reference.id, created.id, 'right')).toBe(true)
+      expect(reference.group.api.width).toBeCloseTo(originalWidth / 2, 0)
+      return created
+    }
+
+    const third = split(second, 'third')
+    const fourth = split(first, 'fourth')
+    const widths = [first, fourth, second, third].map((panel) => panel.group.api.width)
+    expect(widths).toEqual([300, 300, 300, 300])
   })
 })

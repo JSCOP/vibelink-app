@@ -269,6 +269,16 @@ impl DaemonState {
         Ok(())
     }
 
+    pub fn set_session_workspace_folder(
+        &mut self,
+        session_id: Uuid,
+        workspace_folder: String,
+    ) -> anyhow::Result<()> {
+        let session = self.session_mut(session_id)?;
+        session.meta.workspace_folder = Some(workspace_folder);
+        Ok(())
+    }
+
     pub fn delete_session(&mut self, session_id: Uuid) -> anyhow::Result<Vec<Pane>> {
         let mut session = self
             .sessions
@@ -1384,6 +1394,21 @@ mod tests {
         assert_eq!(
             state.list_sessions()[0].workspace_folder.as_deref(),
             Some("C:\\")
+        );
+    }
+
+    #[test]
+    fn set_session_workspace_folder_updates_existing_workspace_metadata() {
+        let mut state = DaemonState::new();
+        let created = state.create_session("Workspace 1".to_string(), None);
+
+        state
+            .set_session_workspace_folder(created.id, "E:\\repo".to_string())
+            .expect("set workspace folder");
+
+        assert_eq!(
+            state.list_sessions()[0].workspace_folder.as_deref(),
+            Some("E:\\repo")
         );
     }
 

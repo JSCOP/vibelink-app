@@ -111,6 +111,7 @@ type WorkspaceState = {
   refreshAttachedSession: (sessionId: string) => Promise<AttachedSession | null>
   createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
   renameSession: (sessionId: string, name: string) => Promise<void>
+  setSessionWorkspaceFolder: (sessionId: string, workspaceFolder: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
   spawnPane: (sessionId: string, overrides?: SpawnPaneOptions) => Promise<PaneMeta>
   closePane: (paneId: string, sessionId?: string) => Promise<void>
@@ -367,6 +368,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   renameSession: async (sessionId: string, name: string) => {
     await invoke('rename_session', { sessionId, name })
+    await get().refreshSessions()
+  },
+
+  setSessionWorkspaceFolder: async (sessionId: string, workspaceFolder: string) => {
+    const normalizedFolder = normalizeWorkspaceFolder(workspaceFolder)
+    if (!normalizedFolder) throw new Error('Workspace folder is required.')
+    await invoke('set_session_workspace_folder', { sessionId, workspaceFolder: normalizedFolder })
     await get().refreshSessions()
   },
 

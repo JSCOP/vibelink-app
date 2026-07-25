@@ -257,6 +257,25 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
   })
 
+  test('adds a local folder to an existing folderless workspace', async () => {
+    const folderless = { ...profileSession, name: 'Workspace 1' }
+    const updated = { ...folderless, workspaceFolder: 'E:/repo' }
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'set_session_workspace_folder') return null
+      if (command === 'list_sessions') return [updated]
+      return null
+    })
+    useWorkspaceStore.setState({ sessions: [folderless], activeSessionId: folderless.id })
+
+    await useWorkspaceStore.getState().setSessionWorkspaceFolder(folderless.id, '  E:/repo  ')
+
+    expect(invoke).toHaveBeenCalledWith('set_session_workspace_folder', {
+      sessionId: folderless.id,
+      workspaceFolder: 'E:/repo',
+    })
+    expect(useWorkspaceStore.getState().sessions[0].workspaceFolder).toBe('E:/repo')
+  })
+
   test('attachSession replaces legacy page layouts with a v3 envelope', async () => {
     const persistedLayout = JSON.stringify({
       version: 2,

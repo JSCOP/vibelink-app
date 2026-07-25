@@ -357,6 +357,11 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         name: String,
     },
+    SetSessionWorkspaceFolder {
+        req: Req,
+        session_id: Uuid,
+        workspace_folder: String,
+    },
     DeleteSession {
         req: Req,
         session_id: Uuid,
