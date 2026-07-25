@@ -19,7 +19,6 @@ export function buildWorkspaceContentTabContextMenu(
     items.push(
       { label: 'Split terminal right', action: () => { void actions.splitTerminal(content.paneId, 'right') } },
       { label: 'Split terminal below', action: () => { void actions.splitTerminal(content.paneId, 'below') } },
-      { label: 'Arrange Terminals', action: () => { void actions.arrangeTerminals() } },
     )
   }
   items.push(

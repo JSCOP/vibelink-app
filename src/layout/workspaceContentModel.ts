@@ -10,6 +10,7 @@ export type WorkspaceContentKind =
   | 'browser'
   | 'editor'
   | 'preview'
+  | 'workspaces'
   | 'explorer'
   | 'sourceControl'
   | 'gitHistory'
@@ -28,7 +29,7 @@ export type WorkspaceContentParams =
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
   | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
-  | { schema: 1; kind: 'explorer' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
+  | { schema: 1; kind: 'workspaces' | 'explorer' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
 
 export type WorkspaceLayoutEnvelope = {
   version: 3
@@ -43,6 +44,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
   browser: 'one-per-resource',
   editor: 'one-per-resource',
   preview: 'singleton',
+  workspaces: 'singleton',
   explorer: 'singleton',
   sourceControl: 'singleton',
   gitHistory: 'singleton',
@@ -57,6 +59,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
 }
 
 const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
+  workspaces: true,
   explorer: true,
   sourceControl: true,
   gitHistory: true,
@@ -75,6 +78,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
   browser: true,
   editor: true,
   preview: true,
+  workspaces: true,
   explorer: true,
   sourceControl: true,
   gitHistory: true,
@@ -89,6 +93,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
 }
 
 const leftStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {
+  workspaces: true,
   explorer: true,
   sourceControl: true,
   gitHistory: true,

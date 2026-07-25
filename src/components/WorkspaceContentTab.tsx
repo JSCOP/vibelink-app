@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { getPanelData } from 'dockview-core'
-import { Maximize2, Minimize2, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Grid3X3, LayoutGrid, Maximize2, Minimize2, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { NewTerminalLauncher } from './NewTerminalLauncher'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useGitStore } from '../state/git'
 import { useWorkspaceContentActions } from '../layout/contentActions'
+import { selectedProfileForWorkspace } from '../state/profiles'
 import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
 import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceContentTabModel'
+import { getTerminalWindow } from '../layout/terminalWindowRegistry'
 
 type WorkspaceContentTabProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
 
@@ -17,6 +20,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const content = parseWorkspaceContentParams(params)
   const paneId = content?.kind === 'terminal' ? content.paneId : null
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const settings = useWorkspaceStore((state) => state.settings)
   const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId ? Boolean(state.paneCompletionHighlights[paneId]) : false)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
@@ -37,6 +41,10 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const [isActive, setIsActive] = useState(api.isActive)
   const [isMaximized, setIsMaximized] = useState(() => api.isMaximized())
   const [location, setLocation] = useState(api.location)
+  const [addPanesOpen, setAddPanesOpen] = useState(false)
+  const addPanesButtonRef = useRef<HTMLButtonElement | null>(null)
+  const terminalWindowPaneCount = content?.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId)?.paneIds().length ?? 0 : 0
+  const activeProfileId = selectedProfileForWorkspace(settings, activeSessionId).id
 
   useEffect(() => {
     const disposable = api.onDidTitleChange((event) => setTitle(event.title))
@@ -184,6 +192,24 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           </>
         ) : content?.kind === 'terminalWindow' ? (
           <>
+            <button ref={addPanesButtonRef} type="button" title="Add panes" aria-label="Add panes" aria-haspopup="dialog" aria-expanded={addPanesOpen} aria-controls={addPanesOpen ? 'new-terminal-popover' : undefined} onClick={(event) => { activateAndStop(event); setAddPanesOpen((value) => !value) }}>
+              <Grid3X3 size={12} aria-hidden="true" />
+            </button>
+            <NewTerminalLauncher
+              isOpen={addPanesOpen}
+              anchorRef={addPanesButtonRef}
+              existingPaneCount={terminalWindowPaneCount}
+              profiles={settings.profiles}
+              activeProfileId={activeProfileId}
+              onClose={() => setAddPanesOpen(false)}
+              onLaunch={({ cols, rows, occupiedGrid, profileId }) => {
+                setAddPanesOpen(false)
+                void actions.openContent({ kind: 'terminal-grid', grid: { cols, rows, occupiedGrid, profileId, windowId: content.instanceId } })
+              }}
+            />
+            <button type="button" title="Arrange panes" aria-label="Arrange panes" onClick={(event) => { activateAndStop(event); void actions.arrangeTerminals(null, content.instanceId) }}>
+              <LayoutGrid size={12} aria-hidden="true" />
+            </button>
             <button type="button" title={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} aria-label={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} onClick={(event) => { activateAndStop(event); actions.toggleTerminalWindowTitles(content.instanceId) }}>
               {content.titlesHidden ? <PanelTop size={12} aria-hidden="true" /> : <PanelTopClose size={12} aria-hidden="true" />}
             </button>

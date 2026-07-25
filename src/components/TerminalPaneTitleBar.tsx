@@ -1,6 +1,6 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
-import { LayoutGrid, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useWorkspaceContentActions } from '../layout/contentActions'
@@ -97,9 +97,6 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
             </button>
             <button type="button" title="Split terminal below" aria-label="Split terminal below" onClick={(event) => { activateAndStop(event); void actions.splitTerminal(paneId, 'below') }}>
               <SplitSquareHorizontal size={12} aria-hidden="true" />
-            </button>
-            <button type="button" title="Arrange terminal panes" aria-label="Arrange terminal panes" onClick={(event) => { activateAndStop(event); void actions.arrangeTerminals() }}>
-              <LayoutGrid size={12} aria-hidden="true" />
             </button>
           </>
         ) : null}

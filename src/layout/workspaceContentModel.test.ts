@@ -104,6 +104,7 @@ describe('workspace content model', () => {
     expect(normalizeWorkspaceLayoutEnvelope(JSON.stringify({ version: 3, dockview: candidate }))).toEqual(freshWorkspaceLayoutEnvelope())
   })
   it('classifies structural edge and central content kinds', () => {
+    expect(isLeftStructuralWorkspaceContentKind('workspaces')).toBe(true)
     expect(isLeftStructuralWorkspaceContentKind('explorer')).toBe(true)
     expect(isLeftStructuralWorkspaceContentKind('gitBranches')).toBe(true)
     expect(isRightStructuralWorkspaceContentKind('agentSessions')).toBe(true)

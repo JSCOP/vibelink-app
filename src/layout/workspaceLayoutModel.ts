@@ -28,6 +28,7 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   browser: { kind: 'browser', component: 'browser', title: 'Browser', icon: 'globe' },
   editor: { kind: 'editor', component: 'editor', title: 'Editor', icon: 'file-code' },
   preview: { kind: 'preview', component: 'preview', title: 'Preview', icon: 'file-search' },
+  workspaces: { kind: 'workspaces', component: 'workspaces', title: 'Workspaces', icon: 'folder' },
   explorer: { kind: 'explorer', component: 'explorer', title: 'Explorer', icon: 'folder-tree' },
   sourceControl: { kind: 'sourceControl', component: 'sourceControl', title: 'Source Control', icon: 'git-compare-arrows' },
   gitHistory: { kind: 'gitHistory', component: 'gitHistory', title: 'Git History', icon: 'history' },
@@ -46,7 +47,7 @@ export const workspaceRightEdgeGroupId = 'workspace-right-tools'
 export const workspaceEdgeCollapsedSize = 38
 export const workspaceMinimumCenterWidth = 640
 
-export const workspaceLeftStructuralKinds = ['explorer', 'sourceControl', 'gitHistory', 'gitBranches'] as const
+export const workspaceLeftStructuralKinds = ['workspaces', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches'] as const
 export const workspaceRightStructuralKinds = ['agentSessions'] as const
 
 export const workspaceEdgeGroupOptions = {

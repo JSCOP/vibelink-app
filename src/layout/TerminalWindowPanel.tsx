@@ -13,7 +13,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { useWorkspaceStore } from '../state/store'
-import { settleDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleDockviewOverlayLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
 import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverlay'
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { removePanelPreservingLayout } from './paneCloseLayout'
@@ -65,6 +65,12 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   const settleInner = useCallback(async () => {
     const api = innerApiRef.current
     if (!api) return
+    // Dockview applies a maximize/restore to its grid over the following
+    // frames and never repositions `renderer: 'always'` overlays for it (it
+    // only does so on move / fromJSON). Sampling immediately would compare the
+    // overlay against its still-stale content container, report "settled" on
+    // attempt 0, and leave the pane fitted one toggle behind.
+    await waitForDockviewOverlayLayout()
     await settleDockviewOverlayLayout({
       layout: () => layoutInner(),
       refresh: () => forceOverlayReposition(api),

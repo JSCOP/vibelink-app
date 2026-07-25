@@ -160,7 +160,7 @@ describe('WorkspaceView shell primitives', () => {
 
     const left = groups.find((group) => group.id === 'workspace-left-tools')!
     const right = groups.find((group) => group.id === 'workspace-right-tools')!
-    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['explorer', 'sourceControl', 'gitHistory', 'gitBranches'])
+    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches'])
     expect(right.panels.map((panel) => panel.params.kind)).toEqual(['agentSessions'])
     expect(groups[0].panels).toEqual([])
   })
@@ -172,6 +172,7 @@ describe('WorkspaceView shell primitives', () => {
 
     expect(resolveWorkspaceContentGroup(api, 'editor', 'workspace-left-tools', 'grid-b')?.id).toBe('grid-b')
     expect(resolveWorkspaceContentGroup(api, 'sourceControl', 'grid-a', 'grid-b')?.id).toBe('workspace-left-tools')
+    expect(resolveWorkspaceContentGroup(api, 'workspaces', 'grid-a', 'grid-b')?.id).toBe('workspace-left-tools')
   })
 
   it('keeps terminals and other content in separate central grid groups', () => {

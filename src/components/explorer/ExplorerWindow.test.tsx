@@ -21,6 +21,7 @@ function workspaceContentActions(openContent: WorkspaceContentActions['openConte
     arrangeTerminals: vi.fn(async () => undefined),
     clearTerminals: vi.fn(async () => undefined),
     toggleMaximizeContent: vi.fn(),
+    toggleZoomContent: vi.fn(),
     toggleTerminalWindowTitles: vi.fn(),
     renameTerminal: vi.fn(async () => undefined),
     resetLayout: vi.fn(async () => undefined),

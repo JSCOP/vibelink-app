@@ -1,5 +1,5 @@
-import { Grid3X3, Plus } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Grid3X3 } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { Profile } from '../state/profiles'
 import { agentStatusLabel } from '../ipc/agents'
@@ -15,13 +15,12 @@ type LaunchRequest = {
 
 type NewTerminalLauncherProps = {
   isOpen: boolean
-  disabled?: boolean
+  anchorRef: RefObject<HTMLElement | null>
   existingPaneCount: number
   profiles: Profile[]
   activeProfileId: string
   preferredGrid?: GridSize | null
   occupancyMatrix?: TerminalOccupancyGrid | null
-  onToggle: () => void
   onClose: () => void
   onLaunch: (request: LaunchRequest) => void
   onSelectionCommit?: (selection: GridSize) => void
@@ -39,11 +38,10 @@ function selectionStateKey(paneCount: number, preferred?: GridSize | null, occup
   return `${Math.max(0, Math.floor(Number.isFinite(paneCount) ? paneCount : 0))}:${preferred?.cols ?? 0}:${preferred?.rows ?? 0}:${matrixKey}`
 }
 
-export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, preferredGrid = null, occupancyMatrix = null, profiles, activeProfileId, onToggle, onClose, onLaunch, onSelectionCommit }: NewTerminalLauncherProps) {
-  const rootRef = useRef<HTMLDivElement | null>(null)
+export function NewTerminalLauncher({ isOpen, anchorRef, existingPaneCount, preferredGrid = null, occupancyMatrix = null, profiles, activeProfileId, onClose, onLaunch, onSelectionCommit }: NewTerminalLauncherProps) {
   const agentClis = useWorkspaceStore((state) => state.agentClis)
   const popoverRef = useRef<HTMLElement | null>(null)
-  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const wasOpenRef = useRef(isOpen)
   const [occupiedPreference, setOccupiedPreference] = useState<GridSize | null>(() => preferredGrid)
   const [selectionState, setSelectionState] = useState<SelectionState>(() => ({
     key: selectionStateKey(existingPaneCount, preferredGrid, occupancyMatrix),
@@ -78,17 +76,29 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
   }, [onClose])
 
   useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      setOccupiedPreference(preferredGrid)
+      setSelectionState({
+        key: selectionStateKey(existingPaneCount, preferredGrid, occupancyMatrix),
+        grid: occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : defaultTerminalGridSelection(existingPaneCount, preferredGrid),
+      })
+      setSelectedProfileId(activeProfileId)
+    }
+    wasOpenRef.current = isOpen
+  }, [activeProfileId, existingPaneCount, isOpen, occupancyMatrix, preferredGrid])
+
+  useEffect(() => {
     if (!isOpen) return
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null
-      if (rootRef.current?.contains(target) || popoverRef.current?.contains(target)) return
+      if (anchorRef.current?.contains(target) || popoverRef.current?.contains(target)) return
       closeLauncher()
     }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
       closeLauncher()
-      buttonRef.current?.focus()
+      anchorRef.current?.focus()
     }
     window.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('keydown', onKeyDown)
@@ -96,7 +106,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
       window.removeEventListener('pointerdown', onPointerDown)
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [closeLauncher, isOpen])
+  }, [anchorRef, closeLauncher, isOpen])
   useEffect(() => {
     if (!isOpen) return
     const endPointerSelection = () => {
@@ -115,7 +125,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
     if (!isOpen) return
 
     const updatePosition = () => {
-      const rect = buttonRef.current?.getBoundingClientRect()
+      const rect = anchorRef.current?.getBoundingClientRect()
       if (!rect) return
       const popoverWidth = popoverRef.current?.getBoundingClientRect().width || 320
       const popoverHeight = popoverRef.current?.getBoundingClientRect().height || 420
@@ -133,7 +143,7 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
       window.cancelAnimationFrame(frame)
       window.removeEventListener('resize', updatePosition)
     }
-  }, [isOpen])
+  }, [anchorRef, isOpen])
 
 
   const selectionFromCell = (col: number, row: number) => terminalGridSelectionFromCell(occupied, col, row)
@@ -168,101 +178,80 @@ export function NewTerminalLauncher({ isOpen, disabled, existingPaneCount, prefe
     onLaunch({ cols: selection.cols, rows: selection.rows, occupiedGrid: occupied, profileId: effectiveProfileId })
   }
 
-  const toggleLauncher = () => {
-    setIsPointerSelecting(false)
-    setPreviewSelection(null)
-    if (!isOpen) {
-      setOccupiedPreference(preferredGrid)
-      setSelectionState({
-        key: selectionStateKey(existingPaneCount, preferredGrid, occupancyMatrix),
-        grid: occupancyMatrix ? { cols: occupancyMatrix.cols, rows: occupancyMatrix.rows } : defaultTerminalGridSelection(existingPaneCount, preferredGrid),
-      })
-      setSelectedProfileId(activeProfileId)
-    }
-    onToggle()
-  }
-
-  return (
-    <div ref={rootRef} className="new-terminal-launcher" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-      <button ref={buttonRef} type="button" className="topbar-text-button" disabled={disabled} title="Add terminals by dragging over free grid cells" aria-label="Add terminals" aria-haspopup="dialog" aria-expanded={isOpen} aria-controls={isOpen ? 'new-terminal-popover' : undefined} onClick={toggleLauncher}>
-        <Plus size={14} aria-hidden="true" /> <span>New</span>
-      </button>
-      {isOpen && typeof document !== 'undefined' ? createPortal(
-        <section ref={popoverRef} id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-          <header className="new-terminal-popover-header">
-            <Grid3X3 size={14} />
-            <span>Add panes</span>
-          </header>
-          <label className="new-terminal-profile">
-            Profile
-            <select
-              value={effectiveProfileId}
-              title={selectedProfileUnavailable ? `Install ${selectedAgentStatus?.displayName ?? effectiveProfileId} or pick another profile` : undefined}
-              onChange={(event) => setSelectedProfileId(event.target.value)}
-            >
-              {profiles.map((profile) => {
-                const status = agentStatusById[profile.id.toLowerCase()]
-                return (
-                  <option
-                    key={profile.id}
-                    value={profile.id}
-                    disabled={Boolean(status && !status.installed)}
-                    title={status && !status.installed ? `Install ${status.displayName} or pick another profile` : undefined}
-                  >
-                    {profile.name}{status ? ` · ${agentStatusLabel(status)}` : ''}
-                  </option>
-                )
-              })}
-            </select>
-          </label>
-          <div className="new-terminal-summary">
-            <strong>{selection.cols}×{selection.rows}</strong>
-            <span>{existingPaneCount} occupied · {newPaneCount} new panes</span>
-          </div>
-          <div
-            className="new-terminal-occupancy-grid"
-            style={{ gridTemplateColumns: `repeat(${display.cols}, minmax(0, 1fr))` }}
-            onPointerLeave={clearCellPreview}
-          >
-            {Array.from({ length: display.rows }).flatMap((_, row) => (
-              Array.from({ length: display.cols }).map((__, col) => {
-                const state = occupancyMatrix ? terminalOccupancyGridCellState(occupancyMatrix, visibleSelection, col, row) : terminalGridCellState(existingPaneCount, occupied, visibleSelection, col, row)
-                const label = `${col + 1}×${row + 1} ${state}`
-                return (
-                  <button
-                    key={`${row}:${col}`}
-                    type="button"
-                    className="new-terminal-cell"
-                    data-state={state}
-                    aria-label={label}
-                    onPointerDown={(event) => { event.preventDefault(); setIsPointerSelecting(true); commitCell(col, row) }}
-                    onPointerEnter={(event) => previewCell(col, row, isPointerSelecting || event.buttons > 0)}
-                    onPointerMove={(event) => previewCell(col, row, isPointerSelecting || event.buttons > 0)}
-                    onFocus={() => setPreviewSelection(selectionFromCell(col, row))}
-                  />
-                )
-              })
-            ))}
-          </div>
-          <div className="new-terminal-legend" aria-hidden="true">
-            <span data-state="occupied">Occupied</span>
-            <span data-state="available">Available</span>
-            <span data-state="selected">Selected</span>
-          </div>
-          <div className="new-terminal-custom">
-            <label>
-              X
-              <input type="number" min="1" max="20" value={selection.cols} onChange={(event) => commitDimensions(clampGridCols(Number(event.target.value)), selection.rows)} />
-            </label>
-            <label>
-              Y
-              <input type="number" min="1" max="10" value={selection.rows} onChange={(event) => commitDimensions(selection.cols, clampGridRows(Number(event.target.value)))} />
-            </label>
-            <button type="button" className="primary-action" disabled={newPaneCount <= 0 || selectedProfileUnavailable} onClick={launchSelection}>Create</button>
-          </div>
-        </section>,
-        document.body,
-      ) : null}
-    </div>
-  )
+  return isOpen && typeof document !== 'undefined' ? createPortal(
+    <section ref={popoverRef} id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+      <header className="new-terminal-popover-header">
+        <Grid3X3 size={14} />
+        <span>Add panes</span>
+      </header>
+      <label className="new-terminal-profile">
+        Profile
+        <select
+          value={effectiveProfileId}
+          title={selectedProfileUnavailable ? `Install ${selectedAgentStatus?.displayName ?? effectiveProfileId} or pick another profile` : undefined}
+          onChange={(event) => setSelectedProfileId(event.target.value)}
+        >
+          {profiles.map((profile) => {
+            const status = agentStatusById[profile.id.toLowerCase()]
+            return (
+              <option
+                key={profile.id}
+                value={profile.id}
+                disabled={Boolean(status && !status.installed)}
+                title={status && !status.installed ? `Install ${status.displayName} or pick another profile` : undefined}
+              >
+                {profile.name}{status ? ` · ${agentStatusLabel(status)}` : ''}
+              </option>
+            )
+          })}
+        </select>
+      </label>
+      <div className="new-terminal-summary">
+        <strong>{selection.cols}×{selection.rows}</strong>
+        <span>{existingPaneCount} occupied · {newPaneCount} new panes</span>
+      </div>
+      <div
+        className="new-terminal-occupancy-grid"
+        style={{ gridTemplateColumns: `repeat(${display.cols}, minmax(0, 1fr))` }}
+        onPointerLeave={clearCellPreview}
+      >
+        {Array.from({ length: display.rows }).flatMap((_, row) => (
+          Array.from({ length: display.cols }).map((__, col) => {
+            const state = occupancyMatrix ? terminalOccupancyGridCellState(occupancyMatrix, visibleSelection, col, row) : terminalGridCellState(existingPaneCount, occupied, visibleSelection, col, row)
+            const label = `${col + 1}×${row + 1} ${state}`
+            return (
+              <button
+                key={`${row}:${col}`}
+                type="button"
+                className="new-terminal-cell"
+                data-state={state}
+                aria-label={label}
+                onPointerDown={(event) => { event.preventDefault(); setIsPointerSelecting(true); commitCell(col, row) }}
+                onPointerEnter={(event) => previewCell(col, row, isPointerSelecting || event.buttons > 0)}
+                onPointerMove={(event) => previewCell(col, row, isPointerSelecting || event.buttons > 0)}
+                onFocus={() => setPreviewSelection(selectionFromCell(col, row))}
+              />
+            )
+          })
+        ))}
+      </div>
+      <div className="new-terminal-legend" aria-hidden="true">
+        <span data-state="occupied">Occupied</span>
+        <span data-state="available">Available</span>
+        <span data-state="selected">Selected</span>
+      </div>
+      <div className="new-terminal-custom">
+        <label>
+          X
+          <input type="number" min="1" max="20" value={selection.cols} onChange={(event) => commitDimensions(clampGridCols(Number(event.target.value)), selection.rows)} />
+        </label>
+        <label>
+          Y
+          <input type="number" min="1" max="10" value={selection.rows} onChange={(event) => commitDimensions(selection.cols, clampGridRows(Number(event.target.value)))} />
+        </label>
+        <button type="button" className="primary-action" disabled={newPaneCount <= 0 || selectedProfileUnavailable} onClick={launchSelection}>Create</button>
+      </div>
+    </section>,
+    document.body,
+  ) : null
 }

@@ -26,6 +26,8 @@ const profile: Profile = {
   icon: 'terminal',
 }
 
+const anchorRef = { current: document.createElement('button') }
+
 afterEach(cleanup)
 
 function renderHtml(element: ReactElement): string {
@@ -38,11 +40,11 @@ describe('NewTerminalLauncher', () => {
     const html = renderHtml(
       <NewTerminalLauncher
         isOpen
+        anchorRef={anchorRef}
         existingPaneCount={12}
         preferredGrid={{ cols: 6, rows: 2 }}
         profiles={[profile]}
         activeProfileId="powershell"
-        onToggle={() => undefined}
         onClose={() => undefined}
         onLaunch={() => undefined}
       />,
@@ -59,6 +61,7 @@ describe('NewTerminalLauncher', () => {
     const html = renderHtml(
       <NewTerminalLauncher
         isOpen
+        anchorRef={anchorRef}
         existingPaneCount={6}
         preferredGrid={{ cols: 2, rows: 2 }}
         occupancyMatrix={{
@@ -72,7 +75,6 @@ describe('NewTerminalLauncher', () => {
         }}
         profiles={[profile]}
         activeProfileId="powershell"
-        onToggle={() => undefined}
         onClose={() => undefined}
         onLaunch={() => undefined}
       />,
@@ -96,12 +98,12 @@ describe('NewTerminalLauncher', () => {
     const html = renderHtml(
       <NewTerminalLauncher
         isOpen
+        anchorRef={anchorRef}
         existingPaneCount={8}
         preferredGrid={{ cols: 5, rows: 2 }}
         occupancyMatrix={null}
         profiles={[profile]}
         activeProfileId="powershell"
-        onToggle={() => undefined}
         onClose={() => undefined}
         onLaunch={() => undefined}
       />,
@@ -119,11 +121,11 @@ describe('NewTerminalLauncher', () => {
     const html = renderHtml(
       <NewTerminalLauncher
         isOpen
+        anchorRef={anchorRef}
         existingPaneCount={9}
         preferredGrid={{ cols: 5, rows: 2 }}
         profiles={[profile]}
         activeProfileId="powershell"
-        onToggle={() => undefined}
         onClose={() => undefined}
         onLaunch={() => undefined}
       />,
@@ -140,11 +142,11 @@ describe('NewTerminalLauncher', () => {
     const html = renderHtml(
       <NewTerminalLauncher
         isOpen
+        anchorRef={anchorRef}
         existingPaneCount={0}
         preferredGrid={{ cols: 6, rows: 4 }}
         profiles={[profile]}
         activeProfileId="powershell"
-        onToggle={() => undefined}
         onClose={() => undefined}
         onLaunch={() => undefined}
       />,

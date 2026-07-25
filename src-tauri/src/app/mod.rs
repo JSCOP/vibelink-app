@@ -258,6 +258,7 @@ pub fn run() {
             git::diff::git_diff_refs,
             git::diff::git_diff_refs_file,
             git::status::git_dir_entries,
+            git::discover::git_discover_repos,
             git::stage::git_discard,
             git::remote::git_fetch,
             git::git_file_contents,

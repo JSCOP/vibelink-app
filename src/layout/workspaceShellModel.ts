@@ -24,10 +24,11 @@ import type { WorkspaceContentChromeState } from './contentActions'
 type StructuralWorkspaceContentKind = typeof workspaceLeftStructuralKinds[number] | typeof workspaceRightStructuralKinds[number]
 
 const workspaceStructuralPlacement: Record<StructuralWorkspaceContentKind, { groupId: string; index: number }> = {
-  explorer: { groupId: workspaceLeftEdgeGroupId, index: 0 },
-  sourceControl: { groupId: workspaceLeftEdgeGroupId, index: 1 },
-  gitHistory: { groupId: workspaceLeftEdgeGroupId, index: 2 },
-  gitBranches: { groupId: workspaceLeftEdgeGroupId, index: 3 },
+  workspaces: { groupId: workspaceLeftEdgeGroupId, index: 0 },
+  explorer: { groupId: workspaceLeftEdgeGroupId, index: 1 },
+  sourceControl: { groupId: workspaceLeftEdgeGroupId, index: 2 },
+  gitHistory: { groupId: workspaceLeftEdgeGroupId, index: 3 },
+  gitBranches: { groupId: workspaceLeftEdgeGroupId, index: 4 },
   agentSessions: { groupId: workspaceRightEdgeGroupId, index: 0 },
 }
 

@@ -7,12 +7,10 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
 import { Activity, AlertTriangle, Bug, Camera, Eraser, Minus, Settings2, Square, Video, X } from 'lucide-react'
-import { Sidebar } from './components/Sidebar'
-import { SidebarRevealEdge } from './components/SidebarRevealEdge'
-import { loadSidebarPinned, saveSidebarPinned } from './components/sidebarPinState'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
+import { ImportReposDialog } from './components/workspaces/ImportReposDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { SetupWizard } from './components/SetupWizard'
@@ -30,6 +28,7 @@ import { paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
 import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
+import { flattenWorkspaceRows, workspaceRows } from './state/workspaceGroups'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { isAppLocked } from './state/licenseGate'
@@ -74,12 +73,12 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isBugReportOpen, setIsBugReportOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
+  // ImportReposDialog is mounted by the repository import slice.
+  const [isImportReposOpen, setIsImportReposOpen] = useState(false)
   const [isSetupWizardOpen, setIsSetupWizardOpen] = useState(false)
   const [contentActions, setContentActions] = useState<WorkspaceContentActions | null>(null)
   const [chromeState, setChromeState] = useState<WorkspaceContentChromeState | null>(null)
   const [dirtyEditorPrompt, setDirtyEditorPrompt] = useState<DirtyEditorPrompt | null>(null)
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const [isSidebarPinned, setIsSidebarPinned] = useState(loadSidebarPinned)
   const [workspaceLocalInteractionSuspended, setWorkspaceLocalInteractionSuspended] = useState(false)
 
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
@@ -107,15 +106,14 @@ function App() {
   const license = useWorkspaceStore((state) => state.license)
   const revalidateLicense = useWorkspaceStore((state) => state.revalidateLicense)
   const createSession = useWorkspaceStore((state) => state.createSession)
-  const renameSession = useWorkspaceStore((state) => state.renameSession)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
   const openSession = useWorkspaceStore((state) => state.openSession)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const prepareSetupWizardRun = useWorkspaceStore((state) => state.prepareSetupWizardRun)
   const settings = useWorkspaceStore((state) => state.settings)
-  const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
   const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
+  const shortcutSessions = useMemo(() => flattenWorkspaceRows(workspaceRows(sessions, settings.workspaceGroups, settings.workspaceGroupIds, settings.workspaceOrder)), [sessions, settings.workspaceGroupIds, settings.workspaceGroups, settings.workspaceOrder])
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
@@ -126,13 +124,13 @@ function App() {
   const appWorkspaceInteractionSuspended = isSettingsOpen
     || isBugReportOpen
     || isCreateOpen
+    || isImportReposOpen
     || setupWizardVisible
     || isResourceMonitorOpen
     || Boolean(ffmpegNotice)
     || Boolean(annotatingCapturePath)
     || Boolean(dirtyEditorPrompt)
     || startupDialogVisible
-    || (!isSidebarPinned && isSidebarOpen)
   const workspaceInteractionSuspended = appWorkspaceInteractionSuspended || workspaceLocalInteractionSuspended
   const nativeSurfacesSuspended = workspaceInteractionSuspended
     || Boolean(ffmpegDownload)
@@ -480,7 +478,7 @@ function App() {
         return
       }
       if (workspaceInteractionSuspended) return
-      const session = workspaceForShortcut(event, orderedSessions)
+      const session = workspaceForShortcut(event, shortcutSessions)
       if (!session) return
       event.preventDefault()
       event.stopPropagation()
@@ -488,7 +486,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown, { capture: true })
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [activeSessionId, orderedSessions, selectSession, workspaceInteractionSuspended])
+  }, [activeSessionId, selectSession, shortcutSessions, workspaceInteractionSuspended])
 
   const createWorkspace = async (name: string, workspaceFolder: string | null, profileId: string) => {
     await createSession(name || undefined, workspaceFolder, profileId)
@@ -611,14 +609,6 @@ function App() {
     }
   }, [keybindings.captureImage, keybindings.captureQuickImage, keybindings.captureVideo])
 
-  const toggleSidebarPin = () => {
-    const pinned = !isSidebarPinned
-    setIsSidebarPinned(pinned)
-    saveSidebarPinned(pinned)
-    // Unpinning from inside the sidebar should not make the control disappear
-    // under the pointer; keep the overlay open until the pointer leaves.
-    setIsSidebarOpen(true)
-  }
 
   const runSetupWizardAgain = () => {
     prepareSetupWizardRun()
@@ -643,27 +633,10 @@ function App() {
     <main
       ref={appShellRef}
       className="app-shell"
-      data-sidebar-pinned={isSidebarPinned ? 'true' : undefined}
       data-active-content={chromeState?.activeContentKind ?? undefined}
       style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}
       aria-hidden={dirtyEditorPrompt ? true : undefined}
     >
-      {!isSidebarPinned ? <SidebarRevealEdge onReveal={() => setIsSidebarOpen(true)} /> : null}
-      <Sidebar
-        isOpen={isSidebarPinned || isSidebarOpen}
-        isPinned={isSidebarPinned}
-        sessions={orderedSessions}
-        activeSessionId={activeSessionId}
-        completionCounts={completionCounts}
-        onPointerEnter={() => setIsSidebarOpen(true)}
-        onPointerLeave={() => { if (!isSidebarPinned) setIsSidebarOpen(false) }}
-        onTogglePin={toggleSidebarPin}
-        onSelect={selectSession}
-        onCreate={() => setIsCreateOpen(true)}
-        onRename={(sessionId, name) => void renameSession(sessionId, name)}
-        onDelete={(sessionId) => { void deleteWorkspace(sessionId).catch((caught) => useWorkspaceStore.getState().setError(String(caught))) }}
-        onReorder={reorderWorkspaces}
-      />
       <section className="main-surface">
         <header className="topbar" data-tauri-drag-region>
           <div className="workspace-crumb-box" data-tauri-drag-region>
@@ -717,6 +690,8 @@ function App() {
               onActionsReady={handleContentActionsReady}
               onChromeStateChange={setChromeState}
               onDeleteWorkspaceRequested={deleteWorkspace}
+              onCreateWorkspaceRequested={() => setIsCreateOpen(true)}
+              onImportReposRequested={() => setIsImportReposOpen(true)}
               onWorkspaceInput={createWorkspaceFromInput}
               onWorkspaceInteractionSuspendedChange={setWorkspaceLocalInteractionSuspended}
               workspaceInteractionSuspended={workspaceInteractionSuspended}
@@ -737,6 +712,7 @@ function App() {
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
         {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {isImportReposOpen ? <ImportReposDialog onClose={() => setIsImportReposOpen(false)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
         {ffmpegDownload ? (
           <div className="ffmpeg-download-toast" role="status" aria-live="polite">

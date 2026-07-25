@@ -7,6 +7,7 @@ import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStat
 import { defaultSettings, isAgentPane, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
+import type { WorkspaceGroup } from './workspaceGroups'
 import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
@@ -124,6 +125,11 @@ type WorkspaceState = {
   prepareSetupWizardRun: () => void
   updateSettings: (settings: Partial<Settings>) => void
   reorderWorkspaces: (orderedIds: string[]) => void
+  createWorkspaceGroup: (name: string) => WorkspaceGroup
+  renameWorkspaceGroup: (groupId: string, name: string) => void
+  deleteWorkspaceGroup: (groupId: string) => void
+  setWorkspaceGroup: (sessionId: string, groupId: string | null) => void
+  toggleWorkspaceGroupCollapsed: (groupId: string) => void
   setDefaultProfile: (profileId: string) => void
   setViewMode: (sessionId: string, mode: ViewMode) => void
   createTask: (sessionId: string, input: { title: string; description: string }) => Promise<Task>
@@ -630,6 +636,45 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   reorderWorkspaces: (orderedIds: string[]) => {
     get().updateSettings({ workspaceOrder: orderedIds })
+  },
+  createWorkspaceGroup: (name: string) => {
+    const group: WorkspaceGroup = {
+      id: crypto.randomUUID(),
+      name: name.trim() || 'Workspace group',
+      collapsed: false,
+    }
+    get().updateSettings({ workspaceGroups: [...get().settings.workspaceGroups, group] })
+    return group
+  },
+  renameWorkspaceGroup: (groupId: string, name: string) => {
+    const normalizedName = name.trim()
+    if (!normalizedName) return
+    get().updateSettings({
+      workspaceGroups: get().settings.workspaceGroups.map((group) =>
+        group.id === groupId ? { ...group, name: normalizedName } : group,
+      ),
+    })
+  },
+  deleteWorkspaceGroup: (groupId: string) => {
+    get().updateSettings({
+      workspaceGroups: get().settings.workspaceGroups.filter((group) => group.id !== groupId),
+      workspaceGroupIds: Object.fromEntries(
+        Object.entries(get().settings.workspaceGroupIds).filter(([, assignedGroupId]) => assignedGroupId !== groupId),
+      ),
+    })
+  },
+  setWorkspaceGroup: (sessionId: string, groupId: string | null) => {
+    const workspaceGroupIds = { ...get().settings.workspaceGroupIds }
+    if (groupId === null) delete workspaceGroupIds[sessionId]
+    else workspaceGroupIds[sessionId] = groupId
+    get().updateSettings({ workspaceGroupIds })
+  },
+  toggleWorkspaceGroupCollapsed: (groupId: string) => {
+    get().updateSettings({
+      workspaceGroups: get().settings.workspaceGroups.map((group) =>
+        group.id === groupId ? { ...group, collapsed: !group.collapsed } : group,
+      ),
+    })
   },
   setDefaultProfile: (profileId: string) => {
     const sessionId = get().activeSessionId

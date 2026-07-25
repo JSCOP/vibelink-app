@@ -7,6 +7,7 @@ export type TerminalGridLaunchRequest = {
   rows: number
   occupiedGrid?: GridSize
   profileId?: string | null
+  windowId?: string
 }
 
 export type WorkspaceContentOwnership = {
@@ -29,9 +30,11 @@ export type WorkspaceContentActions = {
   activateContent(panelId: string): void
   requestCloseContent(panelId: string, ownership?: WorkspaceContentOwnership): Promise<'closed' | 'cancelled'>
   splitTerminal(paneId: string, direction: 'right' | 'below'): Promise<void>
-  arrangeTerminals(grid?: GridSize | null): Promise<void>
+  arrangeTerminals(grid?: GridSize | null, windowId?: string): Promise<void>
   clearTerminals(): Promise<void>
   toggleMaximizeContent(panelId: string): void
+  /** Zoom the focused terminal pane inside its window; other content maximizes. */
+  toggleZoomContent(panelId: string): void
   toggleTerminalWindowTitles(windowId: string): void
   renameTerminal(paneId: string, title: string): Promise<void>
   resetLayout(): Promise<void>

@@ -2,6 +2,7 @@ import type { PaneConfig, PaneMeta } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
 import { preferredFontFamily } from './fonts'
+import type { WorkspaceGroup } from './workspaceGroups'
 
 export type ProfileKind = 'local' | 'ssh' | 'command'
 export type ChatPersonality = 'direct' | 'balanced' | 'concise' | 'exploratory'
@@ -63,6 +64,8 @@ export type Settings = {
   profiles: Profile[]
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
+  workspaceGroups: WorkspaceGroup[]
+  workspaceGroupIds: Record<string, string>
   paneRoles: Record<string, string>
   workspaceOrder: string[]
   rolePresets: string[]
@@ -233,6 +236,8 @@ export const defaultSettings: Settings = {
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
+  workspaceGroups: [],
+  workspaceGroupIds: {},
   paneRoles: {},
   workspaceOrder: [],
   hermesCommand: '',
@@ -256,6 +261,8 @@ export function normalizeSettings(value: unknown): Settings {
   const requestedProfileId = readString(record?.defaultProfileId, profiles[0].id)
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
   const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
+  const workspaceGroups = normalizeWorkspaceGroups(record?.workspaceGroups)
+  const workspaceGroupIds = normalizeWorkspaceGroupIds(record?.workspaceGroupIds, workspaceGroups)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
   const workspaceOrder = normalizeWorkspaceOrder(record?.workspaceOrder)
   const rolePresets = normalizeRolePresets(record?.rolePresets)
@@ -284,6 +291,8 @@ export function normalizeSettings(value: unknown): Settings {
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
     workspaceProfileIds,
+    workspaceGroups,
+    workspaceGroupIds,
     paneRoles,
     workspaceOrder,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
@@ -492,6 +501,37 @@ function randomProfileSuffix(): string {
   const uuid = globalThis.crypto?.randomUUID?.()
   if (uuid) return uuid.slice(0, 8)
   return Math.random().toString(36).slice(2, 10) || Date.now().toString(36)
+}
+
+function normalizeWorkspaceGroups(value: unknown): WorkspaceGroup[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const groups: WorkspaceGroup[] = []
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || typeof entry.name !== 'string') continue
+    const id = entry.id.trim()
+    const name = entry.name.trim()
+    if (id.length === 0 || name.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    groups.push({ id, name, collapsed: typeof entry.collapsed === 'boolean' ? entry.collapsed : false })
+  }
+  return groups
+}
+
+function normalizeWorkspaceGroupIds(value: unknown, groups: WorkspaceGroup[]): Record<string, string> {
+  if (!isRecord(value)) return {}
+  const groupIds = new Set(groups.map((group) => group.id))
+  const assignments: Record<string, string> = {}
+  const seen = new Set<string>()
+  for (const [rawSessionId, rawGroupId] of Object.entries(value)) {
+    if (typeof rawGroupId !== 'string') continue
+    const sessionId = rawSessionId.trim()
+    const groupId = rawGroupId.trim()
+    if (sessionId.length === 0 || seen.has(sessionId) || !groupIds.has(groupId)) continue
+    seen.add(sessionId)
+    assignments[sessionId] = groupId
+  }
+  return assignments
 }
 
 function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Record<string, string> {

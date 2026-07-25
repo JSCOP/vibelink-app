@@ -10,7 +10,6 @@ import {
   type FunctionComponent,
   type ReactNode,
 } from 'react'
-import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import {
   DockviewReact,
@@ -22,8 +21,9 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react'
 import { getGridLocation, type AddPanelOptions } from 'dockview-core'
-import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, Plus, SquareTerminal, Workflow } from 'lucide-react'
+import { FileCode2 } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
+import { WorkspaceAddMenu } from '../components/WorkspaceAddMenu'
 import { QuickPick } from '../components/QuickPick'
 import type { PickerEntry } from '../components/pickerModel'
 import { KanbanBoard } from '../components/KanbanBoard'
@@ -32,6 +32,7 @@ import { WorkbenchContentPanel as WorkbenchPanel } from '../components/git/GitWi
 import { ExplorerSidebarPanel } from '../components/explorer/ExplorerWindow'
 import { PreviewContentPanel } from '../components/explorer/PreviewContentPanel'
 import { SourceControlSidebar } from '../components/git/SourceControlSidebar'
+import { WorkspacesSidebar } from '../components/workspaces/WorkspacesSidebar'
 import { GitHistorySidebar } from '../components/git/GitHistorySidebar'
 import { GitBranchesSidebar } from '../components/git/GitBranchesSidebar'
 import { GitWorkspaceProvider } from '../components/git/GitWorkspaceProvider'
@@ -119,6 +120,7 @@ import {
 } from './workspaceShellModel'
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
+import { resolvePaneZoomTarget } from './paneZoom'
 
 type WorkspaceContentPanelProps = IDockviewPanelProps<WorkspaceContentParams>
 type TerminalContentParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
@@ -138,6 +140,8 @@ export type WorkspaceViewProps = {
   saveLayoutRequestId?: number
   contentComponents?: WorkspaceContentComponentMap
   onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
+  onCreateWorkspaceRequested?: () => void
+  onImportReposRequested?: () => void
   onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
   workspaceInteractionSuspended?: boolean
   onWorkspaceInteractionSuspendedChange?: (suspended: boolean) => void
@@ -211,6 +215,12 @@ function useEdgePanelState(api: WorkspaceContentPanelProps['api']) {
   return state
 }
 
+function WorkspacesContentPanel(props: WorkspaceContentPanelProps) {
+  const state = useEdgePanelState(props.api)
+  const integration = useContext(WorkspaceIntegrationContext)
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-workspaces"><ProPanelBoundary feature="Workspaces"><ErrorBoundary label="Workspaces panel"><WorkspacesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} integration={integration} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
 function SourceControlContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-source-control"><ProPanelBoundary feature="Source Control"><ErrorBoundary label="Source Control panel"><SourceControlSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
@@ -251,6 +261,9 @@ function DiffContentPanel(props: WorkspaceContentPanelProps) {
 }
 
 type WorkspaceIntegrationContextValue = {
+  onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
+  onCreateWorkspaceRequested?: () => void
+  onImportReposRequested?: () => void
   onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
   openFilePicker?: (targetGroupId?: string) => void
   nativeSurfacesSuspended?: boolean
@@ -421,6 +434,7 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   browser: BrowserWorkspaceContentPanel,
   editor: EditorWorkspaceContentPanel,
   preview: PreviewWorkspaceContentPanel,
+  workspaces: WorkspacesContentPanel,
   explorer: ExplorerContentPanel,
   sourceControl: SourceControlContentPanel,
   gitHistory: GitHistoryContentPanel,
@@ -445,69 +459,23 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
   const actions = useContext(WorkspaceContentActionsContext) ?? props.fallbackActions ?? null
   const integration = useContext(WorkspaceIntegrationContext)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null)
   const groupId = props.group.id
   const menuOverlayId = `group-menu:${groupId}`
   const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
-  const open = (request: OpenContentRequest) => {
-    setMenuOpen(false)
-    void actions?.openContent({ ...request, targetGroupId: groupId })
-  }
   const isCurrentMainGroup = workspaceGroupShowsCreationControls(props.group.api.location.type, groupId, integration.currentMainGroupId)
-
-  useEffect(() => {
-    integration.setWorkspaceOverlayOpen?.(menuOverlayId, menuOpen)
-    if (!menuOpen) return () => integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false) }
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      integration.setWorkspaceOverlayOpen?.(menuOverlayId, false)
-    }
-  }, [integration, menuOpen, menuOverlayId])
 
   if (!isCurrentMainGroup) return null
 
-  // The + button lists WINDOW types to add as a sibling tab. Terminal opens a
-  // new terminal window (its panes live inside it); other kinds open as their
-  // own window tab.
   return (
     <div className="workspace-group-actions" onMouseDown={stop} onPointerDown={stop}>
-      <button
-        type="button"
-        className="workspace-group-new"
-        title="Add window"
-        aria-label="Add window"
-        aria-expanded={menuOpen}
+      <WorkspaceAddMenu
+        actions={actions}
+        targetGroupId={groupId}
+        overlayId={menuOverlayId}
         disabled={!actions || !activeSessionId}
-        onClick={(event) => {
-          if (!menuOpen) {
-            const rect = event.currentTarget.getBoundingClientRect()
-            setMenuAnchor({ right: rect.right, bottom: rect.bottom })
-          }
-          setMenuOpen((value) => !value)
-        }}
-      ><Plus size={14} aria-hidden="true" /><span className="workspace-group-new-label">New</span></button>
-      {menuOpen && menuAnchor && typeof document !== 'undefined' ? createPortal(
-        <>
-          <div className="workspace-group-menu-backdrop" onMouseDown={() => setMenuOpen(false)} />
-          <div className="workspace-group-menu" role="menu" style={{ right: Math.max(8, window.innerWidth - menuAnchor.right), top: menuAnchor.bottom + 2 }}>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'terminalWindow' })}><SquareTerminal size={13} aria-hidden="true" /> Terminal</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'browser' })}><Globe size={13} aria-hidden="true" /> Browser</button>
-            <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); integration.openFilePicker?.(groupId) }}><FileCode2 size={13} aria-hidden="true" /> Editor</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'agent' })}><Bot size={13} aria-hidden="true" /> VibeLink Agent</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'orchestration' })}><Workflow size={13} aria-hidden="true" /> Orchestration</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'workbench' })}><GitBranch size={13} aria-hidden="true" /> Workbench</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'kanban' })}><LayoutGrid size={13} aria-hidden="true" /> Kanban</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'todo' })}><ListTodo size={13} aria-hidden="true" /> Todo List</button>
-            <button type="button" role="menuitem" onClick={() => open({ kind: 'diff' })}><GitCompare size={13} aria-hidden="true" /> Task Diff</button>
-            <div className="workspace-group-menu-separator" role="separator" />
-            <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void actions?.arrangeTerminals() }}>Arrange Terminals</button>
-          </div>
-        </>,
-        document.body,
-      ) : null}
+        openFilePicker={integration.openFilePicker}
+        setWorkspaceOverlayOpen={integration.setWorkspaceOverlayOpen}
+      />
     </div>
   )
 }
@@ -522,6 +490,8 @@ export function WorkspaceView({
   saveLayoutRequestId = 0,
   contentComponents,
   onDeleteWorkspaceRequested,
+  onCreateWorkspaceRequested,
+  onImportReposRequested,
   onWorkspaceInput,
   onWorkspaceInteractionSuspendedChange,
   workspaceInteractionSuspended = false,
@@ -657,13 +627,16 @@ export function WorkspaceView({
       })
   }, [])
   const integration = useMemo<WorkspaceIntegrationContextValue>(() => ({
+    onDeleteWorkspaceRequested,
+    onCreateWorkspaceRequested,
+    onImportReposRequested,
     onWorkspaceInput,
     openFilePicker,
     nativeSurfacesSuspended: effectiveNativeSurfacesSuspended,
     layoutOwner: loadedLayoutOwner,
     setWorkspaceOverlayOpen,
     currentMainGroupId,
-  }), [currentMainGroupId, effectiveNativeSurfacesSuspended, loadedLayoutOwner, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
+  }), [currentMainGroupId, effectiveNativeSurfacesSuspended, loadedLayoutOwner, onCreateWorkspaceRequested, onDeleteWorkspaceRequested, onImportReposRequested, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
 
   const layoutDockview = useCallback((api: DockviewApi) => {
     const root = dockRef.current
@@ -906,15 +879,18 @@ export function WorkspaceView({
     return current ? workspaceContentResourceKey(current) === workspaceContentResourceKey(params) : false
   }), [])
 
-  const arrangeTerminals = useCallback(async (requestedGrid?: GridSize | null, persist = true, owner?: WorkspaceLayoutOwner) => {
-    const layoutOwner = owner ?? currentLayoutOwner()
+  const arrangeTerminals = useCallback(async (requestedGrid?: GridSize | null, windowId?: string) => {
+    const layoutOwner = currentLayoutOwner()
     if (!layoutOwner || !ownsLayout(layoutOwner)) return
-    // Arrange within the active/first terminal window's inner grid.
+    // A tab action targets its own terminal window. Keyboard/global requests keep
+    // the active/first-window fallback.
     const api = layoutOwner.api
     const activeWindow = parseWorkspaceContentParams(api.activePanel?.params)
-    const handle = activeWindow?.kind === 'terminalWindow'
-      ? getTerminalWindow(activeWindow.instanceId)
-      : listTerminalWindows()[0]
+    const handle = windowId
+      ? getTerminalWindow(windowId)
+      : activeWindow?.kind === 'terminalWindow'
+        ? getTerminalWindow(activeWindow.instanceId)
+        : listTerminalWindows()[0]
     const innerApi = handle?.getInnerApi()
     if (!handle || !innerApi) return
     const activePanelId = innerApi.activePanel?.id ?? null
@@ -933,7 +909,8 @@ export function WorkspaceView({
     if (activePanelId) innerApi.getPanel(activePanelId)?.api.setActive()
     if (!ownsLayout(layoutOwner)) return
     await handle.settle()
-    if (persist) { handle.persist(); persistLayoutSoon() }
+    handle.persist()
+    persistLayoutSoon()
   }, [currentLayoutOwner, ownsLayout, persistLayoutSoon])
 
   const openContent = useCallback(async (request: OpenContentRequest): Promise<string> => {
@@ -957,7 +934,9 @@ export function WorkspaceView({
       // Fill one terminal window with the requested pane count. Panes land in the
       // window's inner grid via spawnTerminal; the window arranges them row-major.
       const targetCount = Math.max(1, request.grid.cols * request.grid.rows)
-      const handle = await ensureTerminalWindow(owner, { targetGroupId: request.targetGroupId })
+      const handle = request.grid.windowId
+        ? getTerminalWindow(request.grid.windowId)
+        : await ensureTerminalWindow(owner, { targetGroupId: request.targetGroupId })
       if (!handle || !ownsLayout(owner)) return ''
       const have = handle.paneIds().length
       let lastPanelId = ''
@@ -1180,6 +1159,35 @@ export function WorkspaceView({
     void settleLayout({ syncPty: true })
   }, [settleLayout])
 
+  /** Alt+Z zoom. A terminal window's panes live in its nested Dockview, so
+   * maximizing the outer window panel is invisible whenever it already fills
+   * the central grid; zoom the focused PANE against its siblings instead and
+   * fall back to the plain outer toggle for everything else. */
+  const toggleZoomContent = useCallback((panelId: string) => {
+    const panel = apiRef.current?.getPanel(panelId)
+    if (!panel) return
+    const content = parseWorkspaceContentParams(panel.params)
+    const handle = content?.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId) : undefined
+    const innerApi = handle?.getInnerApi() ?? null
+    const activePaneId = useWorkspaceStore.getState().activePaneId
+    const activeInnerId = innerApi && activePaneId && handle?.paneIds().includes(activePaneId)
+      ? workspaceContentPanelId({ kind: 'terminal', instanceId: activePaneId })
+      : innerApi?.activePanel?.id ?? null
+    const target = resolvePaneZoomTarget({
+      outerMaximized: panel.api.isMaximized(),
+      innerMaximized: Boolean(innerApi?.hasMaximizedGroup()),
+      innerPaneCount: innerApi?.panels.length ?? 0,
+      innerActivePanelId: activeInnerId,
+    })
+    if (target.scope === 'outerToggle') {
+      toggleMaximizeContent(panelId)
+      return
+    }
+    if (target.scope === 'innerRestore') innerApi?.exitMaximizedGroup()
+    else innerApi?.getPanel(target.panelId)?.api.maximize()
+    void handle?.settle()
+  }, [toggleMaximizeContent])
+
   const toggleTerminalWindowTitles = useCallback((windowId: string) => {
     const panel = apiRef.current?.getPanel(workspaceContentPanelId({ kind: 'terminalWindow', instanceId: windowId }))
     const params = parseWorkspaceContentParams(panel?.params)
@@ -1247,11 +1255,12 @@ export function WorkspaceView({
     arrangeTerminals,
     clearTerminals,
     toggleMaximizeContent,
+    toggleZoomContent,
     toggleTerminalWindowTitles,
     renameTerminal,
     resetLayout,
     getContentParams,
-  }), [activateContent, arrangeTerminals, clearTerminals, getContentParams, openContent, renameTerminal, requestCloseContent, resetLayout, splitTerminal, toggleMaximizeContent, toggleTerminalWindowTitles])
+  }), [activateContent, arrangeTerminals, clearTerminals, getContentParams, openContent, renameTerminal, requestCloseContent, resetLayout, splitTerminal, toggleMaximizeContent, toggleTerminalWindowTitles, toggleZoomContent])
 
   const loadActiveSessionLayout = useCallback(() => {
     const run = async () => {
@@ -1923,7 +1932,7 @@ async function runKeybindingAction(
       return
     }
     case 'toggleMaximize':
-      actions.toggleMaximizeContent(active.id)
+      actions.toggleZoomContent(active.id)
       return
     case 'togglePaneReviewed':
       if (activePaneId) useWorkspaceStore.getState().togglePaneReviewed(activePaneId)

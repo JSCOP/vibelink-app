@@ -9,6 +9,7 @@ import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
 import type { WorkspaceContentParams } from './workspaceContentModel'
 import { reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
+import { findTerminalWindowForPane } from './terminalWindowRegistry'
 
 type TerminalPanelParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
 
@@ -128,9 +129,11 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     if (paneId) void actions.splitTerminal(paneId, direction)
   }
 
+  // Arrange only the window that owns this pane; the always-visible pane-tab
+  // button was removed, so this menu item is the on-demand entry point.
   const arrangeTerminals = () => {
     closeContextMenu()
-    void actions.arrangeTerminals()
+    if (paneId) void actions.arrangeTerminals(null, findTerminalWindowForPane(paneId)?.windowId)
   }
 
   const closeTerminal = () => {
@@ -256,7 +259,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
               <SplitSquareHorizontal size={13} /> Split terminal below
             </button>
             <button type="button" role="menuitem" onClick={arrangeTerminals}>
-              <LayoutGrid size={13} /> Arrange Terminals
+              <LayoutGrid size={13} /> Arrange panes in this window
             </button>
             <button type="button" role="menuitem" onClick={pasteClipboard}>
               <ClipboardPaste size={13} /> Paste
