@@ -19,7 +19,7 @@ export function WorkbenchContentPanel({ onWorkspaceInput }: WorkbenchContentPane
       hostingError={git.repository.hostingError}
       onHostingChanged={() => git.refreshHosting(true)}
       onRepositoryChanged={git.refreshRepository}
-      onRevealFile={git.revealFile}
+      onRevealFile={git.selectInExplorer}
     />
   ) : null
   const assignedContent = git.sessionId ? <AssignedTab sessionId={git.sessionId} onWorkspaceInput={onWorkspaceInput} reviewContent={reviewContent} /> : null

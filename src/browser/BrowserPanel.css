@@ -255,12 +255,37 @@
 .browser-cookie-origin,
 .browser-cookie-consent { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; }
 
+/* The native WebView2 child paints over this host once a real page is visible,
+   so this background is only ever seen before the first navigation, during a
+   load, and in the gap while the native surface is being (re)positioned. A
+   white fill made every one of those moments a full-pane flashbang against the
+   dark workspace; keep it on the app panel color and only hand the pane over to
+   the page's own white once the native surface is actually up. */
 .browser-surface-host {
   grid-row: 3;
   position: relative;
   min-width: 0;
   min-height: 0;
+  background: var(--vibelink-panel, #11161c);
+}
+
+.browser-surface-host[data-native-surface-visible='true'] {
   background: #fff;
+}
+
+/* Idle "New Tab" affordance: a quiet centered hint instead of a blank slab. */
+.browser-surface-host[data-native-surface-visible='false']::after {
+  content: attr(data-idle-hint);
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--vibelink-muted, #8b97a5);
+  font-size: 13px;
+  text-align: center;
+  white-space: pre-line;
+  pointer-events: none;
 }
 
 @media (max-width: 760px) {

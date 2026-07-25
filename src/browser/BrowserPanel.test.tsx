@@ -140,4 +140,41 @@ describe('BrowserPanel', () => {
     // Title never changed across re-renders, so no additional invocations.
     expect(onTitleChange.mock.calls.length).toBe(callsAfterMount)
   })
+
+  it('waits for the Dockview overlay to settle before publishing the native surface', async () => {
+    // Dockview re-shows a hidden content panel by unhiding/repositioning its
+    // render overlay over the FOLLOWING frames. Until that settles,
+    // `measureSurface` correctly refuses to measure and returns null. A
+    // fixed-length activation burst could therefore spend every frame on a
+    // still-hidden overlay and give up, leaving the native child hidden behind
+    // this panel's opaque host — a loaded page the user only saw as blank.
+    //
+    // Model exactly that: unmeasurable for more frames than the old burst had,
+    // then measurable.
+    const rect = { x: 300, y: 100, width: 800, height: 600, top: 100, left: 300, right: 1100, bottom: 700 }
+    const settleAfterCalls = 40
+    let calls = 0
+    const measure = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(() => {
+      calls += 1
+      const settled = calls > settleAfterCalls
+      const value = settled ? rect : { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 }
+      return { ...value, toJSON: () => value } as DOMRect
+    })
+    const clientRects = vi.spyOn(Element.prototype, 'getClientRects')
+      .mockReturnValue({ length: 1 } as unknown as DOMRectList)
+    try {
+      const controller = new RecordingController()
+      const props = { controller, initialState: state(), focused: true, workspaceVisible: true }
+      render(<BrowserPanel {...props} active />)
+      // `measureSurface` clips to the viewport, so assert on a real positive
+      // surface rather than the raw mock width.
+      await waitFor(
+        () => expect(controller.surfaces.some((surface) => surface.visible && (surface.bounds?.width ?? 0) > 0)).toBe(true),
+        { timeout: 4000 },
+      )
+    } finally {
+      measure.mockRestore()
+      clientRects.mockRestore()
+    }
+  })
 })

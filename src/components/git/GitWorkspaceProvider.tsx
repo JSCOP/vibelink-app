@@ -163,6 +163,10 @@ export type GitWorkspaceController = {
   runPrimaryAction: () => void
   openWorkbench: (tab?: GitTab) => Promise<void>
   openAssigned: () => Promise<void>
+  // Background-only: highlights the path in the Explorer store without
+  // activating the Explorer panel. Diff/file-list clicks use this.
+  selectInExplorer: (path: string) => void
+  // Explicit reveal: also brings the Explorer panel forward.
   revealFile: (path: string) => void
   runMutation: (operation: () => Promise<unknown>) => Promise<void>
 }
@@ -312,12 +316,17 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     void runMutation(operation).then(after).catch(() => {})
   }, [runMutation])
 
-  const revealFile = useCallback((path: string) => {
+  // Clicking a change/commit/PR file is a DIFF gesture, not a navigation
+  // gesture: it must not yank the left rail from Source Control over to
+  // Explorer (the user loses their change list mid-review). Select the path in
+  // the Explorer store so the file is already highlighted when Explorer is
+  // opened, but never activate/expand that panel here. Explicit "reveal"
+  // remains available from the editor toolbar and the Explorer context menu.
+  const selectInExplorer = useCallback((path: string) => {
     if (!sessionId || !workspaceFolder) return
     const fullPath = activeRepoRoot ? `${activeRepoRoot}/${path}` : path
-    void contentActions.openContent({ kind: 'explorer' })
-      .then(() => useExplorerStore.getState().revealPath(sessionId, workspaceFolder, fullPath))
-  }, [activeRepoRoot, contentActions, sessionId, workspaceFolder])
+    void useExplorerStore.getState().revealPath(sessionId, workspaceFolder, fullPath)
+  }, [activeRepoRoot, sessionId, workspaceFolder])
 
   const openWorkbench = useCallback(async (tab: GitTab = gitState.activeTab) => {
     if (sessionId) setActiveTab(sessionId, tab, tab === 'history' ? gitState.pathFilter : null)
@@ -325,6 +334,14 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   }, [contentActions, gitState.activeTab, gitState.pathFilter, sessionId, setActiveTab])
 
   const openAssigned = useCallback(() => openWorkbench('assigned'), [openWorkbench])
+
+  // Explicit user request to see the file in the tree — this one IS allowed to
+  // bring the Explorer panel forward.
+  const revealFile = useCallback((path: string) => {
+    if (!sessionId || !workspaceFolder) return
+    selectInExplorer(path)
+    void contentActions.openContent({ kind: 'explorer' })
+  }, [contentActions, selectInExplorer, sessionId, workspaceFolder])
 
   const selectChange = useCallback((item: GitChangeItem) => {
     if (!sessionId) return
@@ -336,9 +353,9 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       setSelectedPath(sessionId, fullPath, activeRepoRoot, item.area)
     }
     setActiveTab(sessionId, 'changes')
-    revealFile(item.path)
+    selectInExplorer(item.path)
     void openWorkbench('changes')
-  }, [activeRepoRoot, openWorkbench, revealFile, sessionId, setActiveTab, setSelectedPath])
+  }, [activeRepoRoot, openWorkbench, selectInExplorer, sessionId, setActiveTab, setSelectedPath])
 
   const discardPaths = useCallback((paths: string[], untracked: boolean) => {
     if (!activeWorkspaceFolder || paths.length === 0) return
@@ -595,9 +612,9 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
 
   const selectHistoryFile = useCallback((path: string) => {
     setHistorySelectedPath(path)
-    revealFile(path)
+    selectInExplorer(path)
     void openWorkbench('history')
-  }, [openWorkbench, revealFile])
+  }, [openWorkbench, selectInExplorer])
   const compareHistoryHead = useCallback(() => {
     if (!activeWorkspaceFolder || !historySelectedSha) return
     setHistoryContentsLoading(true)
@@ -811,7 +828,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     compare: compareBranches,
     selectFile: (path: string) => {
       setCompareSelectedPath(path)
-      revealFile(path)
+      selectInExplorer(path)
       void openWorkbench('branches')
     },
     openStash: () => setStashOpen(true),
@@ -820,7 +837,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       () => { setStashOpen(false); setStashMessage(''); setIncludeUntracked(false) },
     ),
     closeStash: () => setStashOpen(false),
-  }), [activeWorkspaceFolder, baseRef, branchActions, branches, branchesError, branchesLoading, compareBranches, compareContents, compareContentsError, compareContentsLoading, compareFiles, compareSelectedPath, headRef, includeUntracked, loadBranches, mutateBranch, openWorkbench, revealFile, stashMessage, stashOpen, stashes, status.conflicted.length, status.staged.length, status.unstaged.length, status.untracked.length, tags])
+  }), [activeWorkspaceFolder, baseRef, branchActions, branches, branchesError, branchesLoading, compareBranches, compareContents, compareContentsError, compareContentsLoading, compareFiles, compareSelectedPath, headRef, includeUntracked, loadBranches, mutateBranch, openWorkbench, selectInExplorer, stashMessage, stashOpen, stashes, status.conflicted.length, status.staged.length, status.unstaged.length, status.untracked.length, tags])
 
   const [branchPickerOpen, setBranchPickerOpen] = useState(false)
   const [switchBranches, setSwitchBranches] = useState<BranchInfo[]>([])
@@ -896,9 +913,10 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     runPrimaryAction,
     openWorkbench,
     openAssigned,
+    selectInExplorer,
     revealFile,
     runMutation,
-  }), [abortState, activateRepository, activeRemoteComparison, activeRepoRoot, activeWorkspaceFolder, branchesModel, commit, compareRemote, continueState, diffContents, diffError, diffLoading, discardPaths, draft.amend, draft.message, entitled, fetchRepo, gitState.activeTab, groups, historyModel, openAssigned, openBranchPicker, openWorkbench, primaryAction, pull, push, refresh, refreshHostingNow, refreshRepositoryNow, remoteCompareLoading, repoInfo, repository, revealFile, runMutation, runPrimaryAction, selectChange, selectedArea, selectedPath, sessionId, setAmend, setCommitMessage, showWorkingChanges, stageAll, stagePaths, status, unstagePaths, workspaceFolder])
+  }), [abortState, activateRepository, activeRemoteComparison, activeRepoRoot, activeWorkspaceFolder, branchesModel, commit, compareRemote, continueState, diffContents, diffError, diffLoading, discardPaths, draft.amend, draft.message, entitled, fetchRepo, gitState.activeTab, groups, historyModel, openAssigned, openBranchPicker, openWorkbench, primaryAction, pull, push, refresh, refreshHostingNow, refreshRepositoryNow, remoteCompareLoading, repoInfo, repository, revealFile, runMutation, runPrimaryAction, selectChange, selectInExplorer, selectedArea, selectedPath, sessionId, setAmend, setCommitMessage, showWorkingChanges, stageAll, stagePaths, status, unstagePaths, workspaceFolder])
 
   const refNames = Array.from(new Set(['HEAD', ...branches.map((branch) => branch.name), ...tags.map((tag) => tag.name)]))
   const refEntries = (filter: string): PickerEntry<string>[] => refNames

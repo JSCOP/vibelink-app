@@ -39,7 +39,13 @@ const devicePresets: Record<string, BrowserDeviceMetrics | null> = {
   tablet: { width: 820, height: 1180, deviceScaleFactor: 2, mobile: true },
 }
 
+// Frames to keep re-measuring AFTER the host first becomes measurable, so the
+// final settled geometry wins over a transitional one.
 const POST_ACTIVATION_MEASURE_FRAMES = 8
+// Hard ceiling on the wait for Dockview's render overlay to become visible
+// (~2s at 60fps). Bounded so a panel that never becomes measurable — collapsed
+// group, zero-size grid — cannot leave a permanent rAF loop running.
+const POST_ACTIVATION_MEASURE_ATTEMPTS = 120
 
 function scheduleFrame(callback: FrameRequestCallback): number {
   if (typeof window.requestAnimationFrame === 'function') return window.requestAnimationFrame(callback)
@@ -150,6 +156,13 @@ export function BrowserPanel({
   const panelVisibleRef = useRef(false)
   const focusedRef = useRef(false)
 
+  // These refs MUST be updated before any other layout effect runs.
+  // `publishSurface` reads `panelVisibleRef`/`focusedRef` rather than the
+  // render-scope values, and React runs layout effects in declaration order —
+  // so a sync effect declared above this one would publish using the PREVIOUS
+  // pass's visibility. That is exactly how an activated browser panel kept
+  // sending `visible: false`: the page was loaded and the host was measurable,
+  // but the native child was told to stay hidden, leaving a blank pane.
   useLayoutEffect(() => {
     panelVisibleRef.current = panelVisible
     focusedRef.current = focused && page.url !== 'about:blank'
@@ -235,17 +248,36 @@ export function BrowserPanel({
       })
   }, [controller, page.id, reportError])
 
+  // Dockview re-shows a hidden content panel by flipping `visibility` on its
+  // render overlay, and that overlay is repositioned/unhidden over the FOLLOWING
+  // frames — the same settle lag the terminal overlays have. `measureSurface`
+  // correctly refuses to measure a `visibility: hidden` ancestor and returns
+  // null, so a fixed-length activation burst could spend every one of its
+  // frames on a still-hidden overlay, publish `null` each time, and give up.
+  // The native child then stayed hidden behind this panel's own opaque host:
+  // the page was loaded (CDP reported the real title) but the user saw a blank
+  // pane until some unrelated event happened to re-measure.
+  //
+  // Keep retrying until the host is actually measurable, then publish that
+  // geometry plus a short tail of frames to catch the final settle position.
   useLayoutEffect(() => {
     const epoch = ++surfaceEpoch.current
     if (activationRaf.current !== null) cancelFrame(activationRaf.current)
     void publishSurface(null, epoch, true).catch(() => undefined)
     if (!panelVisible) return
-    let remaining = POST_ACTIVATION_MEASURE_FRAMES
+    let attempts = 0
+    let framesAfterFirstMeasurement = 0
     const measureFrame = () => {
       if (!mounted.current || epoch !== surfaceEpoch.current) return
-      void publishSurface(measureSurface(), epoch).catch(() => undefined)
-      remaining -= 1
-      if (remaining > 0) activationRaf.current = scheduleFrame(measureFrame)
+      const bounds = measureSurface()
+      // `force` because the bounds after a hide/show round-trip are usually
+      // identical to the last published ones, and the equality guard would
+      // otherwise skip the very update that makes the page visible again.
+      if (bounds) void publishSurface(bounds, epoch, true).catch(() => undefined)
+      attempts += 1
+      if (bounds) framesAfterFirstMeasurement += 1
+      const settled = framesAfterFirstMeasurement >= POST_ACTIVATION_MEASURE_FRAMES
+      if (!settled && attempts < POST_ACTIVATION_MEASURE_ATTEMPTS) activationRaf.current = scheduleFrame(measureFrame)
     }
     activationRaf.current = scheduleFrame(measureFrame)
     return () => {
@@ -301,12 +333,22 @@ export function BrowserPanel({
     return () => cancelFrame(frame)
   }, [active, nativeSurfacesSuspended, page.id, page.navigationGeneration, page.url, workspaceVisible])
 
-  useEffect(() => () => {
-    mounted.current = false
-    surfaceEpoch.current += 1
-    if (activationRaf.current !== null) cancelFrame(activationRaf.current)
-    if (resizeRaf.current !== null) cancelFrame(resizeRaf.current)
-    void controller.setSurfaceState(page.id, { bounds: null, visible: false, focused: false }).catch(() => undefined)
+  // `mounted` gates every surface publish, so it MUST be re-armed on mount, not
+  // only cleared on unmount. React StrictMode mounts, runs cleanup, then mounts
+  // again with the SAME refs; a cleanup-only effect therefore latched
+  // `mounted.current = false` forever and `publishSurface` silently returned on
+  // its first line for the rest of the panel's life. The native page then never
+  // received a `visible: true` surface and the user saw a permanently blank
+  // pane over a page that had actually loaded.
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      surfaceEpoch.current += 1
+      if (activationRaf.current !== null) cancelFrame(activationRaf.current)
+      if (resizeRaf.current !== null) cancelFrame(resizeRaf.current)
+      void controller.setSurfaceState(page.id, { bounds: null, visible: false, focused: false }).catch(() => undefined)
+    }
   }, [controller, page.id])
 
   useEffect(() => {
@@ -617,6 +659,7 @@ export function BrowserPanel({
         data-page-id={page.id}
         data-profile-id={state.profile.id}
         data-native-surface-visible={page.effectiveVisible ? 'true' : 'false'}
+        data-idle-hint={page.loadState === 'loading' ? 'Loading…' : page.url === 'about:blank' ? 'Enter an address or search above.' : ''}
       />
     </section>
   )

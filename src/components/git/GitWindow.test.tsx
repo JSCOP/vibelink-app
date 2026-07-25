@@ -112,13 +112,16 @@ beforeEach(() => {
 })
 
 describe('Git sidebar and Workbench projection', () => {
-  test('keeps Source Control mounted while selection reveals Explorer and opens central Workbench', async () => {
+  test('selects the file in Explorer without pulling the side panel away from Source Control', async () => {
     renderGit()
     const row = await screen.findByRole('button', { name: 'unstaged: src/file.ts' })
     fireEvent.click(row)
     await waitFor(() => expect(openContent).toHaveBeenCalledWith({ kind: 'workbench' }))
-    await waitFor(() => expect(openContent).toHaveBeenCalledWith({ kind: 'explorer' }))
+    // The path is selected in the Explorer store so it is already highlighted
+    // whenever the user opens Explorer themselves...
     await waitFor(() => expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('src/file.ts'))
+    // ...but reviewing a diff must never steal the left rail from the change list.
+    expect(openContent).not.toHaveBeenCalledWith({ kind: 'explorer' })
     expect(screen.getByRole('region', { name: 'Source Control' })).toBeTruthy()
     expect(await screen.findByTestId('diff-viewer')).toBeTruthy()
   })

@@ -794,6 +794,12 @@ impl BrowserProvider for NativeBrowserProvider {
                     _ => true,
                 }
             })
+            // WebView2 paints its own base color before a document commits. The
+            // default is white, which flashed the full pane against the dark
+            // workspace on every create/navigate; match the app panel color so
+            // the handoff to a real page is not a flashbang. A page that sets
+            // its own background still paints over this immediately.
+            .background_color(tauri::webview::Color(0x11, 0x16, 0x1c, 0xff))
             .additional_browser_args(&browser_arguments);
         if let Some(user_data_dir) = &request.user_data_dir {
             builder = builder.data_directory(user_data_dir.clone());
