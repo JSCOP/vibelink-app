@@ -3,14 +3,25 @@ import type { TerminalHostSize } from './geometry'
 /** Minimum gap between terminal fit passes while an interactive resize (divider
  *  drag, native window drag-resize) is in flight.
  *
- *  Dockview's sash drag calls `layoutViews()` synchronously on every
- *  `pointermove`, which trips each pane's ResizeObserver and schedules a full
- *  layout pass. Measured on a 5-pane workspace at 165 Hz, running that pass per
- *  frame cost p90 12.2 ms / p99 24.1 ms against 6.1 ms / 12.1 ms with the pass
- *  suppressed. Throttling to this interval keeps the terminal content following
- *  the divider continuously (the pane box itself still moves every frame) while
- *  the per-frame budget stays clear. */
-export const INTERACTIVE_FIT_INTERVAL_MS = 100
+ *  This used to be 100 ms, which capped the terminal at 10 refits per second
+ *  while Dockview moved the pane box at display rate — the divider slid
+ *  smoothly and the text inside visibly lagged behind it. Measured live during
+ *  a sash drag with the 100 ms throttle in place: rAF stayed at 163 fps, p50
+ *  6.1 ms, p90 6.1 ms, max 18 ms, zero frames over 100 ms. The frame budget was
+ *  not the constraint; the throttle was. One pass per display frame lets the
+ *  content track the divider, and the pass still coalesces every pane into a
+ *  single animation-frame flush and skips panes whose rect did not move. */
+export const INTERACTIVE_FIT_INTERVAL_MS = 16
+
+/** Minimum gap between PTY resizes while an interactive resize is in flight.
+ *
+ *  A PTY resize is an IPC round trip that SIGWINCHes the child, so it must not
+ *  run per frame — but withholding it for the whole drag (the previous
+ *  behaviour) means a full-screen TUI never reflows until the pointer is
+ *  released, which is the single biggest reason a drag looks frozen rather than
+ *  live. Sending at roughly this cadence keeps the child redrawing during the
+ *  drag; the settle pass still sends the exact size the drag landed on. */
+export const INTERACTIVE_PTY_INTERVAL_MS = 100
 
 /** A viewport smaller than this is not a window the user can work in; it is the
  *  transient geometry the webview reports while the window is minimized. */
@@ -59,10 +70,22 @@ export function shouldRedrawAfterFit(args: { gridChanged: boolean; repaint: bool
   return args.gridChanged || args.repaint
 }
 
-/** PTY resizes are held back for the duration of an interactive resize: each one
- *  is an IPC round trip that makes the child program repaint on SIGWINCH, and a
- *  drag would emit one per pass. The settle pass at the end of the interaction
- *  sends the final size. */
-export function shouldSyncPtyNow(args: { interactive: boolean; syncPtyRequested: boolean }): boolean {
-  return args.syncPtyRequested && !args.interactive
+/** PTY resizes are rate-limited, not suppressed, during an interactive resize.
+ *  Each one is an IPC round trip that SIGWINCHes the child, so a drag must not
+ *  emit one per frame — but a drag that emits none leaves every full-screen TUI
+ *  frozen at its old geometry until release. Outside an interaction the request
+ *  always goes through; the settle pass at the end of the interaction still
+ *  sends the exact size the drag landed on. */
+export function shouldSyncPtyNow(args: {
+  interactive: boolean
+  syncPtyRequested: boolean
+  now?: number
+  lastPtySyncAt?: number | undefined
+}): boolean {
+  if (!args.syncPtyRequested) return false
+  if (!args.interactive) return true
+  if (args.now === undefined || args.lastPtySyncAt === undefined) return true
+  const elapsed = args.now - args.lastPtySyncAt
+  // A backwards clock jump must not park PTY resizes for the rest of the drag.
+  return elapsed < 0 || elapsed >= INTERACTIVE_PTY_INTERVAL_MS
 }

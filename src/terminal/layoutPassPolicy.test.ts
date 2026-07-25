@@ -17,7 +17,13 @@ describe('interactivePassDelay', () => {
   })
 
   it('defers the remainder of the fit interval while dragging', () => {
-    expect(interactivePassDelay({ interactive: true, now: 1_030, lastPassAt: 1_000 })).toBe(70)
+    expect(interactivePassDelay({ interactive: true, now: 1_005, lastPassAt: 1_000 })).toBe(INTERACTIVE_FIT_INTERVAL_MS - 5)
+  })
+
+  it('keeps the interval short enough to refit once per display frame', () => {
+    // At the old 100 ms the terminal refit 10x/s while the divider itself moved
+    // at display rate, so the text visibly trailed the divider.
+    expect(INTERACTIVE_FIT_INTERVAL_MS).toBeLessThanOrEqual(16)
   })
 
   it('runs immediately once the fit interval has elapsed', () => {
@@ -77,11 +83,24 @@ describe('shouldSyncPtyNow', () => {
     expect(shouldSyncPtyNow({ interactive: false, syncPtyRequested: true })).toBe(true)
   })
 
-  it('holds the PTY resize back while a divider drag is in flight', () => {
-    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true })).toBe(false)
+  it('rate-limits rather than suppresses the PTY resize during a divider drag', () => {
+    // Suppressing it for the whole drag left every full-screen TUI frozen at its
+    // old geometry until the pointer was released.
+    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_050, lastPtySyncAt: 1_000 })).toBe(false)
+    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_100, lastPtySyncAt: 1_000 })).toBe(true)
+    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_400, lastPtySyncAt: 1_000 })).toBe(true)
+  })
+
+  it('sends the first PTY resize of a drag immediately', () => {
+    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_000, lastPtySyncAt: undefined })).toBe(true)
+  })
+
+  it('never parks PTY resizes for the rest of a drag when the clock jumps backwards', () => {
+    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 900, lastPtySyncAt: 1_000 })).toBe(true)
   })
 
   it('stays false when no sync was requested', () => {
     expect(shouldSyncPtyNow({ interactive: false, syncPtyRequested: false })).toBe(false)
+    expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: false, now: 2_000, lastPtySyncAt: 1_000 })).toBe(false)
   })
 })

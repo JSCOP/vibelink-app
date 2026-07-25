@@ -91,6 +91,8 @@ type Entry = {
   observedSize?: { width: number; height: number }
   lastSentPtyCols?: number
   lastSentPtyRows?: number
+  /** When this pane last sent `resize_pane`; rate-limits PTY resizes during a drag. */
+  lastPtySyncAt?: number
   remoteLease?: boolean
   remoteResizeGeneration?: number
   container?: HTMLElement
@@ -330,14 +332,16 @@ class TerminalManagerImpl {
         if (entry.remoteLease) return
         const sessionId = entry.sessionId
         if (!sessionId || (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows)) return
-        // A divider drag walks the grid through every intermediate size. Each
-        // resize_pane is an IPC round trip that SIGWINCHes the child, so a full
-        // -screen agent repaints its whole screen per step. Leave lastSentPty*
-        // untouched so the settle pass still sees a difference and sends the
-        // size the drag actually landed on.
-        if (this.interactive) return
+        // A divider drag walks the grid through every intermediate size, and
+        // each resize_pane is an IPC round trip that SIGWINCHes the child. Rate
+        // -limit rather than suppress: a drag that sends nothing leaves every
+        // full-screen agent frozen at its old geometry until release. When the
+        // send is skipped, leave lastSentPty* untouched so the settle pass still
+        // sees a difference and sends the size the drag actually landed on.
+        if (!shouldSyncPtyNow({ interactive: this.interactive, syncPtyRequested: true, now: Date.now(), lastPtySyncAt: entry.lastPtySyncAt })) return
         entry.lastSentPtyCols = cols
         entry.lastSentPtyRows = rows
+        entry.lastPtySyncAt = Date.now()
         void invoke('resize_pane', { sessionId, paneId, cols, rows })
       })
       entry.dataWired = true
@@ -713,7 +717,7 @@ class TerminalManagerImpl {
       entry.lastFitRect = { width: rect.width, height: rect.height }
       // A PTY resize held back during an interaction is sent by the settle pass
       // that endInteraction() schedules, so nothing is lost by skipping it here.
-      if (shouldSyncPtyNow({ interactive, syncPtyRequested: pass.syncPty })) this.syncEntryPtySize(entry)
+      if (shouldSyncPtyNow({ interactive, syncPtyRequested: pass.syncPty, now: Date.now(), lastPtySyncAt: entry.lastPtySyncAt })) this.syncEntryPtySize(entry)
     }
   }
 
@@ -1090,6 +1094,7 @@ class TerminalManagerImpl {
     if (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows) return
     entry.lastSentPtyCols = cols
     entry.lastSentPtyRows = rows
+    entry.lastPtySyncAt = Date.now()
     void invoke('resize_pane', { sessionId, paneId: entry.paneId, cols, rows })
   }
 

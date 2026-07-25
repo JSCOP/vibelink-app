@@ -1086,15 +1086,28 @@ export function WorkspaceView({
       const paneId = panelId.slice('content:terminal:'.length)
       const handle = findTerminalWindowForPane(paneId)
       if (!handle) return 'cancelled'
-      try {
-        await closePaneInStore(paneId, owner.sessionId)
-      } catch (error) {
-        useWorkspaceStore.getState().setError(String(error))
-        return 'cancelled'
-      }
+      // Closing is optimistic. `close_pane` kills the shell AND its whole
+      // descendant process tree (pwsh -> omp -> bun -> ConPTY), a daemon round
+      // trip measured at 130 ms for an idle prompt and far longer for a loaded
+      // agent pane. Waiting for it before touching the UI is what made Ctrl+W
+      // feel slow; the user already decided the pane is gone, so drop it now and
+      // let the teardown finish in the background.
+      //
+      // The pane stays in `pendingTerminalPaneIdsRef` until the daemon confirms,
+      // so the live-pane sync effect does not re-add it from the store snapshot
+      // that still lists it as alive.
+      pendingTerminalPaneIdsRef.current.add(paneId)
       TerminalManager.dispose(paneId)
-      if (!ownsLayout(owner)) return 'closed'
+      if (!ownsLayout(owner)) {
+        void closePaneInStore(paneId, owner.sessionId)
+          .catch((error) => useWorkspaceStore.getState().setError(String(error)))
+          .finally(() => pendingTerminalPaneIdsRef.current.delete(paneId))
+        return 'closed'
+      }
       handle.removePane(paneId)
+      void closePaneInStore(paneId, owner.sessionId)
+        .catch((error) => useWorkspaceStore.getState().setError(String(error)))
+        .finally(() => pendingTerminalPaneIdsRef.current.delete(paneId))
       await handle.settle()
       handle.persist()
       if (handle.paneIds().length === 0) {
