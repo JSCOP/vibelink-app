@@ -284,6 +284,92 @@ describe('TerminalManager remote pane leases', () => {
   })
 })
 
+describe('TerminalManager divider resize scheduling', () => {
+  it('holds terminal fits until the divider is released', () => {
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, {
+        fit: { fit(): void }
+        term: { cols: number }
+        observedSize?: { width: number; height: number }
+        lastFitRect?: { width: number; height: number }
+      }>
+      pendingPass: Map<string, unknown>
+      passFrame?: number
+      passTimer?: number
+    }
+    if (manager.passFrame !== undefined) window.cancelAnimationFrame(manager.passFrame)
+    if (manager.passTimer !== undefined) window.clearTimeout(manager.passTimer)
+    manager.passFrame = undefined
+    manager.passTimer = undefined
+    manager.pendingPass.clear()
+
+    let nextFrame = 1
+    const frames = new Map<number, FrameRequestCallback>()
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame
+      nextFrame += 1
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const flushFrames = () => {
+      for (let pass = 0; pass < 20 && frames.size > 0; pass += 1) {
+        const callbacks = [...frames.values()]
+        frames.clear()
+        callbacks.forEach((callback) => callback(performance.now()))
+      }
+      expect(frames.size).toBe(0)
+    }
+    const paneId = 'pane-divider-fit-hold'
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 500,
+      height: 300,
+      top: 0,
+      right: 500,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    })
+    TerminalManager.attach(paneId, container)
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing divider resize entry')
+    flushFrames()
+    expect(entry.lastFitRect).toEqual({ width: 500, height: 300 })
+    const fitSpy = vi.spyOn(entry.fit, 'fit')
+    const sash = document.createElement('div')
+    sash.className = 'dv-sash'
+    document.body.appendChild(sash)
+    const release = () => document.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }))
+
+    try {
+      sash.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+      entry.observedSize = { width: 650, height: 300 }
+      entry.term.cols = 79
+      TerminalManager.reflow(paneId)
+      flushFrames()
+
+      expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(true)
+      expect(fitSpy).not.toHaveBeenCalled()
+
+      release()
+      flushFrames()
+      expect(fitSpy).toHaveBeenCalled()
+      expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(false)
+    } finally {
+      if (document.documentElement.classList.contains('vibelink-interacting')) release()
+      sash.remove()
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+    }
+  })
+})
+
 describe('TerminalManager pointer repair', () => {
   it('nudges and restores an alternate-buffer PTY once per click gesture', () => {
     vi.useFakeTimers()

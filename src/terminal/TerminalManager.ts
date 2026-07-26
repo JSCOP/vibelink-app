@@ -15,7 +15,7 @@ import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLink
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
 import { agentActivityTracker, shouldTrackAgentInput, type AgentActivityActions } from './agentActivity'
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
-import { beginInteractiveResize, endInteractiveResize, type InteractiveResizeKind } from '../layout/interactiveResize'
+import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
@@ -180,6 +180,11 @@ class TerminalManagerImpl {
 
   private beginInteraction(kind: InteractiveResizeKind): void {
     beginInteractiveResize(kind)
+    // A column-changing xterm fit reflows the pane's entire scrollback and is
+    // not preemptible once it starts. Loaded grids can therefore spend a full
+    // frame inside one pane even with the adaptive pass budget. Keep Dockview's
+    // box resize on the pointer path, but hold terminal fits until pointerup.
+    if (kind === 'divider') this.cancelScheduledPassFlush()
     this.interactionDepth += 1
     if (this.interactionDepth > 1) return
     // A cost sampled from a previous gesture describes a layout that no longer
@@ -187,6 +192,22 @@ class TerminalManagerImpl {
     // the floor and let the first real pass re-measure.
     this.lastPassDurationMs = undefined
     this.markInteracting(true)
+  }
+
+  private cancelScheduledPassFlush(): void {
+    if (this.passFrame !== undefined) {
+      cancelAnimationFrame(this.passFrame)
+      this.passFrame = undefined
+    }
+    if (this.passTimer !== undefined) {
+      window.clearTimeout(this.passTimer)
+      this.passTimer = undefined
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.fitFrame === undefined) continue
+      cancelAnimationFrame(entry.fitFrame)
+      entry.fitFrame = undefined
+    }
   }
 
   private endInteraction(kind: InteractiveResizeKind): void {
@@ -198,7 +219,7 @@ class TerminalManagerImpl {
     endInteractiveResize(kind)
     if (this.interactionDepth > 0) return
     this.markInteracting(false)
-    this.settleLayout()
+    this.settleLayout({ paneIds: kind === 'divider' ? [...this.pendingPass.keys()] : undefined })
   }
 
   /** Terminals stop taking pointer events for the duration of the interaction.
@@ -216,12 +237,12 @@ class TerminalManagerImpl {
   }
 
   /** One authoritative pass after an interaction ends: force the fit and send
-   *  the PTY size that was held back while the pointer was down. `repaint` is
-   *  reserved for the resumes where the panes may have missed draws entirely
-   *  (tab hidden, window minimized); a drag end only needs the fit, because a
-   *  drag that changed anything also changed the grid. */
-  private settleLayout(options: { repaint?: boolean } = {}): void {
-    this.scheduleLayoutPass({ force: true, repaint: options.repaint, syncPty: true })
+   *  the PTY size that was held back while the pointer was down. Divider drags
+   *  settle only panes whose ResizeObserver marked them dirty; native window
+   *  resizes and visibility recovery still settle every pane. `repaint` is
+   *  reserved for panes that may have missed draws entirely. */
+  private settleLayout(options: { paneIds?: string[]; repaint?: boolean } = {}): void {
+    this.scheduleLayoutPass({ paneIds: options.paneIds, force: true, repaint: options.repaint, syncPty: true })
   }
 
   setLinkActions(actions: CaptureLinkActions): void {
@@ -347,12 +368,10 @@ class TerminalManagerImpl {
         if (entry.remoteLease) return
         const sessionId = entry.sessionId
         if (!sessionId || (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows)) return
-        // A divider drag walks the grid through every intermediate size, and
-        // each resize_pane is an IPC round trip that SIGWINCHes the child. Rate
-        // -limit rather than suppress: a drag that sends nothing leaves every
-        // full-screen agent frozen at its old geometry until release. When the
-        // send is skipped, leave lastSentPty* untouched so the settle pass still
-        // sees a difference and sends the size the drag actually landed on.
+        // Native window resizing can walk the grid through intermediate sizes.
+        // Divider fits are held until pointerup, but any other interactive path
+        // that reaches xterm still rate-limits SIGWINCH. A skipped send leaves
+        // lastSentPty* untouched so the settle pass sends the landed size.
         if (!shouldSyncPtyNow({ interactive: this.interactive, syncPtyRequested: true, now: Date.now(), lastPtySyncAt: entry.lastPtySyncAt })) return
         entry.lastSentPtyCols = cols
         entry.lastSentPtyRows = rows
@@ -577,7 +596,7 @@ class TerminalManagerImpl {
    *  host container is not yet measurable. */
   measureForSpawn(paneId: string): { cols: number; rows: number } | null {
     const entry = this.entries.get(paneId)
-    if (!entry?.opened || entry.remoteLease) return null
+    if (!entry?.opened || entry.remoteLease || isDividerResizeActive()) return null
     try {
       if (!this.safeFit(entry)) return null
     } catch {
@@ -672,12 +691,12 @@ class TerminalManagerImpl {
     this.requestPassFlush()
   }
 
-  /** Queue the animation-frame flush, honouring the interaction throttle. While
-   *  a divider or window drag is in flight the pass runs no more often than
-   *  `interactiveFitInterval` allows — one pass per display frame when the pass
-   *  is cheap, proportionally less often when scrollback reflow makes it
-   *  expensive, so the gesture keeps a share of the frame for its own layout. */
+  /** Queue one animation-frame flush. Divider drags deliberately leave every
+   *  terminal at its last stable grid while Dockview moves the pane boxes; a
+   *  single forced pass on pointerup fits and PTY-syncs the landed geometry.
+   *  Native window resizing keeps the adaptive live-fit path below. */
   private requestPassFlush(): void {
+    if (isDividerResizeActive()) return
     if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
     // While the window is minimized the webview reports a degenerate viewport.
     // Hold the requests: handleWindowResize settles once the window is back.
@@ -724,16 +743,11 @@ class TerminalManagerImpl {
     this.pendingPass = new Map()
     const interactive = this.interactive
     // A pass over N panes does N scrollback reflows back to back, and the frame
-    // it runs in cannot paint until the last one finishes. On an 8-pane grid a
-    // vertical divider touches four panes at ~5 ms each, so an unbounded pass
-    // blocks a single frame for ~21 ms however cheaply it is scheduled — the
-    // p99 spike that survived the throttle and repaint fixes.
-    //
-    // During a gesture, stop once the frame budget is spent and put the
-    // remaining panes back on the queue: they refit on the next pass, one or
-    // two frames later, while the divider keeps tracking the pointer. The panes
-    // are deferred, never dropped, and the drag-end settle re-fits every pane
-    // unconditionally, so the geometry the drag lands on is always exact.
+    // it runs in cannot paint until the last one finishes. Divider drags never
+    // enter this path; their fits are held until pointerup. During a native
+    // window resize, stop once the frame budget is spent and put the remaining
+    // panes back on the queue. They are deferred, never dropped, and the final
+    // settle re-fits every pane unconditionally.
     const deadline = interactive ? performance.now() + INTERACTIVE_FIT_FRAME_BUDGET_MS : undefined
     for (const [paneId, pass] of pending) {
       if (deadline !== undefined && performance.now() >= deadline) {
@@ -897,6 +911,7 @@ class TerminalManagerImpl {
   // the content — so every fit path must go through this guard, not entry.fit.fit()
   // directly. Returns true when a fit was applied (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
+    if (isDividerResizeActive()) return false
     if (entry.remoteLease) return true
     const proposed = entry.fit.proposeDimensions()
     if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
@@ -905,6 +920,11 @@ class TerminalManagerImpl {
   }
 
   private restoreDesktopFit(entry: Entry, attempt = 0): void {
+    if (isDividerResizeActive()) {
+      entry.forceFitOnNextMeasure = true
+      this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, repaint: true, syncPty: true })
+      return
+    }
     try {
       if (!this.safeFit(entry, true)) {
         entry.forceFitOnNextMeasure = true
@@ -1183,6 +1203,10 @@ class TerminalManagerImpl {
   }
 
   private fit(entry: Entry, attempt: number, force = false): void {
+    if (isDividerResizeActive()) {
+      this.scheduleLayoutPass({ paneIds: [entry.paneId], force, repaint: true })
+      return
+    }
     entry.fitForcePending = Boolean(entry.fitForcePending || force)
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     entry.fitFrame = requestAnimationFrame(() => {

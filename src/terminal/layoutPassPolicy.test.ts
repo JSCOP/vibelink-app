@@ -8,7 +8,7 @@ import {
   shouldSyncPtyNow,
 } from './layoutPassPolicy'
 
-describe('interactivePassDelay', () => {
+describe('interactivePassDelay for native window resizing', () => {
   it('runs immediately when no interaction is in flight', () => {
     expect(interactivePassDelay({ interactive: false, now: 1_000, lastPassAt: 999 })).toBe(0)
   })
@@ -17,13 +17,13 @@ describe('interactivePassDelay', () => {
     expect(interactivePassDelay({ interactive: true, now: 1_000, lastPassAt: undefined })).toBe(0)
   })
 
-  it('defers the remainder of the fit interval while dragging', () => {
+  it('defers the remainder of the fit interval while resizing the window', () => {
     expect(interactivePassDelay({ interactive: true, now: 1_005, lastPassAt: 1_000 })).toBe(INTERACTIVE_FIT_INTERVAL_MS - 5)
   })
 
   it('keeps a cheap pass at one refit per display frame', () => {
-    // At the old 100 ms the terminal refit 10x/s while the divider itself moved
-    // at display rate, so the text visibly trailed the divider.
+    // Divider drags bypass live fits; this cadence preserves live feedback when
+    // the native window itself is being resized.
     expect(INTERACTIVE_FIT_INTERVAL_MS).toBeLessThanOrEqual(16)
     expect(interactivePassDelay({ interactive: true, now: 1_016, lastPassAt: 1_000, lastPassDurationMs: 4 })).toBe(0)
   })
@@ -52,8 +52,8 @@ describe('interactiveFitInterval', () => {
   })
 
   it('never re-arms faster than one display frame for a cheap pass', () => {
-    // Half of a 0.5 ms pass is well under a frame; the floor keeps the content
-    // tracking the divider instead of chasing the sample downwards.
+    // Half of a 0.5 ms pass is well under a frame; the floor avoids chasing the
+    // sample downwards during a native window resize.
     expect(interactiveFitInterval(0.5)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
     expect(interactiveFitInterval(4)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
   })
@@ -63,7 +63,7 @@ describe('interactiveFitInterval', () => {
     expect(interactiveFitInterval(21)).toBe(42)
   })
 
-  it('caps the interval so a pathological pane slows but never freezes the drag', () => {
+  it('caps the interval so a pathological pane cannot monopolize window resizing', () => {
     expect(interactiveFitInterval(500)).toBe(INTERACTIVE_FIT_MAX_INTERVAL_MS)
   })
 
@@ -99,19 +99,19 @@ describe('shouldSyncPtyNow', () => {
     expect(shouldSyncPtyNow({ interactive: false, syncPtyRequested: true })).toBe(true)
   })
 
-  it('rate-limits rather than suppresses the PTY resize during a divider drag', () => {
-    // Suppressing it for the whole drag left every full-screen TUI frozen at its
-    // old geometry until the pointer was released.
+  it('rate-limits PTY resize on an interactive live-fit path', () => {
+    // Divider drags are held before xterm resize; native window resizing still
+    // reaches this guard and must not SIGWINCH on every frame.
     expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_050, lastPtySyncAt: 1_000 })).toBe(false)
     expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_100, lastPtySyncAt: 1_000 })).toBe(true)
     expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_400, lastPtySyncAt: 1_000 })).toBe(true)
   })
 
-  it('sends the first PTY resize of a drag immediately', () => {
+  it('sends the first PTY resize of an interaction immediately', () => {
     expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 1_000, lastPtySyncAt: undefined })).toBe(true)
   })
 
-  it('never parks PTY resizes for the rest of a drag when the clock jumps backwards', () => {
+  it('never parks PTY resizes when the clock jumps backwards', () => {
     expect(shouldSyncPtyNow({ interactive: true, syncPtyRequested: true, now: 900, lastPtySyncAt: 1_000 })).toBe(true)
   })
 
