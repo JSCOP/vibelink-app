@@ -16,8 +16,9 @@
  *    change, so the forced layout is REQUIRED: proportions are re-applied to
  *    the new size, which is correct. Only the settle/persist tail is deferred.
  *
- *  So `isDividerResizeActive()` (suppress forced re-layout) is deliberately
- *  narrower than `isInteractiveResizeActive()` (throttle terminal work).
+ *  So `isDividerResizeActive()` (suppress forced re-layout, gate PTY sync, and
+ *  schedule stable local fits) is deliberately narrower than
+ *  `isInteractiveResizeActive()` (apply the shared frame budget).
  *
  *  `TerminalManager` owns detection, because Dockview's stock sash exposes no
  *  drag events; this module owns the state so layout code can read it without

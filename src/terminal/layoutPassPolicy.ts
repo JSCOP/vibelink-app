@@ -1,19 +1,17 @@
 import type { TerminalHostSize } from './geometry'
 
-/** Floor for live terminal fits during a native window drag-resize.
+/** Floor for live terminal fits during an interactive resize.
  *
- * Divider drags do not use this cadence: `TerminalManager` holds their xterm
- * fits completely until pointerup because a column-changing fit reflows all
- * scrollback and cannot be made frame-safe. Window resizing still benefits
- * from adaptive live fits because the whole viewport is changing. */
+ * Divider panes enter this cadence only after their Orca-style stable-grid
+ * probe; native window resizing enters directly because the whole viewport is
+ * changing. Both paths retain the adaptive duty-cycle budget. */
 export const INTERACTIVE_FIT_INTERVAL_MS = 16
 
-/** Share of wall-clock time a native-window fit pass may occupy.
+/** Share of wall-clock time an interactive fit pass may occupy.
  *
  * Fit cost scales with visible scrollback: `term.resize()` reflows the whole
  * buffer when the column count changes. The adaptive interval leaves half of
- * the wall clock to browser layout and paint. Divider drags bypass this policy
- * and settle once after release. */
+ * the wall clock to Dockview geometry, browser layout, and paint. */
 export const INTERACTIVE_FIT_MAX_DUTY_CYCLE = 0.5
 
 /** Ceiling for the adaptive native-window interval. */
@@ -27,15 +25,14 @@ export function interactiveFitInterval(lastPassDurationMs: number | undefined): 
   return Math.min(INTERACTIVE_FIT_MAX_INTERVAL_MS, Math.max(INTERACTIVE_FIT_INTERVAL_MS, budgeted))
 }
 
-/** Wall-clock a single native-window fit pass may spend before deferring panes
+/** Wall-clock a single interactive fit pass may spend before deferring panes
  *  to the next pass. A fit cannot be preempted once it starts, but this budget
- *  prevents several loaded panes from reflowing back to back in one frame.
- *  Divider drags never enter this path. */
+ *  prevents several loaded panes from reflowing back to back in one frame. */
 export const INTERACTIVE_FIT_FRAME_BUDGET_MS = 8
 
-/** Minimum gap between PTY resizes for an interactive fit path that reaches
- *  xterm. Ordinary divider drags produce no intermediate fits or PTY resizes;
- *  their pointerup settle sends the exact landed grid. */
+/** Minimum gap between PTY resizes for interactive paths that forward live.
+ *  Divider drags hold PTY/SIGWINCH separately in `TerminalManager`; their
+ *  pointerup settle sends the exact landed grid. */
 export const INTERACTIVE_PTY_INTERVAL_MS = 100
 
 /** A viewport smaller than this is not a window the user can work in; it is the
@@ -75,9 +72,9 @@ export function isViewportViable(size: TerminalHostSize | null | undefined): boo
   return size.width >= MIN_VIEWPORT_WIDTH && size.height >= MIN_VIEWPORT_HEIGHT
 }
 
-/** PTY resizes are rate-limited for interactive paths that still fit live
- *  (currently native window resizing). Outside an interaction the request
- *  always goes through; the final settle sends the exact landed size. */
+/** PTY resizes are rate-limited for interactive paths that forward live
+ *  (currently native window resizing). Divider drags are gated before this
+ *  helper and flush the exact landed size after release. */
 export function shouldSyncPtyNow(args: {
   interactive: boolean
   syncPtyRequested: boolean

@@ -58,16 +58,8 @@ const WINDOW_RESIZE_SETTLE_MS = 160
 // document-level pointermove, so a capture-phase pointerdown is the only place
 // the drag can be observed before the layout storm starts.
 const SASH_SELECTOR = '.dv-sash'
+const MAX_DIVIDER_STABILITY_FRAMES = 8
 
-type DividerResizePreview = {
-  axis: 'x' | 'y'
-  hostWidth: number
-  hostHeight: number
-  screenWidth: number
-  screenHeight: number
-  scale: number
-  active: boolean
-}
 
 
 
@@ -100,9 +92,9 @@ type Entry = {
   /** Last size reported by this pane's ResizeObserver, so the layout pass does
    *  not have to force a synchronous layout to re-measure it. */
   observedSize?: { width: number; height: number }
-  /** Stable xterm surface dimensions captured before a divider moves. The
-   *  screen is compositor-scaled to the live host size until the final fit. */
-  resizePreview?: DividerResizePreview
+  /** One pending Orca-style stability probe before fitting this pane's real
+   *  xterm grid during a divider drag. */
+  dividerFitFrame?: number
   lastSentPtyCols?: number
   lastSentPtyRows?: number
   /** When this pane last sent `resize_pane`; rate-limits PTY resizes during a drag. */
@@ -133,6 +125,7 @@ class TerminalManagerImpl {
   private lastPassDurationMs: number | undefined
   // Non-zero while a divider drag or a native window drag-resize is in flight.
   private interactionDepth = 0
+  private dividerResizePaneIds = new Set<string>()
   private windowResizeTimer: number | undefined
   private viewportViable = true
 
@@ -161,9 +154,7 @@ class TerminalManagerImpl {
     if (!(target instanceof Element)) return
     const sash = target.closest<HTMLElement>(SASH_SELECTOR)
     if (!sash) return
-    const rect = sash.getBoundingClientRect()
     this.beginInteraction('divider')
-    this.prepareDividerResizePreviews(rect.height >= rect.width ? 'x' : 'y')
     // Mirror the exact set of end triggers Dockview's own sash uses, so this
     // interaction can never outlive the drag it is throttling.
     const end = () => {
@@ -197,12 +188,7 @@ class TerminalManagerImpl {
 
   private beginInteraction(kind: InteractiveResizeKind): void {
     beginInteractiveResize(kind)
-    // A column-changing xterm fit reflows the pane's entire scrollback and is
-    // not preemptible once it starts. Loaded grids can therefore spend a full
-    // frame inside one pane even with the adaptive pass budget. Hold terminal
-    // fits until pointerup; a compositor-only preview keeps the rendered
-    // surface attached to Dockview's live box without touching the xterm grid.
-    if (kind === 'divider') this.cancelScheduledPassFlush()
+    if (kind === 'divider') this.dividerResizePaneIds.clear()
     this.interactionDepth += 1
     if (this.interactionDepth > 1) return
     // A cost sampled from a previous gesture describes a layout that no longer
@@ -210,22 +196,6 @@ class TerminalManagerImpl {
     // the floor and let the first real pass re-measure.
     this.lastPassDurationMs = undefined
     this.markInteracting(true)
-  }
-
-  private cancelScheduledPassFlush(): void {
-    if (this.passFrame !== undefined) {
-      cancelAnimationFrame(this.passFrame)
-      this.passFrame = undefined
-    }
-    if (this.passTimer !== undefined) {
-      window.clearTimeout(this.passTimer)
-      this.passTimer = undefined
-    }
-    for (const entry of this.entries.values()) {
-      if (entry.fitFrame === undefined) continue
-      cancelAnimationFrame(entry.fitFrame)
-      entry.fitFrame = undefined
-    }
   }
 
   private endInteraction(kind: InteractiveResizeKind): void {
@@ -236,11 +206,18 @@ class TerminalManagerImpl {
     // scheduled below then fits terminals to that final geometry.
     endInteractiveResize(kind)
     if (this.interactionDepth > 0) return
-    const dividerPaneIds = kind === 'divider'
-      ? [...new Set([...this.pendingPass.keys(), ...this.finishDividerResizePreviews()])]
-      : undefined
+    const dividerPaneIds = kind === 'divider' ? [...this.dividerResizePaneIds] : undefined
+    if (kind === 'divider') {
+      for (const paneId of dividerPaneIds ?? []) {
+        const entry = this.entries.get(paneId)
+        if (entry?.dividerFitFrame === undefined) continue
+        cancelAnimationFrame(entry.dividerFitFrame)
+        entry.dividerFitFrame = undefined
+      }
+      this.dividerResizePaneIds.clear()
+    }
     this.markInteracting(false)
-    this.settleLayout({ paneIds: dividerPaneIds })
+    this.settleLayout({ paneIds: dividerPaneIds?.length ? dividerPaneIds : undefined })
   }
 
   /** Terminals stop taking pointer events for the duration of the interaction.
@@ -253,83 +230,36 @@ class TerminalManagerImpl {
     document.documentElement.classList.toggle('vibelink-interacting', active)
   }
 
-  private prepareDividerResizePreviews(axis: DividerResizePreview['axis']): void {
-    for (const entry of this.entries.values()) this.clearDividerResizePreview(entry)
-    const measured: Array<{ entry: Entry; preview: DividerResizePreview }> = []
-    for (const entry of this.entries.values()) {
-      if (!entry.opened || entry.remoteLease || !entry.container) continue
-      const screen = entry.term.element?.querySelector<HTMLElement>('.xterm-screen')
-      if (!screen) continue
-      const hostRect = entry.container.getBoundingClientRect()
-      const screenRect = screen.getBoundingClientRect()
-      if (hostRect.width <= 0 || hostRect.height <= 0 || screenRect.width <= 0 || screenRect.height <= 0) continue
-      // A renderer-always pane hidden behind a tab can retain a large stale
-      // screen inside a near-zero host. It is not visible and must not join the
-      // preview set for the active layout.
-      if (Math.abs(hostRect.width - screenRect.width) > 64 || Math.abs(hostRect.height - screenRect.height) > 64) continue
-      measured.push({
-        entry,
-        preview: {
-          axis,
-          hostWidth: hostRect.width,
-          hostHeight: hostRect.height,
-          screenWidth: screenRect.width,
-          screenHeight: screenRect.height,
-          scale: 1,
-          active: false,
-        },
+  /** Match Orca's resize contract: Dockview owns live geometry while each pane
+   *  waits for a stable grid proposal before doing a real local xterm fit.
+   *  Continuous motion is bounded, so a pane cannot remain visually stale for
+   *  more than a handful of frames. PTY synchronization stays held separately. */
+  private requestStableDividerFit(entry: Entry): void {
+    if (!isDividerResizeActive() || !entry.opened || entry.remoteLease) return
+    this.dividerResizePaneIds.add(entry.paneId)
+    if (entry.dividerFitFrame !== undefined) return
+    let previous = entry.fit.proposeDimensions()
+    let frames = 0
+    const waitForStableGrid = () => {
+      entry.dividerFitFrame = requestAnimationFrame(() => {
+        entry.dividerFitFrame = undefined
+        if (!isDividerResizeActive() || this.entries.get(entry.paneId) !== entry || !entry.opened) return
+        const next = entry.fit.proposeDimensions()
+        frames += 1
+        const stable =
+          !next ||
+          (entry.term.cols === next.cols && entry.term.rows === next.rows) ||
+          (previous?.cols === next.cols && previous.rows === next.rows) ||
+          frames >= MAX_DIVIDER_STABILITY_FRAMES
+        if (!stable) {
+          previous = next
+          waitForStableGrid()
+          return
+        }
+        this.scheduleLayoutPass({ paneIds: [entry.paneId] })
       })
     }
-    for (const { entry, preview } of measured) entry.resizePreview = preview
-  }
-
-  private updateDividerResizePreview(entry: Entry, size: { width: number; height: number }): void {
-    const preview = entry.resizePreview
-    const container = entry.container
-    if (!preview || !container) return
-    const baseScreenExtent = preview.axis === 'x' ? preview.screenWidth : preview.screenHeight
-    const hostDelta = preview.axis === 'x' ? size.width - preview.hostWidth : size.height - preview.hostHeight
-    const scale = Math.max(0.05, (baseScreenExtent + hostDelta) / baseScreenExtent)
-    if (Math.abs(scale - preview.scale) <= 0.0005) return
-    preview.scale = scale
-    preview.active = Math.abs(scale - 1) > 0.001
-    if (!preview.active) {
-      this.resetDividerResizePreviewStyles(entry)
-      return
-    }
-    container.classList.add('terminal-resize-preview')
-    container.style.setProperty(
-      preview.axis === 'x' ? '--vibelink-terminal-resize-scale-x' : '--vibelink-terminal-resize-scale-y',
-      String(scale),
-    )
-  }
-
-  private finishDividerResizePreviews(): string[] {
-    const measured: Array<{ entry: Entry; width: number; height: number }> = []
-    for (const entry of this.entries.values()) {
-      if (!entry.resizePreview || !entry.container) continue
-      const rect = entry.container.getBoundingClientRect()
-      measured.push({ entry, width: rect.width, height: rect.height })
-    }
-    for (const { entry, width, height } of measured) this.updateDividerResizePreview(entry, { width, height })
-    const changed: string[] = []
-    for (const entry of this.entries.values()) {
-      if (!entry.resizePreview) continue
-      if (entry.resizePreview.active) changed.push(entry.paneId)
-      else this.clearDividerResizePreview(entry)
-    }
-    return changed
-  }
-
-  private resetDividerResizePreviewStyles(entry: Entry): void {
-    entry.container?.classList.remove('terminal-resize-preview')
-    entry.container?.style.removeProperty('--vibelink-terminal-resize-scale-x')
-    entry.container?.style.removeProperty('--vibelink-terminal-resize-scale-y')
-  }
-
-  private clearDividerResizePreview(entry: Entry): void {
-    this.resetDividerResizePreviewStyles(entry)
-    entry.resizePreview = undefined
+    waitForStableGrid()
   }
 
   private get interactive(): boolean {
@@ -434,7 +364,8 @@ class TerminalManagerImpl {
     // Dockview re-parents panes on maximize/restore and pane swaps; a size
     // observed against the old container must not survive into the new one.
     if (entry.container !== container) {
-      this.clearDividerResizePreview(entry)
+      if (entry.dividerFitFrame !== undefined) cancelAnimationFrame(entry.dividerFitFrame)
+      entry.dividerFitFrame = undefined
       entry.observedSize = undefined
     }
     entry.container = container
@@ -468,13 +399,12 @@ class TerminalManagerImpl {
         if (entry.pendingInput.length < MAX_PENDING_INPUT_CHUNKS) entry.pendingInput.push(data)
       })
       entry.term.onResize(({ cols, rows }) => {
-        if (entry.remoteLease) return
+        if (entry.remoteLease || isDividerResizeActive()) return
         const sessionId = entry.sessionId
         if (!sessionId || (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows)) return
         // Native window resizing can walk the grid through intermediate sizes.
-        // Divider fits are held until pointerup, but any other interactive path
-        // that reaches xterm still rate-limits SIGWINCH. A skipped send leaves
-        // lastSentPty* untouched so the settle pass sends the landed size.
+        // Divider drags hold every SIGWINCH until pointerup; other interactive
+        // paths retain the adaptive PTY rate limit.
         if (!shouldSyncPtyNow({ interactive: this.interactive, syncPtyRequested: true, now: Date.now(), lastPtySyncAt: entry.lastPtySyncAt })) return
         entry.lastSentPtyCols = cols
         entry.lastSentPtyRows = rows
@@ -504,9 +434,10 @@ class TerminalManagerImpl {
     entry.observer?.disconnect()
     entry.observer = new ResizeObserver((observed) => {
       const box = observed[observed.length - 1]?.contentRect
-      if (box) {
-        entry.observedSize = { width: box.width, height: box.height }
-        if (isDividerResizeActive()) this.updateDividerResizePreview(entry, box)
+      if (box) entry.observedSize = { width: box.width, height: box.height }
+      if (isDividerResizeActive()) {
+        this.requestStableDividerFit(entry)
+        return
       }
       this.scheduleLayoutPass({ paneIds: [paneId] })
     })
@@ -797,12 +728,10 @@ class TerminalManagerImpl {
     this.requestPassFlush()
   }
 
-  /** Queue one animation-frame flush. Divider drags deliberately leave every
-   *  terminal at its last stable grid while Dockview moves the pane boxes; a
-   *  single forced pass on pointerup fits and PTY-syncs the landed geometry.
-   *  Native window resizing keeps the adaptive live-fit path below. */
+  /** Queue one animation-frame flush. Divider panes arrive here only after an
+   *  Orca-style stable-grid probe; native window resizing uses the same
+   *  adaptive frame budget without the stability gate. */
   private requestPassFlush(): void {
-    if (isDividerResizeActive()) return
     if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
     // While the window is minimized the webview reports a degenerate viewport.
     // Hold the requests: handleWindowResize settles once the window is back.
@@ -908,10 +837,6 @@ class TerminalManagerImpl {
           this.redraw(entry, { clearWebglTextureAtlas: pass.clearWebglTextureAtlas && entry.webgl !== undefined })
         }
       }
-      // fit() updates xterm's real screen dimensions synchronously. Drop the
-      // temporary scale in the same task so no stale or double-scaled frame can
-      // paint after pointerup.
-      this.clearDividerResizePreview(entry)
       entry.lastFitRect = { width: rect.width, height: rect.height }
       // A PTY resize held back during an interaction is sent by the settle pass
       // that endInteraction() schedules, so nothing is lost by skipping it here.
@@ -936,7 +861,8 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     agentActivityTracker.clear(paneId)
-    this.clearDividerResizePreview(entry)
+    this.dividerResizePaneIds.delete(paneId)
+    if (entry.dividerFitFrame !== undefined) cancelAnimationFrame(entry.dividerFitFrame)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     this.pendingPass.delete(paneId)
@@ -1022,7 +948,6 @@ class TerminalManagerImpl {
   // the content — so every fit path must go through this guard, not entry.fit.fit()
   // directly. Returns true when a fit was applied (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
-    if (isDividerResizeActive()) return false
     if (entry.remoteLease) return true
     const proposed = entry.fit.proposeDimensions()
     if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
@@ -1290,7 +1215,7 @@ class TerminalManagerImpl {
   }
 
   private syncEntryPtySize(entry: Entry): void {
-    if (entry.remoteLease) return
+    if (entry.remoteLease || isDividerResizeActive()) return
     const sessionId = entry.sessionId
     if (!sessionId || !entry.opened) return
     this.flushOutput(entry)
@@ -1315,7 +1240,7 @@ class TerminalManagerImpl {
 
   private fit(entry: Entry, attempt: number, force = false): void {
     if (isDividerResizeActive()) {
-      this.scheduleLayoutPass({ paneIds: [entry.paneId], force, repaint: true })
+      this.requestStableDividerFit(entry)
       return
     }
     entry.fitForcePending = Boolean(entry.fitForcePending || force)

@@ -1,0 +1,173 @@
+diff --git a/dist/cjs/splitview/splitview.js b/dist/cjs/splitview/splitview.js
+index 04f3b5db80b870868c9bb0ee1eb0d18900477953..7ec1f000af4a021293a4ad5a80a05d64b029620a 100644
+--- a/dist/cjs/splitview/splitview.js
++++ b/dist/cjs/splitview/splitview.js
+@@ -543,17 +543,35 @@ var Splitview = /** @class */ (function () {
+                         size: snappedViewItem.size,
+                     };
+                 }
++                var pendingDelta;
++                var resizeFrame;
++                var flushResize = function () {
++                    resizeFrame = undefined;
++                    if (pendingDelta === undefined) {
++                        return;
++                    }
++                    var delta = pendingDelta;
++                    pendingDelta = undefined;
++                    _this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
++                    _this.distributeEmptySpace();
++                    _this.layoutViews();
++                };
+                 var onPointerMove = function (event) {
+                     var current = _this._orientation === Orientation.HORIZONTAL
+                         ? event.clientX
+                         : event.clientY;
+-                    var delta = current - start;
+-                    _this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
+-                    _this.distributeEmptySpace();
+-                    _this.layoutViews();
++                    pendingDelta = current - start;
++                    if (resizeFrame === undefined) {
++                        resizeFrame = requestAnimationFrame(flushResize);
++                    }
+                 };
+                 var end = function () {
+                     var e_4, _a;
++                    if (resizeFrame !== undefined) {
++                        cancelAnimationFrame(resizeFrame);
++                        resizeFrame = undefined;
++                    }
++                    flushResize();
+                     try {
+                         for (var _b = __values(_this.viewItems), _c = _b.next(); !_c.done; _c = _b.next()) {
+                             var item = _c.value;
+diff --git a/dist/esm/splitview/splitview.js b/dist/esm/splitview/splitview.js
+index 521a9f3bbd6588d2252ba9c18cb6c578ec5fb0ec..3289f6e6009fff1dc28e79d5d01dc0cec888d04b 100644
+--- a/dist/esm/splitview/splitview.js
++++ b/dist/esm/splitview/splitview.js
+@@ -409,16 +409,34 @@ export class Splitview {
+                         size: snappedViewItem.size,
+                     };
+                 }
++                let pendingDelta;
++                let resizeFrame;
++                const flushResize = () => {
++                    resizeFrame = undefined;
++                    if (pendingDelta === undefined) {
++                        return;
++                    }
++                    const delta = pendingDelta;
++                    pendingDelta = undefined;
++                    this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
++                    this.distributeEmptySpace();
++                    this.layoutViews();
++                };
+                 const onPointerMove = (event) => {
+                     const current = this._orientation === Orientation.HORIZONTAL
+                         ? event.clientX
+                         : event.clientY;
+-                    const delta = current - start;
+-                    this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
+-                    this.distributeEmptySpace();
+-                    this.layoutViews();
++                    pendingDelta = current - start;
++                    if (resizeFrame === undefined) {
++                        resizeFrame = requestAnimationFrame(flushResize);
++                    }
+                 };
+                 const end = () => {
++                    if (resizeFrame !== undefined) {
++                        cancelAnimationFrame(resizeFrame);
++                        resizeFrame = undefined;
++                    }
++                    flushResize();
+                     for (const item of this.viewItems) {
+                         item.enabled = true;
+                     }
+diff --git a/dist/package/main.cjs.js b/dist/package/main.cjs.js
+index 9bacff7177b7549a7037592ba8cc83fac1a9e530..bf1b9bb7da85a1239ba08189b4bb753b1b06148e 100644
+--- a/dist/package/main.cjs.js
++++ b/dist/package/main.cjs.js
+@@ -1284,16 +1284,34 @@ class Splitview {
+                         size: snappedViewItem.size,
+                     };
+                 }
++                let pendingDelta;
++                let resizeFrame;
++                const flushResize = () => {
++                    resizeFrame = undefined;
++                    if (pendingDelta === undefined) {
++                        return;
++                    }
++                    const delta = pendingDelta;
++                    pendingDelta = undefined;
++                    this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
++                    this.distributeEmptySpace();
++                    this.layoutViews();
++                };
+                 const onPointerMove = (event) => {
+                     const current = this._orientation === exports.Orientation.HORIZONTAL
+                         ? event.clientX
+                         : event.clientY;
+-                    const delta = current - start;
+-                    this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
+-                    this.distributeEmptySpace();
+-                    this.layoutViews();
++                    pendingDelta = current - start;
++                    if (resizeFrame === undefined) {
++                        resizeFrame = requestAnimationFrame(flushResize);
++                    }
+                 };
+                 const end = () => {
++                    if (resizeFrame !== undefined) {
++                        cancelAnimationFrame(resizeFrame);
++                        resizeFrame = undefined;
++                    }
++                    flushResize();
+                     for (const item of this.viewItems) {
+                         item.enabled = true;
+                     }
+diff --git a/dist/package/main.esm.mjs b/dist/package/main.esm.mjs
+index ce8f30b35000f5e8162453018cbabc8123227c17..f560ca98a5b7821d00ee3485f4d6eac31a4e3988 100644
+--- a/dist/package/main.esm.mjs
++++ b/dist/package/main.esm.mjs
+@@ -1282,16 +1282,34 @@ class Splitview {
+                         size: snappedViewItem.size,
+                     };
+                 }
++                let pendingDelta;
++                let resizeFrame;
++                const flushResize = () => {
++                    resizeFrame = undefined;
++                    if (pendingDelta === undefined) {
++                        return;
++                    }
++                    const delta = pendingDelta;
++                    pendingDelta = undefined;
++                    this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
++                    this.distributeEmptySpace();
++                    this.layoutViews();
++                };
+                 const onPointerMove = (event) => {
+                     const current = this._orientation === Orientation.HORIZONTAL
+                         ? event.clientX
+                         : event.clientY;
+-                    const delta = current - start;
+-                    this.resize(sashIndex, delta, sizes, undefined, undefined, minDelta, maxDelta, snapBefore, snapAfter);
+-                    this.distributeEmptySpace();
+-                    this.layoutViews();
++                    pendingDelta = current - start;
++                    if (resizeFrame === undefined) {
++                        resizeFrame = requestAnimationFrame(flushResize);
++                    }
+                 };
+                 const end = () => {
++                    if (resizeFrame !== undefined) {
++                        cancelAnimationFrame(resizeFrame);
++                        resizeFrame = undefined;
++                    }
++                    flushResize();
+                     for (const item of this.viewItems) {
+                         item.enabled = true;
+                     }

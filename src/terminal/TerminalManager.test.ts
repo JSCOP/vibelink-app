@@ -310,17 +310,18 @@ describe('TerminalManager remote pane leases', () => {
 })
 
 describe('TerminalManager divider resize scheduling', () => {
-  it('holds terminal fits until the divider is released', () => {
+  it('fits stable pane grids during the drag and flushes the PTY size on release', () => {
     const manager = TerminalManager as unknown as {
       entries: Map<string, {
-        fit: { fit(): void }
-        term: { cols: number; element?: HTMLElement }
+        fit: { fit(): void; proposeDimensions(): { cols: number; rows: number } }
+        term: { cols: number; rows: number; resize(cols: number, rows: number): void }
         observedSize?: { width: number; height: number }
         lastFitRect?: { width: number; height: number }
       }>
       pendingPass: Map<string, unknown>
       passFrame?: number
       passTimer?: number
+      lastPassAt?: number
     }
     if (manager.passFrame !== undefined) window.cancelAnimationFrame(manager.passFrame)
     if (manager.passTimer !== undefined) window.clearTimeout(manager.passTimer)
@@ -347,7 +348,7 @@ describe('TerminalManager divider resize scheduling', () => {
       }
       expect(frames.size).toBe(0)
     }
-    const paneId = 'pane-divider-fit-hold'
+    const paneId = 'pane-divider-stable-fit'
     const container = makeContainer()
     let hostWidth = 500
     vi.spyOn(container, 'getBoundingClientRect').mockImplementation(() => ({
@@ -361,38 +362,17 @@ describe('TerminalManager divider resize scheduling', () => {
       left: 0,
       toJSON: () => ({}),
     }))
-    TerminalManager.attach(paneId, container)
+    TerminalManager.attach(paneId, container, { sessionId: 'session-divider' })
     const entry = manager.entries.get(paneId)
     if (!entry) throw new Error('missing divider resize entry')
-    const screen = entry.term.element?.querySelector<HTMLElement>('.xterm-screen')
-    if (!screen) throw new Error('missing xterm screen')
-    vi.spyOn(screen, 'getBoundingClientRect').mockReturnValue({
-      x: 0,
-      y: 0,
-      width: 482,
-      height: 300,
-      top: 0,
-      right: 482,
-      bottom: 300,
-      left: 0,
-      toJSON: () => ({}),
-    })
     flushFrames()
     expect(entry.lastFitRect).toEqual({ width: 500, height: 300 })
-    const fitSpy = vi.spyOn(entry.fit, 'fit')
+    invokeMock.mockClear()
+    manager.lastPassAt = undefined
+    vi.spyOn(entry.fit, 'proposeDimensions').mockReturnValue({ cols: 100, rows: 24 })
+    const fitSpy = vi.spyOn(entry.fit, 'fit').mockImplementation(() => entry.term.resize(100, 24))
     const sash = document.createElement('div')
     sash.className = 'dv-sash'
-    vi.spyOn(sash, 'getBoundingClientRect').mockReturnValue({
-      x: 500,
-      y: 0,
-      width: 4,
-      height: 300,
-      top: 0,
-      right: 504,
-      bottom: 300,
-      left: 500,
-      toJSON: () => ({}),
-    })
     document.body.appendChild(sash)
     const release = () => document.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }))
 
@@ -400,20 +380,24 @@ describe('TerminalManager divider resize scheduling', () => {
       sash.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
       hostWidth = 650
       emitResize(container, hostWidth, 300)
-      entry.term.cols = 79
+
+      expect(fitSpy).not.toHaveBeenCalled()
       flushFrames()
 
       expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(true)
-      expect(fitSpy).not.toHaveBeenCalled()
-      expect(container.classList.contains('terminal-resize-preview')).toBe(true)
-      expect(Number(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x'))).toBeCloseTo(632 / 482)
+      expect(fitSpy).toHaveBeenCalledTimes(1)
+      expect(entry.term.cols).toBe(100)
+      expect(container.classList.contains('terminal-resize-preview')).toBe(false)
+      expect(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x')).toBe('')
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([])
 
       release()
       flushFrames()
-      expect(fitSpy).toHaveBeenCalled()
+
       expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(false)
-      expect(container.classList.contains('terminal-resize-preview')).toBe(false)
-      expect(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x')).toBe('')
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
+        ['resize_pane', { sessionId: 'session-divider', paneId, cols: 100, rows: 24 }],
+      ])
     } finally {
       if (document.documentElement.classList.contains('vibelink-interacting')) release()
       sash.remove()
