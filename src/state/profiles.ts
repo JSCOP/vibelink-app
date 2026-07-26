@@ -2,6 +2,7 @@ import type { PaneConfig, PaneMeta } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
 import { preferredFontFamily } from './fonts'
+import { defaultCompletionSoundId, isCompletionSoundId, type CompletionSoundId } from '../notifications/completionSounds'
 import type { WorkspaceGroup } from './workspaceGroups'
 
 export type ProfileKind = 'local' | 'ssh' | 'command'
@@ -52,6 +53,9 @@ export type Settings = {
   selectedPaneHighlightColor: string
   alarmHighlightColor: string
   reviewedPaneHighlightColor: string
+  completionSoundEnabled: boolean
+  completionSoundId: CompletionSoundId
+  completionSoundVolume: number
   terminalScrollbarVisible: boolean
   cursorStyle: TerminalCursorStyle
   cursorWidth: number
@@ -224,6 +228,9 @@ export const defaultSettings: Settings = {
   selectedPaneHighlightColor: '#ff9f1a',
   alarmHighlightColor: '#7ee787',
   reviewedPaneHighlightColor: '#58a6ff',
+  completionSoundEnabled: true,
+  completionSoundId: defaultCompletionSoundId,
+  completionSoundVolume: 0.55,
   terminalScrollbarVisible: false,
   cursorStyle: 'bar',
   cursorWidth: 1,
@@ -278,6 +285,9 @@ export function normalizeSettings(value: unknown): Settings {
     selectedPaneHighlightColor: readHexColor(record?.selectedPaneHighlightColor, defaultSettings.selectedPaneHighlightColor),
     alarmHighlightColor: readHexColor(record?.alarmHighlightColor, defaultSettings.alarmHighlightColor),
     reviewedPaneHighlightColor: readHexColor(record?.reviewedPaneHighlightColor, defaultSettings.reviewedPaneHighlightColor),
+    completionSoundEnabled: readBoolean(record?.completionSoundEnabled, defaultSettings.completionSoundEnabled),
+    completionSoundId: isCompletionSoundId(record?.completionSoundId) ? record.completionSoundId : defaultCompletionSoundId,
+    completionSoundVolume: readNumberInRange(record?.completionSoundVolume, defaultSettings.completionSoundVolume, 0, 1),
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
     cursorWidth: readNumberInRange(record?.cursorWidth, defaultSettings.cursorWidth, 1, 10),

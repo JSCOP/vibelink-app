@@ -35,6 +35,7 @@ import { isAppLocked } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
 import { desktopSelectionPayload } from './remote/desktopSelection'
+import { hasNewCompletionHighlight, playCompletionSound } from './notifications/completionSounds'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -139,6 +140,11 @@ function App() {
   useEffect(() => {
     applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor)
   }, [settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor])
+
+  useEffect(() => useWorkspaceStore.subscribe((state, previousState) => {
+    if (!hasNewCompletionHighlight(state.paneCompletionHighlights, previousState.paneCompletionHighlights)) return
+    void playCompletionSound(state.settings).catch((caught) => console.warn('Failed to play completion sound', caught))
+  }), [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

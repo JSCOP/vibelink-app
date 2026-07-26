@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, Bot, Box, ChevronDown, GitPullRequest, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Archive, Bell, Bot, Box, ChevronDown, GitPullRequest, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, Trash2, Upload, X } from 'lucide-react'
 import { LicenseSettings } from './LicenseSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
@@ -21,6 +21,7 @@ import { HermesInstallGuidance } from './HermesInstallGuidance'
 import { GitHostingSettings } from './GitHostingSettings'
 import { ProviderIntegrationsPanel } from './ProviderIntegrationsPanel'
 import { AndroidDeviceLabPanel } from './AndroidDeviceLabPanel'
+import { addCustomCompletionSound, builtInCompletionSounds, defaultCompletionSoundId, listCustomCompletionSounds, playCompletionSound, removeCustomCompletionSound, type CompletionSoundId, type CustomCompletionSound } from '../notifications/completionSounds'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -34,6 +35,7 @@ type SettingsSection =
   | 'model'
   | 'chat'
   | 'appearance'
+  | 'notifications'
   | 'workspace'
   | 'integrations'
   | 'gitHosting'
@@ -53,6 +55,7 @@ const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[]
   { id: 'model', label: 'Model', icon: Bot },
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'workspace', label: 'Workspace', icon: Monitor },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'gitHosting', label: 'Git Hosting', icon: GitPullRequest },
@@ -121,6 +124,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null)
   const [isThemePickerOpen, setThemePickerOpen] = useState(false)
   const [isFontPickerOpen, setFontPickerOpen] = useState(false)
+  const [customCompletionSounds, setCustomCompletionSounds] = useState<CustomCompletionSound[]>([])
+  const [completionSoundMessage, setCompletionSoundMessage] = useState('')
+  const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -173,6 +179,15 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     }
     return () => { cancelled = true }
   }, [activeSection, activeSession?.workspaceFolder, activeSessionId, draft.hermesCommand])
+
+  useEffect(() => {
+    if (activeSection !== 'notifications') return
+    let cancelled = false
+    void listCustomCompletionSounds()
+      .then((sounds) => { if (!cancelled) setCustomCompletionSounds(sounds) })
+      .catch((error) => { if (!cancelled) setCompletionSoundMessage(String(error)) })
+    return () => { cancelled = true }
+  }, [activeSection])
 
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
   const previewHighlightColors = (patch: Partial<Pick<Settings, 'selectedPaneHighlightColor' | 'alarmHighlightColor' | 'reviewedPaneHighlightColor'>>) => {
@@ -307,6 +322,41 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const browseCaptureDir = async () => {
     const selected = await open({ directory: true, multiple: false, title: 'Select capture folder' })
     if (typeof selected === 'string') patchDraft({ captureDir: selected })
+  }
+  const previewCompletionSound = async (soundId: CompletionSoundId = draft.completionSoundId) => {
+    setCompletionSoundMessage('')
+    try {
+      const played = await playCompletionSound({
+        completionSoundEnabled: true,
+        completionSoundId: soundId,
+        completionSoundVolume: draft.completionSoundVolume,
+      })
+      setCompletionSoundMessage(played ? 'Sound preview played.' : 'This sound is unavailable.')
+    } catch (error) {
+      setCompletionSoundMessage(String(error))
+    }
+  }
+  const importCompletionSound = async (file: File) => {
+    setCompletionSoundMessage('Adding sound...')
+    try {
+      const sound = await addCustomCompletionSound(file)
+      setCustomCompletionSounds((current) => [...current.filter((entry) => entry.id !== sound.id), sound])
+      patchDraft({ completionSoundId: sound.id })
+      setCompletionSoundMessage(`${sound.name} added and selected.`)
+    } catch (error) {
+      setCompletionSoundMessage(String(error))
+    }
+  }
+  const deleteCompletionSound = async (sound: CustomCompletionSound) => {
+    setCompletionSoundMessage('')
+    try {
+      await removeCustomCompletionSound(sound.id)
+      setCustomCompletionSounds((current) => current.filter((entry) => entry.id !== sound.id))
+      if (draft.completionSoundId === sound.id) patchDraft({ completionSoundId: defaultCompletionSoundId })
+      setCompletionSoundMessage(`${sound.name} removed.`)
+    } catch (error) {
+      setCompletionSoundMessage(String(error))
+    }
   }
   const testFfmpeg = async () => {
     setFfmpegStatus('Checking...')
@@ -508,6 +558,66 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                   <div className="vibelink-settings-note"><span>Every mode keeps a plain-language hover explanation. Words is the clearest; letters is the most compact.</span></div>
                 </SettingsGroup>
               </>
+            ) : null}
+
+            {activeSection === 'notifications' ? (
+              <SettingsGroup title="Completion notifications" description="Play a short local sound when an AI coding agent response or assigned task finishes. Visual pane and workspace highlights remain enabled independently.">
+                <SettingsToggle label="Play completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />
+                <label>
+                  Completion sound
+                  <select aria-label="Completion sound" value={draft.completionSoundId} disabled={!draft.completionSoundEnabled} onChange={(event) => patchDraft({ completionSoundId: event.target.value as CompletionSoundId })}>
+                    <optgroup label="Built-in">
+                      {builtInCompletionSounds.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
+                    </optgroup>
+                    {customCompletionSounds.length > 0 ? (
+                      <optgroup label="Custom">
+                        {customCompletionSounds.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
+                      </optgroup>
+                    ) : null}
+                    {draft.completionSoundId.startsWith('custom:') && !customCompletionSounds.some((sound) => sound.id === draft.completionSoundId) ? (
+                      <option value={draft.completionSoundId}>Missing custom sound</option>
+                    ) : null}
+                  </select>
+                </label>
+                <label>
+                  Volume · {Math.round(draft.completionSoundVolume * 100)}%
+                  <input aria-label="Completion sound volume" type="range" min="0" max="1" step="0.05" value={draft.completionSoundVolume} disabled={!draft.completionSoundEnabled} onChange={(event) => patchDraft({ completionSoundVolume: Number(event.target.value) })} />
+                </label>
+                <div className="vibelink-settings-actions">
+                  <button type="button" disabled={!draft.completionSoundEnabled} onClick={() => void previewCompletionSound()}><Play size={14} /> Preview</button>
+                  <button type="button" onClick={() => completionSoundInputRef.current?.click()}><Upload size={14} /> Add audio file</button>
+                  <input
+                    ref={completionSoundInputRef}
+                    hidden
+                    aria-label="Add custom notification sound"
+                    type="file"
+                    accept=".mp3,.wav,.ogg,.m4a,.aac,.flac,audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/aac,audio/flac"
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0]
+                      event.currentTarget.value = ''
+                      if (file) void importCompletionSound(file)
+                    }}
+                  />
+                </div>
+                {builtInCompletionSounds.find((sound) => sound.id === draft.completionSoundId)?.description ? (
+                  <div className="vibelink-settings-note"><span>{builtInCompletionSounds.find((sound) => sound.id === draft.completionSoundId)?.description}</span></div>
+                ) : null}
+                {customCompletionSounds.length > 0 ? (
+                  <div className="vibelink-notification-sound-list" aria-label="Custom notification sounds">
+                    {customCompletionSounds.map((sound) => (
+                      <div key={sound.id} className="vibelink-notification-sound-row">
+                        <span><strong>{sound.name}</strong><small>{Math.max(1, Math.round(sound.size / 1024))} KB</small></span>
+                        <div>
+                          <button type="button" title={`Preview ${sound.name}`} onClick={() => void previewCompletionSound(sound.id)}><Play size={13} /></button>
+                          <button type="button" title={`Remove ${sound.name}`} onClick={() => void deleteCompletionSound(sound)}><Trash2 size={13} /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="vibelink-settings-note"><span>Built-in sounds are generated locally and ship license-free. Custom MP3, WAV, OGG, M4A, AAC, and FLAC files up to 10 MB stay in this app's local browser storage.</span></div>
+                {completionSoundMessage ? <div className="vibelink-settings-note"><span>{completionSoundMessage}</span></div> : null}
+              </SettingsGroup>
             ) : null}
 
             {activeSection === 'workspace' ? (

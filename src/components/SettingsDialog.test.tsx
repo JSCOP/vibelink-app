@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
@@ -39,6 +40,37 @@ describe('SettingsDialog editor preferences', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ editorWordWrap: false, editorMinimap: true }))
+  })
+
+  test('stages built-in completion sound and volume changes until Apply', () => {
+    const onChange = vi.fn()
+    render(
+      <SettingsDialog
+        settings={normalizeSettings(defaultSettings)}
+        onChange={onChange}
+        onClose={vi.fn()}
+        onRunSetupWizard={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications' }))
+    expect(screen.getByRole('checkbox', { name: 'Play completion sound' })).toBeChecked()
+    const sound = screen.getByRole('combobox', { name: 'Completion sound' })
+    expect(screen.getByRole('option', { name: 'Clear chime' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Soft bell' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Success rise' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Gentle pulse' })).toBeInTheDocument()
+
+    fireEvent.change(sound, { target: { value: 'builtin:soft-bell' } })
+    fireEvent.change(screen.getByRole('slider', { name: 'Completion sound volume' }), { target: { value: '0.25' } })
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({
+      completionSoundEnabled: true,
+      completionSoundId: 'builtin:soft-bell',
+      completionSoundVolume: 0.25,
+    }))
   })
 
   test('lists workspace navigation shortcuts in Advanced settings', () => {

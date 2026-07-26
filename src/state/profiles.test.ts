@@ -243,6 +243,27 @@ describe('terminal profiles', () => {
     })
   })
 
+  test('normalizes completion sound preferences', () => {
+    expect(defaultSettings).toMatchObject({
+      completionSoundEnabled: true,
+      completionSoundId: 'builtin:clear-chime',
+      completionSoundVolume: 0.55,
+    })
+    expect(normalizeSettings({
+      completionSoundEnabled: false,
+      completionSoundId: 'custom:12345678-abcd',
+      completionSoundVolume: 0.25,
+    })).toMatchObject({
+      completionSoundEnabled: false,
+      completionSoundId: 'custom:12345678-abcd',
+      completionSoundVolume: 0.25,
+    })
+    expect(normalizeSettings({ completionSoundId: 'missing', completionSoundVolume: 4 })).toMatchObject({
+      completionSoundId: defaultSettings.completionSoundId,
+      completionSoundVolume: defaultSettings.completionSoundVolume,
+    })
+  })
+
   test('normalizes workspace specific profile defaults', () => {
     const settings = normalizeSettings({
       defaultProfileId: 'powershell',
