@@ -107,6 +107,7 @@ import {
 } from './workspaceLayoutModel'
 import {
   centralGridIsEmpty,
+  closeStrayTerminalPanels,
   createWorkspaceResizeCoordinator,
   collapseStructuralWorkspacePanel,
   toggleStructuralWorkspacePanel,
@@ -1094,7 +1095,22 @@ export function WorkspaceView({
     if (panelId.startsWith('content:terminal:')) {
       const paneId = panelId.slice('content:terminal:'.length)
       const handle = findTerminalWindowForPane(paneId)
-      if (!handle) return 'cancelled'
+      if (!handle) {
+        // No window owns this pane. A layout written before panes moved into a
+        // terminal window can still hold a TOP-LEVEL terminal panel; without
+        // this path its close button is inert and the panel is stuck in the
+        // outer dock forever. Close the panel, then release the pane.
+        const stray = api.getPanel(panelId)
+        if (!stray) return 'cancelled'
+        pendingTerminalPaneIdsRef.current.add(paneId)
+        TerminalManager.dispose(paneId)
+        await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { stray.api.close() })
+        void closePaneInStore(paneId, owner.sessionId)
+          .catch((error) => useWorkspaceStore.getState().setError(String(error)))
+          .finally(() => pendingTerminalPaneIdsRef.current.delete(paneId))
+        persistLayoutSoon()
+        return 'closed'
+      }
       // Closing is optimistic. `close_pane` kills the shell AND its whole
       // descendant process tree (pwsh -> omp -> bun -> ConPTY), a daemon round
       // trip measured at 130 ms for an idle prompt and far longer for a loaded
@@ -1351,6 +1367,11 @@ export function WorkspaceView({
           applyEdgeDefaults = true
         }
         ensureWorkspaceEdgeShell(api)
+        // Legacy layouts (panes as outer panels) upgrade in place: the seeded
+        // window below adopts every LIVE pane, so any top-level terminal panel
+        // left here is unreachable chrome. Drop it before the dock is handed to
+        // the user; the healed layout is persisted by the tail of this run.
+        closeStrayTerminalPanels(api)
         if (applyEdgeDefaults) resetWorkspaceEdgeDefaults(api, rootWidth)
         else collapseWorkspaceEdgesForCenterWidth(api, rootWidth)
       })
@@ -1553,9 +1574,12 @@ export function WorkspaceView({
         requestAnimationFrame(() => {
           const owner = layoutOwnerRef.current
           if (!owner || owner.api !== event.api || !ownsLayout(owner)) return
-          if (removed && (removed.kind === 'terminal' || removed.kind === 'browser' || removed.kind === 'editor')) {
-            const resourceIsLive = removed.kind !== 'terminal' || Boolean(useWorkspaceStore.getState().panes[removed.paneId]?.alive)
-            if (resourceIsLive && !event.api.getPanel(removedPanel.id)) addContentPanel(removed, { inactive: true }, event.api)
+          // Terminal panes are never outer-dock resources. A live pane whose
+          // panel disappears is re-adopted by its window's pane sync, so
+          // re-adding it here would recreate exactly the unreachable top-level
+          // pane panel the restore path removes.
+          if (removed && (removed.kind === 'browser' || removed.kind === 'editor') && !event.api.getPanel(removedPanel.id)) {
+            addContentPanel(removed, { inactive: true }, event.api)
           }
           void reconcileTerminalPanels(
             event.api,

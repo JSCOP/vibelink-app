@@ -5,6 +5,7 @@ import {
   authoredWorkspaceLayoutHistoryLimit,
   rememberAuthoredLayout,
   collapseStructuralWorkspacePanel,
+  closeStrayTerminalPanels,
   toggleStructuralWorkspacePanel,
   toggleWorkspaceLeftSidebar,
   collapseWorkspaceEdgesForCenterWidth,
@@ -46,6 +47,7 @@ type FakePanel = {
     setTitle: Mock
     setActive: Mock
     moveTo: Mock
+    close: Mock
   }
 }
 
@@ -94,6 +96,11 @@ function fakeDock(initialGridIds: string[] = []) {
           panel.group.panels = panel.group.panels.filter((candidate) => candidate !== panel)
           panel.group = destination
           destination.panels.splice(index ?? destination.panels.length, 0, panel)
+        }),
+        close: vi.fn(() => {
+          panel.group.panels = panel.group.panels.filter((candidate) => candidate !== panel)
+          const index = panels.indexOf(panel)
+          if (index >= 0) panels.splice(index, 1)
         }),
       },
     }
@@ -336,6 +343,21 @@ describe('WorkspaceView shell primitives', () => {
 
     collapseWorkspaceEdgesForCenterWidth(api, 700)
     expect(left.api.collapse).toHaveBeenCalledOnce()
+  })
+
+  it('closes top-level terminal panels left by pre-window layouts', () => {
+    // Panes moved into a nested terminal window. A layout persisted before that
+    // still carries outer `content:terminal:*` panels whose close button is
+    // inert (no window owns the pane), so they were stuck on screen forever.
+    const { api, groups, makePanel } = fakeDock(['grid-main'])
+    const stray = makePanel({ schema: 1, kind: 'terminal', instanceId: 'pane-omp', title: 'omp', icon: 'zap', paneId: 'pane-omp' }, groups[0])
+    const window = makePanel({ schema: 1, kind: 'terminalWindow', instanceId: 'win-1', title: 'Terminal', icon: 'terminal', inner: null, titlesHidden: false }, groups[0])
+    const editor = makePanel({ schema: 1, kind: 'editor', instanceId: 'a.ts', title: 'a.ts', icon: 'file-code', relPath: 'a.ts' }, groups[0])
+
+    expect(closeStrayTerminalPanels(api)).toEqual([stray.id])
+    expect(stray.api.close).toHaveBeenCalledOnce()
+    expect(window.api.close).not.toHaveBeenCalled()
+    expect(editor.api.close).not.toHaveBeenCalled()
   })
 })
 

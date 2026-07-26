@@ -300,3 +300,15 @@ export function collapseWorkspaceEdgesForCenterWidth(api: DockviewApi, rootWidth
 export function centralGridIsEmpty(api: DockviewApi): boolean {
   return !api.groups.some((group) => group.api.location.type === 'grid' && group.panels.length > 0)
 }
+
+/** Terminal panes live inside a terminal WINDOW's nested Dockview, so the outer
+ * dock must never hold a `terminal` panel. Layouts written before that split
+ * still carry top-level pane panels, and they are unreachable: every close path
+ * resolves a pane id through its owning window, finds none, and cancels — so the
+ * panel survives as a dead column no X can remove. Close them and report which
+ * ids went; a still-live pane is re-adopted by the window's pane sync. */
+export function closeStrayTerminalPanels(api: DockviewApi): string[] {
+  const strays = api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')
+  for (const panel of strays) panel.api.close()
+  return strays.map((panel) => panel.id)
+}
