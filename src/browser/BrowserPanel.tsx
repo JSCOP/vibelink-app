@@ -1,11 +1,12 @@
 import './BrowserPanel.css'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
-import type { ChangeEvent, FormEvent } from 'react'
+import type { ChangeEvent, FocusEvent, FormEvent } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { formatBrowserAnnotation } from './agentContext'
 import { activeSurfaceVisible, browserPanelReducer, createBrowserPanelState } from './state'
 import type {
   BrowserAnnotation,
   BrowserCertificatePrompt,
-  BrowserAnnotationDestination,
   BrowserContentController,
   BrowserContentState,
   BrowserCookieImportSource,
@@ -17,8 +18,6 @@ import type {
   PhysicalBounds,
 } from './types'
 
-export type LiveAgentPane = { paneId: string; title: string; role: string | null }
-
 type BrowserPanelProps = {
   controller: BrowserContentController
   initialState: BrowserContentState
@@ -26,11 +25,9 @@ type BrowserPanelProps = {
   focused: boolean
   workspaceVisible: boolean
   nativeSurfacesSuspended?: boolean
-  liveAgentPanes?: LiveAgentPane[]
   onStateChange?: (state: BrowserContentState) => void
   onError?: (error: string) => void
   onTitleChange?: (title: string) => void
-  onDeliverAnnotation?: (annotation: BrowserAnnotation, destination: BrowserAnnotationDestination) => Promise<void>
 }
 
 const devicePresets: Record<string, BrowserDeviceMetrics | null> = {
@@ -109,6 +106,36 @@ function dialogPrompt(event: BrowserLifecycleEvent): BrowserDialogPrompt | null 
   }
 }
 
+// WebView2 raises one `PermissionRequested` PER FRAME, so a page whose iframes
+// all ask for the same capability (Naver sign-in asks every login frame for
+// `sensors`) produced a stack of identical, indistinguishable cards. Show ONE
+// card per (permission, origin) — that is the whole decision the user can make
+// — while keeping every underlying request id so the single click resolves all
+// of them. Dropping a request instead would orphan its native deferral and
+// hang that frame forever.
+function groupPermissionPrompts(queue: BrowserPermissionPrompt[]): Array<{ key: string; permission: string; origin: string; requestIds: string[] }> {
+  const groups = new Map<string, { key: string; permission: string; origin: string; requestIds: string[] }>()
+  for (const request of queue) {
+    const key = `${request.permission}\u0000${request.origin}`
+    const existing = groups.get(key)
+    if (existing) existing.requestIds.push(request.id)
+    else groups.set(key, { key, permission: request.permission, origin: request.origin, requestIds: [request.id] })
+  }
+  return [...groups.values()]
+}
+
+// Raw WebView2 capability ids ("sensors", "midi_system_exclusive") are not
+// answerable by a user. State what the page is actually asking for.
+const permissionLabels: Record<string, string> = {
+  microphone: 'Use your microphone',
+  camera: 'Use your camera',
+  geolocation: 'Know your location',
+  notifications: 'Show notifications',
+  clipboard_read: 'Read your clipboard',
+  midi_system_exclusive: 'Use MIDI devices',
+  window_management: 'Manage windows across your displays',
+}
+
 export function BrowserPanel({
   controller,
   initialState,
@@ -116,11 +143,9 @@ export function BrowserPanel({
   focused,
   workspaceVisible,
   nativeSurfacesSuspended = false,
-  liveAgentPanes = [],
   onStateChange,
   onError,
   onTitleChange,
-  onDeliverAnnotation,
 }: BrowserPanelProps) {
   const [state, dispatch] = useReducer(browserPanelReducer, initialState, createBrowserPanelState)
   const [overflowOpen, setOverflowOpen] = useState(false)
@@ -132,6 +157,7 @@ export function BrowserPanel({
   const [cookieImportStatus, setCookieImportStatus] = useState<string | null>(null)
   const [operationError, setOperationError] = useState<string | null>(null)
   const [navigationActionPending, setNavigationActionPending] = useState(false)
+  const [copyNotice, setCopyNotice] = useState<string | null>(null)
   const addressInput = useRef<HTMLInputElement>(null)
   const surfaceHost = useRef<HTMLDivElement>(null)
   const surfaceEpoch = useRef(0)
@@ -144,6 +170,7 @@ export function BrowserPanel({
   const lastPublishedSurface = useRef<{ bounds: PhysicalBounds | null; visible: boolean; focused: boolean } | null>(null)
   const page = state.page
   const pendingPromptCount: number = state.permissionQueue.length + state.certificateQueue.length + state.dialogQueue.length
+  const permissionGroups = useMemo(() => groupPermissionPrompts(state.permissionQueue), [state.permissionQueue])
   const navigationBlocked = navigationActionPending || page.loadState === 'loading'
   // Annotation no longer hides the native page: the annotation UI is an in-page
   // popover injected into the WebView itself, so the page must stay visible.
@@ -155,6 +182,15 @@ export function BrowserPanel({
     && !domSurfaceBlocker
   const panelVisibleRef = useRef(false)
   const focusedRef = useRef(false)
+  // A native child WebView2 owns the real Win32 keyboard focus while it is
+  // focused, and there is no "unfocus" call — so DOM focus landing on this
+  // panel's own chrome (address bar, buttons) does NOT take keystrokes back
+  // from the page. The address bar then looked focused and silently swallowed
+  // every character. Track chrome focus explicitly and publish `focused:false`
+  // so the native side hands the focus HWND back to the host webview.
+  const chromeFocused = useRef(false)
+  const [chromeHasFocus, setChromeHasFocus] = useState(false)
+  const nativeFocusWanted = focused && !chromeHasFocus && page.url !== 'about:blank'
 
   // These refs MUST be updated before any other layout effect runs.
   // `publishSurface` reads `panelVisibleRef`/`focusedRef` rather than the
@@ -165,8 +201,8 @@ export function BrowserPanel({
   // but the native child was told to stay hidden, leaving a blank pane.
   useLayoutEffect(() => {
     panelVisibleRef.current = panelVisible
-    focusedRef.current = focused && page.url !== 'about:blank'
-  }, [focused, page.url, panelVisible])
+    focusedRef.current = nativeFocusWanted
+  }, [nativeFocusWanted, panelVisible])
 
   useEffect(() => onStateChange?.(state), [onStateChange, state])
   useEffect(() => onTitleChange?.(page.title || 'Browser'), [onTitleChange, page.title])
@@ -322,7 +358,7 @@ export function BrowserPanel({
   useEffect(() => {
     const epoch = surfaceEpoch.current
     void publishSurface(latestBounds.current, epoch, true).catch(() => undefined)
-  }, [focused, page.url, publishSurface])
+  }, [nativeFocusWanted, page.url, publishSurface])
 
   useEffect(() => {
     if (!active || !workspaceVisible || nativeSurfacesSuspended || page.url !== 'about:blank') return
@@ -351,6 +387,72 @@ export function BrowserPanel({
     }
   }, [controller, page.id])
 
+  // Chrome focus is what decides whether the native child keeps the Win32
+  // focus HWND. `onPointerDownCapture` matters as much as `onFocusCapture`:
+  // clicking a toolbar button that never takes DOM focus must still pull the
+  // keyboard back, otherwise the next keystroke goes to the page.
+  const handleChromeFocus = useCallback(() => {
+    chromeFocused.current = true
+    setChromeHasFocus(true)
+  }, [])
+
+  // A blur inside the toolbar that lands on another toolbar control is not a
+  // release; only a blur whose target leaves the chrome hands the page back.
+  const handleChromeBlur = useCallback((event: FocusEvent<HTMLElement>) => {
+    const next = event.relatedTarget
+    if (next instanceof Node && event.currentTarget.contains(next)) return
+    chromeFocused.current = false
+    setChromeHasFocus(false)
+  }, [])
+
+  useEffect(() => {
+    if (!copyNotice) return
+    const timer = window.setTimeout(() => setCopyNotice(null), 2200)
+    return () => window.clearTimeout(timer)
+  }, [copyNotice])
+
+  // Clipboard copy MUST go through the native command. The in-app browser hands
+  // the OS keyboard focus to a native child WebView2, and
+  // `navigator.clipboard.writeText` throws "Document is not focused" from a
+  // host document that does not hold Win32 focus — exactly the state the user
+  // is in while annotating a live page.
+  const copyAnnotation = useCallback(async (annotation: BrowserAnnotation) => {
+    const text = formatBrowserAnnotation(annotation)
+    try {
+      await invoke('clipboard_write_text', { text })
+    } catch {
+      await navigator.clipboard.writeText(text)
+    }
+    if (mounted.current) setCopyNotice('Annotation copied to the clipboard.')
+  }, [])
+
+  // WebView2 denies every `window.open`/`target="_blank"` popup, and until now
+  // the denial was terminal: the click emitted `popup_requested` and nothing
+  // else happened. Real sites route ordinary links that way (naver.com's 메일,
+  // 카페, 뉴스 shortcuts are all `target="_blank"`), so those buttons looked
+  // completely dead. Adopt the blocked target into THIS pane instead — the
+  // single-pane browser has no tab strip to hand it to.
+  const adoptBlockedPopup = useCallback((url: string) => {
+    const target = url.trim()
+    if (!target || !/^https?:/i.test(target)) return
+    navigationActionPendingRef.current = true
+    setNavigationActionPending(true)
+    void controller.navigate(page.id, target)
+      .then((result) => {
+        if (!mounted.current) return
+        if (result.navigationGeneration > authoritativeGeneration.current) {
+          authoritativeGeneration.current = result.navigationGeneration
+          dispatch({ type: 'navigationStarted', input: result.url, generation: result.navigationGeneration })
+          dispatch({ type: 'navigationCommitted', url: result.url, generation: result.navigationGeneration })
+        }
+      })
+      .catch((error) => {
+        navigationActionPendingRef.current = false
+        setNavigationActionPending(false)
+        if (mounted.current) reportError(error)
+      })
+  }, [controller, page.id, reportError])
+
   useEffect(() => {
     if (!controller.subscribeLifecycle) return
     let cancelled = false
@@ -366,6 +468,7 @@ export function BrowserPanel({
       if (certificate) dispatch({ type: 'certificateQueued', request: certificate })
       const dialog = dialogPrompt(event)
       if (dialog) dispatch({ type: 'dialogQueued', request: dialog })
+      if (event.kind === 'popup_requested' && event.url) adoptBlockedPopup(event.url)
       if (event.kind === 'navigation_finished' || event.kind === 'navigation_failed') {
         navigationActionPendingRef.current = false
         setNavigationActionPending(false)
@@ -380,7 +483,7 @@ export function BrowserPanel({
       cancelled = true
       unsubscribe?.()
     }
-  }, [controller, page.id, reportError])
+  }, [adoptBlockedPopup, controller, page.id, reportError])
 
   useEffect(() => {
     if (!controller.subscribeDesignGrabs) return
@@ -388,15 +491,15 @@ export function BrowserPanel({
     let unsubscribe: (() => void) | undefined
     void controller.subscribeDesignGrabs((grab) => {
       if (grab.pageId !== page.id || grab.navigationGeneration !== page.navigationGeneration) return
-      // The in-page annotation popover already collected the comment and the
-      // user clicked "Send to Agent"; create the annotation with that comment
-      // and deliver it straight to the Agent panel. The native page stays
-      // visible throughout (annotation state is no longer a surface blocker).
+      // The in-page popover already collected the note and the user clicked
+      // "Copy". Create the annotation for its screenshot crop/metadata, then
+      // put the formatted text on the OS clipboard so the user can paste it
+      // wherever they want. Nothing is pushed at an agent panel.
       const comment = grab.comment ?? ''
       void controller.createAnnotation(page.id, grab, comment)
         .then((annotation) => {
           if (cancelled) return
-          if (onDeliverAnnotation) void onDeliverAnnotation(annotation, { kind: 'agent' }).catch(reportError)
+          return copyAnnotation(annotation)
         })
         .catch(reportError)
     }).then((stop) => {
@@ -407,7 +510,7 @@ export function BrowserPanel({
       cancelled = true
       unsubscribe?.()
     }
-  }, [controller, onDeliverAnnotation, page.id, page.navigationGeneration, reportError])
+  }, [controller, copyAnnotation, page.id, page.navigationGeneration, reportError])
 
   const profileLabel = useMemo(() => {
     if (state.profile.kind === 'workspace') return 'Workspace'
@@ -477,7 +580,7 @@ export function BrowserPanel({
       .catch(reportError)
   }
 
-  const deliverAnnotation = (destination: BrowserAnnotationDestination) => {
+  const deliverAnnotation = () => {
     const annotation = state.annotation
     if (!annotation) return
     if (annotation.navigationGeneration !== page.navigationGeneration) {
@@ -485,11 +588,17 @@ export function BrowserPanel({
       reportError('The annotation is stale because the page navigated. Pick the element again.')
       return
     }
-    if (destination.kind === 'copy') {
-      void import('./agentContext').then(({ formatBrowserAnnotation }) => navigator.clipboard.writeText(formatBrowserAnnotation(annotation))).catch(reportError)
-      return
+    void copyAnnotation(annotation).catch(reportError)
+  }
+
+  // Every grouped request id MUST be resolved: each one holds a live WebView2
+  // deferral, and an unresolved deferral blocks that frame indefinitely.
+  const resolvePermissionGroup = (requestIds: string[], decision: 'allow_once' | 'allow_for_origin' | 'deny') => {
+    for (const requestId of requestIds) {
+      void controller.resolvePermission(requestId, decision)
+        .then(() => dispatch({ type: 'permissionResolved', requestId }))
+        .catch(reportError)
     }
-    if (onDeliverAnnotation) void onDeliverAnnotation(annotation, destination).catch(reportError)
   }
 
   const detectCookieSource = () => {
@@ -546,7 +655,12 @@ export function BrowserPanel({
 
   return (
     <section className="browser-panel" aria-label={`Browser page ${page.title}`} aria-busy={page.loadState === 'loading'} data-load-state={page.loadState}>
-      <div className="browser-toolbar">
+      <div
+        className="browser-toolbar"
+        onFocusCapture={handleChromeFocus}
+        onBlurCapture={handleChromeBlur}
+        onPointerDownCapture={handleChromeFocus}
+      >
         <button type="button" aria-label="Back" disabled={navigationBlocked || !page.canGoBack} onClick={() => runPageNavigation(() => controller.goBack(page.id))}>←</button>
         <button type="button" aria-label="Forward" disabled={navigationBlocked || !page.canGoForward} onClick={() => runPageNavigation(() => controller.goForward(page.id))}>→</button>
         <button type="button" aria-label="Reload" disabled={navigationBlocked} onClick={() => runPageNavigation(() => controller.reload(page.id))}>↻</button>
@@ -580,39 +694,43 @@ export function BrowserPanel({
           ) : null}
         </div>
         {pendingPromptCount > 0 ? <span className="browser-prompt-count" aria-label="Pending browser prompts">{pendingPromptCount}</span> : null}
+        {copyNotice ? <span role="status" className="browser-toolbar-notice">{copyNotice}</span> : null}
         {operationError || page.error ? <span role="alert" className="browser-toolbar-error" title={operationError ?? page.error ?? undefined}>{operationError ?? page.error}</span> : null}
       </div>
 
       {state.annotation ? (
-        <aside className="browser-annotation" aria-label="Browser annotation">
+        <aside
+          className="browser-annotation"
+          aria-label="Browser annotation"
+          onFocusCapture={handleChromeFocus}
+          onBlurCapture={handleChromeBlur}
+          onPointerDownCapture={handleChromeFocus}
+        >
           <div>
             <strong>{state.annotation.accessibleName || state.annotation.browserRef}</strong>
             <span>{state.annotation.domAncestry.join(' › ')}</span>
           </div>
           <input
             aria-label="Annotation comment"
-            placeholder="What should change?"
+            placeholder="Add a note (optional)"
             value={state.annotationComment}
             onChange={(event) => dispatch({ type: 'annotationCommentChanged', comment: event.target.value })}
           />
-          <button type="button" onClick={() => deliverAnnotation({ kind: 'agent' })}>VibeLink Agent</button>
-          {liveAgentPanes.map((pane) => (
-            <button key={pane.paneId} type="button" title={pane.role ?? pane.title} onClick={() => deliverAnnotation({ kind: 'terminal', ...pane })}>{pane.title}</button>
-          ))}
-          <button type="button" onClick={() => deliverAnnotation({ kind: 'copy' })}>Copy</button>
+          <button type="button" onClick={deliverAnnotation}>Copy</button>
           <button type="button" aria-label="Clear browser annotation" onClick={() => dispatch({ type: 'annotationCleared' })}>×</button>
         </aside>
       ) : null}
 
       {pendingPromptCount > 0 && !page.effectiveVisible ? (
         <section className="browser-prompts" aria-label="Browser security prompts">
-          {state.permissionQueue.map((request) => (
-            <article key={request.id}>
-              <strong>Permission: {request.permission}</strong><span>{request.origin}</span>
+          {permissionGroups.map((group) => (
+            <article key={group.key}>
+              <strong>{permissionLabels[group.permission] ?? `Permission: ${group.permission}`}</strong>
+              <span>{group.origin}{group.requestIds.length > 1 ? ` · ${group.requestIds.length} frames` : ''}</span>
               <div>
-                <button type="button" onClick={() => void controller.resolvePermission(request.id, 'allow_once').then(() => dispatch({ type: 'permissionResolved', requestId: request.id })).catch(reportError)}>Allow once</button>
-                <button type="button" onClick={() => void controller.resolvePermission(request.id, 'allow_for_origin').then(() => dispatch({ type: 'permissionResolved', requestId: request.id })).catch(reportError)}>Allow origin</button>
-                <button type="button" onClick={() => void controller.resolvePermission(request.id, 'deny').then(() => dispatch({ type: 'permissionResolved', requestId: request.id })).catch(reportError)}>Deny</button>
+                <button type="button" onClick={() => resolvePermissionGroup(group.requestIds, 'allow_once')}>Allow once</button>
+                <button type="button" onClick={() => resolvePermissionGroup(group.requestIds, 'allow_for_origin')}>Always allow</button>
+                <button type="button" onClick={() => resolvePermissionGroup(group.requestIds, 'deny')}>Deny</button>
               </div>
             </article>
           ))}

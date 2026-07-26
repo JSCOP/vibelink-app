@@ -18,8 +18,6 @@ import type {
   BrowserPermissionPrompt,
   BrowserProfile,
 } from './types'
-import { isAgentPane } from '../state/profiles'
-import { useWorkspaceStore } from '../state/store'
 
 type BackendProfile = BrowserProfile & { pageIds: string[]; userDataDir?: string | null }
 type BackendPage = BrowserPage & { droppedFrameCount?: number; latestFrameSequence?: number | null; focused?: boolean; visibilityLeaseCount?: number }
@@ -56,10 +54,7 @@ export function BrowserContentPanel({
   workspaceVisible,
   nativeSurfacesSuspended = false,
   onTitleChange,
-  onDeliverAnnotation,
 }: BrowserContentPanelProps & { nativeSurfacesSuspended?: boolean }) {
-  const panes = useWorkspaceStore((state) => state.panes)
-  const settings = useWorkspaceStore((state) => state.settings)
   const [initialState, setInitialState] = useState<BrowserContentState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [surfaceOwnerGeneration] = useState(nextSurfaceOwnerGeneration)
@@ -67,14 +62,6 @@ export function BrowserContentPanel({
   const latestSurfaceUpdateGeneration = useRef(0)
   const lifecycleSubscribers = useRef(new Set<(event: BrowserLifecycleEvent) => void>())
   const bufferedLifecycleEvents = useRef<BrowserLifecycleEvent[]>([])
-
-  const liveAgentPanes = useMemo(() => Object.values(panes)
-    .filter((pane) => pane.alive && isAgentPane(pane, settings))
-    .map((pane) => ({
-      paneId: pane.id,
-      title: pane.config.title?.trim() || pane.id,
-      role: settings.paneRoles[pane.id]?.trim() || pane.config.role?.trim() || null,
-    })), [panes, settings])
 
   const controller = useMemo<BrowserContentController>(() => ({
     async navigate(targetPageId, input) {
@@ -220,9 +207,7 @@ export function BrowserContentPanel({
       focused={focused}
       workspaceVisible={workspaceVisible}
       nativeSurfacesSuspended={nativeSurfacesSuspended}
-      liveAgentPanes={liveAgentPanes}
       onTitleChange={onTitleChange}
-      onDeliverAnnotation={onDeliverAnnotation}
     />
   )
 }

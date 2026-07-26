@@ -166,6 +166,16 @@
   font-size: 11px;
 }
 
+.browser-toolbar-notice {
+  flex: 0 0 auto;
+  max-width: 240px;
+  overflow: hidden;
+  color: #7ee787;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .browser-panel-empty {
   display: grid;
   place-items: center;

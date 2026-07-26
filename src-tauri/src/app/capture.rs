@@ -643,6 +643,18 @@ pub async fn clipboard_write_image(png_bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn clipboard_write_text(text: String) -> Result<(), String> {
+    // The in-app browser hands the OS keyboard focus to a native child
+    // WebView2, and `navigator.clipboard.writeText` refuses to run from a
+    // document that does not hold focus ("Document is not focused"). Copying
+    // through the OS clipboard directly is focus-independent, so browser
+    // annotations can be copied while the page itself is focused.
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(to_string)
+}
+
+#[tauri::command]
 pub fn read_capture_file(dir: String, path: String) -> Result<Vec<u8>, String> {
     let path = resolve_capture_image_file(&dir, &path)?;
     std::fs::read(path).map_err(to_string)

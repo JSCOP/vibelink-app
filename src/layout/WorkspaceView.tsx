@@ -45,15 +45,13 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { ProLockedPanel } from '../components/ProLockedPanel'
 import { BrowserContentPanel as NativeBrowserContentPanel } from '../browser/BrowserDockPanel'
 import { closeBrowserContent } from '../browser/browserContentLifecycle'
-import { browserAnnotationDeliveryPayload, publishBrowserAnnotationDraft } from '../browser/agentContext'
-import type { BrowserAnnotation, BrowserAnnotationDestination, BrowserPage, BrowserProfile } from '../browser/types'
+import type { BrowserPage, BrowserProfile } from '../browser/types'
 import { EditorContentPanel } from '../editor/EditorContentPanel'
 import {
   getEditorDocumentStore,
   requestEditorDocumentClose,
   type NativeSaveTextDocumentResult,
 } from '../editor/documentStore'
-import { sendToPane, submitAgentPrompt } from '../ipc/panes'
 import type { DirEntryInfo, PaneMeta } from '../ipc/types'
 import type { WorkspaceCreationInput } from '../ipc/providerIntegrations'
 import { TerminalManager } from '../terminal/TerminalManager'
@@ -280,7 +278,6 @@ type WorkspaceIntegrationContextValue = {
 const WorkspaceIntegrationContext = createContext<WorkspaceIntegrationContextValue>({})
 
 function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
-  const actions = useContext(WorkspaceContentActionsContext)
   const { layoutOwner, nativeSurfacesSuspended = false } = useContext(WorkspaceIntegrationContext)
   const params = parseWorkspaceContentParams(props.params)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
@@ -325,37 +322,6 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
     props.api.setTitle(nextTitle)
   }, [props.api])
 
-  // Stabilize onDeliverAnnotation too: an inline arrow re-subscribed BrowserPanel's
-  // design-grab listener on every render. Keyed on its real inputs so it only
-  // changes when they do.
-  const browserTargetGroupId = props.api.group.id
-  const handleDeliverAnnotation = useCallback(async (annotation: BrowserAnnotation, destination: BrowserAnnotationDestination) => {
-    if (!actions) throw new Error('Workspace content actions are unavailable.')
-    if (!workspaceId || workspaceEpoch === null) throw new Error('The browser workspace is not ready.')
-    const payload = browserAnnotationDeliveryPayload(annotation, destination)
-    if (destination.kind === 'agent') {
-      const panelId = await actions.openContent({ kind: 'agent', targetGroupId: browserTargetGroupId, workspaceId, workspaceEpoch })
-      if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
-      if (panelId) actions.activateContent(panelId)
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-      if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
-      publishBrowserAnnotationDraft(annotation)
-      return
-    }
-    if (destination.kind === 'copy') {
-      await navigator.clipboard.writeText(payload.prompt)
-      return
-    }
-    if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) throw new Error('The browser workspace changed before delivery completed.')
-    const pane = useWorkspaceStore.getState().panes[destination.paneId]
-    if (!pane?.alive || !payload.paneId) throw new Error('The selected terminal destination is no longer live.')
-    await sendToPane(workspaceId, payload.paneId, payload.prompt, false)
-    if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
-    await submitAgentPrompt(workspaceId, payload.paneId)
-    if (getWorkspaceSessionEpoch() !== workspaceEpoch || getWorkspaceSessionReadyEpoch() !== workspaceEpoch || getWorkspaceSessionTargetId() !== workspaceId) return
-    actions.activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: payload.paneId }))
-  }, [actions, browserTargetGroupId, workspaceEpoch, workspaceId])
-
   if (!workspaceId || workspaceEpoch === null || params?.kind !== 'browser') {
     return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Browser content metadata is missing.</div></WindowPanelShell>
   }
@@ -372,7 +338,6 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
             workspaceVisible={panelState.visible && !nativeSurfacesSuspended}
             nativeSurfacesSuspended={nativeSurfacesSuspended}
             onTitleChange={handleBrowserTitleChange}
-            onDeliverAnnotation={handleDeliverAnnotation}
           />
         </ErrorBoundary>
       </ProPanelBoundary>

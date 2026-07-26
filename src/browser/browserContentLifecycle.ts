@@ -1,9 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type {
-  BrowserAnnotation,
-  BrowserAnnotationDestination,
-  BrowserCloseResult,
-} from './types'
+import type { BrowserCloseResult } from './types'
 
 export type BrowserContentPanelProps = {
   workspaceId: string
@@ -13,7 +9,6 @@ export type BrowserContentPanelProps = {
   focused: boolean
   workspaceVisible: boolean
   onTitleChange?: (title: string) => void
-  onDeliverAnnotation?: (annotation: BrowserAnnotation, destination: BrowserAnnotationDestination) => Promise<void>
 }
 
 // Workspace content integration calls this before removing the matching

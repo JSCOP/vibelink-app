@@ -318,6 +318,7 @@ pub fn run() {
             capture::open_capture_overlay,
             capture::capture_region_image,
             capture::clipboard_write_image,
+            capture::clipboard_write_text,
             capture::read_capture_file,
             capture::start_video_capture,
             capture::stop_video_capture,

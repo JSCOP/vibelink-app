@@ -255,7 +255,7 @@ use webview2_com::{
     take_pwstr,
     Microsoft::Web::WebView2::Win32::{
         ICoreWebView2PermissionRequestedEventArgs3, ICoreWebView2_14, COREWEBVIEW2_PERMISSION_KIND,
-        COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_STATE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
         COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_SCRIPT_DIALOG_KIND,
         COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD,
         COREWEBVIEW2_SCRIPT_DIALOG_KIND_CONFIRM, COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT,
@@ -392,6 +392,23 @@ impl NativeBrowserProvider {
                 "native browser state lock is poisoned",
             )
         })
+    }
+
+    // Returning keyboard focus to the host is NOT symmetric with focusing the
+    // guest. `Webview::set_focus` only ever moves Win32 focus INTO a webview;
+    // there is no "unfocus". So when the app's own chrome (address bar, tab,
+    // dialog) takes DOM focus while the guest page still owns the OS focus
+    // HWND, every keystroke keeps going to the guest and the user sees a
+    // focused-looking input that silently swallows typing. Explicitly focusing
+    // the parent window's webview hands the focus HWND back.
+    fn focus_host_webview(&self) {
+        if let Some(webview) = self.app.get_webview(&self.parent_window_label) {
+            let _ = webview.set_focus();
+            return;
+        }
+        if let Some(window) = self.app.get_webview_window(&self.parent_window_label) {
+            let _ = window.set_focus();
+        }
     }
 
     fn validate_user_data_dir(&self, user_data_dir: &std::path::Path) -> BrowserResult<()> {
@@ -933,6 +950,7 @@ impl BrowserProvider for NativeBrowserProvider {
         let page = pages
             .get_mut(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
+        let was_focused = page.state.focused;
         if focused {
             if !page.state.visible {
                 return Err(BrowserError::new(
@@ -943,6 +961,10 @@ impl BrowserProvider for NativeBrowserProvider {
             page.webview.set_focus().map_err(native_error)?;
         }
         page.state.focused = focused;
+        drop(pages);
+        if !focused && was_focused {
+            self.focus_host_webview();
+        }
         Ok(())
     }
 
@@ -1003,8 +1025,14 @@ impl BrowserProvider for NativeBrowserProvider {
         if let Some(bounds) = bounds {
             page.state.bounds = bounds;
         }
+        let was_focused = page.state.focused;
         page.state.visible = visible;
         page.state.focused = visible && focused;
+        let released_focus = was_focused && !page.state.focused;
+        drop(pages);
+        if released_focus {
+            self.focus_host_webview();
+        }
         Ok(())
     }
 
@@ -1176,7 +1204,7 @@ impl BrowserProvider for NativeBrowserProvider {
             .get(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
         let script = if enabled {
-            r#"(()=>{if(window.__vibelinkDesignGrab)return;const HL='3px solid #ff2d55';let active=null;const clearHL=()=>{if(active){active.style.outline=active.dataset.vibelinkOutline||'';delete active.dataset.vibelinkOutline;active=null}};const hover=(event)=>{if(window.__vibelinkDesignPopover)return;clearHL();active=event.target;active.dataset.vibelinkOutline=active.style.outline||'';active.style.outline=HL};const removePopover=()=>{const p=window.__vibelinkDesignPopover;if(p){p.remove();window.__vibelinkDesignPopover=null}};const buildSelection=(e,comment)=>{const r=e.getBoundingClientRect();const ancestry=[];for(let n=e;n&&n.nodeType===1;n=n.parentElement)ancestry.unshift(n.tagName.toLowerCase()+(n.id?'#'+n.id:''));const styles=getComputedStyle(e);return{browserRef:e.tagName.toLowerCase()+(e.id?'#'+e.id:''),domAncestry:ancestry,accessibleName:e.getAttribute('aria-label')||e.innerText||e.value||'',bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height),scaleFactorMilli:Math.round(devicePixelRatio*1000)},computedStyles:['display','position','color','background-color','font-family','font-size'].map(k=>[k,styles.getPropertyValue(k)]),attributes:Array.from(e.attributes).map(a=>[a.name,a.value]),text:e.innerText||e.value||'',comment:comment||'',sourceHints:[]}};const submit=(e,comment)=>{removePopover();clearHL();location.href='vibelink-design://grab?payload='+encodeURIComponent(JSON.stringify(buildSelection(e,comment)))};const showPopover=(e)=>{removePopover();const r=e.getBoundingClientRect();const box=document.createElement('div');box.setAttribute('data-vibelink-annot','1');const top=r.top>150;box.style.cssText='position:fixed;z-index:2147483647;left:'+Math.max(8,Math.min(r.left,innerWidth-320))+'px;'+(top?('top:'+(r.top-8)+'px;transform:translateY(-100%);'):('top:'+(r.bottom+8)+'px;'))+'width:300px;background:#14171c;color:#e6e6e6;border:1px solid #2d333b;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);font:13px system-ui,sans-serif;padding:10px;box-sizing:border-box';const crumb=e.tagName.toLowerCase()+(e.id?'#'+e.id:'');box.innerHTML='<div style=\"font-weight:600;color:#ff6b8a;margin-bottom:6px;word-break:break-all\">'+crumb+'</div>';const ta=document.createElement('textarea');ta.placeholder='What should change here?';ta.style.cssText='width:100%;min-height:56px;resize:vertical;background:#0d0f12;color:#e6e6e6;border:1px solid #2d333b;border-radius:6px;padding:6px;font:13px system-ui,sans-serif;box-sizing:border-box';const row=document.createElement('div');row.style.cssText='display:flex;gap:6px;justify-content:flex-end;margin-top:8px';const mk=(label,primary)=>{const b=document.createElement('button');b.textContent=label;b.style.cssText='padding:5px 12px;border-radius:6px;border:1px solid '+(primary?'#3b82f6':'#2d333b')+';background:'+(primary?'#2563eb':'transparent')+';color:#e6e6e6;cursor:pointer;font:13px system-ui,sans-serif';return b};const cancel=mk('Cancel',false);const send=mk('Send to Agent',true);cancel.onclick=(ev)=>{ev.stopPropagation();removePopover();clearHL()};send.onclick=(ev)=>{ev.stopPropagation();submit(e,ta.value)};ta.onkeydown=(ev)=>{ev.stopPropagation();if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter')submit(e,ta.value);if(ev.key==='Escape'){removePopover();clearHL()}};row.appendChild(cancel);row.appendChild(send);box.appendChild(ta);box.appendChild(row);document.documentElement.appendChild(box);window.__vibelinkDesignPopover=box;setTimeout(()=>ta.focus(),0)};const click=(event)=>{if(event.target.closest&&event.target.closest('[data-vibelink-annot]'))return;event.preventDefault();event.stopImmediatePropagation();showPopover(event.target)};document.addEventListener('mouseover',hover,true);document.addEventListener('click',click,true);window.__vibelinkDesignGrab={hover,click,clear:()=>{removePopover();clearHL()}}})()"#
+            r#"(()=>{if(window.__vibelinkDesignGrab)return;const HL='3px solid #ff2d55';let active=null;const clearHL=()=>{if(active){active.style.outline=active.dataset.vibelinkOutline||'';delete active.dataset.vibelinkOutline;active=null}};const hover=(event)=>{if(window.__vibelinkDesignPopover)return;clearHL();active=event.target;active.dataset.vibelinkOutline=active.style.outline||'';active.style.outline=HL};const removePopover=()=>{const p=window.__vibelinkDesignPopover;if(p){p.remove();window.__vibelinkDesignPopover=null}};const buildSelection=(e,comment)=>{const r=e.getBoundingClientRect();const ancestry=[];for(let n=e;n&&n.nodeType===1;n=n.parentElement)ancestry.unshift(n.tagName.toLowerCase()+(n.id?'#'+n.id:''));const styles=getComputedStyle(e);return{browserRef:e.tagName.toLowerCase()+(e.id?'#'+e.id:''),domAncestry:ancestry,accessibleName:e.getAttribute('aria-label')||e.innerText||e.value||'',bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height),scaleFactorMilli:Math.round(devicePixelRatio*1000)},computedStyles:['display','position','color','background-color','font-family','font-size'].map(k=>[k,styles.getPropertyValue(k)]),attributes:Array.from(e.attributes).map(a=>[a.name,a.value]),text:e.innerText||e.value||'',comment:comment||'',sourceHints:[]}};const toast=(msg)=>{const t=document.createElement('div');t.setAttribute('data-vibelink-annot','1');t.textContent=msg;t.style.cssText='position:fixed;z-index:2147483647;left:50%;top:16px;transform:translateX(-50%);background:#14171c;color:#e6e6e6;border:1px solid #2d333b;border-radius:8px;padding:8px 14px;font:13px system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5)';document.documentElement.appendChild(t);setTimeout(()=>t.remove(),1800)};const submit=(e,comment)=>{removePopover();clearHL();toast('Copied to clipboard');location.href='vibelink-design://grab?payload='+encodeURIComponent(JSON.stringify(buildSelection(e,comment)))};const showPopover=(e)=>{removePopover();const r=e.getBoundingClientRect();const box=document.createElement('div');box.setAttribute('data-vibelink-annot','1');const top=r.top>150;box.style.cssText='position:fixed;z-index:2147483647;left:'+Math.max(8,Math.min(r.left,innerWidth-320))+'px;'+(top?('top:'+(r.top-8)+'px;transform:translateY(-100%);'):('top:'+(r.bottom+8)+'px;'))+'width:300px;background:#14171c;color:#e6e6e6;border:1px solid #2d333b;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);font:13px system-ui,sans-serif;padding:10px;box-sizing:border-box';const crumb=e.tagName.toLowerCase()+(e.id?'#'+e.id:'');box.innerHTML='<div style=\"font-weight:600;color:#ff6b8a;margin-bottom:6px;word-break:break-all\">'+crumb+'</div>';const ta=document.createElement('textarea');ta.placeholder='Add a note (optional)';ta.style.cssText='width:100%;min-height:56px;resize:vertical;background:#0d0f12;color:#e6e6e6;border:1px solid #2d333b;border-radius:6px;padding:6px;font:13px system-ui,sans-serif;box-sizing:border-box';const row=document.createElement('div');row.style.cssText='display:flex;gap:6px;justify-content:flex-end;margin-top:8px';const mk=(label,primary)=>{const b=document.createElement('button');b.textContent=label;b.style.cssText='padding:5px 12px;border-radius:6px;border:1px solid '+(primary?'#3b82f6':'#2d333b')+';background:'+(primary?'#2563eb':'transparent')+';color:#e6e6e6;cursor:pointer;font:13px system-ui,sans-serif';return b};const cancel=mk('Cancel',false);const send=mk('Copy',true);cancel.onclick=(ev)=>{ev.stopPropagation();removePopover();clearHL()};send.onclick=(ev)=>{ev.stopPropagation();submit(e,ta.value)};ta.onkeydown=(ev)=>{ev.stopPropagation();if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter')submit(e,ta.value);if(ev.key==='Escape'){removePopover();clearHL()}};row.appendChild(cancel);row.appendChild(send);box.appendChild(ta);box.appendChild(row);document.documentElement.appendChild(box);window.__vibelinkDesignPopover=box;setTimeout(()=>ta.focus(),0)};const click=(event)=>{if(event.target.closest&&event.target.closest('[data-vibelink-annot]'))return;event.preventDefault();event.stopImmediatePropagation();showPopover(event.target)};document.addEventListener('mouseover',hover,true);document.addEventListener('click',click,true);window.__vibelinkDesignGrab={hover,click,clear:()=>{removePopover();clearHL()}}})()"#
         } else {
             r#"(()=>{const d=window.__vibelinkDesignGrab;if(!d)return;document.removeEventListener('mouseover',d.hover,true);document.removeEventListener('click',d.click,true);d.clear();delete window.__vibelinkDesignGrab})()"#
         };
@@ -1785,8 +1813,8 @@ fn attach_native_prompt_handlers(
                 let origin = security_origin(&take_pwstr(raw_uri));
                 let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
                 args.PermissionKind(&mut kind)?;
-                if kind == COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE {
-                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                if let Some(state) = automatic_permission_state(kind) {
+                    args.SetState(state)?;
                     deferral.Complete()?;
                     return Ok(());
                 }
@@ -2019,6 +2047,32 @@ fn permission_kind_name(kind: COREWEBVIEW2_PERMISSION_KIND) -> &'static str {
         11 => "midi_system_exclusive",
         12 => "window_management",
         _ => "unknown",
+    }
+}
+
+// WebView2 raises `PermissionRequested` for capabilities that a normal Chrome
+// tab decides silently, and it raises one PER FRAME. `nid.naver.com` (Naver
+// sign-in) requests `sensors` from every login iframe, which produced four
+// identical "Permission: sensors" cards that meant nothing to the user AND —
+// because any pending prompt hid the native surface — left the sign-in page
+// blank behind them.
+//
+// Anything a browser would not interrupt for gets decided here and never
+// reaches the UI. Only genuinely user-visible capabilities (camera,
+// microphone, geolocation, notifications, clipboard read, MIDI SysEx, window
+// management) still prompt.
+#[cfg(windows)]
+fn automatic_permission_state(
+    kind: COREWEBVIEW2_PERMISSION_KIND,
+) -> Option<COREWEBVIEW2_PERMISSION_STATE> {
+    match kind.0 {
+        // Motion/orientation sensors, autoplay, and local font enumeration are
+        // ambient page capabilities; Chrome grants them without any prompt.
+        5 | 9 | 10 => Some(COREWEBVIEW2_PERMISSION_STATE_ALLOW),
+        // Filesystem write access and bulk downloads are never granted to a
+        // guest page in this browser.
+        7 | 8 => Some(COREWEBVIEW2_PERMISSION_STATE_DENY),
+        _ => None,
     }
 }
 

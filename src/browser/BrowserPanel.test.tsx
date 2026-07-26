@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { invoke } from '@tauri-apps/api/core'
 import { BrowserPanel } from './BrowserPanel'
+import { formatBrowserAnnotation } from './agentContext'
 import { activeSurfaceVisible, browserPanelReducer, createBrowserPanelState } from './state'
-import type { BrowserAnnotation, BrowserContentController, BrowserContentState, BrowserDesignGrab, BrowserPage, PhysicalBounds } from './types'
+import type { BrowserAnnotation, BrowserContentController, BrowserContentState, BrowserDesignGrab, BrowserLifecycleEvent, BrowserPage, PhysicalBounds } from './types'
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }))
 
 const page: BrowserPage = {
   id: 'page-a',
@@ -61,7 +65,9 @@ function state(): BrowserContentState {
 class RecordingController implements BrowserContentController {
   surfaces: Array<{ pageId: string; bounds: PhysicalBounds | null; visible: boolean; focused: boolean }> = []
   designHandler: ((grab: BrowserDesignGrab) => void) | null = null
-  async navigate(_pageId: string, input: string) { return { url: input, navigationGeneration: 3 } }
+  lifecycleHandler: ((event: BrowserLifecycleEvent) => void) | null = null
+  navigations: string[] = []
+  async navigate(_pageId: string, input: string) { this.navigations.push(input); return { url: input, navigationGeneration: 3 } }
   async goBack() {}
   async goForward() {}
   async reload() {}
@@ -75,8 +81,10 @@ class RecordingController implements BrowserContentController {
   async detectCookieImportSource(endpoint: string) { return { endpoint, browser: 'chrome' as const, origins: ['https://example.com'] } }
   async importCookies() { return { importedCount: 1, originCount: 1, verified: true, rolledBack: false, quarantined: false } }
   async subscribeDesignGrabs(handler: (grab: BrowserDesignGrab) => void) { this.designHandler = handler; return () => { this.designHandler = null } }
+  async subscribeLifecycle(handler: (event: BrowserLifecycleEvent) => void) { this.lifecycleHandler = handler; return () => { this.lifecycleHandler = null } }
 }
 
+beforeEach(() => vi.mocked(invoke).mockClear())
 afterEach(() => cleanup())
 
 describe('browser content state', () => {
@@ -106,24 +114,35 @@ describe('BrowserPanel', () => {
     await waitFor(() => expect(controller.surfaces.some((surface) => surface.pageId === page.id)).toBe(true))
   })
 
-  it('routes annotations to the explicit Agent and exact live pane destinations', async () => {
+  it('copies an annotation to the OS clipboard instead of pushing it at an agent', async () => {
     const controller = new RecordingController()
-    const deliver = vi.fn(async () => undefined)
-    render(
-      <BrowserPanel
-        controller={controller}
-        initialState={{ ...state(), annotation }}
-        active
-        focused
-        workspaceVisible
-        liveAgentPanes={[{ paneId: 'pane-codex', title: 'Codex', role: 'Reviewer' }]}
-        onDeliverAnnotation={deliver}
-      />,
-    )
-    fireEvent.click(screen.getByRole('button', { name: 'VibeLink Agent' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Codex' }))
-    await waitFor(() => expect(deliver).toHaveBeenNthCalledWith(1, annotation, { kind: 'agent' }))
-    expect(deliver).toHaveBeenNthCalledWith(2, annotation, { kind: 'terminal', paneId: 'pane-codex', title: 'Codex', role: 'Reviewer' })
+    render(<BrowserPanel controller={controller} initialState={{ ...state(), annotation }} active focused workspaceVisible />)
+    // Only a clipboard action exists now; the old agent/pane destinations are gone.
+    expect(screen.queryByRole('button', { name: 'VibeLink Agent' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    // Copy MUST go through the native command: the guest WebView2 owns the OS
+    // focus, so `navigator.clipboard` would throw "Document is not focused".
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('clipboard_write_text', { text: formatBrowserAnnotation(annotation) }))
+    expect(await screen.findByText('Annotation copied to the clipboard.')).toBeInTheDocument()
+  })
+
+  it('adopts a blocked target="_blank" popup into this pane instead of dropping the click', async () => {
+    // Real sites (naver.com's 메일/카페/뉴스 shortcuts) are ordinary
+    // `target="_blank"` links. WebView2 denies every popup, so without this the
+    // buttons were completely dead.
+    const controller = new RecordingController()
+    render(<BrowserPanel controller={controller} initialState={state()} active focused workspaceVisible />)
+    await waitFor(() => expect(controller.lifecycleHandler).not.toBeNull())
+    controller.lifecycleHandler?.({
+      sequence: 1,
+      pageId: page.id,
+      navigationGeneration: page.navigationGeneration,
+      kind: 'popup_requested',
+      url: 'https://mail.naver.com/',
+      detail: 'popup blocked pending explicit tab creation',
+      timestampMs: 0,
+    })
+    await waitFor(() => expect(controller.navigations).toContain('https://mail.naver.com/'))
   })
 
   it('calls a stable onTitleChange only when the title actually changes, never every render', async () => {

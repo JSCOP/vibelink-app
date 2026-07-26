@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { browserAnnotationDeliveryPayload, formatBrowserAnnotation } from './agentContext'
+import { formatBrowserAnnotation } from './agentContext'
 import type { BrowserAnnotation } from './types'
 
 const annotation: BrowserAnnotation = {
@@ -29,12 +29,10 @@ describe('browser annotation formatting', () => {
     expect(prompt).toContain('Comment: Use the primary accent.')
   })
 
-  it('returns the exact pane transport payload without using clipboard as transport', () => {
-    expect(browserAnnotationDeliveryPayload(annotation, { kind: 'terminal', paneId: 'pane-1', title: 'Codex', role: 'Builder' })).toEqual({
-      destination: { kind: 'terminal', paneId: 'pane-1', title: 'Codex', role: 'Builder' },
-      prompt: formatBrowserAnnotation(annotation),
-      artifactPath: 'C:/artifacts/design-crop.png',
-      paneId: 'pane-1',
-    })
+  it('names the exact screenshot artifact and element identity a paste must carry', () => {
+    const prompt = formatBrowserAnnotation(annotation)
+    expect(prompt).toContain('Element: button#save')
+    expect(prompt).toContain('DOM ancestry: html > body > button#save')
+    expect(prompt).toContain('Source hints: src/App.tsx')
   })
 })
