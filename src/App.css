@@ -6054,6 +6054,17 @@ button.git-window-primary-action,
   pointer-events: none;
 }
 
+/* Divider drags keep xterm's expensive scrollback grid stable, but the visible
+ * renderer still follows Dockview through a compositor-only scale. The host
+ * clips the transformed surface; the final pointerup fit restores crisp glyphs
+ * before the next paint. */
+.dock-terminal-host.terminal-resize-preview .xterm-screen {
+  transform: scale(var(--vibelink-terminal-resize-scale-x, 1), var(--vibelink-terminal-resize-scale-y, 1)) !important;
+  transform-origin: top left !important;
+  transition: none !important;
+  will-change: transform;
+}
+
 /* Import repos dialog */
 .import-repos-backdrop {
   align-items: center;

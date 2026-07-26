@@ -40,6 +40,10 @@ vi.mock('@xterm/xterm', () => {
     }
     open(container: HTMLElement): void {
       this.element = document.createElement('div')
+      this.element.className = 'xterm'
+      const screen = document.createElement('div')
+      screen.className = 'xterm-screen'
+      this.element.appendChild(screen)
       container.appendChild(this.element)
     }
     focus(): void { this.focusCalls += 1 }
@@ -103,17 +107,38 @@ function makeContainer(): HTMLElement {
   return el
 }
 
+const resizeObservers = new Set<StubResizeObserver>()
+
+class StubResizeObserver {
+  private target: Element | undefined
+  private readonly callback: ResizeObserverCallback
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback
+    resizeObservers.add(this)
+  }
+
+  observe(target: Element): void { this.target = target }
+  unobserve(target: Element): void { if (this.target === target) this.target = undefined }
+  disconnect(): void { this.target = undefined }
+
+  emit(target: Element, width: number, height: number): void {
+    if (this.target !== target) return
+    this.callback([{ target, contentRect: { width, height } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+  }
+}
+
+function emitResize(target: Element, width: number, height: number): void {
+  for (const observer of resizeObservers) observer.emit(target, width, height)
+}
+
 beforeEach(() => {
+  resizeObservers.clear()
   invokeMock.mockReset()
   invokeMock.mockResolvedValue(undefined)
   useRemotePaneLeaseStore.setState({ leases: {} })
 })
 
-class StubResizeObserver {
-  observe(): void {}
-  unobserve(): void {}
-  disconnect(): void {}
-}
 vi.stubGlobal('ResizeObserver', StubResizeObserver)
 
 describe('TerminalManager pre-session input buffering', () => {
@@ -289,7 +314,7 @@ describe('TerminalManager divider resize scheduling', () => {
     const manager = TerminalManager as unknown as {
       entries: Map<string, {
         fit: { fit(): void }
-        term: { cols: number }
+        term: { cols: number; element?: HTMLElement }
         observedSize?: { width: number; height: number }
         lastFitRect?: { width: number; height: number }
       }>
@@ -324,42 +349,71 @@ describe('TerminalManager divider resize scheduling', () => {
     }
     const paneId = 'pane-divider-fit-hold'
     const container = makeContainer()
-    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({
+    let hostWidth = 500
+    vi.spyOn(container, 'getBoundingClientRect').mockImplementation(() => ({
       x: 0,
       y: 0,
-      width: 500,
+      width: hostWidth,
       height: 300,
       top: 0,
-      right: 500,
+      right: hostWidth,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    }))
+    TerminalManager.attach(paneId, container)
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing divider resize entry')
+    const screen = entry.term.element?.querySelector<HTMLElement>('.xterm-screen')
+    if (!screen) throw new Error('missing xterm screen')
+    vi.spyOn(screen, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 482,
+      height: 300,
+      top: 0,
+      right: 482,
       bottom: 300,
       left: 0,
       toJSON: () => ({}),
     })
-    TerminalManager.attach(paneId, container)
-    const entry = manager.entries.get(paneId)
-    if (!entry) throw new Error('missing divider resize entry')
     flushFrames()
     expect(entry.lastFitRect).toEqual({ width: 500, height: 300 })
     const fitSpy = vi.spyOn(entry.fit, 'fit')
     const sash = document.createElement('div')
     sash.className = 'dv-sash'
+    vi.spyOn(sash, 'getBoundingClientRect').mockReturnValue({
+      x: 500,
+      y: 0,
+      width: 4,
+      height: 300,
+      top: 0,
+      right: 504,
+      bottom: 300,
+      left: 500,
+      toJSON: () => ({}),
+    })
     document.body.appendChild(sash)
     const release = () => document.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }))
 
     try {
       sash.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
-      entry.observedSize = { width: 650, height: 300 }
+      hostWidth = 650
+      emitResize(container, hostWidth, 300)
       entry.term.cols = 79
-      TerminalManager.reflow(paneId)
       flushFrames()
 
       expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(true)
       expect(fitSpy).not.toHaveBeenCalled()
+      expect(container.classList.contains('terminal-resize-preview')).toBe(true)
+      expect(Number(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x'))).toBeCloseTo(632 / 482)
 
       release()
       flushFrames()
       expect(fitSpy).toHaveBeenCalled()
       expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(false)
+      expect(container.classList.contains('terminal-resize-preview')).toBe(false)
+      expect(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x')).toBe('')
     } finally {
       if (document.documentElement.classList.contains('vibelink-interacting')) release()
       sash.remove()

@@ -59,6 +59,16 @@ const WINDOW_RESIZE_SETTLE_MS = 160
 // the drag can be observed before the layout storm starts.
 const SASH_SELECTOR = '.dv-sash'
 
+type DividerResizePreview = {
+  axis: 'x' | 'y'
+  hostWidth: number
+  hostHeight: number
+  screenWidth: number
+  screenHeight: number
+  scale: number
+  active: boolean
+}
+
 
 
 
@@ -90,6 +100,9 @@ type Entry = {
   /** Last size reported by this pane's ResizeObserver, so the layout pass does
    *  not have to force a synchronous layout to re-measure it. */
   observedSize?: { width: number; height: number }
+  /** Stable xterm surface dimensions captured before a divider moves. The
+   *  screen is compositor-scaled to the live host size until the final fit. */
+  resizePreview?: DividerResizePreview
   lastSentPtyCols?: number
   lastSentPtyRows?: number
   /** When this pane last sent `resize_pane`; rate-limits PTY resizes during a drag. */
@@ -145,8 +158,12 @@ class TerminalManagerImpl {
    *  observed here rather than through a Dockview API. */
   private handlePointerDown = (event: PointerEvent): void => {
     const target = event.target
-    if (!(target instanceof Element) || !target.closest(SASH_SELECTOR)) return
+    if (!(target instanceof Element)) return
+    const sash = target.closest<HTMLElement>(SASH_SELECTOR)
+    if (!sash) return
+    const rect = sash.getBoundingClientRect()
     this.beginInteraction('divider')
+    this.prepareDividerResizePreviews(rect.height >= rect.width ? 'x' : 'y')
     // Mirror the exact set of end triggers Dockview's own sash uses, so this
     // interaction can never outlive the drag it is throttling.
     const end = () => {
@@ -182,8 +199,9 @@ class TerminalManagerImpl {
     beginInteractiveResize(kind)
     // A column-changing xterm fit reflows the pane's entire scrollback and is
     // not preemptible once it starts. Loaded grids can therefore spend a full
-    // frame inside one pane even with the adaptive pass budget. Keep Dockview's
-    // box resize on the pointer path, but hold terminal fits until pointerup.
+    // frame inside one pane even with the adaptive pass budget. Hold terminal
+    // fits until pointerup; a compositor-only preview keeps the rendered
+    // surface attached to Dockview's live box without touching the xterm grid.
     if (kind === 'divider') this.cancelScheduledPassFlush()
     this.interactionDepth += 1
     if (this.interactionDepth > 1) return
@@ -218,8 +236,11 @@ class TerminalManagerImpl {
     // scheduled below then fits terminals to that final geometry.
     endInteractiveResize(kind)
     if (this.interactionDepth > 0) return
+    const dividerPaneIds = kind === 'divider'
+      ? [...new Set([...this.pendingPass.keys(), ...this.finishDividerResizePreviews()])]
+      : undefined
     this.markInteracting(false)
-    this.settleLayout({ paneIds: kind === 'divider' ? [...this.pendingPass.keys()] : undefined })
+    this.settleLayout({ paneIds: dividerPaneIds })
   }
 
   /** Terminals stop taking pointer events for the duration of the interaction.
@@ -230,6 +251,85 @@ class TerminalManagerImpl {
   private markInteracting(active: boolean): void {
     if (typeof document === 'undefined') return
     document.documentElement.classList.toggle('vibelink-interacting', active)
+  }
+
+  private prepareDividerResizePreviews(axis: DividerResizePreview['axis']): void {
+    for (const entry of this.entries.values()) this.clearDividerResizePreview(entry)
+    const measured: Array<{ entry: Entry; preview: DividerResizePreview }> = []
+    for (const entry of this.entries.values()) {
+      if (!entry.opened || entry.remoteLease || !entry.container) continue
+      const screen = entry.term.element?.querySelector<HTMLElement>('.xterm-screen')
+      if (!screen) continue
+      const hostRect = entry.container.getBoundingClientRect()
+      const screenRect = screen.getBoundingClientRect()
+      if (hostRect.width <= 0 || hostRect.height <= 0 || screenRect.width <= 0 || screenRect.height <= 0) continue
+      // A renderer-always pane hidden behind a tab can retain a large stale
+      // screen inside a near-zero host. It is not visible and must not join the
+      // preview set for the active layout.
+      if (Math.abs(hostRect.width - screenRect.width) > 64 || Math.abs(hostRect.height - screenRect.height) > 64) continue
+      measured.push({
+        entry,
+        preview: {
+          axis,
+          hostWidth: hostRect.width,
+          hostHeight: hostRect.height,
+          screenWidth: screenRect.width,
+          screenHeight: screenRect.height,
+          scale: 1,
+          active: false,
+        },
+      })
+    }
+    for (const { entry, preview } of measured) entry.resizePreview = preview
+  }
+
+  private updateDividerResizePreview(entry: Entry, size: { width: number; height: number }): void {
+    const preview = entry.resizePreview
+    const container = entry.container
+    if (!preview || !container) return
+    const baseScreenExtent = preview.axis === 'x' ? preview.screenWidth : preview.screenHeight
+    const hostDelta = preview.axis === 'x' ? size.width - preview.hostWidth : size.height - preview.hostHeight
+    const scale = Math.max(0.05, (baseScreenExtent + hostDelta) / baseScreenExtent)
+    if (Math.abs(scale - preview.scale) <= 0.0005) return
+    preview.scale = scale
+    preview.active = Math.abs(scale - 1) > 0.001
+    if (!preview.active) {
+      this.resetDividerResizePreviewStyles(entry)
+      return
+    }
+    container.classList.add('terminal-resize-preview')
+    container.style.setProperty(
+      preview.axis === 'x' ? '--vibelink-terminal-resize-scale-x' : '--vibelink-terminal-resize-scale-y',
+      String(scale),
+    )
+  }
+
+  private finishDividerResizePreviews(): string[] {
+    const measured: Array<{ entry: Entry; width: number; height: number }> = []
+    for (const entry of this.entries.values()) {
+      if (!entry.resizePreview || !entry.container) continue
+      const rect = entry.container.getBoundingClientRect()
+      measured.push({ entry, width: rect.width, height: rect.height })
+    }
+    for (const { entry, width, height } of measured) this.updateDividerResizePreview(entry, { width, height })
+    const changed: string[] = []
+    for (const entry of this.entries.values()) {
+      if (!entry.resizePreview) continue
+      if (entry.resizePreview.active) changed.push(entry.paneId)
+      else this.clearDividerResizePreview(entry)
+    }
+    return changed
+  }
+
+  private resetDividerResizePreviewStyles(entry: Entry): void {
+    entry.container?.classList.remove('terminal-resize-preview')
+    entry.container?.style.removeProperty('--vibelink-terminal-resize-scale-x')
+    entry.container?.style.removeProperty('--vibelink-terminal-resize-scale-y')
+  }
+
+  private clearDividerResizePreview(entry: Entry): void {
+    this.resetDividerResizePreviewStyles(entry)
+    entry.resizePreview = undefined
   }
 
   private get interactive(): boolean {
@@ -333,7 +433,10 @@ class TerminalManagerImpl {
     entry.sessionId = options.sessionId
     // Dockview re-parents panes on maximize/restore and pane swaps; a size
     // observed against the old container must not survive into the new one.
-    if (entry.container !== container) entry.observedSize = undefined
+    if (entry.container !== container) {
+      this.clearDividerResizePreview(entry)
+      entry.observedSize = undefined
+    }
     entry.container = container
     entry.term.options.theme = terminalThemeById(this.settings.terminalThemeId)
     this.applyScrollbarVisibility(entry)
@@ -401,7 +504,10 @@ class TerminalManagerImpl {
     entry.observer?.disconnect()
     entry.observer = new ResizeObserver((observed) => {
       const box = observed[observed.length - 1]?.contentRect
-      if (box) entry.observedSize = { width: box.width, height: box.height }
+      if (box) {
+        entry.observedSize = { width: box.width, height: box.height }
+        if (isDividerResizeActive()) this.updateDividerResizePreview(entry, box)
+      }
       this.scheduleLayoutPass({ paneIds: [paneId] })
     })
     entry.observer.observe(container)
@@ -802,6 +908,10 @@ class TerminalManagerImpl {
           this.redraw(entry, { clearWebglTextureAtlas: pass.clearWebglTextureAtlas && entry.webgl !== undefined })
         }
       }
+      // fit() updates xterm's real screen dimensions synchronously. Drop the
+      // temporary scale in the same task so no stale or double-scaled frame can
+      // paint after pointerup.
+      this.clearDividerResizePreview(entry)
       entry.lastFitRect = { width: rect.width, height: rect.height }
       // A PTY resize held back during an interaction is sent by the settle pass
       // that endInteraction() schedules, so nothing is lost by skipping it here.
@@ -826,6 +936,7 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     agentActivityTracker.clear(paneId)
+    this.clearDividerResizePreview(entry)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     this.pendingPass.delete(paneId)
