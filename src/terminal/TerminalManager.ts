@@ -9,7 +9,7 @@ import { terminalThemeById } from '../state/terminalThemes'
 import { terminalFontStack } from '../state/fonts'
 import { createTerminalOptions, defaultTerminalSettings, terminalLetterSpacing, terminalLineHeight, type TerminalVisualSettings } from './options'
 import { terminalHostBecameMeasurable, terminalHostMeasureState, type TerminalHostMeasureState } from './geometry'
-import { interactivePassDelay, isViewportViable, shouldRedrawAfterFit, shouldSyncPtyNow } from './layoutPassPolicy'
+import { INTERACTIVE_FIT_FRAME_BUDGET_MS, interactivePassDelay, isViewportViable, shouldSyncPtyNow } from './layoutPassPolicy'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
@@ -114,6 +114,10 @@ class TerminalManagerImpl {
   private passFrame: number | undefined
   private passTimer: number | undefined
   private lastPassAt: number | undefined
+  /** Wall-clock cost of the last interactive fit pass. Drives the adaptive
+   *  throttle: the pass is cheap for idle panes and expensive for panes holding
+   *  scrollback, because a column change reflows the whole buffer. */
+  private lastPassDurationMs: number | undefined
   // Non-zero while a divider drag or a native window drag-resize is in flight.
   private interactionDepth = 0
   private windowResizeTimer: number | undefined
@@ -177,7 +181,12 @@ class TerminalManagerImpl {
   private beginInteraction(kind: InteractiveResizeKind): void {
     beginInteractiveResize(kind)
     this.interactionDepth += 1
-    if (this.interactionDepth === 1) this.markInteracting(true)
+    if (this.interactionDepth > 1) return
+    // A cost sampled from a previous gesture describes a layout that no longer
+    // exists (different pane count, different buffers). Start each gesture at
+    // the floor and let the first real pass re-measure.
+    this.lastPassDurationMs = undefined
+    this.markInteracting(true)
   }
 
   private endInteraction(kind: InteractiveResizeKind): void {
@@ -401,6 +410,15 @@ class TerminalManagerImpl {
 
   adoptRemoteResize(paneId: string, cols: number, rows: number): void {
     const entry = this.entries.get(paneId)
+    // The daemon broadcasts `PaneResized` to EVERY attached client, including
+    // the one that asked for it, so a purely local divider drag is echoed
+    // straight back at us. Adopting that echo is not free: it runs a
+    // `remote_get_pane_lease` IPC round trip per pane per resize and then
+    // `restoreDesktopFit`, which force-fits and repaints. Measured on an
+    // 8-pane drag: 70 adoptions, 70 of them echoes of a size this pane had
+    // just sent, zero of them holding a lease. A size we already sent tells
+    // us nothing new, so drop it before the round trip.
+    if (entry && entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows) return
     const generation = (entry?.remoteResizeGeneration ?? 0) + 1
     if (entry) entry.remoteResizeGeneration = generation
     void refreshRemotePaneLease(paneId).then((lease) => {
@@ -655,8 +673,10 @@ class TerminalManagerImpl {
   }
 
   /** Queue the animation-frame flush, honouring the interaction throttle. While
-   *  a divider or window drag is in flight the pass runs at most every
-   *  INTERACTIVE_FIT_INTERVAL_MS instead of once per pointermove frame. */
+   *  a divider or window drag is in flight the pass runs no more often than
+   *  `interactiveFitInterval` allows — one pass per display frame when the pass
+   *  is cheap, proportionally less often when scrollback reflow makes it
+   *  expensive, so the gesture keeps a share of the frame for its own layout. */
   private requestPassFlush(): void {
     if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
     // While the window is minimized the webview reports a degenerate viewport.
@@ -666,6 +686,7 @@ class TerminalManagerImpl {
       interactive: this.interactive,
       now: Date.now(),
       lastPassAt: this.lastPassAt,
+      lastPassDurationMs: this.lastPassDurationMs,
     })
     if (delay > 0) {
       this.passTimer = window.setTimeout(() => {
@@ -676,8 +697,25 @@ class TerminalManagerImpl {
     }
     this.passFrame = requestAnimationFrame(() => {
       this.passFrame = undefined
-      this.lastPassAt = Date.now()
+      // Only an interactive pass needs the cost sample, and `performance.now()`
+      // is the clock that can resolve a sub-millisecond pass. Outside a gesture
+      // the throttle is inactive, so skip the measurement entirely.
+      if (!this.interactive) {
+        this.lastPassAt = Date.now()
+        this.flushLayoutPass()
+        return
+      }
+      const started = performance.now()
       this.flushLayoutPass()
+      this.lastPassDurationMs = performance.now() - started
+      // Measure the cooldown from the END of the pass: an expensive pass that
+      // overran its own interval must not re-arm the instant it returns.
+      this.lastPassAt = Date.now()
+      // Panes the frame budget deferred are still queued, and the callers that
+      // normally re-arm the flush are pointermove events that may already have
+      // stopped. Re-arm here — AFTER the bookkeeping above, so the deferred
+      // work is throttled like any other pass instead of running back to back.
+      if (this.pendingPass.size > 0) this.requestPassFlush()
     })
   }
 
@@ -685,7 +723,31 @@ class TerminalManagerImpl {
     const pending = this.pendingPass
     this.pendingPass = new Map()
     const interactive = this.interactive
+    // A pass over N panes does N scrollback reflows back to back, and the frame
+    // it runs in cannot paint until the last one finishes. On an 8-pane grid a
+    // vertical divider touches four panes at ~5 ms each, so an unbounded pass
+    // blocks a single frame for ~21 ms however cheaply it is scheduled — the
+    // p99 spike that survived the throttle and repaint fixes.
+    //
+    // During a gesture, stop once the frame budget is spent and put the
+    // remaining panes back on the queue: they refit on the next pass, one or
+    // two frames later, while the divider keeps tracking the pointer. The panes
+    // are deferred, never dropped, and the drag-end settle re-fits every pane
+    // unconditionally, so the geometry the drag lands on is always exact.
+    const deadline = interactive ? performance.now() + INTERACTIVE_FIT_FRAME_BUDGET_MS : undefined
     for (const [paneId, pass] of pending) {
+      if (deadline !== undefined && performance.now() >= deadline) {
+        // Re-queue verbatim; merge with anything scheduled since this pass began.
+        const queued = this.pendingPass.get(paneId)
+        this.pendingPass.set(paneId, queued ? {
+          fit: true,
+          syncPty: queued.syncPty || pass.syncPty,
+          force: queued.force || pass.force,
+          repaint: queued.repaint || pass.repaint,
+          clearWebglTextureAtlas: queued.clearWebglTextureAtlas || pass.clearWebglTextureAtlas,
+        } : pass)
+        continue
+      }
       const entry = this.entries.get(paneId)
       if (!entry?.opened || entry.remoteLease || !pass.fit) continue
       // Prefer the size the ResizeObserver already measured: calling
@@ -705,18 +767,24 @@ class TerminalManagerImpl {
         if (!this.forceFitAndRepaint(entry)) continue
       } else {
         const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
-        const previousCols = entry.term.cols
-        const previousRows = entry.term.rows
         if (!this.safeFit(entry, pass.force || measurement.forceFitForMeasure)) {
           entry.forceFitOnNextMeasure = true
           continue
         }
-        const gridChanged = entry.term.cols !== previousCols || entry.term.rows !== previousRows
         if (wasAtBottom) entry.term.scrollToBottom()
         entry.forceFitOnNextMeasure = false
-        // Clearing the shared-free atlas is itself a repair request, so it
-        // implies a redraw even when the caller did not spell one out.
-        if (shouldRedrawAfterFit({ gridChanged, repaint: pass.repaint || pass.clearWebglTextureAtlas })) {
+        // A grid change does NOT need a repaint from us, though it reads like
+        // it should: xterm's `resize()` fires `onResize`, wired straight to
+        // `RenderService.handleResize()` -> `_fullRefresh()`, so every visible
+        // row is already dirty before we could ask. Repainting anyway made the
+        // renderer re-upload the whole model a second time on exactly the panes
+        // a divider drag reflows (verified live by counting
+        // `RenderService.refreshRows`: a lone resize issues 2, our follow-up
+        // refresh only added a redundant 3rd). Removing it measured fit-pass
+        // p90 24.8 ms -> 10.8 ms and drag frames over 16.7 ms 24 -> 5.
+        // Only an explicit repair may redraw; clearing the pane's private
+        // atlas is itself a repair, so it implies one.
+        if (pass.repaint || pass.clearWebglTextureAtlas) {
           this.redraw(entry, { clearWebglTextureAtlas: pass.clearWebglTextureAtlas && entry.webgl !== undefined })
         }
       }

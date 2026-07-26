@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   INTERACTIVE_FIT_INTERVAL_MS,
+  INTERACTIVE_FIT_MAX_INTERVAL_MS,
+  interactiveFitInterval,
   interactivePassDelay,
   isViewportViable,
-  shouldRedrawAfterFit,
   shouldSyncPtyNow,
 } from './layoutPassPolicy'
 
@@ -20,10 +21,19 @@ describe('interactivePassDelay', () => {
     expect(interactivePassDelay({ interactive: true, now: 1_005, lastPassAt: 1_000 })).toBe(INTERACTIVE_FIT_INTERVAL_MS - 5)
   })
 
-  it('keeps the interval short enough to refit once per display frame', () => {
+  it('keeps a cheap pass at one refit per display frame', () => {
     // At the old 100 ms the terminal refit 10x/s while the divider itself moved
     // at display rate, so the text visibly trailed the divider.
     expect(INTERACTIVE_FIT_INTERVAL_MS).toBeLessThanOrEqual(16)
+    expect(interactivePassDelay({ interactive: true, now: 1_016, lastPassAt: 1_000, lastPassDurationMs: 4 })).toBe(0)
+  })
+
+  it('stretches the interval when the previous pass was expensive', () => {
+    // Eight panes holding 5,000 lines each: one column change reflows every
+    // affected pane's scrollback, so the pass measured p90 15.2 ms. Re-arming
+    // that every 16 ms leaves the gesture no frame time of its own.
+    expect(interactivePassDelay({ interactive: true, now: 1_016, lastPassAt: 1_000, lastPassDurationMs: 15 })).toBe(14)
+    expect(interactivePassDelay({ interactive: true, now: 1_030, lastPassAt: 1_000, lastPassDurationMs: 15 })).toBe(0)
   })
 
   it('runs immediately once the fit interval has elapsed', () => {
@@ -33,6 +43,34 @@ describe('interactivePassDelay', () => {
 
   it('never defers longer than one interval when the clock jumps backwards', () => {
     expect(interactivePassDelay({ interactive: true, now: 900, lastPassAt: 1_000 })).toBe(INTERACTIVE_FIT_INTERVAL_MS)
+  })
+})
+
+describe('interactiveFitInterval', () => {
+  it('falls back to the floor when no pass has been measured', () => {
+    expect(interactiveFitInterval(undefined)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
+  })
+
+  it('never re-arms faster than one display frame for a cheap pass', () => {
+    // Half of a 0.5 ms pass is well under a frame; the floor keeps the content
+    // tracking the divider instead of chasing the sample downwards.
+    expect(interactiveFitInterval(0.5)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
+    expect(interactiveFitInterval(4)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
+  })
+
+  it('leaves the gesture at least half of the wall clock', () => {
+    expect(interactiveFitInterval(15)).toBe(30)
+    expect(interactiveFitInterval(21)).toBe(42)
+  })
+
+  it('caps the interval so a pathological pane slows but never freezes the drag', () => {
+    expect(interactiveFitInterval(500)).toBe(INTERACTIVE_FIT_MAX_INTERVAL_MS)
+  })
+
+  it('ignores a degenerate cost sample', () => {
+    expect(interactiveFitInterval(0)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
+    expect(interactiveFitInterval(Number.NaN)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
+    expect(interactiveFitInterval(-5)).toBe(INTERACTIVE_FIT_INTERVAL_MS)
   })
 })
 
@@ -53,28 +91,6 @@ describe('isViewportViable', () => {
   it('rejects a collapsed viewport', () => {
     expect(isViewportViable({ width: 0, height: 0 })).toBe(false)
     expect(isViewportViable(null)).toBe(false)
-  })
-})
-
-describe('shouldRedrawAfterFit', () => {
-  it('repaints when the fit changed the terminal grid', () => {
-    expect(shouldRedrawAfterFit({ gridChanged: true, repaint: false })).toBe(true)
-  })
-
-  it('repaints when a caller explicitly asked for renderer repair', () => {
-    // Pane became visible, restore from minimize, pointer repair, WebGL loss.
-    expect(shouldRedrawAfterFit({ gridChanged: false, repaint: true })).toBe(true)
-  })
-
-  it('skips the full-buffer repaint when nothing changed', () => {
-    expect(shouldRedrawAfterFit({ gridChanged: false, repaint: false })).toBe(false)
-  })
-
-  it('does NOT repaint a forced re-fit that left the grid alone', () => {
-    // A split runs the settle loop over many frames and forces a re-fit on each
-    // one because overlay rects go stale. Repainting there too made every pane
-    // redraw ~21 times per split, which is the visible blink.
-    expect(shouldRedrawAfterFit({ gridChanged: false, repaint: false })).toBe(false)
   })
 })
 

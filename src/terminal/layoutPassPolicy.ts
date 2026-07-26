@@ -1,17 +1,67 @@
 import type { TerminalHostSize } from './geometry'
 
-/** Minimum gap between terminal fit passes while an interactive resize (divider
- *  drag, native window drag-resize) is in flight.
+/** Floor for the gap between terminal fit passes while an interactive resize
+ *  (divider drag, native window drag-resize) is in flight.
  *
  *  This used to be 100 ms, which capped the terminal at 10 refits per second
  *  while Dockview moved the pane box at display rate — the divider slid
- *  smoothly and the text inside visibly lagged behind it. Measured live during
- *  a sash drag with the 100 ms throttle in place: rAF stayed at 163 fps, p50
- *  6.1 ms, p90 6.1 ms, max 18 ms, zero frames over 100 ms. The frame budget was
- *  not the constraint; the throttle was. One pass per display frame lets the
- *  content track the divider, and the pass still coalesces every pane into a
- *  single animation-frame flush and skips panes whose rect did not move. */
+ *  smoothly and the text inside visibly lagged behind it. One pass per display
+ *  frame lets the content track the divider, and the pass still coalesces every
+ *  pane into a single animation-frame flush and skips panes whose rect did not
+ *  move.
+ *
+ *  This is only the FLOOR. A fixed 16 ms cadence silently assumes the pass is
+ *  cheap, which is true for idle panes and false for loaded ones — see
+ *  `interactiveFitInterval`. */
 export const INTERACTIVE_FIT_INTERVAL_MS = 16
+
+/** Share of wall-clock time the interactive fit pass may occupy.
+ *
+ *  The pass is not free and its cost scales with the work the user actually has
+ *  on screen: `term.resize()` reflows the whole scrollback whenever the COLUMN
+ *  count changes. Measured on a 4x2 grid of eight panes holding 5,000 lines
+ *  each, one column-changing resize costs ~4.2 ms per affected pane, so a
+ *  single pass over the four panes a vertical divider touches costs ~17 ms —
+ *  measured pass duration p90 15.2 ms, max 21.1 ms.
+ *
+ *  Re-arming that pass every 16 ms asks the main thread to spend ~100% of every
+ *  frame reflowing, leaving no headroom for Dockview's own pointermove layout
+ *  and paint. That is the jank: with the fixed floor the same drag measured rAF
+ *  p90 15 ms / p99 37.4 ms / 21 frames over 16.7 ms, against a 6.5 ms p90 floor
+ *  with the fit pass stubbed out.
+ *
+ *  Budgeting the pass to half the wall clock keeps a cheap pass at one per
+ *  display frame (unchanged) and stretches an expensive one just far enough to
+ *  leave the compositor a whole frame to itself. */
+export const INTERACTIVE_FIT_MAX_DUTY_CYCLE = 0.5
+
+/** Ceiling for the adaptive interval. A pathological pane must slow the content
+ *  down, never stop it: past this the drag would read as frozen rather than
+ *  merely coarse, which is the failure mode the old 100 ms throttle had. */
+export const INTERACTIVE_FIT_MAX_INTERVAL_MS = 64
+
+/** Gap to leave before the next interactive fit pass, given what the previous
+ *  pass actually cost. Unknown/degenerate cost falls back to the floor. */
+export function interactiveFitInterval(lastPassDurationMs: number | undefined): number {
+  if (lastPassDurationMs === undefined || !Number.isFinite(lastPassDurationMs) || lastPassDurationMs <= 0) return INTERACTIVE_FIT_INTERVAL_MS
+  const budgeted = Math.ceil(lastPassDurationMs / INTERACTIVE_FIT_MAX_DUTY_CYCLE)
+  return Math.min(INTERACTIVE_FIT_MAX_INTERVAL_MS, Math.max(INTERACTIVE_FIT_INTERVAL_MS, budgeted))
+}
+
+/** Wall-clock a single interactive fit pass may spend before deferring the
+ *  panes it has not reached yet to the next pass.
+ *
+ *  The throttle controls how OFTEN the pass runs; it cannot make one pass
+ *  cheaper. A pass refits every dirty pane back to back, and the frame it runs
+ *  in cannot paint until the last reflow returns — on an 8-pane grid holding
+ *  5,000 lines each, the four panes a vertical divider touches cost ~5 ms
+ *  apiece, so one unbounded pass blocks a frame for ~21 ms no matter how
+ *  rarely it is scheduled.
+ *
+ *  Half a 60 Hz frame leaves the rest of the budget to Dockview's own
+ *  pointermove layout and the compositor. Deferred panes are re-queued, never
+ *  dropped, and the drag-end settle refits every pane on the final geometry. */
+export const INTERACTIVE_FIT_FRAME_BUDGET_MS = 8
 
 /** Minimum gap between PTY resizes while an interactive resize is in flight.
  *
@@ -28,18 +78,25 @@ export const INTERACTIVE_PTY_INTERVAL_MS = 100
 const MIN_VIEWPORT_WIDTH = 200
 const MIN_VIEWPORT_HEIGHT = 120
 
-/** Milliseconds to wait before running the next layout pass. 0 means "now". */
+/** Milliseconds to wait before running the next layout pass. 0 means "now".
+ *
+ *  `lastPassAt` is the moment the previous pass FINISHED, so this is a genuine
+ *  cooldown. Measuring from the pass start instead lets an expensive pass
+ *  overrun its own interval and re-arm immediately, which is how a 16 ms
+ *  cadence degenerates into back-to-back reflow. */
 export function interactivePassDelay(args: {
   interactive: boolean
   now: number
   lastPassAt: number | undefined
+  lastPassDurationMs?: number | undefined
 }): number {
   if (!args.interactive || args.lastPassAt === undefined) return 0
+  const interval = interactiveFitInterval(args.lastPassDurationMs)
   const elapsed = args.now - args.lastPassAt
-  if (elapsed >= INTERACTIVE_FIT_INTERVAL_MS) return 0
+  if (elapsed >= interval) return 0
   // A backwards clock jump must not park the pass indefinitely.
-  if (elapsed < 0) return INTERACTIVE_FIT_INTERVAL_MS
-  return INTERACTIVE_FIT_INTERVAL_MS - elapsed
+  if (elapsed < 0) return interval
+  return interval - elapsed
 }
 
 /** Whether the window geometry can host a real terminal fit.
@@ -51,23 +108,6 @@ export function interactivePassDelay(args: {
 export function isViewportViable(size: TerminalHostSize | null | undefined): boolean {
   if (!size) return false
   return size.width >= MIN_VIEWPORT_WIDTH && size.height >= MIN_VIEWPORT_HEIGHT
-}
-
-/** `term.refresh(0, rows - 1)` marks every visible row dirty and makes the
- *  renderer re-upload the whole model, so it must not run on passes where the
- *  fit left the grid untouched.
- *
- *  `force` and `repaint` are deliberately SEPARATE intents. `force` only means
- *  "re-fit even though the observed rect looks unchanged" — the settle pipeline
- *  needs that after a split, because a pane's Dockview render overlay can still
- *  report its pre-split box. Repainting on those passes as well is what made a
- *  single split blink: the settle loop runs many frames, and every one of them
- *  repainted EVERY pane (measured: 147 `term.refresh` calls over ~21 whole-grid
- *  repaints for one split). Only a real grid change or an explicit repair
- *  request (`repaint`, which the renderer-recovery and pointer-activation paths
- *  set) may redraw. */
-export function shouldRedrawAfterFit(args: { gridChanged: boolean; repaint: boolean }): boolean {
-  return args.gridChanged || args.repaint
 }
 
 /** PTY resizes are rate-limited, not suppressed, during an interactive resize.

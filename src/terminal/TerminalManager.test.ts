@@ -183,11 +183,22 @@ describe('TerminalManager remote pane leases', () => {
     const container = makeContainer()
     TerminalManager.attach(paneId, container, { sessionId: 'session-wide' })
     const manager = TerminalManager as unknown as {
-      entries: Map<string, { term: { cols: number; rows: number; resize(cols: number, rows: number): void } }>
+      entries: Map<string, {
+        term: { cols: number; rows: number; resize(cols: number, rows: number): void }
+        lastSentPtyCols?: number
+        lastSentPtyRows?: number
+      }>
     }
     const entry = manager.entries.get(paneId)
     if (!entry) throw new Error('missing remote resize entry')
     entry.term.resize(160, 48)
+    // A remote client authored this geometry, not us: the desktop's own last
+    // send stays at its fit size. Driving the mock terminal also runs xterm's
+    // onResize, so restore that invariant explicitly — otherwise the pane looks
+    // like it asked for 160x48 itself and the echo guard would (correctly) drop
+    // the event as its own.
+    entry.lastSentPtyCols = 80
+    entry.lastSentPtyRows = 24
     invokeMock.mockClear()
 
     TerminalManager.adoptRemoteResize(paneId, 160, 48)
@@ -195,6 +206,31 @@ describe('TerminalManager remote pane leases', () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
       ['resize_pane', { sessionId: 'session-wide', paneId, cols: 80, rows: 24 }],
     ])
+    TerminalManager.dispose(paneId)
+  })
+
+  it('ignores a daemon resize that only echoes the size this pane just sent', async () => {
+    // The daemon broadcasts PaneResized to every attached client including the
+    // originator, so a local divider drag is echoed back. Adopting the echo
+    // costs a remote_get_pane_lease round trip plus a forced fit and repaint
+    // per pane per resize, and it can never carry new information.
+    const paneId = 'pane-resize-echo'
+    const container = makeContainer()
+    TerminalManager.attach(paneId, container, { sessionId: 'session-echo' })
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { cols: number; rows: number; resize(cols: number, rows: number): void } }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing resize echo entry')
+    entry.term.resize(120, 40)
+    TerminalManager.syncPtySize(paneId)
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('resize_pane', { sessionId: 'session-echo', paneId, cols: 120, rows: 40 }))
+    invokeMock.mockClear()
+
+    TerminalManager.adoptRemoteResize(paneId, 120, 40)
+
+    expect(invokeMock).not.toHaveBeenCalledWith('remote_get_pane_lease', expect.anything())
+    expect({ cols: entry.term.cols, rows: entry.term.rows }).toEqual({ cols: 120, rows: 40 })
     TerminalManager.dispose(paneId)
   })
 
