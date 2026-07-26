@@ -69,6 +69,15 @@ function renderSidebar() {
   return render(<WorkspacesSidebar integration={integration} />)
 }
 
+function clickWorkspaceRow(row: HTMLElement, pointerId = 1) {
+  Object.defineProperties(row, {
+    setPointerCapture: { configurable: true, value: vi.fn() },
+    hasPointerCapture: { configurable: true, value: vi.fn(() => false) },
+  })
+  fireEvent.pointerDown(row, { button: 0, pointerId, clientY: 100 })
+  fireEvent.pointerUp(row, { button: 0, pointerId, clientY: 100 })
+}
+
 describe('WorkspacesSidebar', () => {
   beforeEach(() => {
     mocks.state.sessions = [
@@ -114,6 +123,17 @@ describe('WorkspacesSidebar', () => {
       const row = screen.getByText(name).closest('[data-session-id]') as HTMLElement
       expect(within(row).getByTitle(shortcut)).toHaveTextContent(number)
     }
+  })
+
+  test('selects another workspace without reopening the active workspace', () => {
+    renderSidebar()
+
+    const activeRow = screen.getByText('Gamma').closest('[data-session-id]') as HTMLElement
+    clickWorkspaceRow(activeRow)
+    fireEvent.keyDown(activeRow, { key: 'Enter' })
+    clickWorkspaceRow(screen.getByText('Beta').closest('[data-session-id]') as HTMLElement, 2)
+
+    expect(mocks.state.openSession).toHaveBeenCalledExactlyOnceWith('beta')
   })
 
   test('marks a workspace row and badge with its AI completion count', () => {

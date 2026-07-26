@@ -114,6 +114,11 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [membershipDropTarget, setMembershipDropTarget] = useState<MembershipDropTarget | null>(null)
 
+  const selectWorkspace = async (sessionId: string) => {
+    if (sessionId === activeSessionId) return
+    await openSession(sessionId)
+  }
+
   const onRowPointerDown = (event: ReactPointerEvent<HTMLDivElement>, sessionId: string) => {
     // Only a primary (left) button press starts a reorder; ignore the small
     // action buttons so rename/delete keep working.
@@ -154,7 +159,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     setMembershipDropTarget(null)
     // A press that never crossed the threshold is a plain click → select.
     if (!drag.active) {
-      void openSession(drag.id)
+      void selectWorkspace(drag.id)
       return
     }
     if (membershipTarget) {
@@ -187,12 +192,12 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         return workspaceFolder.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === normalizedRootFolder
       })
       if (existing) {
-        await openSession(existing.id)
+        await selectWorkspace(existing.id)
         return
       }
       const created = await createSession(group.name, rootFolder, defaultProfileId)
       setWorkspaceGroup(created.id, group.id)
-      await openSession(created.id)
+      await selectWorkspace(created.id)
     } catch (caught) {
       setError(String(caught))
     } finally {
@@ -253,7 +258,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         onKeyDown={(event) => {
           if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
           event.preventDefault()
-          void openSession(session.id)
+          void selectWorkspace(session.id)
         }}
       >
         <div className="session-main">
