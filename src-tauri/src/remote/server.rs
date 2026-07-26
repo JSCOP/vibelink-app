@@ -7,6 +7,7 @@ use super::{
     bridge,
     config::RemoteConfig,
     devices::{DevicePublic, DeviceStore, PairingInfo},
+    firewall,
     identity::RemoteIdentity,
     protocol::ServerMessage,
 };
@@ -30,6 +31,55 @@ use tungstenite::Message;
 use uuid::Uuid;
 
 const MAX_CLIENTS: usize = 8;
+
+const REMOTE_AUTOSTART_ENV: &str = "VIBELINK_REMOTE_AUTOSTART";
+
+fn should_autostart(enabled: bool, debug_build: bool, env_value: Option<&str>) -> bool {
+    enabled && (!debug_build || env_value == Some("1"))
+}
+
+#[derive(Debug)]
+struct LanFirewallNotConfirmed {
+    port: u16,
+    detail: String,
+}
+
+impl std::fmt::Display for LanFirewallNotConfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "LAN/VPN remote access requires Windows Firewall rule '{}' for TCP port {} on the Private profile: {}",
+            firewall::rule_name(),
+            self.port,
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for LanFirewallNotConfirmed {}
+
+fn ensure_lan_firewall_with(
+    lan_enabled: bool,
+    port: u16,
+    configured: impl FnOnce(u16) -> Result<bool>,
+) -> Result<()> {
+    if !lan_enabled {
+        return Ok(());
+    }
+    match configured(port) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(LanFirewallNotConfirmed {
+            port,
+            detail: "the matching rule is not configured".to_string(),
+        }
+        .into()),
+        Err(error) => Err(LanFirewallNotConfirmed {
+            port,
+            detail: format!("rule status could not be confirmed: {error}"),
+        }
+        .into()),
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,10 +295,23 @@ impl RemoteServer {
     }
 
     pub fn start_if_enabled(&self) -> Result<()> {
-        if self.config.lock().expect("remote config mutex").enabled {
-            self.start()?;
+        let config = self.config.lock().expect("remote config mutex").clone();
+        let env_value = std::env::var(REMOTE_AUTOSTART_ENV).ok();
+        if !should_autostart(config.enabled, cfg!(debug_assertions), env_value.as_deref()) {
+            return Ok(());
         }
-        Ok(())
+        match self.start() {
+            Err(error) if error.downcast_ref::<LanFirewallNotConfirmed>().is_some() => {
+                tracing::warn!(
+                    ?error,
+                    port = config.port,
+                    rule_name = firewall::rule_name(),
+                    "remote LAN autostart skipped until its firewall rule is approved"
+                );
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     pub fn start(&self) -> Result<()> {
@@ -258,6 +321,7 @@ impl RemoteServer {
         }
         let config = self.config.lock().expect("remote config mutex").clone();
         let port = config.port;
+        ensure_lan_firewall_with(config.lan_enabled, port, firewall::is_configured)?;
         let bind_host = if config.lan_enabled {
             "0.0.0.0"
         } else {
@@ -667,6 +731,43 @@ mod tests {
         net::TcpStream,
         sync::{mpsc, Barrier},
     };
+
+    #[test]
+    fn debug_autostart_requires_explicit_opt_in() {
+        assert!(!should_autostart(true, true, None));
+        assert!(!should_autostart(true, true, Some("0")));
+        assert!(!should_autostart(true, true, Some("true")));
+        assert!(should_autostart(true, true, Some("1")));
+        assert!(!should_autostart(false, true, Some("1")));
+    }
+
+    #[test]
+    fn production_autostart_preserves_enabled_configuration() {
+        assert!(should_autostart(true, false, None));
+        assert!(should_autostart(true, false, Some("0")));
+        assert!(!should_autostart(false, false, Some("1")));
+    }
+
+    #[test]
+    fn lan_firewall_preflight_is_required_only_for_lan_binding() {
+        ensure_lan_firewall_with(false, 42_811, |_| {
+            panic!("local-only startup must not query the firewall")
+        })
+        .unwrap();
+
+        let error = ensure_lan_firewall_with(true, 42_812, |port| {
+            assert_eq!(port, 42_812);
+            Ok(false)
+        })
+        .unwrap_err();
+        assert!(error.downcast_ref::<LanFirewallNotConfirmed>().is_some());
+
+        ensure_lan_firewall_with(true, 42_812, |port| {
+            assert_eq!(port, 42_812);
+            Ok(true)
+        })
+        .unwrap();
+    }
 
     #[test]
     fn active_client_capacity_is_atomic_under_contention() {

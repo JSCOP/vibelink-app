@@ -175,17 +175,34 @@ pub async fn remote_regenerate_identity(
     remote_request(&client, json!({ "action": "regenerateIdentity" }))
 }
 
-#[tauri::command]
-pub async fn remote_firewall_status(client: State<'_, DaemonClient>) -> Result<bool, String> {
-    let status: RemoteStatus = remote_request(&client, json!({ "action": "status" }))?;
-    crate::remote::firewall::is_configured(status.port).map_err(to_string)
+fn remote_firewall_port(client: &DaemonClient, requested_port: Option<u16>) -> Result<u16, String> {
+    let port = match requested_port {
+        Some(port) => port,
+        None => {
+            let status: RemoteStatus = remote_request(client, json!({ "action": "status" }))?;
+            status.port
+        }
+    };
+    crate::remote::firewall::validate_port(port).map_err(to_string)
 }
 
 #[tauri::command]
-pub async fn remote_setup_firewall(client: State<'_, DaemonClient>) -> Result<bool, String> {
-    let status: RemoteStatus = remote_request(&client, json!({ "action": "status" }))?;
-    crate::remote::firewall::setup(status.port).map_err(to_string)?;
-    crate::remote::firewall::is_configured(status.port).map_err(to_string)
+pub async fn remote_firewall_status(
+    client: State<'_, DaemonClient>,
+    port: Option<u16>,
+) -> Result<bool, String> {
+    let port = remote_firewall_port(&client, port)?;
+    crate::remote::firewall::is_configured(port).map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn remote_setup_firewall(
+    client: State<'_, DaemonClient>,
+    port: Option<u16>,
+) -> Result<bool, String> {
+    let port = remote_firewall_port(&client, port)?;
+    crate::remote::firewall::setup(port).map_err(to_string)?;
+    crate::remote::firewall::is_configured(port).map_err(to_string)
 }
 
 #[tauri::command]
