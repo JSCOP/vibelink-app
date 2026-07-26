@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react'
-import ReactDiffViewer from 'react-diff-viewer-continued'
+import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
 import type { ChangedFile, FileContents } from '../../ipc/types'
-import { buildDiffHighlightMap, type DiffHighlightMap } from './diffSyntaxHighlight'
+import { buildDiffHighlightMap, expandDiffTabs, type DiffHighlightMap } from './diffSyntaxHighlight'
+import { gitChangeMeta } from '../../state/gitChangeMeta'
 import { useWorkspaceStore } from '../../state/store'
 
 export type DiffPaneProps = {
@@ -55,13 +56,15 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
     return () => observer.disconnect()
   }, [])
 
+  // Line endings and tabs are normalized once, before diffing, highlighting, or
+  // rendering. CRLF checkouts would otherwise mark every line changed, and a
+  // raw tab is one character to the word-diff overlay but `tabSize` rendered
+  // columns to Monaco, which knocked every later highlight on the line out of
+  // alignment onto partial words.
   const normalizedContents = useMemo(() => {
     if (!contents || contents.binary) return contents
-    return {
-      ...contents,
-      old: contents.old.includes('\r') ? contents.old.replace(/\r\n?/g, '\n') : contents.old,
-      new: contents.new.includes('\r') ? contents.new.replace(/\r\n?/g, '\n') : contents.new,
-    }
+    const normalize = (value: string) => expandDiffTabs(value.includes('\r') ? value.replace(/\r\n?/g, '\n') : value)
+    return { ...contents, old: normalize(contents.old), new: normalize(contents.new) }
   }, [contents])
   const renderLimitExceeded = useMemo(
     () => Boolean(normalizedContents && !normalizedContents.binary && diffExceedsRenderLimit(normalizedContents.old, normalizedContents.new)),
@@ -109,18 +112,27 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
           <aside className="task-diff-files git-diff-files">
             {title ? <h3>{title}</h3> : null}
             {error ? <div className="kanban-error">{error}</div> : null}
-            {files.map((file) => (
-              <button
-                key={`${file.changeType}:${file.path}`}
-                type="button"
-                className={selectedPath === file.path ? 'active' : undefined}
-                title={file.oldPath ? `${file.path} (from ${file.oldPath})` : file.path}
-                onClick={() => onSelect(file.path)}
-              >
-                <span>{file.changeType}</span>
-                {file.path}
-              </button>
-            ))}
+            {files.map((file) => {
+              const meta = gitChangeMeta[file.changeType]
+              const slash = file.path.lastIndexOf('/')
+              const basename = slash >= 0 ? file.path.slice(slash + 1) : file.path
+              const parent = slash >= 0 ? file.path.slice(0, slash) : ''
+              return (
+                <button
+                  key={`${file.changeType}:${file.path}`}
+                  type="button"
+                  data-selected={selectedPath === file.path || undefined}
+                  data-change-type={file.changeType}
+                  title={`${meta.word} — ${meta.explanation}\n${file.oldPath ? `${file.path} (from ${file.oldPath})` : file.path}`}
+                  aria-label={`${meta.word}: ${file.path}`}
+                  onClick={() => onSelect(file.path)}
+                >
+                  <span className="task-diff-file-badge" aria-hidden="true">{meta.letter}</span>
+                  <strong>{basename}</strong>
+                  {parent ? <small>{parent}</small> : null}
+                </button>
+              )
+            })}
           </aside>
           <div className="task-diff-resizer git-diff-resizer" role="separator" aria-orientation="vertical" onPointerDown={startResize} />
         </>
@@ -147,7 +159,13 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
         ) : null}
         {noContents ? <div className="task-diff-empty git-diff-empty">No diff available for this file.</div> : null}
         {!loading && normalizedContents && !normalizedContents.binary && !noDifferences && !renderLimitExceeded ? (
-          <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} useDarkTheme styles={diffStyles} renderContent={renderContent} />
+          // Word-level, not the library default `DiffMethod.CHARS`: character
+          // diffing highlighted the shared letters inside unrelated identifiers
+          // (`browser`/`editor` painting `brows`, `e`, `tor`), which reads as
+          // noise. WORDS_WITH_SPACE keeps whitespace in the chunks, so the
+          // reconstructed line is byte-identical to the source and the
+          // syntax-highlight overlay stays aligned.
+          <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} compareMethod={DiffMethod.WORDS_WITH_SPACE} useDarkTheme styles={diffStyles} renderContent={renderContent} />
         ) : null}
       </main>
     </div>

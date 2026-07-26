@@ -4,7 +4,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-vi.mock('react-diff-viewer-continued', () => ({ default: ({ oldValue, newValue }: { oldValue: string; newValue: string }) => <div data-testid="diff">{oldValue}|{newValue}</div> }))
+vi.mock('react-diff-viewer-continued', () => ({ DiffMethod: { WORDS_WITH_SPACE: 'diffWordsWithSpace' }, default: ({ oldValue, newValue }: { oldValue: string; newValue: string }) => <div data-testid="diff">{oldValue}|{newValue}</div> }))
 
 import { useWorkspaceStore } from '../state/store'
 import { TaskDiffView } from './TaskDiffView'

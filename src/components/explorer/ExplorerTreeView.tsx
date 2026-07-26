@@ -4,6 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, Copy, File, FileMinus2, FilePlus2, Folder, FolderGit2, FolderOpen, GitCommit, GitFork, Link2, LoaderCircle, PanelRightClose, PanelRightOpen, Pencil, RefreshCw } from 'lucide-react'
 import type { ChangeType } from '../../ipc/types'
 import type { ExplorerChangeSummary, ExplorerGitDecoration, ExplorerNode } from '../../state/explorer'
+import { gitChangeMeta } from '../../state/gitChangeMeta'
 import type { GitStatusPresentation } from '../../state/profiles'
 import './ExplorerTreeView.css'
 
@@ -179,13 +180,6 @@ function stableDomId(value: string): string {
   return Array.from(value, (character) => character.codePointAt(0)?.toString(16) ?? '0').join('-')
 }
 
-type ChangeBadgeMeta = {
-  letter: string
-  word: string
-  explanation: string
-  icon: typeof Check
-}
-
 type StatusBadgeSpec = {
   area: string
   letter: string
@@ -195,14 +189,14 @@ type StatusBadgeSpec = {
   changeType?: ChangeType
 }
 
-const CHANGE_META_BY_TYPE: Record<ChangeType, ChangeBadgeMeta> = {
-  added: { letter: 'A', word: 'Added', explanation: 'new tracked file', icon: FilePlus2 },
-  modified: { letter: 'M', word: 'Modified', explanation: 'tracked file content changed', icon: Pencil },
-  deleted: { letter: 'D', word: 'Deleted', explanation: 'tracked file removed', icon: FileMinus2 },
-  renamed: { letter: 'R', word: 'Renamed', explanation: 'tracked file moved or renamed', icon: ArrowRight },
-  copied: { letter: 'C', word: 'Copied', explanation: 'tracked file copied', icon: Copy },
-  typeChanged: { letter: 'T', word: 'Type changed', explanation: 'file type or mode changed', icon: RefreshCw },
-  untracked: { letter: 'U', word: 'Untracked', explanation: 'new file Git is not tracking yet', icon: FilePlus2 },
+const CHANGE_ICON_BY_TYPE: Record<ChangeType, typeof Check> = {
+  added: FilePlus2,
+  modified: Pencil,
+  deleted: FileMinus2,
+  renamed: ArrowRight,
+  copied: Copy,
+  typeChanged: RefreshCw,
+  untracked: FilePlus2,
 }
 
 const CONFLICT_SPEC: StatusBadgeSpec = { area: 'conflicted', letter: '!', word: 'Conflict', title: 'Conflict — Git needs you to choose or combine competing changes.', icon: AlertTriangle }
@@ -273,7 +267,7 @@ function StatusBadge({ spec, presentation, count }: { spec: StatusBadgeSpec; pre
 }
 
 function changeSpec(changeType: ChangeType, staged: boolean): StatusBadgeSpec {
-  const meta = CHANGE_META_BY_TYPE[changeType]
+  const meta = gitChangeMeta[changeType]
   return {
     area: staged ? 'staged' : 'unstaged',
     letter: meta.letter,
@@ -281,7 +275,7 @@ function changeSpec(changeType: ChangeType, staged: boolean): StatusBadgeSpec {
     title: staged
       ? `Staged ${meta.word.toLowerCase()} — ${meta.explanation}; included in the next commit.`
       : `${meta.word} — ${meta.explanation}; not staged for the next commit.`,
-    icon: meta.icon,
+    icon: CHANGE_ICON_BY_TYPE[changeType],
     changeType,
   }
 }

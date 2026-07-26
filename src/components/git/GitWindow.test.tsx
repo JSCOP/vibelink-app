@@ -29,7 +29,7 @@ vi.mock('@tanstack/react-virtual', () => ({
     },
   }),
 }))
-vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="diff-viewer" /> }))
+vi.mock('react-diff-viewer-continued', () => ({ DiffMethod: { WORDS_WITH_SPACE: 'diffWordsWithSpace' }, default: () => <div data-testid="diff-viewer" /> }))
 
 vi.mock('./AssignedTab', () => ({ AssignedTab: () => <div>Assigned projection</div> }))
 vi.mock('./PullRequestsTab', () => ({ PullRequestsTab: () => <div>Pull requests projection</div> }))

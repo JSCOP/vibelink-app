@@ -3,8 +3,9 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('react-diff-viewer-continued', () => ({
-  default: ({ oldValue, newValue }: { oldValue: string; newValue: string }) => (
-    <div data-testid="diff-viewer" data-old-value={oldValue} data-new-value={newValue} />
+  DiffMethod: { WORDS_WITH_SPACE: 'diffWordsWithSpace' },
+  default: ({ oldValue, newValue, compareMethod }: { oldValue: string; newValue: string; compareMethod: string }) => (
+    <div data-testid="diff-viewer" data-old-value={oldValue} data-new-value={newValue} data-compare-method={compareMethod} />
   ),
 }))
 
@@ -27,6 +28,63 @@ describe('DiffPane', () => {
     )
 
     expect(container.querySelector('.git-diff-pane')?.getAttribute('data-file-list-hidden')).toBe('true')
+  })
+
+  it('labels each changed file with a compact status letter and a distinguishable selection', () => {
+    const { container } = render(
+      <DiffPane
+        files={[
+          { path: 'src/layout/WorkspaceView.tsx', changeType: 'modified', additions: 3, deletions: 1, binary: false },
+          { path: 'src/new.ts', changeType: 'added', additions: 9, deletions: 0, binary: false },
+        ]}
+        selectedPath="src/new.ts"
+        onSelect={vi.fn()}
+        contents={null}
+        loading={false}
+        splitView
+      />,
+    )
+
+    const rows = [...container.querySelectorAll('.task-diff-files button')]
+    expect(rows.map((row) => row.querySelector('.task-diff-file-badge')?.textContent)).toEqual(['M', 'A'])
+    expect(rows.map((row) => row.querySelector('strong')?.textContent)).toEqual(['WorkspaceView.tsx', 'new.ts'])
+    expect(rows.map((row) => row.querySelector('small')?.textContent)).toEqual(['src/layout', 'src'])
+    expect(rows.map((row) => row.getAttribute('data-selected'))).toEqual([null, 'true'])
+    expect(screen.getByLabelText('Modified: src/layout/WorkspaceView.tsx')).toBeTruthy()
+  })
+
+  it('diffs changed lines by word so shared letters inside unrelated identifiers stay unhighlighted', () => {
+    render(
+      <DiffPane
+        files={[]}
+        selectedPath="words.ts"
+        onSelect={vi.fn()}
+        contents={{ old: "kind === 'browser'\n", new: "kind === 'editor'\n", binary: false }}
+        loading={false}
+        splitView
+        hideFileList
+      />,
+    )
+
+    expect(screen.getByTestId('diff-viewer').getAttribute('data-compare-method')).toBe('diffWordsWithSpace')
+  })
+
+  it('expands tabs to rendered columns so the syntax overlay lines up with the word diff', () => {
+    render(
+      <DiffPane
+        files={[]}
+        selectedPath="tabs.ts"
+        onSelect={vi.fn()}
+        contents={{ old: '\tconst value = 1\n', new: '\t\tconst value = 2\n', binary: false }}
+        loading={false}
+        splitView
+        hideFileList
+      />,
+    )
+
+    const viewer = screen.getByTestId('diff-viewer')
+    expect(viewer.getAttribute('data-old-value')).toBe('  const value = 1\n')
+    expect(viewer.getAttribute('data-new-value')).toBe('    const value = 2\n')
   })
 
   it('hides the diff renderer when both sides are identical and empty', () => {

@@ -21,6 +21,38 @@ export type DiffHighlightMap = Map<string, string>
 
 const TAB_SIZE = 2
 
+/**
+ * Expand tabs to their rendered columns before anything else sees the text.
+ *
+ * Monaco's colorizer turns one `\t` into `tabSize` non-breaking spaces, but
+ * `react-diff-viewer-continued` overlays the word-diff ranges by counting
+ * characters in that HTML against the raw line. One tab therefore shifted every
+ * later highlight on the line by `tabSize - 1` columns, which is what painted
+ * boxes around single letters mid-word. Feeding both sides pre-expanded text
+ * keeps the two character counts identical; visually nothing changes because
+ * Monaco rendered the same columns anyway.
+ */
+export function expandDiffTabs(value: string): string {
+  if (!value.includes('\t')) return value
+  let result = ''
+  let column = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === '\t') {
+      const width = TAB_SIZE - (column % TAB_SIZE)
+      result += ' '.repeat(width)
+      column += width
+    } else if (character === '\n') {
+      result += character
+      column = 0
+    } else {
+      result += character
+      column += 1
+    }
+  }
+  return result
+}
+
 function stripTrailingNewline(value: string): string[] {
   const normalized = value.endsWith('\n') ? value.slice(0, -1) : value
   return normalized.split('\n')

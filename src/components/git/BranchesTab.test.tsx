@@ -6,7 +6,7 @@ import type { BranchInfo, ChangedFile, RepoInfo, WorkingStatus } from '../../ipc
 const { invoke, openContent } = vi.hoisted(() => ({ invoke: vi.fn(), openContent: vi.fn(async () => 'content:workbench:workbench') }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel: class MockChannel<T> { onmessage: ((event: T) => void) | null; constructor(callback?: (event: T) => void) { this.onmessage = callback ?? null } } }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
-vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="branch-diff" /> }))
+vi.mock('react-diff-viewer-continued', () => ({ DiffMethod: { WORDS_WITH_SPACE: 'diffWordsWithSpace' }, default: () => <div data-testid="branch-diff" /> }))
 
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
 import { useGitStore } from '../../state/git'
@@ -63,7 +63,7 @@ test('opens central ref comparison and reveals a selected compare file', async (
   fireEvent.click(await screen.findByRole('button', { name: 'Compare origin/main…main' }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_diff_refs', { workspaceFolder: 'C:/repo', baseRef: 'origin/main', headRef: 'main' }))
   expect(openContent).toHaveBeenCalledWith({ kind: 'workbench' })
-  fireEvent.click(await screen.findByText('src/remote.ts'))
+  fireEvent.click(await screen.findByRole('button', { name: 'Modified: src/remote.ts' }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_diff_refs_file', { workspaceFolder: 'C:/repo', baseRef: 'origin/main', headRef: 'main', path: 'src/remote.ts' }))
   await waitFor(() => expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('src/remote.ts'))
   expect(screen.getByRole('region', { name: 'Branches' })).toBeTruthy()

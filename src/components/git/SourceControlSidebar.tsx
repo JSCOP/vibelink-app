@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Check, ChevronRight, CloudDownload, CloudUpload, FileDiff, FolderGit2, GitBranch, GitCommit, GitCompareArrows, MoreHorizontal, RefreshCw, RotateCcw } from 'lucide-react'
 import { memo, useMemo, useRef } from 'react'
-import type { ChangeType } from '../../ipc/types'
+import { gitChangeMeta } from '../../state/gitChangeMeta'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { useGitWorkspace } from './GitWorkspaceProvider'
 import { flattenGitChangeRows, gitChangeRowHeight } from './gitChangeRows'
@@ -12,16 +12,6 @@ export type SourceControlSidebarProps = {
   active?: boolean
   collapsed?: boolean
   onCollapse?: () => void
-}
-
-const CHANGE_LABEL: Record<ChangeType, string> = {
-  added: 'A',
-  modified: 'M',
-  deleted: 'D',
-  renamed: 'R',
-  copied: 'C',
-  typeChanged: 'T',
-  untracked: '?',
 }
 
 export function SourceControlSidebar({ active = true, collapsed = false, onCollapse }: SourceControlSidebarProps) {
@@ -131,7 +121,7 @@ const ChangeRow = memo(function ChangeRow({ item, selected, untracked, onSelect,
   const parent = slash >= 0 ? item.path.slice(0, slash) : ''
   return (
     <div className="git-sidebar-change-row" data-selected={selected || undefined}>
-      <button type="button" className="git-sidebar-change-main" aria-label={`${item.area}: ${item.path}`} onClick={() => onSelect(item)}><span data-change-type={item.changeType}>{CHANGE_LABEL[item.changeType]}</span><FileDiff size={12} aria-hidden="true" /><strong>{basename}</strong>{parent ? <small>{parent}</small> : null}</button>
+      <button type="button" className="git-sidebar-change-main" aria-label={`${item.area}: ${item.path}`} title={`${gitChangeMeta[item.changeType].word} — ${gitChangeMeta[item.changeType].explanation}\n${item.path}`} onClick={() => onSelect(item)}><span data-change-type={item.changeType}>{gitChangeMeta[item.changeType].letter}</span><FileDiff size={12} aria-hidden="true" /><strong>{basename}</strong>{parent ? <small>{parent}</small> : null}</button>
       <details><summary role="button" aria-label={`Actions for ${item.path}`}><MoreHorizontal size={13} aria-hidden="true" /></summary><div role="menu">{item.area === 'staged' ? <button type="button" role="menuitem" onClick={() => onUnstage([item.path])}>Unstage</button> : item.area !== 'remote' ? <button type="button" role="menuitem" onClick={() => onStage([item.path])}>Stage</button> : null}{item.area !== 'remote' ? <button type="button" role="menuitem" data-danger onClick={() => onDiscard([item.path], untracked)}>Discard…</button> : null}</div></details>
     </div>
   )

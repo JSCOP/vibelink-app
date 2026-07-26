@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import ReactDiffViewer from 'react-diff-viewer-continued'
+import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
 import type { PendingPermission } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
 
@@ -22,7 +22,7 @@ export function HermesPermissionPrompt({ sessionId, permission }: HermesPermissi
       {permission.oldText !== undefined || permission.newText !== undefined ? (
         <div className="hermes-permission-diff">
           {permission.diffPath ? <strong>{permission.diffPath}</strong> : null}
-          <ReactDiffViewer oldValue={permission.oldText ?? ''} newValue={permission.newText ?? ''} splitView={false} useDarkTheme />
+          <ReactDiffViewer oldValue={permission.oldText ?? ''} newValue={permission.newText ?? ''} splitView={false} compareMethod={DiffMethod.WORDS_WITH_SPACE} useDarkTheme />
         </div>
       ) : null}
       <div className="hermes-permission-actions">

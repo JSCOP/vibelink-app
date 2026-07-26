@@ -7,7 +7,7 @@ const { invoke, openContent } = vi.hoisted(() => ({ invoke: vi.fn(), openContent
 vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel: class MockChannel<T> { onmessage: ((event: T) => void) | null; constructor(callback?: (event: T) => void) { this.onmessage = callback ?? null } } }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
 vi.mock('@tanstack/react-virtual', () => ({ useVirtualizer: ({ count }: { count: number }) => ({ getVirtualItems: () => [], getTotalSize: () => count * 42 }) }))
-vi.mock('react-diff-viewer-continued', () => ({ default: () => <div data-testid="history-diff" /> }))
+vi.mock('react-diff-viewer-continued', () => ({ DiffMethod: { WORDS_WITH_SPACE: 'diffWordsWithSpace' }, default: () => <div data-testid="history-diff" /> }))
 
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
 import { useGitStore } from '../../state/git'
@@ -70,7 +70,7 @@ test('shares commit selection and detail with central Workbench and loads detail
   expect(invoke.mock.calls.filter(([command]) => command === 'git_commit_detail')).toHaveLength(1)
   fireEvent.click(screen.getByText('Initial commit'))
   expect(invoke.mock.calls.filter(([command]) => command === 'git_commit_detail')).toHaveLength(1)
-  fireEvent.click(await screen.findByText('src/committed.ts'))
+  fireEvent.click(await screen.findByRole('button', { name: 'Modified: src/committed.ts' }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_commit_file_contents', { workspaceFolder: 'C:/repo', sha: commit.sha, path: 'src/committed.ts' }))
   await waitFor(() => expect(useExplorerStore.getState().sessions['session-1']?.selectedPath).toBe('src/committed.ts'))
 })
