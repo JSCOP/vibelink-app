@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, test, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => {
   if (command === 'list_installed_fonts') return []
@@ -12,6 +12,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 
 import { defaultSettings, normalizeSettings } from '../state/profiles'
 import { SettingsDialog } from './SettingsDialog'
+
+afterEach(cleanup)
 
 describe('SettingsDialog editor preferences', () => {
   test('stages word wrap and minimap changes until Apply', () => {
@@ -37,5 +39,20 @@ describe('SettingsDialog editor preferences', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ editorWordWrap: false, editorMinimap: true }))
+  })
+
+  test('lists workspace navigation shortcuts in Advanced settings', () => {
+    const view = render(
+      <SettingsDialog
+        settings={normalizeSettings(defaultSettings)}
+        onChange={vi.fn()}
+        onClose={vi.fn()}
+        onRunSetupWizard={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(view.getByRole('button', { name: 'Advanced' }))
+    expect((view.getByRole('textbox', { name: 'Toggle Workspaces panel' }) as HTMLInputElement).value).toBe('ctrl+shift+e')
+    expect((view.getByRole('textbox', { name: 'Toggle left sidebar' }) as HTMLInputElement).value).toBe('ctrl+b')
   })
 })

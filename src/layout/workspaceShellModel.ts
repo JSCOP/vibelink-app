@@ -202,6 +202,26 @@ export function collapseStructuralWorkspacePanel(panel: IDockviewPanel, content:
   return true
 }
 
+export function toggleStructuralWorkspacePanel(api: DockviewApi, kind: StructuralWorkspaceContentKind): boolean {
+  const panel = api.getPanel(workspaceContentPanelId(createSingletonContentParams(kind)))
+  if (!panel || panel.group.api.location.type !== 'edge') return false
+  if (panel.group.activePanel?.id === panel.id && !panel.group.api.isCollapsed()) {
+    panel.group.api.collapse()
+    return true
+  }
+  panel.group.api.expand()
+  panel.api.setActive()
+  return true
+}
+
+export function toggleWorkspaceLeftSidebar(api: DockviewApi): boolean {
+  const left = api.getEdgeGroup('left')
+  if (!left) return false
+  if (left.isCollapsed()) left.expand()
+  else left.collapse()
+  return true
+}
+
 export function registerWorkspaceEdgeGroups(api: DockviewApi, rootWidth: number): void {
   const collapsed = workspaceDefaultEdgeCollapse(rootWidth)
   const left = api.getEdgeGroup('left') ?? api.addEdgeGroup('left', { ...workspaceEdgeGroupOptions.left, collapsed: collapsed.left })

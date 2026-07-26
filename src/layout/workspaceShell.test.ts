@@ -5,6 +5,8 @@ import {
   authoredWorkspaceLayoutHistoryLimit,
   rememberAuthoredLayout,
   collapseStructuralWorkspacePanel,
+  toggleStructuralWorkspacePanel,
+  toggleWorkspaceLeftSidebar,
   collapseWorkspaceEdgesForCenterWidth,
   ensureWorkspaceEdgeShell,
   registerWorkspaceEdgeGroups,
@@ -22,6 +24,7 @@ import { workspaceContentPanelId, type WorkspaceContentParams } from './workspac
 type FakeGroup = {
   id: string
   panels: FakePanel[]
+  activePanel?: FakePanel
   api: {
     location: { type: 'grid' | 'edge'; position?: 'left' | 'right' }
     isVisible: boolean
@@ -83,7 +86,10 @@ function fakeDock(initialGridIds: string[] = []) {
       update: vi.fn((update: { params?: WorkspaceContentParams }) => { if (update.params) panel.params = update.params }),
       api: {
         setTitle: vi.fn(),
-        setActive: vi.fn(() => { activeGroup = panel.group }),
+        setActive: vi.fn(() => {
+          panel.group.activePanel = panel
+          activeGroup = panel.group
+        }),
         moveTo: vi.fn(({ group: destination, index }: { group: FakeGroup; index?: number }) => {
           panel.group.panels = panel.group.panels.filter((candidate) => candidate !== panel)
           panel.group = destination
@@ -231,6 +237,34 @@ describe('WorkspaceView shell primitives', () => {
     expect(right.api.setSize).toHaveBeenCalledWith({ width: 340 })
     expect(edgeOptions.left).toMatchObject({ minimumSize: 240, maximumSize: 440 })
     expect(edgeOptions.right).toMatchObject({ minimumSize: 280, maximumSize: 520 })
+  })
+
+  it('toggles the whole left sidebar without changing its active structural panel', () => {
+    const { api, groups } = fakeDock(['grid-main'])
+    registerWorkspaceEdgeGroups(api, 1600)
+    const left = groups.find((group) => group.id === 'workspace-left-tools')!
+
+    expect(toggleWorkspaceLeftSidebar(api)).toBe(true)
+    expect(left.api.isCollapsed()).toBe(true)
+    expect(toggleWorkspaceLeftSidebar(api)).toBe(true)
+    expect(left.api.isCollapsed()).toBe(false)
+  })
+
+  it('opens Workspaces from another left tab and collapses it when already active', () => {
+    const { api, groups } = fakeDock(['grid-main'])
+    registerWorkspaceEdgeGroups(api, 1600)
+    ensureWorkspaceEdgeShell(api)
+    const left = groups.find((group) => group.id === 'workspace-left-tools')!
+    const workspaces = left.panels.find((panel) => panel.params.kind === 'workspaces')!
+    const explorer = left.panels.find((panel) => panel.params.kind === 'explorer')!
+    explorer.api.setActive()
+    left.api.collapse()
+
+    expect(toggleStructuralWorkspacePanel(api, 'workspaces')).toBe(true)
+    expect(left.api.isCollapsed()).toBe(false)
+    expect(left.activePanel?.id).toBe(workspaces.id)
+    expect(toggleStructuralWorkspacePanel(api, 'workspaces')).toBe(true)
+    expect(left.api.isCollapsed()).toBe(true)
   })
 
   it('coalesces live resize work per frame and settles once after quiet', () => {

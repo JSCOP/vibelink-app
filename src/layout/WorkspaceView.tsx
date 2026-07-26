@@ -109,6 +109,8 @@ import {
   centralGridIsEmpty,
   createWorkspaceResizeCoordinator,
   collapseStructuralWorkspacePanel,
+  toggleStructuralWorkspacePanel,
+  toggleWorkspaceLeftSidebar,
   collapseWorkspaceEdgesForCenterWidth,
   ensureWorkspaceEdgeShell,
   registerWorkspaceEdgeGroups,
@@ -2023,6 +2025,12 @@ async function runKeybindingAction(
       return
     case 'splitDown':
       if (activePaneId) await actions.splitTerminal(activePaneId, 'below')
+      return
+    case 'toggleWorkspaces':
+      toggleStructuralWorkspacePanel(api, 'workspaces')
+      return
+    case 'toggleLeftSidebar':
+      toggleWorkspaceLeftSidebar(api)
       return
     case 'closePane':
       await actions.requestCloseContent(activePaneId ? workspaceContentPanelId({ kind: 'terminal', instanceId: activePaneId }) : active.id)

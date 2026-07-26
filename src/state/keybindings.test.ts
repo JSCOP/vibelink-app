@@ -5,6 +5,8 @@ describe('keybindings', () => {
   it('uses Windows Terminal compatible defaults for pane close and focus movement', () => {
     expect(defaultKeybindings.closePane).toBe('ctrl+w')
     expect(defaultKeybindings.closeWorkspace).toBe('ctrl+shift+w')
+    expect(defaultKeybindings.toggleWorkspaces).toBe('ctrl+shift+e')
+    expect(defaultKeybindings.toggleLeftSidebar).toBe('ctrl+b')
     expect(defaultKeybindings.arrangePanes).toBe('ctrl+shift+g')
     expect(defaultKeybindings.focusLeft).toBe('ctrl+left')
     expect(defaultKeybindings.focusRight).toBe('ctrl+right')
@@ -27,6 +29,8 @@ describe('keybindings', () => {
 
     expect(normalized.closePane).toBe('ctrl+q')
     expect(normalized.closeWorkspace).toBe(defaultKeybindings.closeWorkspace)
+    expect(normalized.toggleWorkspaces).toBe(defaultKeybindings.toggleWorkspaces)
+    expect(normalized.toggleLeftSidebar).toBe(defaultKeybindings.toggleLeftSidebar)
     expect(normalized.arrangePanes).toBe(defaultKeybindings.arrangePanes)
     expect(normalized.focusLeft).toBe(defaultKeybindings.focusLeft)
     expect(normalized.copyTerminalContents).toBe(defaultKeybindings.copyTerminalContents)
@@ -82,6 +86,8 @@ describe('keybindings', () => {
 
   it('finds matching actions from user settings', () => {
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'w', ctrlKey: true }))).toBe('closePane')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'e', ctrlKey: true, shiftKey: true }))).toBe('toggleWorkspaces')
+    expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'b', ctrlKey: true }))).toBe('toggleLeftSidebar')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'a', ctrlKey: true }))).toBe('copyTerminalContents')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 'c', ctrlKey: true, shiftKey: true }))).toBe('copyTerminalSelection')
     expect(findKeybindingAction(defaultKeybindings, keyEvent({ key: 's', altKey: true, shiftKey: true }))).toBe('captureImage')
