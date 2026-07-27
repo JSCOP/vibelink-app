@@ -70,6 +70,8 @@ const builtinIds: Record<BuiltInCompletionSoundId, true> = {
 const dbName = 'vibelink-completion-sounds'
 const storeName = 'sounds'
 let databasePromise: Promise<IDBDatabase | null> | undefined
+let sharedAudioContext: AudioContext | undefined
+const customSoundBufferCache = new Map<string, Promise<AudioBuffer>>()
 
 const toneRecipes: Record<BuiltInCompletionSoundId, readonly Tone[]> = {
   'builtin:clear-chime': [
@@ -149,11 +151,16 @@ export async function listCustomCompletionSounds(): Promise<CustomCompletionSoun
 
 export async function removeCustomCompletionSound(id: CompletionSoundId): Promise<void> {
   if (!id.startsWith('custom:')) return
+  customSoundBufferCache.delete(id)
   const database = await completionSoundDatabase()
   if (!database) return
   const transaction = database.transaction(storeName, 'readwrite')
   transaction.objectStore(storeName).delete(id)
   await transactionComplete(transaction)
+}
+
+export async function prepareCompletionSoundPlayback(): Promise<boolean> {
+  return Boolean(await readyAudioContext())
 }
 
 export async function playCompletionSound(settings: CompletionSoundSettings): Promise<boolean> {
@@ -163,13 +170,11 @@ export async function playCompletionSound(settings: CompletionSoundSettings): Pr
   return playBuiltInSound(settings.completionSoundId, volume)
 }
 
-function playBuiltInSound(id: BuiltInCompletionSoundId, volume: number): boolean {
-  const AudioContextConstructor = globalThis.AudioContext
-  if (!AudioContextConstructor) return false
-  const context = new AudioContextConstructor()
+async function playBuiltInSound(id: BuiltInCompletionSoundId, volume: number): Promise<boolean> {
+  const context = await readyAudioContext()
+  if (!context) return false
   const now = context.currentTime
   const recipe = toneRecipes[id]
-  const duration = Math.max(...recipe.map((tone) => tone.start + tone.duration))
   const master = context.createGain()
   master.gain.setValueAtTime(volume, now)
   master.connect(context.destination)
@@ -190,27 +195,38 @@ function playBuiltInSound(id: BuiltInCompletionSoundId, volume: number): boolean
     oscillator.stop(end)
   }
 
-  void context.resume().catch(() => {})
-  globalThis.setTimeout(() => void context.close().catch(() => {}), Math.ceil((duration + 0.1) * 1000))
   return true
 }
 
 async function playCustomSound(id: `custom:${string}`, volume: number): Promise<boolean> {
-  const record = await customSoundRecord(id)
-  if (!record || typeof Audio === 'undefined' || typeof URL.createObjectURL !== 'function') return false
-  const objectUrl = URL.createObjectURL(record.blob)
-  const audio = new Audio(objectUrl)
-  audio.volume = volume
-  const cleanup = () => URL.revokeObjectURL(objectUrl)
-  audio.addEventListener('ended', cleanup, { once: true })
-  audio.addEventListener('error', cleanup, { once: true })
+  const [context, record] = await Promise.all([readyAudioContext(), customSoundRecord(id)])
+  if (!context || !record) return false
+  let bufferPromise = customSoundBufferCache.get(id)
+  if (!bufferPromise) {
+    bufferPromise = record.blob.arrayBuffer().then((bytes) => context.decodeAudioData(bytes))
+    customSoundBufferCache.set(id, bufferPromise)
+  }
   try {
-    await audio.play()
+    const source = context.createBufferSource()
+    const gain = context.createGain()
+    source.buffer = await bufferPromise
+    gain.gain.setValueAtTime(volume, context.currentTime)
+    source.connect(gain)
+    gain.connect(context.destination)
+    source.start()
     return true
   } catch (error) {
-    cleanup()
+    customSoundBufferCache.delete(id)
     throw error
   }
+}
+
+async function readyAudioContext(): Promise<AudioContext | null> {
+  const AudioContextConstructor = globalThis.AudioContext
+  if (!AudioContextConstructor) return null
+  if (!sharedAudioContext || sharedAudioContext.state === 'closed') sharedAudioContext = new AudioContextConstructor()
+  if (sharedAudioContext.state !== 'running') await sharedAudioContext.resume()
+  return sharedAudioContext.state === 'running' ? sharedAudioContext : null
 }
 
 async function customSoundRecord(id: `custom:${string}`): Promise<StoredCustomCompletionSound | undefined> {

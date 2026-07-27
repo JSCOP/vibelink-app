@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   builtInCompletionSounds,
   customCompletionSoundValidationError,
@@ -6,8 +6,17 @@ import {
   hasNewCompletionHighlight,
   isCompletionSoundId,
   maxCustomCompletionSoundBytes,
+  playCompletionSound,
+  prepareCompletionSoundPlayback,
 } from './completionSounds'
 
+const originalAudioContext = globalThis.AudioContext
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  if (originalAudioContext) vi.stubGlobal('AudioContext', originalAudioContext)
+  else vi.unstubAllGlobals()
+})
 describe('completion sounds', () => {
   test('ships a distinct built-in completion set with a valid default', () => {
     expect(builtInCompletionSounds.map((sound) => sound.id)).toEqual([
@@ -41,5 +50,42 @@ describe('completion sounds', () => {
     expect(hasNewCompletionHighlight({ ...previous, paneB: { completedAt: 11 } }, previous)).toBe(true)
     expect(hasNewCompletionHighlight({ paneA: { completedAt: 12 } }, previous)).toBe(true)
     expect(hasNewCompletionHighlight({}, previous)).toBe(false)
+  })
+
+  test('primes and reuses one audio context for later completion playback', async () => {
+    let created = 0
+    let resumed = 0
+    class FakeAudioContext {
+      currentTime = 0
+      destination = {}
+      state: AudioContextState = 'suspended'
+      constructor() { created += 1 }
+      createGain() {
+        return {
+          connect: vi.fn(),
+          gain: {
+            setValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+          },
+        }
+      }
+      createOscillator() {
+        return {
+          connect: vi.fn(),
+          frequency: { setValueAtTime: vi.fn() },
+          start: vi.fn(),
+          stop: vi.fn(),
+          type: 'sine' as OscillatorType,
+        }
+      }
+      async resume() { resumed += 1; this.state = 'running' as AudioContextState }
+      async close() { this.state = 'closed' as AudioContextState }
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+
+    expect(await prepareCompletionSoundPlayback()).toBe(true)
+    expect(await playCompletionSound({ completionSoundEnabled: true, completionSoundId: defaultCompletionSoundId, completionSoundVolume: 0.55 })).toBe(true)
+    expect(created).toBe(1)
+    expect(resumed).toBe(1)
   })
 })

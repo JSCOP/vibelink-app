@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { AgentActivityTracker, shouldTrackAgentInput } from './agentActivity'
+import { AgentActivityTracker } from './agentActivity'
 
 const encoder = new TextEncoder()
 
@@ -166,10 +166,6 @@ describe('AgentActivityTracker', () => {
     expect(completed).toEqual([])
   })
 
-  test('tracks typed prompts only while an interactive agent TUI owns the alternate buffer', () => {
-    expect(shouldTrackAgentInput('alternate')).toBe(true)
-    expect(shouldTrackAgentInput('normal')).toBe(false)
-  })
 
   test('newlines inside a bracketed paste do not count as a submit', () => {
     tracker.noteUserInput('agent-pane', '\u001b[200~line one\rline two\rline three\u001b[201~')

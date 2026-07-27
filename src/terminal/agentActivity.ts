@@ -154,9 +154,6 @@ export class AgentActivityTracker {
   }
 }
 
-export function shouldTrackAgentInput(bufferType: string): boolean {
-  return bufferType === 'alternate'
-}
 
 export const agentActivityTracker = new AgentActivityTracker()
 

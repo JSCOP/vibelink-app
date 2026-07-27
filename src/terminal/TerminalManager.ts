@@ -13,7 +13,7 @@ import { INTERACTIVE_FIT_FRAME_BUDGET_MS, interactivePassDelay, isViewportViable
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
-import { agentActivityTracker, shouldTrackAgentInput, type AgentActivityActions } from './agentActivity'
+import { agentActivityTracker, type AgentActivityActions } from './agentActivity'
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
 
@@ -385,8 +385,10 @@ class TerminalManagerImpl {
     if (!entry.dataWired) {
       entry.term.onData((data) => {
         if (entry.remoteLease) return
-        if (shouldTrackAgentInput(entry.term.buffer.active.type)) agentActivityTracker.noteUserInput(paneId, data)
-        else agentActivityTracker.clear(paneId)
+        // OMP 17.1+ renders its interactive TUI in xterm's normal buffer.
+        // AgentActivityTracker already capability-gates the pane, so buffer
+        // type must not suppress prompt tracking for inline agent renderers.
+        agentActivityTracker.noteUserInput(paneId, data)
         const sessionId = entry.sessionId
         if (sessionId) {
           void invoke('write_pane', { sessionId, paneId, data })

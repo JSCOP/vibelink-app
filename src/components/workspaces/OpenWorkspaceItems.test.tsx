@@ -95,4 +95,25 @@ describe('OpenWorkspaceItems', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand Terminal' }))
     expect(screen.getByText('Claude Code')).toBeInTheDocument()
   })
+
+  test('highlights the completed terminal row and its owning terminal group', () => {
+    const windowPanelId = 'content:terminalWindow:window-1'
+    const codexPanelId = workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-codex' })
+    const claudePanelId = workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-claude' })
+    publishOpenContentSnapshot([
+      { panelId: windowPanelId, kind: 'terminalWindow', title: 'Terminal', icon: 'terminal', active: false, parentPanelId: null },
+      { panelId: codexPanelId, kind: 'terminal', title: 'Codex', icon: 'codex', active: true, parentPanelId: windowPanelId },
+      { panelId: claudePanelId, kind: 'terminal', title: 'Claude Code', icon: 'claude-code', active: false, parentPanelId: windowPanelId },
+    ])
+    renderItems({ 'pane-claude': { sessionId: 'workspace-a' } })
+
+    const groupHeader = screen.getByRole('button', { name: 'Collapse Terminal' })
+    const completedPane = screen.getByRole('button', { name: 'Claude Code' })
+    expect(groupHeader).toHaveClass('is-complete')
+    expect(groupHeader.querySelector('.workspace-open-content-status')).toHaveClass('is-complete')
+    expect(completedPane).toHaveClass('is-complete')
+
+    fireEvent.click(groupHeader)
+    expect(screen.getByRole('button', { name: 'Activate Claude Code' })).toHaveClass('is-complete')
+  })
 })

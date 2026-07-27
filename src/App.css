@@ -74,6 +74,13 @@ button {
   color: var(--vibelink-alarm-highlight);
 }
 
+.session-row.has-completions .workspaces-session-status {
+  animation: session-completion-pulse 1.8s ease-in-out infinite;
+  background: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
+  opacity: 1;
+}
+
 .session-row {
   position: relative;
 }
@@ -6818,6 +6825,17 @@ button.git-window-primary-action,
   color: var(--vibelink-text);
 }
 
+.workspace-open-content-item.is-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--vibelink-alarm-highlight), inset 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 24%, transparent);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-item.is-complete .workspace-open-content-icon,
+.workspace-open-content-group-header.is-complete .workspace-open-content-icon {
+  color: var(--vibelink-alarm-highlight);
+}
+
 .workspace-open-content-icon {
   align-items: center;
   display: inline-flex;
@@ -6941,6 +6959,12 @@ button.git-window-primary-action,
   color: var(--vibelink-text);
 }
 
+.workspace-open-content-group-header.is-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--vibelink-alarm-highlight), inset 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 20%, transparent);
+  color: var(--vibelink-text);
+}
+
 .workspace-open-content-group-chevron {
   align-items: center;
   display: inline-flex;
@@ -6991,6 +7015,13 @@ button.git-window-primary-action,
 .workspace-open-content-icon-button.is-active {
   background: var(--vibelink-accent-muted);
   border-color: var(--vibelink-accent);
+}
+
+.workspace-open-content-icon-button.is-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 15%, var(--vibelink-input));
+  border-color: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--vibelink-alarm-highlight) 28%, transparent);
+  color: var(--vibelink-alarm-highlight);
 }
 
 .workspace-open-content-icon-button-status {

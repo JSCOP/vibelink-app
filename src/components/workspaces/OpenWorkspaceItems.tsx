@@ -50,7 +50,7 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
     return (
       <div
         key={item.panelId}
-        className={`workspace-open-content-item${item.active ? ' is-active' : ''}${item.kind === 'terminal' ? ' is-terminal-pane' : ''}`}
+        className={`workspace-open-content-item${item.active ? ' is-active' : ''}${responseComplete ? ' is-complete' : ''}${item.kind === 'terminal' ? ' is-terminal-pane' : ''}`}
         role="button"
         tabIndex={actions ? 0 : -1}
         aria-current={item.active ? 'true' : undefined}
@@ -92,11 +92,13 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
         if (group.kind === 'item') return renderItem(group.item)
         const collapsed = collapsedGroups.has(group.window.panelId)
         const active = group.window.active || group.panes.some((pane) => pane.active)
+        const completionCount = group.panes.filter(responseCompleteFor).length
+        const hasCompletion = completionCount > 0
         return (
-          <div key={group.window.panelId} className={`workspace-open-content-group${active ? ' is-active' : ''}${collapsed ? ' is-collapsed' : ''}`} role="listitem">
+          <div key={group.window.panelId} className={`workspace-open-content-group${active ? ' is-active' : ''}${hasCompletion ? ' has-completions' : ''}${collapsed ? ' is-collapsed' : ''}`} role="listitem">
             <button
               type="button"
-              className="workspace-open-content-group-header"
+              className={`workspace-open-content-group-header${hasCompletion ? ' is-complete' : ''}`}
               aria-expanded={!collapsed}
               aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${group.window.title}`}
               onPointerDown={(event) => event.stopPropagation()}
@@ -105,7 +107,7 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
               <span className="workspace-open-content-group-chevron" aria-hidden="true">{collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}</span>
               <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={group.window.icon} size={11} strokeWidth={1.8} /></span>
               <span className="workspace-open-content-title" title={group.window.title}>{group.window.title}</span>
-              <span className={`workspace-open-content-status${active ? ' is-active' : ''}`} aria-hidden="true" />
+              <span className={`workspace-open-content-status${active ? ' is-active' : ''}${hasCompletion ? ' is-complete' : ''}`} title={hasCompletion ? `${completionCount} completed ${completionCount === 1 ? 'pane' : 'panes'}` : active ? 'Active terminal window' : 'Open terminal window'} aria-hidden="true" />
             </button>
             {collapsed ? (
               <div className="workspace-open-content-icon-strip" role="group" aria-label={`${group.window.title} programs`}>
