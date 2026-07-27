@@ -1,7 +1,10 @@
-export function worktreeBranchName(name: string): string {
-  const slug = name.trim().toLowerCase()
+export function worktreeNameSlug(name: string): string {
+  return name.trim().toLowerCase()
     .replace(/['’]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-  return `vibelink/${slug || 'worktree'}`
+}
+
+export function worktreeBranchName(name: string): string {
+  return `vibelink/${worktreeNameSlug(name) || 'worktree'}`
 }

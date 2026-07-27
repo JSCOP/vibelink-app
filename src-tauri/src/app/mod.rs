@@ -291,6 +291,7 @@ pub fn run() {
             git::diff::git_working_file_contents,
             git::status::git_working_status,
             git::git_worktree_create,
+            git::git_worktree_create_named,
             git::git_worktree_remove,
             commands::list_installed_fonts,
             commands::list_sessions,

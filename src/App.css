@@ -6932,7 +6932,7 @@ button.git-window-primary-action,
 }
 
 .worktree-create-dialog {
-  width: min(660px, 100%);
+  width: min(600px, 100%);
 }
 
 .worktree-create-heading,
@@ -6990,8 +6990,8 @@ button.git-window-primary-action,
 
 .worktree-create-fields {
   display: grid;
-  gap: 14px;
-  padding: 18px 20px;
+  gap: 12px;
+  padding: 16px 18px;
 }
 
 .worktree-create-fields label {
@@ -7025,6 +7025,11 @@ button.git-window-primary-action,
   grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
 }
 
+.worktree-create-field-hint {
+  color: var(--vibelink-muted);
+  font: 10px/1.35 var(--vibelink-sans);
+}
+
 .worktree-profile-select {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
@@ -7045,6 +7050,74 @@ button.git-window-primary-action,
 
 .worktree-create-hint {
   color: var(--vibelink-muted);
+}
+
+.worktree-create-summary {
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 4px;
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+}
+
+.worktree-create-summary > div {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 88px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.worktree-create-summary span {
+  color: var(--vibelink-muted);
+  font: 10px/1.3 var(--vibelink-sans);
+  text-transform: uppercase;
+}
+
+.worktree-create-summary code,
+.worktree-create-summary strong {
+  color: var(--vibelink-text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-create-summary code {
+  font: 11px/1.3 var(--vibelink-mono);
+}
+
+.worktree-create-summary strong {
+  font: 600 11px/1.3 var(--vibelink-sans);
+}
+
+.worktree-create-warning {
+  align-items: flex-start;
+  background: var(--vibelink-warning-soft);
+  border: 1px solid color-mix(in srgb, var(--vibelink-warning) 32%, transparent);
+  border-radius: 4px;
+  color: var(--vibelink-warning);
+  display: flex;
+  font: 11px/1.4 var(--vibelink-sans);
+  gap: 7px;
+  margin: 0;
+  padding: 7px 9px;
+}
+
+.worktree-create-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.worktree-create-footer {
+  justify-content: flex-end;
+}
+
+.worktree-create-progress {
+  color: var(--vibelink-muted);
+  font: 11px/1.3 var(--vibelink-sans);
+  margin-right: auto;
 }
 
 .worktree-create-error {

@@ -236,7 +236,7 @@ describe('WorkspacesSidebar', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Create worktree' }))
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_is_available', { workspaceFolder: 'E:/repos/beta' }))
-    expect(screen.getByRole('dialog', { name: 'Create isolated AI workspace' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Create worktree' })).toBeInTheDocument()
   })
 
   test('creates, groups, and opens a root workspace once during a fast double click', async () => {

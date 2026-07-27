@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { FolderGit2, GitBranch, X } from 'lucide-react'
+import { FolderGit2, GitBranch, TriangleAlert, X } from 'lucide-react'
 import type { SessionMeta } from '../../ipc/types'
 import type { Profile } from '../../state/profiles'
 import type { CreateWorkspaceWorktreeInput } from '../../state/store'
 import { ProfileIcon } from '../ProfileIcon'
-import { worktreeBranchName } from './worktreeNaming'
+import { worktreeBranchName, worktreeNameSlug } from './worktreeNaming'
 
 export type WorktreeCreateDialogProps = {
   sourceSession: SessionMeta
@@ -24,6 +24,8 @@ export function WorktreeCreateDialog({ sourceSession, profiles, initialProfileId
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const selectedProfile = useMemo(() => profiles.find((profile) => profile.id === profileId) ?? profiles[0], [profileId, profiles])
+  const folderSlug = worktreeNameSlug(name)
+  const managedFolder = `App data/worktrees/manual/${folderSlug || '<name>'}-<id>`
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -65,11 +67,8 @@ export function WorktreeCreateDialog({ sourceSession, profiles, initialProfileId
       <form className="workspace-create-dialog worktree-create-dialog" role="dialog" aria-modal="true" aria-labelledby="worktree-create-title" onSubmit={(event) => void submit(event)} onMouseDown={(event) => event.stopPropagation()}>
         <header className="workspace-create-header">
           <div className="worktree-create-heading">
-            <span className="worktree-create-mark" aria-hidden="true"><FolderGit2 size={18} /></span>
-            <div>
-              <p className="settings-eyebrow">Repository worktree</p>
-              <h2 id="worktree-create-title">Create isolated AI workspace</h2>
-            </div>
+            <span className="worktree-create-mark" aria-hidden="true"><FolderGit2 size={17} /></span>
+            <h2 id="worktree-create-title">Create worktree</h2>
           </div>
           <button type="button" className="settings-close" title="Close" aria-label="Close worktree dialog" disabled={submitting} onClick={onClose}>
             <X size={14} aria-hidden="true" />
@@ -103,11 +102,12 @@ export function WorktreeCreateDialog({ sourceSession, profiles, initialProfileId
             </label>
             <label>
               New branch
-              <input value={branch} placeholder="vibelink/fix-login-flow" disabled={submitting} onChange={(event) => { setBranchEdited(true); setBranch(event.target.value) }} />
+              <input aria-label="New branch" value={branch} placeholder="vibelink/fix-login-flow" disabled={submitting} onChange={(event) => { setBranchEdited(true); setBranch(event.target.value) }} />
+              <small className="worktree-create-field-hint">Creates a new branch; the name must not already exist.</small>
             </label>
           </div>
           <label>
-            Start AI with
+            Start with
             <span className="worktree-profile-select">
               {selectedProfile ? <ProfileIcon name={selectedProfile.icon} size={18} /> : null}
               <select value={profileId} disabled={submitting} onChange={(event) => setProfileId(event.target.value)}>
@@ -115,12 +115,16 @@ export function WorktreeCreateDialog({ sourceSession, profiles, initialProfileId
               </select>
             </span>
           </label>
-          <p className="worktree-create-hint">VibeLink creates a real Git worktree, opens it as a child workspace, and launches the selected agent in that checkout.</p>
+          <div className="worktree-create-summary" aria-label="Worktree behavior">
+            <div><span>Managed folder</span><code>{managedFolder}</code></div>
+            <div><span>Agent cwd</span><strong>This worktree folder</strong></div>
+          </div>
+          <p className="worktree-create-warning"><TriangleAlert size={13} aria-hidden="true" /><span>Uncommitted source changes are not copied. Branches and Git history are shared.</span></p>
           {error ? <p className="worktree-create-error" role="alert">{error}</p> : null}
         </div>
 
-        <footer className="workspace-create-footer">
-          <span>{submitting ? 'Creating checkout and terminal…' : 'The source workspace stays unchanged.'}</span>
+        <footer className="workspace-create-footer worktree-create-footer">
+          {submitting ? <span className="worktree-create-progress">Creating checkout and terminal…</span> : null}
           <div className="workspace-create-footer-actions">
             <button type="button" disabled={submitting} onClick={onClose}>Cancel</button>
             <button type="submit" className="primary-action" disabled={submitting || !name.trim() || !profileId}>{submitting ? 'Creating…' : 'Create worktree'}</button>

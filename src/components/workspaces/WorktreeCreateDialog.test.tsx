@@ -38,6 +38,27 @@ describe('WorktreeCreateDialog', () => {
     expect(screen.getByLabelText('New branch')).toHaveValue('feature/custom-branch')
   })
 
+  test('keeps guidance compact and explains the real isolation boundary', () => {
+    render(
+      <WorktreeCreateDialog
+        sourceSession={sourceSession}
+        profiles={defaultSettings.profiles}
+        initialProfileId="omp"
+        onCreate={vi.fn(async () => undefined)}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('heading', { name: 'Create worktree' })).toBeInTheDocument()
+    expect(screen.queryByText('Create isolated AI workspace')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'Fix Login' } })
+    expect(screen.getByText('App data/worktrees/manual/fix-login-<id>')).toBeInTheDocument()
+    expect(screen.getByText('This worktree folder')).toBeInTheDocument()
+    expect(screen.getByText(/Uncommitted source changes are not copied/)).toBeInTheDocument()
+    expect(screen.getByText(/Branches and Git history are shared/)).toBeInTheDocument()
+    expect(screen.getByText(/must not already exist/)).toBeInTheDocument()
+  })
+
   test('submits the repository, ref, branch, and selected agent profile', async () => {
     const onCreate = vi.fn(async () => undefined)
     render(
@@ -52,7 +73,7 @@ describe('WorktreeCreateDialog', () => {
 
     fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'Fix Login' } })
     fireEvent.change(screen.getByLabelText('Start ref'), { target: { value: 'origin/main' } })
-    fireEvent.change(screen.getByLabelText('Start AI with'), { target: { value: 'claude' } })
+    fireEvent.change(screen.getByLabelText('Start with'), { target: { value: 'claude' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create worktree' }))
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith({
