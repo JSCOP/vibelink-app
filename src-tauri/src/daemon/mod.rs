@@ -4108,7 +4108,7 @@ fn spawn_pane_for_session_internal(
     let spawned = Pane::spawn(cfg)?;
     let child = spawned.pane.child();
     let reader = spawned.reader;
-    let meta = {
+    let (meta, generation) = {
         let mut guard = lock_state(&state);
         let meta = match guard.insert_pane_or_recover(session_id, spawned.pane) {
             Ok(meta) => meta,
@@ -4123,7 +4123,10 @@ fn spawn_pane_for_session_internal(
         if let Some(client_id) = attach_client {
             guard.attach_client_to_pane(client_id, pane_id);
         }
-        meta
+        let generation = guard
+            .pane_output_generation(pane_id)
+            .expect("inserted pane has an output generation");
+        (meta, generation)
     };
 
     thread::Builder::new()
@@ -4132,6 +4135,7 @@ fn spawn_pane_for_session_internal(
             read_pane_loop(
                 state,
                 pane_id,
+                generation,
                 reader,
                 child,
                 Arc::new(sessions_path),
@@ -4145,6 +4149,7 @@ fn spawn_pane_for_session_internal(
 fn read_pane_loop(
     state: SharedState,
     pane_id: Uuid,
+    generation: u64,
     mut reader: Box<dyn Read + Send>,
     child: SharedChild,
     sessions_path: Arc<PathBuf>,
@@ -4156,8 +4161,9 @@ fn read_pane_loop(
             Ok(0) => break,
             Ok(n) => {
                 let bytes = &buf[..n];
-                let senders = lock_state(&state).record_output_and_push(pane_id, bytes);
-                if !senders.is_empty() {
+                let senders = lock_state(&state)
+                    .record_output_and_push_for_generation(pane_id, generation, bytes);
+                if let Some(senders) = senders.filter(|senders| !senders.is_empty()) {
                     send_output_to_clients(senders, pane_id, bytes.to_vec());
                 }
             }
@@ -4172,7 +4178,11 @@ fn read_pane_loop(
         .wait()
         .ok()
         .and_then(|status| i32::try_from(status.exit_code()).ok());
-    let PaneExitEffect { senders, lease } = lock_state(&state).mark_exited(pane_id);
+    let Some(PaneExitEffect { senders, lease }) =
+        lock_state(&state).mark_exited_for_generation(pane_id, generation)
+    else {
+        return;
+    };
     for sender in senders {
         let _ = sender.send(DaemonToClient::PaneExited { pane_id, exit_code });
     }

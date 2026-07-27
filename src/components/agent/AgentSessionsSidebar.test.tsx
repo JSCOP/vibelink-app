@@ -2,7 +2,8 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
+import { WorkspaceContentActionsContext, type OpenContentRequest, type WorkspaceContentActions } from '../../layout/contentActions'
+import { useWorkspaceStore } from '../../state/store'
 import { AgentSessionsSidebar } from './AgentSessionsSidebar'
 
 const mocks = vi.hoisted(() => ({
@@ -45,7 +46,7 @@ vi.mock('../WorkspaceSidebarPanelShell', () => ({
   ),
 }))
 
-const openContent = vi.fn(async () => 'content:agent:agent')
+const openContent = vi.fn<(request: OpenContentRequest) => Promise<string>>(async () => 'content:agent:agent')
 const activateContent = vi.fn()
 const actions: WorkspaceContentActions = {
   openContent,
@@ -78,6 +79,7 @@ describe('AgentSessionsSidebar', () => {
     mocks.controller.permissions = [{ requestId: 1, title: 'Allow edit', toolKind: 'edit', options: [] }]
     mocks.controller.actionsDisabled = false
     mocks.controller.currentSessionId = 'current-acp'
+    useWorkspaceStore.setState({ activePaneId: undefined })
     mocks.controller.sessions = [
       { id: 'older-acp', title: 'Older', updatedAt: '2026-07-21T10:00:00.000Z', cwd: 'D:/other/project' },
       { id: 'current-acp', title: 'Current task', updatedAt: '2026-07-22T10:00:00.000Z', cwd: 'E:/repo' },
@@ -172,25 +174,27 @@ describe('AgentSessionsSidebar', () => {
     expect(viewed.workspaces['workspace-a']['new-acp']).toEqual(expect.any(Number))
   })
 
-  test('resumes a recent conversation in the active terminal, or a new window on Ctrl+click', async () => {
+  test('replaces the highlighted terminal for a recent conversation, or opens a new window on Ctrl+click', async () => {
     mocks.controller.status = 'running'
     mocks.controller.permissions = []
     mocks.controller.conversations = [
       { id: 'omp-1', title: 'Resumable omp', agent: 'omp', updatedAt: '2026-07-22T09:00:00.000Z', cwd: 'E:/repo', path: 'E:/repo/.omp/agent/sessions/x.jsonl' },
     ]
-    openContent.mockResolvedValueOnce('content:terminal:pane-1')
+    useWorkspaceStore.setState({ activePaneId: 'pane-selected' })
+    openContent.mockResolvedValueOnce('content:terminal:pane-selected')
     renderSidebar()
 
     const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
     fireEvent.click(row)
-    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', newWindow: false, shell: 'pwsh.exe' })))
-    expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-1')
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', replacePaneId: 'pane-selected', newWindow: false, shell: 'pwsh.exe' })))
+    expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-selected')
 
     openContent.mockClear()
     activateContent.mockClear()
     openContent.mockResolvedValueOnce('content:terminal:pane-2')
     fireEvent.click(row, { ctrlKey: true })
     await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', newWindow: true })))
+    expect(openContent.mock.calls.at(-1)?.[0]).not.toHaveProperty('replacePaneId')
     expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-2')
   })
 })

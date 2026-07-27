@@ -1115,6 +1115,37 @@ impl DaemonState {
         self.senders_for_pane(pane_id)
     }
 
+    pub fn pane_output_generation(&self, pane_id: Uuid) -> Option<u64> {
+        let (session_id, _) = self.find_pane(pane_id)?;
+        self.sessions
+            .get(&session_id)
+            .and_then(|session| session.panes.get(&pane_id))
+            .map(|pane| pane.output_cursor().0)
+    }
+
+    pub fn record_output_and_push_for_generation(
+        &mut self,
+        pane_id: Uuid,
+        generation: u64,
+        bytes: &[u8],
+    ) -> Option<Vec<Sender<DaemonToClient>>> {
+        if self.pane_output_generation(pane_id) != Some(generation) {
+            return None;
+        }
+        Some(self.record_output_and_push(pane_id, bytes))
+    }
+
+    pub fn mark_exited_for_generation(
+        &mut self,
+        pane_id: Uuid,
+        generation: u64,
+    ) -> Option<PaneExitEffect> {
+        if self.pane_output_generation(pane_id) != Some(generation) {
+            return None;
+        }
+        Some(self.mark_exited(pane_id))
+    }
+
     pub fn mark_exited(&mut self, pane_id: Uuid) -> PaneExitEffect {
         let owner = self.find_pane(pane_id).map(|(session_id, _)| session_id);
         let senders = owner
@@ -1956,6 +1987,54 @@ mod tests {
             .close_pane(meta.id, pane_id)
             .expect("close exited pane")
             .is_none());
+    }
+
+    #[test]
+    fn stale_reader_cannot_exit_replacement_with_reused_pane_id() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert original pane");
+        let original_generation = state
+            .pane_output_generation(pane_id)
+            .expect("original generation");
+
+        state
+            .close_pane(workspace.id, pane_id)
+            .expect("close original pane");
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert replacement pane");
+        let replacement_generation = state
+            .pane_output_generation(pane_id)
+            .expect("replacement generation");
+        assert_ne!(original_generation, replacement_generation);
+
+        assert!(state
+            .record_output_and_push_for_generation(pane_id, original_generation, b"stale")
+            .is_none());
+        assert!(state
+            .mark_exited_for_generation(pane_id, original_generation)
+            .is_none());
+        assert_eq!(
+            state
+                .pane_metas(workspace.id)
+                .expect("replacement pane")
+                .len(),
+            1
+        );
+        assert!(state
+            .record_output_and_push_for_generation(pane_id, replacement_generation, b"current")
+            .is_some());
+        assert!(state
+            .mark_exited_for_generation(pane_id, replacement_generation)
+            .is_some());
+        assert!(state
+            .pane_metas(workspace.id)
+            .expect("pane removed")
+            .is_empty());
     }
 
     #[test]

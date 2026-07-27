@@ -28,6 +28,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
   const controller = useHermesSessionController()
   const contentActions = useWorkspaceContentActions()
   const setError = useWorkspaceStore((state) => state.setError)
+  const activePaneId = useWorkspaceStore((state) => state.activePaneId)
   const [search, setSearch] = useState('')
   const [selection, setSelection] = useState(() => ({ workspaceId: controller.workspaceId, sessionId: controller.currentSessionId }))
   const [refreshing, setRefreshing] = useState(false)
@@ -82,8 +83,9 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
       return
     }
     try {
-      // Plain click resumes in the active terminal window (activating one from
-      // the tab list when none is on screen); Ctrl/Cmd+click opens a new window.
+      // Plain click replaces the process in the highlighted terminal pane so
+      // the spatial grid stays unchanged. Ctrl/Cmd+click keeps the explicit
+      // escape hatch that opens the conversation in a fresh terminal window.
       const panelId = await contentActions.openContent({
         kind: 'terminal',
         cwd: conversation.cwd,
@@ -91,14 +93,13 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
         args: launch.args,
         title: launch.title,
         newWindow,
+        ...(!newWindow && activePaneId ? { replacePaneId: activePaneId } : {}),
       })
-      // Reveal the owning terminal window and focus the resumed pane so the user
-      // immediately sees the resumed agent instead of a hidden background pane.
       if (panelId) contentActions.activateContent(panelId)
     } catch (reason) {
       setError(String(reason))
     }
-  }, [contentActions, setError])
+  }, [activePaneId, contentActions, setError])
 
   const openSelected = async () => {
     if (!selectedSession) return
@@ -238,7 +239,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
                 type="button"
                 className="agent-session-row agent-conversation-row"
                 role="listitem"
-                title={`Resume in the active terminal · Ctrl+click for a new window · ${conversation.path}`}
+                title={`Resume in the highlighted terminal · Ctrl+click for a new window · ${conversation.path}`}
                 onClick={(event) => { void resumeConversation(conversation, event.ctrlKey || event.metaKey) }}
               >
                 <span className="agent-session-row-title">
