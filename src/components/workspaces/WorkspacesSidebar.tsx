@@ -11,6 +11,7 @@ export type WorkspacesSidebarIntegration = {
   onCreateWorkspaceRequested?: () => void
   onImportReposRequested?: () => void
   onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
+  onEditWorkspaceRequested?: (sessionId: string) => void
 }
 
 export type WorkspacesSidebarProps = {
@@ -93,7 +94,6 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const defaultProfileId = useWorkspaceStore((state) => state.settings.defaultProfileId)
   const openSession = useWorkspaceStore((state) => state.openSession)
   const createSession = useWorkspaceStore((state) => state.createSession)
-  const renameSession = useWorkspaceStore((state) => state.renameSession)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const renameWorkspaceGroup = useWorkspaceStore((state) => state.renameWorkspaceGroup)
   const deleteWorkspaceGroup = useWorkspaceStore((state) => state.deleteWorkspaceGroup)
@@ -219,12 +219,6 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     if (name?.trim()) renameWorkspaceGroup(group.id, name.trim())
   }
 
-  const renameWorkspace = (session: SessionMeta) => {
-    const name = window.prompt('Rename workspace', session.name)
-    if (!name?.trim()) return
-    void renameSession(session.id, name.trim()).catch((caught) => setError(String(caught)))
-  }
-
   const deleteWorkspace = (sessionId: string) => {
     if (!integration.onDeleteWorkspaceRequested) return
     void Promise.resolve(integration.onDeleteWorkspaceRequested(sessionId)).catch((caught) => setError(String(caught)))
@@ -277,7 +271,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
         </div>
         <div className="workspaces-row-actions">
-          <button type="button" title="Rename workspace" aria-label={`Rename ${session.name}`} className="session-small-action" onClick={() => renameWorkspace(session)}>
+          <button type="button" title="Edit workspace details" aria-label={`Edit ${session.name}`} className="session-small-action" disabled={!integration.onEditWorkspaceRequested} onClick={() => integration.onEditWorkspaceRequested?.(session.id)}>
             <Pencil size={13} strokeWidth={1.7} aria-hidden="true" />
           </button>
           <button type="button" title="Delete workspace" aria-label={`Delete ${session.name}`} className="session-small-action danger" disabled={!integration.onDeleteWorkspaceRequested} onClick={() => deleteWorkspace(session.id)}>

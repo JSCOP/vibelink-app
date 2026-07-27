@@ -440,7 +440,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const paneCompletionHighlights = withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId)
       const paneReviewMarkers = withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId)
       const paneRoles = withoutPaneKeys(state.settings.paneRoles, deletedPaneIds)
-      const settings = paneRoles === state.settings.paneRoles ? state.settings : { ...state.settings, paneRoles }
+      const workspaceProfileIds = { ...state.settings.workspaceProfileIds }
+      const workspaceDetails = { ...state.settings.workspaceDetails }
+      delete workspaceProfileIds[sessionId]
+      delete workspaceDetails[sessionId]
+      const settings = { ...state.settings, paneRoles, workspaceProfileIds, workspaceDetails }
       delete viewModes[sessionId]
       delete kanbanLayouts[sessionId]
       delete orchestratorPaneIds[sessionId]

@@ -63,6 +63,7 @@ const integration = {
   onCreateWorkspaceRequested: vi.fn(),
   onImportReposRequested: vi.fn(),
   onDeleteWorkspaceRequested: vi.fn(),
+  onEditWorkspaceRequested: vi.fn(),
 }
 
 function renderSidebar() {
@@ -259,5 +260,13 @@ describe('WorkspacesSidebar', () => {
     expect(mocks.state.openSession).not.toHaveBeenCalled()
     await waitFor(() => expect(open).toHaveBeenCalledWith({ directory: true, multiple: false, title: 'Select workspace group root folder' }))
     expect(mocks.state.setWorkspaceGroupRootFolder).toHaveBeenCalledExactlyOnceWith('core', 'E:/repos/core-root')
+  })
+
+  test('opens workspace details from the row action', () => {
+    renderSidebar()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Alpha' }))
+
+    expect(integration.onEditWorkspaceRequested).toHaveBeenCalledExactlyOnceWith('alpha')
   })
 })

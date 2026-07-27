@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DockviewReact,
   type DockviewApi,
@@ -60,6 +60,8 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   // Set when a persist was requested while a drag was still running.
   const persistDeferredRef = useRef(false)
   const titlesHidden = Boolean(props.params.titlesHidden)
+  const [gridCreationLabel, setGridCreationLabel] = useState<string | null>(null)
+  const gridCreationDepthRef = useRef(0)
 
   const paneIdsFromParams = useMemo(() => collectInnerPaneIds(props.params.inner), [props.params.inner])
 
@@ -237,6 +239,16 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     if (first) TerminalManager.focus(first)
   }, [paneIds])
 
+  const setGridCreationPending = useCallback((pending: boolean, label?: string) => {
+    if (pending) {
+      gridCreationDepthRef.current += 1
+      setGridCreationLabel(label?.trim() || 'Creating terminal grid…')
+      return
+    }
+    gridCreationDepthRef.current = Math.max(0, gridCreationDepthRef.current - 1)
+    if (gridCreationDepthRef.current === 0) setGridCreationLabel(null)
+  }, [])
+
   const scheduleInnerInvariantCheck = useCallback(() => {
     if (invariantCheckPendingRef.current) return
     invariantCheckPendingRef.current = true
@@ -295,11 +307,12 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       removePane,
       settle: settleInner,
       persist: persistInner,
+      setGridCreationPending,
       paneIds,
       focusFirst,
     })
     return unregister
-  }, [addPane, focusFirst, paneIds, persistInner, removePane, settleInner, windowId])
+  }, [addPane, focusFirst, paneIds, persistInner, removePane, setGridCreationPending, settleInner, windowId])
 
   // Fit cascade: the OUTER panel resize / visibility drives the inner Dockview.
   useEffect(() => {
@@ -331,6 +344,7 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     innerApiRef.current = null
     invariantCheckPendingRef.current = false
     for (const disposable of innerDisposablesRef.current) disposable.dispose()
+    gridCreationDepthRef.current = 0
     innerDisposablesRef.current = []
     if (persistTimerRef.current !== undefined) window.clearTimeout(persistTimerRef.current)
   }, [])
@@ -353,6 +367,11 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
         hideBorders
         theme={vibelinkDockviewTheme}
       />
+      {gridCreationLabel ? (
+        <div className="terminal-grid-creation-cover" aria-live="polite" aria-busy="true">
+          <span className="terminal-grid-creation-status">{gridCreationLabel}</span>
+        </div>
+      ) : null}
     </div>
   )
 }

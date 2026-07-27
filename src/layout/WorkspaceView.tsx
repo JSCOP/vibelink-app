@@ -56,7 +56,7 @@ import type { DirEntryInfo, PaneMeta } from '../ipc/types'
 import type { WorkspaceCreationInput } from '../ipc/providerIntegrations'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
-import { profileById } from '../state/profiles'
+import { profileById, selectedProfileForWorkspace } from '../state/profiles'
 import {
   getWorkspaceSessionEpoch,
   getWorkspaceSessionReadyEpoch,
@@ -143,6 +143,7 @@ export type WorkspaceViewProps = {
   saveLayoutRequestId?: number
   contentComponents?: WorkspaceContentComponentMap
   onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
+  onEditWorkspaceRequested?: (sessionId: string) => void
   onCreateWorkspaceRequested?: () => void
   onImportReposRequested?: () => void
   onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
@@ -265,6 +266,7 @@ function DiffContentPanel(props: WorkspaceContentPanelProps) {
 
 type WorkspaceIntegrationContextValue = {
   onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
+  onEditWorkspaceRequested?: (sessionId: string) => void
   onCreateWorkspaceRequested?: () => void
   onImportReposRequested?: () => void
   onWorkspaceInput?: (input: WorkspaceCreationInput) => void | Promise<void>
@@ -460,6 +462,7 @@ export function WorkspaceView({
   saveLayoutRequestId = 0,
   contentComponents,
   onDeleteWorkspaceRequested,
+  onEditWorkspaceRequested,
   onCreateWorkspaceRequested,
   onImportReposRequested,
   onWorkspaceInput,
@@ -600,6 +603,7 @@ export function WorkspaceView({
   }, [])
   const integration = useMemo<WorkspaceIntegrationContextValue>(() => ({
     onDeleteWorkspaceRequested,
+    onEditWorkspaceRequested,
     onCreateWorkspaceRequested,
     onImportReposRequested,
     onWorkspaceInput,
@@ -608,7 +612,7 @@ export function WorkspaceView({
     layoutOwner: loadedLayoutOwner,
     setWorkspaceOverlayOpen,
     currentMainGroupId,
-  }), [currentMainGroupId, effectiveNativeSurfacesSuspended, loadedLayoutOwner, onCreateWorkspaceRequested, onDeleteWorkspaceRequested, onImportReposRequested, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
+  }), [currentMainGroupId, effectiveNativeSurfacesSuspended, loadedLayoutOwner, onCreateWorkspaceRequested, onDeleteWorkspaceRequested, onEditWorkspaceRequested, onImportReposRequested, onWorkspaceInput, openFilePicker, setWorkspaceOverlayOpen])
 
   const layoutDockview = useCallback((api: DockviewApi) => {
     const root = dockRef.current
@@ -790,11 +794,13 @@ export function WorkspaceView({
     return waitForTerminalWindow(windowId, owner)
   }, [addContentPanel, ownsLayout, resolveTerminalWindowId, settleLayout, waitForTerminalWindow])
 
-  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; inactive?: boolean; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
+  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; inactive?: boolean; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string; deferLayoutCommit?: boolean } = {}) => {
     if (!ownsLayout(owner)) return ''
     const handle = await ensureTerminalWindow(owner, { windowId: options.windowId, targetGroupId: options.targetGroupId, forceNew: options.forceNewWindow })
     if (!handle || !ownsLayout(owner)) return ''
-    const profile = profileById(useWorkspaceStore.getState().settings, options.profileId)
+    const profile = options.profileId === undefined
+      ? selectedProfileForWorkspace(useWorkspaceStore.getState().settings, owner.sessionId)
+      : profileById(useWorkspaceStore.getState().settings, options.profileId)
     const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
     const panelId = workspaceContentPanelId({ kind: 'terminal', instanceId: pending.id })
     pendingTerminalPaneIdsRef.current.add(pending.id)
@@ -808,7 +814,7 @@ export function WorkspaceView({
       const size = await measuredSpawnSize(pending.id)
       const spawned = await spawnPane(owner.sessionId, {
         paneId: pending.id,
-        profileId: options.profileId,
+        ...(options.profileId !== undefined ? { profileId: options.profileId } : {}),
         ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
         ...(options.shell !== undefined ? { shell: options.shell } : {}),
         ...(options.args !== undefined ? { args: options.args } : {}),
@@ -827,9 +833,11 @@ export function WorkspaceView({
         useWorkspaceStore.getState().setActivePaneId(spawned.id)
         if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(spawned.id)
       }
-      reflowTerminalsAfterLayout({ syncPty: true, paneIds: [spawned.id] })
-      handle.persist()
-      persistLayoutSoon()
+      if (!options.deferLayoutCommit) {
+        reflowTerminalsAfterLayout({ syncPty: true, paneIds: [spawned.id] })
+        handle.persist()
+        persistLayoutSoon()
+      }
       committed = true
       return panelId
     } catch (error) {
@@ -917,30 +925,36 @@ export function WorkspaceView({
       )
       const newPanelIds: string[] = []
       let lastPanelId = ''
-      for (let index = existingPanelIds.length; index < targetCount; index += 1) {
-        if (!ownsLayout(owner)) return ''
-        const panelId = await spawnTerminal(owner, { windowId: handle.windowId, profileId: request.grid.profileId, inactive: true })
-        if (!ownsLayout(owner)) return ''
-        if (panelId) {
-          newPanelIds.push(panelId)
-          lastPanelId = panelId
+      const gridCreationPending = targetCount > existingPanelIds.length
+      if (gridCreationPending) handle.setGridCreationPending(true, `Creating ${requestedGrid.cols}×${requestedGrid.rows} terminal grid…`)
+      try {
+        for (let index = existingPanelIds.length; index < targetCount; index += 1) {
+          if (!ownsLayout(owner)) return ''
+          const panelId = await spawnTerminal(owner, { windowId: handle.windowId, profileId: request.grid.profileId, inactive: true, deferLayoutCommit: true })
+          if (!ownsLayout(owner)) return ''
+          if (panelId) {
+            newPanelIds.push(panelId)
+            lastPanelId = panelId
+          }
         }
+        const occupied = occupiedGridForPaneCount(existingPanelIds.length, request.grid.occupiedGrid)
+        const orderedPanelIds = expandPaneIdsIntoGrid(existingPanelIds, newPanelIds, occupied, requestedGrid)
+        const includedPanelIds = new Set(orderedPanelIds)
+        for (const panelId of [...existingPanelIds, ...newPanelIds]) {
+          if (includedPanelIds.has(panelId)) continue
+          includedPanelIds.add(panelId)
+          orderedPanelIds.push(panelId)
+        }
+        const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
+        arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
+        if (!ownsLayout(owner)) return ''
+        await handle.settle()
+        handle.persist()
+        persistLayoutSoon()
+        return lastPanelId
+      } finally {
+        if (gridCreationPending) handle.setGridCreationPending(false)
       }
-      const occupied = occupiedGridForPaneCount(existingPanelIds.length, request.grid.occupiedGrid)
-      const orderedPanelIds = expandPaneIdsIntoGrid(existingPanelIds, newPanelIds, occupied, requestedGrid)
-      const includedPanelIds = new Set(orderedPanelIds)
-      for (const panelId of [...existingPanelIds, ...newPanelIds]) {
-        if (includedPanelIds.has(panelId)) continue
-        includedPanelIds.add(panelId)
-        orderedPanelIds.push(panelId)
-      }
-      const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
-      arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
-      if (!ownsLayout(owner)) return ''
-      await handle.settle()
-      handle.persist()
-      persistLayoutSoon()
-      return lastPanelId
     }
 
     if (request.kind === 'browser') {

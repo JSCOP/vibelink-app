@@ -79,6 +79,7 @@ describe('openContentRegistry', () => {
       removePane: vi.fn(),
       settle: vi.fn(async () => undefined),
       persist: vi.fn(),
+      setGridCreationPending: vi.fn(),
       paneIds: () => [paneId],
       focusFirst: vi.fn(),
     })

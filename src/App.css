@@ -915,6 +915,24 @@ button {
   width: 100%;
 }
 
+.terminal-grid-creation-cover {
+  align-items: center;
+  background: var(--vibelink-terminal-bg);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+  z-index: 20;
+}
+
+.terminal-grid-creation-status {
+  border: 1px solid var(--vibelink-border-soft);
+  background: var(--vibelink-panel-3);
+  color: var(--vibelink-muted);
+  font: 12px/1.35 var(--vibelink-sans);
+  padding: 9px 12px;
+}
+
 /* Per-pane title bar (the inner Dockview tab). Reuses terminal tab chrome but
  * always reads as a status/title bar, never an addable tab strip. */
 .terminal-pane-title-bar {
@@ -1512,6 +1530,95 @@ button {
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.workspace-settings-dialog {
+  width: min(560px, calc(100vw - 48px));
+}
+
+.workspace-settings-header {
+  align-items: flex-start;
+  border-bottom: 0;
+  padding-bottom: 8px;
+}
+
+.workspace-settings-header p {
+  color: var(--vibelink-muted);
+  font: 12px/1.4 var(--vibelink-sans);
+  margin: 6px 0 0;
+}
+
+.workspace-settings-form {
+  align-content: start;
+  display: grid;
+  gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 22px 20px;
+}
+
+.workspace-settings-field {
+  color: var(--vibelink-muted);
+  display: grid;
+  font: 11px/1.35 var(--vibelink-sans);
+  gap: 6px;
+}
+
+.workspace-settings-field > span {
+  color: var(--vibelink-text);
+  font-weight: 700;
+}
+
+.workspace-settings-field input,
+.workspace-settings-field select,
+.workspace-settings-field textarea {
+  border: 1px solid var(--vibelink-border);
+  border-radius: 6px;
+  background: var(--vibelink-input);
+  color: var(--vibelink-text);
+  font: 13px/1.4 var(--vibelink-sans);
+  outline: none;
+  padding: 8px 10px;
+}
+
+.workspace-settings-field input,
+.workspace-settings-field select {
+  height: 34px;
+}
+
+.workspace-settings-field textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.workspace-settings-field input:focus,
+.workspace-settings-field select:focus,
+.workspace-settings-field textarea:focus {
+  border-color: var(--vibelink-accent-border);
+  box-shadow: 0 0 0 1px var(--vibelink-accent-border);
+}
+
+.workspace-settings-field small {
+  color: var(--vibelink-muted);
+}
+
+.workspace-settings-error {
+  color: var(--vibelink-danger);
+  font-size: 12px;
+  margin: 0;
+}
+
+.workspace-settings-footer {
+  align-items: center;
+  border-top: 0;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 0 22px 20px;
+}
+
+.workspace-settings-footer button {
+  min-height: 32px;
 }
 
 .settings-dialog-header {

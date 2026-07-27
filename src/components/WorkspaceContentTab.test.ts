@@ -103,6 +103,7 @@ describe('WorkspaceContentTab', () => {
       removePane: () => undefined,
       settle: async () => undefined,
       persist: () => undefined,
+      setGridCreationPending: () => undefined,
       paneIds: () => ['pane-a', 'pane-b'],
       focusFirst: () => undefined,
     })

@@ -10,6 +10,7 @@ import { Activity, AlertTriangle, Bug, Camera, Eraser, Minus, Settings2, Square,
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
+import { WorkspaceSettingsDialog } from './components/WorkspaceSettingsDialog'
 import { ImportReposDialog } from './components/workspaces/ImportReposDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
@@ -74,6 +75,7 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isBugReportOpen, setIsBugReportOpen] = useState(false)
   const [isCreateOpen, setIsCreateOpen] = useState(false)
+  const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null)
   // ImportReposDialog is mounted by the repository import slice.
   const [isImportReposOpen, setIsImportReposOpen] = useState(false)
   const [isSetupWizardOpen, setIsSetupWizardOpen] = useState(false)
@@ -107,6 +109,7 @@ function App() {
   const license = useWorkspaceStore((state) => state.license)
   const revalidateLicense = useWorkspaceStore((state) => state.revalidateLicense)
   const createSession = useWorkspaceStore((state) => state.createSession)
+  const renameSession = useWorkspaceStore((state) => state.renameSession)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
   const openSession = useWorkspaceStore((state) => state.openSession)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
@@ -117,6 +120,7 @@ function App() {
   const shortcutSessions = useMemo(() => flattenWorkspaceRows(workspaceRows(sessions, settings.workspaceGroups, settings.workspaceGroupIds, settings.workspaceOrder)), [sessions, settings.workspaceGroupIds, settings.workspaceGroups, settings.workspaceOrder])
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
+  const editingWorkspace = sessions.find((session) => session.id === editingWorkspaceId) ?? null
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
   const appLocked = status === 'ready' && license.ready && isAppLocked(license.status)
   const setupWizardVisible = !appLocked && (isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null))
@@ -125,6 +129,7 @@ function App() {
   const appWorkspaceInteractionSuspended = isSettingsOpen
     || isBugReportOpen
     || isCreateOpen
+    || Boolean(editingWorkspace)
     || isImportReposOpen
     || setupWizardVisible
     || isResourceMonitorOpen
@@ -696,6 +701,7 @@ function App() {
               onActionsReady={handleContentActionsReady}
               onChromeStateChange={setChromeState}
               onDeleteWorkspaceRequested={deleteWorkspace}
+              onEditWorkspaceRequested={setEditingWorkspaceId}
               onCreateWorkspaceRequested={() => setIsCreateOpen(true)}
               onImportReposRequested={() => setIsImportReposOpen(true)}
               onWorkspaceInput={createWorkspaceFromInput}
@@ -718,6 +724,7 @@ function App() {
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
         {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {editingWorkspace ? <WorkspaceSettingsDialog session={editingWorkspace} settings={settings} onChange={updateSettings} onRename={renameSession} onClose={() => setEditingWorkspaceId(null)} /> : null}
         {isImportReposOpen ? <ImportReposDialog onClose={() => setIsImportReposOpen(false)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
         {ffmpegDownload ? (

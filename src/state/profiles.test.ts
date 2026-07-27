@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine } from './profiles'
+import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
 
 describe('orderSessions', () => {
   const sessions = [
@@ -276,6 +276,21 @@ describe('terminal profiles', () => {
     expect(settings.workspaceProfileIds).toEqual({ 'session-a': 'codex' })
     expect(selectedProfileForWorkspace(settings, 'session-a').id).toBe('codex')
     expect(selectedProfileForWorkspace(settings, 'session-b').id).toBe('powershell')
+  })
+
+  test('normalizes workspace details and returns empty defaults', () => {
+    const settings = normalizeSettings({
+      workspaceDetails: {
+        ' session-a ': { githubIssue: ' 42 ', githubPullRequest: ' https://github.com/example/repo/pull/7 ', notes: '**Review**' },
+        empty: { githubIssue: '', githubPullRequest: '', notes: '' },
+        invalid: 'nope',
+      },
+    })
+
+    expect(settings.workspaceDetails).toEqual({
+      'session-a': { githubIssue: '42', githubPullRequest: 'https://github.com/example/repo/pull/7', notes: '**Review**' },
+    })
+    expect(workspaceDetailsFor(settings, 'missing')).toEqual({ githubIssue: '', githubPullRequest: '', notes: '' })
   })
 
   test('normalizes terminal scrollbar visibility and workspace order settings', () => {

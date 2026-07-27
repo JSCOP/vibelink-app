@@ -35,6 +35,11 @@ export type Profile = {
   color: string
   icon: string
 }
+export type WorkspaceDetails = {
+  githubIssue: string
+  githubPullRequest: string
+  notes: string
+}
 
 const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
 const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
@@ -68,6 +73,7 @@ export type Settings = {
   profiles: Profile[]
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
+  workspaceDetails: Record<string, WorkspaceDetails>
   workspaceGroups: WorkspaceGroup[]
   workspaceGroupIds: Record<string, string>
   paneRoles: Record<string, string>
@@ -243,6 +249,7 @@ export const defaultSettings: Settings = {
   profiles: cloneProfiles(defaultProfiles),
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
+  workspaceDetails: {},
   workspaceGroups: [],
   workspaceGroupIds: {},
   paneRoles: {},
@@ -268,6 +275,7 @@ export function normalizeSettings(value: unknown): Settings {
   const requestedProfileId = readString(record?.defaultProfileId, profiles[0].id)
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
   const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
+  const workspaceDetails = normalizeWorkspaceDetails(record?.workspaceDetails)
   const workspaceGroups = normalizeWorkspaceGroups(record?.workspaceGroups)
   const workspaceGroupIds = normalizeWorkspaceGroupIds(record?.workspaceGroupIds, workspaceGroups)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
@@ -301,6 +309,7 @@ export function normalizeSettings(value: unknown): Settings {
     keybindings: normalizeKeybindings(record?.keybindings),
     defaultProfileId,
     workspaceProfileIds,
+    workspaceDetails,
     workspaceGroups,
     workspaceGroupIds,
     paneRoles,
@@ -326,6 +335,12 @@ export function selectedProfile(settings: Settings): Profile {
 export function selectedProfileForWorkspace(settings: Settings, sessionId?: string | null): Profile {
   const profileId = sessionId ? settings.workspaceProfileIds[sessionId] : undefined
   return profileById(settings, profileId)
+}
+
+const emptyWorkspaceDetails: WorkspaceDetails = Object.freeze({ githubIssue: '', githubPullRequest: '', notes: '' })
+
+export function workspaceDetailsFor(settings: Settings, sessionId: string): WorkspaceDetails {
+  return settings.workspaceDetails[sessionId] ?? emptyWorkspaceDetails
 }
 
 export function profileById(settings: Settings, profileId?: string | null): Profile {
@@ -553,6 +568,20 @@ function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Reco
       (entry): entry is [string, string] => entry[0].trim().length > 0 && typeof entry[1] === 'string' && profileIds.has(entry[1]),
     ),
   )
+}
+
+function normalizeWorkspaceDetails(value: unknown): Record<string, WorkspaceDetails> {
+  if (!isRecord(value)) return {}
+  const details: Record<string, WorkspaceDetails> = {}
+  for (const [rawSessionId, rawDetails] of Object.entries(value)) {
+    const sessionId = rawSessionId.trim()
+    if (sessionId.length === 0 || !isRecord(rawDetails)) continue
+    const githubIssue = readString(rawDetails.githubIssue, '').trim().slice(0, 512)
+    const githubPullRequest = readString(rawDetails.githubPullRequest, '').trim().slice(0, 512)
+    const notes = readString(rawDetails.notes, '').slice(0, 8000)
+    if (githubIssue || githubPullRequest || notes) details[sessionId] = { githubIssue, githubPullRequest, notes }
+  }
+  return details
 }
 
 function normalizePaneRoles(value: unknown): Record<string, string> {
