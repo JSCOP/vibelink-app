@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { applyCaptureOverlayTransparency, captureFileName, evenFloor, isCaptureOverlayLabel, placeControlBar } from './captureOverlay'
+import {
+  applyCaptureOverlayTransparency,
+  captureFileName,
+  evenFloor,
+  intersectsAnyMonitor,
+  isCaptureOverlayLabel,
+  monitorAt,
+  monitorGapRects,
+  placeControlBar,
+  toVirtualRect,
+} from './captureOverlay'
+import type { VirtualScreen } from './captureOverlay'
 
 function styleTarget() {
   const properties: Record<string, string> = {}
@@ -118,5 +129,70 @@ describe('isCaptureOverlayLabel', () => {
     expect(isCaptureOverlayLabel('capture-overlay-')).toBe(false)
     expect(isCaptureOverlayLabel('capture-overlay-a')).toBe(false)
     expect(isCaptureOverlayLabel('xcapture-overlay-1')).toBe(false)
+  })
+})
+
+// The real layout this was built against: a 2560x1440 primary at the origin and
+// a portrait 1440x2560 secondary placed left of and above it. The bounding box
+// is 4000x2560 with L-shaped areas no display covers.
+const dualScreen: VirtualScreen = {
+  bounds: { x: -1440, y: -510, width: 4000, height: 2560 },
+  monitors: [
+    { x: 0, y: 0, width: 2560, height: 1440 },
+    { x: -1440, y: -510, width: 1440, height: 2560 },
+  ],
+}
+
+describe('virtual screen geometry', () => {
+  it('accepts a region that spans both monitors', () => {
+    expect(intersectsAnyMonitor(dualScreen, { x: -200, y: 100, w: 600, h: 400 })).toBe(true)
+  })
+
+  it('accepts a region entirely on the secondary monitor at negative coordinates', () => {
+    expect(intersectsAnyMonitor(dualScreen, { x: -1400, y: -400, w: 300, h: 300 })).toBe(true)
+  })
+
+  it('rejects a region lying only in an uncovered gap so capture never returns blank pixels', () => {
+    // Right of the portrait monitor's bottom half, below the primary monitor.
+    expect(intersectsAnyMonitor(dualScreen, { x: 200, y: 1600, w: 400, h: 300 })).toBe(false)
+    // Above the primary monitor, right of the portrait monitor.
+    expect(intersectsAnyMonitor(dualScreen, { x: 300, y: -500, w: 400, h: 200 })).toBe(false)
+  })
+
+  it('treats edge adjacency as non-overlapping', () => {
+    expect(intersectsAnyMonitor(dualScreen, { x: 2560, y: 0, w: 100, h: 100 })).toBe(false)
+    expect(intersectsAnyMonitor(dualScreen, { x: 2460, y: 0, w: 100, h: 100 })).toBe(true)
+  })
+
+  it('reports gap rectangles for the uncovered corners and none for a single full-cover monitor', () => {
+    expect(monitorGapRects(dualScreen).length).toBeGreaterThan(0)
+    const single: VirtualScreen = {
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      monitors: [{ x: 0, y: 0, width: 1920, height: 1080 }],
+    }
+    expect(monitorGapRects(single)).toEqual([])
+  })
+
+  it('resolves the monitor under a virtual-desktop point', () => {
+    expect(monitorAt(dualScreen, 10, 10)).toEqual(dualScreen.monitors[0])
+    expect(monitorAt(dualScreen, -700, 1000)).toEqual(dualScreen.monitors[1])
+    expect(monitorAt(dualScreen, 400, 1800)).toBeNull()
+  })
+
+  it('offsets overlay-local pixels by the virtual origin so negative monitors resolve', () => {
+    // Overlay origin IS the virtual origin, so local (0,0) maps to (-1440,-510).
+    expect(toVirtualRect({ x: 0, y: 0, w: 100, h: 50 }, dualScreen.bounds, 1)).toEqual({
+      x: -1440, y: -510, width: 100, height: 50,
+    })
+    // 1440 local px right of the origin is the primary monitor's left edge.
+    expect(toVirtualRect({ x: 1440, y: 510, w: 200, h: 200 }, dualScreen.bounds, 1)).toEqual({
+      x: 0, y: 0, width: 200, height: 200,
+    })
+  })
+
+  it('scales local CSS pixels by the device pixel ratio before offsetting', () => {
+    expect(toVirtualRect({ x: 10, y: 20, w: 30, h: 40 }, { x: -100, y: -50, width: 800, height: 600 }, 2)).toEqual({
+      x: -80, y: -10, width: 60, height: 80,
+    })
   })
 })

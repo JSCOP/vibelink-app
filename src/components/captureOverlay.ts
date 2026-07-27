@@ -41,6 +41,9 @@ export function isCaptureOverlayLabel(label: string): boolean {
   return generation.length > 0 && /^\d+$/.test(generation)
 }
 
+export type MonitorRect = { x: number; y: number; width: number; height: number }
+export type VirtualScreen = { bounds: MonitorRect; monitors: MonitorRect[] }
+
 
 const CONTROL_GAP = 8
 
@@ -73,4 +76,63 @@ export function captureFileName(mode: CaptureMode, d = new Date()): string {
   const seconds = String(d.getSeconds()).padStart(2, '0')
   const ts = `${year}${month}${day}-${hours}${minutes}${seconds}`
   return mode === 'video' ? `recording-${ts}.mp4` : `capture-${ts}.png`
+}
+
+// The overlay spans the whole virtual desktop, whose bounding box is NOT fully
+// covered by real displays: a 2560x1440 primary at (0,0) plus a portrait
+// 1440x2560 secondary at (-1440,-510) leaves L-shaped gaps. Selecting there
+// would capture black, so the overlay paints the gaps opaque and rejects them.
+export function monitorGapRects(screen: VirtualScreen, step = 8): MonitorRect[] {
+  const { bounds, monitors } = screen
+  if (monitors.length === 0) return []
+  const gaps: MonitorRect[] = []
+  for (let y = bounds.y; y < bounds.y + bounds.height; y += step) {
+    const rowHeight = Math.min(step, bounds.y + bounds.height - y)
+    let runStart: number | null = null
+    for (let x = bounds.x; x < bounds.x + bounds.width; x += step) {
+      const columnWidth = Math.min(step, bounds.x + bounds.width - x)
+      const covered = isCoveredByMonitor(screen, x, y) && isCoveredByMonitor(screen, x + columnWidth - 1, y + rowHeight - 1)
+      if (!covered && runStart === null) runStart = x
+      if (covered && runStart !== null) {
+        gaps.push({ x: runStart, y, width: x - runStart, height: rowHeight })
+        runStart = null
+      }
+    }
+    if (runStart !== null) {
+      gaps.push({ x: runStart, y, width: bounds.x + bounds.width - runStart, height: rowHeight })
+    }
+  }
+  return gaps
+}
+
+export function isCoveredByMonitor(screen: VirtualScreen, x: number, y: number): boolean {
+  return screen.monitors.some((monitor) =>
+    x >= monitor.x && x < monitor.x + monitor.width && y >= monitor.y && y < monitor.y + monitor.height,
+  )
+}
+
+// A selection is capturable only when its area actually overlaps a display.
+// A rect lying entirely in a gap would produce a fully transparent image.
+export function intersectsAnyMonitor(screen: VirtualScreen, rect: Rect): boolean {
+  return screen.monitors.some((monitor) =>
+    rect.x < monitor.x + monitor.width &&
+    rect.x + rect.w > monitor.x &&
+    rect.y < monitor.y + monitor.height &&
+    rect.y + rect.h > monitor.y,
+  )
+}
+
+// Overlay-local CSS pixels -> virtual-desktop physical pixels. The overlay
+// window's origin IS the virtual-screen origin, which is negative whenever a
+// monitor sits left of / above the primary one.
+export function toVirtualRect(rect: Rect, bounds: MonitorRect, dpr: number): MonitorRect {
+  const x = Math.round(rect.x * dpr) + bounds.x
+  const y = Math.round(rect.y * dpr) + bounds.y
+  return { x, y, width: Math.round(rect.w * dpr), height: Math.round(rect.h * dpr) }
+}
+
+export function monitorAt(screen: VirtualScreen, x: number, y: number): MonitorRect | null {
+  return screen.monitors.find((monitor) =>
+    x >= monitor.x && x < monitor.x + monitor.width && y >= monitor.y && y < monitor.y + monitor.height,
+  ) ?? null
 }

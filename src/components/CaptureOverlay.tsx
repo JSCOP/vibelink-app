@@ -4,7 +4,8 @@ import { emit, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { captureFileName, evenFloor, placeControlBar } from './captureOverlay'
+import { captureFileName, evenFloor, intersectsAnyMonitor, monitorAt, monitorGapRects, placeControlBar, toVirtualRect } from './captureOverlay'
+import type { VirtualScreen } from './captureOverlay'
 
 type CaptureMode = 'image' | 'quick' | 'video'
 
@@ -12,6 +13,7 @@ type CaptureConfig = {
   mode: CaptureMode
   dir: string
   ffmpeg: string
+  screen: VirtualScreen
 }
 
 declare global {
@@ -53,6 +55,9 @@ const overlayPalette = {
   primaryBackground: 'rgba(8, 145, 178, 0.95)',
   mask: 'rgba(0, 0, 0, 0.35)',
   dim: 'rgba(0, 0, 0, 0.28)',
+  // Opaque, not dimmed: the virtual-desktop bounding box includes areas no
+  // display covers, and capturing there would yield blank pixels.
+  gap: 'rgba(2, 6, 16, 0.97)',
   shadow: 'rgba(0, 0, 0, 0.35)',
   outlineRing: 'rgba(15, 23, 42, 0.65)',
   outlineShadow: 'rgba(56, 189, 248, 0.45)',
@@ -151,6 +156,14 @@ function formatElapsed(seconds: number): string {
 
 export default function CaptureOverlay() {
   const cfg = window.__VIBELINK_CAPTURE__ ?? { mode: 'image', dir: '', ffmpeg: '' }
+  // A single-monitor fallback keeps the overlay usable if the native payload is
+  // ever missing; every capture path below works in virtual-screen coordinates.
+  // The native payload is injected once before load, so a stable identity here
+  // keeps every capture callback from being rebuilt on each render.
+  const screen: VirtualScreen = useMemo(() => cfg.screen ?? {
+    bounds: { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight },
+    monitors: [{ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }],
+  }, [cfg.screen])
   const mode: CaptureMode = cfg.mode === 'video' || cfg.mode === 'quick' ? cfg.mode : 'image'
   const [phase, setPhase] = useState<'select' | 'recording'>('select')
   const [rect, setRect] = useState<CaptureRect | null>(null)
@@ -159,6 +172,9 @@ export default function CaptureOverlay() {
   const viewport = useViewportSize()
   const dragStartRef = useRef<Point | null>(null)
   const pointerIdRef = useRef<number | null>(null)
+  // Last pointer position in overlay-local CSS pixels, so "Full screen" can
+  // resolve which display the user is on without an extra native round trip.
+  const hoverPointRef = useRef<Point | null>(null)
   const captureInProgressRef = useRef(false)
   const localStopInProgressRef = useRef(false)
   const selectedRect = isUsableRect(rect) ? rect : null
@@ -200,10 +216,28 @@ export default function CaptureOverlay() {
     return () => { void unlisten.then((dispose) => dispose()) }
   }, [phase])
 
+  // "Full screen" means the display under the pointer, not the whole virtual
+  // desktop: that bounding box includes uncovered gaps and, on mixed layouts,
+  // is far larger than anything the user wants in one image.
   const selectFullScreen = useCallback(() => {
     setError('')
-    setRect({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight })
-  }, [])
+    const dpr = window.devicePixelRatio || 1
+    const point = hoverPointRef.current
+    const virtualPoint = point
+      ? { x: Math.round(point.x * dpr) + screen.bounds.x, y: Math.round(point.y * dpr) + screen.bounds.y }
+      : null
+    const monitor = (virtualPoint && monitorAt(screen, virtualPoint.x, virtualPoint.y)) ?? screen.monitors[0]
+    if (!monitor) {
+      setRect({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight })
+      return
+    }
+    setRect({
+      x: (monitor.x - screen.bounds.x) / dpr,
+      y: (monitor.y - screen.bounds.y) / dpr,
+      w: monitor.width / dpr,
+      h: monitor.height / dpr,
+    })
+  }, [screen])
 
   const requireRect = useCallback(() => {
     if (selectedRect) return selectedRect
@@ -218,21 +252,24 @@ export default function CaptureOverlay() {
     }
     if (captureInProgressRef.current) return
 
+    const dpr = window.devicePixelRatio || 1
+    const virtualRect = toVirtualRect(targetRect, screen.bounds, dpr)
+    if (!intersectsAnyMonitor(screen, { x: virtualRect.x, y: virtualRect.y, w: virtualRect.width, h: virtualRect.height })) {
+      setError('That area is outside every display.')
+      return
+    }
+
     captureInProgressRef.current = true
     setError('')
     const win = getCurrentWindow()
     try {
-      const pos = await win.outerPosition()
-      const dpr = window.devicePixelRatio || 1
       const path = await invoke<string>('capture_region_image', {
         dir: cfg.dir,
         fileName: captureFileName(savedMode),
-        monitorX: pos.x,
-        monitorY: pos.y,
-        x: Math.round(targetRect.x * dpr),
-        y: Math.round(targetRect.y * dpr),
-        w: Math.round(targetRect.w * dpr),
-        h: Math.round(targetRect.h * dpr),
+        x: virtualRect.x,
+        y: virtualRect.y,
+        w: virtualRect.width,
+        h: virtualRect.height,
       })
       await emit('capture://saved', { mode: savedMode, path })
       await win.close()
@@ -240,7 +277,7 @@ export default function CaptureOverlay() {
       captureInProgressRef.current = false
       setError(formatError(captureError))
     }
-  }, [cfg.dir])
+  }, [cfg.dir, screen])
 
   const captureImage = useCallback(async () => {
     const targetRect = requireRect()
@@ -261,10 +298,15 @@ export default function CaptureOverlay() {
       originalPosition = await win.outerPosition()
       originalSize = await win.innerSize()
       const dpr = window.devicePixelRatio || 1
-      const offsetX = originalPosition.x + Math.round(targetRect.x * dpr)
-      const offsetY = originalPosition.y + Math.round(targetRect.y * dpr)
-      const w = evenFloor(targetRect.w * dpr)
-      const h = evenFloor(targetRect.h * dpr)
+      // gdigrab offsets are virtual-desktop coordinates and accept negatives,
+      // so a region on a monitor left of / above the primary one records fine.
+      const virtualRect = toVirtualRect(targetRect, screen.bounds, dpr)
+      if (!intersectsAnyMonitor(screen, { x: virtualRect.x, y: virtualRect.y, w: virtualRect.width, h: virtualRect.height })) {
+        setError('That area is outside every display.')
+        return
+      }
+      const w = evenFloor(virtualRect.width)
+      const h = evenFloor(virtualRect.height)
       const bar = placeControlBar(targetRect, { w: viewport.w, h: viewport.h }, RECORDING_BAR_WIDTH, RECORDING_BAR_HEIGHT)
 
       await win.setSize(new PhysicalSize(Math.round(RECORDING_BAR_WIDTH * dpr), Math.round(RECORDING_BAR_HEIGHT * dpr)))
@@ -273,8 +315,8 @@ export default function CaptureOverlay() {
         dir: cfg.dir,
         fileName: captureFileName('video'),
         ffmpegPath: cfg.ffmpeg,
-        offsetX,
-        offsetY,
+        offsetX: virtualRect.x,
+        offsetY: virtualRect.y,
         w,
         h,
       })
@@ -285,7 +327,7 @@ export default function CaptureOverlay() {
       setError(formatError(startError))
       setPhase('select')
     }
-  }, [cfg.dir, cfg.ffmpeg, requireRect, viewport.h, viewport.w])
+  }, [cfg.dir, cfg.ffmpeg, requireRect, screen, viewport.h, viewport.w])
 
   const stopVideo = useCallback(async () => {
     setError('')
@@ -313,6 +355,7 @@ export default function CaptureOverlay() {
   }, [phase])
 
   const onPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    hoverPointRef.current = pointFromEvent(event)
     if (phase !== 'select' || pointerIdRef.current !== event.pointerId || !dragStartRef.current) return
     event.preventDefault()
     setRect(normalizeRect(dragStartRef.current, pointFromEvent(event)))
@@ -354,6 +397,7 @@ export default function CaptureOverlay() {
       onContextMenu={(event) => { event.preventDefault(); closeOverlay() }}
     >
       {rect ? <SelectionMasks rect={rect} viewport={viewport} /> : <div style={fullDimStyle} />}
+      <MonitorGaps screen={screen} />
       {selectedRect ? <SelectionOutline rect={selectedRect} /> : null}
       {mode !== 'quick' && barPosition && selectedRect ? (
         <div style={{ ...selectBarStyle, left: barPosition.x, top: barPosition.y }} onPointerDown={(event) => event.stopPropagation()}>
@@ -385,6 +429,31 @@ function SelectionMasks({ rect, viewport }: { rect: CaptureRect; viewport: { w: 
       <div style={{ ...maskStyle, left: 0, top: rect.y, width: rect.x, height: rect.h }} />
       <div style={{ ...maskStyle, right: 0, top: rect.y, width: right, height: rect.h }} />
       <div style={{ ...maskStyle, left: 0, bottom: 0, width: viewport.w, height: bottom }} />
+    </>
+  )
+}
+
+// Areas of the virtual-desktop bounding box that no display covers. They are
+// painted OPAQUE (not dimmed) so it is obvious nothing can be captured there;
+// `intersectsAnyMonitor` rejects a selection that lands entirely inside them.
+function MonitorGaps({ screen }: { screen: VirtualScreen }) {
+  const dpr = window.devicePixelRatio || 1
+  const gaps = useMemo(() => monitorGapRects(screen), [screen])
+  if (gaps.length === 0) return null
+  return (
+    <>
+      {gaps.map((gap) => (
+        <div
+          key={`${gap.x}:${gap.y}:${gap.width}:${gap.height}`}
+          style={{
+            ...gapStyle,
+            left: (gap.x - screen.bounds.x) / dpr,
+            top: (gap.y - screen.bounds.y) / dpr,
+            width: gap.width / dpr,
+            height: gap.height / dpr,
+          }}
+        />
+      ))}
     </>
   )
 }
@@ -429,6 +498,12 @@ const fullDimStyle: CSSProperties = {
   position: 'absolute',
   inset: 0,
   background: overlayPalette.dim,
+  pointerEvents: 'none',
+}
+
+const gapStyle: CSSProperties = {
+  position: 'absolute',
+  background: overlayPalette.gap,
   pointerEvents: 'none',
 }
 

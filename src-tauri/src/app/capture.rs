@@ -64,6 +64,60 @@ pub struct CaptureRecordingState {
     started_at_ms: u64,
 }
 
+/// One physical display, in virtual-desktop coordinates.
+///
+/// The overlay spans the whole virtual desktop so a selection may cross
+/// monitors, but the bounding box is NOT fully covered by real displays: with a
+/// 2560x1440 primary at (0,0) and a portrait 1440x2560 secondary at
+/// (-1440,-510) the box is 4000x2560 and the uncovered corners would capture as
+/// black. The overlay paints those gaps opaque and refuses selections there.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureMonitorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureVirtualScreen {
+    pub bounds: CaptureMonitorRect,
+    pub monitors: Vec<CaptureMonitorRect>,
+}
+
+impl CaptureMonitorRect {
+    fn right(self) -> i64 {
+        self.x as i64 + self.width as i64
+    }
+
+    fn bottom(self) -> i64 {
+        self.y as i64 + self.height as i64
+    }
+}
+
+/// Bounding box of every monitor. Returns `None` when the list is empty.
+fn virtual_bounds(monitors: &[CaptureMonitorRect]) -> Option<CaptureMonitorRect> {
+    let first = *monitors.first()?;
+    let mut left = first.x as i64;
+    let mut top = first.y as i64;
+    let mut right = first.right();
+    let mut bottom = first.bottom();
+    for monitor in &monitors[1..] {
+        left = left.min(monitor.x as i64);
+        top = top.min(monitor.y as i64);
+        right = right.max(monitor.right());
+        bottom = bottom.max(monitor.bottom());
+    }
+    Some(CaptureMonitorRect {
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
+}
+
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -570,9 +624,12 @@ fn next_capture_overlay_label() -> String {
 pub fn is_capture_overlay_label(label: &str) -> bool {
     label
         .strip_prefix(CAPTURE_OVERLAY_LABEL_PREFIX)
-        .is_some_and(|rest| rest.is_empty() || rest.strip_prefix('-').is_some_and(|generation| {
-            !generation.is_empty() && generation.bytes().all(|byte| byte.is_ascii_digit())
-        }))
+        .is_some_and(|rest| {
+            rest.is_empty()
+                || rest.strip_prefix('-').is_some_and(|generation| {
+                    !generation.is_empty() && generation.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
 }
 
 #[tauri::command]
@@ -590,20 +647,33 @@ pub async fn open_capture_overlay(
         }
     }
 
-    let main = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
-    let monitor = main
-        .current_monitor()
+    // The overlay spans the ENTIRE virtual desktop, so a region may cross
+    // monitors and a second display is reachable without moving VibeLink.
+    // Coordinates are virtual-desktop physical pixels and go negative for
+    // monitors left of / above the primary one.
+    let monitors: Vec<CaptureMonitorRect> = app
+        .available_monitors()
         .map_err(to_string)?
-        .ok_or_else(|| "no monitor".to_string())?;
-    let position = monitor.position();
-    let size = monitor.size();
+        .iter()
+        .map(|monitor| CaptureMonitorRect {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        })
+        .collect();
+    let bounds = virtual_bounds(&monitors).ok_or_else(|| "no monitor".to_string())?;
+    let screen = CaptureVirtualScreen {
+        bounds,
+        monitors: monitors.clone(),
+    };
+
     let mode_json = serde_json::to_string(&mode).map_err(to_string)?;
     let dir_json = serde_json::to_string(&dir).map_err(to_string)?;
     let ffmpeg_json = serde_json::to_string(&ffmpeg_path).map_err(to_string)?;
+    let screen_json = serde_json::to_string(&screen).map_err(to_string)?;
     let initialization_script = format!(
-        "window.__VIBELINK_CAPTURE__={{mode:{mode_json},dir:{dir_json},ffmpeg:{ffmpeg_json}}};"
+        "window.__VIBELINK_CAPTURE__={{mode:{mode_json},dir:{dir_json},ffmpeg:{ffmpeg_json},screen:{screen_json}}};"
     );
 
     let window = WebviewWindowBuilder::new(
@@ -623,47 +693,106 @@ pub async fn open_capture_overlay(
     .build()
     .map_err(to_string)?;
 
+    // Position BEFORE size: a transparent always-on-top window sized to the
+    // full virtual desktop while still at the default origin would briefly
+    // cover every display.
     window
-        .set_position(tauri::PhysicalPosition::new(position.x, position.y))
+        .set_position(tauri::PhysicalPosition::new(bounds.x, bounds.y))
         .map_err(to_string)?;
     window
-        .set_size(tauri::PhysicalSize::new(size.width, size.height))
+        .set_size(tauri::PhysicalSize::new(bounds.width, bounds.height))
         .map_err(to_string)?;
 
     Ok(())
+}
+
+/// Intersection of a requested virtual-desktop region with one monitor,
+/// expressed as the monitor-local source rect and the destination offset inside
+/// the stitched output image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MonitorCrop {
+    src_x: u32,
+    src_y: u32,
+    dest_x: u32,
+    dest_y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn monitor_crop(region: CaptureMonitorRect, monitor: CaptureMonitorRect) -> Option<MonitorCrop> {
+    let left = (region.x as i64).max(monitor.x as i64);
+    let top = (region.y as i64).max(monitor.y as i64);
+    let right = region.right().min(monitor.right());
+    let bottom = region.bottom().min(monitor.bottom());
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(MonitorCrop {
+        src_x: (left - monitor.x as i64) as u32,
+        src_y: (top - monitor.y as i64) as u32,
+        dest_x: (left - region.x as i64) as u32,
+        dest_y: (top - region.y as i64) as u32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
 }
 
 #[tauri::command]
 pub async fn capture_region_image(
     dir: String,
     file_name: String,
-    monitor_x: i32,
-    monitor_y: i32,
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
     w: u32,
     h: u32,
 ) -> Result<String, String> {
+    if w == 0 || h == 0 {
+        return Err("empty region".to_string());
+    }
     let dir = resolve_dir(&dir, "Images").map_err(to_string)?;
-    let monitor = Monitor::from_point(monitor_x + 1, monitor_y + 1).map_err(to_string)?;
-    let full = monitor.capture_image().map_err(to_string)?;
+    let region = CaptureMonitorRect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
-    if x >= full.width() || y >= full.height() {
+    // The region is in virtual-desktop coordinates and may span monitors, so
+    // every intersecting display is grabbed and blitted into one image. Areas
+    // the region covers but no monitor does stay transparent rather than
+    // silently becoming black.
+    let mut stitched = xcap::image::RgbaImage::new(w, h);
+    let mut captured_any = false;
+    for monitor in Monitor::all().map_err(to_string)? {
+        let bounds = CaptureMonitorRect {
+            x: monitor.x().map_err(to_string)?,
+            y: monitor.y().map_err(to_string)?,
+            width: monitor.width().map_err(to_string)?,
+            height: monitor.height().map_err(to_string)?,
+        };
+        let Some(crop) = monitor_crop(region, bounds) else {
+            continue;
+        };
+        let source = monitor
+            .capture_region(crop.src_x, crop.src_y, crop.width, crop.height)
+            .map_err(to_string)?;
+        xcap::image::imageops::replace(
+            &mut stitched,
+            &source,
+            crop.dest_x as i64,
+            crop.dest_y as i64,
+        );
+        captured_any = true;
+    }
+    if !captured_any {
         return Err("empty region".to_string());
     }
 
-    let crop_width = w.min(full.width().saturating_sub(x));
-    let crop_height = h.min(full.height().saturating_sub(y));
-    if crop_width == 0 || crop_height == 0 {
-        return Err("empty region".to_string());
-    }
-
-    let cropped = xcap::image::imageops::crop_imm(&full, x, y, crop_width, crop_height).to_image();
     let output = unique_path(&dir, &file_name);
-    cropped
+    stitched
         .save_with_format(&output, xcap::image::ImageFormat::Png)
         .map_err(to_string)?;
-    copy_rgba_to_clipboard(cropped.width(), cropped.height(), cropped.into_raw())?;
+    copy_rgba_to_clipboard(stitched.width(), stitched.height(), stitched.into_raw())?;
     Ok(output.to_string_lossy().to_string())
 }
 
@@ -939,5 +1068,128 @@ mod tests {
         assert!(!is_capture_overlay_label("capture-overlay-a"));
         assert!(!is_capture_overlay_label("capture-overlay-1x"));
         assert!(!is_capture_overlay_label("xcapture-overlay-1"));
+    }
+
+    /// Real layout this was built against: 2560x1440 primary at the origin plus
+    /// a portrait 1440x2560 secondary left of and above it.
+    fn dual_monitors() -> Vec<CaptureMonitorRect> {
+        vec![
+            CaptureMonitorRect {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+            CaptureMonitorRect {
+                x: -1440,
+                y: -510,
+                width: 1440,
+                height: 2560,
+            },
+        ]
+    }
+
+    #[test]
+    fn virtual_bounds_span_monitors_placed_at_negative_coordinates() {
+        assert_eq!(
+            virtual_bounds(&dual_monitors()).expect("bounds"),
+            CaptureMonitorRect {
+                x: -1440,
+                y: -510,
+                width: 4000,
+                height: 2560
+            }
+        );
+        assert_eq!(virtual_bounds(&[]), None);
+    }
+
+    #[test]
+    fn a_region_spanning_two_monitors_produces_one_crop_per_monitor() {
+        let region = CaptureMonitorRect {
+            x: -200,
+            y: 100,
+            width: 600,
+            height: 400,
+        };
+        let monitors = dual_monitors();
+
+        let primary = monitor_crop(region, monitors[0]).expect("primary overlap");
+        assert_eq!(
+            primary,
+            // Right 400px of the region land on the primary at its left edge,
+            // offset 200px into the stitched output.
+            MonitorCrop {
+                src_x: 0,
+                src_y: 100,
+                dest_x: 200,
+                dest_y: 0,
+                width: 400,
+                height: 400
+            }
+        );
+
+        let secondary = monitor_crop(region, monitors[1]).expect("secondary overlap");
+        assert_eq!(
+            secondary,
+            // Left 200px come from the portrait monitor, whose own origin is
+            // (-1440,-510), so the source offset stays positive.
+            MonitorCrop {
+                src_x: 1240,
+                src_y: 610,
+                dest_x: 0,
+                dest_y: 0,
+                width: 200,
+                height: 400
+            }
+        );
+    }
+
+    #[test]
+    fn a_region_inside_an_uncovered_gap_yields_no_crop() {
+        // Below the primary monitor and right of the portrait one.
+        let gap = CaptureMonitorRect {
+            x: 200,
+            y: 1600,
+            width: 400,
+            height: 300,
+        };
+        assert!(dual_monitors()
+            .into_iter()
+            .all(|monitor| monitor_crop(gap, monitor).is_none()));
+    }
+
+    #[test]
+    fn edge_adjacent_regions_do_not_overlap() {
+        let monitor = CaptureMonitorRect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let touching = CaptureMonitorRect {
+            x: 2560,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(monitor_crop(touching, monitor), None);
+
+        let overlapping = CaptureMonitorRect {
+            x: 2460,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(
+            monitor_crop(overlapping, monitor).expect("overlap"),
+            MonitorCrop {
+                src_x: 2460,
+                src_y: 0,
+                dest_x: 0,
+                dest_y: 0,
+                width: 100,
+                height: 100
+            }
+        );
     }
 }
