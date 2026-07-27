@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyCaptureOverlayTransparency, captureFileName, evenFloor, placeControlBar } from './captureOverlay'
+import { applyCaptureOverlayTransparency, captureFileName, evenFloor, isCaptureOverlayLabel, placeControlBar } from './captureOverlay'
 
 function styleTarget() {
   const properties: Record<string, string> = {}
@@ -103,5 +103,20 @@ describe('applyCaptureOverlayTransparency', () => {
       expect(target.style.minWidth).toBe('0')
       expect(target.properties['--vibelink-bg']).toBe('transparent')
     }
+  })
+})
+
+describe('isCaptureOverlayLabel', () => {
+  it('renders the overlay for every generation-suffixed native window label', () => {
+    expect(isCaptureOverlayLabel('capture-overlay')).toBe(true)
+    expect(isCaptureOverlayLabel('capture-overlay-1')).toBe(true)
+    expect(isCaptureOverlayLabel('capture-overlay-42')).toBe(true)
+  })
+
+  it('renders the workspace app for every other window label', () => {
+    expect(isCaptureOverlayLabel('main')).toBe(false)
+    expect(isCaptureOverlayLabel('capture-overlay-')).toBe(false)
+    expect(isCaptureOverlayLabel('capture-overlay-a')).toBe(false)
+    expect(isCaptureOverlayLabel('xcapture-overlay-1')).toBe(false)
   })
 })

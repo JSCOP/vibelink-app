@@ -828,6 +828,10 @@ fn spawn_configured_daemon(include_breakaway: bool) -> Result<SpawnedDaemon> {
     let mut command = Command::new(exe);
     command
         .arg("--daemon")
+        // The app keeps WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS set for its own
+        // WebView2 environment (see `app::run`); the daemon must not inherit
+        // its debugging port.
+        .env_remove("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

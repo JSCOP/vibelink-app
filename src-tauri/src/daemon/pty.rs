@@ -81,6 +81,10 @@ impl Pane {
         // re-add these for users who intentionally want no color.
         command.env_remove("NO_COLOR");
         command.env_remove("NODE_DISABLE_COLORS");
+        // The app keeps WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS set for its own
+        // WebView2 environment (see `app::run`); terminal children must not
+        // inherit its debugging port.
+        command.env_remove("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
         for (key, value) in &config.env {
             command.env(key, value);
         }

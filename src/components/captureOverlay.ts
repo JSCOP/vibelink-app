@@ -32,6 +32,15 @@ export function applyCaptureOverlayTransparency(doc: CaptureOverlayDocument = do
   }
 }
 
+// The native overlay window label carries a per-open generation suffix
+// (`capture-overlay-7`) because Tauri never frees a leaked window label, and a
+// fixed label permanently breaks capture after one leak. Match the family here.
+export function isCaptureOverlayLabel(label: string): boolean {
+  if (label === 'capture-overlay') return true
+  const generation = label.startsWith('capture-overlay-') ? label.slice('capture-overlay-'.length) : ''
+  return generation.length > 0 && /^\d+$/.test(generation)
+}
+
 
 const CONTROL_GAP = 8
 

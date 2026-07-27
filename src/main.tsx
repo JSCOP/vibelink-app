@@ -6,9 +6,9 @@ import './editor/monaco'
 import './index.css'
 import App from './App.tsx'
 import CaptureOverlay from './components/CaptureOverlay.tsx'
-import { applyCaptureOverlayTransparency } from './components/captureOverlay.ts'
+import { applyCaptureOverlayTransparency, isCaptureOverlayLabel } from './components/captureOverlay.ts'
 
-const isOverlay = getCurrentWindow().label === 'capture-overlay'
+const isOverlay = isCaptureOverlayLabel(getCurrentWindow().label)
 
 if (isOverlay) {
   applyCaptureOverlayTransparency()

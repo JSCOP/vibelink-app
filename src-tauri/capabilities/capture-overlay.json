@@ -3,11 +3,13 @@
   "identifier": "capture-overlay",
   "description": "Capture overlay window",
   "windows": [
-    "capture-overlay"
+    "capture-overlay",
+    "capture-overlay-*"
   ],
   "permissions": [
     "core:default",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-outer-position",
     "core:window:allow-set-size",
     "core:window:allow-set-position",

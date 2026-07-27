@@ -549,6 +549,32 @@ fn expand_home_path(target: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(target))
 }
 
+/// Every overlay gets a fresh, unique window label.
+///
+/// Tauri only frees a window/webview label when the runtime reports
+/// `WindowEvent::Destroyed` for it. On Windows the overlay is a transparent,
+/// always-on-top `WebviewWindow`; when its `WM_DESTROY` never reaches the Tao
+/// event loop (the app holds the last `Arc<Window>` alive, so the window is
+/// only hidden), the label stays registered forever. Reusing the fixed
+/// `capture-overlay` label then makes every later capture fail with
+/// "a webview with label `capture-overlay` already exists", permanently
+/// breaking screenshots and recording until the app restarts.
+pub const CAPTURE_OVERLAY_LABEL_PREFIX: &str = "capture-overlay";
+
+fn next_capture_overlay_label() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{CAPTURE_OVERLAY_LABEL_PREFIX}-{generation}")
+}
+
+pub fn is_capture_overlay_label(label: &str) -> bool {
+    label
+        .strip_prefix(CAPTURE_OVERLAY_LABEL_PREFIX)
+        .is_some_and(|rest| rest.is_empty() || rest.strip_prefix('-').is_some_and(|generation| {
+            !generation.is_empty() && generation.bytes().all(|byte| byte.is_ascii_digit())
+        }))
+}
+
 #[tauri::command]
 pub async fn open_capture_overlay(
     app: tauri::AppHandle,
@@ -556,8 +582,12 @@ pub async fn open_capture_overlay(
     dir: String,
     ffmpeg_path: String,
 ) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("capture-overlay") {
-        window.close().map_err(to_string)?;
+    // Close any live overlay first. A previous overlay whose label leaked is
+    // unreachable here, which is exactly why the new window gets a fresh label.
+    for (label, window) in app.webview_windows() {
+        if is_capture_overlay_label(&label) {
+            let _ = window.destroy();
+        }
     }
 
     let main = app
@@ -578,7 +608,7 @@ pub async fn open_capture_overlay(
 
     let window = WebviewWindowBuilder::new(
         &app,
-        "capture-overlay",
+        next_capture_overlay_label(),
         WebviewUrl::App("index.html".into()),
     )
     .title("Capture")
@@ -884,5 +914,30 @@ mod tests {
         assert!(traversal_escape.contains("escapes image directory"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_capture_overlay_open_uses_a_fresh_label() {
+        let first = next_capture_overlay_label();
+        let second = next_capture_overlay_label();
+        assert_ne!(
+            first, second,
+            "reusing a label makes Tauri reject the overlay once a label leaks"
+        );
+        assert!(is_capture_overlay_label(&first));
+        assert!(is_capture_overlay_label(&second));
+    }
+
+    #[test]
+    fn overlay_label_matching_covers_the_family_without_catching_other_windows() {
+        assert!(is_capture_overlay_label("capture-overlay"));
+        assert!(is_capture_overlay_label("capture-overlay-1"));
+        assert!(is_capture_overlay_label("capture-overlay-42"));
+
+        assert!(!is_capture_overlay_label("main"));
+        assert!(!is_capture_overlay_label("capture-overlay-"));
+        assert!(!is_capture_overlay_label("capture-overlay-a"));
+        assert!(!is_capture_overlay_label("capture-overlay-1x"));
+        assert!(!is_capture_overlay_label("xcapture-overlay-1"));
     }
 }
