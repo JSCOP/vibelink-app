@@ -561,7 +561,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
 
   useEffect(() => {
     if (historyActivated) void loadHistory(true)
-  }, [activeRepoRoot, debouncedHistoryAuthor, debouncedHistorySearch, gitState.pathFilter, historyActivated, loadHistory])
+  }, [activeRepoRoot, debouncedHistoryAuthor, debouncedHistorySearch, gitState.pathFilter, historyActivated, loadHistory, repoInfo?.headSha])
 
   const activateHistory = useCallback(() => setHistoryActivated(true), [])
   const selectHistoryCommit = useCallback((sha: string) => {
@@ -721,7 +721,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     setBaseRef(repoInfo?.upstream ?? 'HEAD')
     setHeadRef(repoInfo?.branch ?? 'HEAD')
     if (branchesActivated) void loadBranches()
-  }, [activeRepoRoot, branchesActivated, loadBranches, repoInfo?.branch, repoInfo?.upstream])
+  }, [activeRepoRoot, branchesActivated, loadBranches, repoInfo?.branch, repoInfo?.headSha, repoInfo?.upstream])
 
   const mutateBranch = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     void runMutation(operation)

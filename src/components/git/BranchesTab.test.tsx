@@ -19,12 +19,12 @@ import { AppDialogHost } from '../AppDialog'
 
 const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
 const branch: BranchInfo = { name: 'feature', isHead: false, isRemote: false, upstream: null, ahead: 0, behind: 0, lastCommitSubject: 'Feature', lastCommitDate: '2026-07-18T00:00:00Z' }
-const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
+const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, headSha: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
 const status: WorkingStatus = { staged: [], unstaged: [{ path: 'src/local.ts', oldPath: null, changeType: 'modified' }], untracked: [], conflicted: [], truncated: false }
 const remoteFile: ChangedFile = { path: 'src/remote.ts', changeType: 'modified', additions: 1, deletions: 1, binary: false }
 
-function renderBranches() {
-  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitBranchesSidebar active /><BranchesTab /></GitWorkspaceProvider><AppDialogHost /></WorkspaceContentActionsContext.Provider>)
+function renderBranches(pollIntervalMs = 60_000) {
+  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={pollIntervalMs}><GitBranchesSidebar active /><BranchesTab /></GitWorkspaceProvider><AppDialogHost /></WorkspaceContentActionsContext.Provider>)
 }
 
 /** Act on the in-app modal (`AppDialogHost`). Queries are scoped to the dialog
@@ -62,6 +62,25 @@ beforeEach(() => {
   useGitStore.setState({ sessions: {} })
   useExplorerStore.setState({ sessions: {} })
   useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], license: { ready: true, status: { state: 'development', entitled: true } as never } })
+})
+
+test('refreshes active branches when polling observes a new HEAD commit', async () => {
+  let currentRepoInfo = repoInfo
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return currentRepoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_branches') return [branch]
+    if (command === 'git_stash_list' || command === 'git_tag_list') return []
+    return null
+  })
+
+  renderBranches(20)
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'git_branches')).toHaveLength(1))
+
+  currentRepoInfo = { ...repoInfo, headSha: 'b'.repeat(40) }
+
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'git_branches')).toHaveLength(2))
 })
 
 test('routes branch and stash mutations to the active repository', async () => {

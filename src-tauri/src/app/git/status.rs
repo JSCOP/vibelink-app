@@ -20,6 +20,7 @@ pub struct RepoInfo {
     pub root: Option<String>,
     pub branch: Option<String>,
     pub detached_sha: Option<String>,
+    pub head_sha: Option<String>,
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
@@ -334,10 +335,15 @@ pub(crate) fn git_repo_info_native(workspace_folder: &str) -> Result<RepoInfo> {
     };
     parse_branch_headers(&status, &mut info);
     if info.branch.is_none() {
-        let sha = git_read(&root, ["rev-parse", "HEAD"])?;
-        let sha = String::from_utf8_lossy(&sha).trim().to_string();
-        if !sha.is_empty() {
+        if let Some(sha) = info.head_sha.clone() {
             info.detached_sha = Some(sha);
+        } else {
+            let sha = git_read(&root, ["rev-parse", "HEAD"])?;
+            let sha = String::from_utf8_lossy(&sha).trim().to_string();
+            if !sha.is_empty() {
+                info.head_sha = Some(sha.clone());
+                info.detached_sha = Some(sha);
+            }
         }
     }
     info.state = repo_state(&root)?;
@@ -372,7 +378,11 @@ pub(crate) fn git_working_status_native(workspace_folder: &str) -> Result<Workin
 fn parse_branch_headers(bytes: &[u8], info: &mut RepoInfo) {
     let text = String::from_utf8_lossy(bytes);
     for line in text.split(['\0', '\n']) {
-        if let Some(value) = line.strip_prefix("# branch.head ") {
+        if let Some(value) = line.strip_prefix("# branch.oid ") {
+            if value != "(initial)" && value != "(unknown)" {
+                info.head_sha = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("# branch.head ") {
             if value != "(detached)" && value != "(unknown)" {
                 info.branch = Some(value.to_string());
             }
@@ -550,6 +560,27 @@ fn change_type_for_xy(xy: &str) -> ChangeType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_info_tracks_head_revision() {
+        use crate::app::git::test_support::{run_git, test_repo};
+
+        let repo = test_repo();
+        std::fs::write(repo.join("tracked.txt"), "first\n").expect("write first");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "first"]);
+        let first = git_repo_info_native(repo.to_str().expect("utf8 repo")).expect("first info");
+
+        std::fs::write(repo.join("tracked.txt"), "second\n").expect("write second");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "second"]);
+        let second = git_repo_info_native(repo.to_str().expect("utf8 repo")).expect("second info");
+
+        assert!(first.head_sha.is_some());
+        assert!(second.head_sha.is_some());
+        assert_ne!(first.head_sha, second.head_sha);
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
 
     #[test]
     fn parses_porcelain_v2_rename_cjk_and_spaces() {

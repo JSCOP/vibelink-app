@@ -11,6 +11,7 @@ const repoInfo: RepoInfo = {
   root: 'C:/repo',
   branch: 'main',
   detachedSha: null,
+  headSha: 'a'.repeat(40),
   upstream: 'origin/main',
   ahead: 0,
   behind: 0,

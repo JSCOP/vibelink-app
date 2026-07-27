@@ -86,6 +86,7 @@ export type RepoInfo = {
   root: string | null
   branch: string | null
   detachedSha: string | null
+  headSha: string | null
   upstream: string | null
   ahead: number
   behind: number

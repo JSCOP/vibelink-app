@@ -19,13 +19,13 @@ import { HistoryTab } from './HistoryTab'
 import { AppDialogHost } from '../AppDialog'
 
 const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
-const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
+const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, headSha: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
 const status: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
 const commit: CommitInfo = { sha: 'a'.repeat(40), parents: [], refs: ['HEAD -> main'], authorName: 'VibeLink', authorEmail: 'test@example.com', authorDate: '2026-07-18T00:00:00Z', subject: 'Initial commit' }
 const changedFile = { path: 'src/committed.ts', changeType: 'modified' as const, additions: 2, deletions: 1, binary: false }
 
-function renderHistory() {
-  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitHistorySidebar active /><HistoryTab /></GitWorkspaceProvider><AppDialogHost /></WorkspaceContentActionsContext.Provider>)
+function renderHistory(pollIntervalMs = 60_000) {
+  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={pollIntervalMs}><GitHistorySidebar active /><HistoryTab /></GitWorkspaceProvider><AppDialogHost /></WorkspaceContentActionsContext.Provider>)
 }
 
 /** Fill the in-app prompt (`AppDialogHost`) and submit it. Queries are scoped
@@ -69,6 +69,28 @@ test('loads history lazily on sidebar activation and paginates with the current 
   expect(await screen.findByText('Initial commit')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
   await waitFor(() => expect(invoke).toHaveBeenLastCalledWith('git_log', { workspaceFolder: 'C:/repo', options: { refName: null, path: null, skip: 1, limit: 200, search: null, author: null } }))
+})
+
+test('refreshes active history when polling observes a new HEAD commit', async () => {
+  const nextCommit: CommitInfo = { ...commit, sha: 'b'.repeat(40), subject: 'External commit' }
+  let currentRepoInfo = { ...repoInfo, headSha: commit.sha }
+  let currentCommits = [commit]
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return currentRepoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_log') return { commits: currentCommits, hasMore: false }
+    return null
+  })
+
+  renderHistory(20)
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'git_log')).toHaveLength(1))
+
+  currentRepoInfo = { ...currentRepoInfo, headSha: nextCommit.sha }
+  currentCommits = [nextCommit, commit]
+
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === 'git_log')).toHaveLength(2))
+  expect(screen.getByText('External commit')).toBeTruthy()
 })
 
 test('shares commit selection and detail with central Workbench and loads detail only once', async () => {
