@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { PaneMeta, SessionMeta } from './types'
 import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../state/store'
+import { agentActivityTracker } from '../terminal/agentActivity'
 import { startTerminalOutputStream } from './output'
 
 type TestTerminalEvent =
@@ -109,6 +110,12 @@ describe('terminal session change reloads', () => {
   })
 
   afterEach(() => {
+    agentActivityTracker.clearAll()
+    agentActivityTracker.setActions({
+      isAgentPane: () => false,
+      onResponseStart: () => {},
+      onResponseComplete: () => {},
+    })
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
@@ -159,5 +166,26 @@ describe('terminal session change reloads', () => {
     expect(highlights).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: 'agent-hook', sessionId: session.id }),
     ]))
+  })
+  test('cancels the pending terminal fallback after an authoritative agent hook', async () => {
+    const fallbackCompletions: string[] = []
+    agentActivityTracker.setActions({
+      isAgentPane: () => true,
+      onResponseStart: () => {},
+      onResponseComplete: (paneId) => { fallbackCompletions.push(paneId) },
+      quietMs: 20,
+    })
+    agentActivityTracker.notePromptSubmitted(pane.id)
+    agentActivityTracker.noteOutput(pane.id, new TextEncoder().encode('Final answer'))
+
+    await startTerminalOutputStream({ force: true })
+    emitTerminalEvent?.({
+      kind: 'task',
+      sessionId: session.id,
+      signal: { kind: 'paneCompleted', paneId: pane.id, agent: 'omp' },
+    })
+    await vi.advanceTimersByTimeAsync(20)
+
+    expect(fallbackCompletions).toEqual([])
   })
 })

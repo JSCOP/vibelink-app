@@ -1,6 +1,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
+import { agentActivityTracker } from '../terminal/agentActivity'
 
 
 type TaskSignal =
@@ -38,10 +39,14 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
         const store = useWorkspaceStore.getState()
         const assignedPaneId = store.kanban.tasks[event.signal.taskId]?.assignedPaneId
         const paneId = event.signal.paneId ?? assignedPaneId
-        if (paneId) store.markPaneResponseComplete(paneId, 'task-done', event.sessionId)
+        if (paneId) {
+          agentActivityTracker.clear(paneId)
+          store.markPaneResponseComplete(paneId, 'task-done', event.sessionId)
+        }
       } else if (event.signal.kind === 'paneCompleted') {
         // Authoritative and workspace-scoped: this must survive the originating
         // pane being detached from the frontend after a workspace switch.
+        agentActivityTracker.clear(event.signal.paneId)
         useWorkspaceStore.getState().markPaneResponseComplete(event.signal.paneId, 'agent-hook', event.sessionId)
       } else if (event.signal.kind === 'paneConfigured') {
         useWorkspaceStore.getState().applyPaneConfiguration(event.signal.paneId, {
