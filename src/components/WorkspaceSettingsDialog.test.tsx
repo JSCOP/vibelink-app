@@ -17,7 +17,10 @@ const session: SessionMeta = {
 
 describe('WorkspaceSettingsDialog', () => {
   beforeEach(() => {
-    useWorkspaceStore.setState({ agentClis: [] })
+    useWorkspaceStore.setState({
+      agentClis: [],
+      settings: normalizeSettings(defaultSettings),
+    })
   })
 
   afterEach(cleanup)
@@ -36,12 +39,14 @@ describe('WorkspaceSettingsDialog', () => {
     const onClose = vi.fn()
     render(<WorkspaceSettingsDialog session={session} settings={settings} onChange={onChange} onRename={onRename} onClose={onClose} />)
 
-    expect(screen.getByRole('combobox', { name: /Default terminal profile/ })).toHaveValue('codex')
-    fireEvent.change(screen.getByRole('textbox', { name: /Display name/ }), { target: { value: 'VibeLink Desktop' } })
-    fireEvent.change(screen.getByRole('combobox', { name: /Default terminal profile/ }), { target: { value: 'claude' } })
-    fireEvent.change(screen.getByRole('textbox', { name: /GitHub issue/ }), { target: { value: 'https://github.com/JSCOP/vibelink-app/issues/42' } })
-    fireEvent.change(screen.getByRole('textbox', { name: /GitHub pull request/ }), { target: { value: '77' } })
-    fireEvent.change(screen.getByRole('textbox', { name: /Notes/ }), { target: { value: '**Ship it**' } })
+    expect(screen.getByRole('combobox', { name: 'Default profile' })).toHaveValue('codex')
+    const nameInput = screen.getByRole('textbox', { name: 'Name' })
+    expect(nameInput).toHaveFocus()
+    fireEvent.change(nameInput, { target: { value: 'VibeLink Desktop' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Default profile' }), { target: { value: 'claude' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Issue' }), { target: { value: 'https://github.com/JSCOP/vibelink-app/issues/42' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Pull request' }), { target: { value: '77' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Notes' }), { target: { value: '**Ship it**' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onRename).toHaveBeenCalledExactlyOnceWith('workspace-a', 'VibeLink Desktop'))
@@ -55,7 +60,67 @@ describe('WorkspaceSettingsDialog', () => {
         },
         untouched: { githubIssue: '', githubPullRequest: '34', notes: '' },
       },
+      workspaceGroupIds: {},
     })
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  test('stages workspace group assignment and removal in the same settings patch', () => {
+    const workspaceGroups = [
+      { id: 'group-a', name: 'Client work', collapsed: false },
+      { id: 'group-b', name: 'Internal', collapsed: false },
+    ]
+    const assignmentSettings = normalizeSettings({
+      ...defaultSettings,
+      workspaceGroups,
+      workspaceGroupIds: { untouched: 'group-b' },
+    })
+    useWorkspaceStore.setState({ settings: assignmentSettings })
+    const onAssign = vi.fn()
+    const firstRender = render(
+      <WorkspaceSettingsDialog
+        session={session}
+        settings={assignmentSettings}
+        onChange={onAssign}
+        onRename={vi.fn(async () => undefined)}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Workspace group' }), { target: { value: 'group-a' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onAssign).toHaveBeenCalledExactlyOnceWith({
+      workspaceProfileIds: { 'workspace-a': 'default' },
+      workspaceDetails: {},
+      workspaceGroupIds: { untouched: 'group-b', 'workspace-a': 'group-a' },
+    })
+
+    firstRender.unmount()
+    const removalSettings = normalizeSettings({
+      ...defaultSettings,
+      workspaceGroups,
+      workspaceGroupIds: { 'workspace-a': 'group-a', untouched: 'group-b' },
+    })
+    useWorkspaceStore.setState({ settings: removalSettings })
+    const onRemove = vi.fn()
+    render(
+      <WorkspaceSettingsDialog
+        session={session}
+        settings={removalSettings}
+        onChange={onRemove}
+        onRename={vi.fn(async () => undefined)}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Workspace group' }), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onRemove).toHaveBeenCalledExactlyOnceWith({
+      workspaceProfileIds: { 'workspace-a': 'default' },
+      workspaceDetails: {},
+      workspaceGroupIds: { untouched: 'group-b' },
+    })
   })
 })

@@ -49,7 +49,7 @@ describe('ProviderIntegrationsPanel', () => {
 
   test('limits Linear discovery to issues and exposes issue comment scope', async () => {
     render(<ProviderIntegrationsPanel />)
-    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'linear' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Linear' }))
     expect(await screen.findByText('issues:comment')).toBeTruthy()
     expect(screen.queryByRole('option', { name: 'Repositories' })).toBeNull()
     expect(screen.queryByRole('option', { name: 'Pull / merge requests' })).toBeNull()

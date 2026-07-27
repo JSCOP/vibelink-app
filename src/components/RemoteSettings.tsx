@@ -1,8 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
 import QRCode from 'qrcode'
 import { useEffect, useMemo, useState } from 'react'
-import { RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Trash2, Wifi } from 'lucide-react'
+import { Clock3, Fingerprint, Hash, KeyRound, MonitorSmartphone, Network, QrCode, RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Trash2, Wifi } from 'lucide-react'
 import { confirmDialog } from './appDialogStore'
+import { SettingsButton, SettingsCard, SettingsIconButton, SettingsMessage, SettingsNumber, SettingsPill, SettingsRow, SettingsSwitch, SettingsValue } from './settings/controls'
 
 type RemoteDevice = { id: string; name: string; createdAt: number; lastSeenAt: number }
 type RemoteStatus = {
@@ -164,67 +165,118 @@ export function RemoteSettings() {
   }
 
   return (
-    <section className="settings-section remote-settings">
-      <div className="settings-section-heading">
-        <div>
-          <h2>Remote access</h2>
-          <p>Remote v2는 TLS 인증서 고정과 Noise 종단간 암호화로 모바일, 브라우저, 오케스트레이션을 연결합니다.</p>
+    <>
+      <SettingsCard
+        icon={Wifi}
+        title="원격 접속"
+        hint="원격 접속은 VibeLink 실행 중에만 동작합니다."
+        status={<SettingsPill tone={status?.running ? 'ok' : undefined}>{status?.running ? 'running' : 'stopped'}</SettingsPill>}
+      >
+        <SettingsRow
+          icon={Wifi}
+          label="원격 서버"
+          control={<SettingsSwitch label="원격 서버" checked={status?.running ?? false} disabled={busy || !status} onChange={toggleEnabled} />}
+        />
+        <SettingsRow
+          icon={Network}
+          label="LAN / VPN"
+          hint="LAN을 켜거나 포트를 바꾸기 전에 방화벽 규칙을 확인하며, 끌 때는 승인이 필요하지 않습니다."
+          control={<SettingsSwitch label="LAN / VPN" checked={status?.lanEnabled ?? false} disabled={busy || !status} onChange={toggleLan} />}
+        />
+        <SettingsRow
+          icon={Hash}
+          label="포트"
+          control={<>
+            <SettingsNumber label="Remote port" value={Number(port)} min={1024} max={65535} disabled={busy || !status} onChange={(value) => setPort(String(value))} />
+            <SettingsButton label="적용" disabled={busy || !status || Number(port) === status.port} onClick={savePort} />
+          </>}
+        />
+        <SettingsRow
+          icon={Fingerprint}
+          label="인증서 지문"
+          control={<>
+            <SettingsValue mono value={status?.fingerprint ? `${status.fingerprint.slice(0, 18)}…` : 'Loading…'} title={status?.fingerprint} />
+            <SettingsIconButton icon={RefreshCw} label="Refresh" disabled={busy} onClick={() => void run(refresh)} />
+          </>}
+        />
+        {message ? <SettingsMessage tone="danger">{message}</SettingsMessage> : null}
+      </SettingsCard>
+
+      <SettingsCard
+        icon={Smartphone}
+        title="기기 페어링"
+        hint={import.meta.env.DEV
+          ? '개발 빌드 Remote는 온디맨드이며 VIBELINK_REMOTE_AUTOSTART=1에서만 자동 시작됩니다.'
+          : 'Remote v2는 TLS 인증서 고정과 Noise 종단간 암호화를 사용합니다.'}
+      >
+        <div className="vl-set-actions">
+          <SettingsButton
+            icon={QrCode}
+            label="QR 생성"
+            title="Remote v2 QR"
+            disabled={busy || !status || !status.lanEnabled}
+            onClick={() => createPairing(false)}
+          />
+          <SettingsButton
+            label="레거시 v1"
+            title="Legacy v1 QR"
+            disabled={busy || !status || !status.lanEnabled}
+            onClick={() => createPairing(true)}
+          />
         </div>
-        <span className={`remote-state remote-state-${status?.running ? 'running' : 'stopped'}`}>
-          {status?.running ? 'running' : 'stopped'}
-        </span>
-      </div>
-
-      <div className="remote-status-grid">
-        <div><span>Server</span><strong>{status?.running ? 'Running' : 'Stopped'}</strong></div>
-        <div><span>Scope</span><strong>{status?.lanEnabled ? 'LAN / VPN' : 'This PC only'}</strong></div>
-        <div><span>Fingerprint</span><code title={status?.fingerprint}>{status?.fingerprint ? `${status.fingerprint.slice(0, 18)}…` : 'Loading…'}</code></div>
-      </div>
-
-      <div className="remote-actions">
-        <button type="button" disabled={busy || !status} onClick={toggleEnabled}><Wifi size={14} /> {status?.running ? 'Disable remote' : 'Enable remote'}</button>
-        <button type="button" disabled={busy || !status} onClick={toggleLan}>{status?.lanEnabled ? 'Disable LAN/VPN' : 'Enable LAN/VPN'}</button>
-        <label>Port<input aria-label="Remote port" type="number" min="1024" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label>
-        <button type="button" disabled={busy || Number(port) === status?.port} onClick={savePort}>Apply port</button>
-        <button type="button" title="Refresh status" disabled={busy} onClick={() => void run(refresh)}><RefreshCw size={14} /> Refresh</button>
-      </div>
-
-      <div className="remote-pairing-panel">
-        <button type="button" disabled={busy || !status || !status.lanEnabled} onClick={() => createPairing(false)}><Smartphone size={14} /> Remote v2 QR</button>
-        <button type="button" disabled={busy || !status || !status.lanEnabled} onClick={() => createPairing(true)}>Legacy v1 QR</button>
-        {!status?.lanEnabled ? <p className="vibelink-settings-note">LAN/VPN access is off by default. Enable it explicitly before pairing a phone.</p> : !status.running ? <p className="vibelink-settings-note">서버가 꺼져 있으면 QR 생성 시 Private 네트워크 인바운드 규칙을 먼저 확인한 뒤 자동으로 켜집니다.</p> : null}
         {pairing ? (
-          <div className="remote-pairing-content">
-            {qrUrl ? <img src={qrUrl} width={360} height={360} alt="VibeLink Mobile pairing QR" /> : null}
-            <div><span>Pairing code</span><strong>{pairing.code}</strong><small>{expiresIn > 0 ? `${Math.floor(expiresIn / 60)}:${String(expiresIn % 60).padStart(2, '0')} 후 만료` : '만료됨'}</small></div>
-          </div>
+          <>
+            {qrUrl ? (
+              <SettingsRow
+                icon={QrCode}
+                label="QR 코드"
+                stacked
+                control={<img
+                  src={qrUrl}
+                  width={240}
+                  height={240}
+                  alt="VibeLink Mobile pairing QR"
+                  style={{ background: '#fff', borderRadius: 6, height: 'auto', imageRendering: 'pixelated', maxWidth: '100%' }}
+                />}
+              />
+            ) : null}
+            <SettingsRow icon={KeyRound} label="페어링 코드" control={<SettingsValue mono value={pairing.code} />} />
+            <SettingsRow icon={Clock3} label="만료" control={<SettingsValue value={expiresIn > 0 ? `${Math.floor(expiresIn / 60)}:${String(expiresIn % 60).padStart(2, '0')}` : '만료됨'} />} />
+          </>
         ) : null}
-      </div>
+      </SettingsCard>
 
-      <div className="remote-device-list">
-        <h3>Paired devices</h3>
+      <SettingsCard icon={MonitorSmartphone} title="페어링된 기기">
         {status?.devices.length ? status.devices.map((device) => (
-          <div className="remote-device-row" key={device.id}>
-            <div><strong>{device.name}</strong><span>Last seen {new Date(device.lastSeenAt * 1000).toLocaleString()}</span></div>
-            <button type="button" title={`Revoke ${device.name}`} disabled={busy} onClick={() => revoke(device.id)}><Trash2 size={14} /> Revoke</button>
-          </div>
-        )) : <p className="vibelink-settings-note">페어링된 기기가 없습니다.</p>}
-      </div>
+          <SettingsRow
+            key={device.id}
+            icon={Smartphone}
+            label={device.name}
+            sub={`Last seen ${new Date(device.lastSeenAt * 1000).toLocaleString()}`}
+            control={<SettingsIconButton icon={Trash2} label={`Revoke ${device.name}`} tone="danger" disabled={busy} onClick={() => revoke(device.id)} />}
+          />
+        )) : <SettingsMessage>페어링된 기기 없음</SettingsMessage>}
+      </SettingsCard>
 
-      <button type="button" className="remote-danger" disabled={busy} onClick={() => void regenerate()}><ShieldAlert size={14} /> 인증서 재생성</button>
-      {status?.lanEnabled ? <div className="remote-firewall-row">
-        {ruleReady ? <span className="remote-firewall-ok"><ShieldCheck size={14} /> 포트 {status.port} Private 네트워크 인바운드 규칙이 설정되어 있습니다.</span> : <>
-          <span className="remote-firewall-warn"><ShieldAlert size={14} /> 포트 {status.port} Private 네트워크 인바운드 허용 규칙이 필요합니다.</span>
-          <button type="button" disabled={busy} onClick={setupFirewall}>방화벽 자동 설정</button>
-        </>}
-      </div> : null}
-      <div className="remote-hints">
-        <span>방화벽 규칙은 Private(개인) 네트워크 프로필의 인바운드 접속만 허용하며, 관리자 승인(UAC) 창을 한 번 표시합니다.</span>
-        <span>LAN 접속을 켜거나 포트를 바꾸기 전에 해당 포트 규칙을 먼저 확인합니다. LAN을 끄거나 서버를 중지할 때는 승인이 필요하지 않습니다.</span>
-        {import.meta.env.DEV ? <span>개발 빌드의 Remote는 온디맨드입니다. 여기서 직접 켜기 전에는 시작되지 않으며, 자동 시작은 `VIBELINK_REMOTE_AUTOSTART=1`에서만 동작합니다.</span> : null}
-        <span>원격 접속은 VibeLink 실행 중에만 동작합니다.</span>
-      </div>
-      {message ? <p className="settings-error">{message}</p> : null}
-    </section>
+      <SettingsCard
+        icon={ShieldAlert}
+        title="보안"
+        hint="Private 네트워크 인바운드 규칙을 만들 때 관리자 승인(UAC)이 한 번 필요합니다."
+      >
+        <SettingsRow
+          icon={ruleReady ? ShieldCheck : ShieldAlert}
+          label="방화벽"
+          control={<>
+            <SettingsPill tone={ruleReady ? 'ok' : firewall.ready === false ? 'danger' : 'warn'}>
+              {ruleReady ? `설정됨 · ${status?.port}` : firewall.ready === false ? `필요 · ${status?.port ?? '—'}` : '확인 중'}
+            </SettingsPill>
+            {!ruleReady && status ? <SettingsButton label="방화벽 설정" disabled={busy} onClick={setupFirewall} /> : null}
+          </>}
+        />
+        <div className="vl-set-actions vl-set-actions-bordered">
+          <SettingsButton icon={ShieldAlert} label="인증서 재생성" tone="danger" disabled={busy} onClick={() => void regenerate()} />
+        </div>
+      </SettingsCard>
+    </>
   )
 }

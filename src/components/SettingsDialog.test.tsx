@@ -55,8 +55,8 @@ describe('SettingsDialog preferences', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Appearance' }))
-    const wordWrap = screen.getByRole('checkbox', { name: 'Word wrap' })
-    const minimap = screen.getByRole('checkbox', { name: 'Minimap' })
+    const wordWrap = screen.getByRole('switch', { name: 'Word wrap' })
+    const minimap = screen.getByRole('switch', { name: 'Minimap' })
     expect((wordWrap as HTMLInputElement).checked).toBe(true)
     expect((minimap as HTMLInputElement).checked).toBe(false)
 
@@ -80,7 +80,7 @@ describe('SettingsDialog preferences', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Notifications' }))
-    expect(screen.getByRole('checkbox', { name: 'Play completion sound' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Play completion sound' })).toBeChecked()
     const sound = screen.getByRole('combobox', { name: 'Completion sound' })
     expect(screen.getByRole('option', { name: 'Clear chime' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Soft bell' })).toBeInTheDocument()
@@ -137,7 +137,7 @@ describe('SettingsDialog preferences', () => {
     expect(screen.getByRole('option', { name: 'App data folder' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Custom folder' })).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Root folder name' })).toHaveValue('VibeLinkWorktrees')
-    expect(screen.getByRole('checkbox', { name: 'Group by repository' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Group by repository' })).toBeChecked()
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_worktree_resolve_root', {
       workspaceFolder: 'E:/repo',
@@ -153,7 +153,7 @@ describe('SettingsDialog preferences', () => {
     expect(screen.getByRole('option', { name: 'E:' })).toBeInTheDocument()
     fireEvent.change(drive, { target: { value: 'E:' } })
     fireEvent.change(screen.getByRole('textbox', { name: 'Root folder name' }), { target: { value: 'TeamWorktrees' } })
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Group by repository' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Group by repository' }))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_worktree_resolve_root', {
       workspaceFolder: 'E:/repo',
       storage: {

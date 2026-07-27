@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useState } from 'react'
 import { useWorkspaceStore } from '../state/store'
+import { BadgeCheck, CalendarDays, CircleUser, Clock3, FlaskConical, Laptop, LogOut, Mail, MonitorSmartphone, RefreshCw, ShoppingCart, Trash2, WifiOff } from 'lucide-react'
 import { AccountSignIn } from './AccountSignIn'
 import { confirmDialog } from './appDialogStore'
+import { SettingsButton, SettingsCard, SettingsIconButton, SettingsMessage, SettingsPill, SettingsRow, SettingsValue } from './settings/controls'
 
 export function LicenseSettings() {
   const license = useWorkspaceStore((state) => state.license)
@@ -45,61 +47,77 @@ export function LicenseSettings() {
     }
   }
 
+  const stateLabel = development ? 'development' : signedIn ? plan : status?.state ?? 'loading'
+  // A null status means the license query has not resolved yet, so the pill
+  // stays neutral instead of claiming a problem.
+  const stateTone = plan === 'trial'
+    ? 'warn'
+    : development || status?.entitled
+      ? 'ok'
+      : status
+        ? 'danger'
+        : undefined
+  const trialEndValue = trialEndsAt
+    ? `${new Date(trialEndsAt).toLocaleDateString()}${trialDaysLeft !== null ? ` · ${trialDaysLeft} day${trialDaysLeft === 1 ? '' : 's'} left` : ''}`
+    : '—'
+
   return (
-    <section className="settings-section license-settings">
-      <div className="settings-section-heading">
-        <div>
-          <h2>Moobang account</h2>
-          <p>Account actions run immediately and are not affected by Settings Apply or Cancel.</p>
-        </div>
-        <span className={`license-state license-state-${status?.state ?? 'loading'}`}>{development ? 'development' : signedIn ? plan : status?.state ?? 'loading'}</span>
-      </div>
-
-      {development ? (
-        <div className="license-summary">
-          <strong>Development build</strong>
-          <span>{status?.message}</span>
-          <span>Set VIBELINK_ENFORCE_LICENSE=1 before launch to test the real sign-in and trial lock.</span>
-        </div>
-      ) : !signedIn ? <AccountSignIn /> : (
-        <div className="license-summary">
-          <strong>{status?.email}</strong>
-          <span>{status?.message}</span>
-          {plan === 'trial' && status?.trialEndsAt ? (
-            <span>Trial ends {new Date(status.trialEndsAt).toLocaleDateString()}{trialDaysLeft !== null ? ` (${trialDaysLeft} day${trialDaysLeft === 1 ? '' : 's'} left)` : ''}</span>
-          ) : null}
-          {status?.validatedAt ? <span>Validated {new Date(status.validatedAt).toLocaleString()}</span> : null}
-          {status?.offlineGraceUntil ? <span>Offline grace until {new Date(status.offlineGraceUntil).toLocaleString()}</span> : null}
-        </div>
-      )}
-
-      {signedIn && status?.devices.length ? (
-        <div className="license-device-list">
-          {status.devices.map((device) => (
-            <div className="license-device-row" key={device.activationId}>
-              <div>
-                <strong>{device.deviceName}{device.current ? ' · Current' : ''}</strong>
-                <span>{device.appVersion} · {device.status}</span>
-              </div>
-              {device.status !== 'deactivated' ? (
-                <button disabled={busy} onClick={() => void run(() => deactivate(device.activationId))}>Remove</button>
-              ) : null}
+    <>
+      <SettingsCard
+        icon={CircleUser}
+        title="Moobang account"
+        hint="Account actions run immediately and are not affected by Settings Apply or Cancel."
+        status={<SettingsPill tone={stateTone}>{stateLabel}</SettingsPill>}
+      >
+        {development ? (
+          <>
+            <SettingsRow icon={FlaskConical} label="Build" control={<SettingsValue value="Development build" />} />
+            <SettingsRow icon={BadgeCheck} label="Entitlement" sub={status?.message} control={<SettingsValue value="Enabled" />} />
+            <SettingsRow
+              icon={FlaskConical}
+              label="License test"
+              hint="Set this environment variable before launch to test the real sign-in and trial lock."
+              control={<SettingsValue mono value="VIBELINK_ENFORCE_LICENSE=1" />}
+            />
+          </>
+        ) : !signedIn ? <AccountSignIn /> : (
+          <>
+            <SettingsRow icon={Mail} label="Email" control={<SettingsValue value={status?.email ?? '—'} />} />
+            <SettingsRow icon={BadgeCheck} label="Plan" sub={status?.message} control={<SettingsValue value={plan === 'none' ? 'None' : `${plan[0].toUpperCase()}${plan.slice(1)}`} />} />
+            <SettingsRow icon={CalendarDays} label="Trial end" control={<SettingsValue value={trialEndValue} />} />
+            <SettingsRow icon={Clock3} label="Last validated" control={<SettingsValue value={status?.validatedAt ? new Date(status.validatedAt).toLocaleString() : '—'} />} />
+            <SettingsRow icon={WifiOff} label="Offline grace" control={<SettingsValue value={status?.offlineGraceUntil ? new Date(status.offlineGraceUntil).toLocaleString() : '—'} />} />
+            <div className="vl-set-actions vl-set-actions-bordered">
+              <SettingsButton icon={RefreshCw} label="Refresh" disabled={busy} onClick={() => void run(revalidate)} />
+              {!status?.entitled ? <SettingsButton icon={ShoppingCart} label="Buy Pro" tone="accent" onClick={() => void invoke('open_path', { path: status?.purchaseUrl })} /> : null}
+              <SettingsButton icon={LogOut} label="Sign out" disabled={busy} onClick={() => {
+                void confirmDialog({ title: 'Sign out', message: 'Sign out of this Moobang account on this device?', confirmLabel: 'Sign out' })
+                  .then((confirmed) => { if (confirmed) return run(signOut) })
+              }} />
             </div>
-          ))}
-        </div>
-      ) : null}
+          </>
+        )}
+        {message ? <SettingsMessage tone="danger">{message}</SettingsMessage> : null}
+      </SettingsCard>
 
       {signedIn ? (
-        <div className="license-actions">
-          <button disabled={busy} onClick={() => void run(revalidate)}>Refresh account</button>
-          {!status?.entitled ? <button onClick={() => void invoke('open_path', { path: status?.purchaseUrl })}>Buy VibeLink Pro</button> : null}
-          <button disabled={busy} onClick={() => {
-            void confirmDialog({ title: 'Sign out', message: 'Sign out of this Moobang account on this device?', confirmLabel: 'Sign out' })
-              .then((confirmed) => { if (confirmed) return run(signOut) })
-          }}>Sign out</button>
-        </div>
+        <SettingsCard icon={MonitorSmartphone} title="Devices">
+          {status?.devices.length ? status.devices.map((device) => (
+            <SettingsRow
+              key={device.activationId}
+              icon={Laptop}
+              label={device.deviceName}
+              sub={`${device.appVersion} · ${device.status}`}
+              control={<>
+                {device.current ? <SettingsPill tone="ok">Current</SettingsPill> : null}
+                {device.status !== 'deactivated' ? (
+                  <SettingsIconButton icon={Trash2} label={`Remove ${device.deviceName}`} disabled={busy} onClick={() => void run(() => deactivate(device.activationId))} />
+                ) : null}
+              </>}
+            />
+          )) : <SettingsMessage>No devices</SettingsMessage>}
+        </SettingsCard>
       ) : null}
-      {message ? <p className="settings-error">{message}</p> : null}
-    </section>
+    </>
   )
 }

@@ -1,9 +1,20 @@
-import { useMemo, useState } from 'react'
-import { X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { CircleDot, Folder, GitPullRequest, Layers, PanelsTopLeft, SquareTerminal, StickyNote, TriangleAlert, Type, X } from 'lucide-react'
 import { agentStatusLabel } from '../ipc/agents'
 import type { SessionMeta } from '../ipc/types'
 import { useWorkspaceStore } from '../state/store'
 import { selectedProfileForWorkspace, workspaceDetailsFor, type Settings } from '../state/profiles'
+import { ProfileIcon } from './ProfileIcon'
+import {
+  SettingsButton,
+  SettingsCard,
+  SettingsIconButton,
+  SettingsMessage,
+  SettingsRow,
+  SettingsText,
+  SettingsValue,
+} from './settings/controls'
+import './settings/workspaceDialog.css'
 
 type WorkspaceSettingsDialogProps = {
   session: SessionMeta
@@ -14,13 +25,16 @@ type WorkspaceSettingsDialogProps = {
 }
 
 export function WorkspaceSettingsDialog({ session, settings, onChange, onRename, onClose }: WorkspaceSettingsDialogProps) {
+  const dialogRef = useRef<HTMLElement>(null)
   const agentClis = useWorkspaceStore((state) => state.agentClis)
+  const workspaceGroups = useWorkspaceStore((state) => state.settings.workspaceGroups)
   const savedDetails = workspaceDetailsFor(settings, session.id)
   const [name, setName] = useState(session.name)
   const [profileId, setProfileId] = useState(selectedProfileForWorkspace(settings, session.id).id)
   const [githubIssue, setGithubIssue] = useState(savedDetails.githubIssue)
   const [githubPullRequest, setGithubPullRequest] = useState(savedDetails.githubPullRequest)
   const [notes, setNotes] = useState(savedDetails.notes)
+  const [groupId, setGroupId] = useState(settings.workspaceGroupIds[session.id] ?? '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const agentStatusById = useMemo(
@@ -29,7 +43,18 @@ export function WorkspaceSettingsDialog({ session, settings, onChange, onRename,
   )
   const selectedAgentStatus = agentStatusById[profileId.toLowerCase()]
   const selectedProfileUnavailable = Boolean(selectedAgentStatus && !selectedAgentStatus.installed)
+  const selectedProfile = settings.profiles.find((profile) => profile.id === profileId)
+    ?? selectedProfileForWorkspace(settings, session.id)
   const normalizedName = name.trim()
+  const headerName = normalizedName || session.name
+
+  useEffect(() => {
+    dialogRef.current?.querySelector<HTMLInputElement>('input[aria-label="Name"]')?.focus()
+  }, [])
+
+  const SelectedProfileIcon = () => (
+    <ProfileIcon name={selectedProfile.icon} color={selectedProfile.color} size={16} />
+  )
 
   const submit = async () => {
     if (saving || normalizedName.length === 0 || selectedProfileUnavailable) return
@@ -45,9 +70,13 @@ export function WorkspaceSettingsDialog({ session, settings, onChange, onRename,
       const workspaceDetails = { ...settings.workspaceDetails }
       if (nextDetails.githubIssue || nextDetails.githubPullRequest || nextDetails.notes) workspaceDetails[session.id] = nextDetails
       else delete workspaceDetails[session.id]
+      const workspaceGroupIds = { ...settings.workspaceGroupIds }
+      if (groupId) workspaceGroupIds[session.id] = groupId
+      else delete workspaceGroupIds[session.id]
       onChange({
         workspaceProfileIds: { ...settings.workspaceProfileIds, [session.id]: profileId },
         workspaceDetails,
+        workspaceGroupIds,
       })
       onClose()
     } catch (caught) {
@@ -60,7 +89,8 @@ export function WorkspaceSettingsDialog({ session, settings, onChange, onRename,
   return (
     <div className="settings-backdrop" role="presentation" onMouseDown={saving ? undefined : onClose}>
       <section
-        className="settings-dialog workspace-settings-dialog"
+        ref={dialogRef}
+        className="vl-ws-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="workspace-settings-title"
@@ -73,68 +103,125 @@ export function WorkspaceSettingsDialog({ session, settings, onChange, onRename,
           }
         }}
       >
-        <header className="settings-dialog-header workspace-settings-header">
-          <div>
-            <h2 id="workspace-settings-title">Edit workspace details</h2>
-            <p>Set the workspace label, terminal profile, GitHub links, and notes.</p>
-          </div>
-          <button type="button" className="settings-close" title="Close" aria-label="Close workspace settings" disabled={saving} onClick={onClose}>
-            <X size={16} aria-hidden="true" />
-          </button>
+        <header className="vl-ws-dialog-header">
+          <PanelsTopLeft size={17} strokeWidth={1.9} aria-hidden="true" />
+          <h2 id="workspace-settings-title">{headerName}</h2>
+          <SettingsIconButton icon={X} label="Close workspace settings" disabled={saving} onClick={onClose} />
         </header>
 
-        <div className="workspace-settings-form">
-          <label className="workspace-settings-field">
-            <span>Display name</span>
-            <input autoFocus value={name} maxLength={120} onChange={(event) => setName(event.target.value)} />
-            <small>Only the sidebar label changes. The folder remains {session.workspaceFolder || 'unchanged'}.</small>
-          </label>
+        <div className="vl-ws-dialog-body">
+          <SettingsCard icon={PanelsTopLeft} title="Workspace">
+            <SettingsRow
+              icon={Type}
+              label="Name"
+              hint="Changes only the workspace label."
+              stacked
+              control={<SettingsText label="Name" value={name} onChange={(value) => setName(value.slice(0, 120))} />}
+            />
+            <SettingsRow
+              icon={Folder}
+              label="Folder"
+              control={<SettingsValue value={session.workspaceFolder || 'No folder'} mono />}
+            />
+          </SettingsCard>
 
-          <label className="workspace-settings-field">
-            <span>Default terminal profile</span>
-            <select
-              value={profileId}
-              title={selectedProfileUnavailable ? `Install ${selectedAgentStatus?.displayName ?? profileId} or choose another profile` : undefined}
-              onChange={(event) => setProfileId(event.target.value)}
-            >
-              {settings.profiles.map((profile) => {
-                const status = agentStatusById[profile.id.toLowerCase()]
-                return (
-                  <option key={profile.id} value={profile.id} disabled={Boolean(status && !status.installed)}>
-                    {profile.name}{status ? ` · ${agentStatusLabel(status)}` : ''}
-                  </option>
-                )
-              })}
-            </select>
-            <small>New terminal windows and splits start with this profile. Add panes also selects it by default.</small>
-          </label>
+          <SettingsCard icon={SquareTerminal} title="Default profile">
+            <SettingsRow
+              icon={SelectedProfileIcon}
+              label="Profile"
+              hint="New terminal windows, splits, and added panes start with this profile."
+              control={(
+                <select
+                  className="vl-set-select"
+                  aria-label="Default profile"
+                  value={profileId}
+                  title={selectedProfileUnavailable ? `Install ${selectedAgentStatus?.displayName ?? profileId} or choose another profile` : undefined}
+                  onChange={(event) => setProfileId(event.target.value)}
+                >
+                  {settings.profiles.map((profile) => {
+                    const status = agentStatusById[profile.id.toLowerCase()]
+                    return (
+                      <option key={profile.id} value={profile.id} disabled={Boolean(status && !status.installed)}>
+                        {profile.name}{status ? ` · ${agentStatusLabel(status)}` : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              )}
+            />
+          </SettingsCard>
 
-          <label className="workspace-settings-field">
-            <span>GitHub issue</span>
-            <input value={githubIssue} maxLength={512} placeholder="Issue # or GitHub URL" onChange={(event) => setGithubIssue(event.target.value)} />
-            <small>Paste an issue URL or enter its number. Clear the field to remove it.</small>
-          </label>
+          <SettingsCard icon={GitPullRequest} title="Linked work">
+            <SettingsRow
+              icon={CircleDot}
+              label="Issue"
+              hint="Paste a GitHub issue URL or number. Clear it to remove the link."
+              stacked
+              control={(
+                <SettingsText
+                  label="Issue"
+                  value={githubIssue}
+                  placeholder="# or URL"
+                  onChange={(value) => setGithubIssue(value.slice(0, 512))}
+                />
+              )}
+            />
+            <SettingsRow
+              icon={GitPullRequest}
+              label="Pull request"
+              hint="Paste a GitHub pull request URL or number. Clear it to remove the link."
+              stacked
+              control={(
+                <SettingsText
+                  label="Pull request"
+                  value={githubPullRequest}
+                  placeholder="# or URL"
+                  onChange={(value) => setGithubPullRequest(value.slice(0, 512))}
+                />
+              )}
+            />
+          </SettingsCard>
 
-          <label className="workspace-settings-field">
-            <span>GitHub pull request</span>
-            <input value={githubPullRequest} maxLength={512} placeholder="PR # or GitHub URL" onChange={(event) => setGithubPullRequest(event.target.value)} />
-            <small>Paste a pull request URL or enter its number. Clear the field to remove it.</small>
-          </label>
+          <SettingsCard icon={StickyNote} title="Notes" hint="Markdown is preserved. Press Ctrl+Enter to save.">
+            <textarea
+              className="vl-set-textarea"
+              aria-label="Notes"
+              value={notes}
+              maxLength={8000}
+              rows={5}
+              placeholder="Workspace notes…"
+              onChange={(event) => setNotes(event.target.value)}
+            />
+          </SettingsCard>
 
-          <label className="workspace-settings-field">
-            <span>Notes</span>
-            <textarea value={notes} maxLength={8000} rows={5} placeholder="Notes about this workspace…" onChange={(event) => setNotes(event.target.value)} />
-            <small>Markdown text is preserved. Press Ctrl+Enter to save.</small>
-          </label>
+          <SettingsCard icon={Layers} title="Group">
+            <SettingsRow
+              icon={Layers}
+              label="Workspace group"
+              control={(
+                <select className="vl-set-select" aria-label="Workspace group" value={groupId} onChange={(event) => setGroupId(event.target.value)}>
+                  <option value="">No group</option>
+                  {workspaceGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+              )}
+            />
+          </SettingsCard>
 
-          {error ? <p className="workspace-settings-error" role="alert">{error}</p> : null}
+          {error ? (
+            <div role="alert">
+              <SettingsMessage tone="danger" icon={TriangleAlert}>{error}</SettingsMessage>
+            </div>
+          ) : null}
         </div>
 
-        <footer className="workspace-settings-footer">
-          <button type="button" className="secondary-action" disabled={saving} onClick={onClose}>Cancel</button>
-          <button type="button" className="primary-action" disabled={saving || normalizedName.length === 0 || selectedProfileUnavailable} onClick={() => void submit()}>
-            {saving ? 'Saving…' : 'Save'}
-          </button>
+        <footer className="vl-ws-dialog-footer">
+          <SettingsButton label="Cancel" disabled={saving} onClick={onClose} />
+          <SettingsButton
+            label={saving ? 'Saving…' : 'Save'}
+            tone="accent"
+            disabled={saving || normalizedName.length === 0 || selectedProfileUnavailable}
+            onClick={() => void submit()}
+          />
         </footer>
       </section>
     </div>

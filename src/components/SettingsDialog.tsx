@@ -1,7 +1,76 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Archive, Bell, Bot, Box, ChevronDown, GitBranch, GitPullRequest, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, Trash2, Upload, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ALargeSmall,
+  Archive,
+  ArrowUpDown,
+  Baseline,
+  Bell,
+  Blocks,
+  Bot,
+  Box,
+  Braces,
+  Camera,
+  Check,
+  ChevronRight,
+  CircleCheck,
+  CircleUser,
+  CircleX,
+  Clapperboard,
+  Contrast,
+  Cpu,
+  Database,
+  Eye,
+  FileCode2,
+  Film,
+  FolderCog,
+  FolderOpen,
+  GitBranch,
+  Hash,
+  HardDrive,
+  Highlighter,
+  Info,
+  Keyboard,
+  KeyRound,
+  Layers,
+  LayoutGrid,
+  LogIn,
+  MessageSquare,
+  Mic,
+  MonitorCog,
+  MousePointer,
+  Package,
+  Palette,
+  PanelsTopLeft,
+  PanelTop,
+  Play,
+  Plug,
+  Plus,
+  RefreshCw,
+  Rows3,
+  Save,
+  Scaling,
+  ScrollText,
+  Search,
+  Send,
+  Server,
+  Settings2,
+  Shield,
+  Sparkles,
+  SquareTerminal,
+  StickyNote,
+  Tag,
+  Terminal,
+  Trash2,
+  TriangleAlert,
+  Type,
+  Upload,
+  Users,
+  Volume2,
+  Wrench,
+  X,
+} from 'lucide-react'
 import { LicenseSettings } from './LicenseSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
@@ -23,6 +92,23 @@ import { ProviderIntegrationsPanel } from './ProviderIntegrationsPanel'
 import { AndroidDeviceLabPanel } from './AndroidDeviceLabPanel'
 import { addCustomCompletionSound, builtInCompletionSounds, defaultCompletionSoundId, listCustomCompletionSounds, playCompletionSound, removeCustomCompletionSound, type CompletionSoundId, type CustomCompletionSound } from '../notifications/completionSounds'
 import { agentHookStatus, setAgentHookEnabled, type AgentHookStatus } from '../ipc/agentHooks'
+import { agentStatusLabel } from '../ipc/agents'
+import {
+  SettingsButton,
+  SettingsCard,
+  SettingsIconButton,
+  SettingsMessage,
+  SettingsNumber,
+  SettingsPill,
+  SettingsRow,
+  SettingsSegmented,
+  SettingsSelect,
+  SettingsSwitch,
+  SettingsText,
+  SettingsValue,
+} from './settings/controls'
+import { agentIconName } from './settings/agentBrand'
+import { filterSettingsSections, settingsSectionById, type SettingsSectionId } from './settings/sections'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -31,89 +117,19 @@ type SettingsDialogProps = {
   onRunSetupWizard: () => void
 }
 
-type SettingsSection =
-  | 'account'
-  | 'model'
-  | 'chat'
-  | 'appearance'
-  | 'notifications'
-  | 'workspace'
-  | 'integrations'
-  | 'gitHosting'
-  | 'remote'
-  | 'safety'
-  | 'memory'
-  | 'voice'
-  | 'advanced'
-  | 'worktrees'
-  | 'messaging'
-  | 'apiKeys'
-  | 'mcp'
-  | 'archived'
-  | 'about'
-
 type WorktreeStorageChoice = 'sameDrive' | 'specificDrive' | 'appData' | 'custom'
 
-const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[] = [
-  { id: 'account', label: 'Account', icon: KeyRound },
-  { id: 'model', label: 'Model', icon: Bot },
-  { id: 'chat', label: 'Chat', icon: MessageSquare },
-  { id: 'appearance', label: 'Appearance', icon: Palette },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'workspace', label: 'Workspace', icon: Monitor },
-  { id: 'integrations', label: 'Integrations', icon: Plug },
-  { id: 'gitHosting', label: 'Git Hosting', icon: GitPullRequest },
-  { id: 'remote', label: 'Remote', icon: Smartphone },
-  { id: 'safety', label: 'Safety', icon: Shield },
-  { id: 'memory', label: 'Memory & Context', icon: HardDrive },
-  { id: 'voice', label: 'Voice', icon: Mic },
-  { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
-  { id: 'worktrees', label: 'Worktrees', icon: GitBranch },
-  { id: 'messaging', label: 'Messaging', icon: MessageSquare },
-  { id: 'apiKeys', label: 'API Keys', icon: KeyRound },
-  { id: 'mcp', label: 'MCP', icon: Box },
-  { id: 'archived', label: 'Archived Chats', icon: Archive },
-  { id: 'about', label: 'About', icon: Info },
-]
-
 const fontWeightOptions = [100, 200, 300, 400, 500, 600, 700, 800, 900]
-const chatPersonalityOptions: { value: ChatPersonality; label: string }[] = [
-  { value: 'direct', label: 'Direct' },
-  { value: 'balanced', label: 'Balanced' },
-  { value: 'concise', label: 'Concise' },
-  { value: 'exploratory', label: 'Exploratory' },
-]
-const imageAttachmentOptions: { value: ChatImageAttachmentMode; label: string }[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'always', label: 'Always' },
-  { value: 'never', label: 'Never' },
-]
-const cursorStyleOptions: { value: Settings['cursorStyle']; label: string }[] = [
-  { value: 'bar', label: 'Bar' },
-  { value: 'block', label: 'Block' },
-  { value: 'underline', label: 'Underline' },
-]
-const gitStatusPresentationOptions: { value: GitStatusPresentation; label: string }[] = [
-  { value: 'icons', label: 'Icons — symbols with explanations on hover' },
-  { value: 'letters', label: 'Letters — S, M, U, P' },
-  { value: 'words', label: 'Words — Staged, Modified, Untracked, Pointer' },
-]
 
 const profileKindLabels: Record<ProfileKind, string> = {
   local: 'Local',
   ssh: 'SSH',
   command: 'Command',
 }
-const profileKindOptions: { value: ProfileKind; label: string }[] = [
-  { value: 'local', label: profileKindLabels.local },
-  { value: 'ssh', label: profileKindLabels.ssh },
-  { value: 'command', label: profileKindLabels.command },
-]
-
 
 export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
-  const [activeSection, setActiveSection] = useState<SettingsSection>('account')
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('account')
   const [search, setSearch] = useState('')
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
   const [defaultCaptureDir, setDefaultCaptureDir] = useState('')
@@ -134,6 +150,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
   const [agentHooks, setAgentHooks] = useState<AgentHookStatus[]>([])
   const [agentHookMessage, setAgentHookMessage] = useState('')
+  const [agentBusy, setAgentBusy] = useState(false)
   const [worktreeStorageOptions, setWorktreeStorageOptions] = useState<WorktreeStorageOptions>({ drives: [], appDataRoot: '' })
   const [worktreeResolution, setWorktreeResolution] = useState<WorktreeStorageResolution | null>(null)
   const [worktreeResolutionError, setWorktreeResolutionError] = useState('')
@@ -141,13 +158,14 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
+  const agentClis = useWorkspaceStore((state) => state.agentClis)
+  const refreshAgentClis = useWorkspaceStore((state) => state.refreshAgentClis)
   const activeSession = activeSessionId ? sessions.find((session) => session.id === activeSessionId) : undefined
   const activeWorkspaceFolder = activeSession?.workspaceFolder?.trim() ?? ''
   const worktreeStorageChoice: WorktreeStorageChoice = draft.worktreeStorage.mode === 'drive'
     ? draft.worktreeStorage.drive ? 'specificDrive' : 'sameDrive'
     : draft.worktreeStorage.mode
   const worktreeDriveOptions = [...new Set([draft.worktreeStorage.drive, ...worktreeStorageOptions.drives].filter(Boolean))]
-    .map((drive) => ({ value: drive, label: drive }))
   const checkMcp = async () => {
     if (!activeSessionId) return
     setMcpCheckBusy(true)
@@ -166,12 +184,23 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     patchDraft({ rolePresets: [...draft.rolePresets, role] })
     setRolePresetDraft('')
   }
-  const removeRolePreset = (role: string) => {
-    patchDraft({ rolePresets: draft.rolePresets.filter((existing) => existing !== role) })
-  }
   const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [draft.fontFamily, installedFonts])
   const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
-  const filteredSections = sections.filter((section) => section.label.toLowerCase().includes(search.trim().toLowerCase()))
+  const navGroups = useMemo(() => filterSettingsSections(search), [search])
+  const section = settingsSectionById(activeSection)
+  const SectionIcon = section.icon
+  /** Hook rows and CLI rows describe the same agents; merge them into one list. */
+  const agentRows = useMemo(() => {
+    const byId = new Map<string, { id: string; displayName: string; cli?: typeof agentClis[number]; hook?: AgentHookStatus }>()
+    for (const cli of agentClis) byId.set(cli.id.toLowerCase(), { id: cli.id, displayName: cli.displayName, cli })
+    for (const hook of agentHooks) {
+      const key = hook.id.toLowerCase()
+      const existing = byId.get(key)
+      if (existing) existing.hook = hook
+      else byId.set(key, { id: hook.id, displayName: hook.displayName, hook })
+    }
+    return [...byId.values()]
+  }, [agentClis, agentHooks])
 
   useEffect(() => {
     let cancelled = false
@@ -209,8 +238,10 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     return () => { cancelled = true }
   }, [activeSection])
 
+  // Hook state is on-disk truth about files the user owns, so it is re-read
+  // whenever the Agents page is opened rather than cached for the dialog run.
   useEffect(() => {
-    if (activeSection !== 'notifications') return
+    if (activeSection !== 'agents') return
     let cancelled = false
     void agentHookStatus()
       .then((hooks) => { if (!cancelled) setAgentHooks(hooks) })
@@ -376,6 +407,25 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
       setTerminalMessage(String(error))
     }
   }
+  /** Runs the agent's own login command in a real pane; VibeLink never stores agent credentials. */
+  const openAgentLogin = async (agentId: string, displayName: string, loginHint: string) => {
+    if (!activeSessionId) return
+    setAgentBusy(true)
+    setAgentHookMessage('')
+    try {
+      await spawnPane(activeSessionId, {
+        shell: 'pwsh.exe',
+        args: ['-NoLogo', '-NoExit', '-Command', `${loginHint}; Write-Host 'Return to VibeLink and refresh when login is complete.'`],
+        cwd: activeSession?.workspaceFolder ?? null,
+        title: `${displayName} login`,
+        icon: agentIconName(agentId),
+      })
+    } catch (error) {
+      setAgentHookMessage(String(error))
+    } finally {
+      setAgentBusy(false)
+    }
+  }
   const browseCaptureDir = async () => {
     const selected = await open({ directory: true, multiple: false, title: 'Select capture folder' })
     if (typeof selected === 'string') patchDraft({ captureDir: selected })
@@ -457,12 +507,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     applyThemeToDocument(themeId, draft.selectedPaneHighlightColor, draft.alarmHighlightColor, draft.reviewedPaneHighlightColor)
     TerminalManager.previewTheme(themeId)
   }
-  const revertThemePreview = () => {
+  const closeSettings = () => {
     applyThemeToDocument(settings.terminalThemeId, settings.selectedPaneHighlightColor, settings.alarmHighlightColor, settings.reviewedPaneHighlightColor)
     TerminalManager.previewTheme(null)
-  }
-  const closeSettings = () => {
-    revertThemePreview()
     TerminalManager.previewFont(null)
     onClose()
   }
@@ -477,378 +524,511 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
 
   return (
     <div className={`settings-backdrop vibelink-settings-backdrop${isThemePickerOpen || isFontPickerOpen ? ' vibelink-settings-backdrop-hidden' : ''}`} role="presentation" onMouseDown={closeSettings}>
-      <section className="settings-dialog vibelink-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
-        <aside className="vibelink-settings-nav">
-          <div className="vibelink-settings-search">
-            <Search size={14} />
-            <input value={search} placeholder="Search settings..." onChange={(event) => setSearch(event.target.value)} />
+      <section className="settings-dialog vl-set-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+        <aside className="vl-set-nav">
+          <div className="vl-set-search">
+            <Search size={13} strokeWidth={1.9} aria-hidden="true" />
+            <input aria-label="Search settings" value={search} placeholder="Search settings" onChange={(event) => setSearch(event.target.value)} />
           </div>
-          <nav aria-label="Settings sections">
-            {filteredSections.map((section) => {
-              const Icon = section.icon
-              return (
-                <button key={section.id} type="button" className={activeSection === section.id ? 'selected' : undefined} onClick={() => setActiveSection(section.id)}>
-                  <Icon size={15} />
-                  {section.label}
-                </button>
-              )
-            })}
-          </nav>
+          <div className="vl-set-nav-scroll">
+            {navGroups.length === 0 ? <p className="vl-set-nav-empty">No matching settings.</p> : null}
+            {navGroups.map((group) => (
+              <nav key={group.id} className="vl-set-nav-group" aria-label={group.label}>
+                <h3>{group.label}</h3>
+                {group.sections.map((entry) => {
+                  const Icon = entry.icon
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className="vl-set-nav-item"
+                      aria-current={activeSection === entry.id}
+                      onClick={() => setActiveSection(entry.id)}
+                    >
+                      <Icon size={14} strokeWidth={1.9} aria-hidden="true" />
+                      <span>{entry.label}</span>
+                    </button>
+                  )
+                })}
+              </nav>
+            ))}
+          </div>
         </aside>
 
-        <main className="vibelink-settings-content">
-          <header className="vibelink-settings-header">
-            <h2 id="settings-title">{sections.find((section) => section.id === activeSection)?.label ?? 'Settings'}</h2>
-            <button type="button" className="settings-close" title="Close settings" onClick={closeSettings}>
-              <X size={15} />
+        <main className="vl-set-main">
+          <header className="vl-set-header">
+            <SectionIcon size={16} strokeWidth={1.9} aria-hidden="true" />
+            <h2 id="settings-title">{section.label}</h2>
+            <button type="button" className="vl-set-icon-button" title="Close settings" aria-label="Close settings" onClick={closeSettings}>
+              <X size={15} strokeWidth={1.9} aria-hidden="true" />
             </button>
           </header>
 
-          <div className="vibelink-settings-scroll">
+          <div className="vl-set-body">
             {activeSection === 'account' ? <LicenseSettings /> : null}
 
+            {activeSection === 'agents' ? (
+              <>
+                <SettingsCard
+                  icon={Sparkles}
+                  title="AI coding agents"
+                  hint="Turning a hook on appends one entry VibeLink owns; your own hooks stay untouched. Turning it off removes exactly that entry and its generated script."
+                  status={<SettingsIconButton icon={RefreshCw} label="Re-check installed agents" disabled={agentBusy} onClick={() => { setAgentBusy(true); void Promise.all([refreshAgentClis(), agentHookStatus().then(setAgentHooks)]).catch((error) => setAgentHookMessage(String(error))).finally(() => setAgentBusy(false)) }} />}
+                >
+                  {agentRows.length === 0 ? (
+                    <SettingsMessage icon={Info}>Reading agent status…</SettingsMessage>
+                  ) : agentRows.map((agent) => (
+                    <div key={agent.id} className="vl-set-agent" data-installed={agent.cli ? String(agent.cli.installed) : 'true'}>
+                      <span className="vl-set-agent-icon">
+                        <ProfileIcon name={agentIconName(agent.id)} size={20} />
+                      </span>
+                      <span className="vl-set-agent-name">
+                        <strong>{agent.displayName}</strong>
+                        <span title={agent.hook?.blockedReason ?? agent.hook?.configPath ?? undefined}>
+                          {agent.cli ? agentStatusLabel(agent.cli) : 'Completion hook only'}
+                        </span>
+                      </span>
+                      {agent.cli && !agent.cli.installed ? (
+                        <SettingsPill icon={CircleX}>Not found</SettingsPill>
+                      ) : agent.cli && agent.cli.auth === 'loggedOut' ? (
+                        <SettingsButton icon={LogIn} label="Log in" title={`Run ${agent.cli.loginHint} in a terminal`} disabled={agentBusy || !activeSessionId} onClick={() => void openAgentLogin(agent.id, agent.displayName, agent.cli?.loginHint ?? agent.id)} />
+                      ) : (
+                        <SettingsPill tone="ok" icon={CircleCheck}>Ready</SettingsPill>
+                      )}
+                      {agent.hook ? (
+                        <SettingsSwitch
+                          label={`${agent.displayName} completion hook`}
+                          checked={agent.hook.installed}
+                          disabled={Boolean(agent.hook.blockedReason)}
+                          onChange={(checked) => void setAgentHook(agent.id, checked)}
+                        />
+                      ) : <span />}
+                    </div>
+                  ))}
+                  {agentHookMessage ? <SettingsMessage icon={Info}>{agentHookMessage}</SettingsMessage> : null}
+                </SettingsCard>
+                <SettingsCard icon={Bell} title="Completion detection" hint="Hooks are exact and work even when you start an agent by typing its name in a plain shell. Terminal-output detection is the fallback.">
+                  <SettingsRow icon={Volume2} label="Completion sound" control={<SettingsSwitch label="Completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />} />
+                  <SettingsRow icon={Bell} label="More sound options" control={<SettingsButton icon={ChevronRight} label="Notifications" onClick={() => setActiveSection('notifications')} />} />
+                </SettingsCard>
+              </>
+            ) : null}
+
             {activeSection === 'model' ? (
-              <SettingsGroup title="Main model" description="Hermes owns provider, login, and model configuration. VibeLink reads the global installation without modifying it.">
-                <ReadonlyRow label="Workspace" value={activeSession?.name ?? 'No workspace'} />
-                <ReadonlyRow label="Global HERMES_HOME" value={runtime?.home ?? workspaceState?.home ?? 'Not resolved'} mono />
-                <ReadonlyRow label="Runtime command" value={runtime?.command ?? 'Not detected'} mono />
-                <ReadonlyRow label="Version" value={runtime?.version ?? 'Not detected'} />
-                <ReadonlyRow label="Provider" value={workspaceState?.model?.provider || runtime?.configuredModel?.provider || 'Hermes default'} />
-                <ReadonlyRow label="Model" value={workspaceState?.model?.model ?? runtime?.configuredModel?.model ?? 'Not configured'} />
-                <ReadonlyRow label="Base URL" value={workspaceState?.model?.baseUrl || runtime?.configuredModel?.baseUrl || 'Hermes provider default'} mono />
-                <label>
-                  hermes-acp override
-                  <input value={draft.hermesCommand} placeholder="hermes-acp" onChange={(event) => patchDraft({ hermesCommand: event.target.value })} />
-                </label>
-                <HermesInstallGuidance
-                  runtime={runtime}
-                  commandOverride={draft.hermesCommand || null}
-                  sessionId={activeSessionId}
-                  workspaceFolder={activeSession?.workspaceFolder ?? null}
-                  onStatus={setRuntime}
-                />
-                <div className="vibelink-settings-actions">
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('model')}><Settings2 size={14} /> Configure model</button>
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('custom-provider')}><Terminal size={14} /> Custom provider</button>
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('auth')}><KeyRound size={14} /> Login / auth</button>
-                  <button type="button" onClick={() => void refreshHermesState()}><RefreshCw size={14} /> Refresh</button>
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('status')}><Terminal size={14} /> Open status CLI</button>
-                </div>
-                {terminalMessage ? <div className="vibelink-settings-note"><span>{terminalMessage}</span></div> : null}
-              </SettingsGroup>
+              <>
+                <SettingsCard
+                  icon={Bot}
+                  title="Hermes runtime"
+                  hint="Hermes owns provider, login, and model configuration. VibeLink reads the global installation without modifying it."
+                  status={runtime?.detected ? <SettingsPill tone="ok" icon={CircleCheck}>Detected</SettingsPill> : <SettingsPill tone="warn" icon={TriangleAlert}>Missing</SettingsPill>}
+                >
+                  <SettingsRow icon={Package} label="Version" control={<SettingsValue value={runtime?.version ?? 'Not detected'} />} />
+                  <SettingsRow icon={Terminal} label="Command" control={<SettingsValue mono value={runtime?.command ?? 'Not detected'} />} />
+                  <SettingsRow icon={FolderCog} label="HERMES_HOME" control={<SettingsValue mono value={runtime?.home ?? workspaceState?.home ?? 'Not resolved'} />} />
+                  <SettingsRow icon={Wrench} label="Command override" hint="Point VibeLink at a specific hermes-acp binary." stacked control={<SettingsText label="hermes-acp override" value={draft.hermesCommand} placeholder="hermes-acp" onChange={(value) => patchDraft({ hermesCommand: value })} />} />
+                  <HermesInstallGuidance
+                    runtime={runtime}
+                    commandOverride={draft.hermesCommand || null}
+                    sessionId={activeSessionId}
+                    workspaceFolder={activeSession?.workspaceFolder ?? null}
+                    onStatus={setRuntime}
+                  />
+                </SettingsCard>
+                <SettingsCard icon={Cpu} title="Model" status={<SettingsIconButton icon={RefreshCw} label="Refresh model status" onClick={() => void refreshHermesState()} />}>
+                  <SettingsRow icon={Server} label="Provider" control={<SettingsValue value={workspaceState?.model?.provider || runtime?.configuredModel?.provider || 'Hermes default'} />} />
+                  <SettingsRow icon={Bot} label="Model" control={<SettingsValue value={workspaceState?.model?.model ?? runtime?.configuredModel?.model ?? 'Not configured'} />} />
+                  <SettingsRow icon={Braces} label="Base URL" control={<SettingsValue mono value={workspaceState?.model?.baseUrl || runtime?.configuredModel?.baseUrl || 'Provider default'} />} />
+                  <div className="vl-set-actions vl-set-actions-bordered">
+                    <SettingsButton icon={Settings2} label="Configure" title="Open Hermes model setup in a terminal" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('model')} />
+                    <SettingsButton icon={Server} label="Custom provider" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('custom-provider')} />
+                    <SettingsButton icon={KeyRound} label="Login" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('auth')} />
+                    <SettingsButton icon={Terminal} label="Status CLI" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesTerminal('status')} />
+                  </div>
+                  {terminalMessage ? <SettingsMessage icon={Info}>{terminalMessage}</SettingsMessage> : null}
+                </SettingsCard>
+              </>
             ) : null}
 
             {activeSection === 'chat' ? (
-              <SettingsGroup title="Chat" description="New VibeLink Agent chats use these local UI preferences.">
-                <SettingsSelect label="Personality" value={draft.chatPersonality} options={chatPersonalityOptions} onChange={(value) => patchDraft({ chatPersonality: value as ChatPersonality })} />
-                <ReadonlyRow label="Timezone" value={Intl.DateTimeFormat().resolvedOptions().timeZone || 'System'} />
-                <SettingsToggle label="Show thinking / reasoning" checked={draft.chatReasoningBlocks} onChange={(checked) => patchDraft({ chatReasoningBlocks: checked })} />
-                <SettingsToggle label="Show tool calls" checked={draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCalls: checked })} />
-                <SettingsToggle label="Show tool call contents" checked={draft.chatToolCallContent} disabled={!draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCallContent: checked })} />
-                <SettingsSelect label="Image attachments" value={draft.chatImageAttachments} options={imageAttachmentOptions} onChange={(value) => patchDraft({ chatImageAttachments: value as ChatImageAttachmentMode })} />
-              </SettingsGroup>
+              <SettingsCard icon={MessageSquare} title="Agent chat" hint="Applies to new VibeLink Agent chats in this app only.">
+                <SettingsRow
+                  icon={Type}
+                  label="Personality"
+                  control={(
+                    <SettingsSegmented
+                      label="Personality"
+                      value={draft.chatPersonality}
+                      options={[
+                        { value: 'direct', label: 'Direct' },
+                        { value: 'balanced', label: 'Balanced' },
+                        { value: 'concise', label: 'Concise' },
+                        { value: 'exploratory', label: 'Explore' },
+                      ]}
+                      onChange={(value) => patchDraft({ chatPersonality: value as ChatPersonality })}
+                    />
+                  )}
+                />
+                <SettingsRow icon={Eye} label="Show thinking" control={<SettingsSwitch label="Show thinking / reasoning" checked={draft.chatReasoningBlocks} onChange={(checked) => patchDraft({ chatReasoningBlocks: checked })} />} />
+                <SettingsRow icon={Wrench} label="Show tool calls" control={<SettingsSwitch label="Show tool calls" checked={draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCalls: checked })} />} />
+                <SettingsRow icon={Braces} label="Tool call contents" control={<SettingsSwitch label="Show tool call contents" checked={draft.chatToolCallContent} disabled={!draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCallContent: checked })} />} />
+                <SettingsRow
+                  icon={Camera}
+                  label="Image attachments"
+                  control={(
+                    <SettingsSegmented
+                      label="Image attachments"
+                      value={draft.chatImageAttachments}
+                      options={[
+                        { value: 'auto', label: 'Auto' },
+                        { value: 'always', label: 'Always' },
+                        { value: 'never', label: 'Never' },
+                      ]}
+                      onChange={(value) => patchDraft({ chatImageAttachments: value as ChatImageAttachmentMode })}
+                    />
+                  )}
+                />
+                <SettingsRow icon={Hash} label="Timezone" control={<SettingsValue value={Intl.DateTimeFormat().resolvedOptions().timeZone || 'System'} />} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'appearance' ? (
               <>
-                <SettingsGroup title="Font" description="Font family previews live on terminal panes and commits on Apply or OK. Size, weight, and scale apply after Apply or OK.">
-                  <label>
-                    Font family
-                    <select
-                      value={draft.fontFamily}
-                      onChange={(event) => {
-                        patchDraft({ fontFamily: event.target.value })
-                        TerminalManager.previewFont(event.target.value)
-                      }}
-                    >
-                      {fontChoices.map((font) => <option key={font} value={font}>{font}</option>)}
-                    </select>
-                  </label>
-                  <div className="vibelink-settings-actions">
-                    <button type="button" onClick={openFontPicker}>Browse fonts (live preview)</button>
-                  </div>
-                  <div className="vibelink-settings-grid">
-                    <label>Font size<input type="number" min="8" max="32" value={draft.fontSize} onChange={(event) => patchDraft({ fontSize: Number(event.target.value) })} /></label>
-                    <label>Font weight<select value={draft.terminalFontWeight} onChange={(event) => patchDraft({ terminalFontWeight: Number(event.target.value) })}>{fontWeightOptions.map((weight) => <option key={weight} value={weight}>{weight}</option>)}</select></label>
-                    <label>Cursor style<select value={draft.cursorStyle} onChange={(event) => patchDraft({ cursorStyle: event.target.value as Settings['cursorStyle'] })}>{cursorStyleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-                    <label>UI scale<input type="number" min="0.85" max="1.2" step="0.05" value={draft.uiScale} onChange={(event) => patchDraft({ uiScale: Number(event.target.value) })} /></label>
-                  </div>
-                  <div className="vibelink-settings-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>PS E:\repo&gt; VibeLink Agent ready</div>
-                </SettingsGroup>
-                <SettingsGroup title="Theme" description="One palette drives app chrome, settings, tabs, and terminal colors. Changes preview live and commit on Apply or OK.">
-                  <label>
-                    Theme
-                    <select
-                      value={draft.terminalThemeId}
-                      onChange={(event) => {
-                        const themeId = event.target.value as TerminalThemeId
-                        patchDraft({ terminalThemeId: themeId })
-                        previewTheme(themeId)
-                      }}
-                    >
-                      {terminalThemeGroups.map((group) => (
-                        <optgroup key={group.category} label={group.category}>
-                          {group.themes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}
-                        </optgroup>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="vibelink-settings-actions">
-                    <button type="button" onClick={openThemePicker}>Browse themes (live preview)</button>
-                  </div>
-                  <div className="vibelink-theme-preview" style={{ background: selectedTheme.terminal.background, color: selectedTheme.terminal.foreground }}>
+                <SettingsCard
+                  icon={Type}
+                  title="Font"
+                  hint="Font family previews live on terminal panes; size, weight, and scale apply after Apply or OK."
+                  status={<SettingsButton icon={Search} label="Browse" title="Browse fonts with live preview" onClick={openFontPicker} />}
+                >
+                  <SettingsRow
+                    icon={Baseline}
+                    label="Family"
+                    control={(
+                      <SettingsSelect
+                        label="Font family"
+                        value={draft.fontFamily}
+                        onChange={(value) => {
+                          patchDraft({ fontFamily: value })
+                          TerminalManager.previewFont(value)
+                        }}
+                      >
+                        {fontChoices.map((font) => <option key={font} value={font}>{font}</option>)}
+                      </SettingsSelect>
+                    )}
+                  />
+                  <SettingsRow icon={ALargeSmall} label="Size" control={<SettingsNumber label="Font size" value={draft.fontSize} min={8} max={32} onChange={(value) => patchDraft({ fontSize: value })} />} />
+                  <SettingsRow
+                    icon={Contrast}
+                    label="Weight"
+                    control={(
+                      <SettingsSelect label="Font weight" value={String(draft.terminalFontWeight)} onChange={(value) => patchDraft({ terminalFontWeight: Number(value) })}>
+                        {fontWeightOptions.map((weight) => <option key={weight} value={weight}>{weight}</option>)}
+                      </SettingsSelect>
+                    )}
+                  />
+                  <SettingsRow
+                    icon={MousePointer}
+                    label="Cursor"
+                    control={(
+                      <SettingsSegmented
+                        label="Cursor style"
+                        value={draft.cursorStyle}
+                        options={[
+                          { value: 'bar', label: 'Bar' },
+                          { value: 'block', label: 'Block' },
+                          { value: 'underline', label: 'Under' },
+                        ]}
+                        onChange={(value) => patchDraft({ cursorStyle: value as Settings['cursorStyle'] })}
+                      />
+                    )}
+                  />
+                  <SettingsRow icon={Scaling} label="UI scale" control={<SettingsNumber label="UI scale" value={draft.uiScale} min={0.85} max={1.2} step={0.05} onChange={(value) => patchDraft({ uiScale: value })} />} />
+                  <div className="vl-set-preview" style={{ fontFamily: terminalFontStack(draft.fontFamily), fontWeight: draft.terminalFontWeight }}>PS E:\repo&gt; VibeLink Agent ready</div>
+                </SettingsCard>
+
+                <SettingsCard
+                  icon={Palette}
+                  title="Theme"
+                  hint="One palette drives app chrome, tabs, and terminal colors. Changes preview live and commit on Apply or OK."
+                  status={<SettingsButton icon={Search} label="Browse" title="Browse themes with live preview" onClick={openThemePicker} />}
+                >
+                  <SettingsRow
+                    icon={Palette}
+                    label="Palette"
+                    control={(
+                      <SettingsSelect
+                        label="Theme"
+                        value={draft.terminalThemeId}
+                        onChange={(value) => {
+                          const themeId = value as TerminalThemeId
+                          patchDraft({ terminalThemeId: themeId })
+                          previewTheme(themeId)
+                        }}
+                      >
+                        {terminalThemeGroups.map((group) => (
+                          <optgroup key={group.category} label={group.category}>
+                            {group.themes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}
+                          </optgroup>
+                        ))}
+                      </SettingsSelect>
+                    )}
+                  />
+                  <SettingsRow icon={Highlighter} label="Selected pane" control={<input className="vl-set-color" type="color" aria-label="Selected pane highlight" value={draft.selectedPaneHighlightColor} onChange={(event) => previewHighlightColors({ selectedPaneHighlightColor: event.target.value })} />} />
+                  <SettingsRow icon={Bell} label="Completion alert" control={<input className="vl-set-color" type="color" aria-label="Alarm highlight" value={draft.alarmHighlightColor} onChange={(event) => previewHighlightColors({ alarmHighlightColor: event.target.value })} />} />
+                  <SettingsRow icon={Check} label="Reviewed pane" control={<input className="vl-set-color" type="color" aria-label="Reviewed pane highlight" value={draft.reviewedPaneHighlightColor} onChange={(event) => previewHighlightColors({ reviewedPaneHighlightColor: event.target.value })} />} />
+                  <div className="vl-set-theme-preview" style={{ background: selectedTheme.terminal.background, color: selectedTheme.terminal.foreground }}>
                     <span>{selectedTheme.name}</span>
                     <small>{selectedTheme.description}</small>
                   </div>
-                  <div className="vibelink-settings-grid">
-                    <label>
-                      Selected pane highlight
-                      <input
-                        type="color"
-                        value={draft.selectedPaneHighlightColor}
-                        onChange={(event) => previewHighlightColors({ selectedPaneHighlightColor: event.target.value })}
+                </SettingsCard>
+
+                <SettingsCard icon={FileCode2} title="Editor">
+                  <SettingsRow icon={ScrollText} label="Word wrap" control={<SettingsSwitch label="Word wrap" checked={draft.editorWordWrap} onChange={(checked) => patchDraft({ editorWordWrap: checked })} />} />
+                  <SettingsRow icon={LayoutGrid} label="Minimap" control={<SettingsSwitch label="Minimap" checked={draft.editorMinimap} onChange={(checked) => patchDraft({ editorMinimap: checked })} />} />
+                </SettingsCard>
+
+                <SettingsCard icon={GitBranch} title="Git status labels" hint="Every mode keeps a plain-language hover explanation. Words is clearest; letters is most compact.">
+                  <SettingsRow
+                    icon={Tag}
+                    label="Presentation"
+                    control={(
+                      <SettingsSegmented
+                        label="Git status presentation"
+                        value={draft.gitStatusPresentation}
+                        options={[
+                          { value: 'icons', label: 'Icons', hint: 'Symbols with explanations on hover' },
+                          { value: 'letters', label: 'Letters', hint: 'S, M, U, P' },
+                          { value: 'words', label: 'Words', hint: 'Staged, Modified, Untracked, Pointer' },
+                        ]}
+                        onChange={(value) => patchDraft({ gitStatusPresentation: value as GitStatusPresentation })}
                       />
-                    </label>
-                    <label>
-                      Alarm highlight
-                      <input
-                        type="color"
-                        value={draft.alarmHighlightColor}
-                        onChange={(event) => previewHighlightColors({ alarmHighlightColor: event.target.value })}
-                      />
-                    </label>
-                    <label>
-                      Reviewed pane highlight
-                      <input
-                        type="color"
-                        value={draft.reviewedPaneHighlightColor}
-                        onChange={(event) => previewHighlightColors({ reviewedPaneHighlightColor: event.target.value })}
-                      />
-                    </label>
-                  </div>
-                </SettingsGroup>
-                <SettingsGroup title="Editor" description="Configure Monaco defaults. Editor toolbar controls update these same workspace-wide preferences.">
-                  <SettingsToggle label="Word wrap" checked={draft.editorWordWrap} onChange={(checked) => patchDraft({ editorWordWrap: checked })} />
-                  <SettingsToggle label="Minimap" checked={draft.editorMinimap} onChange={(checked) => patchDraft({ editorMinimap: checked })} />
-                </SettingsGroup>
-                <SettingsGroup title="Git status labels" description="Choose how Explorer explains file, folder, repository, and submodule states.">
-                  <SettingsSelect label="Presentation" value={draft.gitStatusPresentation} options={gitStatusPresentationOptions} onChange={(value) => patchDraft({ gitStatusPresentation: value as GitStatusPresentation })} />
-                  <div className="vibelink-settings-note"><span>Every mode keeps a plain-language hover explanation. Words is the clearest; letters is the most compact.</span></div>
-                </SettingsGroup>
+                    )}
+                  />
+                </SettingsCard>
               </>
             ) : null}
 
             {activeSection === 'notifications' ? (
               <>
-              <SettingsGroup title="Completion notifications" description="Play a short local sound when an AI coding agent response or assigned task finishes. Visual pane and workspace highlights remain enabled independently.">
-                <SettingsToggle label="Play completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />
-                <label>
-                  Completion sound
-                  <select aria-label="Completion sound" value={draft.completionSoundId} disabled={!draft.completionSoundEnabled} onChange={(event) => patchDraft({ completionSoundId: event.target.value as CompletionSoundId })}>
-                    <optgroup label="Built-in">
-                      {builtInCompletionSounds.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
-                    </optgroup>
-                    {customCompletionSounds.length > 0 ? (
-                      <optgroup label="Custom">
-                        {customCompletionSounds.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
-                      </optgroup>
-                    ) : null}
-                    {draft.completionSoundId.startsWith('custom:') && !customCompletionSounds.some((sound) => sound.id === draft.completionSoundId) ? (
-                      <option value={draft.completionSoundId}>Missing custom sound</option>
-                    ) : null}
-                  </select>
-                </label>
-                <label>
-                  Volume · {Math.round(draft.completionSoundVolume * 100)}%
-                  <input aria-label="Completion sound volume" type="range" min="0" max="1" step="0.05" value={draft.completionSoundVolume} disabled={!draft.completionSoundEnabled} onChange={(event) => patchDraft({ completionSoundVolume: Number(event.target.value) })} />
-                </label>
-                <div className="vibelink-settings-actions">
-                  {/* Preview stays enabled while the toggle is off so the sound
-                      can always be auditioned before committing to it. */}
-                  <button type="button" onClick={() => void previewCompletionSound()}><Play size={14} /> Preview</button>
-                  <button type="button" onClick={() => completionSoundInputRef.current?.click()}><Upload size={14} /> Add audio file</button>
-                  <input
-                    ref={completionSoundInputRef}
-                    hidden
-                    aria-label="Add custom notification sound"
-                    type="file"
-                    accept=".mp3,.wav,.ogg,.m4a,.aac,.flac,audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/aac,audio/flac"
-                    onChange={(event) => {
-                      const file = event.currentTarget.files?.[0]
-                      event.currentTarget.value = ''
-                      if (file) void importCompletionSound(file)
-                    }}
+                <SettingsCard
+                  icon={Volume2}
+                  title="Completion sound"
+                  hint="Plays when an AI agent response or assigned task finishes. Pane and workspace highlights stay on independently."
+                  status={<SettingsSwitch label="Play completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />}
+                >
+                  <SettingsRow
+                    icon={Bell}
+                    label="Sound"
+                    sub={builtInCompletionSounds.find((sound) => sound.id === draft.completionSoundId)?.description}
+                    control={(
+                      <SettingsSelect label="Completion sound" value={draft.completionSoundId} disabled={!draft.completionSoundEnabled} onChange={(value) => patchDraft({ completionSoundId: value as CompletionSoundId })}>
+                        <optgroup label="Built-in">
+                          {builtInCompletionSounds.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
+                        </optgroup>
+                        {customCompletionSounds.length > 0 ? (
+                          <optgroup label="Custom">
+                            {customCompletionSounds.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
+                          </optgroup>
+                        ) : null}
+                        {draft.completionSoundId.startsWith('custom:') && !customCompletionSounds.some((sound) => sound.id === draft.completionSoundId) ? (
+                          <option value={draft.completionSoundId}>Missing custom sound</option>
+                        ) : null}
+                      </SettingsSelect>
+                    )}
                   />
-                </div>
-                {builtInCompletionSounds.find((sound) => sound.id === draft.completionSoundId)?.description ? (
-                  <div className="vibelink-settings-note"><span>{builtInCompletionSounds.find((sound) => sound.id === draft.completionSoundId)?.description}</span></div>
-                ) : null}
-                {customCompletionSounds.length > 0 ? (
-                  <div className="vibelink-notification-sound-list" aria-label="Custom notification sounds">
-                    {customCompletionSounds.map((sound) => (
-                      <div key={sound.id} className="vibelink-notification-sound-row">
-                        <span><strong>{sound.name}</strong><small>{Math.max(1, Math.round(sound.size / 1024))} KB</small></span>
-                        <div>
-                          <button type="button" title={`Preview ${sound.name}`} onClick={() => void previewCompletionSound(sound.id)}><Play size={13} /></button>
-                          <button type="button" title={`Remove ${sound.name}`} onClick={() => void deleteCompletionSound(sound)}><Trash2 size={13} /></button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="vibelink-settings-note"><span>Built-in sounds are generated locally and ship license-free. Custom MP3, WAV, OGG, M4A, AAC, and FLAC files up to 10 MB stay in this app's local browser storage.</span></div>
-                {completionSoundMessage ? <div className="vibelink-settings-note"><span>{completionSoundMessage}</span></div> : null}
-              </SettingsGroup>
-              <SettingsGroup
-                title="Agent completion hooks"
-                description="Ask each AI coding agent to tell VibeLink when it finishes a turn. This is exact — it works even when you start the agent by typing its name inside an ordinary shell, which terminal-output detection cannot see reliably."
-              >
-                {agentHooks.length === 0 ? (
-                  <div className="vibelink-settings-note"><span>Reading agent hook status…</span></div>
-                ) : agentHooks.map((hook) => (
-                  <div key={hook.id}>
-                    <SettingsToggle
-                      label={hook.displayName}
-                      checked={hook.installed}
-                      onChange={(checked) => void setAgentHook(hook.id, checked)}
+                  <SettingsRow
+                    icon={ArrowUpDown}
+                    label={`Volume · ${Math.round(draft.completionSoundVolume * 100)}%`}
+                    control={(
+                      <input
+                        className="vl-set-range"
+                        aria-label="Completion sound volume"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={draft.completionSoundVolume}
+                        disabled={!draft.completionSoundEnabled}
+                        onChange={(event) => patchDraft({ completionSoundVolume: Number(event.target.value) })}
+                      />
+                    )}
+                  />
+                  <div className="vl-set-actions vl-set-actions-bordered">
+                    {/* Preview stays enabled while the toggle is off so the sound
+                        can always be auditioned before committing to it. */}
+                    <SettingsButton icon={Play} label="Preview" onClick={() => void previewCompletionSound()} />
+                    <SettingsButton icon={Upload} label="Add file" title="Add a custom MP3, WAV, OGG, M4A, AAC, or FLAC up to 10 MB" onClick={() => completionSoundInputRef.current?.click()} />
+                    <input
+                      ref={completionSoundInputRef}
+                      hidden
+                      aria-label="Add custom notification sound"
+                      type="file"
+                      accept=".mp3,.wav,.ogg,.m4a,.aac,.flac,audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/aac,audio/flac"
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0]
+                        event.currentTarget.value = ''
+                        if (file) void importCompletionSound(file)
+                      }}
                     />
-                    <div className="vibelink-settings-note">
-                      <span>
-                        {hook.blockedReason
-                          ? hook.blockedReason
-                          : `${hook.installed ? 'Installed in' : 'Would be installed in'} ${hook.configPath}`}
-                      </span>
-                    </div>
                   </div>
-                ))}
-                <div className="vibelink-settings-note">
-                  <span>
-                    Turning a hook on appends one entry that VibeLink owns; your own hooks and other tools' hooks are left untouched. Turning it off removes exactly that entry and deletes the generated script, leaving nothing behind. The scripts do nothing outside a VibeLink terminal.
-                  </span>
-                </div>
-                {agentHookMessage ? <div className="vibelink-settings-note"><span>{agentHookMessage}</span></div> : null}
-              </SettingsGroup>
+                  {customCompletionSounds.map((sound) => (
+                    <div key={sound.id} className="vl-set-sound-row">
+                      <Volume2 size={13} strokeWidth={1.9} aria-hidden="true" />
+                      <span>
+                        <strong>{sound.name}</strong>
+                        <small>{Math.max(1, Math.round(sound.size / 1024))} KB</small>
+                      </span>
+                      <div>
+                        <SettingsIconButton icon={Play} label={`Preview ${sound.name}`} onClick={() => void previewCompletionSound(sound.id)} />
+                        <SettingsIconButton icon={Trash2} tone="danger" label={`Remove ${sound.name}`} onClick={() => void deleteCompletionSound(sound)} />
+                      </div>
+                    </div>
+                  ))}
+                  {completionSoundMessage ? <SettingsMessage icon={Info}>{completionSoundMessage}</SettingsMessage> : null}
+                </SettingsCard>
+                <SettingsCard icon={Sparkles} title="Agent completion hooks" hint="Each agent reports its own turn end. Configure them on the Agents page.">
+                  <SettingsRow icon={Sparkles} label="Manage agent hooks" control={<SettingsButton icon={ChevronRight} label="Agents" onClick={() => setActiveSection('agents')} />} />
+                </SettingsCard>
               </>
             ) : null}
 
             {activeSection === 'workspace' ? (
               <>
-                <SettingsGroup title="Layout" description="Controls workspace window panes, tab height, and terminal restore behavior.">
-                  <div className="vibelink-settings-grid">
-                    <label>Pane header height<input type="number" min="24" max="56" value={draft.paneHeaderHeight} onChange={(event) => patchDraft({ paneHeaderHeight: Number(event.target.value) })} /></label>
-                    <label>Resize snap<input type="number" min="0" max="128" value={draft.resizeSnapTolerance} onChange={(event) => patchDraft({ resizeSnapTolerance: Number(event.target.value) })} /></label>
-                    <label>Scrollback<input type="number" min="100" max="200000" step="100" value={draft.scrollback} onChange={(event) => patchDraft({ scrollback: Number(event.target.value) })} /></label>
-                  </div>
-                  <SettingsToggle label="Show terminal scrollbars" checked={draft.terminalScrollbarVisible} onChange={(checked) => patchDraft({ terminalScrollbarVisible: checked })} />
-                  <SettingsToggle label="Keep terminals alive after window close" checked={draft.keepTerminalsAliveOnClose} onChange={(checked) => patchDraft({ keepTerminalsAliveOnClose: checked })} />
-                </SettingsGroup>
-                <SettingsGroup title="Agent roles" description="Reusable responsibility labels for task assignment and terminal orchestration.">
-                  <div className="vibelink-settings-actions">
+                <SettingsCard icon={Info} title="Scope" hint="These are defaults for every workspace. Per-workspace name, folder, profile, links, notes, and group live in each workspace's own settings dialog.">
+                  <SettingsRow
+                    icon={PanelsTopLeft}
+                    label={activeSession ? `This workspace · ${activeSession.name}` : 'No workspace open'}
+                    sub={activeWorkspaceFolder || undefined}
+                    subMono
+                    control={<SettingsPill icon={Info}>Right-click a workspace → Edit</SettingsPill>}
+                  />
+                </SettingsCard>
+                <SettingsCard icon={LayoutGrid} title="Layout">
+                  <SettingsRow icon={PanelTop} label="Pane header height" control={<SettingsNumber label="Pane header height" value={draft.paneHeaderHeight} min={24} max={56} onChange={(value) => patchDraft({ paneHeaderHeight: value })} />} />
+                  <SettingsRow icon={Scaling} label="Resize snap" hint="Pixel tolerance for snapping a divider to a neighbouring edge." control={<SettingsNumber label="Resize snap" value={draft.resizeSnapTolerance} min={0} max={128} onChange={(value) => patchDraft({ resizeSnapTolerance: value })} />} />
+                  <SettingsRow icon={Rows3} label="Scrollback" hint="Lines of terminal history kept per pane." control={<SettingsNumber label="Scrollback" value={draft.scrollback} min={100} max={200000} step={100} onChange={(value) => patchDraft({ scrollback: value })} />} />
+                  <SettingsRow icon={ScrollText} label="Terminal scrollbars" control={<SettingsSwitch label="Show terminal scrollbars" checked={draft.terminalScrollbarVisible} onChange={(checked) => patchDraft({ terminalScrollbarVisible: checked })} />} />
+                  <SettingsRow icon={MonitorCog} label="Stop terminals on exit" hint="Stop all processes when the window closes and restore the panes next launch." control={<SettingsSwitch label="Stop all processes on exit; restore panes next launch" checked={draft.stopTerminalsOnAppExit} onChange={(checked) => patchDraft({ stopTerminalsOnAppExit: checked })} />} />
+                </SettingsCard>
+                <SettingsCard icon={Users} title="Agent roles" hint="Reusable responsibility labels for task assignment and terminal orchestration.">
+                  <div className="vl-set-actions">
                     <input
+                      className="vl-set-input"
+                      aria-label="New role preset"
                       value={rolePresetDraft}
-                      placeholder="Add role preset"
+                      placeholder="Add role"
                       onChange={(event) => setRolePresetDraft(event.target.value)}
                       onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addRolePreset() } }}
                     />
-                    <button type="button" onClick={addRolePreset}>Add</button>
+                    <SettingsButton icon={Plus} label="Add" onClick={addRolePreset} />
                   </div>
-                  <div className="vibelink-role-presets">
+                  <div className="vl-set-chips">
                     {draft.rolePresets.map((role) => (
-                      <span key={role}>
+                      <span key={role} className="vl-set-chip">
                         {role}
-                        <button type="button" title={`Remove ${role}`} onClick={() => removeRolePreset(role)}>×</button>
+                        <button type="button" title={`Remove ${role}`} aria-label={`Remove ${role}`} onClick={() => patchDraft({ rolePresets: draft.rolePresets.filter((existing) => existing !== role) })}>
+                          <X size={11} strokeWidth={2.2} aria-hidden="true" />
+                        </button>
                       </span>
                     ))}
                   </div>
-                </SettingsGroup>
-                <SettingsGroup title="Profiles" description="Create local shell, command, and SSH terminal profiles.">
-                  <div className="vibelink-profile-toolbar">
-                    <button type="button" onClick={addProfile}>Add profile</button>
-                  </div>
-                  <div className="vibelink-profile-list">
-                    {draft.profiles.map((profile) => {
-                      const isExpanded = expandedProfileId === profile.id
-                      const isDefault = profile.id === draft.defaultProfileId
-                      const deleteDisabled = !canDeleteProfile(draft, profile.id)
-                      return (
-                        <section key={profile.id} className="vibelink-profile-card">
-                          <div className="vibelink-profile-row">
-                            <button type="button" className="vibelink-profile-summary" aria-expanded={isExpanded} onClick={() => setExpandedProfileId(isExpanded ? null : profile.id)}>
-                              <ProfileIcon name={profile.icon} color={profile.color} size={16} />
-                              <span className="vibelink-profile-name">{profile.name || profile.id}</span>
-                              <span className="vibelink-profile-type-badge">{profileKindLabels[profile.type]}</span>
-                            </button>
-                            <button type="button" onClick={() => patchDraft({ defaultProfileId: profile.id })} disabled={isDefault}>{isDefault ? 'Default' : 'Set default'}</button>
-                            <button type="button" onClick={() => deleteProfile(profile.id)} disabled={deleteDisabled} title={deleteDisabled ? 'At least one profile is required' : 'Delete profile'}>Delete</button>
-                          </div>
-                          {isExpanded ? (
-                            <div className="vibelink-profile-editor">
-                              <div className="vibelink-settings-grid">
-                                <label>Name<input value={profile.name} onChange={(event) => updateProfile(profile.id, { name: event.target.value })} /></label>
-                                <label>
-                                  Type
-                                  <select value={profile.type} onChange={(event) => changeProfileType(profile, event.target.value as ProfileKind)}>
-                                    {profileKindOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                                  </select>
-                                </label>
-                                <label>
-                                  Icon
-                                  <span className="vibelink-profile-icon-field">
-                                    <ProfileIcon name={profile.icon} color={profile.color} size={16} />
-                                    <select value={profile.icon} onChange={(event) => updateProfile(profile.id, { icon: event.target.value })}>
-                                      {profileIconNames.map((iconName) => <option key={iconName} value={iconName}>{iconName}</option>)}
-                                    </select>
-                                  </span>
-                                </label>
-                                <label>Color<input type="color" value={profile.color} onChange={(event) => updateProfile(profile.id, { color: event.target.value })} /></label>
-                              </div>
-                              {profile.type === 'local' ? (
-                                <div className="vibelink-settings-grid">
-                                  <label>Shell<input value={profile.shell ?? ''} placeholder="pwsh.exe" onChange={(event) => updateProfile(profile.id, { shell: event.target.value || null })} /></label>
-                                  <label>Arguments<input value={joinCommandLine(profile.args)} placeholder="-NoLogo" onChange={(event) => updateProfile(profile.id, { args: splitCommandLine(event.target.value) })} /></label>
-                                  <label>Working directory<input value={profile.cwd ?? ''} placeholder="Optional local cwd" onChange={(event) => updateProfile(profile.id, { cwd: event.target.value || null })} /></label>
-                                </div>
-                              ) : null}
-                              {profile.type === 'command' ? (
-                                <label className="vibelink-profile-field-wide">Command line<input value={profile.command} placeholder="pnpm dev" onChange={(event) => updateProfile(profile.id, { command: event.target.value })} /></label>
-                              ) : null}
-                              {profile.type === 'ssh' ? (
-                                <div className="vibelink-profile-editor-grid">
-                                  <label>Host<input value={profile.sshHost} placeholder="100.98.54.122" onChange={(event) => updateProfile(profile.id, { sshHost: event.target.value })} /></label>
-                                  <label>User<input value={profile.sshUser} placeholder="js" onChange={(event) => updateProfile(profile.id, { sshUser: event.target.value })} /></label>
-                                  <label>Port<input type="number" min="1" max="65535" value={profile.sshPort ?? ''} placeholder="22" onChange={(event) => updateSshPort(profile.id, event.target.value)} /></label>
-                                  <label>Identity file<input value={profile.sshIdentityFile ?? ''} placeholder="C:\\Users\\js\\.ssh\\id_ed25519" onChange={(event) => updateProfile(profile.id, { sshIdentityFile: event.target.value || null })} /></label>
-                                  <label>Remote cwd default<input value={profile.sshRemoteCwd ?? ''} placeholder="/home/js/projects/app" onChange={(event) => updateProfile(profile.id, { sshRemoteCwd: event.target.value || null })} /></label>
-                                  <label>Remote command<input value={profile.sshRemoteCommand} placeholder={'exec "${SHELL:-sh}" -l'} onChange={(event) => updateProfile(profile.id, { sshRemoteCommand: event.target.value })} /></label>
-                                  <label className="vibelink-profile-field-wide">Extra SSH options<input value={profile.sshOptions} placeholder="-o ServerAliveInterval=30" onChange={(event) => updateProfile(profile.id, { sshOptions: event.target.value })} /></label>
-                                  <label className="vibelink-settings-toggle vibelink-profile-toggle"><span>Allocate TTY (-t)</span><input type="checkbox" checked={profile.sshAllocateTty} onChange={(event) => updateProfile(profile.id, { sshAllocateTty: event.target.checked })} /></label>
-                                </div>
-                              ) : null}
-                            </div>
-                          ) : null}
-                        </section>
-                      )
-                    })}
-                  </div>
-                </SettingsGroup>
+                </SettingsCard>
               </>
             ) : null}
 
+            {activeSection === 'terminals' ? (
+              <SettingsCard
+                icon={SquareTerminal}
+                title="Terminal profiles"
+                hint="Local shell, command, and SSH launchers. Each workspace picks its default profile in its own settings dialog."
+                status={<SettingsButton icon={Plus} label="Add" onClick={addProfile} />}
+              >
+                {draft.profiles.map((profile) => {
+                  const isExpanded = expandedProfileId === profile.id
+                  const isDefault = profile.id === draft.defaultProfileId
+                  const deleteDisabled = !canDeleteProfile(draft, profile.id)
+                  return (
+                    <section key={profile.id} className="vl-set-profile">
+                      <div className="vl-set-profile-row">
+                        <button type="button" className="vl-set-profile-summary" aria-expanded={isExpanded} onClick={() => setExpandedProfileId(isExpanded ? null : profile.id)}>
+                          <ChevronRight size={13} strokeWidth={2} aria-hidden="true" />
+                          <span className="vl-set-profile-icon"><ProfileIcon name={profile.icon} color={profile.color} size={16} /></span>
+                          <span>{profile.name || profile.id}</span>
+                        </button>
+                        <SettingsPill>{profileKindLabels[profile.type]}</SettingsPill>
+                        {isDefault
+                          ? <SettingsPill tone="ok" icon={Check}>Default</SettingsPill>
+                          : <SettingsIconButton icon={Check} label={`Make ${profile.name || profile.id} the default profile`} onClick={() => patchDraft({ defaultProfileId: profile.id })} />}
+                        <SettingsIconButton
+                          icon={Trash2}
+                          tone="danger"
+                          label={deleteDisabled ? 'At least one profile is required' : `Delete ${profile.name || profile.id}`}
+                          disabled={deleteDisabled}
+                          onClick={() => deleteProfile(profile.id)}
+                        />
+                      </div>
+                      {isExpanded ? (
+                        <div className="vl-set-profile-editor">
+                          <div className="vl-set-grid">
+                            <label className="vl-set-field"><span>Name</span><input className="vl-set-input" value={profile.name} onChange={(event) => updateProfile(profile.id, { name: event.target.value })} /></label>
+                            <label className="vl-set-field">
+                              <span>Type</span>
+                              <select className="vl-set-select" value={profile.type} onChange={(event) => changeProfileType(profile, event.target.value as ProfileKind)}>
+                                <option value="local">{profileKindLabels.local}</option>
+                                <option value="command">{profileKindLabels.command}</option>
+                                <option value="ssh">{profileKindLabels.ssh}</option>
+                              </select>
+                            </label>
+                            <label className="vl-set-field">
+                              <span><ProfileIcon name={profile.icon} color={profile.color} size={14} /> Icon</span>
+                              <select className="vl-set-select" value={profile.icon} onChange={(event) => updateProfile(profile.id, { icon: event.target.value })}>
+                                {profileIconNames.map((iconName) => <option key={iconName} value={iconName}>{iconName}</option>)}
+                              </select>
+                            </label>
+                            <label className="vl-set-field"><span>Color</span><input className="vl-set-color" type="color" value={profile.color} onChange={(event) => updateProfile(profile.id, { color: event.target.value })} /></label>
+                          </div>
+                          {profile.type === 'local' ? (
+                            <div className="vl-set-grid">
+                              <label className="vl-set-field"><span>Shell</span><input className="vl-set-input mono" value={profile.shell ?? ''} placeholder="pwsh.exe" onChange={(event) => updateProfile(profile.id, { shell: event.target.value || null })} /></label>
+                              <label className="vl-set-field"><span>Arguments</span><input className="vl-set-input mono" value={joinCommandLine(profile.args)} placeholder="-NoLogo" onChange={(event) => updateProfile(profile.id, { args: splitCommandLine(event.target.value) })} /></label>
+                              <label className="vl-set-field"><span>Working directory</span><input className="vl-set-input mono" value={profile.cwd ?? ''} placeholder="Optional" onChange={(event) => updateProfile(profile.id, { cwd: event.target.value || null })} /></label>
+                            </div>
+                          ) : null}
+                          {profile.type === 'command' ? (
+                            <div className="vl-set-grid">
+                              <label className="vl-set-field vl-set-field-wide"><span>Command line</span><input className="vl-set-input mono" value={profile.command} placeholder="pnpm dev" onChange={(event) => updateProfile(profile.id, { command: event.target.value })} /></label>
+                            </div>
+                          ) : null}
+                          {profile.type === 'ssh' ? (
+                            <div className="vl-set-grid">
+                              <label className="vl-set-field"><span>Host</span><input className="vl-set-input mono" value={profile.sshHost} placeholder="100.98.54.122" onChange={(event) => updateProfile(profile.id, { sshHost: event.target.value })} /></label>
+                              <label className="vl-set-field"><span>User</span><input className="vl-set-input mono" value={profile.sshUser} placeholder="js" onChange={(event) => updateProfile(profile.id, { sshUser: event.target.value })} /></label>
+                              <label className="vl-set-field"><span>Port</span><input className="vl-set-input" type="number" min="1" max="65535" value={profile.sshPort ?? ''} placeholder="22" onChange={(event) => updateSshPort(profile.id, event.target.value)} /></label>
+                              <label className="vl-set-field"><span>Identity file</span><input className="vl-set-input mono" value={profile.sshIdentityFile ?? ''} placeholder="~/.ssh/id_ed25519" onChange={(event) => updateProfile(profile.id, { sshIdentityFile: event.target.value || null })} /></label>
+                              <label className="vl-set-field"><span>Remote cwd</span><input className="vl-set-input mono" value={profile.sshRemoteCwd ?? ''} placeholder="/home/js/app" onChange={(event) => updateProfile(profile.id, { sshRemoteCwd: event.target.value || null })} /></label>
+                              <label className="vl-set-field"><span>Remote command</span><input className="vl-set-input mono" value={profile.sshRemoteCommand} placeholder={'exec "${SHELL:-sh}" -l'} onChange={(event) => updateProfile(profile.id, { sshRemoteCommand: event.target.value })} /></label>
+                              <label className="vl-set-field vl-set-field-wide"><span>Extra SSH options</span><input className="vl-set-input mono" value={profile.sshOptions} placeholder="-o ServerAliveInterval=30" onChange={(event) => updateProfile(profile.id, { sshOptions: event.target.value })} /></label>
+                            </div>
+                          ) : null}
+                          {profile.type === 'ssh' ? (
+                            <SettingsRow icon={Terminal} label="Allocate TTY (-t)" control={<SettingsSwitch label="Allocate TTY (-t)" checked={profile.sshAllocateTty} onChange={(checked) => updateProfile(profile.id, { sshAllocateTty: checked })} />} />
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </section>
+                  )
+                })}
+              </SettingsCard>
+            ) : null}
+
             {activeSection === 'integrations' ? (
-              <SettingsGroup title="External editor" description="Explorer and large-diff actions append the selected absolute path to this command.">
-                <label>
-                  Editor command
-                  <input value={draft.externalEditorCommand} placeholder="code" onChange={(event) => patchDraft({ externalEditorCommand: event.target.value })} />
-                </label>
-                <div className="vibelink-settings-note"><span>Leave empty to hide Open in Editor actions.</span></div>
-              </SettingsGroup>
+              <SettingsCard icon={Plug} title="External editor" hint="Explorer and large-diff actions append the selected absolute path to this command. Leave empty to hide Open in Editor actions.">
+                <SettingsRow icon={FileCode2} label="Editor command" stacked control={<SettingsText label="Editor command" mono value={draft.externalEditorCommand} placeholder="code" onChange={(value) => patchDraft({ externalEditorCommand: value })} />} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'gitHosting' ? (
               <>
-                <SettingsGroup title="GitHub & GitLab" description="Tokens stay in Windows Credential Manager and are scoped per host. Provider overrides support self-hosted instances.">
-                  <GitHostingSettings />
-                </SettingsGroup>
+                <GitHostingSettings />
                 <ProviderIntegrationsPanel />
               </>
             ) : null}
@@ -856,169 +1036,221 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             {activeSection === 'remote' ? <RemoteSettings /> : null}
 
             {activeSection === 'safety' ? (
-              <SettingsGroup title="Safety" description="VibeLink follows workspace-scoped process and agent safety rules.">
-                <SettingsToggle label="Scoped process cleanup only" checked />
-                <ReadonlyRow label="Policy" value="Never kill broad process image names; prove exact workspace ownership first." />
-              </SettingsGroup>
+              <SettingsCard icon={Shield} title="Process safety" hint="VibeLink never kills a broad process image name; it proves exact workspace ownership first.">
+                <SettingsRow icon={Shield} label="Scoped process cleanup" control={<SettingsPill tone="ok" icon={CircleCheck}>Enforced</SettingsPill>} />
+                <SettingsRow icon={Cpu} label="Broad image-name kills" control={<SettingsPill tone="ok" icon={CircleX}>Blocked</SettingsPill>} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'memory' ? (
-              <SettingsGroup title="Memory & Context" description="Native Hermes manages durable memory and compression.">
-                <SettingsToggle label="Persistent memory" checked />
-                <SettingsToggle label="Auto-compression" checked />
-                <ReadonlyRow label="Context engine" value="Native Hermes / compressor" />
-              </SettingsGroup>
+              <SettingsCard icon={Blocks} title="Memory & context" hint="Native Hermes manages durable memory and compression.">
+                <SettingsRow icon={Database} label="Persistent memory" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
+                <SettingsRow icon={Layers} label="Auto-compression" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
+                <SettingsRow icon={Cpu} label="Context engine" control={<SettingsValue value="Native Hermes" />} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'voice' ? (
-              <SettingsGroup title="Voice" description="Voice controls are reserved for a future VibeLink Agent provider.">
-                <SettingsToggle label="Voice input" checked={false} disabled />
-                <SettingsToggle label="Voice output" checked={false} disabled />
-              </SettingsGroup>
+              <SettingsCard icon={Mic} title="Voice" hint="Reserved for a future VibeLink Agent provider.">
+                <SettingsRow icon={Mic} label="Voice input" control={<SettingsSwitch label="Voice input" checked={false} disabled />} />
+                <SettingsRow icon={Volume2} label="Voice output" control={<SettingsSwitch label="Voice output" checked={false} disabled />} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'advanced' ? (
               <>
-                <SettingsGroup title="Capture" description="Screenshots use the capture folder; recordings auto-download ffmpeg on first use unless you set an override path.">
-                  <label>Capture folder<input value={draft.captureDir} placeholder={defaultCaptureDir || 'Default capture folder'} onChange={(event) => patchDraft({ captureDir: event.target.value })} /></label>
-                  <button type="button" onClick={() => void browseCaptureDir()}>Browse</button>
-                  <label>ffmpeg path<input value={draft.captureFfmpegPath} placeholder="ffmpeg on PATH" onChange={(event) => patchDraft({ captureFfmpegPath: event.target.value })} /></label>
-                  <button type="button" onClick={() => void testFfmpeg()}>Test ffmpeg</button>
-                  {ffmpegStatus ? <ReadonlyRow label="ffmpeg" value={ffmpegStatus} /> : null}
-                </SettingsGroup>
-                <SettingsGroup title="Keybindings" description="Click a shortcut field and press the new combination.">
-                  <button type="button" onClick={() => patchDraft({ keybindings: { ...defaultKeybindings } })}>Reset keybindings</button>
-                  <div className="vibelink-keybinding-list">
+                <SettingsCard icon={Camera} title="Capture" hint="Screenshots use the capture folder; recordings download ffmpeg on first use unless you set an override path.">
+                  <SettingsRow
+                    icon={FolderOpen}
+                    label="Capture folder"
+                    stacked
+                    control={(
+                      <>
+                        <SettingsText label="Capture folder" mono value={draft.captureDir} placeholder={defaultCaptureDir || 'Default capture folder'} onChange={(value) => patchDraft({ captureDir: value })} />
+                        <SettingsIconButton icon={FolderOpen} label="Browse for capture folder" onClick={() => void browseCaptureDir()} />
+                      </>
+                    )}
+                  />
+                  <SettingsRow
+                    icon={Film}
+                    label="ffmpeg path"
+                    sub={ffmpegStatus || undefined}
+                    stacked
+                    control={(
+                      <>
+                        <SettingsText label="ffmpeg path" mono value={draft.captureFfmpegPath} placeholder="ffmpeg on PATH" onChange={(value) => patchDraft({ captureFfmpegPath: value })} />
+                        <SettingsIconButton icon={Clapperboard} label="Test ffmpeg" onClick={() => void testFfmpeg()} />
+                      </>
+                    )}
+                  />
+                </SettingsCard>
+                <SettingsCard
+                  icon={Keyboard}
+                  title="Keyboard shortcuts"
+                  hint="Click a shortcut field and press the new combination."
+                  status={<SettingsButton icon={RefreshCw} label="Reset" title="Reset all shortcuts to defaults" onClick={() => patchDraft({ keybindings: { ...defaultKeybindings } })} />}
+                >
+                  <div className="vl-set-keybinds">
                     {keybindingDefinitions.map((definition) => (
-                      <label key={definition.id}>
-                        {definition.label}
-                        <input
-                          value={draft.keybindings[definition.id]}
-                          onChange={(event) => updateKeybinding(definition.id, event.target.value)}
-                          onKeyDown={(event) => {
-                            event.preventDefault()
-                            event.stopPropagation()
-                            updateKeybinding(definition.id, eventToKeyChord(event.nativeEvent))
-                          }}
-                        />
-                      </label>
+                      <SettingsRow
+                        key={definition.id}
+                        icon={Keyboard}
+                        label={definition.label}
+                        hint={definition.description}
+                        control={(
+                          <input
+                            className="vl-set-input"
+                            aria-label={definition.label}
+                            value={draft.keybindings[definition.id]}
+                            onChange={(event) => updateKeybinding(definition.id, event.target.value)}
+                            onKeyDown={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              updateKeybinding(definition.id, eventToKeyChord(event.nativeEvent))
+                            }}
+                          />
+                        )}
+                      />
                     ))}
                   </div>
-                </SettingsGroup>
+                </SettingsCard>
                 <AndroidDeviceLabPanel />
               </>
             ) : null}
 
             {activeSection === 'worktrees' ? (
-              <SettingsGroup title="Worktree storage" description="Choose where VibeLink creates managed Git worktrees.">
-                <SettingsSelect
-                  label="Storage mode"
-                  value={worktreeStorageChoice}
-                  options={[
-                    { value: 'sameDrive', label: 'Same drive as repository' },
-                    { value: 'specificDrive', label: 'Specific drive' },
-                    { value: 'appData', label: 'App data folder' },
-                    { value: 'custom', label: 'Custom folder' },
-                  ]}
-                  onChange={(value) => {
-                    const choice = value as WorktreeStorageChoice
-                    if (choice === 'sameDrive') patchWorktreeStorage({ mode: 'drive', drive: '' })
-                    else if (choice === 'specificDrive') patchWorktreeStorage({ mode: 'drive', drive: draft.worktreeStorage.drive || worktreeStorageOptions.drives[0] || '' })
-                    else patchWorktreeStorage({ mode: choice })
-                  }}
+              <SettingsCard icon={GitBranch} title="Worktree storage" hint="Where VibeLink creates managed Git worktrees for the active repository workspace.">
+                <SettingsRow
+                  icon={HardDrive}
+                  label="Location"
+                  control={(
+                    <SettingsSelect
+                      label="Storage mode"
+                      value={worktreeStorageChoice}
+                      onChange={(value) => {
+                        const choice = value as WorktreeStorageChoice
+                        if (choice === 'sameDrive') patchWorktreeStorage({ mode: 'drive', drive: '' })
+                        else if (choice === 'specificDrive') patchWorktreeStorage({ mode: 'drive', drive: draft.worktreeStorage.drive || worktreeStorageOptions.drives[0] || '' })
+                        else patchWorktreeStorage({ mode: choice })
+                      }}
+                    >
+                      <option value="sameDrive">Same drive as repository</option>
+                      <option value="specificDrive">Specific drive</option>
+                      <option value="appData">App data folder</option>
+                      <option value="custom">Custom folder</option>
+                    </SettingsSelect>
+                  )}
                 />
                 {worktreeStorageChoice === 'specificDrive' ? (
-                  <SettingsSelect label="Drive" value={draft.worktreeStorage.drive} options={worktreeDriveOptions} onChange={(drive) => patchWorktreeStorage({ drive })} />
+                  <SettingsRow
+                    icon={HardDrive}
+                    label="Drive"
+                    control={(
+                      <SettingsSelect label="Drive" value={draft.worktreeStorage.drive} onChange={(drive) => patchWorktreeStorage({ drive })}>
+                        {worktreeDriveOptions.map((drive) => <option key={drive} value={drive}>{drive}</option>)}
+                      </SettingsSelect>
+                    )}
+                  />
                 ) : null}
                 {draft.worktreeStorage.mode === 'drive' ? (
-                  <label>
-                    Root folder name
-                    <input value={draft.worktreeStorage.folderName} onChange={(event) => patchWorktreeStorage({ folderName: event.target.value })} />
-                  </label>
+                  <SettingsRow icon={FolderCog} label="Root folder name" control={<SettingsText label="Root folder name" value={draft.worktreeStorage.folderName} onChange={(folderName) => patchWorktreeStorage({ folderName })} />} />
                 ) : null}
                 {draft.worktreeStorage.mode === 'custom' ? (
-                  <div className="worktree-settings-path">
-                    <label>
-                      Custom folder
-                      <input value={draft.worktreeStorage.customRoot} onChange={(event) => patchWorktreeStorage({ customRoot: event.target.value })} />
-                    </label>
-                    <button type="button" onClick={() => void browseWorktreeRoot()}>Browse</button>
-                  </div>
+                  <SettingsRow
+                    icon={FolderOpen}
+                    label="Custom folder"
+                    stacked
+                    control={(
+                      <>
+                        <SettingsText label="Custom folder" mono value={draft.worktreeStorage.customRoot} onChange={(customRoot) => patchWorktreeStorage({ customRoot })} />
+                        <SettingsIconButton icon={FolderOpen} label="Browse" onClick={() => void browseWorktreeRoot()} />
+                      </>
+                    )}
+                  />
                 ) : null}
-                <SettingsToggle label="Group by repository" checked={draft.worktreeStorage.groupByRepository} onChange={(groupByRepository) => patchWorktreeStorage({ groupByRepository })} />
-                <ReadonlyRow
+                <SettingsRow icon={Layers} label="Group by repository" control={<SettingsSwitch label="Group by repository" checked={draft.worktreeStorage.groupByRepository} onChange={(groupByRepository) => patchWorktreeStorage({ groupByRepository })} />} />
+                <SettingsRow
+                  icon={FolderCog}
                   label="Resolved root"
-                  value={worktreeResolution?.root ?? (!activeWorkspaceFolder ? 'Open a repository workspace' : worktreeResolutionError ? 'Unavailable' : 'Resolving…')}
-                  mono
+                  control={<SettingsValue mono value={worktreeResolution?.root ?? (!activeWorkspaceFolder ? 'Open a repository workspace' : worktreeResolutionError ? 'Unavailable' : 'Resolving…')} />}
                 />
-                <ReadonlyRow label="Example worktree" value={worktreeResolution?.example ?? '—'} mono />
-                {worktreeResolution?.fallbackReason ? <div className="worktree-settings-warning">{worktreeResolution.fallbackReason}</div> : null}
-                {worktreeResolution && !worktreeResolution.writable && !worktreeResolution.fallbackReason ? <div className="worktree-settings-warning">The resolved worktree root is not writable.</div> : null}
-                {worktreeResolutionError ? <div className="worktree-settings-warning">{worktreeResolutionError}</div> : null}
-              </SettingsGroup>
+                <SettingsRow icon={GitBranch} label="Example worktree" control={<SettingsValue mono value={worktreeResolution?.example ?? '—'} />} />
+                {worktreeResolution?.fallbackReason ? <SettingsMessage tone="danger" icon={TriangleAlert}>{worktreeResolution.fallbackReason}</SettingsMessage> : null}
+                {worktreeResolution && !worktreeResolution.writable && !worktreeResolution.fallbackReason ? <SettingsMessage tone="danger" icon={TriangleAlert}>The resolved worktree root is not writable.</SettingsMessage> : null}
+                {worktreeResolutionError ? <SettingsMessage tone="danger" icon={TriangleAlert}>{worktreeResolutionError}</SettingsMessage> : null}
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'messaging' ? (
-              <SettingsGroup title="Messaging" description="Messaging gateways (Telegram, Discord, Slack, WhatsApp…) are owned by your Hermes install.">
-                <div className="vibelink-settings-actions">
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('setup')}>Set up gateway</button>
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('status')}>Gateway status</button>
-                  <button type="button" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('run')}>Run gateway</button>
+              <SettingsCard
+                icon={Send}
+                title="Messaging gateways"
+                hint="Telegram, Discord, Slack, and WhatsApp gateways are owned by your Hermes install."
+                status={runtime?.detected ? <SettingsPill tone="ok" icon={CircleCheck}>Hermes ready</SettingsPill> : <SettingsPill tone="warn" icon={TriangleAlert}>Install Hermes</SettingsPill>}
+              >
+                <div className="vl-set-actions">
+                  <SettingsButton icon={Settings2} label="Set up" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('setup')} />
+                  <SettingsButton icon={Info} label="Status" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('status')} />
+                  <SettingsButton icon={Play} label="Run" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('run')} />
                 </div>
-                {!runtime?.detected ? <p>Install Hermes Agent to configure messaging.</p> : null}
-              </SettingsGroup>
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'apiKeys' ? (
-              <SettingsGroup title="API Keys" description="VibeLink does not store provider API keys. Native Hermes auth remains the source of truth.">
-                <button type="button" disabled={!activeSessionId || authBusy} onClick={() => void refreshAuthList()}><RefreshCw size={14} /> Refresh auth list</button>
-                <pre className="vibelink-settings-pre">{authList || 'No auth list loaded.'}</pre>
-              </SettingsGroup>
+              <SettingsCard
+                icon={KeyRound}
+                title="Provider auth"
+                hint="VibeLink never stores provider API keys. Native Hermes auth remains the source of truth."
+                status={<SettingsIconButton icon={RefreshCw} label="Refresh auth list" disabled={!activeSessionId || authBusy} onClick={() => void refreshAuthList()} />}
+              >
+                <pre className="vl-set-pre">{authList || 'No auth list loaded.'}</pre>
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'mcp' ? (
-              <SettingsGroup title="MCP servers" description="VibeLink registers its workspace MCP bridge per agent session over ACP; your Hermes config file is never modified.">
-                <ReadonlyRow label="Server" value="vibelink" />
-                <ReadonlyRow label="Command" value="vibelink.exe mcp serve" mono />
-                <ReadonlyRow label="Scope" value={activeSessionId ? `VIBELINK_SESSION_ID=${activeSessionId}` : 'Open a workspace'} mono />
-                <div className="vibelink-settings-actions">
-                  <button type="button" disabled={!activeSessionId || mcpCheckBusy} onClick={() => void checkMcp()}>
-                    {mcpCheckBusy ? 'Checking…' : 'Run self-check'}
-                  </button>
-                </div>
+              <SettingsCard
+                icon={Box}
+                title="MCP bridge"
+                hint="VibeLink registers its workspace MCP bridge per agent session over ACP; your Hermes config file is never modified."
+                status={<SettingsButton icon={Play} label={mcpCheckBusy ? 'Checking…' : 'Self-check'} disabled={!activeSessionId || mcpCheckBusy} onClick={() => void checkMcp()} />}
+              >
+                <SettingsRow icon={Server} label="Server" control={<SettingsValue value="vibelink" />} />
+                <SettingsRow icon={Terminal} label="Command" control={<SettingsValue mono value="vibelink.exe mcp serve" />} />
+                <SettingsRow icon={Hash} label="Scope" control={<SettingsValue mono value={activeSessionId ? `VIBELINK_SESSION_ID=${activeSessionId}` : 'Open a workspace'} />} />
                 {mcpCheck ? (
-                  <div className="setup-check-result" data-ok={mcpCheck.initializeOk ? 'true' : 'false'}>
-                    <span>Spawn {mcpCheck.spawnOk ? 'OK' : 'failed'} · Initialize {mcpCheck.initializeOk ? 'OK' : 'failed'} · {mcpCheck.toolCount} tools</span>
-                    {mcpCheck.error ? <pre>{mcpCheck.error}</pre> : null}
-                  </div>
+                  <>
+                    <SettingsRow icon={Play} label="Spawn" control={mcpCheck.spawnOk ? <SettingsPill tone="ok" icon={CircleCheck}>OK</SettingsPill> : <SettingsPill tone="danger" icon={CircleX}>Failed</SettingsPill>} />
+                    <SettingsRow icon={Plug} label="Initialize" control={mcpCheck.initializeOk ? <SettingsPill tone="ok" icon={CircleCheck}>OK</SettingsPill> : <SettingsPill tone="danger" icon={CircleX}>Failed</SettingsPill>} />
+                    <SettingsRow icon={Wrench} label="Tools" control={<SettingsValue value={String(mcpCheck.toolCount)} />} />
+                    {mcpCheck.error ? <pre className="vl-set-pre">{mcpCheck.error}</pre> : null}
+                  </>
                 ) : null}
-              </SettingsGroup>
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'archived' ? (
-              <SettingsGroup title="Archived Chats" description="Archived agent chats remain owned by your Hermes installation.">
-                <ReadonlyRow label="Management" value="Use the VibeLink Agent session list to resume available sessions." />
-              </SettingsGroup>
+              <SettingsCard icon={Archive} title="Archived chats" hint="Archived agent chats remain owned by your Hermes installation.">
+                <SettingsRow icon={StickyNote} label="Management" control={<SettingsValue value="Resume from the Agent session list" />} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'about' ? (
-              <SettingsGroup title="About" description="VibeLink">
-                <ReadonlyRow label="Product" value="VibeLink Agent / VibeLink" />
-                <ReadonlyRow label="Runtime" value={runtime?.version ?? 'Unknown'} mono />
-                <div className="vibelink-settings-actions">
-                  <button type="button" onClick={onRunSetupWizard}>Run setup wizard again</button>
+              <SettingsCard icon={Info} title="About VibeLink">
+                <SettingsRow icon={Package} label="Product" control={<SettingsValue value="VibeLink" />} />
+                <SettingsRow icon={Bot} label="Hermes runtime" control={<SettingsValue mono value={runtime?.version ?? 'Unknown'} />} />
+                <SettingsRow icon={CircleUser} label="Account" control={<SettingsButton icon={ChevronRight} label="Open" onClick={() => setActiveSection('account')} />} />
+                <div className="vl-set-actions vl-set-actions-bordered">
+                  <SettingsButton icon={Settings2} label="Run setup wizard" onClick={onRunSetupWizard} />
                 </div>
-              </SettingsGroup>
+              </SettingsCard>
             ) : null}
           </div>
 
-          <footer className="vibelink-settings-footer">
-            <span>Changes are staged until Apply or OK.</span>
-            <div>
-              <button type="button" className="secondary-action" onClick={closeSettings}>Cancel</button>
-              <button type="button" className="secondary-action" onClick={apply}>Apply</button>
-              <button type="button" className="primary-action" onClick={ok}>OK</button>
-            </div>
+          <footer className="vl-set-footer">
+            <span className="vl-set-footer-note">Changes are staged until Apply or OK.</span>
+            <button type="button" onClick={closeSettings}>Cancel</button>
+            <button type="button" onClick={apply}><Save size={13} strokeWidth={1.9} aria-hidden="true" /> Apply</button>
+            <button type="button" className="vl-set-primary" onClick={ok}><Check size={13} strokeWidth={2.1} aria-hidden="true" /> OK</button>
           </footer>
         </main>
       </section>
@@ -1054,62 +1286,6 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
         />
       ) : null}
     </div>
-  )
-}
-
-function SettingsGroup({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  return (
-    <section className="vibelink-settings-group">
-      <header>
-        <h3>{title}</h3>
-        <p>{description}</p>
-      </header>
-      <div className="vibelink-settings-group-body">{children}</div>
-    </section>
-  )
-}
-
-function ReadonlyRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="vibelink-settings-row">
-      <span>{label}</span>
-      <strong className={mono ? 'mono' : undefined}>{value}</strong>
-    </div>
-  )
-}
-
-function SettingsToggle({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange?: (checked: boolean) => void }) {
-  return (
-    <label className="vibelink-settings-toggle">
-      <span>{label}</span>
-      <input type="checkbox" checked={checked} disabled={disabled || !onChange} onChange={(event) => onChange?.(event.target.checked)} />
-    </label>
-  )
-}
-
-function SettingsSelect({
-  label,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  label: string
-  value: string
-  options: { value: string; label: string }[]
-  disabled?: boolean
-  onChange: (value: string) => void
-}) {
-  return (
-    <label>
-      {label}
-      <span className="vibelink-settings-select-shell">
-        <select value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-          {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
-        <ChevronDown size={14} />
-      </span>
-    </label>
   )
 }
 

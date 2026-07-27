@@ -64,10 +64,10 @@ describe('LicenseSettings', () => {
     render(<LicenseSettings />)
 
     await act(async () => { vi.advanceTimersByTime(0) })
-    expect(screen.getByText(/Trial ends .*\(2 days left\)/)).toBeInTheDocument()
+    expect(screen.getByText(/2 days left/)).toBeInTheDocument()
 
     await act(async () => { vi.advanceTimersByTime(2 * 60 * 60 * 1_000) })
-    expect(screen.getByText(/Trial ends .*\(1 day left\)/)).toBeInTheDocument()
+    expect(screen.getByText(/1 day left/)).toBeInTheDocument()
   })
 
   it('shows the debug entitlement without asking for Moobang sign-in', () => {
