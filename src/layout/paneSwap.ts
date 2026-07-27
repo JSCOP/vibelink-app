@@ -1,3 +1,4 @@
+import type { DockviewApi, SerializedDockview } from 'dockview-core'
 export type PaneDirection = 'left' | 'right' | 'up' | 'down'
 
 export type PaneRect = {
@@ -165,6 +166,31 @@ export function swapPanelIdsInDockviewLayout(layout: unknown, firstId: string, s
   visitGroups(layout, swapGroup)
   return true
 }
+
+/** Swap two live Dockview panels by exchanging the panel ids stored in their
+ * serialized groups. Restoring with panel reuse keeps the grid topology and
+ * every live panel instance intact; moving to a target group's center would
+ * merge the panes into a tab group instead of exchanging their positions. */
+export function swapPanelsInDockviewApi(
+  api: Pick<DockviewApi, 'toJSON' | 'fromJSON'>,
+  firstId: string,
+  secondId: string,
+): boolean {
+  let layout: SerializedDockview
+  try {
+    layout = api.toJSON()
+  } catch {
+    return false
+  }
+  if (!swapPanelIdsInDockviewLayout(layout, firstId, secondId)) return false
+  try {
+    api.fromJSON(layout, { reuseExistingPanels: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
 
 
 function visitGroups(layout: unknown, visitor: (group: unknown) => void): void {

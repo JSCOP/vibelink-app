@@ -1,5 +1,9 @@
+// @vitest-environment jsdom
+import { createDockview } from 'dockview-core'
 import { describe, expect, it } from 'vitest'
-import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelIdsInDockviewLayout, type PaneRect } from './paneSwap'
+import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelIdsInDockviewLayout, swapPanelsInDockviewApi, type PaneRect } from './paneSwap'
+
+Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: class { observe() {} unobserve() {} disconnect() {} } })
 
 describe('swapPanelIdsInDockviewLayout', () => {
   it('swaps pane ids between grid groups without changing panel state', () => {
@@ -25,6 +29,34 @@ describe('swapPanelIdsInDockviewLayout', () => {
     expect(layout.grid.root.data[1].data.views).toEqual(['pane-a'])
     expect(layout.grid.root.data[1].data.activeView).toBe('pane-a')
     expect(Object.keys(layout.panels)).toEqual(['pane-a', 'pane-b'])
+  })
+
+  it('swaps live pane locations without merging either pane into a tab group', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const api = createDockview(host, {
+      createComponent: () => ({ element: document.createElement('div'), init: () => undefined }),
+    })
+    try {
+      api.layout(600, 400)
+      const topLeft = api.addPanel({ id: 'pane-a', component: 'test' })
+      const topRight = api.addPanel({ id: 'pane-b', component: 'test', position: { referencePanel: topLeft, direction: 'right' } })
+      api.addPanel({ id: 'pane-c', component: 'test', position: { referencePanel: topLeft, direction: 'below' } })
+      api.addPanel({ id: 'pane-d', component: 'test', position: { referencePanel: topRight, direction: 'below' } })
+      const sourceGroupId = topLeft.group.id
+      const targetGroupId = topRight.group.id
+
+      expect(swapPanelsInDockviewApi(api, 'pane-a', 'pane-b')).toBe(true)
+
+      expect(api.getPanel('pane-a')?.group.id).toBe(targetGroupId)
+      expect(api.getPanel('pane-b')?.group.id).toBe(sourceGroupId)
+      expect(api.groups).toHaveLength(4)
+      expect(api.groups.every((group) => group.panels.length === 1)).toBe(true)
+      expect(api.panels).toHaveLength(4)
+    } finally {
+      api.dispose()
+      host.remove()
+    }
   })
 
   it('does not mutate pane ids inside the same tab group', () => {

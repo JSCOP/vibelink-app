@@ -78,7 +78,7 @@ import { TerminalWindowPanel } from './TerminalWindowPanel'
 import { getTerminalWindow, listTerminalWindows, allWindowedPaneIds, findTerminalWindowForPane, type TerminalWindowHandle } from './terminalWindowRegistry'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
-import { nearestPaneIdInDirection, paneIdsInReadingOrder, type PaneDirection } from './paneSwap'
+import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelsInDockviewApi, type PaneDirection } from './paneSwap'
 import { paneIdFromEventTarget } from './paneActivation'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
 import { arrangeTerminalPaneGrid } from './innerPaneLayout'
@@ -2152,12 +2152,15 @@ async function runKeybindingAction(
       const direction = directionForAction(action)
       const nav = terminalWindowNavContext()
       const targetId = direction ? nearestPaneIdInDirection(nav.activeId, nav.panelIds, direction, getContentRect) : null
-      const moveApi = nav.api
-      const source = moveApi.getPanel(nav.activeId)
-      const target = targetId ? moveApi.getPanel(targetId) : undefined
-      if (!source || !target) return
-      source.api.moveTo({ group: target.group, position: 'center' })
+      if (!targetId || !swapPanelsInDockviewApi(nav.api, nav.activeId, targetId)) return
       nav.activate(nav.activeId)
+      if (content?.kind === 'terminalWindow') {
+        const handle = getTerminalWindow(content.instanceId)
+        await handle?.settle()
+        handle?.persist()
+      } else {
+        await persistLayout()
+      }
       return
     }
     case 'copyTerminalContents':
