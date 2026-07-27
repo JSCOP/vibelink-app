@@ -38,11 +38,11 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
         const store = useWorkspaceStore.getState()
         const assignedPaneId = store.kanban.tasks[event.signal.taskId]?.assignedPaneId
         const paneId = event.signal.paneId ?? assignedPaneId
-        if (paneId) store.markPaneResponseComplete(paneId, 'task-done')
+        if (paneId) store.markPaneResponseComplete(paneId, 'task-done', event.sessionId)
       } else if (event.signal.kind === 'paneCompleted') {
-        // Authoritative: the agent's own completion hook reported this, so it
-        // bypasses the terminal-output heuristic entirely.
-        useWorkspaceStore.getState().markPaneResponseComplete(event.signal.paneId, 'agent-hook')
+        // Authoritative and workspace-scoped: this must survive the originating
+        // pane being detached from the frontend after a workspace switch.
+        useWorkspaceStore.getState().markPaneResponseComplete(event.signal.paneId, 'agent-hook', event.sessionId)
       } else if (event.signal.kind === 'paneConfigured') {
         useWorkspaceStore.getState().applyPaneConfiguration(event.signal.paneId, {
           title: event.signal.title ?? undefined,

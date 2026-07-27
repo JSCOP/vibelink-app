@@ -4,7 +4,11 @@ import type { PaneMeta, SessionMeta } from './types'
 import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../state/store'
 import { startTerminalOutputStream } from './output'
 
-let emitTerminalEvent: ((event: { kind: 'sessionChanged'; sessionId: string }) => void) | undefined
+type TestTerminalEvent =
+  | { kind: 'sessionChanged'; sessionId: string }
+  | { kind: 'task'; sessionId: string; signal: { kind: 'paneCompleted'; paneId: string; agent?: string | null } }
+
+let emitTerminalEvent: ((event: TestTerminalEvent) => void) | undefined
 
 vi.mock('@tauri-apps/api/core', () => ({
   Channel: class MockChannel<T> {
@@ -126,5 +130,34 @@ describe('terminal session change reloads', () => {
     expect(after.workspaceReadyEpoch).toBe(before.workspaceReadyEpoch)
     expect(after.panes).toBe(before.panes)
     expect(after.activePaneId).toBe(pane.id)
+  })
+  test('records eight agent-hook completions for an inactive workspace', async () => {
+    const activeSession: SessionMeta = {
+      ...session,
+      id: 'session-b',
+      name: 'Workspace B',
+      workspaceFolder: 'E:/other-repo',
+    }
+    useWorkspaceStore.setState({
+      sessions: [session, activeSession],
+      activeSessionId: activeSession.id,
+      panes: {},
+      paneCompletionHighlights: {},
+    })
+
+    await startTerminalOutputStream({ force: true })
+    for (let index = 1; index <= 8; index += 1) {
+      emitTerminalEvent?.({
+        kind: 'task',
+        sessionId: session.id,
+        signal: { kind: 'paneCompleted', paneId: `pane-a-${index}`, agent: 'omp' },
+      })
+    }
+
+    const highlights = Object.values(useWorkspaceStore.getState().paneCompletionHighlights)
+    expect(highlights).toHaveLength(8)
+    expect(highlights).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'agent-hook', sessionId: session.id }),
+    ]))
   })
 })

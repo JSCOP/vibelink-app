@@ -102,7 +102,7 @@ type WorkspaceState = {
   capturesByPane: Record<string, string[]>
   recentCaptures: string[]
   setActivePaneId: (paneId?: string) => void
-  markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource) => void
+  markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource, sessionId?: string) => void
   clearPaneCompletionHighlight: (paneId: string) => void
   togglePaneReviewed: (paneId: string) => void
   recordCapture: (paneId: string | undefined, path: string) => void
@@ -686,15 +686,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
   setActivePaneId: (paneId) => set({ activePaneId: paneId }),
-  markPaneResponseComplete: (paneId, source = 'agent-response') => set((state) => {
+  markPaneResponseComplete: (paneId, source = 'agent-response', reportedSessionId) => set((state) => {
+    const sessionId = reportedSessionId ?? state.activeSessionId
+    if (!sessionId) return {}
     const pane = state.panes[paneId]
-    const sessionId = state.activeSessionId
-    if (!sessionId || !pane?.alive) return {}
-    // `agent-hook` and `task-done` are authoritative: the agent (or the board)
-    // told us the turn finished, so the pane IS an agent pane no matter what its
-    // profile says. Only the output heuristic needs the capability gate, because
-    // it is the one that could misfire on a plain shell.
-    if (source === 'agent-response' && !isAgentPane(pane, state.settings)) return {}
+    // The terminal-output heuristic only observes the attached workspace, so
+    // it still requires a live recognized agent pane. Hook/task signals carry
+    // their daemon-validated workspace id and remain authoritative even after
+    // the user switched elsewhere and the pane left the frontend snapshot.
+    if (source === 'agent-response') {
+      if (sessionId !== state.activeSessionId || !pane?.alive || !isAgentPane(pane, state.settings)) return {}
+    } else if (!reportedSessionId && (!pane?.alive || sessionId !== state.activeSessionId)) {
+      return {}
+    }
     return {
       paneCompletionHighlights: {
         ...state.paneCompletionHighlights,
