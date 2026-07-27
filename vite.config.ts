@@ -12,8 +12,8 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     watch: {
-      // Cargo holds locks on target/ artifacts; watching them crashes vite (EBUSY).
-      ignored: ['**/src-tauri/target/**'],
+      // Ignore every Cargo target variant, including agent/test-specific target-* dirs.
+      ignored: ['**/src-tauri/target*/**'],
     },
   },
 })

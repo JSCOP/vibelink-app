@@ -156,6 +156,13 @@ pub struct ControlSocketClient {
 
 impl ControlSocketClient {
     pub fn connect(config: ControlSocketConfig) -> Result<Self, CliError> {
+        let timeout = config.timeout;
+        run_timed("control socket connect", timeout, move || {
+            Self::connect_blocking(config)
+        })
+    }
+
+    fn connect_blocking(config: ControlSocketConfig) -> Result<Self, CliError> {
         let socket_name = config.socket_name();
         let name = socket_name
             .clone()
@@ -418,5 +425,18 @@ mod tests {
                 .code,
             ErrorCode::UnavailableRuntime
         );
+    }
+
+    #[test]
+    fn timed_operation_returns_before_blocked_worker_finishes() {
+        let started = std::time::Instant::now();
+        let error = run_timed("timeout test", Duration::from_millis(25), || {
+            thread::sleep(Duration::from_millis(500));
+            Ok(())
+        })
+        .expect_err("blocked operation must time out");
+
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(250));
     }
 }

@@ -22,6 +22,7 @@ pub type DaemonStream = LocalSocketStream;
 const STARTUP_PING_REQ: Req = 0;
 const AUTHENTICATE_REQ: Req = u64::MAX;
 const STARTUP_PING_TIMEOUT: Duration = Duration::from_secs(2);
+const STARTUP_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const DAEMON_READY_DELAY: Duration = Duration::from_millis(100);
@@ -263,10 +264,18 @@ pub(super) fn ensure_daemon_with_recovery(
 }
 
 pub fn connect_daemon() -> io::Result<DaemonStream> {
-    let mut stream = connect_daemon_with_timeout(socket_name()?, STARTUP_CONNECT_TIMEOUT)?;
-    authenticate_daemon_io(&mut stream)
-        .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))?;
-    Ok(stream)
+    let stream = connect_daemon_with_timeout(socket_name()?, STARTUP_CONNECT_TIMEOUT)?;
+    authenticate_daemon(stream).map_err(|error| {
+        let message = error.to_string();
+        let kind = if message.contains("timed out") {
+            io::ErrorKind::TimedOut
+        } else if message.contains("authentication failed") {
+            io::ErrorKind::PermissionDenied
+        } else {
+            io::ErrorKind::ConnectionAborted
+        };
+        io::Error::new(kind, message)
+    })
 }
 
 fn connect_daemon_with_timeout(name: Name<'static>, timeout: Duration) -> io::Result<DaemonStream> {
@@ -296,33 +305,67 @@ fn connect_daemon_with_timeout(name: Name<'static>, timeout: Duration) -> io::Re
 }
 
 fn connect_ready_daemon() -> std::result::Result<DaemonStream, StartupAttemptError> {
-    let stream = connect_daemon()
-        .context("connect daemon")
-        .map_err(StartupAttemptError::connect)?;
+    let stream = connect_daemon_with_timeout(
+        socket_name().map_err(|error| StartupAttemptError::connect(error.into()))?,
+        STARTUP_CONNECT_TIMEOUT,
+    )
+    .context("connect daemon")
+    .map_err(StartupAttemptError::connect)?;
+    let stream = authenticate_daemon(stream)
+        .context("authenticate daemon")
+        .map_err(StartupAttemptError::unhealthy)?;
     probe_daemon(stream)
         .context("probe daemon startup ping")
         .map_err(StartupAttemptError::unhealthy)
 }
 
+fn authenticate_daemon(stream: DaemonStream) -> Result<DaemonStream> {
+    run_daemon_step_with_timeout(
+        stream,
+        STARTUP_AUTH_TIMEOUT,
+        "vibelink-daemon-authenticate",
+        "daemon authentication",
+        authenticate_daemon_io,
+    )
+}
+
 fn probe_daemon(stream: DaemonStream) -> Result<DaemonStream> {
+    run_daemon_step_with_timeout(
+        stream,
+        STARTUP_PING_TIMEOUT,
+        "vibelink-daemon-probe",
+        "daemon startup ping",
+        ping_daemon_io,
+    )
+}
+
+fn run_daemon_step_with_timeout<S, F>(
+    mut stream: S,
+    timeout: Duration,
+    thread_name: &'static str,
+    operation: &'static str,
+    step: F,
+) -> Result<S>
+where
+    S: Send + 'static,
+    F: FnOnce(&mut S) -> Result<()> + Send + 'static,
+{
     let (tx, rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("vibelink-daemon-probe".to_string())
+        .name(thread_name.to_string())
         .spawn(move || {
-            let mut stream = stream;
-            let result = ping_daemon_io(&mut stream).map(|()| stream);
+            let result = step(&mut stream).map(|()| stream);
             let _ = tx.send(result);
         })
-        .context("spawn daemon startup probe")?;
+        .with_context(|| format!("spawn {operation}"))?;
 
-    match rx.recv_timeout(STARTUP_PING_TIMEOUT) {
+    match rx.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => bail!(
-            "daemon startup ping timed out after {}ms",
-            STARTUP_PING_TIMEOUT.as_millis()
-        ),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            bail!("{operation} timed out after {}ms", timeout.as_millis())
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            bail!("daemon startup probe stopped before returning a stream")
+            bail!("{operation} stopped before returning a stream")
         }
     }
 }
@@ -454,7 +497,8 @@ fn should_recover_unrecorded_stale_daemon(
         (
             RecordedDaemonState::Dead,
             StartupAttemptErrorKind::Connect | StartupAttemptErrorKind::Unhealthy,
-        ) => true,
+        )
+        | (RecordedDaemonState::Missing, StartupAttemptErrorKind::Unhealthy) => true,
         (RecordedDaemonState::Alive, StartupAttemptErrorKind::Unhealthy) => {
             unhealthy_elapsed.is_some_and(|elapsed| elapsed >= RECORDED_UNHEALTHY_RECOVERY_DELAY)
         }
@@ -466,7 +510,11 @@ fn should_recover_unrecorded_after_spawn_exit(
     already_recovered: bool,
     recorded_state: RecordedDaemonState,
 ) -> bool {
-    !already_recovered && recorded_state == RecordedDaemonState::Dead
+    !already_recovered
+        && matches!(
+            recorded_state,
+            RecordedDaemonState::Missing | RecordedDaemonState::Dead
+        )
 }
 
 fn should_retry_startup_attempt(
@@ -1193,6 +1241,25 @@ mod tests {
         assert!(err.to_string().contains("unexpected startup ping response"));
     }
 
+    #[test]
+    fn daemon_step_timeout_returns_without_waiting_for_blocked_io() {
+        let started = Instant::now();
+        let error = run_daemon_step_with_timeout(
+            (),
+            Duration::from_millis(25),
+            "vibelink-daemon-timeout-test",
+            "daemon timeout test",
+            |_| {
+                thread::sleep(Duration::from_millis(500));
+                Ok(())
+            },
+        )
+        .expect_err("blocked daemon step must time out");
+
+        assert!(error.to_string().contains("timed out after 25ms"));
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_detached_flags_match_process_contract() {
@@ -1289,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn unrecorded_recovery_requires_recorded_stale_evidence() {
+    fn unrecorded_recovery_requires_stale_process_evidence() {
         let connect_error = StartupAttemptError::connect(anyhow!("connect failed"));
         let unhealthy_error = StartupAttemptError::unhealthy(anyhow!("probe failed"));
 
@@ -1305,6 +1372,13 @@ mod tests {
             false,
             false,
             RecordedDaemonState::Dead,
+            None,
+        ));
+        assert!(should_recover_unrecorded_stale_daemon(
+            &unhealthy_error,
+            false,
+            false,
+            RecordedDaemonState::Missing,
             None,
         ));
         assert!(!should_recover_unrecorded_stale_daemon(
@@ -1338,12 +1412,12 @@ mod tests {
     }
 
     #[test]
-    fn unrecorded_recovery_after_spawn_exit_requires_dead_recorded_pid() {
+    fn unrecorded_recovery_after_spawn_exit_accepts_missing_or_dead_pid_record() {
         assert!(should_recover_unrecorded_after_spawn_exit(
             false,
             RecordedDaemonState::Dead
         ));
-        assert!(!should_recover_unrecorded_after_spawn_exit(
+        assert!(should_recover_unrecorded_after_spawn_exit(
             false,
             RecordedDaemonState::Missing
         ));
