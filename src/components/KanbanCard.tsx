@@ -3,6 +3,7 @@ import { CheckCircle2, Eye, RotateCcw, Trash2, UserPlus, type LucideProps } from
 import type { Task } from '../ipc/types'
 import { taskDragMime } from '../layout/taskDrag'
 import { useWorkspaceStore } from '../state/store'
+import { confirmDialog } from './appDialogStore'
 
 type KanbanCardProps = {
   task: Task
@@ -44,8 +45,8 @@ export const KanbanCard = memo(function KanbanCard({ task, onAssign, onEdit }: K
   const markCurrentTaskDone = useCallback(() => markTaskDone(task.id), [markTaskDone, task.id])
   const reopenCurrentTask = useCallback(() => updateTask(task.id, { status: 'in-progress' }), [updateTask, task.id])
   const removeTask = useCallback(() => {
-    if (typeof window !== 'undefined' && !window.confirm('Delete this task?')) return
-    deleteTask(task.id)
+    void confirmDialog({ title: 'Delete task', message: 'Delete this task? This cannot be undone.', confirmLabel: 'Delete', danger: true })
+      .then((confirmed) => { if (confirmed) deleteTask(task.id) })
   }, [deleteTask, task.id])
   return (
     <article

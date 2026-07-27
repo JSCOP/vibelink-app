@@ -9,6 +9,7 @@ import { flattenWorkspaceRows, workspaceRootSessions, workspaceRows, type Worksp
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { OpenWorkspaceItems } from './OpenWorkspaceItems'
 import { WorktreeCreateDialog } from './WorktreeCreateDialog'
+import { promptDialog } from '../appDialogStore'
 
 export type WorkspacesSidebarIntegration = {
   onCreateWorkspaceRequested?: () => void
@@ -254,8 +255,8 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   }
 
   const renameGroup = (group: WorkspaceGroup) => {
-    const name = window.prompt('Rename workspace group', group.name)
-    if (name?.trim()) renameWorkspaceGroup(group.id, name.trim())
+    void promptDialog({ title: 'Rename workspace group', label: 'Group name', defaultValue: group.name, confirmLabel: 'Rename' })
+      .then((name) => { if (name) renameWorkspaceGroup(group.id, name) })
   }
 
 

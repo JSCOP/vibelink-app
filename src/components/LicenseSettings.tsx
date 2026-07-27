@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useState } from 'react'
 import { useWorkspaceStore } from '../state/store'
 import { AccountSignIn } from './AccountSignIn'
+import { confirmDialog } from './appDialogStore'
 
 export function LicenseSettings() {
   const license = useWorkspaceStore((state) => state.license)
@@ -93,7 +94,8 @@ export function LicenseSettings() {
           <button disabled={busy} onClick={() => void run(revalidate)}>Refresh account</button>
           {!status?.entitled ? <button onClick={() => void invoke('open_path', { path: status?.purchaseUrl })}>Buy VibeLink Pro</button> : null}
           <button disabled={busy} onClick={() => {
-            if (window.confirm('Sign out of this Moobang account on this device?')) void run(signOut)
+            void confirmDialog({ title: 'Sign out', message: 'Sign out of this Moobang account on this device?', confirmLabel: 'Sign out' })
+              .then((confirmed) => { if (confirmed) return run(signOut) })
           }}>Sign out</button>
         </div>
       ) : null}

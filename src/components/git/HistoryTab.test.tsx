@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, test, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { CommitInfo, RepoInfo, WorkingStatus } from '../../ipc/types'
 
 const { invoke, openContent } = vi.hoisted(() => ({ invoke: vi.fn(), openContent: vi.fn(async () => 'content:workbench:workbench') }))
@@ -16,6 +16,7 @@ import { useWorkspaceStore } from '../../state/store'
 import { GitHistorySidebar } from './GitHistorySidebar'
 import { GitWorkspaceProvider } from './GitWorkspaceProvider'
 import { HistoryTab } from './HistoryTab'
+import { AppDialogHost } from '../AppDialog'
 
 const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
 const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
@@ -24,7 +25,15 @@ const commit: CommitInfo = { sha: 'a'.repeat(40), parents: [], refs: ['HEAD -> m
 const changedFile = { path: 'src/committed.ts', changeType: 'modified' as const, additions: 2, deletions: 1, binary: false }
 
 function renderHistory() {
-  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitHistorySidebar active /><HistoryTab /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
+  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitHistorySidebar active /><HistoryTab /></GitWorkspaceProvider><AppDialogHost /></WorkspaceContentActionsContext.Provider>)
+}
+
+/** Fill the in-app prompt (`AppDialogHost`) and submit it. Queries are scoped
+ *  to the modal so history rows cannot shadow its controls. */
+async function answerPrompt(label: string, value: string, submitLabel: string) {
+  const modal = within(await screen.findByRole('dialog'))
+  fireEvent.change(modal.getByLabelText(label), { target: { value } })
+  fireEvent.click(modal.getByRole('button', { name: submitLabel }))
 }
 
 beforeEach(() => {
@@ -76,13 +85,15 @@ test('shares commit selection and detail with central Workbench and loads detail
 })
 
 test('keeps compare, branch, and tag actions on the active repository', async () => {
-  vi.spyOn(window, 'prompt').mockReturnValueOnce('from-history').mockReturnValueOnce('v1').mockReturnValueOnce('release')
   renderHistory()
   fireEvent.click(await screen.findByText('Initial commit'))
   fireEvent.click(await screen.findByRole('button', { name: 'Compare with HEAD' }))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_diff_refs', { workspaceFolder: 'C:/repo', baseRef: commit.sha, headRef: 'HEAD' }))
   fireEvent.click(screen.getByRole('button', { name: 'Create branch here' }))
+  await answerPrompt('Branch name', 'from-history', 'Create')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_branch_create', { workspaceFolder: 'C:/repo', name: 'from-history', fromRef: commit.sha, checkout: false }))
   fireEvent.click(screen.getByRole('button', { name: 'Create tag here' }))
+  await answerPrompt('Tag name', 'v1', 'Next')
+  await answerPrompt('Annotation message', 'release', 'Create')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_tag_create', { workspaceFolder: 'C:/repo', name: 'v1', refName: commit.sha, message: 'release' }))
 })

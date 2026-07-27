@@ -29,6 +29,7 @@ import {
 } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import { QuickPick } from '../QuickPick'
+import { confirmDialog, promptDialog } from '../appDialogStore'
 import type { PickerEntry } from '../pickerModel'
 import { computeGraphLanes, type GraphLanes } from './graphLanes'
 import type {
@@ -360,10 +361,11 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   const discardPaths = useCallback((paths: string[], untracked: boolean) => {
     if (!activeWorkspaceFolder || paths.length === 0) return
     const message = untracked
-      ? `Discard ${paths.length === 1 ? paths[0] : `${paths.length} untracked files`}? (moves to Recycle Bin)`
+      ? `Discard ${paths.length === 1 ? paths[0] : `${paths.length} untracked files`}? They are moved to the Recycle Bin.`
       : `Discard changes in ${paths.length === 1 ? paths[0] : `${paths.length} files`}? This cannot be undone.`
-    if (!window.confirm(message)) return
-    mutate(() => invoke('git_discard', { workspaceFolder: activeWorkspaceFolder, paths }))
+    void confirmDialog({ title: 'Discard changes', message, confirmLabel: 'Discard', danger: true }).then((confirmed) => {
+      if (confirmed) mutate(() => invoke('git_discard', { workspaceFolder: activeWorkspaceFolder, paths }))
+    })
   }, [activeWorkspaceFolder, mutate])
 
   const stagePaths = useCallback((paths: string[]) => {
@@ -659,15 +661,16 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     compareHead: compareHistoryHead,
     createBranch: () => {
       if (!activeWorkspaceFolder || !historySelectedSha) return
-      const name = window.prompt('Branch name')?.trim()
-      if (name) mutate(() => invoke('git_branch_create', { workspaceFolder: activeWorkspaceFolder, name, fromRef: historySelectedSha, checkout: false }))
+      void promptDialog({ title: 'New branch', label: 'Branch name', placeholder: 'feature/my-change', confirmLabel: 'Create' }).then((name) => {
+        if (name) mutate(() => invoke('git_branch_create', { workspaceFolder: activeWorkspaceFolder, name, fromRef: historySelectedSha, checkout: false }))
+      })
     },
-    createTag: () => {
+    createTag: async () => {
       if (!activeWorkspaceFolder || !historySelectedSha) return
-      const name = window.prompt('Tag name')?.trim()
+      const name = await promptDialog({ title: 'New tag', label: 'Tag name', placeholder: 'v1.0.0', confirmLabel: 'Next' })
       if (!name) return
-      const message = window.prompt('Annotation message (leave empty for lightweight tag)')?.trim() ?? ''
-      mutate(() => invoke('git_tag_create', { workspaceFolder: activeWorkspaceFolder, name, refName: historySelectedSha, message: message || null }))
+      const message = await promptDialog({ title: 'Tag annotation', message: 'Leave empty for a lightweight tag.', label: 'Annotation message', confirmLabel: 'Create' })
+      mutate(() => invoke('git_tag_create', { workspaceFolder: activeWorkspaceFolder, name, refName: historySelectedSha, message }))
     },
   }), [activeWorkspaceFolder, activateHistory, compareHistoryHead, gitState.pathFilter, historyAuthor, historyCommits, historyCompareFiles, historyCompareMode, historyContents, historyContentsError, historyContentsLoading, historyDetail, historyDetailLoading, historyError, historyHasMore, historyLoading, historySearch, historySelectedPath, historySelectedSha, loadHistory, mutate, selectHistoryCommit, selectHistoryFile, sessionId, setActiveTab])
 
@@ -734,26 +737,33 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       { id: 'rebase', label: 'Rebase', onClick: () => mutateBranch(() => invoke('git_rebase', { workspaceFolder: activeWorkspaceFolder, refName: branch.name })) },
       { id: 'copy', label: 'Copy name', onClick: () => { void navigator.clipboard.writeText(branch.name) } },
       { id: 'new-from', label: 'New branch from', onClick: () => {
-        const name = window.prompt('New branch name')?.trim()
-        if (name) mutateBranch(() => invoke('git_branch_create', { workspaceFolder: activeWorkspaceFolder, name, fromRef: branch.name, checkout: false }))
+        void promptDialog({ title: `New branch from ${branch.name}`, label: 'Branch name', placeholder: 'feature/my-change', confirmLabel: 'Create' }).then((name) => {
+          if (name) mutateBranch(() => invoke('git_branch_create', { workspaceFolder: activeWorkspaceFolder, name, fromRef: branch.name, checkout: false }))
+        })
       } },
     ]
     if (!branch.isRemote) {
       actions.splice(3, 0,
         { id: 'rename', label: 'Rename', onClick: () => {
-          const newName = window.prompt('Rename branch', branch.name)?.trim()
-          if (newName && newName !== branch.name) mutateBranch(() => invoke('git_branch_rename', { workspaceFolder: activeWorkspaceFolder, oldName: branch.name, newName }))
+          void promptDialog({ title: 'Rename branch', label: 'Branch name', defaultValue: branch.name, confirmLabel: 'Rename' }).then((newName) => {
+            if (newName && newName !== branch.name) mutateBranch(() => invoke('git_branch_rename', { workspaceFolder: activeWorkspaceFolder, oldName: branch.name, newName }))
+          })
         } },
         { id: 'delete', label: 'Delete', danger: true, onClick: () => {
-          if (!window.confirm(`Delete branch ${branch.name}?`)) return
-          void runMutation(() => invoke('git_branch_delete', { workspaceFolder: activeWorkspaceFolder, name: branch.name, force: false }))
-            .then(() => loadBranches())
-            .catch((reason) => {
-              const message = String(reason)
-              if (message.includes('not fully merged') && window.confirm(`${message}\nForce delete?`)) {
-                mutateBranch(() => invoke('git_branch_delete', { workspaceFolder: activeWorkspaceFolder, name: branch.name, force: true }))
-              } else setBranchesError(message)
-            })
+          void confirmDialog({ title: 'Delete branch', message: `Delete branch ${branch.name}?`, confirmLabel: 'Delete', danger: true }).then((confirmed) => {
+            if (!confirmed) return
+            return runMutation(() => invoke('git_branch_delete', { workspaceFolder: activeWorkspaceFolder, name: branch.name, force: false }))
+              .then(() => loadBranches())
+              .catch(async (reason) => {
+                const message = String(reason)
+                // Git refuses an unmerged branch; offer the force path instead
+                // of surfacing a dead-end error the user cannot act on.
+                if (!message.includes('not fully merged')) return setBranchesError(message)
+                if (await confirmDialog({ title: 'Branch is not fully merged', message: `${message}\n\nForce delete ${branch.name}?`, confirmLabel: 'Force delete', danger: true })) {
+                  mutateBranch(() => invoke('git_branch_delete', { workspaceFolder: activeWorkspaceFolder, name: branch.name, force: true }))
+                }
+              })
+          })
         } },
       )
     }
@@ -799,7 +809,11 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       stash,
       onApply: () => mutateBranch(() => invoke('git_stash_apply', { workspaceFolder: activeWorkspaceFolder, index: stash.index })),
       onPop: () => mutateBranch(() => invoke('git_stash_pop', { workspaceFolder: activeWorkspaceFolder, index: stash.index })),
-      onDrop: () => { if (window.confirm(`Drop stash@{${stash.index}}?`)) mutateBranch(() => invoke('git_stash_drop', { workspaceFolder: activeWorkspaceFolder, index: stash.index })) },
+      onDrop: () => {
+        void confirmDialog({ title: 'Drop stash', message: `Drop stash@{${stash.index}}? This cannot be undone.`, confirmLabel: 'Drop', danger: true }).then((confirmed) => {
+          if (confirmed) mutateBranch(() => invoke('git_stash_drop', { workspaceFolder: activeWorkspaceFolder, index: stash.index }))
+        })
+      },
     })),
     tags,
     loading: branchesLoading,
@@ -820,8 +834,9 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     activate: () => setBranchesActivated(true),
     refresh: loadBranches,
     createBranch: () => {
-      const name = window.prompt('Branch name')?.trim()
-      if (name) mutateBranch(() => invoke('git_branch_create', { workspaceFolder: activeWorkspaceFolder, name, fromRef: null, checkout: false }))
+      void promptDialog({ title: 'New branch', label: 'Branch name', placeholder: 'feature/my-change', confirmLabel: 'Create' }).then((name) => {
+        if (name) mutateBranch(() => invoke('git_branch_create', { workspaceFolder: activeWorkspaceFolder, name, fromRef: null, checkout: false }))
+      })
     },
     openBasePicker: () => setRefPicker('base'),
     openHeadPicker: () => setRefPicker('head'),

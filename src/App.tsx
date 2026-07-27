@@ -17,6 +17,8 @@ import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
+import { AppDialogHost } from './components/AppDialog'
+import { confirmDialog, isAppDialogOpen } from './components/appDialogStore'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
 import { isControlCharacterCode } from './layout/workspaceContentModel'
@@ -488,7 +490,7 @@ function App() {
         event.stopImmediatePropagation()
         return
       }
-      if (workspaceInteractionSuspended) return
+      if (workspaceInteractionSuspended || isAppDialogOpen()) return
       const session = workspaceForShortcut(event, shortcutSessions)
       if (!session) return
       event.preventDefault()
@@ -655,7 +657,8 @@ function App() {
           </div>
           <div className="topbar-spacer" data-tauri-drag-region />
           <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !contentActions} title="Reset layout" aria-label="Reset workspace layout" onClick={() => {
-            if (window.confirm('Reset the workspace layout?')) void contentActions?.resetLayout()
+            void confirmDialog({ title: 'Reset the workspace layout?', message: 'Panes keep running; only the arrangement is rebuilt.', confirmLabel: 'Reset' })
+              .then((confirmed) => { if (confirmed) return contentActions?.resetLayout() })
           }}>
             <Eraser size={16} aria-hidden="true" />
           </button>
@@ -798,6 +801,7 @@ function App() {
       </div>,
       document.body,
     ) : null}
+    <AppDialogHost />
     </>
   )
 }

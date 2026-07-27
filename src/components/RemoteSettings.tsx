@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import QRCode from 'qrcode'
 import { useEffect, useMemo, useState } from 'react'
 import { RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Trash2, Wifi } from 'lucide-react'
+import { confirmDialog } from './appDialogStore'
 
 type RemoteDevice = { id: string; name: string; createdAt: number; lastSeenAt: number }
 type RemoteStatus = {
@@ -145,8 +146,15 @@ export function RemoteSettings() {
     await refresh()
   })
 
-  const regenerate = () => {
-    if (!window.confirm('인증서를 재생성하면 페어링된 모든 기기가 해제되며 다시 페어링해야 합니다. 계속할까요?')) return
+  const regenerate = async () => {
+    const confirmed = await confirmDialog({
+      title: '인증서 재생성',
+      message: '인증서를 재생성하면 페어링된 모든 기기가 해제되며 다시 페어링해야 합니다. 계속할까요?',
+      confirmLabel: '재생성',
+      cancelLabel: '취소',
+      danger: true,
+    })
+    if (!confirmed) return
     void run(async () => {
       const next = await invoke<RemoteStatus>('remote_regenerate_identity')
       setStatus(next)
@@ -203,7 +211,7 @@ export function RemoteSettings() {
         )) : <p className="vibelink-settings-note">페어링된 기기가 없습니다.</p>}
       </div>
 
-      <button type="button" className="remote-danger" disabled={busy} onClick={regenerate}><ShieldAlert size={14} /> 인증서 재생성</button>
+      <button type="button" className="remote-danger" disabled={busy} onClick={() => void regenerate()}><ShieldAlert size={14} /> 인증서 재생성</button>
       {status?.lanEnabled ? <div className="remote-firewall-row">
         {ruleReady ? <span className="remote-firewall-ok"><ShieldCheck size={14} /> 포트 {status.port} Private 네트워크 인바운드 규칙이 설정되어 있습니다.</span> : <>
           <span className="remote-firewall-warn"><ShieldAlert size={14} /> 포트 {status.port} Private 네트워크 인바운드 허용 규칙이 필요합니다.</span>

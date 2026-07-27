@@ -25,6 +25,7 @@ import { FileCode2 } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
 import { WorkspaceAddMenu } from '../components/WorkspaceAddMenu'
 import { QuickPick } from '../components/QuickPick'
+import { isAppDialogOpen, promptDialog } from '../components/appDialogStore'
 import type { PickerEntry } from '../components/pickerModel'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
@@ -1727,7 +1728,7 @@ export function WorkspaceView({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (effectiveWorkspaceInteractionSuspended) return
+      if (effectiveWorkspaceInteractionSuspended || isAppDialogOpen()) return
       const api = apiRef.current
       const active = api?.activePanel
       if (!api || !active) return
@@ -1757,10 +1758,12 @@ export function WorkspaceView({
             if (!sessionId || !workspaceFolder || getWorkspaceSessionReadyEpoch() !== sessionEpoch || getWorkspaceSessionTargetId() !== sessionId) return
             const store = getEditorDocumentStore(sessionId, workspaceFolder)
             if (event.shiftKey) {
-              const target = window.prompt('Save As (workspace-relative path)', content.relPath)?.trim()
-              if (!target) return
-              void store.saveAs(content.relPath, target).then((result: NativeSaveTextDocumentResult) => {
-                if (result.status === 'saved') void actions.openContent({ kind: 'editor', relPath: target, targetGroupId: active.group.id, workspaceId: sessionId, workspaceEpoch: sessionEpoch })
+              void promptDialog({ title: 'Save As', label: 'Workspace-relative path', defaultValue: content.relPath, confirmLabel: 'Save' }).then(async (target) => {
+                // The prompt is asynchronous, so the workspace can change while
+                // it is open; re-check ownership before writing anywhere.
+                if (!target || getWorkspaceSessionReadyEpoch() !== sessionEpoch || getWorkspaceSessionTargetId() !== sessionId) return
+                const result: NativeSaveTextDocumentResult = await store.saveAs(content.relPath, target)
+                if (result.status === 'saved') await actions.openContent({ kind: 'editor', relPath: target, targetGroupId: active.group.id, workspaceId: sessionId, workspaceEpoch: sessionEpoch })
               }).catch((error: unknown) => useWorkspaceStore.getState().setError(String(error)))
             } else {
               void store.save(content.relPath).catch((error: unknown) => useWorkspaceStore.getState().setError(String(error)))

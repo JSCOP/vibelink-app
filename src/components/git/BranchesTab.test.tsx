@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, test, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { BranchInfo, ChangedFile, RepoInfo, WorkingStatus } from '../../ipc/types'
 
 const { invoke, openContent } = vi.hoisted(() => ({ invoke: vi.fn(), openContent: vi.fn(async () => 'content:workbench:workbench') }))
@@ -15,6 +15,7 @@ import { useWorkspaceStore } from '../../state/store'
 import { BranchesTab } from './BranchesTab'
 import { GitBranchesSidebar } from './GitBranchesSidebar'
 import { GitWorkspaceProvider } from './GitWorkspaceProvider'
+import { AppDialogHost } from '../AppDialog'
 
 const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
 const branch: BranchInfo = { name: 'feature', isHead: false, isRemote: false, upstream: null, ahead: 0, behind: 0, lastCommitSubject: 'Feature', lastCommitDate: '2026-07-18T00:00:00Z' }
@@ -23,7 +24,23 @@ const status: WorkingStatus = { staged: [], unstaged: [{ path: 'src/local.ts', o
 const remoteFile: ChangedFile = { path: 'src/remote.ts', changeType: 'modified', additions: 1, deletions: 1, binary: false }
 
 function renderBranches() {
-  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitBranchesSidebar active /><BranchesTab /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
+  return render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider pollIntervalMs={60_000}><GitBranchesSidebar active /><BranchesTab /></GitWorkspaceProvider><AppDialogHost /></WorkspaceContentActionsContext.Provider>)
+}
+
+/** Act on the in-app modal (`AppDialogHost`). Queries are scoped to the dialog
+ *  because branch/stash rows carry the same labels as its action buttons. */
+async function dialog() {
+  return within(await screen.findByRole('dialog'))
+}
+
+async function answerPrompt(label: string, value: string, submitLabel: string) {
+  const modal = await dialog()
+  fireEvent.change(modal.getByLabelText(label), { target: { value } })
+  fireEvent.click(modal.getByRole('button', { name: submitLabel }))
+}
+
+async function answerConfirm(actionLabel: string) {
+  fireEvent.click((await dialog()).getByRole('button', { name: actionLabel }))
 }
 
 beforeEach(() => {
@@ -42,7 +59,6 @@ beforeEach(() => {
     if (command === 'fs_list_dir' || command === 'git_dir_entries') return []
     return null
   })
-  vi.spyOn(window, 'confirm').mockReturnValue(true)
   useGitStore.setState({ sessions: {} })
   useExplorerStore.setState({ sessions: {} })
   useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], license: { ready: true, status: { state: 'development', entitled: true } as never } })
@@ -55,6 +71,7 @@ test('routes branch and stash mutations to the active repository', async () => {
   fireEvent.click(await screen.findByTitle('Apply stash 0'))
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stash_apply', { workspaceFolder: 'C:/repo', index: 0 }))
   fireEvent.click(screen.getByTitle('Drop stash 0'))
+  await answerConfirm('Drop')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_stash_drop', { workspaceFolder: 'C:/repo', index: 0 }))
 })
 
@@ -70,18 +87,29 @@ test('opens central ref comparison and reveals a selected compare file', async (
 })
 
 test('preserves branch create, rename, delete, copy, and new-from actions', async () => {
-  vi.spyOn(window, 'prompt').mockReturnValueOnce('new-branch').mockReturnValueOnce('renamed').mockReturnValueOnce('from-feature')
   const writeText = vi.fn(async () => undefined)
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
   renderBranches()
   fireEvent.click(await screen.findByTitle('Create a new branch'))
+  await answerPrompt('Branch name', 'new-branch', 'Create')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_branch_create', { workspaceFolder: 'C:/repo', name: 'new-branch', fromRef: null, checkout: false }))
   fireEvent.click(screen.getByTitle('Rename feature'))
+  await answerPrompt('Branch name', 'renamed', 'Rename')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_branch_rename', { workspaceFolder: 'C:/repo', oldName: 'feature', newName: 'renamed' }))
   fireEvent.click(screen.getByTitle('Copy name feature'))
   expect(writeText).toHaveBeenCalledWith('feature')
   fireEvent.click(screen.getByTitle('New branch from feature'))
+  await answerPrompt('Branch name', 'from-feature', 'Create')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_branch_create', { workspaceFolder: 'C:/repo', name: 'from-feature', fromRef: 'feature', checkout: false }))
   fireEvent.click(screen.getByTitle('Delete feature'))
+  await answerConfirm('Delete')
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_branch_delete', { workspaceFolder: 'C:/repo', name: 'feature', force: false }))
+})
+
+test('cancelling the delete dialog leaves the branch alone', async () => {
+  renderBranches()
+  fireEvent.click(await screen.findByTitle('Delete feature'))
+  await answerConfirm('Cancel')
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(invoke).not.toHaveBeenCalledWith('git_branch_delete', expect.anything())
 })

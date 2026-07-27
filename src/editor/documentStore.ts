@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { normalizeWorkspaceRelativePath } from '../layout/workspaceContentModel'
+import { choiceDialog } from '../components/appDialogStore'
 
 export type TextDocumentEncoding = 'utf8' | 'utf8Bom'
 export type TextDocumentLineEnding = 'lf' | 'crlf'
@@ -557,10 +558,15 @@ export async function saveAllEditorDocuments(sessionId: string, workspaceFolder:
   return getEditorDocumentStore(sessionId, workspaceFolder).saveAll()
 }
 
-export function browserEditorCloseDecision(document: EditorDocument): EditorCloseDecision {
-  if (typeof window === 'undefined') return 'cancel'
-  if (window.confirm(`Save changes to ${document.relPath}?\n\nOK: Save\nCancel: choose Discard or Cancel next.`)) return 'save'
-  return window.confirm(`Discard local changes to ${document.relPath}?\n\nOK: Discard\nCancel: keep the editor open.`) ? 'discard' : 'cancel'
+/** Save / Discard / Cancel for one dirty document. The two-step native confirm
+ *  chain this replaced could not express three outcomes in one dialog. */
+export async function browserEditorCloseDecision(document: EditorDocument): Promise<EditorCloseDecision> {
+  const choice = await choiceDialog({
+    title: 'Unsaved changes',
+    message: `${document.relPath} has unsaved changes.`,
+    choices: [{ id: 'discard', label: 'Discard', tone: 'danger' }, { id: 'save', label: 'Save', tone: 'primary' }],
+  })
+  return choice === 'save' || choice === 'discard' ? choice : 'cancel'
 }
 
 function emptyDocument(relPath: string): DocumentRecord {

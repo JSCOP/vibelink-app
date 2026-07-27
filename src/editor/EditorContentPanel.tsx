@@ -14,6 +14,7 @@ import { languageForPath, languageLabel } from './languageForPath'
 import { monaco } from './monaco'
 import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './monacoTheme'
 import './EditorContentPanel.css'
+import { promptDialog } from '../components/appDialogStore'
 
 type Disposable = { dispose(): void }
 type MonacoModelOptions = { tabSize: number; insertSpaces: boolean }
@@ -184,7 +185,7 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
   const saveAs = useCallback(async () => {
     const current = store.getDocument(relPath)
     if (!current || current.saving) return
-    const target = window.prompt('Save As (workspace-relative path)', current.relPath)?.trim()
+    const target = await promptDialog({ title: 'Save As', label: 'Workspace-relative path', defaultValue: current.relPath, confirmLabel: 'Save' })
     if (!target) return
     const result = await store.saveAs(relPath, target).catch(() => null)
     if (result?.status !== 'saved') return

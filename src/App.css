@@ -5895,6 +5895,110 @@ button.git-window-primary-action,
   justify-content: flex-end;
 }
 
+/* Shared confirm/prompt surface (`AppDialogHost`). It replaces WebView2's
+   native `window.confirm` / `window.prompt` bar, so it must outrank every
+   other dialog: Settings, Kanban, and Git dialogs can all raise one. */
+.app-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--vibelink-overlay);
+}
+
+.app-dialog {
+  width: min(460px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 10px;
+  background: var(--vibelink-dialog);
+  box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
+  color: var(--vibelink-text);
+  font-size: calc(12px * var(--vibelink-ui-scale, 1));
+}
+
+.app-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-dialog-header h2 {
+  margin: 0;
+  font-size: calc(14px * var(--vibelink-ui-scale, 1));
+}
+
+.app-dialog-danger .app-dialog-header {
+  color: var(--vibelink-danger);
+}
+
+.app-dialog-message {
+  margin: 0;
+  color: var(--vibelink-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-dialog-form {
+  display: grid;
+  gap: 12px;
+}
+
+.app-dialog-field {
+  display: grid;
+  gap: 6px;
+  color: var(--vibelink-muted);
+}
+
+.app-dialog-field input {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 6px;
+  color: var(--vibelink-text);
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.app-dialog-field input:focus-visible {
+  border-color: var(--vibelink-accent-border);
+  outline: none;
+}
+
+.app-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.app-dialog-actions button {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 10px;
+  color: var(--vibelink-text);
+  min-height: 28px;
+  padding: 0 12px;
+}
+
+.app-dialog-actions button:disabled {
+  opacity: 0.5;
+}
+
+.app-dialog-actions button.primary-action {
+  background: var(--vibelink-accent-soft);
+  border-color: var(--vibelink-accent-border);
+}
+
+.app-dialog-actions button.app-dialog-danger-action {
+  background: var(--vibelink-danger-soft);
+  border-color: var(--vibelink-danger-border);
+  color: var(--vibelink-danger-text);
+}
+
 /* Global app-chrome stacking contract. Dockview/native surfaces stay below
    launchers, while every app dialog remains the final interaction layer. */
 .topbar {
@@ -5923,6 +6027,10 @@ button.git-window-primary-action,
 .vibelink-quick-pick-backdrop,
 .dirty-editor-backdrop {
   z-index: calc(var(--z-modal) + 20);
+}
+
+.app-dialog-backdrop {
+  z-index: calc(var(--z-modal) + 30);
 }
 
 .workspace-sidebar-panel-shell {

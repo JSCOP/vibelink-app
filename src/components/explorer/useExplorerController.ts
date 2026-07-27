@@ -8,6 +8,7 @@ import { emptyExplorerSessionState, deriveGitDecorations, flattenExplorerTree, j
 import { emptyGitSessionState, repositoryFolder, repositoryStateFor, useGitStore } from '../../state/git'
 import { getWorkspaceSessionEpoch, getWorkspaceSessionReadyEpoch, getWorkspaceSessionTargetId, useWorkspaceStore } from '../../state/store'
 import type { ExplorerContextAction, ExplorerContextMenu } from './ExplorerTreeView'
+import { confirmDialog, promptDialog } from '../appDialogStore'
 
 export type ExplorerControllerOptions = { sessionId: string; workspaceFolder: string }
 
@@ -291,7 +292,7 @@ export function useExplorerController({ sessionId, workspaceFolder }: ExplorerCo
 
   const deleteNode = useCallback(async (node: ExplorerNode) => {
     setContextMenu(null)
-    if (!window.confirm(`Delete ${node.name}? This cannot be undone.`)) return
+    if (!await confirmDialog({ title: `Delete ${node.name}`, message: `Delete ${node.name}? This cannot be undone.`, confirmLabel: 'Delete', danger: true })) return
     const ownership = captureWorkspaceOwnership()
     if (!ownership) return
     const openPaths = await prepareEditorPathMutation(node.path, ownership)
@@ -314,7 +315,7 @@ export function useExplorerController({ sessionId, workspaceFolder }: ExplorerCo
 
   const createEntry = useCallback(async (node: ExplorerNode | null, directory: boolean) => {
     setContextMenu(null)
-    const name = window.prompt(directory ? 'Folder name' : 'File name')?.trim()
+    const name = await promptDialog({ title: directory ? 'New folder' : 'New file', label: directory ? 'Folder name' : 'File name', confirmLabel: 'Create' })
     if (!name) return
     const ownership = captureWorkspaceOwnership()
     if (!ownership) return
@@ -442,7 +443,7 @@ export function useExplorerController({ sessionId, workspaceFolder }: ExplorerCo
     const message = untracked
       ? `Discard ${targetName}? Untracked paths will be moved to the Recycle Bin.`
       : `Discard changes in ${targetName}? This cannot be undone.`
-    if (!window.confirm(message)) return
+    if (!await confirmDialog({ title: 'Discard changes', message, confirmLabel: 'Discard', danger: true })) return
     const ownership = captureWorkspaceOwnership()
     if (!ownership) return
     const target = gitTargetForNode(node)

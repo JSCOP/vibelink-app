@@ -101,7 +101,6 @@ beforeEach(() => {
     if (command === 'provider_credential_status') return { configured: false }
     return null
   })
-  vi.spyOn(window, 'confirm').mockReturnValue(true)
   useGitStore.setState({ sessions: {} })
   useExplorerStore.setState({ sessions: {} })
   useWorkspaceStore.setState({
