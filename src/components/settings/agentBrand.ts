@@ -1,15 +1,24 @@
-/**
- * Maps an agent CLI / hook id onto the brand icon registered in
- * `state/profileIcons.ts`. Settings shows the real agent mark rather than a
- * generic robot glyph so a row is identifiable before its label is read.
- */
+/** Maps hook ids onto an available brand or semantic profile icon. */
 const agentIconNames: Record<string, string> = {
   claude: 'claude-code',
   'claude-code': 'claude-code',
   codex: 'codex',
+  gemini: 'sparkles',
+  antigravity: 'rocket',
+  amp: 'zap',
+  opencode: 'opencode',
+  'mimo-code': 'file-code',
+  cursor: 'code',
+  pi: 'terminal-square',
   omp: 'oh-my-pi',
   'oh-my-pi': 'oh-my-pi',
-  opencode: 'opencode',
+  droid: 'bot',
+  'command-code': 'command',
+  grok: 'flame',
+  copilot: 'git-branch',
+  hermes: 'messages-square',
+  devin: 'bot',
+  kimi: 'sparkles',
   powershell: 'powershell',
 }
 

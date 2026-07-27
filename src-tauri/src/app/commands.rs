@@ -8,7 +8,7 @@ use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, AppHandle, Manager as _, State};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -277,20 +277,30 @@ pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<Sessio
 }
 
 #[tauri::command]
-pub async fn agent_hook_status() -> Result<Vec<crate::app::agent_hooks::AgentHookStatus>, String> {
-    crate::app::agent_hooks::status().map_err(to_string)
+pub async fn agent_hook_status(
+    app: AppHandle,
+) -> Result<Vec<crate::app::agent_hooks::AgentHookStatus>, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    Ok(crate::app::agent_hooks::get_managed_agent_hook_statuses(
+        &app_data_dir,
+    ))
 }
 
 #[tauri::command]
 pub async fn set_agent_hook_enabled(
+    app: AppHandle,
     agent_id: String,
     enabled: bool,
 ) -> Result<crate::app::agent_hooks::AgentHookStatus, String> {
-    if enabled {
-        crate::app::agent_hooks::install(&agent_id).map_err(to_string)
-    } else {
-        crate::app::agent_hooks::uninstall(&agent_id).map_err(to_string)
-    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    crate::app::agent_hooks::set_agent_hook_enabled_native(&app_data_dir, &agent_id, enabled)
+        .map_err(to_string)
 }
 
 #[tauri::command]

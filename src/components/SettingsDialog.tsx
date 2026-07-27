@@ -191,15 +191,18 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const SectionIcon = section.icon
   /** Hook rows and CLI rows describe the same agents; merge them into one list. */
   const agentRows = useMemo(() => {
-    const byId = new Map<string, { id: string; displayName: string; cli?: typeof agentClis[number]; hook?: AgentHookStatus }>()
-    for (const cli of agentClis) byId.set(cli.id.toLowerCase(), { id: cli.id, displayName: cli.displayName, cli })
-    for (const hook of agentHooks) {
-      const key = hook.id.toLowerCase()
-      const existing = byId.get(key)
-      if (existing) existing.hook = hook
-      else byId.set(key, { id: hook.id, displayName: hook.displayName, hook })
+    const cliById = new Map(agentClis.map((cli) => [cli.id.toLowerCase(), cli]))
+    const rows: { id: string; displayName: string; cli?: typeof agentClis[number]; hook?: AgentHookStatus }[] = agentHooks.map((hook) => ({
+      id: hook.id,
+      displayName: hook.displayName,
+      cli: cliById.get(hook.id.toLowerCase()),
+      hook,
+    }))
+    const hookedIds = new Set(agentHooks.map((hook) => hook.id.toLowerCase()))
+    for (const cli of agentClis) {
+      if (!hookedIds.has(cli.id.toLowerCase())) rows.push({ id: cli.id, displayName: cli.displayName, cli, hook: undefined })
     }
-    return [...byId.values()]
+    return rows
   }, [agentClis, agentHooks])
 
   useEffect(() => {
@@ -572,7 +575,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                 <SettingsCard
                   icon={Sparkles}
                   title="AI coding agents"
-                  hint="Turning a hook on appends one entry VibeLink owns; your own hooks stay untouched. Turning it off removes exactly that entry and its generated script."
+                  hint="17 completion integrations use each agent's native hook or extension API. VibeLink preserves user-owned config and removes only its own entries."
                   status={<SettingsIconButton icon={RefreshCw} label="Re-check installed agents" disabled={agentBusy} onClick={() => { setAgentBusy(true); void Promise.all([refreshAgentClis(), agentHookStatus().then(setAgentHooks)]).catch((error) => setAgentHookMessage(String(error))).finally(() => setAgentBusy(false)) }} />}
                 >
                   {agentRows.length === 0 ? (
@@ -588,9 +591,11 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                           {agent.cli ? agentStatusLabel(agent.cli) : 'Completion hook only'}
                         </span>
                       </span>
-                      {agent.cli && !agent.cli.installed ? (
+                      {!agent.cli ? (
+                        <SettingsPill icon={Sparkles}>Hook available</SettingsPill>
+                      ) : !agent.cli.installed ? (
                         <SettingsPill icon={CircleX}>Not found</SettingsPill>
-                      ) : agent.cli && agent.cli.auth === 'loggedOut' ? (
+                      ) : agent.cli.auth === 'loggedOut' ? (
                         <SettingsButton icon={LogIn} label="Log in" title={`Run ${agent.cli.loginHint} in a terminal`} disabled={agentBusy || !activeSessionId} onClick={() => void openAgentLogin(agent.id, agent.displayName, agent.cli?.loginHint ?? agent.id)} />
                       ) : (
                         <SettingsPill tone="ok" icon={CircleCheck}>Ready</SettingsPill>
