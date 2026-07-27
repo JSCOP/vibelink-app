@@ -65,7 +65,7 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
           activate(item)
         }}
       >
-        <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={item.icon} size={13} strokeWidth={1.8} /></span>
+        <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={item.icon} size={11} strokeWidth={1.8} /></span>
         <span className="workspace-open-content-title" title={item.title}>{item.title}</span>
         <span
           className={`workspace-open-content-status${item.active ? ' is-active' : ''}${responseComplete ? ' is-complete' : ''}`}
@@ -102,8 +102,8 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => { event.stopPropagation(); toggleGroup(group.window.panelId) }}
             >
-              <span className="workspace-open-content-group-chevron" aria-hidden="true">{collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</span>
-              <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={group.window.icon} size={13} strokeWidth={1.8} /></span>
+              <span className="workspace-open-content-group-chevron" aria-hidden="true">{collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}</span>
+              <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={group.window.icon} size={11} strokeWidth={1.8} /></span>
               <span className="workspace-open-content-title" title={group.window.title}>{group.window.title}</span>
               <span className={`workspace-open-content-status${active ? ' is-active' : ''}`} aria-hidden="true" />
             </button>
@@ -123,7 +123,7 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => { event.stopPropagation(); activate(pane) }}
                     >
-                      <ProfileIcon name={pane.icon} size={16} strokeWidth={1.8} />
+                      <ProfileIcon name={pane.icon} size={12} strokeWidth={1.8} />
                       <span className="workspace-open-content-icon-button-status" aria-hidden="true" />
                     </button>
                   )
