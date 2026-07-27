@@ -1,9 +1,21 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { SessionMeta } from '../../ipc/types'
 import { defaultSettings } from '../../state/profiles'
+
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  storage: { mode: 'drive', drive: '', folderName: 'VibeLinkWorktrees', customRoot: '', groupByRepository: true },
+  fallbackReason: null as string | null,
+}))
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
+vi.mock('../../state/store', () => ({
+  useWorkspaceStore: (selector: (state: { settings: { worktreeStorage: typeof mocks.storage } }) => unknown) => selector({ settings: { worktreeStorage: mocks.storage } }),
+}))
+
 import { WorktreeCreateDialog } from './WorktreeCreateDialog'
 import { worktreeBranchName } from './worktreeNaming'
 
@@ -14,6 +26,20 @@ const sourceSession: SessionMeta = {
   createdAt: 1,
   workspaceFolder: 'E:/repos/project',
 }
+
+beforeEach(() => {
+  mocks.fallbackReason = null
+  invoke.mockReset().mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    if (command !== 'git_worktree_resolve_root') return undefined
+    const name = typeof args?.name === 'string' ? args.name : ''
+    return {
+      root: 'E:\\VibeLinkWorktrees',
+      example: `E:\\VibeLinkWorktrees\\project-01234567\\${name === 'Fix Login' ? 'fix-login' : '<name>'}-abc12345`,
+      writable: true,
+      fallbackReason: mocks.fallbackReason,
+    }
+  })
+})
 
 afterEach(cleanup)
 
@@ -38,7 +64,8 @@ describe('WorktreeCreateDialog', () => {
     expect(screen.getByLabelText('New branch')).toHaveValue('feature/custom-branch')
   })
 
-  test('keeps guidance compact and explains the real isolation boundary', () => {
+  test('shows the resolved managed folder and compact fallback warning', async () => {
+    mocks.fallbackReason = 'Requested drive is unavailable; using app data.'
     render(
       <WorktreeCreateDialog
         sourceSession={sourceSession}
@@ -52,7 +79,14 @@ describe('WorktreeCreateDialog', () => {
     expect(screen.getByRole('heading', { name: 'Create worktree' })).toBeInTheDocument()
     expect(screen.queryByText('Create isolated AI workspace')).not.toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'Fix Login' } })
-    expect(screen.getByText('App data/worktrees/manual/fix-login-<id>')).toBeInTheDocument()
+    const managedFolder = await screen.findByText('E:\\VibeLinkWorktrees\\project-01234567\\fix-login-abc12345')
+    expect(managedFolder).toHaveAttribute('title', 'E:\\VibeLinkWorktrees\\project-01234567\\fix-login-abc12345')
+    expect(invoke).toHaveBeenCalledWith('git_worktree_resolve_root', {
+      workspaceFolder: 'E:/repos/project',
+      storage: mocks.storage,
+      name: 'Fix Login',
+    })
+    expect(screen.getByText(/Requested drive is unavailable; using app data/)).toBeInTheDocument()
     expect(screen.getByText('This worktree folder')).toBeInTheDocument()
     expect(screen.getByText(/Uncommitted source changes are not copied/)).toBeInTheDocument()
     expect(screen.getByText(/Branches and Git history are shared/)).toBeInTheDocument()

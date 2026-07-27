@@ -6,10 +6,17 @@ import type { SessionMeta } from '../../ipc/types'
 import type { WorkspaceGroup } from '../../state/workspaceGroups'
 import { clearOpenContentSnapshot, publishOpenContentSnapshot } from '../../layout/openContentRegistry'
 
-const { open, invoke } = vi.hoisted(() => ({ open: vi.fn(), invoke: vi.fn() }))
+const { open, invoke, choiceDialog, confirmDialog, promptDialog } = vi.hoisted(() => ({
+  open: vi.fn(),
+  invoke: vi.fn(),
+  choiceDialog: vi.fn(),
+  confirmDialog: vi.fn(),
+  promptDialog: vi.fn(),
+}))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open }))
+vi.mock('../appDialogStore', () => ({ choiceDialog, confirmDialog, promptDialog }))
 
 const mocks = vi.hoisted(() => ({
   state: {
@@ -25,6 +32,7 @@ const mocks = vi.hoisted(() => ({
       defaultProfileId: 'codex',
       profiles: [],
       workspaceProfileIds: {} as Record<string, string>,
+      worktreeStorage: { mode: 'drive', drive: '', folderName: 'VibeLinkWorktrees', customRoot: '', groupByRepository: true },
       workspaceWorktrees: {} as Record<string, {
         parentSessionId: string
         sourceWorkspaceFolder: string
@@ -50,6 +58,8 @@ const mocks = vi.hoisted(() => ({
     })),
     renameSession: vi.fn(async () => undefined),
     createWorktreeSession: vi.fn(async () => undefined),
+    moveWorktreeSession: vi.fn(async () => undefined),
+    removeWorktreeSession: vi.fn(async () => undefined),
     reorderWorkspaces: vi.fn(),
     renameWorkspaceGroup: vi.fn(),
     deleteWorkspaceGroup: vi.fn(),
@@ -76,6 +86,7 @@ const integration = {
   onImportReposRequested: vi.fn(),
   onDeleteWorkspaceRequested: vi.fn(),
   onEditWorkspaceRequested: vi.fn(),
+  setWorkspaceOverlayOpen: vi.fn(),
 }
 
 function renderSidebar() {
@@ -89,6 +100,23 @@ function clickWorkspaceRow(row: HTMLElement, pointerId = 1) {
   })
   fireEvent.pointerDown(row, { button: 0, pointerId, clientY: 100 })
   fireEvent.pointerUp(row, { button: 0, pointerId, clientY: 100 })
+}
+
+function seedBetaWorktree() {
+  mocks.state.sessions = [
+    ...mocks.state.sessions,
+    { id: 'beta-worktree', name: 'Fix Login', paneCount: 1, createdAt: 5, workspaceFolder: 'E:/worktrees/fix-login' },
+  ]
+  mocks.state.settings.workspaceWorktrees = {
+    'beta-worktree': {
+      parentSessionId: 'beta',
+      sourceWorkspaceFolder: 'E:/repos/beta',
+      worktreePath: 'E:/worktrees/fix-login',
+      branch: 'vibelink/fix-login',
+      startRef: 'HEAD',
+      createdAt: '2026-07-27T00:00:00.000Z',
+    },
+  }
 }
 
 describe('WorkspacesSidebar', () => {
@@ -110,8 +138,15 @@ describe('WorkspacesSidebar', () => {
     clearOpenContentSnapshot()
     vi.clearAllMocks()
     open.mockReset().mockResolvedValue(null)
-    invoke.mockReset().mockResolvedValue(true)
-    mocks.state.openSession.mockReset().mockResolvedValue(undefined)
+    invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === 'git_is_available') return true
+      if (command === 'git_worktree_resolve_root') return { root: 'E:/VibeLinkWorktrees', example: 'E:/VibeLinkWorktrees/beta-12345678/<name>-abc12345', writable: true, fallbackReason: null }
+      if (command === 'git_worktree_list') return []
+      return undefined
+    })
+    choiceDialog.mockReset().mockResolvedValue(null)
+    confirmDialog.mockReset().mockResolvedValue(false)
+    promptDialog.mockReset().mockResolvedValue(null)
     mocks.state.createSession.mockReset().mockImplementation(async (name?: string, workspaceFolder?: string | null): Promise<SessionMeta> => ({
       id: `created-${name}`,
       name: name ?? '',
@@ -212,20 +247,7 @@ describe('WorkspacesSidebar', () => {
   })
 
   test('nests worktree sessions and opens creation from the repository context menu', async () => {
-    mocks.state.sessions = [
-      ...mocks.state.sessions,
-      { id: 'beta-worktree', name: 'Fix Login', paneCount: 1, createdAt: 5, workspaceFolder: 'E:/worktrees/fix-login' },
-    ]
-    mocks.state.settings.workspaceWorktrees = {
-      'beta-worktree': {
-        parentSessionId: 'beta',
-        sourceWorkspaceFolder: 'E:/repos/beta',
-        worktreePath: 'E:/worktrees/fix-login',
-        branch: 'vibelink/fix-login',
-        startRef: 'HEAD',
-        createdAt: '2026-07-27T00:00:00.000Z',
-      },
-    }
+    seedBetaWorktree()
     renderSidebar()
 
     const betaRow = screen.getByText('Beta').closest('[data-session-id]') as HTMLElement
@@ -237,6 +259,54 @@ describe('WorkspacesSidebar', () => {
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_is_available', { workspaceFolder: 'E:/repos/beta' }))
     expect(screen.getByRole('dialog', { name: 'Create worktree' })).toBeInTheDocument()
+  })
+
+  test('reveals a worktree checkout from its row action', async () => {
+    seedBetaWorktree()
+    renderSidebar()
+
+    const worktreeRow = screen.getByText('Fix Login').closest('[data-session-id]') as HTMLElement
+    fireEvent.click(within(worktreeRow).getByRole('button', { name: 'Reveal Fix Login in File Explorer' }))
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('reveal_path', { path: 'E:/worktrees/fix-login' }))
+  })
+
+  test('removes a worktree through the worktree lifecycle instead of plain workspace deletion', async () => {
+    seedBetaWorktree()
+    choiceDialog.mockResolvedValue('checkout-and-branch')
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'git_worktree_list') return [{
+        worktreePath: 'E:/worktrees/fix-login',
+        branch: 'vibelink/fix-login',
+        head: 'a'.repeat(40),
+        isMain: false,
+        locked: false,
+        prunable: false,
+        dirty: true,
+        exists: true,
+      }]
+      return undefined
+    })
+    renderSidebar()
+
+    const worktreeRow = screen.getByText('Fix Login').closest('[data-session-id]') as HTMLElement
+    fireEvent.click(within(worktreeRow).getByRole('button', { name: 'Remove worktree Fix Login' }))
+
+    await waitFor(() => expect(mocks.state.removeWorktreeSession).toHaveBeenCalledWith('beta-worktree', { deleteBranch: true, force: true }))
+    expect(integration.onDeleteWorkspaceRequested).not.toHaveBeenCalled()
+  })
+
+  test('opens Manage worktrees from a worktree context menu for its parent repository', async () => {
+    seedBetaWorktree()
+    renderSidebar()
+
+    const worktreeRow = screen.getByText('Fix Login').closest('[data-session-id]') as HTMLElement
+    fireEvent.contextMenu(worktreeRow, { clientX: 120, clientY: 140 })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage worktrees' }))
+
+    expect(screen.getByRole('dialog', { name: 'Manage worktrees' })).toBeInTheDocument()
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_worktree_list', { workspaceFolder: 'E:/repos/beta' }))
+    expect(integration.setWorkspaceOverlayOpen).toHaveBeenCalledWith('worktree-manage', true)
   })
 
   test('creates, groups, and opens a root workspace once during a fast double click', async () => {

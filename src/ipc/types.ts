@@ -75,6 +75,31 @@ export type ChangedFile = {
 
 export type FileContents = { old: string; new: string; binary: boolean }
 
+export type WorktreeStorageMode = 'drive' | 'appData' | 'custom'
+
+export type WorktreeStorage = {
+  mode: WorktreeStorageMode
+  drive: string
+  folderName: string
+  customRoot: string
+  groupByRepository: boolean
+}
+
+export type WorktreeStorageOptions = { drives: string[]; appDataRoot: string }
+
+export type WorktreeStorageResolution = { root: string; example: string; writable: boolean; fallbackReason: string | null }
+
+export type WorktreeEntry = {
+  worktreePath: string
+  branch: string
+  head: string
+  isMain: boolean
+  locked: boolean
+  prunable: boolean
+  dirty: boolean
+  exists: boolean
+}
+
 export type WorktreeInfo = { worktreePath: string; branch: string }
 
 export type RepoState = 'clean' | 'merging' | 'rebasing' | 'cherryPicking' | 'reverting'

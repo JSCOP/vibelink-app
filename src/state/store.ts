@@ -119,6 +119,8 @@ type WorkspaceState = {
   refreshAttachedSession: (sessionId: string) => Promise<AttachedSession | null>
   createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
   createWorktreeSession: (input: CreateWorkspaceWorktreeInput) => Promise<SessionMeta>
+  removeWorktreeSession: (sessionId: string, options: { deleteBranch: boolean; force: boolean }) => Promise<void>
+  moveWorktreeSession: (sessionId: string, destinationPath: string) => Promise<void>
   renameSession: (sessionId: string, name: string) => Promise<void>
   setSessionWorkspaceFolder: (sessionId: string, workspaceFolder: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
@@ -399,6 +401,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       name,
       startRef,
       branch,
+      storage: get().settings.worktreeStorage,
     })
     try {
       const created = await get().createSession(name, worktree.worktreePath, input.profileId)
@@ -429,10 +432,47 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         workspaceFolder: sourceWorkspaceFolder,
         worktreePath: worktree.worktreePath,
         branch: worktree.branch,
+        deleteBranch: true,
         force: true,
       }).catch(() => undefined)
       throw error
     }
+  },
+
+  removeWorktreeSession: async (sessionId, options) => {
+    const worktree = get().settings.workspaceWorktrees[sessionId]
+    if (!worktree) throw new Error(`Workspace session "${sessionId}" is not a recorded worktree.`)
+    await invoke('git_worktree_remove', {
+      workspaceFolder: worktree.sourceWorkspaceFolder,
+      worktreePath: worktree.worktreePath,
+      branch: worktree.branch,
+      force: options.force,
+      deleteBranch: options.deleteBranch,
+    })
+    await get().deleteSession(sessionId)
+  },
+
+  moveWorktreeSession: async (sessionId, destinationPath) => {
+    const worktree = get().settings.workspaceWorktrees[sessionId]
+    if (!worktree) throw new Error(`Workspace session "${sessionId}" is not a recorded worktree.`)
+    const destination = normalizeWorkspaceFolder(destinationPath)
+    if (!destination) throw new Error('Worktree destination path is required.')
+    const moved = await invoke<WorktreeInfo>('git_worktree_move', {
+      workspaceFolder: worktree.sourceWorkspaceFolder,
+      worktreePath: worktree.worktreePath,
+      destinationPath: destination,
+    })
+    await get().setSessionWorkspaceFolder(sessionId, moved.worktreePath)
+    const settings = get().settings
+    get().updateSettings({
+      workspaceWorktrees: {
+        ...settings.workspaceWorktrees,
+        [sessionId]: {
+          ...(settings.workspaceWorktrees[sessionId] ?? worktree),
+          worktreePath: moved.worktreePath,
+        },
+      },
+    })
   },
 
   renameSession: async (sessionId: string, name: string) => {

@@ -2,14 +2,15 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderPlus, GitBranch, Pencil, Plus, Trash2 } from 'lucide-react'
-import type { SessionMeta } from '../../ipc/types'
+import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderGit2, FolderOpen, FolderPlus, GitBranch, Pencil, Plus, Trash2 } from 'lucide-react'
+import type { SessionMeta, WorktreeEntry } from '../../ipc/types'
 import { paneCompletionCountsBySession, useWorkspaceStore } from '../../state/store'
 import { flattenWorkspaceRows, workspaceRootSessions, workspaceRows, type WorkspaceGroup, type WorkspaceSessionNode, type WorkspaceWorktreeNode } from '../../state/workspaceGroups'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
+import { choiceDialog, promptDialog } from '../appDialogStore'
 import { OpenWorkspaceItems } from './OpenWorkspaceItems'
 import { WorktreeCreateDialog } from './WorktreeCreateDialog'
-import { promptDialog } from '../appDialogStore'
+import { WorktreeManageDialog } from './WorktreeManageDialog'
 
 export type WorkspacesSidebarIntegration = {
   onCreateWorkspaceRequested?: () => void
@@ -43,7 +44,9 @@ type MembershipDropTarget =
   | { kind: 'group'; groupId: string }
   | { kind: 'ungrouped' }
 
-type WorkspaceContextMenu = { session: SessionMeta; x: number; y: number }
+type WorkspaceContextMenu =
+  | { kind: 'repository'; session: SessionMeta; x: number; y: number }
+  | { kind: 'worktree'; session: SessionMeta; parentSession: SessionMeta; worktree: WorkspaceWorktreeNode['worktree']; x: number; y: number }
 function reorderIds(ids: string[], sourceId: string, targetId: string, place: 'before' | 'after'): string[] {
   if (sourceId === targetId) return ids
   const without = ids.filter((id) => id !== sourceId)
@@ -90,6 +93,7 @@ function workspaceFolderBasename(workspaceFolder: string | null | undefined): st
   return normalized.slice(separator + 1)
 }
 
+
 export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse, integration }: WorkspacesSidebarProps) {
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
@@ -104,6 +108,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const openSession = useWorkspaceStore((state) => state.openSession)
   const createSession = useWorkspaceStore((state) => state.createSession)
   const createWorktreeSession = useWorkspaceStore((state) => state.createWorktreeSession)
+  const removeWorktreeSession = useWorkspaceStore((state) => state.removeWorktreeSession)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const renameWorkspaceGroup = useWorkspaceStore((state) => state.renameWorkspaceGroup)
   const deleteWorkspaceGroup = useWorkspaceStore((state) => state.deleteWorkspaceGroup)
@@ -127,12 +132,18 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [membershipDropTarget, setMembershipDropTarget] = useState<MembershipDropTarget | null>(null)
   const [worktreeSource, setWorktreeSource] = useState<SessionMeta | null>(null)
+  const [worktreeManageSource, setWorktreeManageSource] = useState<SessionMeta | null>(null)
   const [contextMenu, setContextMenu] = useState<WorkspaceContextMenu | null>(null)
 
   useEffect(() => {
     integration.setWorkspaceOverlayOpen?.('worktree-create', Boolean(worktreeSource))
     return () => integration.setWorkspaceOverlayOpen?.('worktree-create', false)
   }, [integration, worktreeSource])
+
+  useEffect(() => {
+    integration.setWorkspaceOverlayOpen?.('worktree-manage', Boolean(worktreeManageSource))
+    return () => integration.setWorkspaceOverlayOpen?.('worktree-manage', false)
+  }, [integration, worktreeManageSource])
 
   const selectWorkspace = async (sessionId: string) => {
     if (sessionId === activeSessionId) return
@@ -150,6 +161,52 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
       const available = await invoke<boolean>('git_is_available', { workspaceFolder })
       if (!available) throw new Error('The selected workspace folder is not inside a Git repository.')
       setWorktreeSource(session)
+    } catch (caught) {
+      setError(String(caught))
+    }
+  }
+
+  const requestManageWorktrees = (session: SessionMeta) => {
+    setContextMenu(null)
+    if (!session.workspaceFolder?.trim()) {
+      setError('This workspace needs a repository folder before it can manage worktrees.')
+      return
+    }
+    setWorktreeManageSource(session)
+  }
+
+  const revealWorktree = async (session: SessionMeta) => {
+    const path = session.workspaceFolder?.trim()
+    if (!path) {
+      setError('This worktree workspace has no checkout folder to reveal.')
+      return
+    }
+    try {
+      await invoke('reveal_path', { path })
+    } catch (caught) {
+      setError(String(caught))
+    }
+  }
+
+  const removeWorktree = async (session: SessionMeta, worktree: WorkspaceWorktreeNode['worktree']) => {
+    setContextMenu(null)
+    try {
+      const entries = await invoke<WorktreeEntry[]>('git_worktree_list', { workspaceFolder: worktree.sourceWorkspaceFolder })
+      const path = worktree.worktreePath.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      const dirty = entries.find((entry) => entry.worktreePath.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === path)?.dirty ?? false
+      const choice = await choiceDialog({
+        title: `Remove ${session.name} worktree`,
+        message: dirty
+          ? `Uncommitted changes in "${worktree.worktreePath}" will be lost. Removal uses force.`
+          : `Remove the checkout at "${worktree.worktreePath}"?`,
+        choices: [
+          { id: 'checkout', label: 'Remove checkout', tone: 'danger' },
+          { id: 'checkout-and-branch', label: 'Remove checkout and branch', tone: 'danger' },
+        ],
+        cancelLabel: 'Cancel',
+      })
+      if (!choice) return
+      await removeWorktreeSession(session.id, { deleteBranch: choice === 'checkout-and-branch', force: dirty })
     } catch (caught) {
       setError(String(caught))
     }
@@ -265,7 +322,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     void Promise.resolve(integration.onDeleteWorkspaceRequested(sessionId)).catch((caught) => setError(String(caught)))
   }
 
-  const renderWorktree = ({ session, worktree }: WorkspaceWorktreeNode) => {
+  const renderWorktree = ({ session, worktree }: WorkspaceWorktreeNode, parentSession: SessionMeta) => {
     const position = orderBySessionId.get(session.id) ?? 0
     const completionCount = completionCounts[session.id] ?? 0
     const folderName = workspaceFolderBasename(session.workspaceFolder)
@@ -278,6 +335,11 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         role="button"
         tabIndex={0}
         aria-current={session.id === activeSessionId ? 'true' : undefined}
+        onContextMenu={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          setContextMenu({ kind: 'worktree', session, parentSession, worktree, x: event.clientX, y: event.clientY })
+        }}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => { event.stopPropagation(); void selectWorkspace(session.id) }}
         onKeyDown={(event) => {
@@ -302,10 +364,13 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
         </div>
         <div className="workspaces-row-actions">
-          <button type="button" title="Edit worktree workspace details" aria-label={`Edit ${session.name}`} className="session-small-action" disabled={!integration.onEditWorkspaceRequested} onClick={() => integration.onEditWorkspaceRequested?.(session.id)}>
+          <button type="button" title="Reveal in File Explorer" aria-label={`Reveal ${session.name} in File Explorer`} className="session-small-action" disabled={!session.workspaceFolder} onClick={(event) => { event.stopPropagation(); void revealWorktree(session) }}>
+            <FolderOpen size={13} strokeWidth={1.7} aria-hidden="true" />
+          </button>
+          <button type="button" title="Edit worktree workspace details" aria-label={`Edit ${session.name}`} className="session-small-action" disabled={!integration.onEditWorkspaceRequested} onClick={(event) => { event.stopPropagation(); integration.onEditWorkspaceRequested?.(session.id) }}>
             <Pencil size={13} strokeWidth={1.7} aria-hidden="true" />
           </button>
-          <button type="button" title="Delete workspace entry" aria-label={`Delete ${session.name}`} className="session-small-action danger" disabled={!integration.onDeleteWorkspaceRequested} onClick={() => deleteWorkspace(session.id)}>
+          <button type="button" title="Remove worktree" aria-label={`Remove worktree ${session.name}`} className="session-small-action danger" onClick={(event) => { event.stopPropagation(); void removeWorktree(session, worktree) }}>
             <Trash2 size={13} aria-hidden="true" />
           </button>
         </div>
@@ -343,7 +408,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         onContextMenu={(event) => {
           event.preventDefault()
           event.stopPropagation()
-          setContextMenu({ session, x: event.clientX, y: event.clientY })
+          setContextMenu({ kind: 'repository', session, x: event.clientX, y: event.clientY })
         }}
         onPointerDown={(event) => onRowPointerDown(event, session.id)}
         onPointerMove={onRowPointerMove}
@@ -381,7 +446,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           </button>
         </div>
         {session.id === activeSessionId ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
-        {node.worktrees.length > 0 ? <div className="workspace-worktree-list" role="group" aria-label={`${session.name} worktrees`}>{node.worktrees.map(renderWorktree)}</div> : null}
+        {node.worktrees.length > 0 ? <div className="workspace-worktree-list" role="group" aria-label={`${session.name} worktrees`}>{node.worktrees.map((worktree) => renderWorktree(worktree, session))}</div> : null}
       </div>
     )
   }
@@ -493,22 +558,41 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         <div
           className="workspace-context-menu"
           role="menu"
-          aria-label={`${contextMenu.session.name} workspace actions`}
+          aria-label={contextMenu.kind === 'repository' ? `${contextMenu.session.name} workspace actions` : `${contextMenu.session.name} worktree actions`}
           style={{
             left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)),
-            top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 132)),
+            top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenu.kind === 'repository' ? 164 : 132))),
           }}
           onMouseDown={(event) => event.stopPropagation()}
         >
-          <button type="button" role="menuitem" onClick={() => void requestWorktree(contextMenu.session)}>
-            <GitBranch size={14} aria-hidden="true" />Create worktree
-          </button>
-          <button type="button" role="menuitem" disabled={!integration.onEditWorkspaceRequested} onClick={() => { integration.onEditWorkspaceRequested?.(contextMenu.session.id); setContextMenu(null) }}>
-            <Pencil size={14} aria-hidden="true" />Edit workspace
-          </button>
-          <button type="button" role="menuitem" className="danger" disabled={!integration.onDeleteWorkspaceRequested} onClick={() => { deleteWorkspace(contextMenu.session.id); setContextMenu(null) }}>
-            <Trash2 size={14} aria-hidden="true" />Delete workspace
-          </button>
+          {contextMenu.kind === 'repository' ? (
+            <>
+              <button type="button" role="menuitem" onClick={() => void requestWorktree(contextMenu.session)}>
+                <GitBranch size={14} aria-hidden="true" />Create worktree
+              </button>
+              <button type="button" role="menuitem" onClick={() => requestManageWorktrees(contextMenu.session)}>
+                <FolderGit2 size={14} aria-hidden="true" />Manage worktrees
+              </button>
+              <button type="button" role="menuitem" disabled={!integration.onEditWorkspaceRequested} onClick={() => { integration.onEditWorkspaceRequested?.(contextMenu.session.id); setContextMenu(null) }}>
+                <Pencil size={14} aria-hidden="true" />Edit workspace
+              </button>
+              <button type="button" role="menuitem" className="danger" disabled={!integration.onDeleteWorkspaceRequested} onClick={() => { deleteWorkspace(contextMenu.session.id); setContextMenu(null) }}>
+                <Trash2 size={14} aria-hidden="true" />Delete workspace
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" role="menuitem" disabled={!contextMenu.session.workspaceFolder} onClick={() => { const session = contextMenu.session; setContextMenu(null); void revealWorktree(session) }}>
+                <FolderOpen size={14} aria-hidden="true" />Reveal in File Explorer
+              </button>
+              <button type="button" role="menuitem" onClick={() => requestManageWorktrees(contextMenu.parentSession)}>
+                <FolderGit2 size={14} aria-hidden="true" />Manage worktrees
+              </button>
+              <button type="button" role="menuitem" className="danger" onClick={() => void removeWorktree(contextMenu.session, contextMenu.worktree)}>
+                <Trash2 size={14} aria-hidden="true" />Remove worktree…
+              </button>
+            </>
+          )}
         </div>
       </div>,
       document.body,
@@ -524,6 +608,10 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         }}
         onClose={() => setWorktreeSource(null)}
       />,
+      document.body,
+    ) : null}
+    {worktreeManageSource && typeof document !== 'undefined' ? createPortal(
+      <WorktreeManageDialog sourceSession={worktreeManageSource} onClose={() => setWorktreeManageSource(null)} />,
       document.body,
     ) : null}
     </>

@@ -265,9 +265,16 @@ describe('workspace store profiles', () => {
       createdAt: 126,
       workspaceFolder: 'E:/managed-worktrees/fix-login-abcd1234',
     }
+    const worktreeStorage = {
+      mode: 'custom' as const,
+      drive: 'E:',
+      folderName: 'TeamWorktrees',
+      customRoot: 'E:/managed-worktrees',
+      groupByRepository: false,
+    }
     useWorkspaceStore.setState({
       sessions: [createdSession],
-      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceOrder: [createdSession.id] }),
+      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceOrder: [createdSession.id], worktreeStorage }),
     })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'git_worktree_create_named') return {
@@ -295,6 +302,7 @@ describe('workspace store profiles', () => {
       name: 'Fix Login',
       startRef: 'origin/main',
       branch: 'vibelink/fix-login',
+      storage: worktreeStorage,
     })
     expect(invoke).toHaveBeenCalledWith('spawn_pane', {
       sessionId: childSession.id,
@@ -308,6 +316,128 @@ describe('workspace store profiles', () => {
       startRef: 'origin/main',
     })
     expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual([createdSession.id, childSession.id])
+    expect(localStorageStub.setItem).toHaveBeenCalledWith('vibelink:settings', expect.stringContaining('"folderName":"TeamWorktrees"'))
+  })
+
+  test('removes a recorded worktree before deleting its workspace session', async () => {
+    const worktreeSession: SessionMeta = {
+      id: 'session-worktree',
+      name: 'Fix Login',
+      paneCount: 0,
+      createdAt: 126,
+      workspaceFolder: 'E:/managed-worktrees/fix-login',
+    }
+    const relation = {
+      parentSessionId: createdSession.id,
+      sourceWorkspaceFolder: 'E:/repo',
+      worktreePath: worktreeSession.workspaceFolder as string,
+      branch: 'vibelink/fix-login',
+      startRef: 'origin/main',
+      createdAt: '2026-07-27T00:00:00.000Z',
+    }
+    useWorkspaceStore.setState({
+      sessions: [createdSession, worktreeSession],
+      activeSessionId: createdSession.id,
+      settings: normalizeSettings({
+        ...useWorkspaceStore.getState().settings,
+        workspaceWorktrees: { [worktreeSession.id]: relation },
+        workspaceOrder: [createdSession.id, worktreeSession.id],
+      }),
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'list_sessions') return [createdSession]
+      return null
+    })
+
+    await useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: true, force: false })
+
+    expect(invoke).toHaveBeenCalledWith('git_worktree_remove', {
+      workspaceFolder: relation.sourceWorkspaceFolder,
+      worktreePath: relation.worktreePath,
+      branch: relation.branch,
+      force: false,
+      deleteBranch: true,
+    })
+    expect(invoke).toHaveBeenCalledWith('delete_session', { sessionId: worktreeSession.id })
+    expect(useWorkspaceStore.getState().sessions).toEqual([createdSession])
+    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[worktreeSession.id]).toBeUndefined()
+  })
+
+  test('keeps a worktree session when Git removal fails', async () => {
+    const worktreeSession: SessionMeta = {
+      id: 'session-worktree',
+      name: 'Fix Login',
+      paneCount: 0,
+      createdAt: 126,
+      workspaceFolder: 'E:/managed-worktrees/fix-login',
+    }
+    const relation = {
+      parentSessionId: createdSession.id,
+      sourceWorkspaceFolder: 'E:/repo',
+      worktreePath: worktreeSession.workspaceFolder as string,
+      branch: 'vibelink/fix-login',
+      startRef: 'origin/main',
+      createdAt: '2026-07-27T00:00:00.000Z',
+    }
+    useWorkspaceStore.setState({
+      sessions: [createdSession, worktreeSession],
+      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceWorktrees: { [worktreeSession.id]: relation } }),
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'git_worktree_remove') throw new Error('worktree is locked')
+      return null
+    })
+
+    await expect(useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: false, force: true }))
+      .rejects.toThrow('worktree is locked')
+
+    expect(invoke).not.toHaveBeenCalledWith('delete_session', expect.anything())
+    expect(useWorkspaceStore.getState().sessions).toContainEqual(worktreeSession)
+    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[worktreeSession.id]).toEqual(relation)
+  })
+
+  test('moves a recorded worktree and updates its workspace folder metadata', async () => {
+    const worktreeSession: SessionMeta = {
+      id: 'session-worktree',
+      name: 'Fix Login',
+      paneCount: 0,
+      createdAt: 126,
+      workspaceFolder: 'E:/managed-worktrees/fix-login',
+    }
+    const relation = {
+      parentSessionId: createdSession.id,
+      sourceWorkspaceFolder: 'E:/repo',
+      worktreePath: worktreeSession.workspaceFolder as string,
+      branch: 'vibelink/fix-login',
+      startRef: 'origin/main',
+      createdAt: '2026-07-27T00:00:00.000Z',
+    }
+    const movedPath = 'E:/target/fix-login-normalized'
+    const movedSession = { ...worktreeSession, workspaceFolder: movedPath }
+    useWorkspaceStore.setState({
+      sessions: [createdSession, worktreeSession],
+      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceWorktrees: { [worktreeSession.id]: relation } }),
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'git_worktree_move') return { worktreePath: movedPath, branch: relation.branch }
+      if (command === 'list_sessions') return [createdSession, movedSession]
+      return null
+    })
+
+    await useWorkspaceStore.getState().moveWorktreeSession(worktreeSession.id, '  E:/target/fix-login  ')
+
+    expect(invoke).toHaveBeenCalledWith('git_worktree_move', {
+      workspaceFolder: relation.sourceWorkspaceFolder,
+      worktreePath: relation.worktreePath,
+      destinationPath: 'E:/target/fix-login',
+    })
+    expect(invoke).toHaveBeenCalledWith('set_session_workspace_folder', {
+      sessionId: worktreeSession.id,
+      workspaceFolder: movedPath,
+    })
+    expect(useWorkspaceStore.getState().sessions).toContainEqual(movedSession)
+    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[worktreeSession.id].worktreePath).toBe(movedPath)
+    expect(localStorageStub.setItem).toHaveBeenCalledWith('vibelink:settings', expect.stringContaining(movedPath))
   })
 
   test('adds a local folder to an existing folderless workspace', async () => {

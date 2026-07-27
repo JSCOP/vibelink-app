@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Archive, Bell, Bot, Box, ChevronDown, GitPullRequest, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, Trash2, Upload, X } from 'lucide-react'
+import { Archive, Bell, Bot, Box, ChevronDown, GitBranch, GitPullRequest, HardDrive, Info, KeyRound, MessageSquare, Mic, Monitor, Palette, Play, Plug, RefreshCw, Search, Settings2, Shield, SlidersHorizontal, Smartphone, Terminal, Trash2, Upload, X } from 'lucide-react'
 import { LicenseSettings } from './LicenseSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
@@ -15,7 +15,7 @@ import { TerminalManager } from '../terminal/TerminalManager'
 import { ThemePicker } from './ThemePicker'
 import { FontPicker } from './FontPicker'
 import { useWorkspaceStore } from '../state/store'
-import type { HermesRuntimeStatus, HermesWorkspaceState } from '../ipc/types'
+import type { HermesRuntimeStatus, HermesWorkspaceState, WorktreeStorage, WorktreeStorageOptions, WorktreeStorageResolution } from '../ipc/types'
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
 import { GitHostingSettings } from './GitHostingSettings'
@@ -44,11 +44,14 @@ type SettingsSection =
   | 'memory'
   | 'voice'
   | 'advanced'
+  | 'worktrees'
   | 'messaging'
   | 'apiKeys'
   | 'mcp'
   | 'archived'
   | 'about'
+
+type WorktreeStorageChoice = 'sameDrive' | 'specificDrive' | 'appData' | 'custom'
 
 const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[] = [
   { id: 'account', label: 'Account', icon: KeyRound },
@@ -64,6 +67,7 @@ const sections: { id: SettingsSection; label: string; icon: typeof Settings2 }[]
   { id: 'memory', label: 'Memory & Context', icon: HardDrive },
   { id: 'voice', label: 'Voice', icon: Mic },
   { id: 'advanced', label: 'Advanced', icon: SlidersHorizontal },
+  { id: 'worktrees', label: 'Worktrees', icon: GitBranch },
   { id: 'messaging', label: 'Messaging', icon: MessageSquare },
   { id: 'apiKeys', label: 'API Keys', icon: KeyRound },
   { id: 'mcp', label: 'MCP', icon: Box },
@@ -127,10 +131,20 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const [customCompletionSounds, setCustomCompletionSounds] = useState<CustomCompletionSound[]>([])
   const [completionSoundMessage, setCompletionSoundMessage] = useState('')
   const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
+  const [worktreeStorageOptions, setWorktreeStorageOptions] = useState<WorktreeStorageOptions>({ drives: [], appDataRoot: '' })
+  const [worktreeResolution, setWorktreeResolution] = useState<WorktreeStorageResolution | null>(null)
+  const [worktreeResolutionError, setWorktreeResolutionError] = useState('')
+  const worktreeResolutionRequestRef = useRef(0)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const activeSession = activeSessionId ? sessions.find((session) => session.id === activeSessionId) : undefined
+  const activeWorkspaceFolder = activeSession?.workspaceFolder?.trim() ?? ''
+  const worktreeStorageChoice: WorktreeStorageChoice = draft.worktreeStorage.mode === 'drive'
+    ? draft.worktreeStorage.drive ? 'specificDrive' : 'sameDrive'
+    : draft.worktreeStorage.mode
+  const worktreeDriveOptions = [...new Set([draft.worktreeStorage.drive, ...worktreeStorageOptions.drives].filter(Boolean))]
+    .map((drive) => ({ value: drive, label: drive }))
   const checkMcp = async () => {
     if (!activeSessionId) return
     setMcpCheckBusy(true)
@@ -164,6 +178,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     void invoke<string>('default_capture_dir')
       .then((dir) => { if (!cancelled) setDefaultCaptureDir(dir) })
       .catch(() => { if (!cancelled) setDefaultCaptureDir('') })
+    void invoke<WorktreeStorageOptions>('git_worktree_storage_options')
+      .then((options) => { if (!cancelled) setWorktreeStorageOptions(options) })
+      .catch(() => { if (!cancelled) setWorktreeStorageOptions({ drives: [], appDataRoot: '' }) })
     return () => { cancelled = true }
   }, [])
 
@@ -189,7 +206,35 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     return () => { cancelled = true }
   }, [activeSection])
 
+  useEffect(() => {
+    const requestId = ++worktreeResolutionRequestRef.current
+    if (activeSection !== 'worktrees' || !activeWorkspaceFolder) return
+    const timer = window.setTimeout(() => {
+      if (worktreeResolutionRequestRef.current !== requestId) return
+      void invoke<WorktreeStorageResolution>('git_worktree_resolve_root', {
+        workspaceFolder: activeWorkspaceFolder,
+        storage: draft.worktreeStorage,
+        name: 'example',
+      })
+        .then((resolution) => {
+          if (worktreeResolutionRequestRef.current !== requestId) return
+          setWorktreeResolution(resolution)
+          setWorktreeResolutionError('')
+        })
+        .catch((error) => {
+          if (worktreeResolutionRequestRef.current !== requestId) return
+          setWorktreeResolution(null)
+          setWorktreeResolutionError(String(error))
+        })
+    }, 150)
+    return () => {
+      window.clearTimeout(timer)
+      if (worktreeResolutionRequestRef.current === requestId) worktreeResolutionRequestRef.current += 1
+    }
+  }, [activeSection, activeWorkspaceFolder, draft.worktreeStorage])
+
   const patchDraft = (patch: Partial<Settings>) => setDraft((current) => ({ ...current, ...patch }))
+  const patchWorktreeStorage = (patch: Partial<WorktreeStorage>) => patchDraft({ worktreeStorage: { ...draft.worktreeStorage, ...patch } })
   const previewHighlightColors = (patch: Partial<Pick<Settings, 'selectedPaneHighlightColor' | 'alarmHighlightColor' | 'reviewedPaneHighlightColor'>>) => {
     const selectedPaneHighlightColor = patch.selectedPaneHighlightColor ?? draft.selectedPaneHighlightColor
     const alarmHighlightColor = patch.alarmHighlightColor ?? draft.alarmHighlightColor
@@ -322,6 +367,10 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const browseCaptureDir = async () => {
     const selected = await open({ directory: true, multiple: false, title: 'Select capture folder' })
     if (typeof selected === 'string') patchDraft({ captureDir: selected })
+  }
+  const browseWorktreeRoot = async () => {
+    const selected = await open({ directory: true, multiple: false, title: 'Select worktree folder' })
+    if (typeof selected === 'string') patchWorktreeStorage({ customRoot: selected })
   }
   const previewCompletionSound = async (soundId: CompletionSoundId = draft.completionSoundId) => {
     setCompletionSoundMessage('')
@@ -796,6 +845,55 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                 </SettingsGroup>
                 <AndroidDeviceLabPanel />
               </>
+            ) : null}
+
+            {activeSection === 'worktrees' ? (
+              <SettingsGroup title="Worktree storage" description="Choose where VibeLink creates managed Git worktrees.">
+                <SettingsSelect
+                  label="Storage mode"
+                  value={worktreeStorageChoice}
+                  options={[
+                    { value: 'sameDrive', label: 'Same drive as repository' },
+                    { value: 'specificDrive', label: 'Specific drive' },
+                    { value: 'appData', label: 'App data folder' },
+                    { value: 'custom', label: 'Custom folder' },
+                  ]}
+                  onChange={(value) => {
+                    const choice = value as WorktreeStorageChoice
+                    if (choice === 'sameDrive') patchWorktreeStorage({ mode: 'drive', drive: '' })
+                    else if (choice === 'specificDrive') patchWorktreeStorage({ mode: 'drive', drive: draft.worktreeStorage.drive || worktreeStorageOptions.drives[0] || '' })
+                    else patchWorktreeStorage({ mode: choice })
+                  }}
+                />
+                {worktreeStorageChoice === 'specificDrive' ? (
+                  <SettingsSelect label="Drive" value={draft.worktreeStorage.drive} options={worktreeDriveOptions} onChange={(drive) => patchWorktreeStorage({ drive })} />
+                ) : null}
+                {draft.worktreeStorage.mode === 'drive' ? (
+                  <label>
+                    Root folder name
+                    <input value={draft.worktreeStorage.folderName} onChange={(event) => patchWorktreeStorage({ folderName: event.target.value })} />
+                  </label>
+                ) : null}
+                {draft.worktreeStorage.mode === 'custom' ? (
+                  <div className="worktree-settings-path">
+                    <label>
+                      Custom folder
+                      <input value={draft.worktreeStorage.customRoot} onChange={(event) => patchWorktreeStorage({ customRoot: event.target.value })} />
+                    </label>
+                    <button type="button" onClick={() => void browseWorktreeRoot()}>Browse</button>
+                  </div>
+                ) : null}
+                <SettingsToggle label="Group by repository" checked={draft.worktreeStorage.groupByRepository} onChange={(groupByRepository) => patchWorktreeStorage({ groupByRepository })} />
+                <ReadonlyRow
+                  label="Resolved root"
+                  value={worktreeResolution?.root ?? (!activeWorkspaceFolder ? 'Open a repository workspace' : worktreeResolutionError ? 'Unavailable' : 'Resolving…')}
+                  mono
+                />
+                <ReadonlyRow label="Example worktree" value={worktreeResolution?.example ?? '—'} mono />
+                {worktreeResolution?.fallbackReason ? <div className="worktree-settings-warning">{worktreeResolution.fallbackReason}</div> : null}
+                {worktreeResolution && !worktreeResolution.writable && !worktreeResolution.fallbackReason ? <div className="worktree-settings-warning">The resolved worktree root is not writable.</div> : null}
+                {worktreeResolutionError ? <div className="worktree-settings-warning">{worktreeResolutionError}</div> : null}
+              </SettingsGroup>
             ) : null}
 
             {activeSection === 'messaging' ? (

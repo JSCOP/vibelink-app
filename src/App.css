@@ -7039,6 +7039,26 @@ button.git-window-primary-action,
   color: var(--vibelink-danger);
 }
 
+.worktree-settings-path {
+  align-items: end;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.worktree-settings-path input {
+  width: 100%;
+}
+
+.worktree-settings-warning {
+  background: var(--vibelink-warning-soft);
+  border: 1px solid color-mix(in srgb, var(--vibelink-warning) 32%, transparent);
+  border-radius: 4px;
+  color: var(--vibelink-warning);
+  font: 11px/1.4 var(--vibelink-sans);
+  padding: 7px 9px;
+}
+
 .worktree-create-dialog {
   width: min(600px, 100%);
 }
@@ -7170,7 +7190,7 @@ button.git-window-primary-action,
 }
 
 .worktree-create-summary > div {
-  align-items: center;
+  align-items: baseline;
   display: grid;
   gap: 8px;
   grid-template-columns: 88px minmax(0, 1fr);
@@ -7187,13 +7207,13 @@ button.git-window-primary-action,
 .worktree-create-summary strong {
   color: var(--vibelink-text);
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
+/* The resolved storage path is the point of this row, so wrap it instead of
+   truncating; long Windows roots must stay fully readable. */
 .worktree-create-summary code {
-  font: 11px/1.3 var(--vibelink-mono);
+  font: 11px/1.4 var(--vibelink-mono);
+  overflow-wrap: anywhere;
 }
 
 .worktree-create-summary strong {
@@ -7218,6 +7238,10 @@ button.git-window-primary-action,
   margin-top: 1px;
 }
 
+.worktree-create-warning strong {
+  font-weight: 650;
+}
+
 .worktree-create-footer {
   justify-content: flex-end;
 }
@@ -7232,9 +7256,161 @@ button.git-window-primary-action,
   color: var(--vibelink-danger);
 }
 
+.worktree-manage-dialog {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  max-height: min(680px, calc(100vh - 48px));
+  width: min(780px, 100%);
+}
+
+.worktree-manage-list {
+  display: grid;
+  gap: 6px;
+  min-height: 96px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.worktree-manage-row {
+  align-items: center;
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 4px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.worktree-manage-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.worktree-manage-title-line,
+.worktree-manage-badges,
+.worktree-manage-actions,
+.worktree-manage-footer .workspace-create-footer-actions {
+  align-items: center;
+  display: flex;
+}
+
+.worktree-manage-title-line {
+  gap: 7px;
+  min-width: 0;
+}
+
+.worktree-manage-title-line > strong {
+  font: 600 12px/1.25 var(--vibelink-sans);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-manage-badges {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.worktree-manage-badge {
+  border: 1px solid var(--vibelink-border);
+  border-radius: 999px;
+  color: var(--vibelink-muted);
+  font: 9px/1 var(--vibelink-sans);
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+
+.worktree-manage-badge.is-main {
+  border-color: var(--vibelink-accent-border);
+  color: var(--vibelink-accent);
+}
+
+.worktree-manage-badge.is-warning {
+  border-color: color-mix(in srgb, var(--vibelink-warning) 36%, transparent);
+  color: var(--vibelink-warning);
+}
+
+.worktree-manage-badge.is-danger {
+  border-color: color-mix(in srgb, var(--vibelink-danger) 38%, transparent);
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-path {
+  color: var(--vibelink-muted);
+  font: 10px/1.3 var(--vibelink-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-manage-actions {
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.worktree-manage-actions button,
+.worktree-manage-footer button {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.worktree-manage-actions button {
+  font: 10px/1 var(--vibelink-sans);
+  min-height: 26px;
+  padding: 0 7px;
+}
+
+.worktree-manage-actions button.danger {
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-error,
+.worktree-manage-empty {
+  font: 11px/1.4 var(--vibelink-sans);
+  margin: 0;
+  padding: 8px 4px;
+}
+
+.worktree-manage-error {
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-empty,
+.worktree-manage-progress {
+  color: var(--vibelink-muted);
+}
+
+.worktree-manage-progress {
+  font: 11px/1.3 var(--vibelink-sans);
+  margin-right: auto;
+}
+
+.worktree-manage-footer {
+  justify-content: flex-end;
+}
+
+.worktree-manage-footer .workspace-create-footer-actions {
+  gap: 7px;
+}
+
 @media (max-width: 720px) {
   .worktree-create-field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .worktree-manage-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .worktree-manage-actions {
+    justify-content: flex-start;
   }
 }
 /* Terminal window tab controls + add menu */

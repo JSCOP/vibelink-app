@@ -318,6 +318,46 @@ describe('terminal profiles', () => {
     expect(workspaceDetailsFor(settings, 'missing')).toEqual({ githubIssue: '', githubPullRequest: '', notes: '' })
   })
 
+  test('normalizes worktree storage and round-trips the normalized shape', () => {
+    expect(defaultSettings.worktreeStorage).toEqual({
+      mode: 'drive',
+      drive: '',
+      folderName: 'VibeLinkWorktrees',
+      customRoot: '',
+      groupByRepository: true,
+    })
+
+    const normalized = normalizeSettings({
+      worktreeStorage: {
+        mode: 'custom',
+        drive: ' e: ',
+        folderName: ' TeamWorktrees ',
+        customRoot: ' E:/managed/worktrees ',
+        groupByRepository: false,
+      },
+    }).worktreeStorage
+    expect(normalized).toEqual({
+      mode: 'custom',
+      drive: 'E:',
+      folderName: 'TeamWorktrees',
+      customRoot: 'E:/managed/worktrees',
+      groupByRepository: false,
+    })
+    expect(normalizeSettings({ worktreeStorage: normalized }).worktreeStorage).toEqual(normalized)
+
+    expect(normalizeSettings({
+      worktreeStorage: {
+        mode: 'missing',
+        drive: 'EE:',
+        folderName: 'nested/worktrees',
+        customRoot: 42,
+        groupByRepository: 'yes',
+      },
+    }).worktreeStorage).toEqual(defaultSettings.worktreeStorage)
+    expect(normalizeSettings({ worktreeStorage: { folderName: 'cache..backup' } }).worktreeStorage.folderName).toBe('VibeLinkWorktrees')
+    expect(normalizeSettings({ worktreeStorage: { folderName: 'nested\\worktrees' } }).worktreeStorage.folderName).toBe('VibeLinkWorktrees')
+  })
+
   test('normalizes terminal scrollbar visibility and workspace order settings', () => {
     expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
     expect(defaultSettings.terminalScrollbarVisible).toBe(false)

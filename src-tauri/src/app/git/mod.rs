@@ -11,18 +11,21 @@ pub(crate) mod status;
 pub(crate) mod submodule;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod worktree;
 
 use self::exec::{
     git_exit_status, git_read as git_output, git_read_allow_fail as git_output_allow_fail,
     git_write,
 };
-use self::paths::{parent_dir, resolve_repo_file_path, validate_base_ref};
+use self::paths::{resolve_repo_file_path, validate_base_ref};
+use self::worktree::{
+    WorktreeEntry, WorktreeInfo, WorktreeStorage, WorktreeStorageOptions, WorktreeStorageResolution,
+};
 use super::license::LicenseService;
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
-use uuid::Uuid;
 
 #[cfg(test)]
 use self::exec::CREATE_NO_WINDOW;
@@ -64,11 +67,26 @@ pub struct FileContents {
     pub binary: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorktreeInfo {
-    pub worktree_path: String,
-    pub branch: String,
+#[tauri::command]
+pub async fn git_worktree_storage_options() -> Result<WorktreeStorageOptions, String> {
+    tauri::async_runtime::spawn_blocking(worktree::storage_options)
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn git_worktree_resolve_root(
+    workspace_folder: String,
+    storage: WorktreeStorage,
+    name: Option<String>,
+) -> Result<WorktreeStorageResolution, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        worktree::resolve_root(&workspace_folder, &storage, name.as_deref())
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
@@ -135,12 +153,13 @@ pub async fn git_worktree_create(
 ) -> Result<WorktreeInfo, String> {
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
-        worktree_create_native(&workspace_folder, &task_id)
+        worktree::create_for_task(&workspace_folder, &task_id)
     })
     .await
     .map_err(to_string)?
     .map_err(to_string)
 }
+
 #[tauri::command]
 pub async fn git_worktree_create_named(
     license: State<'_, Arc<LicenseService>>,
@@ -148,14 +167,27 @@ pub async fn git_worktree_create_named(
     name: String,
     start_ref: String,
     branch: String,
+    storage: WorktreeStorage,
 ) -> Result<WorktreeInfo, String> {
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
-        worktree_create_named_native(&workspace_folder, &name, &start_ref, &branch)
+        worktree::create_named(&workspace_folder, &name, &start_ref, &branch, &storage)
     })
     .await
     .map_err(to_string)?
     .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn git_worktree_list(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+) -> Result<Vec<WorktreeEntry>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || worktree::list(&workspace_folder))
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
 }
 
 #[tauri::command]
@@ -165,10 +197,33 @@ pub async fn git_worktree_remove(
     worktree_path: String,
     branch: String,
     force: bool,
+    delete_branch: bool,
 ) -> Result<(), String> {
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
-        worktree_remove_native(&workspace_folder, &worktree_path, &branch, force)
+        worktree::remove(
+            &workspace_folder,
+            &worktree_path,
+            &branch,
+            force,
+            delete_branch,
+        )
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn git_worktree_move(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    worktree_path: String,
+    destination_path: String,
+) -> Result<WorktreeInfo, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        worktree::move_to(&workspace_folder, &worktree_path, &destination_path)
     })
     .await
     .map_err(to_string)?
@@ -241,104 +296,6 @@ fn file_contents_native(repo: &str, base_ref: &str, path: &str) -> Result<FileCo
             binary: true,
         }),
     }
-}
-
-fn worktree_create_native(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
-    let short = short_task_id(task_id);
-    let branch = format!("vibelink/task-{short}");
-    let data_dir = crate::daemon::paths::daemon_paths()?.data_dir;
-    let worktree_path = data_dir.join("worktrees").join(&short);
-    std::fs::create_dir_all(parent_dir(&worktree_path)?)?;
-    let path_string = worktree_path.to_string_lossy().to_string();
-    git_write(
-        repo,
-        ["worktree", "add", "-b", &branch, &path_string, "HEAD"],
-    )?;
-    Ok(WorktreeInfo {
-        worktree_path: path_string,
-        branch,
-    })
-}
-fn worktree_create_named_native(
-    repo: &str,
-    name: &str,
-    start_ref: &str,
-    branch: &str,
-) -> Result<WorktreeInfo> {
-    let data_dir = crate::daemon::paths::daemon_paths()?.data_dir;
-    worktree_create_named_at_native(
-        repo,
-        name,
-        start_ref,
-        branch,
-        &data_dir.join("worktrees").join("manual"),
-    )
-}
-
-fn worktree_create_named_at_native(
-    repo: &str,
-    name: &str,
-    start_ref: &str,
-    branch: &str,
-    worktree_root: &std::path::Path,
-) -> Result<WorktreeInfo> {
-    let slug = slug_worktree_name(name);
-    if slug.is_empty() {
-        return Err(anyhow!("worktree name must contain a letter or number"));
-    }
-    validate_base_ref(start_ref)?;
-    validate_base_ref(branch)?;
-    let commit_ref = format!("{start_ref}^{{commit}}");
-    git_write(repo, ["rev-parse", "--verify", "--quiet", &commit_ref])
-        .with_context(|| format!("resolve worktree start ref {start_ref}"))?;
-    git_write(repo, ["check-ref-format", "--branch", branch])
-        .with_context(|| format!("validate worktree branch {branch}"))?;
-
-    let unique = Uuid::new_v4().simple().to_string();
-    let worktree_path = worktree_root.join(format!("{slug}-{}", &unique[..8]));
-    std::fs::create_dir_all(parent_dir(&worktree_path)?)?;
-    let path_string = worktree_path.to_string_lossy().to_string();
-    git_write(
-        repo,
-        ["worktree", "add", "-b", branch, &path_string, start_ref],
-    )?;
-    Ok(WorktreeInfo {
-        worktree_path: path_string,
-        branch: branch.to_string(),
-    })
-}
-
-fn slug_worktree_name(name: &str) -> String {
-    let mut slug = String::with_capacity(name.len());
-    let mut separator_pending = false;
-    for ch in name.trim().chars() {
-        if ch.is_ascii_alphanumeric() {
-            if separator_pending && !slug.is_empty() {
-                slug.push('-');
-            }
-            slug.push(ch.to_ascii_lowercase());
-            separator_pending = false;
-        } else if !slug.is_empty() {
-            separator_pending = true;
-        }
-    }
-    slug
-}
-
-fn worktree_remove_native(
-    repo: &str,
-    worktree_path: &str,
-    branch: &str,
-    force: bool,
-) -> Result<()> {
-    let mut remove_args = vec!["worktree", "remove"];
-    if force {
-        remove_args.push("--force");
-    }
-    remove_args.push(worktree_path);
-    git_write(repo, remove_args)?;
-    git_write(repo, ["branch", "-D", branch])?;
-    Ok(())
 }
 
 pub(crate) fn parse_name_status(bytes: &[u8]) -> Vec<ChangedFile> {
@@ -447,19 +404,6 @@ pub(crate) fn change_type_from_status(status: char) -> ChangeType {
         'C' => ChangeType::Copied,
         'T' => ChangeType::TypeChanged,
         _ => ChangeType::Modified,
-    }
-}
-
-fn short_task_id(task_id: &str) -> String {
-    let short: String = task_id
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-        .take(12)
-        .collect();
-    if short.is_empty() {
-        "task".to_string()
-    } else {
-        short
     }
 }
 
@@ -572,18 +516,19 @@ mod tests {
     }
 
     #[test]
-    fn named_worktree_uses_requested_ref_and_branch() {
+    fn named_worktree_creates_lists_moves_and_removes() {
         let repo = test_repo();
         std::fs::write(repo.join("tracked.txt"), "base\n").expect("write tracked");
         run_git(&repo, &["add", "tracked.txt"]);
         run_git(&repo, &["commit", "-m", "base"]);
+        let repo_str = repo.to_str().expect("utf8 repo");
         let root = repo
             .parent()
             .expect("temp parent")
             .join(format!("vibelink-worktrees-{}", Uuid::new_v4()));
 
-        let created = worktree_create_named_at_native(
-            repo.to_str().expect("utf8 repo"),
+        let created = worktree::create_named_at(
+            repo_str,
             "Fix Login Flow",
             "HEAD",
             "vibelink/fix-login-flow",
@@ -600,14 +545,48 @@ mod tests {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("fix-login-flow-")));
 
-        worktree_remove_native(
-            repo.to_str().expect("utf8 repo"),
-            &created.worktree_path,
-            &created.branch,
-            false,
+        std::fs::write(
+            Path::new(&created.worktree_path).join("tracked.txt"),
+            "dirty\n",
         )
-        .expect("remove named worktree");
+        .expect("dirty the worktree");
+        let listed = worktree::list(repo_str).expect("list worktrees");
+        let entry = listed
+            .iter()
+            .find(|entry| entry.branch == created.branch)
+            .expect("created worktree is listed");
+        assert!(!entry.is_main && entry.exists && entry.dirty);
+        assert!(listed.iter().any(|entry| entry.is_main));
+
+        let moved_path = root.join("moved-fix-login-flow");
+        let moved = worktree::move_to(
+            repo_str,
+            &created.worktree_path,
+            moved_path.to_str().expect("utf8 destination"),
+        )
+        .expect("move worktree");
+        assert_eq!(moved.branch, created.branch);
+        assert!(moved_path.join("tracked.txt").is_file());
+        assert!(!Path::new(&created.worktree_path).exists());
+
+        // A dirty checkout must not be removed without force.
+        assert!(
+            worktree::remove(repo_str, &moved.worktree_path, &moved.branch, false, false).is_err()
+        );
+        worktree::remove(repo_str, &moved.worktree_path, &moved.branch, true, true)
+            .expect("force remove worktree and branch");
+        assert!(!moved_path.exists());
+        assert!(worktree::list(repo_str)
+            .expect("list after removal")
+            .iter()
+            .all(|entry| entry.branch != created.branch));
+        assert!(!String::from_utf8_lossy(
+            &git_output(repo_str, ["branch", "--list", &created.branch]).expect("list branches")
+        )
+        .contains("fix-login-flow"));
+
         std::fs::remove_dir_all(repo).expect("cleanup repo");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -623,19 +602,19 @@ mod tests {
         let repo_str = repo.to_str().expect("utf8 repo");
 
         assert!(
-            worktree_create_named_at_native(repo_str, "...", "HEAD", "vibelink/empty", &root)
+            worktree::create_named_at(repo_str, "...", "HEAD", "vibelink/empty", &root)
                 .expect_err("empty slug should fail")
                 .to_string()
                 .contains("letter or number")
         );
         assert!(
-            worktree_create_named_at_native(repo_str, "safe", "-HEAD", "vibelink/safe", &root)
+            worktree::create_named_at(repo_str, "safe", "-HEAD", "vibelink/safe", &root)
                 .expect_err("unsafe start ref should fail")
                 .to_string()
                 .contains("must not start")
         );
         assert!(
-            worktree_create_named_at_native(repo_str, "safe", "HEAD", "bad branch", &root)
+            worktree::create_named_at(repo_str, "safe", "HEAD", "bad branch", &root)
                 .expect_err("unsafe branch should fail")
                 .to_string()
                 .contains("unsupported")

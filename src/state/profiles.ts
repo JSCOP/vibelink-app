@@ -1,4 +1,4 @@
-import type { PaneConfig, PaneMeta } from '../ipc/types'
+import type { PaneConfig, PaneMeta, WorktreeStorage } from '../ipc/types'
 import { defaultKeybindings, normalizeKeybindings, type KeybindingSettings } from './keybindings'
 import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from './terminalThemes'
 import { preferredFontFamily } from './fonts'
@@ -93,6 +93,7 @@ export type Settings = {
   workspaceGroups: WorkspaceGroup[]
   workspaceGroupIds: Record<string, string>
   workspaceWorktrees: Record<string, WorkspaceWorktree>
+  worktreeStorage: WorktreeStorage
   paneRoles: Record<string, string>
   workspaceOrder: string[]
   rolePresets: string[]
@@ -270,6 +271,13 @@ export const defaultSettings: Settings = {
   workspaceGroups: [],
   workspaceGroupIds: {},
   workspaceWorktrees: {},
+  worktreeStorage: {
+    mode: 'drive',
+    drive: '',
+    folderName: 'VibeLinkWorktrees',
+    customRoot: '',
+    groupByRepository: true,
+  },
   paneRoles: {},
   workspaceOrder: [],
   hermesCommand: '',
@@ -297,6 +305,7 @@ export function normalizeSettings(value: unknown): Settings {
   const workspaceGroups = normalizeWorkspaceGroups(record?.workspaceGroups)
   const workspaceGroupIds = normalizeWorkspaceGroupIds(record?.workspaceGroupIds, workspaceGroups)
   const workspaceWorktrees = normalizeWorkspaceWorktrees(record?.workspaceWorktrees)
+  const worktreeStorage = normalizeWorktreeStorage(record?.worktreeStorage)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
   const workspaceOrder = normalizeWorkspaceOrder(record?.workspaceOrder)
   const rolePresets = normalizeRolePresets(record?.rolePresets)
@@ -332,6 +341,7 @@ export function normalizeSettings(value: unknown): Settings {
     workspaceGroups,
     workspaceGroupIds,
     workspaceWorktrees,
+    worktreeStorage,
     paneRoles,
     workspaceOrder,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
@@ -590,6 +600,22 @@ function normalizeWorkspaceGroupIds(value: unknown, groups: WorkspaceGroup[]): R
     assignments[sessionId] = groupId
   }
   return assignments
+}
+
+function normalizeWorktreeStorage(value: unknown): WorktreeStorage {
+  const record = isRecord(value) ? value : undefined
+  const mode = record?.mode === 'appData' || record?.mode === 'custom' || record?.mode === 'drive' ? record.mode : 'drive'
+  const rawDrive = readString(record?.drive, '').trim().toUpperCase()
+  const rawFolderName = readString(record?.folderName, '').trim()
+  return {
+    mode,
+    drive: /^[A-Z]:$/.test(rawDrive) ? rawDrive : '',
+    folderName: rawFolderName && !/[\\/]/.test(rawFolderName) && !rawFolderName.includes('..')
+      ? rawFolderName
+      : defaultSettings.worktreeStorage.folderName,
+    customRoot: readString(record?.customRoot, '').trim(),
+    groupByRepository: readBoolean(record?.groupByRepository, defaultSettings.worktreeStorage.groupByRepository),
+  }
 }
 
 function normalizeWorkspaceWorktrees(value: unknown): Record<string, WorkspaceWorktree> {

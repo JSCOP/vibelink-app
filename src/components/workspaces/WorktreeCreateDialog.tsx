@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { FolderGit2, GitBranch, TriangleAlert, X } from 'lucide-react'
-import type { SessionMeta } from '../../ipc/types'
+import type { SessionMeta, WorktreeStorageResolution } from '../../ipc/types'
 import type { Profile } from '../../state/profiles'
-import type { CreateWorkspaceWorktreeInput } from '../../state/store'
+import { useWorkspaceStore, type CreateWorkspaceWorktreeInput } from '../../state/store'
 import { ProfileIcon } from '../ProfileIcon'
-import { worktreeBranchName, worktreeNameSlug } from './worktreeNaming'
+import { worktreeBranchName } from './worktreeNaming'
 
 export type WorktreeCreateDialogProps = {
   sourceSession: SessionMeta
@@ -16,16 +17,49 @@ export type WorktreeCreateDialogProps = {
 
 
 export function WorktreeCreateDialog({ sourceSession, profiles, initialProfileId, onCreate, onClose }: WorktreeCreateDialogProps) {
+  const storage = useWorkspaceStore((state) => state.settings.worktreeStorage)
   const [name, setName] = useState('')
   const [startRef, setStartRef] = useState('HEAD')
   const [branch, setBranch] = useState(worktreeBranchName(''))
   const [branchEdited, setBranchEdited] = useState(false)
   const [profileId, setProfileId] = useState(() => profiles.some((profile) => profile.id === initialProfileId) ? initialProfileId : profiles[0]?.id ?? '')
   const [submitting, setSubmitting] = useState(false)
+  const [storageResolution, setStorageResolution] = useState<WorktreeStorageResolution | null>(null)
+  const [resolutionError, setResolutionError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const resolutionRequestRef = useRef(0)
   const selectedProfile = useMemo(() => profiles.find((profile) => profile.id === profileId) ?? profiles[0], [profileId, profiles])
-  const folderSlug = worktreeNameSlug(name)
-  const managedFolder = `App data/worktrees/manual/${folderSlug || '<name>'}-<id>`
+  const managedFolder = storageResolution?.example ?? 'Resolving…'
+
+  useEffect(() => {
+    const requestId = ++resolutionRequestRef.current
+    const workspaceFolder = sourceSession.workspaceFolder?.trim()
+    if (!workspaceFolder) {
+      const missingFolder = window.setTimeout(() => {
+        if (resolutionRequestRef.current !== requestId) return
+        setStorageResolution(null)
+        setResolutionError('A repository workspace folder is required to resolve worktree storage.')
+      }, 0)
+      return () => window.clearTimeout(missingFolder)
+    }
+    const timeout = window.setTimeout(() => {
+      void invoke<WorktreeStorageResolution>('git_worktree_resolve_root', { workspaceFolder, storage, name: name.trim() })
+        .then((resolution) => {
+          if (resolutionRequestRef.current !== requestId) return
+          setStorageResolution(resolution)
+          setResolutionError(null)
+        })
+        .catch((caught) => {
+          if (resolutionRequestRef.current !== requestId) return
+          setStorageResolution(null)
+          setResolutionError(String(caught))
+        })
+    }, name.trim() ? 120 : 0)
+    return () => {
+      window.clearTimeout(timeout)
+      if (resolutionRequestRef.current === requestId) resolutionRequestRef.current += 1
+    }
+  }, [name, sourceSession.workspaceFolder, storage])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -116,10 +150,11 @@ export function WorktreeCreateDialog({ sourceSession, profiles, initialProfileId
             </span>
           </label>
           <div className="worktree-create-summary" aria-label="Worktree behavior">
-            <div><span>Managed folder</span><code>{managedFolder}</code></div>
+            <div><span>Managed folder</span><code title={storageResolution?.example}>{managedFolder}</code></div>
             <div><span>Agent cwd</span><strong>This worktree folder</strong></div>
           </div>
-          <p className="worktree-create-warning"><TriangleAlert size={13} aria-hidden="true" /><span>Uncommitted source changes are not copied. Branches and Git history are shared.</span></p>
+          <p className="worktree-create-warning"><TriangleAlert size={13} aria-hidden="true" /><span>{storageResolution?.fallbackReason ? <><strong>{storageResolution.fallbackReason}</strong> </> : null}Uncommitted source changes are not copied. Branches and Git history are shared.</span></p>
+          {resolutionError ? <p className="worktree-create-error" role="alert">{resolutionError}</p> : null}
           {error ? <p className="worktree-create-error" role="alert">{error}</p> : null}
         </div>
 

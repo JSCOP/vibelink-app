@@ -1,5 +1,5 @@
-pub mod agents;
 pub mod agent_history;
+pub mod agents;
 pub mod android_device_lab;
 pub mod board;
 pub mod browser;
@@ -292,7 +292,11 @@ pub fn run() {
             git::status::git_working_status,
             git::git_worktree_create,
             git::git_worktree_create_named,
+            git::git_worktree_list,
+            git::git_worktree_move,
             git::git_worktree_remove,
+            git::git_worktree_resolve_root,
+            git::git_worktree_storage_options,
             commands::list_installed_fonts,
             commands::list_sessions,
             commands::ping,
