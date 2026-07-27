@@ -13,6 +13,7 @@ import {
 import { languageForPath, languageLabel } from './languageForPath'
 import { monaco } from './monaco'
 import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './monacoTheme'
+import { registerEditorNavigation, type EditorNavigationTarget } from './editorNavigation'
 import './EditorContentPanel.css'
 import { promptDialog } from '../components/appDialogStore'
 
@@ -26,6 +27,8 @@ type MonacoEditorTextModel = EditorTextModel & {
 export type MonacoEditorHandle = {
   getModel(): MonacoEditorTextModel | null
   getPosition(): { lineNumber: number; column: number } | null
+  setPosition(position: { lineNumber: number; column: number }): void
+  revealPositionInCenter(position: { lineNumber: number; column: number }): void
   focus(): void
   layout(dimension?: { width: number; height: number }): void
   updateOptions(options: Record<string, unknown>): void
@@ -73,6 +76,8 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
   const editorRef = useRef<MonacoEditorHandle | null>(null)
   const surfaceRef = useRef<HTMLDivElement | null>(null)
   const editorListenersRef = useRef<Disposable[]>([])
+  const pendingNavigationRef = useRef<EditorNavigationTarget | null>(null)
+  const navigationFramesRef = useRef<number[]>([])
 
   useEffect(() => {
     store.setRefreshHooks({
@@ -112,7 +117,37 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
     monaco.editor.setTheme(themeName)
   }, [terminalThemeId])
 
+  const revealPendingNavigation = useCallback(() => {
+    const editor = editorRef.current
+    const target = pendingNavigationRef.current
+    if (!editor || !target) return
+    for (const frameId of navigationFramesRef.current) window.cancelAnimationFrame(frameId)
+    navigationFramesRef.current = []
+    const firstFrame = window.requestAnimationFrame(() => {
+      const secondFrame = window.requestAnimationFrame(() => {
+        navigationFramesRef.current = []
+        if (editorRef.current !== editor || pendingNavigationRef.current !== target) return
+        editor.setPosition(target)
+        editor.revealPositionInCenter(target)
+        editor.focus()
+        pendingNavigationRef.current = null
+      })
+      navigationFramesRef.current = [secondFrame]
+    })
+    navigationFramesRef.current = [firstFrame]
+  }, [])
+
+  const navigateTo = useCallback((target: EditorNavigationTarget) => {
+    pendingNavigationRef.current = target
+    revealPendingNavigation()
+  }, [revealPendingNavigation])
+
+  useEffect(() => registerEditorNavigation(sessionId, relPath, navigateTo), [navigateTo, relPath, sessionId])
+
   useEffect(() => () => {
+    for (const frameId of navigationFramesRef.current) window.cancelAnimationFrame(frameId)
+    navigationFramesRef.current = []
+    pendingNavigationRef.current = null
     for (const listener of editorListenersRef.current) listener.dispose()
     editorListenersRef.current = []
     editorRef.current = null
@@ -244,8 +279,9 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
       editor.onDidChangeCursorPosition((event) => setCursor(event.position)),
       editor.onDidChangeModelOptions(updateStatus),
     ]
-    editor.focus()
-  }, [relPath, store])
+    if (pendingNavigationRef.current) revealPendingNavigation()
+    else editor.focus()
+  }, [relPath, revealPendingNavigation, store])
 
   if (!document) return <div className="editor-content-panel editor-loading">Opening {relPath}…</div>
 

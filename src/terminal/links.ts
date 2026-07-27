@@ -1,7 +1,8 @@
 import type { IBufferCell, ILink, ILinkProvider, Terminal } from '@xterm/xterm'
+import { parseTerminalOpenTarget, type TerminalOpenTarget } from './fileLinkNavigation'
 
 export type CaptureLinkActions = {
-  onOpenPath(path: string): void
+  onOpenPath(target: TerminalOpenTarget): void
   resolveMarker(paneId: string, n: number): string | undefined
 }
 
@@ -70,7 +71,7 @@ export function createPathLinkProvider(term: Terminal, getActions: () => Capture
           text,
           (event) => {
             if (!isModifiedClick(event)) return
-            getActions().onOpenPath(text)
+            getActions().onOpenPath(parseTerminalOpenTarget(text))
           },
         ))
         cachedGroup = { key, links: links.length > 0 ? links : undefined }
@@ -94,7 +95,7 @@ export function createImageMarkerLinkProvider(term: Terminal, paneId: string, ge
         return createLink(rangeForMappedSpan(row, bufferLineNumber, term.cols, index, text.length), text, (event) => {
           if (!isModifiedClick(event)) return
           const path = getActions().resolveMarker(paneId, n)
-          if (path) getActions().onOpenPath(path)
+          if (path) getActions().onOpenPath({ path })
         })
       })
       callback(links.length > 0 ? links : undefined)

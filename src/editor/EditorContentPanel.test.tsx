@@ -18,9 +18,12 @@ import { defaultSettings, normalizeSettings } from '../state/profiles'
 import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../state/store'
 import { disposeEditorDocumentStore } from './documentStore'
 import { EditorContentPanel, type MonacoEditorHandle, type MonacoEditorSurfaceProps } from './EditorContentPanel'
+import { requestEditorNavigation } from './editorNavigation'
 
 let latestSurfaceProps: MonacoEditorSurfaceProps | null = null
 let mountCount = 0
+const setPosition = vi.fn()
+const revealPositionInCenter = vi.fn()
 
 function FakeMonacoEditor(props: MonacoEditorSurfaceProps) {
   const { onMount } = props
@@ -42,6 +45,8 @@ function FakeMonacoEditor(props: MonacoEditorSurfaceProps) {
   const editorRef = useRef<MonacoEditorHandle>({
     getModel: () => modelRef.current,
     getPosition: () => ({ lineNumber: 3, column: 7 }),
+    setPosition,
+    revealPositionInCenter,
     focus: vi.fn(),
     layout: vi.fn(),
     updateOptions: vi.fn(),
@@ -80,6 +85,10 @@ beforeEach(async () => {
   openContent.mockClear()
   registerThemes.mockClear()
   setTheme.mockClear()
+  setPosition.mockClear()
+  revealPositionInCenter.mockClear()
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
+  vi.stubGlobal('cancelAnimationFrame', vi.fn())
   invoke.mockReset()
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === 'attach_session') return {
@@ -182,5 +191,14 @@ describe('EditorContentPanel', () => {
       expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'sourceControl' }))
       expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'workbench' }))
     })
+  })
+
+  test('reveals a pending terminal file-link line after Monaco mounts', async () => {
+    requestEditorNavigation('editor-session', 'src/app.ts', { lineNumber: 120, column: 1 })
+    renderEditor()
+
+    await screen.findByLabelText('Fake Monaco')
+    await waitFor(() => expect(setPosition).toHaveBeenCalledWith({ lineNumber: 120, column: 1 }))
+    expect(revealPositionInCenter).toHaveBeenCalledWith({ lineNumber: 120, column: 1 })
   })
 })

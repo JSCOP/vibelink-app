@@ -12,6 +12,14 @@ describe('terminal link matchers', () => {
       ])
     })
 
+    it('keeps OMP Read line selectors inside the clickable path', () => {
+      const line = 'Read E:/repo/src/App.tsx:120-230,410-450'
+
+      expect(findPathMatches(line)).toEqual([
+        { index: 5, text: 'E:/repo/src/App.tsx:120-230,410-450' },
+      ])
+    })
+
     it('matches a quoted path without including the quotes', () => {
       const line = 'open "E:\\a b\\c.png" now'
 
@@ -133,6 +141,24 @@ describe('terminal link matchers', () => {
         },
       })
       expect(continuationLinks).toBe(firstRowLinks)
+    })
+
+    it('routes a modified click to the first requested Read selector line', () => {
+      const term = stubTerminal(80, [{ text: 'Read E:/repo/src/App.tsx:120-230,410-450' }])
+      let opened: unknown
+      const provider = createPathLinkProvider(term, () => ({
+        onOpenPath: (target) => { opened = target },
+        resolveMarker: () => undefined,
+      }))
+      let links: ILink[] | undefined
+      provider.provideLinks(1, (found) => { links = found })
+
+      ;(links?.[0].activate as (event: MouseEvent) => void)({ ctrlKey: true, metaKey: false } as MouseEvent)
+
+      expect(opened).toEqual({
+        path: 'E:/repo/src/App.tsx',
+        location: { lineNumber: 120, column: 1 },
+      })
     })
 
     it('underlines the exact URL cells after wide CJK glyphs', () => {

@@ -27,9 +27,10 @@ import { startTerminalOutputStream } from './ipc/output'
 import { getHermesRuntimeStatus, startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import type { CloneProgress, HermesRuntimeStatus } from './ipc/types'
 import type { WorkspaceCreationInput } from './ipc/providerIntegrations'
-import { paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
+import { getWorkspaceSessionEpoch, paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
 import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
+import { openTerminalLinkTarget } from './terminal/fileLinkNavigation'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { flattenWorkspaceRows, workspaceRows } from './state/workspaceGroups'
 import { applyThemeToDocument } from './state/themePreview'
@@ -218,7 +219,20 @@ function App() {
 
   useEffect(() => {
     TerminalManager.setLinkActions({
-      onOpenPath: (path) => void invoke('open_path', { path }),
+      onOpenPath: (target) => {
+        const state = useWorkspaceStore.getState()
+        const sessionId = state.activeSessionId
+        const workspaceFolder = state.sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
+        const workspaceEpoch = getWorkspaceSessionEpoch()
+        void openTerminalLinkTarget(target, {
+          activeSessionId: sessionId,
+          workspaceFolder,
+          workspaceEpoch,
+          contentActions: contentActionsRef.current,
+          openSystemPath: async (path) => { await invoke('open_path', { path }) },
+          isOwnershipCurrent: () => useWorkspaceStore.getState().activeSessionId === sessionId && getWorkspaceSessionEpoch() === workspaceEpoch,
+        }).catch((caught) => useWorkspaceStore.getState().setError(String(caught)))
+      },
       resolveMarker: (paneId, n) => useWorkspaceStore.getState().resolveCaptureMarker(paneId, n),
     })
     TerminalManager.setAgentActivityActions({
