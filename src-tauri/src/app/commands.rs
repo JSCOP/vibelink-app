@@ -277,6 +277,23 @@ pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<Sessio
 }
 
 #[tauri::command]
+pub async fn agent_hook_status() -> Result<Vec<crate::app::agent_hooks::AgentHookStatus>, String> {
+    crate::app::agent_hooks::status().map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn set_agent_hook_enabled(
+    agent_id: String,
+    enabled: bool,
+) -> Result<crate::app::agent_hooks::AgentHookStatus, String> {
+    if enabled {
+        crate::app::agent_hooks::install(&agent_id).map_err(to_string)
+    } else {
+        crate::app::agent_hooks::uninstall(&agent_id).map_err(to_string)
+    }
+}
+
+#[tauri::command]
 pub async fn resource_snapshot(
     client: State<'_, DaemonClient>,
 ) -> Result<ResourceSnapshotDto, String> {

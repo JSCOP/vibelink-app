@@ -587,6 +587,14 @@ pub enum TaskSignal {
         title: Option<String>,
         role: Option<String>,
     },
+    /// An AI coding agent running inside `pane_id` finished a turn. Emitted by
+    /// the agent's own completion hook through `terminal complete`, so it is
+    /// authoritative rather than inferred from terminal output.
+    PaneCompleted {
+        #[serde(rename = "paneId")]
+        pane_id: Uuid,
+        agent: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

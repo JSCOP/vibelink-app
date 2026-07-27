@@ -46,6 +46,9 @@ action_enum!(TerminalAction {
     Create => "create",
     Split => "split",
     Close => "close",
+    // Reported by the agent-completion hook scripts, which run as an ordinary
+    // child of the pane and identify themselves through VIBELINK_PANE_ID.
+    Complete => "complete",
 });
 
 action_enum!(OrchestrationAction {

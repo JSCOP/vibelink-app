@@ -55,7 +55,7 @@ export function resetWorkspaceSessionOwnershipForTests(): void {
 type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 
 type Status = 'booting' | 'ready' | 'error'
-export type PaneCompletionSource = 'agent-response' | 'task-done'
+export type PaneCompletionSource = 'agent-response' | 'task-done' | 'agent-hook'
 export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource; sessionId: string }
 export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
 export type CreateWorkspaceWorktreeInput = {
@@ -689,7 +689,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   markPaneResponseComplete: (paneId, source = 'agent-response') => set((state) => {
     const pane = state.panes[paneId]
     const sessionId = state.activeSessionId
-    if (!sessionId || !pane?.alive || !isAgentPane(pane, state.settings)) return {}
+    if (!sessionId || !pane?.alive) return {}
+    // `agent-hook` and `task-done` are authoritative: the agent (or the board)
+    // told us the turn finished, so the pane IS an agent pane no matter what its
+    // profile says. Only the output heuristic needs the capability gate, because
+    // it is the one that could misfire on a plain shell.
+    if (source === 'agent-response' && !isAgentPane(pane, state.settings)) return {}
     return {
       paneCompletionHighlights: {
         ...state.paneCompletionHighlights,

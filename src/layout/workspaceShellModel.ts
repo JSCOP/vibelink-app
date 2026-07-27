@@ -251,6 +251,19 @@ export function resetWorkspaceEdgeDefaults(api: DockviewApi, rootWidth: number):
 
 export function ensureWorkspaceEdgeShell(api: DockviewApi): void {
   registerWorkspaceEdgeGroups(api, Number.POSITIVE_INFINITY)
+  // Reordering below moves panels with `skipSetActive`, and Dockview drops a
+  // group's active panel when that panel is the one being moved out and back
+  // in. An edge group left with tabs but NO active panel renders as an
+  // expanded, fully blank rail — the "the Workspaces panel vanished" report.
+  const edgeGroupIds = [workspaceLeftEdgeGroupId, workspaceRightEdgeGroupId]
+  const edgeGroup = (groupId: string) => api.groups.find(
+    (candidate) => candidate.id === groupId && candidate.api.location.type === 'edge',
+  )
+  const previousActiveIds = new Map<string, string | undefined>()
+  for (const groupId of edgeGroupIds) {
+    const group = edgeGroup(groupId)
+    if (group) previousActiveIds.set(groupId, group.activePanel?.id)
+  }
   for (const kind of [...workspaceLeftStructuralKinds, ...workspaceRightStructuralKinds]) {
     const placement = workspaceStructuralPlacement[kind]
     const group = api.groups.find((candidate) => candidate.id === placement.groupId && candidate.api.location.type === 'edge')
@@ -276,6 +289,13 @@ export function ensureWorkspaceEdgeShell(api: DockviewApi): void {
     if (panel.group.id !== group.id || group.panels[placement.index]?.id !== panel.id) {
       panel.api.moveTo({ group, position: 'center', index: placement.index, skipSetActive: true })
     }
+  }
+  for (const groupId of edgeGroupIds) {
+    const group = edgeGroup(groupId)
+    if (!group || group.panels.length === 0 || group.activePanel) continue
+    const preferredId = previousActiveIds.get(groupId)
+    const restored = group.panels.find((panel) => panel.id === preferredId) ?? group.panels[0]
+    restored.api.setActive()
   }
   api.getEdgeGroup('left')!.locked = 'no-drop-target'
   api.getEdgeGroup('right')!.locked = 'no-drop-target'

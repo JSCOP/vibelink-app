@@ -92,10 +92,16 @@ function fakeDock(initialGridIds: string[] = []) {
           panel.group.activePanel = panel
           activeGroup = panel.group
         }),
-        moveTo: vi.fn(({ group: destination, index }: { group: FakeGroup; index?: number }) => {
-          panel.group.panels = panel.group.panels.filter((candidate) => candidate !== panel)
+        moveTo: vi.fn(({ group: destination, index, skipSetActive }: { group: FakeGroup; index?: number; skipSetActive?: boolean }) => {
+          const source = panel.group
+          source.panels = source.panels.filter((candidate) => candidate !== panel)
+          // Dockview drops a group's active panel when that panel leaves it. A
+          // `skipSetActive` move therefore leaves the group with NO active
+          // panel, which is exactly how the edge rail rendered blank.
+          if (source.activePanel === panel) source.activePanel = undefined
           panel.group = destination
           destination.panels.splice(index ?? destination.panels.length, 0, panel)
+          if (!skipSetActive) destination.activePanel = panel
         }),
         close: vi.fn(() => {
           panel.group.panels = panel.group.panels.filter((candidate) => candidate !== panel)
@@ -176,6 +182,29 @@ describe('WorkspaceView shell primitives', () => {
     expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches'])
     expect(right.panels.map((panel) => panel.params.kind)).toEqual(['agentSessions'])
     expect(groups[0].panels).toEqual([])
+  })
+
+  it('leaves every edge group with an active panel so the rail cannot render blank', () => {
+    const { api, groups, makePanel } = fakeDock(['grid-main'])
+    registerWorkspaceEdgeGroups(api, 1600)
+    const left = groups.find((group) => group.id === 'workspace-left-tools')!
+
+    // Seed the rail out of order so reconciliation must MOVE panels, which is
+    // the path that dropped the active panel and produced an expanded-but-empty
+    // Workspaces panel during workspace switches.
+    makePanel(createSingletonContentParams('gitHistory'), left)
+    const workspaces = makePanel(createSingletonContentParams('workspaces'), left)
+    left.activePanel = workspaces
+
+    ensureWorkspaceEdgeShell(api)
+
+    expect(left.panels.length).toBeGreaterThan(0)
+    expect(left.activePanel, 'left rail must keep an active panel').toBeDefined()
+    // The panel the user was looking at is the one restored, not an arbitrary tab.
+    expect(left.activePanel?.params.kind).toBe('workspaces')
+
+    const right = groups.find((group) => group.id === 'workspace-right-tools')!
+    expect(right.activePanel, 'right rail must keep an active panel').toBeDefined()
   })
 
   it('never resolves central content into an active or requested edge group', () => {

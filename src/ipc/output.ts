@@ -7,6 +7,7 @@ type TaskSignal =
   | { kind: 'done'; taskId: string; commitMsg?: string | null; resultSummary?: string | null; paneId?: string | null }
   | { kind: 'note'; taskId: string; message: string; paneId?: string | null }
   | { kind: 'paneConfigured'; paneId: string; title?: string | null; role?: string | null }
+  | { kind: 'paneCompleted'; paneId: string; agent?: string | null }
   | { kind: 'boardChanged' }
 
 type TerminalEvent =
@@ -38,6 +39,10 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
         const assignedPaneId = store.kanban.tasks[event.signal.taskId]?.assignedPaneId
         const paneId = event.signal.paneId ?? assignedPaneId
         if (paneId) store.markPaneResponseComplete(paneId, 'task-done')
+      } else if (event.signal.kind === 'paneCompleted') {
+        // Authoritative: the agent's own completion hook reported this, so it
+        // bypasses the terminal-output heuristic entirely.
+        useWorkspaceStore.getState().markPaneResponseComplete(event.signal.paneId, 'agent-hook')
       } else if (event.signal.kind === 'paneConfigured') {
         useWorkspaceStore.getState().applyPaneConfiguration(event.signal.paneId, {
           title: event.signal.title ?? undefined,

@@ -22,6 +22,7 @@ import { GitHostingSettings } from './GitHostingSettings'
 import { ProviderIntegrationsPanel } from './ProviderIntegrationsPanel'
 import { AndroidDeviceLabPanel } from './AndroidDeviceLabPanel'
 import { addCustomCompletionSound, builtInCompletionSounds, defaultCompletionSoundId, listCustomCompletionSounds, playCompletionSound, removeCustomCompletionSound, type CompletionSoundId, type CustomCompletionSound } from '../notifications/completionSounds'
+import { agentHookStatus, setAgentHookEnabled, type AgentHookStatus } from '../ipc/agentHooks'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -131,6 +132,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const [customCompletionSounds, setCustomCompletionSounds] = useState<CustomCompletionSound[]>([])
   const [completionSoundMessage, setCompletionSoundMessage] = useState('')
   const completionSoundInputRef = useRef<HTMLInputElement | null>(null)
+  const [agentHooks, setAgentHooks] = useState<AgentHookStatus[]>([])
+  const [agentHookMessage, setAgentHookMessage] = useState('')
   const [worktreeStorageOptions, setWorktreeStorageOptions] = useState<WorktreeStorageOptions>({ drives: [], appDataRoot: '' })
   const [worktreeResolution, setWorktreeResolution] = useState<WorktreeStorageResolution | null>(null)
   const [worktreeResolutionError, setWorktreeResolutionError] = useState('')
@@ -203,6 +206,15 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
     void listCustomCompletionSounds()
       .then((sounds) => { if (!cancelled) setCustomCompletionSounds(sounds) })
       .catch((error) => { if (!cancelled) setCompletionSoundMessage(String(error)) })
+    return () => { cancelled = true }
+  }, [activeSection])
+
+  useEffect(() => {
+    if (activeSection !== 'notifications') return
+    let cancelled = false
+    void agentHookStatus()
+      .then((hooks) => { if (!cancelled) setAgentHooks(hooks) })
+      .catch((error) => { if (!cancelled) setAgentHookMessage(String(error)) })
     return () => { cancelled = true }
   }, [activeSection])
 
@@ -383,6 +395,23 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
       setCompletionSoundMessage(played ? 'Sound preview played.' : 'This sound is unavailable.')
     } catch (error) {
       setCompletionSoundMessage(String(error))
+    }
+  }
+  const setAgentHook = async (agentId: string, enabled: boolean) => {
+    setAgentHookMessage('')
+    try {
+      const next = await setAgentHookEnabled(agentId, enabled)
+      setAgentHooks((current) => current.map((hook) => hook.id === next.id ? next : hook))
+      setAgentHookMessage(
+        next.installed
+          ? `${next.displayName} will now report completions to VibeLink.`
+          : `${next.displayName} hook removed. Nothing was left behind.`,
+      )
+    } catch (error) {
+      setAgentHookMessage(String(error))
+      // The install/uninstall failed, so the on-screen toggle would otherwise
+      // lie about the real on-disk state. Re-read it.
+      void agentHookStatus().then(setAgentHooks).catch(() => {})
     }
   }
   const importCompletionSound = async (file: File) => {
@@ -610,6 +639,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             ) : null}
 
             {activeSection === 'notifications' ? (
+              <>
               <SettingsGroup title="Completion notifications" description="Play a short local sound when an AI coding agent response or assigned task finishes. Visual pane and workspace highlights remain enabled independently.">
                 <SettingsToggle label="Play completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />
                 <label>
@@ -633,7 +663,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                   <input aria-label="Completion sound volume" type="range" min="0" max="1" step="0.05" value={draft.completionSoundVolume} disabled={!draft.completionSoundEnabled} onChange={(event) => patchDraft({ completionSoundVolume: Number(event.target.value) })} />
                 </label>
                 <div className="vibelink-settings-actions">
-                  <button type="button" disabled={!draft.completionSoundEnabled} onClick={() => void previewCompletionSound()}><Play size={14} /> Preview</button>
+                  {/* Preview stays enabled while the toggle is off so the sound
+                      can always be auditioned before committing to it. */}
+                  <button type="button" onClick={() => void previewCompletionSound()}><Play size={14} /> Preview</button>
                   <button type="button" onClick={() => completionSoundInputRef.current?.click()}><Upload size={14} /> Add audio file</button>
                   <input
                     ref={completionSoundInputRef}
@@ -667,6 +699,36 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                 <div className="vibelink-settings-note"><span>Built-in sounds are generated locally and ship license-free. Custom MP3, WAV, OGG, M4A, AAC, and FLAC files up to 10 MB stay in this app's local browser storage.</span></div>
                 {completionSoundMessage ? <div className="vibelink-settings-note"><span>{completionSoundMessage}</span></div> : null}
               </SettingsGroup>
+              <SettingsGroup
+                title="Agent completion hooks"
+                description="Ask each AI coding agent to tell VibeLink when it finishes a turn. This is exact — it works even when you start the agent by typing its name inside an ordinary shell, which terminal-output detection cannot see reliably."
+              >
+                {agentHooks.length === 0 ? (
+                  <div className="vibelink-settings-note"><span>Reading agent hook status…</span></div>
+                ) : agentHooks.map((hook) => (
+                  <div key={hook.id}>
+                    <SettingsToggle
+                      label={hook.displayName}
+                      checked={hook.installed}
+                      onChange={(checked) => void setAgentHook(hook.id, checked)}
+                    />
+                    <div className="vibelink-settings-note">
+                      <span>
+                        {hook.blockedReason
+                          ? hook.blockedReason
+                          : `${hook.installed ? 'Installed in' : 'Would be installed in'} ${hook.configPath}`}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                <div className="vibelink-settings-note">
+                  <span>
+                    Turning a hook on appends one entry that VibeLink owns; your own hooks and other tools' hooks are left untouched. Turning it off removes exactly that entry and deletes the generated script, leaving nothing behind. The scripts do nothing outside a VibeLink terminal.
+                  </span>
+                </div>
+                {agentHookMessage ? <div className="vibelink-settings-note"><span>{agentHookMessage}</span></div> : null}
+              </SettingsGroup>
+              </>
             ) : null}
 
             {activeSection === 'workspace' ? (

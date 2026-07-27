@@ -338,6 +338,18 @@ pub fn command_contracts() -> Vec<CommandContract> {
             HighRisk
         ),
         contract!(
+            "terminal",
+            "complete",
+            "Report that the agent in a pane finished a turn (used by agent hooks).",
+            WORKSPACE_PANE,
+            &[O::string("agent-id")],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
             "orchestration",
             "send",
             "Send a message to a run or task.",
@@ -1556,6 +1568,28 @@ mod tests {
         assert!(parse_args(["workspace", "create"]).is_err());
         assert!(parse_args(["computer", "list-windows", "--process-id", "abc"]).is_err());
         assert!(parse_args(["remote", "status", "--token", "secret"]).is_err());
+    }
+
+    #[test]
+    fn terminal_complete_round_trips_through_the_daemon_wire_format() {
+        // The agent-completion hooks call this command, so a serialization gap
+        // here silently breaks every hook while the CLI still reports success.
+        let invocation = parse_args([
+            "terminal",
+            "complete",
+            "--workspace",
+            "ws-1",
+            "--pane",
+            "pane-1",
+            "--agent-id",
+            "omp",
+        ])
+        .expect("terminal complete must parse");
+
+        let json = serde_json::to_string(&invocation.command).expect("serialize");
+        let decoded: crate::dedicated_cli::Command =
+            serde_json::from_str(&json).expect("daemon must decode the same bytes");
+        assert_eq!(decoded, invocation.command);
     }
 
     #[test]

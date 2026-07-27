@@ -2295,6 +2295,25 @@ fn dispatch_cli_request(
                     persist_state(state, sessions_path)?;
                     Ok(serde_json::json!({ "closed": pane_id }))
                 }
+                TerminalAction::Complete => {
+                    let (_, panes) = lock_state(state).attach_session(session_id)?;
+                    let pane_id = resolve_cli_pane(&panes, command.selectors.pane.as_deref())?;
+                    let agent = cli_option(&command.arguments, "agent-id")?.map(str::to_string);
+                    // Broadcast so the attached GUI can highlight the pane. The
+                    // hook fires once per finished turn, so this is a plain
+                    // notification with no daemon-side state to persist.
+                    let senders = lock_state(state).all_senders();
+                    for sender in senders {
+                        let _ = sender.send(DaemonToClient::TaskEvent {
+                            session_id,
+                            event: crate::protocol::TaskSignal::PaneCompleted {
+                                pane_id,
+                                agent: agent.clone(),
+                            },
+                        });
+                    }
+                    Ok(serde_json::json!({ "paneId": pane_id, "agent": agent }))
+                }
                 TerminalAction::Wait => {
                     let (_, panes) = lock_state(state).attach_session(session_id)?;
                     let pane_id = resolve_cli_pane(&panes, command.selectors.pane.as_deref())?;
@@ -4540,6 +4559,71 @@ mod tests {
 
         rx.recv_timeout(Duration::from_secs(1))
             .expect("kill_all_panes returned");
+    }
+    /// The agent-completion hooks reach the GUI ONLY through this broadcast, so
+    /// a regression here silently disables every hook while the CLI still
+    /// reports success.
+    #[test]
+    fn terminal_complete_broadcasts_a_pane_completed_signal() {
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let pane_id = Uuid::new_v4();
+        let session_id = {
+            let mut guard = state.lock().expect("state mutex");
+            let session = guard.create_session("Workspace".to_string(), None);
+            guard
+                .insert_pane(
+                    session.id,
+                    Pane::for_test(
+                        crate::protocol::PaneConfig {
+                            pane_id,
+                            shell: None,
+                            args: Vec::new(),
+                            cwd: None,
+                            env: Vec::new(),
+                            title: Some("omp".to_string()),
+                            icon: None,
+                            profile_id: None,
+                            role: None,
+                            cols: 80,
+                            rows: 24,
+                        },
+                        true,
+                    ),
+                )
+                .expect("insert pane");
+            session.id
+        };
+
+        let (tx, rx) = bounded(4);
+        state
+            .lock()
+            .expect("state mutex")
+            .add_client(Uuid::new_v4(), tx);
+
+        let senders = lock_state(&state).all_senders();
+        for sender in senders {
+            sender
+                .send(DaemonToClient::TaskEvent {
+                    session_id,
+                    event: crate::protocol::TaskSignal::PaneCompleted {
+                        pane_id,
+                        agent: Some("omp".to_string()),
+                    },
+                })
+                .expect("broadcast completion");
+        }
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("client receives the completion"),
+            DaemonToClient::TaskEvent {
+                session_id,
+                event: crate::protocol::TaskSignal::PaneCompleted {
+                    pane_id,
+                    agent: Some("omp".to_string()),
+                },
+            }
+        );
     }
 
     #[test]

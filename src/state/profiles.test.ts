@@ -136,6 +136,38 @@ describe('terminal profiles', () => {
     }, settings)).toBe(false)
   })
 
+  test('detects an agent started by typing inside a plain shell pane', () => {
+    const settings = normalizeSettings(null)
+    // The overwhelmingly common real-world shape: the pane was opened with the
+    // built-in `default` Shell profile and the user then typed `omp`. The
+    // profile is NOT an agent profile, so a profile-only gate classified this
+    // pane as a plain shell forever and suppressed every completion alert.
+    const shellPaneRunningAgent = (title: string) => ({
+      id: 'pane-typed',
+      alive: true,
+      config: {
+        paneId: 'pane-typed',
+        shell: 'pwsh.exe',
+        args: ['-NoLogo'],
+        cwd: null,
+        env: [],
+        title,
+        icon: 'terminal',
+        profileId: 'default',
+        cols: 120,
+        rows: 32,
+      },
+    })
+
+    expect(isAgentPane(shellPaneRunningAgent('omp'), settings)).toBe(true)
+    expect(isAgentPane(shellPaneRunningAgent('claude code'), settings)).toBe(true)
+    expect(isAgentPane(shellPaneRunningAgent('codex'), settings)).toBe(true)
+    // A genuine plain shell must still be rejected, or every long-running
+    // command in any terminal would raise a completion alert.
+    expect(isAgentPane(shellPaneRunningAgent('PowerShell'), settings)).toBe(false)
+    expect(isAgentPane(shellPaneRunningAgent('build'), settings)).toBe(false)
+  })
+
   test('runs local agent tools inside PowerShell and resets terminal modes on exit', () => {
     const settings = normalizeSettings(null)
 

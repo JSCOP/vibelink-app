@@ -1,3 +1,4 @@
+pub mod agent_hooks;
 pub mod agent_history;
 pub mod agents;
 pub mod android_device_lab;
@@ -54,7 +55,21 @@ pub fn run() {
                 if let Err(error) = window_chrome::disable_system_menu(&main_window) {
                     eprintln!("disable system menu: {error}");
                 }
-                std::env::remove_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
+                // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS MUST stay set for the
+                // whole process lifetime. WebView2 keeps one browser
+                // environment per (user data dir, options) pair, and creating a
+                // later webview in the same profile with different options
+                // fails with ERROR_INVALID_STATE (0x8007139F). Clearing it here
+                // — after the main window was created WITH the arguments — made
+                // every capture overlay silently fail to build its webview:
+                // `WebviewWindowBuilder::build()` still returned Ok and Tauri
+                // still registered the label, so screenshots and recording
+                // broke permanently with "a webview with label
+                // `capture-overlay` already exists".
+                //
+                // Child processes must not inherit the debugging port, so the
+                // variable is removed per spawned command instead
+                // (`daemon::pty` and `app::spawn_daemon`).
             }
             if let Ok(cli_executable) = cli_path::dedicated_cli_path() {
                 std::env::set_var("VIBELINK_CLI_EXE", cli_executable);
@@ -303,6 +318,8 @@ pub fn run() {
             commands::rename_session,
             commands::set_session_workspace_folder,
             commands::resource_snapshot,
+            commands::agent_hook_status,
+            commands::set_agent_hook_enabled,
             commands::set_pane_role,
             commands::restart_daemon,
             commands::set_keep_terminals_alive_on_close,

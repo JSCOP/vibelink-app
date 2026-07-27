@@ -417,7 +417,12 @@ export function isAgentPane(pane: PaneMeta, settings: Settings): boolean {
   const profileId = pane.config.profileId?.trim()
   if (profileId) {
     const profile = settings.profiles.find((candidate) => candidate.id === profileId)
-    if (profile) return isAgentProfile(profile)
+    // An agent PROFILE is proof. A non-agent profile is NOT proof of the
+    // opposite: users routinely open the plain Shell profile and then type
+    // `omp` / `claude` / `codex` inside it, so returning the profile's verdict
+    // here permanently misclassified the pane. Fall through to the runtime
+    // signals below instead.
+    if (profile && isAgentProfile(profile)) return true
   }
   const haystack = [
     pane.config.title ?? '',

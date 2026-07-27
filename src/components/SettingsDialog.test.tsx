@@ -18,6 +18,16 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string, arg
     return { root, example: `${root}\\example-abcd1234`, writable: true, fallbackReason }
   }
   if (command === 'hermes_runtime_status') return { detected: false, command: null, cliCommand: null, version: null, home: null, source: null, configuredModel: null }
+  if (command === 'agent_hook_status') {
+    return [{
+      id: 'omp',
+      displayName: 'Oh My Pi',
+      installed: false,
+      configPresent: true,
+      configPath: 'C:\\Users\\test\\.omp\\agent\\hooks\\pre\\vibelink-complete.ts',
+      blockedReason: null,
+    }]
+  }
   return null
 }) }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
