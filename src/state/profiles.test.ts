@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
+import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, profileIconForPane, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
 
 describe('orderSessions', () => {
   const sessions = [
@@ -53,7 +53,32 @@ describe('terminal profiles', () => {
   test('ships common terminal and agent profiles by default', () => {
     const profileNames = normalizeSettings(null).profiles.map((profile) => profile.name)
 
-    expect(profileNames).toEqual(expect.arrayContaining(['Shell', 'PowerShell', 'CMD', 'Claude', 'Codex', 'OMP']))
+    expect(profileNames).toEqual(expect.arrayContaining(['Shell', 'PowerShell', 'CMD', 'Claude Code', 'Codex', 'OMP']))
+  })
+
+  test('migrates legacy built-in glyphs to downloaded brand icons while preserving custom choices', () => {
+    const settings = normalizeSettings({
+      ...defaultSettings,
+      profiles: defaultSettings.profiles.map((profile) => {
+        if (profile.id === 'powershell') return { ...profile, icon: 'terminal-square' }
+        if (profile.id === 'claude') return { ...profile, name: 'Claude', icon: 'sparkles' }
+        if (profile.id === 'codex') return { ...profile, icon: 'bot' }
+        if (profile.id === 'omp') return { ...profile, icon: 'zap' }
+        return profile
+      }),
+    })
+
+    expect(profileById(settings, 'powershell').icon).toBe('powershell')
+    expect(profileById(settings, 'claude')).toMatchObject({ name: 'Claude Code', icon: 'claude-code' })
+    expect(profileById(settings, 'codex').icon).toBe('codex')
+    expect(profileById(settings, 'omp').icon).toBe('oh-my-pi')
+    expect(profileIconForPane(profileById(settings, 'codex'), 'bot')).toBe('codex')
+
+    const custom = normalizeSettings({
+      ...defaultSettings,
+      profiles: defaultSettings.profiles.map((profile) => profile.id === 'codex' ? { ...profile, icon: 'rocket' } : profile),
+    })
+    expect(profileById(custom, 'codex').icon).toBe('rocket')
   })
 
   test('identifies task-assignable AI agent profiles and panes', () => {

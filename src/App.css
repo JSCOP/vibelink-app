@@ -6741,6 +6741,321 @@ button.git-window-primary-action,
   opacity: 1;
 }
 
+
+.profile-brand-icon {
+  display: block;
+  flex: none;
+  object-fit: contain;
+}
+
+.repository-session-row.has-active-worktree {
+  border-left-color: color-mix(in srgb, var(--vibelink-accent) 65%, transparent);
+}
+
+.workspace-worktree-list {
+  border-left: 1px solid color-mix(in srgb, var(--vibelink-accent) 28%, var(--vibelink-border-soft));
+  display: grid;
+  gap: 2px;
+  margin: 0 5px 5px 28px;
+  min-width: 0;
+  padding: 1px 0 1px 6px;
+}
+
+.workspaces-group-members .workspace-worktree-list .session-row {
+  margin-left: 0;
+  width: 100%;
+}
+
+.workspaces-sidebar .worktree-session-row {
+  min-height: 38px;
+}
+
+.workspaces-sidebar .worktree-session-row .session-main {
+  cursor: pointer;
+  min-height: 38px;
+  padding-block: 4px;
+}
+
+.workspaces-sidebar .worktree-session-row > .workspaces-row-actions {
+  top: 19px;
+}
+
+.worktree-session-name {
+  align-items: center;
+  display: flex !important;
+  gap: 5px;
+}
+
+.worktree-session-name > svg {
+  color: var(--vibelink-accent);
+  flex: none;
+}
+
+.worktree-add-action {
+  color: var(--vibelink-accent) !important;
+}
+
+.workspace-open-content-group {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.workspace-open-content-group-header {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+  display: grid;
+  font: 700 11px/1.25 var(--vibelink-sans);
+  gap: 5px;
+  grid-template-columns: 12px 15px minmax(0, 1fr) 7px;
+  min-height: 25px;
+  padding: 3px 5px 3px 1px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-open-content-group-header:hover,
+.workspace-open-content-group-header:focus-visible,
+.workspace-open-content-group.is-active > .workspace-open-content-group-header {
+  background: color-mix(in srgb, var(--vibelink-accent) 8%, var(--vibelink-hover));
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-group-chevron {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.workspace-open-content-group-members {
+  border-left: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 1px;
+  margin-left: 7px;
+  min-width: 0;
+  padding-left: 4px;
+}
+
+.workspace-open-content-icon-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px 3px 5px 16px;
+}
+
+.workspace-open-content-icon-button {
+  align-items: center;
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 4px;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  height: 27px;
+  justify-content: center;
+  padding: 0;
+  position: relative;
+  width: 27px;
+}
+
+.workspace-open-content-icon-button:hover,
+.workspace-open-content-icon-button:focus-visible {
+  background: var(--vibelink-hover);
+  border-color: var(--vibelink-accent-border);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-icon-button.is-active {
+  background: var(--vibelink-accent-muted);
+  border-color: var(--vibelink-accent);
+}
+
+.workspace-open-content-icon-button-status {
+  background: transparent;
+  border-radius: 50%;
+  bottom: 2px;
+  height: 5px;
+  position: absolute;
+  right: 2px;
+  width: 5px;
+}
+
+.workspace-open-content-icon-button.is-active .workspace-open-content-icon-button-status {
+  background: var(--vibelink-success, #3fb950);
+}
+
+.workspace-open-content-icon-button.is-complete .workspace-open-content-icon-button-status {
+  background: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
+}
+
+.workspace-context-menu-backdrop {
+  inset: 0;
+  position: fixed;
+  z-index: calc(var(--z-popover) + 5);
+}
+
+.workspace-context-menu {
+  background: var(--vibelink-dialog);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 5px;
+  box-shadow: var(--vibelink-shadow);
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  position: fixed;
+  width: 212px;
+}
+
+.workspace-context-menu button {
+  align-items: center;
+  color: var(--vibelink-text);
+  display: flex;
+  font: 12px/1 var(--vibelink-sans);
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 30px;
+  padding: 0 9px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-context-menu button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+}
+
+.workspace-context-menu button.danger {
+  color: var(--vibelink-danger);
+}
+
+.worktree-create-dialog {
+  width: min(660px, 100%);
+}
+
+.worktree-create-heading,
+.worktree-create-source,
+.worktree-profile-select {
+  align-items: center;
+  display: flex;
+}
+
+.worktree-create-heading {
+  gap: 10px;
+}
+
+.worktree-create-heading h2,
+.worktree-create-heading p {
+  margin: 0;
+}
+
+.worktree-create-mark {
+  align-items: center;
+  background: var(--vibelink-accent-muted);
+  border: 1px solid var(--vibelink-accent-border);
+  border-radius: 5px;
+  color: var(--vibelink-accent);
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.worktree-create-source {
+  background: var(--vibelink-panel-3);
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-accent);
+  gap: 9px;
+  padding: 10px 20px;
+}
+
+.worktree-create-source > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.worktree-create-source strong,
+.worktree-create-source small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-create-source small {
+  color: var(--vibelink-muted);
+}
+
+.worktree-create-fields {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.worktree-create-fields label {
+  color: var(--vibelink-muted);
+  display: grid;
+  font: 12px/1.25 var(--vibelink-sans);
+  gap: 7px;
+}
+
+.worktree-create-fields input,
+.worktree-create-fields select {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 4px;
+  color: var(--vibelink-text);
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.worktree-create-fields input:focus,
+.worktree-create-fields select:focus {
+  border-color: var(--vibelink-accent);
+  outline: none;
+}
+
+.worktree-create-field-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+}
+
+.worktree-profile-select {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 4px;
+  gap: 9px;
+  padding-left: 10px;
+}
+
+.worktree-profile-select select {
+  border: 0;
+}
+
+.worktree-create-hint,
+.worktree-create-error {
+  font: 11px/1.5 var(--vibelink-sans);
+  margin: 0;
+}
+
+.worktree-create-hint {
+  color: var(--vibelink-muted);
+}
+
+.worktree-create-error {
+  color: var(--vibelink-danger);
+}
+
+@media (max-width: 720px) {
+  .worktree-create-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
 /* Terminal window tab controls + add menu */
 .workspace-add-menu {
   display: grid;

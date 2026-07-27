@@ -117,7 +117,7 @@ function App() {
   const settings = useWorkspaceStore((state) => state.settings)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
   const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
-  const shortcutSessions = useMemo(() => flattenWorkspaceRows(workspaceRows(sessions, settings.workspaceGroups, settings.workspaceGroupIds, settings.workspaceOrder)), [sessions, settings.workspaceGroupIds, settings.workspaceGroups, settings.workspaceOrder])
+  const shortcutSessions = useMemo(() => flattenWorkspaceRows(workspaceRows(sessions, settings.workspaceGroups, settings.workspaceGroupIds, settings.workspaceOrder, settings.workspaceWorktrees)), [sessions, settings.workspaceGroupIds, settings.workspaceGroups, settings.workspaceOrder, settings.workspaceWorktrees])
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const editingWorkspace = sessions.find((session) => session.id === editingWorkspaceId) ?? null

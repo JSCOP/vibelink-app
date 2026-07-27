@@ -1,5 +1,5 @@
 import type { DockviewApi } from 'dockview-react'
-import { profileById } from '../state/profiles'
+import { profileById, profileIconForPane } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 import { getTerminalWindow } from './terminalWindowRegistry'
 import { workspaceContentDescriptors } from './workspaceLayoutModel'
@@ -16,6 +16,7 @@ export type OpenContentItem = {
   title: string
   icon: string
   active: boolean
+  parentPanelId?: string | null
 }
 
 export type OpenContentSnapshot = readonly OpenContentItem[]
@@ -70,6 +71,7 @@ export function publishOpenContentFromDockview(api: DockviewApi): boolean {
         ? content.icon
         : workspaceContentDescriptors[content.kind].icon,
       active: outerActive && paneIds.length === 0,
+      parentPanelId: null,
     })
 
     if (content.kind !== 'terminalWindow') continue
@@ -83,8 +85,9 @@ export function publishOpenContentFromDockview(api: DockviewApi): boolean {
         panelId: panePanelId,
         kind: 'terminal',
         title: pane.config.title?.trim() || profile.name || 'Shell',
-        icon: pane.config.icon?.trim() || profile.icon || 'terminal',
+        icon: profileIconForPane(profile, pane.config.icon),
         active: outerActive && (activeInnerPanelId ? activeInnerPanelId === panePanelId : state.activePaneId === paneId),
+        parentPanelId: panel.id,
       })
     }
   }
@@ -103,7 +106,8 @@ function openContentSnapshotsEqual(left: OpenContentSnapshot, right: OpenContent
       || a.kind !== b.kind
       || a.title !== b.title
       || a.icon !== b.icon
-      || a.active !== b.active) return false
+      || a.active !== b.active
+      || a.parentPanelId !== b.parentPanelId) return false
   }
   return true
 }

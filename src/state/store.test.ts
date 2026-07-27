@@ -257,6 +257,59 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
   })
 
+  test('creates a named Git worktree and launches the chosen agent inside its child workspace', async () => {
+    const childSession: SessionMeta = {
+      id: 'session-worktree',
+      name: 'Fix Login',
+      paneCount: 0,
+      createdAt: 126,
+      workspaceFolder: 'E:/managed-worktrees/fix-login-abcd1234',
+    }
+    useWorkspaceStore.setState({
+      sessions: [createdSession],
+      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceOrder: [createdSession.id] }),
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'git_worktree_create_named') return {
+        worktreePath: childSession.workspaceFolder,
+        branch: 'vibelink/fix-login',
+      }
+      if (command === 'create_session') return childSession
+      if (command === 'list_sessions') return [createdSession, childSession]
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      if (command === 'spawn_pane') return { ...spawnedPane, id: 'pane-worktree', config: { ...spawnedPane.config, paneId: 'pane-worktree' } }
+      return null
+    })
+
+    const created = await useWorkspaceStore.getState().createWorktreeSession({
+      parentSessionId: createdSession.id,
+      name: 'Fix Login',
+      startRef: 'origin/main',
+      branch: 'vibelink/fix-login',
+      profileId: 'agent',
+    })
+
+    expect(created).toEqual(childSession)
+    expect(invoke).toHaveBeenCalledWith('git_worktree_create_named', {
+      workspaceFolder: 'E:/repo',
+      name: 'Fix Login',
+      startRef: 'origin/main',
+      branch: 'vibelink/fix-login',
+    })
+    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
+      sessionId: childSession.id,
+      cfg: expect.objectContaining({ cwd: childSession.workspaceFolder, profileId: 'agent' }),
+    })
+    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[childSession.id]).toMatchObject({
+      parentSessionId: createdSession.id,
+      sourceWorkspaceFolder: createdSession.workspaceFolder,
+      worktreePath: childSession.workspaceFolder,
+      branch: 'vibelink/fix-login',
+      startRef: 'origin/main',
+    })
+    expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual([createdSession.id, childSession.id])
+  })
+
   test('adds a local folder to an existing folderless workspace', async () => {
     const folderless = { ...profileSession, name: 'Workspace 1' }
     const updated = { ...folderless, workspaceFolder: 'E:/repo' }

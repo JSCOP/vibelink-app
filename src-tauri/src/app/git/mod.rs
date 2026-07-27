@@ -22,6 +22,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
+use uuid::Uuid;
 
 #[cfg(test)]
 use self::exec::CREATE_NO_WINDOW;
@@ -140,6 +141,22 @@ pub async fn git_worktree_create(
     .map_err(to_string)?
     .map_err(to_string)
 }
+#[tauri::command]
+pub async fn git_worktree_create_named(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    name: String,
+    start_ref: String,
+    branch: String,
+) -> Result<WorktreeInfo, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        worktree_create_named_native(&workspace_folder, &name, &start_ref, &branch)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
 
 #[tauri::command]
 pub async fn git_worktree_remove(
@@ -241,6 +258,71 @@ fn worktree_create_native(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
         worktree_path: path_string,
         branch,
     })
+}
+fn worktree_create_named_native(
+    repo: &str,
+    name: &str,
+    start_ref: &str,
+    branch: &str,
+) -> Result<WorktreeInfo> {
+    let data_dir = crate::daemon::paths::daemon_paths()?.data_dir;
+    worktree_create_named_at_native(
+        repo,
+        name,
+        start_ref,
+        branch,
+        &data_dir.join("worktrees").join("manual"),
+    )
+}
+
+fn worktree_create_named_at_native(
+    repo: &str,
+    name: &str,
+    start_ref: &str,
+    branch: &str,
+    worktree_root: &std::path::Path,
+) -> Result<WorktreeInfo> {
+    let slug = slug_worktree_name(name);
+    if slug.is_empty() {
+        return Err(anyhow!("worktree name must contain a letter or number"));
+    }
+    validate_base_ref(start_ref)?;
+    validate_base_ref(branch)?;
+    let commit_ref = format!("{start_ref}^{{commit}}");
+    git_write(repo, ["rev-parse", "--verify", "--quiet", &commit_ref])
+        .with_context(|| format!("resolve worktree start ref {start_ref}"))?;
+    git_write(repo, ["check-ref-format", "--branch", branch])
+        .with_context(|| format!("validate worktree branch {branch}"))?;
+
+    let unique = Uuid::new_v4().simple().to_string();
+    let worktree_path = worktree_root.join(format!("{slug}-{}", &unique[..8]));
+    std::fs::create_dir_all(parent_dir(&worktree_path)?)?;
+    let path_string = worktree_path.to_string_lossy().to_string();
+    git_write(
+        repo,
+        ["worktree", "add", "-b", branch, &path_string, start_ref],
+    )?;
+    Ok(WorktreeInfo {
+        worktree_path: path_string,
+        branch: branch.to_string(),
+    })
+}
+
+fn slug_worktree_name(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut separator_pending = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if separator_pending && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(ch.to_ascii_lowercase());
+            separator_pending = false;
+        } else if !slug.is_empty() {
+            separator_pending = true;
+        }
+    }
+    slug
 }
 
 fn worktree_remove_native(
@@ -486,6 +568,79 @@ mod tests {
             .to_string()
             .contains("unsupported"));
         assert!(validate_base_ref("feature/foo_1-2.3@~^").is_ok());
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn named_worktree_uses_requested_ref_and_branch() {
+        let repo = test_repo();
+        std::fs::write(repo.join("tracked.txt"), "base\n").expect("write tracked");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+        let root = repo
+            .parent()
+            .expect("temp parent")
+            .join(format!("vibelink-worktrees-{}", Uuid::new_v4()));
+
+        let created = worktree_create_named_at_native(
+            repo.to_str().expect("utf8 repo"),
+            "Fix Login Flow",
+            "HEAD",
+            "vibelink/fix-login-flow",
+            &root,
+        )
+        .expect("create named worktree");
+
+        assert_eq!(created.branch, "vibelink/fix-login-flow");
+        assert!(Path::new(&created.worktree_path)
+            .join("tracked.txt")
+            .is_file());
+        assert!(Path::new(&created.worktree_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("fix-login-flow-")));
+
+        worktree_remove_native(
+            repo.to_str().expect("utf8 repo"),
+            &created.worktree_path,
+            &created.branch,
+            false,
+        )
+        .expect("remove named worktree");
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn named_worktree_rejects_unsafe_ref_branch_and_name() {
+        let repo = test_repo();
+        std::fs::write(repo.join("tracked.txt"), "base\n").expect("write tracked");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+        let root = repo
+            .parent()
+            .expect("temp parent")
+            .join(format!("vibelink-worktrees-{}", Uuid::new_v4()));
+        let repo_str = repo.to_str().expect("utf8 repo");
+
+        assert!(
+            worktree_create_named_at_native(repo_str, "...", "HEAD", "vibelink/empty", &root)
+                .expect_err("empty slug should fail")
+                .to_string()
+                .contains("letter or number")
+        );
+        assert!(
+            worktree_create_named_at_native(repo_str, "safe", "-HEAD", "vibelink/safe", &root)
+                .expect_err("unsafe start ref should fail")
+                .to_string()
+                .contains("must not start")
+        );
+        assert!(
+            worktree_create_named_at_native(repo_str, "safe", "HEAD", "bad branch", &root)
+                .expect_err("unsafe branch should fail")
+                .to_string()
+                .contains("unsupported")
+        );
+
         std::fs::remove_dir_all(repo).expect("cleanup repo");
     }
 

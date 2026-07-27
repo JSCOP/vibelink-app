@@ -27,15 +27,15 @@ describe('workspace groups', () => {
 
     expect(rows).toHaveLength(3)
     expect(rows[0]).toMatchObject({ kind: 'group', group })
-    expect(rows[0].kind === 'group' ? rows[0].sessions.map(({ id }) => id) : []).toEqual(['member-a', 'member-b'])
-    expect(rows.slice(1).map((row) => row.kind === 'session' ? row.session.id : row.group.id)).toEqual(['ungrouped-a', 'ungrouped-b'])
+    expect(rows[0].kind === 'group' ? rows[0].sessions.map(({ session }) => session.id) : []).toEqual(['member-a', 'member-b'])
+    expect(rows.slice(1).map((row) => row.kind === 'session' ? row.node.session.id : row.group.id)).toEqual(['ungrouped-a', 'ungrouped-b'])
   })
 
   test('keeps empty groups in group order', () => {
     const emptyGroup: WorkspaceGroup = { id: 'group-empty', name: 'Empty', collapsed: false }
     const rows = workspaceRows([session('member-a')], [emptyGroup, group], { 'member-a': group.id }, [])
 
-    expect(rows.map((row) => row.kind === 'group' ? row.group.id : row.session.id)).toEqual(['group-empty', 'group-a'])
+    expect(rows.map((row) => row.kind === 'group' ? row.group.id : row.node.session.id)).toEqual(['group-empty', 'group-a'])
     expect(rows[0].kind === 'group' ? rows[0].sessions : []).toEqual([])
   })
 
@@ -49,6 +49,37 @@ describe('workspace groups', () => {
     )
 
     expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['member-a', 'member-b', 'ungrouped'])
+  })
+
+  test('nests persisted worktree sessions under their repository and keeps shortcut order parent-first', () => {
+    const rows = workspaceRows(
+      [session('worktree-b'), session('repo'), session('ungrouped'), session('worktree-a')],
+      [group],
+      { repo: group.id },
+      ['worktree-a', 'repo', 'worktree-b', 'ungrouped'],
+      {
+        'worktree-a': {
+          parentSessionId: 'repo',
+          sourceWorkspaceFolder: 'E:/repo',
+          worktreePath: 'E:/worktrees/a',
+          branch: 'vibelink/a',
+          startRef: 'HEAD',
+          createdAt: '2026-07-27T00:00:00.000Z',
+        },
+        'worktree-b': {
+          parentSessionId: 'repo',
+          sourceWorkspaceFolder: 'E:/repo',
+          worktreePath: 'E:/worktrees/b',
+          branch: 'vibelink/b',
+          startRef: 'main',
+          createdAt: '2026-07-27T00:00:01.000Z',
+        },
+      },
+    )
+
+    expect(rows[0].kind === 'group' ? rows[0].sessions[0]?.session.id : null).toBe('repo')
+    expect(rows[0].kind === 'group' ? rows[0].sessions[0]?.worktrees.map(({ session: child }) => child.id) : []).toEqual(['worktree-a', 'worktree-b'])
+    expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['repo', 'worktree-a', 'worktree-b', 'ungrouped'])
   })
 
   test('settings round-trip preserves normalized group roots and drops malformed groups and assignments', () => {
@@ -68,6 +99,24 @@ describe('workspace groups', () => {
         'session-b': 'missing-group',
         'session-c': 42,
       },
+      workspaceWorktrees: {
+        ' worktree-a ': {
+          parentSessionId: ' repo ',
+          sourceWorkspaceFolder: ' E:/repo ',
+          worktreePath: ' E:/worktrees/a ',
+          branch: ' vibelink/a ',
+          startRef: ' HEAD ',
+          createdAt: ' 2026-07-27T00:00:00.000Z ',
+        },
+        repo: {
+          parentSessionId: 'repo',
+          sourceWorkspaceFolder: 'E:/repo',
+          worktreePath: 'E:/worktrees/self',
+          branch: 'vibelink/self',
+          startRef: 'HEAD',
+        },
+        invalid: { parentSessionId: 'repo' },
+      },
     })
 
     expect(normalized.workspaceGroups).toEqual([
@@ -78,9 +127,20 @@ describe('workspace groups', () => {
     ])
     expect(normalized.workspaceGroupIds).toEqual({ 'session-a': 'group-a' })
 
+    expect(normalized.workspaceWorktrees).toEqual({
+      'worktree-a': {
+        parentSessionId: 'repo',
+        sourceWorkspaceFolder: 'E:/repo',
+        worktreePath: 'E:/worktrees/a',
+        branch: 'vibelink/a',
+        startRef: 'HEAD',
+        createdAt: '2026-07-27T00:00:00.000Z',
+      },
+    })
     const roundTripped = normalizeSettings(JSON.parse(JSON.stringify(normalized)))
     expect(roundTripped.workspaceGroups).toEqual(normalized.workspaceGroups)
     expect(roundTripped.workspaceGroupIds).toEqual(normalized.workspaceGroupIds)
+    expect(roundTripped.workspaceWorktrees).toEqual(normalized.workspaceWorktrees)
   })
 
   test('store actions create, update, assign, and delete groups without deleting sessions', () => {

@@ -95,9 +95,9 @@ describe('openContentRegistry', () => {
     try {
       publishOpenContentFromDockview({ panels: [browser, terminalWindow], activePanel: terminalWindow } as DockviewApi)
       expect(getOpenContentSnapshot()).toEqual([
-        { panelId: browser.id, kind: 'browser', title: 'Docs', icon: 'globe', active: false },
-        { panelId: terminalWindow.id, kind: 'terminalWindow', title: 'Terminal window', icon: 'terminal', active: false },
-        { panelId: panePanelId, kind: 'terminal', title: 'Registry Agent', icon: 'bot', active: true },
+        { panelId: browser.id, kind: 'browser', title: 'Docs', icon: 'globe', active: false, parentPanelId: null },
+        { panelId: terminalWindow.id, kind: 'terminalWindow', title: 'Terminal window', icon: 'terminal', active: false, parentPanelId: null },
+        { panelId: panePanelId, kind: 'terminal', title: 'Registry Agent', icon: 'bot', active: true, parentPanelId: terminalWindow.id },
       ])
     } finally {
       unregister()

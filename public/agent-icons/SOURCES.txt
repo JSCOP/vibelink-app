@@ -1,0 +1,5 @@
+codex.svg — https://developers.openai.com/favicon.svg (OpenAI)
+claude-code.svg — https://claude.ai/favicon.svg (Anthropic)
+oh-my-pi.svg — https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/icon.svg (Oh My Pi)
+opencode.svg — https://opencode.ai/favicon.svg (OpenCode)
+powershell.svg — https://raw.githubusercontent.com/PowerShell/PowerShell/master/assets/ps_black_64.svg (Microsoft PowerShell)

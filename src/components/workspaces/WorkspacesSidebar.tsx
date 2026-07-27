@@ -1,17 +1,21 @@
+import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderPlus, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderPlus, GitBranch, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta } from '../../ipc/types'
 import { paneCompletionCountsBySession, useWorkspaceStore } from '../../state/store'
-import { flattenWorkspaceRows, workspaceRows, type WorkspaceGroup } from '../../state/workspaceGroups'
+import { flattenWorkspaceRows, workspaceRootSessions, workspaceRows, type WorkspaceGroup, type WorkspaceSessionNode, type WorkspaceWorktreeNode } from '../../state/workspaceGroups'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { OpenWorkspaceItems } from './OpenWorkspaceItems'
+import { WorktreeCreateDialog } from './WorktreeCreateDialog'
 
 export type WorkspacesSidebarIntegration = {
   onCreateWorkspaceRequested?: () => void
   onImportReposRequested?: () => void
   onDeleteWorkspaceRequested?: (sessionId: string) => void | Promise<void>
   onEditWorkspaceRequested?: (sessionId: string) => void
+  setWorkspaceOverlayOpen?: (overlayId: string, open: boolean) => void
 }
 
 export type WorkspacesSidebarProps = {
@@ -38,6 +42,7 @@ type MembershipDropTarget =
   | { kind: 'group'; groupId: string }
   | { kind: 'ungrouped' }
 
+type WorkspaceContextMenu = { session: SessionMeta; x: number; y: number }
 function reorderIds(ids: string[], sourceId: string, targetId: string, place: 'before' | 'after'): string[] {
   if (sourceId === targetId) return ids
   const without = ids.filter((id) => id !== sourceId)
@@ -51,18 +56,18 @@ function reorderIds(ids: string[], sourceId: string, targetId: string, place: 'b
 // Hit-test the pointer against the rendered rows to find the drop slot: which
 // row the pointer is over and whether it sits in that row's top or bottom half.
 function dropTargetFromPoint(list: HTMLElement, clientY: number, draggingId: string): DropTarget | null {
-  const rows = [...list.querySelectorAll<HTMLElement>('[data-session-id]')]
+  const rows = [...list.querySelectorAll<HTMLElement>('[data-workspace-reorder-id]')]
   for (const row of rows) {
-    const id = row.dataset.sessionId
+    const id = row.dataset.workspaceReorderId
     if (!id || id === draggingId) continue
     const rect = row.getBoundingClientRect()
     if (clientY < rect.top || clientY > rect.bottom) continue
     return { id, place: clientY < rect.top + rect.height / 2 ? 'before' : 'after' }
   }
   // Past the last row → drop after the last non-dragging row.
-  const last = rows.reverse().find((row) => row.dataset.sessionId && row.dataset.sessionId !== draggingId)
+  const last = rows.reverse().find((row) => row.dataset.workspaceReorderId && row.dataset.workspaceReorderId !== draggingId)
   if (last && clientY > last.getBoundingClientRect().bottom) {
-    return { id: last.dataset.sessionId as string, place: 'after' }
+    return { id: last.dataset.workspaceReorderId as string, place: 'after' }
   }
   return null
 }
@@ -92,8 +97,12 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const groupIds = useWorkspaceStore((state) => state.settings.workspaceGroupIds)
   const order = useWorkspaceStore((state) => state.settings.workspaceOrder)
   const defaultProfileId = useWorkspaceStore((state) => state.settings.defaultProfileId)
+  const profiles = useWorkspaceStore((state) => state.settings.profiles)
+  const workspaceWorktrees = useWorkspaceStore((state) => state.settings.workspaceWorktrees)
+  const workspaceProfileIds = useWorkspaceStore((state) => state.settings.workspaceProfileIds)
   const openSession = useWorkspaceStore((state) => state.openSession)
   const createSession = useWorkspaceStore((state) => state.createSession)
+  const createWorktreeSession = useWorkspaceStore((state) => state.createWorktreeSession)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const renameWorkspaceGroup = useWorkspaceStore((state) => state.renameWorkspaceGroup)
   const deleteWorkspaceGroup = useWorkspaceStore((state) => state.deleteWorkspaceGroup)
@@ -101,22 +110,48 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const setWorkspaceGroupRootFolder = useWorkspaceStore((state) => state.setWorkspaceGroupRootFolder)
   const toggleWorkspaceGroupCollapsed = useWorkspaceStore((state) => state.toggleWorkspaceGroupCollapsed)
   const setError = useWorkspaceStore((state) => state.setError)
-  const rows = useMemo(() => workspaceRows(sessions, groups, groupIds, order), [groupIds, groups, order, sessions])
+  const rows = useMemo(() => workspaceRows(sessions, groups, groupIds, order, workspaceWorktrees), [groupIds, groups, order, sessions, workspaceWorktrees])
   const flattenedSessions = useMemo(() => flattenWorkspaceRows(rows), [rows])
+  const rootSessions = useMemo(() => workspaceRootSessions(rows), [rows])
+  const rootNodes = useMemo(() => rows.flatMap((row) => row.kind === 'group' ? row.sessions : [row.node]), [rows])
+  const rootNodesById = useMemo(() => new Map(rootNodes.map((node) => [node.session.id, node])), [rootNodes])
   const orderBySessionId = useMemo(() => new Map(flattenedSessions.map((session, index) => [session.id, index + 1])), [flattenedSessions])
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const groupedRows = rows.flatMap((row) => row.kind === 'group' ? [row] : [])
-  const ungroupedSessions = rows.flatMap((row) => row.kind === 'session' ? [row.session] : [])
+  const ungroupedNodes = rows.flatMap((row) => row.kind === 'session' ? [row.node] : [])
   const listRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DragState | null>(null)
   const openingGroupIdsRef = useRef(new Set<string>())
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [membershipDropTarget, setMembershipDropTarget] = useState<MembershipDropTarget | null>(null)
+  const [worktreeSource, setWorktreeSource] = useState<SessionMeta | null>(null)
+  const [contextMenu, setContextMenu] = useState<WorkspaceContextMenu | null>(null)
+
+  useEffect(() => {
+    integration.setWorkspaceOverlayOpen?.('worktree-create', Boolean(worktreeSource))
+    return () => integration.setWorkspaceOverlayOpen?.('worktree-create', false)
+  }, [integration, worktreeSource])
 
   const selectWorkspace = async (sessionId: string) => {
     if (sessionId === activeSessionId) return
     await openSession(sessionId)
+  }
+
+  const requestWorktree = async (session: SessionMeta) => {
+    setContextMenu(null)
+    const workspaceFolder = session.workspaceFolder?.trim()
+    if (!workspaceFolder) {
+      setError('This workspace needs a repository folder before it can create a worktree.')
+      return
+    }
+    try {
+      const available = await invoke<boolean>('git_is_available', { workspaceFolder })
+      if (!available) throw new Error('The selected workspace folder is not inside a Git repository.')
+      setWorktreeSource(session)
+    } catch (caught) {
+      setError(String(caught))
+    }
   }
 
   const onRowPointerDown = (event: ReactPointerEvent<HTMLDivElement>, sessionId: string) => {
@@ -167,7 +202,11 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
       return
     }
     if (!target) return
-    const next = reorderIds(flattenedSessions.map((session) => session.id), drag.id, target.id, target.place)
+    const nextRootIds = reorderIds(rootSessions.map((session) => session.id), drag.id, target.id, target.place)
+    const next = nextRootIds.flatMap((sessionId) => {
+      const node = rootNodesById.get(sessionId)
+      return node ? [sessionId, ...node.worktrees.map((worktree) => worktree.session.id)] : [sessionId]
+    })
     if (next.some((id, index) => id !== flattenedSessions[index]?.id)) reorderWorkspaces(next)
     const targetGroupId = groupIds[target.id] ?? null
     if ((groupIds[drag.id] ?? null) !== targetGroupId) setWorkspaceGroup(drag.id, targetGroupId)
@@ -219,19 +258,73 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     if (name?.trim()) renameWorkspaceGroup(group.id, name.trim())
   }
 
+
   const deleteWorkspace = (sessionId: string) => {
     if (!integration.onDeleteWorkspaceRequested) return
     void Promise.resolve(integration.onDeleteWorkspaceRequested(sessionId)).catch((caught) => setError(String(caught)))
   }
 
-  const renderSession = (session: SessionMeta) => {
+  const renderWorktree = ({ session, worktree }: WorkspaceWorktreeNode) => {
+    const position = orderBySessionId.get(session.id) ?? 0
+    const completionCount = completionCounts[session.id] ?? 0
+    const folderName = workspaceFolderBasename(session.workspaceFolder)
+    return (
+      <div
+        key={session.id}
+        className={`session-row worktree-session-row${session.id === activeSessionId ? ' active' : ''}${completionCount > 0 ? ' has-completions' : ''}`}
+        data-session-id={session.id}
+        data-completion-count={completionCount || undefined}
+        role="button"
+        tabIndex={0}
+        aria-current={session.id === activeSessionId ? 'true' : undefined}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => { event.stopPropagation(); void selectWorkspace(session.id) }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          event.stopPropagation()
+          void selectWorkspace(session.id)
+        }}
+      >
+        <div className="session-main">
+          <span className="session-order" title={position > 0 && position <= 9 ? `Ctrl+${position}` : undefined}>{position}</span>
+          <span className={`workspaces-session-status${session.id === activeSessionId ? ' is-active' : ''}`} title={session.id === activeSessionId ? 'Active worktree' : 'Inactive worktree'} aria-label={session.id === activeSessionId ? 'Active worktree' : 'Inactive worktree'} />
+          <span className="workspaces-session-copy">
+            <strong className="session-name worktree-session-name"><GitBranch size={11} strokeWidth={1.8} aria-hidden="true" />{session.name}</strong>
+            <span className="workspaces-session-folder" title={`${worktree.branch} · ${session.workspaceFolder ?? ''}`}>{worktree.branch}{folderName ? ` · ${folderName}` : ''}</span>
+          </span>
+          {completionCount > 0 ? (
+            <span className="session-completion-badge" title={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`}>
+              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />{completionCount}
+            </span>
+          ) : null}
+          <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
+        </div>
+        <div className="workspaces-row-actions">
+          <button type="button" title="Edit worktree workspace details" aria-label={`Edit ${session.name}`} className="session-small-action" disabled={!integration.onEditWorkspaceRequested} onClick={() => integration.onEditWorkspaceRequested?.(session.id)}>
+            <Pencil size={13} strokeWidth={1.7} aria-hidden="true" />
+          </button>
+          <button type="button" title="Delete workspace entry" aria-label={`Delete ${session.name}`} className="session-small-action danger" disabled={!integration.onDeleteWorkspaceRequested} onClick={() => deleteWorkspace(session.id)}>
+            <Trash2 size={13} aria-hidden="true" />
+          </button>
+        </div>
+        {session.id === activeSessionId ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
+      </div>
+    )
+  }
+
+  const renderSession = (node: WorkspaceSessionNode) => {
+    const session = node.session
     const position = orderBySessionId.get(session.id) ?? 0
     const completionCount = completionCounts[session.id] ?? 0
     const folderName = workspaceFolderBasename(session.workspaceFolder)
     const isDropTarget = dropTarget?.id === session.id
+    const hasActiveWorktree = node.worktrees.some((worktree) => worktree.session.id === activeSessionId)
     const rowClass = [
       'session-row',
+      'repository-session-row',
       session.id === activeSessionId ? 'active' : '',
+      hasActiveWorktree ? 'has-active-worktree' : '',
       completionCount > 0 ? 'has-completions' : '',
       draggingId === session.id ? 'dragging' : '',
       isDropTarget ? `drop-${dropTarget.place}` : '',
@@ -241,10 +334,16 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         key={session.id}
         className={rowClass}
         data-session-id={session.id}
+        data-workspace-reorder-id={session.id}
         data-completion-count={completionCount || undefined}
         role="button"
         tabIndex={0}
         aria-current={session.id === activeSessionId ? 'true' : undefined}
+        onContextMenu={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          setContextMenu({ session, x: event.clientX, y: event.clientY })
+        }}
         onPointerDown={(event) => onRowPointerDown(event, session.id)}
         onPointerMove={onRowPointerMove}
         onPointerUp={finishDrag}
@@ -264,13 +363,15 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           </span>
           {completionCount > 0 ? (
             <span className="session-completion-badge" title={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`} aria-label={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`}>
-              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />
-              {completionCount}
+              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />{completionCount}
             </span>
           ) : null}
           <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
         </div>
         <div className="workspaces-row-actions">
+          <button type="button" title="Create Git worktree" aria-label={`Create worktree from ${session.name}`} className="session-small-action worktree-add-action" disabled={!session.workspaceFolder} onClick={() => void requestWorktree(session)}>
+            <Plus size={13} strokeWidth={2} aria-hidden="true" />
+          </button>
           <button type="button" title="Edit workspace details" aria-label={`Edit ${session.name}`} className="session-small-action" disabled={!integration.onEditWorkspaceRequested} onClick={() => integration.onEditWorkspaceRequested?.(session.id)}>
             <Pencil size={13} strokeWidth={1.7} aria-hidden="true" />
           </button>
@@ -279,6 +380,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           </button>
         </div>
         {session.id === activeSessionId ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
+        {node.worktrees.length > 0 ? <div className="workspace-worktree-list" role="group" aria-label={`${session.name} worktrees`}>{node.worktrees.map(renderWorktree)}</div> : null}
       </div>
     )
   }
@@ -295,6 +397,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   )
 
   return (
+    <>
     <WorkspaceSidebarPanelShell
       title="Workspaces"
       icon={<Folder size={15} aria-hidden="true" />}
@@ -311,6 +414,10 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           const dropInside = membershipDropTarget?.kind === 'group' && membershipDropTarget.groupId === group.id
           const rootFolder = group.rootFolder?.trim() || null
           const rootFolderName = workspaceFolderBasename(rootFolder)
+          const normalizedRootFolder = rootFolder?.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() ?? null
+          const groupWorktreeSource = normalizedRootFolder
+            ? groupSessions.find(({ session }) => session.workspaceFolder?.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === normalizedRootFolder)?.session ?? null
+            : null
           return (
             <div key={group.id} className={`workspaces-group${dropInside ? ' is-drop-target' : ''}`}>
               <div
@@ -345,6 +452,9 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
                   {rootFolderName ? <span className="workspaces-session-folder" title={rootFolder ?? undefined}>{rootFolderName}</span> : null}
                 </span>
                 <div className="workspaces-row-actions">
+                  <button type="button" title={groupWorktreeSource ? `Create worktree from ${groupWorktreeSource.name}` : 'Open the group repository before creating a worktree'} aria-label={`Create worktree in ${group.name} group`} className="session-small-action worktree-add-action" disabled={!groupWorktreeSource} onClick={(event) => { event.stopPropagation(); if (groupWorktreeSource) void requestWorktree(groupWorktreeSource) }}>
+                    <Plus size={12} strokeWidth={2} aria-hidden="true" />
+                  </button>
                   {!rootFolder ? (
                     <button type="button" title="Set group root folder" aria-label={`Set root folder for ${group.name} group`} className="session-small-action" onClick={(event) => { event.stopPropagation(); void chooseGroupRoot(group) }}>
                       <FolderPlus size={12} strokeWidth={1.7} aria-hidden="true" />
@@ -363,7 +473,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
                 // you are standing in: otherwise the active row and its open
                 // items vanish and the panel cannot say where you are.
                 const visible = group.collapsed
-                  ? groupSessions.filter((session) => session.id === activeSessionId)
+                  ? groupSessions.filter(({ session, worktrees }) => session.id === activeSessionId || worktrees.some((worktree) => worktree.session.id === activeSessionId))
                   : groupSessions
                 if (visible.length === 0) return null
                 return <div className="workspaces-group-members" role="group" aria-label={`${group.name} workspaces`}>{visible.map(renderSession)}</div>
@@ -372,10 +482,49 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           )
         })}
         <div className={`workspaces-ungrouped-region${draggingId ? ' is-dragging' : ''}${membershipDropTarget?.kind === 'ungrouped' ? ' is-drop-target' : ''}`} data-workspace-ungrouped="true">
-          {ungroupedSessions.map(renderSession)}
-          {draggingId && ungroupedSessions.length === 0 ? <span className="workspaces-ungrouped-drop-hint">Drop here to ungroup</span> : null}
+          {ungroupedNodes.map(renderSession)}
+          {draggingId && ungroupedNodes.length === 0 ? <span className="workspaces-ungrouped-drop-hint">Drop here to ungroup</span> : null}
         </div>
       </div>
     </WorkspaceSidebarPanelShell>
+    {contextMenu && typeof document !== 'undefined' ? createPortal(
+      <div className="workspace-context-menu-backdrop" role="presentation" onMouseDown={() => setContextMenu(null)} onContextMenu={(event) => { event.preventDefault(); setContextMenu(null) }}>
+        <div
+          className="workspace-context-menu"
+          role="menu"
+          aria-label={`${contextMenu.session.name} workspace actions`}
+          style={{
+            left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)),
+            top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 132)),
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button type="button" role="menuitem" onClick={() => void requestWorktree(contextMenu.session)}>
+            <GitBranch size={14} aria-hidden="true" />Create worktree
+          </button>
+          <button type="button" role="menuitem" disabled={!integration.onEditWorkspaceRequested} onClick={() => { integration.onEditWorkspaceRequested?.(contextMenu.session.id); setContextMenu(null) }}>
+            <Pencil size={14} aria-hidden="true" />Edit workspace
+          </button>
+          <button type="button" role="menuitem" className="danger" disabled={!integration.onDeleteWorkspaceRequested} onClick={() => { deleteWorkspace(contextMenu.session.id); setContextMenu(null) }}>
+            <Trash2 size={14} aria-hidden="true" />Delete workspace
+          </button>
+        </div>
+      </div>,
+      document.body,
+    ) : null}
+    {worktreeSource && typeof document !== 'undefined' ? createPortal(
+      <WorktreeCreateDialog
+        sourceSession={worktreeSource}
+        profiles={profiles}
+        initialProfileId={workspaceProfileIds[worktreeSource.id] ?? defaultProfileId}
+        onCreate={async (input) => {
+          await createWorktreeSession(input)
+          setWorktreeSource(null)
+        }}
+        onClose={() => setWorktreeSource(null)}
+      />,
+      document.body,
+    ) : null}
+    </>
   )
 }

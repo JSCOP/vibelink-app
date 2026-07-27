@@ -4,7 +4,7 @@ import { deactivateLicenseDevice, getLicenseStatus, revalidateLicense, signOutAc
 import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
 import { create } from 'zustand'
 import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief, WorktreeInfo } from '../ipc/types'
-import { defaultSettings, isAgentPane, normalizeSettings, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
+import { defaultSettings, isAgentPane, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
 import type { WorkspaceGroup } from './workspaceGroups'
@@ -58,6 +58,13 @@ type Status = 'booting' | 'ready' | 'error'
 export type PaneCompletionSource = 'agent-response' | 'task-done'
 export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource; sessionId: string }
 export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
+export type CreateWorkspaceWorktreeInput = {
+  parentSessionId: string
+  name: string
+  startRef: string
+  branch: string
+  profileId: string
+}
 
 
 type WorkspaceState = {
@@ -111,6 +118,7 @@ type WorkspaceState = {
   attachSession: (sessionId: string, requestEpoch?: number) => Promise<AttachedSession>
   refreshAttachedSession: (sessionId: string) => Promise<AttachedSession | null>
   createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
+  createWorktreeSession: (input: CreateWorkspaceWorktreeInput) => Promise<SessionMeta>
   renameSession: (sessionId: string, name: string) => Promise<void>
   setSessionWorkspaceFolder: (sessionId: string, workspaceFolder: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
@@ -377,6 +385,56 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return created
   },
 
+  createWorktreeSession: async (input: CreateWorkspaceWorktreeInput) => {
+    const parent = get().sessions.find((session) => session.id === input.parentSessionId)
+    const sourceWorkspaceFolder = normalizeWorkspaceFolder(parent?.workspaceFolder)
+    if (!parent || !sourceWorkspaceFolder) throw new Error('A repository workspace folder is required to create a worktree.')
+    const name = input.name.trim()
+    const startRef = input.startRef.trim()
+    const branch = input.branch.trim()
+    if (!name || !startRef || !branch) throw new Error('Worktree name, start ref, and branch are required.')
+
+    const worktree = await invoke<WorktreeInfo>('git_worktree_create_named', {
+      workspaceFolder: sourceWorkspaceFolder,
+      name,
+      startRef,
+      branch,
+    })
+    try {
+      const created = await get().createSession(name, worktree.worktreePath, input.profileId)
+      const settings = get().settings
+      const workspaceWorktrees = {
+        ...settings.workspaceWorktrees,
+        [created.id]: {
+          parentSessionId: parent.id,
+          sourceWorkspaceFolder,
+          worktreePath: worktree.worktreePath,
+          branch: worktree.branch,
+          startRef,
+          createdAt: new Date().toISOString(),
+        },
+      }
+      const workspaceOrder = orderSessions(get().sessions, settings.workspaceOrder).map((session) => session.id).filter((sessionId) => sessionId !== created.id)
+      const siblingIds = new Set(Object.entries(settings.workspaceWorktrees)
+        .filter(([, relation]) => relation.parentSessionId === parent.id)
+        .map(([sessionId]) => sessionId))
+      let insertAt = workspaceOrder.indexOf(parent.id)
+      if (insertAt < 0) insertAt = workspaceOrder.length - 1
+      while (insertAt + 1 < workspaceOrder.length && siblingIds.has(workspaceOrder[insertAt + 1])) insertAt += 1
+      workspaceOrder.splice(insertAt + 1, 0, created.id)
+      get().updateSettings({ workspaceWorktrees, workspaceOrder })
+      return created
+    } catch (error) {
+      await invoke('git_worktree_remove', {
+        workspaceFolder: sourceWorkspaceFolder,
+        worktreePath: worktree.worktreePath,
+        branch: worktree.branch,
+        force: true,
+      }).catch(() => undefined)
+      throw error
+    }
+  },
+
   renameSession: async (sessionId: string, name: string) => {
     await invoke('rename_session', { sessionId, name })
     await get().refreshSessions()
@@ -442,9 +500,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const paneRoles = withoutPaneKeys(state.settings.paneRoles, deletedPaneIds)
       const workspaceProfileIds = { ...state.settings.workspaceProfileIds }
       const workspaceDetails = { ...state.settings.workspaceDetails }
+      const workspaceGroupIds = { ...state.settings.workspaceGroupIds }
+      const workspaceWorktrees = Object.fromEntries(Object.entries(state.settings.workspaceWorktrees)
+        .filter(([worktreeSessionId, worktree]) => worktreeSessionId !== sessionId && worktree.parentSessionId !== sessionId))
+      const workspaceOrder = state.settings.workspaceOrder.filter((workspaceSessionId) => workspaceSessionId !== sessionId)
       delete workspaceProfileIds[sessionId]
       delete workspaceDetails[sessionId]
-      const settings = { ...state.settings, paneRoles, workspaceProfileIds, workspaceDetails }
+      delete workspaceGroupIds[sessionId]
+      const settings = { ...state.settings, paneRoles, workspaceProfileIds, workspaceDetails, workspaceGroupIds, workspaceWorktrees, workspaceOrder }
       delete viewModes[sessionId]
       delete kanbanLayouts[sessionId]
       delete orchestratorPaneIds[sessionId]

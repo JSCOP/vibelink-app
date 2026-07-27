@@ -40,11 +40,27 @@ export type WorkspaceDetails = {
   githubPullRequest: string
   notes: string
 }
+export type WorkspaceWorktree = {
+  parentSessionId: string
+  sourceWorkspaceFolder: string
+  worktreePath: string
+  branch: string
+  startRef: string
+  createdAt: string
+}
+
 
 const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
 const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
 const agentNamePhrasePattern = /\b(?:claude code|oh my pi|oh-my-pi|ohmypi)\b/
 const sixDigitHexColorPattern = /^#[0-9a-f]{6}$/i
+const builtInProfileIconMigrations: Record<string, { icon: string; legacy: readonly string[] }> = {
+  powershell: { icon: 'powershell', legacy: ['terminal-square'] },
+  claude: { icon: 'claude-code', legacy: ['sparkles'] },
+  codex: { icon: 'codex', legacy: ['bot'] },
+  omp: { icon: 'oh-my-pi', legacy: ['zap'] },
+  opencode: { icon: 'opencode', legacy: [] },
+}
 
 export type GitStatusPresentation = 'icons' | 'letters' | 'words'
 
@@ -76,6 +92,7 @@ export type Settings = {
   workspaceDetails: Record<string, WorkspaceDetails>
   workspaceGroups: WorkspaceGroup[]
   workspaceGroupIds: Record<string, string>
+  workspaceWorktrees: Record<string, WorkspaceWorktree>
   paneRoles: Record<string, string>
   workspaceOrder: string[]
   rolePresets: string[]
@@ -138,7 +155,7 @@ const defaultProfiles: Profile[] = [
     env: [],
     cwd: null,
     color: '#58a6ff',
-    icon: 'terminal-square',
+    icon: 'powershell',
   },
   {
     id: 'cmd',
@@ -162,7 +179,7 @@ const defaultProfiles: Profile[] = [
   },
   {
     id: 'claude',
-    name: 'Claude',
+    name: 'Claude Code',
     type: 'local',
     shell: 'pwsh.exe',
     args: agentProfileArgs('claude'),
@@ -178,7 +195,7 @@ const defaultProfiles: Profile[] = [
     env: [],
     cwd: null,
     color: '#f2cc60',
-    icon: 'sparkles',
+    icon: 'claude-code',
   },
   {
     id: 'codex',
@@ -198,7 +215,7 @@ const defaultProfiles: Profile[] = [
     env: [],
     cwd: null,
     color: '#7ee787',
-    icon: 'bot',
+    icon: 'codex',
   },
   {
     id: 'omp',
@@ -218,7 +235,7 @@ const defaultProfiles: Profile[] = [
     env: [],
     cwd: null,
     color: '#76e3ea',
-    icon: 'zap',
+    icon: 'oh-my-pi',
   },
 ]
 
@@ -252,6 +269,7 @@ export const defaultSettings: Settings = {
   workspaceDetails: {},
   workspaceGroups: [],
   workspaceGroupIds: {},
+  workspaceWorktrees: {},
   paneRoles: {},
   workspaceOrder: [],
   hermesCommand: '',
@@ -278,6 +296,7 @@ export function normalizeSettings(value: unknown): Settings {
   const workspaceDetails = normalizeWorkspaceDetails(record?.workspaceDetails)
   const workspaceGroups = normalizeWorkspaceGroups(record?.workspaceGroups)
   const workspaceGroupIds = normalizeWorkspaceGroupIds(record?.workspaceGroupIds, workspaceGroups)
+  const workspaceWorktrees = normalizeWorkspaceWorktrees(record?.workspaceWorktrees)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
   const workspaceOrder = normalizeWorkspaceOrder(record?.workspaceOrder)
   const rolePresets = normalizeRolePresets(record?.rolePresets)
@@ -312,6 +331,7 @@ export function normalizeSettings(value: unknown): Settings {
     workspaceDetails,
     workspaceGroups,
     workspaceGroupIds,
+    workspaceWorktrees,
     paneRoles,
     workspaceOrder,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
@@ -410,7 +430,8 @@ function normalizeProfile(value: unknown, index: number): Profile {
   const record = isRecord(value) ? value : undefined
   const fallbackId = index === 0 ? defaultProfile.id : `${defaultProfile.id}-${index + 1}`
   const id = readString(record?.id, fallbackId).trim() || fallbackId
-  const name = readString(record?.name, id === defaultProfile.id ? defaultProfile.name : id).trim() || defaultProfile.name
+  const rawName = readString(record?.name, id === defaultProfile.id ? defaultProfile.name : id).trim() || defaultProfile.name
+  const name = id.toLowerCase() === 'claude' && rawName === 'Claude' ? 'Claude Code' : rawName
   const type = readProfileKind(record?.type)
 
   const args = readStringArray(record?.args)
@@ -433,8 +454,19 @@ function normalizeProfile(value: unknown, index: number): Profile {
     env: readEnv(record?.env),
     cwd: readNullableString(record?.cwd, defaultProfile.cwd),
     color: readString(record?.color, defaultProfile.color),
-    icon: readString(record?.icon, defaultProfile.icon),
+    icon: migrateBuiltInProfileIcon(id, readString(record?.icon, defaultProfile.icon)),
   }
+}
+
+function migrateBuiltInProfileIcon(profileId: string, icon: string): string {
+  const migration = builtInProfileIconMigrations[profileId.toLowerCase()]
+  return migration?.legacy.includes(icon) ? migration.icon : icon
+}
+
+export function profileIconForPane(profile: Profile, configuredIcon?: string | null): string {
+  const icon = configuredIcon?.trim() || profile.icon
+  const migration = builtInProfileIconMigrations[profile.id.toLowerCase()]
+  return migration?.legacy.includes(icon) ? profile.icon : icon
 }
 
 function cloneProfiles(profiles: Profile[]): Profile[] {
@@ -558,6 +590,30 @@ function normalizeWorkspaceGroupIds(value: unknown, groups: WorkspaceGroup[]): R
     assignments[sessionId] = groupId
   }
   return assignments
+}
+
+function normalizeWorkspaceWorktrees(value: unknown): Record<string, WorkspaceWorktree> {
+  if (!isRecord(value)) return {}
+  const worktrees: Record<string, WorkspaceWorktree> = {}
+  for (const [rawSessionId, rawWorktree] of Object.entries(value)) {
+    const sessionId = rawSessionId.trim()
+    if (!sessionId || !isRecord(rawWorktree)) continue
+    const parentSessionId = readString(rawWorktree.parentSessionId, '').trim()
+    const sourceWorkspaceFolder = readString(rawWorktree.sourceWorkspaceFolder, '').trim()
+    const worktreePath = readString(rawWorktree.worktreePath, '').trim()
+    const branch = readString(rawWorktree.branch, '').trim()
+    const startRef = readString(rawWorktree.startRef, '').trim()
+    if (!parentSessionId || !sourceWorkspaceFolder || !worktreePath || !branch || !startRef || parentSessionId === sessionId) continue
+    worktrees[sessionId] = {
+      parentSessionId,
+      sourceWorkspaceFolder,
+      worktreePath,
+      branch,
+      startRef,
+      createdAt: readString(rawWorktree.createdAt, '').trim(),
+    }
+  }
+  return worktrees
 }
 
 function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Record<string, string> {

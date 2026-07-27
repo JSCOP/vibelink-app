@@ -70,4 +70,29 @@ describe('OpenWorkspaceItems', () => {
     expect(activateContent).toHaveBeenCalledWith(panelId)
     expect(panelId).toBe('content:terminal:pane-42')
   })
+
+  test('collapses a terminal window into icon-only program launchers', () => {
+    const windowPanelId = 'content:terminalWindow:window-1'
+    const codexPanelId = workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-codex' })
+    const claudePanelId = workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-claude' })
+    publishOpenContentSnapshot([
+      { panelId: windowPanelId, kind: 'terminalWindow', title: 'Terminal', icon: 'terminal', active: false, parentPanelId: null },
+      { panelId: codexPanelId, kind: 'terminal', title: 'Codex', icon: 'codex', active: true, parentPanelId: windowPanelId },
+      { panelId: claudePanelId, kind: 'terminal', title: 'Claude Code', icon: 'claude-code', active: false, parentPanelId: windowPanelId },
+    ])
+    renderItems()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse Terminal' }))
+    const codexIcon = screen.getByRole('button', { name: 'Activate Codex' })
+    const claudeIcon = screen.getByRole('button', { name: 'Activate Claude Code' })
+    expect(codexIcon).toHaveAttribute('aria-current', 'true')
+    expect(codexIcon.querySelector('img')).toHaveAttribute('src', '/agent-icons/codex.svg')
+    expect(claudeIcon.querySelector('img')).toHaveAttribute('src', '/agent-icons/claude-code.svg')
+    expect(screen.queryByText('Claude Code')).not.toBeInTheDocument()
+
+    fireEvent.click(claudeIcon)
+    expect(activateContent).toHaveBeenCalledWith(claudePanelId)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Terminal' }))
+    expect(screen.getByText('Claude Code')).toBeInTheDocument()
+  })
 })

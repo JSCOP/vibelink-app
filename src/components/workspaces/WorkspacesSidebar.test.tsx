@@ -6,8 +6,9 @@ import type { SessionMeta } from '../../ipc/types'
 import type { WorkspaceGroup } from '../../state/workspaceGroups'
 import { clearOpenContentSnapshot, publishOpenContentSnapshot } from '../../layout/openContentRegistry'
 
-const { open } = vi.hoisted(() => ({ open: vi.fn() }))
+const { open, invoke } = vi.hoisted(() => ({ open: vi.fn(), invoke: vi.fn() }))
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open }))
 
 const mocks = vi.hoisted(() => ({
@@ -22,6 +23,16 @@ const mocks = vi.hoisted(() => ({
     paneCompletionHighlights: {} as Record<string, { sessionId: string }>,
     settings: {
       defaultProfileId: 'codex',
+      profiles: [],
+      workspaceProfileIds: {} as Record<string, string>,
+      workspaceWorktrees: {} as Record<string, {
+        parentSessionId: string
+        sourceWorkspaceFolder: string
+        worktreePath: string
+        branch: string
+        startRef: string
+        createdAt: string
+      }>,
       workspaceGroups: [
         { id: 'core', name: 'Core', collapsed: false },
         { id: 'tools', name: 'Tools', collapsed: false },
@@ -38,6 +49,7 @@ const mocks = vi.hoisted(() => ({
       workspaceFolder,
     })),
     renameSession: vi.fn(async () => undefined),
+    createWorktreeSession: vi.fn(async () => undefined),
     reorderWorkspaces: vi.fn(),
     renameWorkspaceGroup: vi.fn(),
     deleteWorkspaceGroup: vi.fn(),
@@ -92,10 +104,13 @@ describe('WorkspacesSidebar', () => {
       { id: 'tools', name: 'Tools', collapsed: false },
     ]
     mocks.state.paneCompletionHighlights = {}
+    mocks.state.settings.workspaceWorktrees = {}
+    mocks.state.settings.workspaceProfileIds = {}
     mocks.state.activeSessionId = 'gamma'
     clearOpenContentSnapshot()
     vi.clearAllMocks()
     open.mockReset().mockResolvedValue(null)
+    invoke.mockReset().mockResolvedValue(true)
     mocks.state.openSession.mockReset().mockResolvedValue(undefined)
     mocks.state.createSession.mockReset().mockImplementation(async (name?: string, workspaceFolder?: string | null): Promise<SessionMeta> => ({
       id: `created-${name}`,
@@ -194,6 +209,34 @@ describe('WorkspacesSidebar', () => {
     const inactiveRow = screen.getByText('Beta').closest('[data-session-id]') as HTMLElement
     expect(within(inactiveRow).queryByRole('list', { name: 'Open workspace items' })).not.toBeInTheDocument()
     expect(screen.getAllByRole('list', { name: 'Open workspace items' })).toHaveLength(1)
+  })
+
+  test('nests worktree sessions and opens creation from the repository context menu', async () => {
+    mocks.state.sessions = [
+      ...mocks.state.sessions,
+      { id: 'beta-worktree', name: 'Fix Login', paneCount: 1, createdAt: 5, workspaceFolder: 'E:/worktrees/fix-login' },
+    ]
+    mocks.state.settings.workspaceWorktrees = {
+      'beta-worktree': {
+        parentSessionId: 'beta',
+        sourceWorkspaceFolder: 'E:/repos/beta',
+        worktreePath: 'E:/worktrees/fix-login',
+        branch: 'vibelink/fix-login',
+        startRef: 'HEAD',
+        createdAt: '2026-07-27T00:00:00.000Z',
+      },
+    }
+    renderSidebar()
+
+    const betaRow = screen.getByText('Beta').closest('[data-session-id]') as HTMLElement
+    expect(within(betaRow).getByText('Fix Login')).toBeInTheDocument()
+    expect(within(betaRow).getByText(/vibelink\/fix-login/)).toBeInTheDocument()
+
+    fireEvent.contextMenu(betaRow, { clientX: 120, clientY: 140 })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Create worktree' }))
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_is_available', { workspaceFolder: 'E:/repos/beta' }))
+    expect(screen.getByRole('dialog', { name: 'Create isolated AI workspace' })).toBeInTheDocument()
   })
 
   test('creates, groups, and opens a root workspace once during a fast double click', async () => {
