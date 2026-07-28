@@ -407,10 +407,7 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ worktreeStorage: { folderName: 'nested\\worktrees' } }).worktreeStorage.folderName).toBe('VibeLinkWorktrees')
   })
 
-  test('normalizes terminal scrollbar visibility and workspace order settings', () => {
-    expect(normalizeSettings({ terminalScrollbarVisible: false }).terminalScrollbarVisible).toBe(false)
-    expect(defaultSettings.terminalScrollbarVisible).toBe(false)
-    expect(normalizeSettings({ terminalScrollbarVisible: 'nope' }).terminalScrollbarVisible).toBe(defaultSettings.terminalScrollbarVisible)
+  test('normalizes workspace order settings', () => {
     expect(normalizeSettings({ workspaceOrder: ['a', 'a', ' b ', '', 3, 'c'] }).workspaceOrder).toEqual(['a', 'b', 'c'])
     expect(normalizeSettings({ workspaceOrder: 'nope' }).workspaceOrder).toEqual([])
     expect(defaultSettings.workspaceOrder).toEqual([])

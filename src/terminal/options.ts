@@ -10,7 +10,6 @@ export type TerminalVisualSettings = {
   terminalFontWeight: number
   scrollback: number
   terminalThemeId: TerminalThemeId
-  terminalScrollbarVisible: boolean
   cursorStyle: TerminalCursorStyle
   cursorWidth: number
 }
@@ -24,7 +23,6 @@ export const defaultTerminalSettings: TerminalVisualSettings = {
   terminalFontWeight: 400,
   scrollback: 5000,
   terminalThemeId: defaultTerminalThemeId,
-  terminalScrollbarVisible: false,
   cursorStyle: 'bar',
   cursorWidth: 1,
 }

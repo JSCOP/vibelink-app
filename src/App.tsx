@@ -509,11 +509,10 @@ function App() {
       terminalFontWeight: settings.terminalFontWeight,
       scrollback: settings.scrollback,
       terminalThemeId: settings.terminalThemeId,
-      terminalScrollbarVisible: settings.terminalScrollbarVisible,
       cursorStyle: settings.cursorStyle,
       cursorWidth: settings.cursorWidth,
     })
-  }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.terminalScrollbarVisible, settings.cursorStyle, settings.cursorWidth])
+  }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.cursorStyle, settings.cursorWidth])
 
   useEffect(() => {
     if (!activeSessionId || !license.ready || !license.status?.entitled) return

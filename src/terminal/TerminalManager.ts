@@ -17,6 +17,7 @@ import { agentActivityTracker, type AgentActivityActions } from './agentActivity
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
 import { PaneTitleCoalescer } from './titleCoalescing'
+import { showPaneScrollbar } from './scrollbar'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 64 * 1024
@@ -109,6 +110,8 @@ type Entry = {
   titleDisposable?: { dispose: () => void }
   linkDisposables?: { dispose(): void }[]
   outputTrimNoticeWritten?: boolean
+  /** Whether this pane's xterm scrollbar was switched to always-visible. */
+  scrollbarPersistent?: boolean
   webgl?: WebglAddon
   webglAttempted?: boolean
   webglContextLossDisposable?: { dispose(): void }
@@ -312,7 +315,6 @@ class TerminalManagerImpl {
       entry.term.options.cursorStyle = options.cursorStyle
       if (options.cursorWidth !== undefined) entry.term.options.cursorWidth = options.cursorWidth
       entry.term.options.theme = terminalThemeById(settings.terminalThemeId)
-      this.applyScrollbarVisibility(entry)
       if (fontChanged) this.fitAfterFontsLoad(entry)
       if (fontChanged || themeChanged || cursorChanged) this.redrawAfterNextFrame(entry)
       this.fit(entry, 0, true)
@@ -381,8 +383,6 @@ class TerminalManagerImpl {
     }
     entry.container = container
     entry.term.options.theme = terminalThemeById(this.settings.terminalThemeId)
-    this.applyScrollbarVisibility(entry)
-
     if (!entry.opened) {
       entry.term.open(container)
       entry.opened = true
@@ -392,6 +392,7 @@ class TerminalManagerImpl {
     }
 
     if (entry.opened) this.loadWebglRenderer(entry)
+    this.ensurePersistentScrollbar(entry)
 
     if (!entry.dataWired) {
       entry.term.onData((data) => {
@@ -947,8 +948,12 @@ class TerminalManagerImpl {
     }
   }
 
-  private applyScrollbarVisibility(entry: Entry): void {
-    entry.container?.classList.toggle('terminal-scrollbar-hidden', !this.settings.terminalScrollbarVisible)
+  /** Every pane keeps its own always-visible scrollbar. xterm builds the
+   *  scrollable element lazily inside `term.open()`, so this runs after the
+   *  terminal is opened and only needs to succeed once per pane. */
+  private ensurePersistentScrollbar(entry: Entry): void {
+    if (entry.scrollbarPersistent || !entry.opened) return
+    entry.scrollbarPersistent = showPaneScrollbar(entry.term)
   }
 
   private clearWebglTextureAtlas(entry: Entry): void {

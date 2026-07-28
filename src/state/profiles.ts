@@ -85,7 +85,6 @@ export type Settings = {
   completionSoundEnabled: boolean
   completionSoundId: CompletionSoundId
   completionSoundVolume: number
-  terminalScrollbarVisible: boolean
   cursorStyle: TerminalCursorStyle
   cursorWidth: number
   sessionRestore: SessionRestoreMode
@@ -265,7 +264,6 @@ export const defaultSettings: Settings = {
   completionSoundEnabled: true,
   completionSoundId: defaultCompletionSoundId,
   completionSoundVolume: 0.55,
-  terminalScrollbarVisible: false,
   cursorStyle: 'bar',
   cursorWidth: 1,
   sessionRestore: 'resume',
@@ -336,7 +334,6 @@ export function normalizeSettings(value: unknown): Settings {
     completionSoundEnabled: readBoolean(record?.completionSoundEnabled, defaultSettings.completionSoundEnabled),
     completionSoundId: isCompletionSoundId(record?.completionSoundId) ? record.completionSoundId : defaultCompletionSoundId,
     completionSoundVolume: readNumberInRange(record?.completionSoundVolume, defaultSettings.completionSoundVolume, 0, 1),
-    terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
     cursorWidth: readNumberInRange(record?.cursorWidth, defaultSettings.cursorWidth, 1, 10),
     sessionRestore: readSessionRestoreMode(record?.sessionRestore, record?.stopTerminalsOnAppExit),
