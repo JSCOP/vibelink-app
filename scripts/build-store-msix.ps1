@@ -128,6 +128,9 @@ Invoke-Checked $makeAppx @('pack', '/d', $StageRoot, '/p', $OutputPath, '/o')
 
 $pfxPath = Join-Path $StoreRoot 'VibeLink-store-test.pfx'
 $pfxPassword = [guid]::NewGuid().ToString('N')
+$certificateNotBefore = (Get-Date).AddMinutes(-5)
+$rootCertificateNotAfter = (Get-Date).AddDays(7)
+$leafCertificateNotAfter = $rootCertificateNotAfter.AddSeconds(-1)
 $rootRsa = [System.Security.Cryptography.RSA]::Create(2048)
 $rootSubject = "CN=VibeLink Store Package Test Root $([guid]::NewGuid().ToString('N'))"
 $rootRequest = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest(
@@ -141,7 +144,7 @@ $rootRequest.CertificateExtensions.Add((New-Object System.Security.Cryptography.
   ([System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign -bor [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::CrlSign),
   $true
 )))
-$rootCertificate = $rootRequest.CreateSelfSigned((Get-Date).AddMinutes(-5), (Get-Date).AddDays(7))
+$rootCertificate = $rootRequest.CreateSelfSigned($certificateNotBefore, $rootCertificateNotAfter)
 
 $leafRsa = [System.Security.Cryptography.RSA]::Create(2048)
 $leafRequest = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest(
@@ -165,7 +168,7 @@ $serial = New-Object byte[] 16
 $serialRng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
 try { $serialRng.GetBytes($serial) } finally { $serialRng.Dispose() }
 $serial[0] = $serial[0] -band 0x7f
-$leafPublic = $leafRequest.Create($rootCertificate, (Get-Date).AddMinutes(-5), (Get-Date).AddDays(7), $serial)
+$leafPublic = $leafRequest.Create($rootCertificate, $certificateNotBefore, $leafCertificateNotAfter, $serial)
 $leafCertificate = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::CopyWithPrivateKey($leafPublic, $leafRsa)
 try {
   $chain = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection

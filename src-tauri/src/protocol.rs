@@ -441,6 +441,12 @@ pub enum ClientToDaemon {
     },
     Shutdown {
         req: Req,
+        /// `true` when the user deliberately quit the app, so the persisted
+        /// workspaces are marked clean and must not cold-restore next launch.
+        /// A daemon RESTART (Resource Monitor) sends `false`: the panes are
+        /// expected to come back.
+        #[serde(default)]
+        clean_exit: bool,
     },
     GetScrollback {
         req: Req,
@@ -635,6 +641,8 @@ pub struct PaneConfig {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
+    pub restore_on_start: bool,
     pub cols: u16,
     pub rows: u16,
 }
@@ -741,6 +749,7 @@ mod tests {
                 icon: Some("sparkles".to_string()),
                 profile_id: Some("codex".to_string()),
                 role: Some("Reviewer".to_string()),
+                restore_on_start: true,
                 cols: 120,
                 rows: 32,
             },

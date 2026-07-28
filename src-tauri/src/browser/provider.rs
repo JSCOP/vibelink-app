@@ -23,7 +23,11 @@ fn append_resolved_renderer_argument(arguments: &str) -> String {
 #[cfg(windows)]
 fn append_software_renderer_argument(arguments: &str, software: bool) -> String {
     let trimmed = arguments.trim();
-    if !software || trimmed.split_whitespace().any(|item| item == "--disable-gpu") {
+    if !software
+        || trimmed
+            .split_whitespace()
+            .any(|item| item == "--disable-gpu")
+    {
         return trimmed.to_string();
     }
     if trimmed.is_empty() {
@@ -44,10 +48,7 @@ mod renderer_argument_tests {
             "--remote-debugging-port=9333 --disable-gpu"
         );
         assert_eq!(
-            append_software_renderer_argument(
-                "--remote-debugging-port=9333 --disable-gpu",
-                true,
-            ),
+            append_software_renderer_argument("--remote-debugging-port=9333 --disable-gpu", true,),
             "--remote-debugging-port=9333 --disable-gpu"
         );
         assert_eq!(

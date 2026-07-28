@@ -221,6 +221,7 @@ mod tests {
                 icon: None,
                 profile_id: None,
                 role: None,
+                restore_on_start: false,
                 cols: 80,
                 rows: 24,
             },

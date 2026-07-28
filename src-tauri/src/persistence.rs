@@ -34,16 +34,20 @@ where
 }
 
 pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).context("serialize persisted JSON")?;
+    write_bytes_atomic(path, &bytes)
+}
+
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create persistence directory {}", parent.display()))?;
     }
     let temporary = temporary_path(path);
-    let bytes = serde_json::to_vec_pretty(value).context("serialize persisted JSON")?;
     {
         let mut file = fs::File::create(&temporary)
             .with_context(|| format!("create persistence temp file {}", temporary.display()))?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .with_context(|| format!("write persistence temp file {}", temporary.display()))?;
         file.flush()
             .with_context(|| format!("flush persistence temp file {}", temporary.display()))?;

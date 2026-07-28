@@ -531,11 +531,23 @@ pub fn socket_name() -> io::Result<Name<'static>> {
     paths::socket_name_string().to_ns_name::<GenericNamespaced>()
 }
 
+/// Stops the daemon without marking a deliberate quit. Used by daemon
+/// RESTART, where the panes are expected to be reconstructed immediately.
 pub fn shutdown_daemon() -> Result<bool> {
+    shutdown_daemon_with(false)
+}
+
+/// Stops the daemon and records a deliberate application quit, so the next
+/// start does not cold-restore these workspaces.
+pub fn shutdown_daemon_clean() -> Result<bool> {
+    shutdown_daemon_with(true)
+}
+
+fn shutdown_daemon_with(clean_exit: bool) -> Result<bool> {
     let daemon_paths = paths::daemon_paths()?;
 
     // Try graceful shutdown via protocol message first.
-    if graceful_shutdown(&daemon_paths.pid)? {
+    if graceful_shutdown(&daemon_paths.pid, clean_exit)? {
         return Ok(true);
     }
 
@@ -546,7 +558,7 @@ pub fn shutdown_daemon() -> Result<bool> {
 const SHUTDOWN_REQ: Req = u64::MAX;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
-fn graceful_shutdown(pid_path: &Path) -> Result<bool> {
+fn graceful_shutdown(pid_path: &Path, clean_exit: bool) -> Result<bool> {
     // Only attempt if daemon is running.
     if read_daemon_pid(pid_path)?.is_none() {
         return Ok(false);
@@ -563,7 +575,13 @@ fn graceful_shutdown(pid_path: &Path) -> Result<bool> {
         .spawn(move || {
             let mut stream = stream;
             let result = (|| -> Result<()> {
-                write_frame(&mut stream, &ClientToDaemon::Shutdown { req: SHUTDOWN_REQ })?;
+                write_frame(
+                    &mut stream,
+                    &ClientToDaemon::Shutdown {
+                        req: SHUTDOWN_REQ,
+                        clean_exit,
+                    },
+                )?;
                 match read_frame::<_, DaemonToClient>(&mut stream)? {
                     DaemonToClient::Reply { req, .. } if req == SHUTDOWN_REQ => Ok(()),
                     DaemonToClient::Error { message, .. } => bail!("shutdown rejected: {message}"),

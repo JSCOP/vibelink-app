@@ -18,6 +18,12 @@ pub struct PersistedSession {
     pub workspace_folder: Option<String>,
     #[serde(default)]
     pub sleeping: bool,
+    /// Orca-parity clean-exit marker. `true` means the previous run shut this
+    /// workspace down deliberately, so its panes must NOT be cold-restored on
+    /// the next daemon start. Only an unclean exit (crash, reboot, kill)
+    /// leaves this `false` and therefore restorable.
+    #[serde(default)]
+    pub clean_exit: bool,
     pub panes: Vec<PaneConfig>,
 }
 
@@ -43,6 +49,7 @@ mod tests {
             layout_json: Some("{\"grid\":true}".to_string()),
             workspace_folder: None,
             sleeping: false,
+            clean_exit: false,
             panes: vec![PaneConfig {
                 pane_id: Uuid::new_v4(),
                 shell: Some("cmd.exe".to_string()),
@@ -53,6 +60,7 @@ mod tests {
                 icon: None,
                 profile_id: None,
                 role: None,
+                restore_on_start: true,
                 cols: 100,
                 rows: 40,
             }],
@@ -80,6 +88,7 @@ mod tests {
             layout_json: None,
             workspace_folder: Some("C:\\".to_string()),
             sleeping: true,
+            clean_exit: true,
             panes: Vec::new(),
         };
 
@@ -102,6 +111,7 @@ mod tests {
             layout_json: None,
             workspace_folder: None,
             sleeping: false,
+            clean_exit: false,
             panes: Vec::new(),
         };
 
@@ -124,6 +134,7 @@ mod tests {
             layout_json: None,
             workspace_folder: Some("E:/work".to_string()),
             sleeping: false,
+            clean_exit: false,
             panes: Vec::new(),
         };
 
@@ -162,5 +173,6 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].panes.len(), 1);
         assert_eq!(loaded[0].panes[0].pane_id, pane_id);
+        assert!(!loaded[0].panes[0].restore_on_start);
     }
 }

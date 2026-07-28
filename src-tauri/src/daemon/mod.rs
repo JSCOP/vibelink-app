@@ -7,6 +7,7 @@ pub mod pty;
 pub mod query_filter;
 pub mod scrollback;
 pub mod session;
+mod terminal_history;
 
 use crate::agent_runtime::WorktreeManager;
 use crate::computer_use::{
@@ -18,7 +19,12 @@ use crate::control_plane::{ControlCommand, ControlPlane};
 use crate::daemon::automation::{AutomationService, CreateAutomation};
 use crate::daemon::persistence::{load_sessions, save_sessions};
 use crate::daemon::pty::{Pane, SharedChild};
-use crate::daemon::session::{DaemonState, PaneExitEffect, PaneLeaseEffect, PaneLeaseTransition};
+use crate::daemon::session::{
+    DaemonState, PaneExitEffect, PaneLeaseEffect, PaneLeaseTransition, PaneOutputEffect,
+};
+use crate::daemon::terminal_history::{
+    load_pane_history, remove_pane_history, remove_session_history, TerminalHistoryWriter,
+};
 use crate::dedicated_cli::{
     AutomationAction, CliControlRequest, Command as DedicatedCommand, ComputerAction,
     OrchestrationAction, RemoteAction, SkillAction, TerminalAction, WorkspaceAction,
@@ -177,6 +183,8 @@ fn resolve_browser_host_response(
 
 struct DebouncedPersister {
     dirty: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
 }
 
 fn lock_state(state: &SharedState) -> MutexGuard<'_, DaemonState> {
@@ -306,9 +314,8 @@ fn run_inner() -> Result<()> {
         }
     }
 
-    info!("daemon shutting down, killing all panes");
-    kill_all_panes(&state);
-    if let Err(err) = persist_state(&state, &sessions_path) {
+    info!("daemon shutting down, preserving restorable panes");
+    if let Err(err) = persist_restorable_panes_and_kill_all(&state, &sessions_path) {
         warn!(?err, "failed to persist state during shutdown");
     }
     drop(lock_file);
@@ -869,28 +876,78 @@ fn reconcile_orchestration_startup(
 }
 
 fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> {
+    let mut panes_to_restore = Vec::new();
     for persisted in load_sessions(sessions_path)? {
+        let session_id = persisted.id;
+        let workspace_folder = persisted.workspace_folder;
+        let sleeping = persisted.sleeping;
+        // Orca parity (`HistoryReader.hasRestorableHistory`): a workspace shut
+        // down deliberately is NOT reconstructed. Only an unclean exit --
+        // crash, machine reboot, or force kill -- leaves `clean_exit` false and
+        // therefore rebuilds its panes. This is what makes "close, then open"
+        // predictable instead of always resurrecting the previous screen.
+        let restorable = !sleeping && !persisted.clean_exit;
+        for cfg in persisted.panes {
+            if restorable && cfg.restore_on_start {
+                panes_to_restore.push((session_id, workspace_folder.clone(), cfg));
+            }
+        }
+        if persisted.clean_exit {
+            // The stale bytes would otherwise be replayed into whatever pane
+            // later reuses this id.
+            if let Err(error) = remove_session_history(sessions_path, session_id) {
+                warn!(?error, %session_id, "failed to drop history after clean exit");
+            }
+        }
         lock_state(&state).insert_session(
             crate::protocol::SessionMeta {
-                id: persisted.id,
+                id: session_id,
                 name: persisted.name,
                 pane_count: 0,
                 created_at: persisted.created_at,
-                workspace_folder: persisted.workspace_folder,
+                workspace_folder,
             },
             persisted.layout_json,
-            persisted.sleeping,
+            sleeping,
+            persisted.clean_exit,
         );
+    }
 
-        if !persisted.panes.is_empty() {
+    for (session_id, workspace_folder, mut cfg) in panes_to_restore {
+        if cfg
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| !Path::new(cwd).is_dir())
+        {
+            let fallback = workspace_folder.filter(|folder| Path::new(folder).is_dir());
             warn!(
-                pane_count = persisted.panes.len(),
-                session_id = %persisted.id,
-                "ignoring persisted pane records"
+                pane_id = %cfg.pane_id,
+                old_cwd = ?cfg.cwd,
+                fallback_cwd = ?fallback,
+                "restored pane working directory no longer exists"
             );
+            cfg.cwd = fallback;
+        }
+        let pane_id = cfg.pane_id;
+        let scrollback = match load_pane_history(sessions_path, session_id, pane_id) {
+            Ok(scrollback) => scrollback,
+            Err(error) => {
+                warn!(?error, %session_id, %pane_id, "failed to load terminal history");
+                Vec::new()
+            }
+        };
+        if let Err(error) = restore_pane_for_session(
+            Arc::clone(&state),
+            sessions_path.to_path_buf(),
+            session_id,
+            cfg,
+            scrollback,
+        ) {
+            warn!(?error, %session_id, %pane_id, "failed to cold-restore pane");
+            let _ = remove_pane_history(sessions_path, session_id, pane_id);
         }
     }
-    Ok(())
+    persist_state(&state, sessions_path)
 }
 
 fn handle_connection(
@@ -1829,6 +1886,7 @@ fn launch_ready_dispatches(
                         icon: Some("bot".to_string()),
                         profile_id: spec.profile.clone(),
                         role: Some("orchestration-worker".to_string()),
+                        restore_on_start: false,
                         cols: 120,
                         rows: 32,
                     },
@@ -2149,6 +2207,9 @@ fn dispatch_cli_request(
                 for pane in &mut panes {
                     pane.kill()?;
                 }
+                if let Err(error) = remove_session_history(sessions_path, session_id) {
+                    warn!(?error, %session_id, "failed to remove deleted workspace history");
+                }
                 Ok(serde_json::json!({ "deleted": session_id }))
             }
             WorkspaceAction::Open => {
@@ -2182,7 +2243,14 @@ fn dispatch_cli_request(
                 };
                 process_pane_lease_transitions(state, lease_transitions);
                 for pane in &mut panes {
+                    let pane_id = pane.id;
                     pane.kill()?;
+                    if let Err(error) = remove_pane_history(sessions_path, session_id, pane_id) {
+                        warn!(?error, %pane_id, "failed to remove sleeping pane history");
+                    }
+                }
+                if let Err(error) = remove_session_history(sessions_path, session_id) {
+                    warn!(?error, %session_id, "failed to remove sleeping workspace history");
                 }
                 persist_state(state, sessions_path)?;
                 for sender in senders {
@@ -2270,6 +2338,7 @@ fn dispatch_cli_request(
                             icon: None,
                             profile_id: None,
                             role: None,
+                            restore_on_start: false,
                             cols: 120,
                             rows: 30,
                         },
@@ -2291,6 +2360,10 @@ fn dispatch_cli_request(
                     }
                     if let Some(mut pane) = pane {
                         pane.kill()?;
+                        if let Err(error) = remove_pane_history(sessions_path, session_id, pane_id)
+                        {
+                            warn!(?error, %pane_id, "failed to remove closed pane history");
+                        }
                     }
                     persist_state(state, sessions_path)?;
                     Ok(serde_json::json!({ "closed": pane_id }))
@@ -3483,13 +3556,21 @@ fn dispatch_message(
             persist_state(&state, sessions_path)?;
             send_ok(tx, req)?;
             notify_session_changed(&state, session_id)?;
+            if let Err(error) = remove_session_history(sessions_path, session_id) {
+                warn!(?error, %session_id, "failed to remove deleted workspace history");
+            }
             for mut pane in panes {
                 let pane_id = pane.id;
+                let sessions_path = sessions_path.to_path_buf();
                 thread::Builder::new()
                     .name(format!("vibelink-close-pty-{pane_id}"))
                     .spawn(move || {
                         if let Err(err) = pane.kill() {
                             warn!(?err, %pane_id, "failed to kill deleted pane");
+                        }
+                        if let Err(error) = remove_pane_history(&sessions_path, session_id, pane_id)
+                        {
+                            warn!(?error, %pane_id, "failed to remove deleted pane history");
                         }
                     })?;
             }
@@ -3500,8 +3581,12 @@ fn dispatch_message(
                 let mut state = lock_state(&state);
                 let attached = state.attach_session(session_id)?;
                 state.attach_client_to_session(client_id, session_id);
+                // The workspace is live again, so a later crash must restore
+                // it even though the previous run exited cleanly.
+                state.clear_clean_exit(session_id);
                 attached
             };
+            debounce_persist_state(&state, sessions_path)?;
             send(
                 tx,
                 DaemonToClient::Reply {
@@ -3637,11 +3722,16 @@ fn dispatch_message(
             notify_session_changed(&state, session_id)?;
             send_ok(tx, req)?;
             if let Some(mut pane) = pane {
+                let sessions_path = sessions_path.to_path_buf();
                 thread::Builder::new()
                     .name(format!("vibelink-close-pty-{pane_id}"))
                     .spawn(move || {
                         if let Err(err) = pane.kill() {
                             warn!(?err, pane_id = %pane_id, "failed to kill closed pane");
+                        }
+                        if let Err(error) = remove_pane_history(&sessions_path, session_id, pane_id)
+                        {
+                            warn!(?error, %pane_id, "failed to remove closed pane history");
                         }
                     })?;
             }
@@ -3661,13 +3751,21 @@ fn dispatch_message(
             send_ok(tx, req)?;
             for mut pane in panes {
                 let pane_id = pane.id;
+                let sessions_path = sessions_path.to_path_buf();
                 thread::Builder::new()
                     .name(format!("vibelink-close-pty-{pane_id}"))
                     .spawn(move || {
                         if let Err(err) = pane.kill() {
                             warn!(?err, pane_id = %pane_id, "failed to kill cleared pane");
                         }
+                        if let Err(error) = remove_pane_history(&sessions_path, session_id, pane_id)
+                        {
+                            warn!(?error, %pane_id, "failed to remove cleared pane history");
+                        }
                     })?;
+            }
+            if let Err(error) = remove_session_history(sessions_path, session_id) {
+                warn!(?error, %session_id, "failed to remove cleared workspace history");
             }
             Ok(())
         }
@@ -3887,15 +3985,18 @@ fn dispatch_message(
                 },
             )
         }
-        ClientToDaemon::Shutdown { req } => {
-            info!("daemon received shutdown request");
+        ClientToDaemon::Shutdown { req, clean_exit } => {
+            info!(clean_exit, "daemon received shutdown request");
             send_ok(tx, req)?;
             shutdown.store(true, Ordering::Release);
 
-            // Clean up all panes before exiting
-            info!("daemon shutting down, killing all panes");
-            kill_all_panes(&state);
-            if let Err(err) = persist_state(&state, sessions_path) {
+            if clean_exit {
+                // Deliberate quit: record it BEFORE the final persist so the
+                // next start treats these workspaces as already closed.
+                lock_state(&state).mark_clean_exit();
+            }
+            info!("daemon shutting down, preserving restorable panes");
+            if let Err(err) = persist_restorable_panes_and_kill_all(&state, sessions_path) {
                 warn!(?err, "failed to persist state during shutdown");
             }
 
@@ -4040,7 +4141,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::RemotePaneLeaseAdminReclaim { req, .. }
         | ClientToDaemon::RemoteConnectionCleanup { req, .. }
         | ClientToDaemon::ResourceSnapshot { req }
-        | ClientToDaemon::Shutdown { req } => Some(*req),
+        | ClientToDaemon::Shutdown { req, .. } => Some(*req),
         ClientToDaemon::Hello { .. }
         | ClientToDaemon::RegisterBrowserHost
         | ClientToDaemon::RemoteBrowserResponse { .. }
@@ -4068,21 +4169,40 @@ fn debounce_persist_state(state: &SharedState, sessions_path: &Path) -> Result<(
     }
 
     let dirty = Arc::new(AtomicBool::new(true));
+    let stop = Arc::new(AtomicBool::new(false));
     let thread_dirty = Arc::clone(&dirty);
+    let thread_stop = Arc::clone(&stop);
     let thread_state = Arc::clone(state);
     let thread_sessions_path = sessions_path.to_path_buf();
-    thread::Builder::new()
+    let handle = thread::Builder::new()
         .name("vibelink-daemon-persister".to_string())
         .spawn(move || loop {
             thread::sleep(PERSIST_DEBOUNCE_INTERVAL);
+            if thread_stop.load(Ordering::Acquire) {
+                break;
+            }
             if thread_dirty.swap(false, Ordering::AcqRel) {
                 if let Err(err) = persist_state(&thread_state, &thread_sessions_path) {
                     warn!(?err, "failed to persist debounced state");
                 }
             }
         })?;
-    *persister = Some(DebouncedPersister { dirty });
+    *persister = Some(DebouncedPersister {
+        dirty,
+        stop,
+        handle,
+    });
     Ok(())
+}
+
+fn stop_debounced_persister() {
+    let persister = lock_mutex(&DEBOUNCED_PERSISTER).take();
+    if let Some(persister) = persister {
+        persister.stop.store(true, Ordering::Release);
+        if persister.handle.join().is_err() {
+            warn!("debounced persistence thread panicked during shutdown");
+        }
+    }
 }
 
 fn spawn_pane_for_session(
@@ -4092,7 +4212,33 @@ fn spawn_pane_for_session(
     cfg: crate::protocol::PaneConfig,
     attach_client: Option<Uuid>,
 ) -> Result<crate::protocol::PaneMeta> {
-    spawn_pane_for_session_internal(state, sessions_path, session_id, cfg, attach_client, None)
+    spawn_pane_for_session_internal(
+        state,
+        sessions_path,
+        session_id,
+        cfg,
+        attach_client,
+        None,
+        None,
+    )
+}
+
+fn restore_pane_for_session(
+    state: SharedState,
+    sessions_path: PathBuf,
+    session_id: Uuid,
+    cfg: crate::protocol::PaneConfig,
+    scrollback: Vec<u8>,
+) -> Result<crate::protocol::PaneMeta> {
+    spawn_pane_for_session_internal(
+        state,
+        sessions_path,
+        session_id,
+        cfg,
+        None,
+        None,
+        Some(scrollback),
+    )
 }
 
 fn spawn_orchestration_pane_for_session(
@@ -4109,6 +4255,7 @@ fn spawn_orchestration_pane_for_session(
         cfg,
         None,
         Some(coordinator),
+        None,
     )
 }
 
@@ -4119,14 +4266,23 @@ fn spawn_pane_for_session_internal(
     mut cfg: crate::protocol::PaneConfig,
     attach_client: Option<Uuid>,
     coordinator: Option<Arc<CoordinatorService>>,
+    restored_scrollback: Option<Vec<u8>>,
 ) -> Result<crate::protocol::PaneMeta> {
     lock_state(&state).pane_metas(session_id)?;
 
     let pane_id = cfg.pane_id;
     cfg.env = pty::inject_pane_identity(std::mem::take(&mut cfg.env), session_id, pane_id);
-    let spawned = Pane::spawn(cfg)?;
+    let spawned = match restored_scrollback {
+        Some(scrollback) => Pane::spawn_restored(cfg, scrollback)?,
+        None => Pane::spawn(cfg)?,
+    };
     let child = spawned.pane.child();
     let reader = spawned.reader;
+    let history_snapshot = spawned
+        .pane
+        .config
+        .restore_on_start
+        .then(|| spawned.pane.scrollback_snapshot());
     let (meta, generation) = {
         let mut guard = lock_state(&state);
         let meta = match guard.insert_pane_or_recover(session_id, spawned.pane) {
@@ -4148,6 +4304,16 @@ fn spawn_pane_for_session_internal(
         (meta, generation)
     };
 
+    let history = history_snapshot.and_then(|snapshot| {
+        match TerminalHistoryWriter::open(&sessions_path, session_id, pane_id, &snapshot) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                warn!(?error, %session_id, %pane_id, "failed to open terminal history");
+                None
+            }
+        }
+    });
+
     thread::Builder::new()
         .name(format!("vibelink-pty-{pane_id}"))
         .spawn(move || {
@@ -4159,6 +4325,7 @@ fn spawn_pane_for_session_internal(
                 child,
                 Arc::new(sessions_path),
                 coordinator,
+                history,
             )
         })?;
 
@@ -4173,6 +4340,7 @@ fn read_pane_loop(
     child: SharedChild,
     sessions_path: Arc<PathBuf>,
     coordinator: Option<Arc<CoordinatorService>>,
+    mut history: Option<TerminalHistoryWriter>,
 ) {
     let mut buf = [0_u8; 65536];
     loop {
@@ -4180,9 +4348,25 @@ fn read_pane_loop(
             Ok(0) => break,
             Ok(n) => {
                 let bytes = &buf[..n];
-                let senders = lock_state(&state)
-                    .record_output_and_push_for_generation(pane_id, generation, bytes);
-                if let Some(senders) = senders.filter(|senders| !senders.is_empty()) {
+                let capture_snapshot = history
+                    .as_ref()
+                    .is_some_and(|writer| writer.should_compact(bytes.len()));
+                let Some(PaneOutputEffect { senders, snapshot }) = lock_state(&state)
+                    .record_output_and_push_for_generation(
+                        pane_id,
+                        generation,
+                        bytes,
+                        capture_snapshot,
+                    )
+                else {
+                    continue;
+                };
+                if let Some(writer) = history.as_mut() {
+                    if let Err(error) = writer.record(bytes, snapshot.as_deref()) {
+                        warn!(?error, %pane_id, "failed to persist terminal output");
+                    }
+                }
+                if !senders.is_empty() {
                     send_output_to_clients(senders, pane_id, bytes.to_vec());
                 }
             }
@@ -4202,6 +4386,11 @@ fn read_pane_loop(
     else {
         return;
     };
+    if let Some(history) = history {
+        if let Err(error) = history.remove() {
+            warn!(?error, %pane_id, "failed to remove exited pane history");
+        }
+    }
     for sender in senders {
         let _ = sender.send(DaemonToClient::PaneExited { pane_id, exit_code });
     }
@@ -4416,6 +4605,13 @@ fn notify_all_sessions_changed(state: &SharedState) {
     }
 }
 
+fn persist_restorable_panes_and_kill_all(state: &SharedState, sessions_path: &Path) -> Result<()> {
+    stop_debounced_persister();
+    let persist_result = persist_state(state, sessions_path);
+    kill_all_panes(state);
+    persist_result
+}
+
 fn kill_all_panes(state: &SharedState) {
     let pane_ids: Vec<Uuid> = {
         let guard = lock_state(state);
@@ -4477,6 +4673,7 @@ mod tests {
                             icon: None,
                             profile_id: None,
                             role: None,
+                            restore_on_start: false,
                             cols,
                             rows,
                         },
@@ -4486,6 +4683,25 @@ mod tests {
                 .expect("insert test pane");
         }
         (state, session_id, pane_id)
+    }
+
+    /// A restorable pane descriptor that never spawns a real process: these
+    /// tests assert on the RESTORE DECISION, not on PTY behavior.
+    fn restorable_test_config(pane_id: Uuid) -> PaneConfig {
+        PaneConfig {
+            pane_id,
+            shell: None,
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            title: Some("restore test".to_string()),
+            icon: None,
+            profile_id: None,
+            role: None,
+            restore_on_start: true,
+            cols: 80,
+            rows: 24,
+        }
     }
 
     #[test]
@@ -4541,6 +4757,7 @@ mod tests {
                             icon: None,
                             profile_id: None,
                             role: None,
+                            restore_on_start: false,
                             cols: 80,
                             rows: 24,
                         },
@@ -4559,6 +4776,367 @@ mod tests {
 
         rx.recv_timeout(Duration::from_secs(1))
             .expect("kill_all_panes returned");
+    }
+
+    #[test]
+    fn shutdown_persists_restartable_panes_before_removing_live_handles() {
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let session_id;
+        let pane_id = Uuid::new_v4();
+        {
+            let mut guard = lock_state(&state);
+            session_id = guard.create_session("Workspace".to_string(), None).id;
+            let config = crate::protocol::PaneConfig {
+                pane_id,
+                shell: None,
+                args: Vec::new(),
+                cwd: None,
+                env: Vec::new(),
+                title: Some("restorable".to_string()),
+                icon: None,
+                profile_id: None,
+                role: None,
+                restore_on_start: true,
+                cols: 80,
+                rows: 24,
+            };
+            guard
+                .insert_pane(session_id, Pane::for_test(config, true))
+                .expect("insert restartable pane");
+        }
+        let root = std::env::temp_dir().join(format!("vibelink-shutdown-{}", Uuid::new_v4()));
+        let sessions_path = root.join("sessions.json");
+
+        debounce_persist_state(&state, &sessions_path).expect("queue debounced persistence");
+        persist_restorable_panes_and_kill_all(&state, &sessions_path)
+            .expect("persist shutdown state");
+        thread::sleep(PERSIST_DEBOUNCE_INTERVAL + Duration::from_millis(100));
+
+        let persisted = load_sessions(&sessions_path).expect("load shutdown state");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].id, session_id);
+        assert_eq!(persisted[0].panes.len(), 1);
+        assert_eq!(persisted[0].panes[0].pane_id, pane_id);
+        assert!(lock_state(&state)
+            .pane_metas(session_id)
+            .expect("pane metadata")
+            .is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// End-to-end proof of the user-visible contract: a live restorable pane
+    /// plus a DELIBERATE quit must yield an initialized screen on the next
+    /// daemon start. The pane descriptor is still persisted either way, so the
+    /// clean-exit marker is the only thing that changes the outcome.
+    ///
+    /// The crash counterpart deliberately stops at the persisted flag: actually
+    /// reconstructing a pane spawns a real shell that blocks on the ConPTY
+    /// startup handshake, which
+    /// `cold_restart_reconstructs_restartable_pane_with_saved_history` already
+    /// covers with a fixture process that answers it.
+    #[test]
+    fn deliberate_quit_reopens_clean_while_a_crash_stays_restorable() {
+        for clean_exit in [true, false] {
+            let state = Arc::new(Mutex::new(DaemonState::new()));
+            let pane_id = Uuid::new_v4();
+            let session_id = {
+                let mut guard = lock_state(&state);
+                let session_id = guard.create_session("Workspace".to_string(), None).id;
+                guard
+                    .insert_pane(
+                        session_id,
+                        Pane::for_test(restorable_test_config(pane_id), true),
+                    )
+                    .expect("insert restartable pane");
+                session_id
+            };
+            let root = std::env::temp_dir().join(format!("vibelink-quit-{}", Uuid::new_v4()));
+            let sessions_path = root.join("sessions.json");
+
+            // The exact ordering the shutdown handler uses.
+            if clean_exit {
+                lock_state(&state).mark_clean_exit();
+            }
+            persist_restorable_panes_and_kill_all(&state, &sessions_path)
+                .expect("persist shutdown state");
+
+            let persisted = load_sessions(&sessions_path).expect("load shutdown state");
+            assert_eq!(
+                persisted[0].panes.len(),
+                1,
+                "the pane descriptor is always persisted; only the restore decision differs"
+            );
+            assert_eq!(persisted[0].clean_exit, clean_exit);
+
+            if clean_exit {
+                // A fresh daemon start over that exact state must spawn nothing.
+                let restarted = Arc::new(Mutex::new(DaemonState::new()));
+                reconstruct_sessions(Arc::clone(&restarted), &sessions_path)
+                    .expect("reconstruct persisted sessions");
+                let guard = lock_state(&restarted);
+                assert!(
+                    guard
+                        .pane_metas(session_id)
+                        .expect("session survives the quit")
+                        .is_empty(),
+                    "a deliberate quit must reopen clean"
+                );
+                assert_eq!(
+                    guard.list_sessions().len(),
+                    1,
+                    "the workspace itself must remain openable"
+                );
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn cold_restart_reconstructs_restartable_pane_with_saved_history() {
+        let root = std::env::temp_dir().join(format!("vibelink-cold-restore-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create cold restore fixture directory");
+        let sessions_path = root.join("sessions.json");
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let fixture_name = "daemon::tests::cold_restore_fixture_process";
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let config = PaneConfig {
+            pane_id,
+            shell: Some(executable.to_string_lossy().into_owned()),
+            args: vec![
+                "--exact".to_string(),
+                fixture_name.to_string(),
+                "--nocapture".to_string(),
+            ],
+            cwd: Some(root.to_string_lossy().into_owned()),
+            env: vec![("VIBELINK_COLD_RESTORE_FIXTURE".to_string(), "1".to_string())],
+            title: Some("restored fixture".to_string()),
+            icon: None,
+            profile_id: None,
+            role: None,
+            restore_on_start: true,
+            cols: 80,
+            rows: 2,
+        };
+        save_sessions(
+            &sessions_path,
+            &[crate::daemon::persistence::PersistedSession {
+                id: session_id,
+                name: "Cold restore".to_string(),
+                created_at: 123,
+                layout_json: None,
+                workspace_folder: Some(root.to_string_lossy().into_owned()),
+                sleeping: false,
+                clean_exit: false,
+                panes: vec![config.clone()],
+            }],
+        )
+        .expect("persist cold restore fixture");
+        drop(
+            TerminalHistoryWriter::open(
+                &sessions_path,
+                session_id,
+                pane_id,
+                b"saved terminal output",
+            )
+            .expect("persist terminal history fixture"),
+        );
+
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let outcome = reconstruct_sessions(Arc::clone(&state), &sessions_path).and_then(|()| {
+            let (panes, snapshot, writer) = {
+                let guard = lock_state(&state);
+                (
+                    guard.pane_metas(session_id)?,
+                    guard.get_scrollback(session_id, pane_id)?,
+                    guard.pane_writer_authorized(
+                        session_id,
+                        pane_id,
+                        &PaneCommandOrigin::Desktop,
+                    )?,
+                )
+            };
+            lock_mutex(&writer)
+                .write_all(b"\x1b[1;1R")
+                .context("answer cold restore fixture cursor query")?;
+            Ok((panes, snapshot))
+        });
+
+        let restored_pane = lock_state(&state)
+            .close_pane(session_id, pane_id)
+            .expect("remove restored pane");
+        let child = restored_pane.as_ref().map(Pane::child);
+        let mut exit_status = None;
+        let mut wait_error = None;
+        if let Some(child) = child.as_ref() {
+            for _ in 0..500 {
+                match lock_mutex(child).try_wait() {
+                    Ok(Some(status)) => {
+                        exit_status = Some(status);
+                        break;
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(20)),
+                    Err(error) => {
+                        wait_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+        drop(child);
+        if exit_status.is_some() {
+            drop(restored_pane);
+        } else if let Some(mut pane) = restored_pane {
+            let _ = pane.kill();
+            std::mem::forget(pane);
+        }
+        let mut removed = false;
+        for _ in 0..100 {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => {
+                    removed = true;
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    removed = true;
+                    break;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+
+        let exit_status = exit_status
+            .unwrap_or_else(|| panic!("cold restore fixture process did not exit: {wait_error:?}"));
+        assert!(exit_status.success(), "cold restore fixture process failed");
+        assert!(removed, "cold restore fixture directory remained locked");
+        let (panes, snapshot) = outcome.expect("reconstruct persisted sessions");
+        assert_eq!(panes.len(), 1);
+        let restored = &panes[0].config;
+        assert_eq!(&restored.pane_id, &config.pane_id);
+        assert_eq!(&restored.shell, &config.shell);
+        assert_eq!(&restored.args, &config.args);
+        assert_eq!(&restored.cwd, &config.cwd);
+        assert_eq!(&restored.title, &config.title);
+        assert!(restored.restore_on_start);
+        assert!(restored
+            .env
+            .iter()
+            .any(|(key, value)| key == "VIBELINK_COLD_RESTORE_FIXTURE" && value == "1"));
+        assert!(restored.env.iter().any(|(key, value)| {
+            key == "VIBELINK_SESSION_ID" && value == &session_id.to_string()
+        }));
+        assert!(restored
+            .env
+            .iter()
+            .any(|(key, value)| key == "VIBELINK_PANE_ID" && value == &pane_id.to_string()));
+        let rendered = String::from_utf8_lossy(&snapshot);
+        assert!(rendered.contains("saved terminal output"));
+        assert!(rendered.contains("[VibeLink cold restore:"));
+    }
+
+    /// A deliberate quit must produce an initialized screen, not the previous
+    /// one. This is the whole point of the clean-exit marker: the pane
+    /// descriptor is still on disk and still `restore_on_start`, yet nothing
+    /// may be reconstructed, and the stale history must not survive to be
+    /// replayed into a later pane.
+    #[test]
+    fn clean_exit_workspace_is_not_reconstructed_and_drops_its_history() {
+        let root = std::env::temp_dir().join(format!("vibelink-clean-exit-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create clean exit fixture directory");
+        let sessions_path = root.join("sessions.json");
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let config = restorable_test_config(pane_id);
+        save_sessions(
+            &sessions_path,
+            &[crate::daemon::persistence::PersistedSession {
+                id: session_id,
+                name: "Clean exit".to_string(),
+                created_at: 123,
+                layout_json: Some("{\"grid\":true}".to_string()),
+                workspace_folder: Some(root.to_string_lossy().into_owned()),
+                sleeping: false,
+                clean_exit: true,
+                panes: vec![config],
+            }],
+        )
+        .expect("persist clean exit fixture");
+        drop(
+            TerminalHistoryWriter::open(&sessions_path, session_id, pane_id, b"previous output")
+                .expect("persist terminal history fixture"),
+        );
+
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        reconstruct_sessions(Arc::clone(&state), &sessions_path)
+            .expect("reconstruct persisted sessions");
+
+        let guard = lock_state(&state);
+        assert_eq!(
+            guard.pane_metas(session_id).expect("session exists").len(),
+            0,
+            "a cleanly closed workspace must not respawn its panes"
+        );
+        assert_eq!(
+            guard.list_sessions().len(),
+            1,
+            "the workspace itself must survive so the user can reopen it"
+        );
+        drop(guard);
+        assert!(
+            load_pane_history(&sessions_path, session_id, pane_id)
+                .expect("history load")
+                .is_empty(),
+            "clean exit must drop stale scrollback"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The inverse: an unclean exit (crash/reboot) leaves `clean_exit` false,
+    /// so the pane descriptor is still queued for cold restore.
+    #[test]
+    fn unclean_exit_workspace_keeps_its_restorable_panes() {
+        let root = std::env::temp_dir().join(format!("vibelink-unclean-exit-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create unclean exit fixture directory");
+        let sessions_path = root.join("sessions.json");
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let config = restorable_test_config(pane_id);
+        save_sessions(
+            &sessions_path,
+            &[crate::daemon::persistence::PersistedSession {
+                id: session_id,
+                name: "Unclean exit".to_string(),
+                created_at: 123,
+                layout_json: None,
+                workspace_folder: Some(root.to_string_lossy().into_owned()),
+                sleeping: false,
+                clean_exit: false,
+                panes: vec![config],
+            }],
+        )
+        .expect("persist unclean exit fixture");
+
+        drop(
+            TerminalHistoryWriter::open(&sessions_path, session_id, pane_id, b"crashed output")
+                .expect("persist terminal history fixture"),
+        );
+        assert!(
+            !load_pane_history(&sessions_path, session_id, pane_id)
+                .expect("history load")
+                .is_empty(),
+            "an unclean exit must retain scrollback for cold restore"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cold_restore_fixture_process() {
+        if std::env::var("VIBELINK_COLD_RESTORE_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
     }
     /// The agent-completion hooks reach the GUI ONLY through this broadcast, so
     /// a regression here silently disables every hook while the CLI still
@@ -4584,6 +5162,7 @@ mod tests {
                             icon: None,
                             profile_id: None,
                             role: None,
+                            restore_on_start: false,
                             cols: 80,
                             rows: 24,
                         },
@@ -4643,6 +5222,7 @@ mod tests {
                 icon: None,
                 profile_id: None,
                 role: None,
+                restore_on_start: false,
                 cols: 80,
                 rows: 24,
             },

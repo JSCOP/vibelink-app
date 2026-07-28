@@ -16,6 +16,7 @@ export type PaneConfig = {
   icon?: string | null
   profileId?: string | null
   role?: string | null
+  restoreOnStart?: boolean
   cols: number
   rows: number
 }

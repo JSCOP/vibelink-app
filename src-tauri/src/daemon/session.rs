@@ -27,6 +27,9 @@ pub struct Session {
     pub layout_json: Option<String>,
     pub panes: IndexMap<Uuid, Pane>,
     pub sleeping: bool,
+    /// Mirrors the persisted clean-exit marker so a workspace reloaded from a
+    /// deliberate shutdown stays non-restorable until it is opened again.
+    pub clean_exit: bool,
 }
 
 pub struct PaneLeaseResize {
@@ -50,6 +53,11 @@ pub struct PaneLeaseTransition {
 pub struct PaneExitEffect {
     pub senders: Vec<Sender<DaemonToClient>>,
     pub lease: Option<PaneLeaseTransition>,
+}
+
+pub struct PaneOutputEffect {
+    pub senders: Vec<Sender<DaemonToClient>>,
+    pub snapshot: Option<Vec<u8>>,
 }
 
 pub struct DaemonState {
@@ -114,6 +122,7 @@ impl DaemonState {
                 layout_json: None,
                 panes: IndexMap::new(),
                 sleeping: false,
+                clean_exit: false,
             },
         );
         meta
@@ -124,6 +133,7 @@ impl DaemonState {
         meta: SessionMeta,
         layout_json: Option<String>,
         sleeping: bool,
+        clean_exit: bool,
     ) {
         self.sessions.insert(
             meta.id,
@@ -131,9 +141,27 @@ impl DaemonState {
                 meta,
                 layout_json,
                 sleeping,
+                clean_exit,
                 panes: IndexMap::new(),
             },
         );
+    }
+
+    /// Marks every workspace as deliberately shut down. Called once on the
+    /// daemon's own shutdown path, immediately before the final persist, so
+    /// the next start can tell a clean quit from a crash.
+    pub fn mark_clean_exit(&mut self) {
+        for session in self.sessions.values_mut() {
+            session.clean_exit = true;
+        }
+    }
+
+    /// Clears the clean-exit marker for one workspace. Attaching to a
+    /// workspace makes it live again, so a later crash must restore it.
+    pub fn clear_clean_exit(&mut self, session_id: Uuid) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.clean_exit = false;
+        }
     }
 
     pub fn list_sessions(&self) -> Vec<SessionMeta> {
@@ -1128,11 +1156,23 @@ impl DaemonState {
         pane_id: Uuid,
         generation: u64,
         bytes: &[u8],
-    ) -> Option<Vec<Sender<DaemonToClient>>> {
+        capture_snapshot: bool,
+    ) -> Option<PaneOutputEffect> {
         if self.pane_output_generation(pane_id) != Some(generation) {
             return None;
         }
-        Some(self.record_output_and_push(pane_id, bytes))
+        let record = self.pane_any_mut(pane_id).ok()?.record_output(bytes);
+        let snapshot = (capture_snapshot || record.reset)
+            .then(|| {
+                self.pane_any_mut(pane_id)
+                    .ok()
+                    .map(|pane| pane.scrollback_snapshot())
+            })
+            .flatten();
+        Some(PaneOutputEffect {
+            senders: self.senders_for_pane(pane_id),
+            snapshot,
+        })
     }
 
     pub fn mark_exited_for_generation(
@@ -1180,7 +1220,13 @@ impl DaemonState {
                 layout_json: session.layout_json.clone(),
                 workspace_folder: session.meta.workspace_folder.clone(),
                 sleeping: session.sleeping,
-                panes: Vec::new(),
+                clean_exit: session.clean_exit,
+                panes: session
+                    .panes
+                    .values()
+                    .filter(|pane| pane.alive && pane.config.restore_on_start)
+                    .map(|pane| pane.config.clone())
+                    .collect(),
             })
             .collect();
         sessions.sort_by_key(|session| session.created_at);
@@ -1526,17 +1572,22 @@ mod tests {
     }
 
     #[test]
-    fn persisted_sessions_exclude_live_panes() {
+    fn persisted_sessions_include_only_restartable_live_panes() {
         let mut state = DaemonState::new();
         let meta = state.create_session("Workspace".to_string(), None);
-        let pane_id = Uuid::new_v4();
-        let config = test_config(pane_id);
-        let pane = Pane::for_test(config, true);
-        state.insert_pane(meta.id, pane).expect("insert pane");
+        let restartable_id = Uuid::new_v4();
+        let mut restartable = test_config(restartable_id);
+        restartable.restore_on_start = true;
+        state
+            .insert_pane(meta.id, Pane::for_test(restartable.clone(), true))
+            .expect("insert restartable pane");
+        state
+            .insert_pane(meta.id, Pane::for_test(test_config(Uuid::new_v4()), true))
+            .expect("insert transient pane");
 
         let persisted = state.persisted_sessions();
 
-        assert!(persisted[0].panes.is_empty());
+        assert_eq!(persisted[0].panes, vec![restartable]);
     }
 
     #[test]
@@ -2013,7 +2064,7 @@ mod tests {
         assert_ne!(original_generation, replacement_generation);
 
         assert!(state
-            .record_output_and_push_for_generation(pane_id, original_generation, b"stale")
+            .record_output_and_push_for_generation(pane_id, original_generation, b"stale", false)
             .is_none());
         assert!(state
             .mark_exited_for_generation(pane_id, original_generation)
@@ -2026,7 +2077,12 @@ mod tests {
             1
         );
         assert!(state
-            .record_output_and_push_for_generation(pane_id, replacement_generation, b"current")
+            .record_output_and_push_for_generation(
+                pane_id,
+                replacement_generation,
+                b"current",
+                false
+            )
             .is_some());
         assert!(state
             .mark_exited_for_generation(pane_id, replacement_generation)
@@ -2740,6 +2796,7 @@ mod tests {
             icon: None,
             profile_id: None,
             role: None,
+            restore_on_start: false,
             cols: 80,
             rows: 24,
         }

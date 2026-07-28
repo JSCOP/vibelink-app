@@ -598,6 +598,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       title: hasTitleOverride ? overrides?.title ?? null : profileDefaults.title,
       icon: overrides?.icon ?? profile.icon,
       profileId: profile.id,
+      restoreOnStart: true,
       cols: overrides?.cols ?? 120,
       rows: overrides?.rows ?? 32,
     }

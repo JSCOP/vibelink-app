@@ -137,7 +137,7 @@ export function ResourceMonitorDialog({ onClose, onStopWorkspaceTerminals, onAft
           {confirmRestart ? (
             <section className="settings-card">
               <h3>Restart daemon?</h3>
-              <p>모든 워크스페이스의 실행 중인 터미널/프로세스가 종료되고, 터미널 출력 기록(scrollback)이 사라지며, 진행 중인 명령이 중단됩니다.</p>
+              <p>실행 중인 명령과 프로세스는 중단됩니다. 복구 가능한 pane은 저장된 화면과 같은 profile의 새 프로세스로 다시 열리지만, 종료된 Codex/OMP/Claude 대화 자체의 자동 resume은 보장되지 않습니다.</p>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button type="button" onClick={() => setConfirmRestart(false)} disabled={busy === 'restart'}>Cancel</button>
                 <button type="button" className="primary-action" onClick={() => void restartDaemon()} disabled={busy === 'restart'}>

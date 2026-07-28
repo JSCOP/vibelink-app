@@ -899,6 +899,7 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
             icon: icon.clone(),
             profile_id: profile_id.clone(),
             role: None,
+            restore_on_start: true,
             cols: 120,
             rows: 32,
         };
@@ -1841,6 +1842,7 @@ mod tests {
                         icon: Some("terminal".to_string()),
                         profile_id: None,
                         role: None,
+                        restore_on_start: false,
                         cols: 120,
                         rows: 32,
                     },

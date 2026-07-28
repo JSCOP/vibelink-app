@@ -22,6 +22,8 @@ const TERMINAL_CAPABILITY_ENV: [(&str, &str); 5] = [
     ("TERM_PROGRAM", "VibeLink"),
 ];
 
+const COLD_RESTORE_NOTICE: &[u8] = b"\r\n\x1b[?1049l\x1b[0m\x1b[38;5;214m[VibeLink cold restore: the previous terminal process stopped; a new process started from this pane's profile.]\x1b[0m\r\n";
+
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 pub type SharedKiller = Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>;
 
@@ -31,9 +33,22 @@ fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, Scrollb
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn cold_restore_scrollback(mut scrollback: Vec<u8>, rows: u16) -> Vec<u8> {
+    scrollback.extend_from_slice(COLD_RESTORE_NOTICE);
+    for _ in 0..rows.clamp(1, 200) {
+        scrollback.extend_from_slice(b"\r\n");
+    }
+    scrollback
+}
+
 pub struct SpawnedPane {
     pub pane: Pane,
     pub reader: Box<dyn Read + Send>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneOutputRecord {
+    pub reset: bool,
 }
 
 pub struct Pane {
@@ -52,7 +67,19 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub fn spawn(mut config: PaneConfig) -> Result<SpawnedPane> {
+    pub fn spawn(config: PaneConfig) -> Result<SpawnedPane> {
+        Self::spawn_inner(config, None)
+    }
+
+    pub fn spawn_restored(config: PaneConfig, scrollback: Vec<u8>) -> Result<SpawnedPane> {
+        let scrollback = cold_restore_scrollback(scrollback, config.rows);
+        Self::spawn_inner(config, Some(scrollback))
+    }
+
+    fn spawn_inner(
+        mut config: PaneConfig,
+        restored_scrollback: Option<Vec<u8>>,
+    ) -> Result<SpawnedPane> {
         config.cols = config.cols.max(1);
         config.rows = config.rows.max(1);
         config.env = with_runtime_agent_env(with_terminal_capability_env(config.env));
@@ -97,6 +124,10 @@ impl Pane {
         let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
+        let mut scrollback = ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP);
+        if let Some(restored_scrollback) = restored_scrollback {
+            scrollback.seed_protected(&restored_scrollback);
+        }
 
         Ok(SpawnedPane {
             pane: Pane {
@@ -108,7 +139,7 @@ impl Pane {
                 root_pid,
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
-                scrollback: Arc::new(Mutex::new(ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP))),
+                scrollback: Arc::new(Mutex::new(scrollback)),
                 output_generation: 1,
                 output_sequence: 0,
                 last_output_at: 0,
@@ -170,14 +201,14 @@ impl Pane {
         lock_scrollback(&self.scrollback).snapshot()
     }
 
-    pub fn record_output(&mut self, bytes: &[u8]) -> u64 {
-        lock_scrollback(&self.scrollback).push(bytes);
+    pub fn record_output(&mut self, bytes: &[u8]) -> PaneOutputRecord {
+        let reset = lock_scrollback(&self.scrollback).push(bytes);
         self.output_sequence = self.output_sequence.saturating_add(1);
         self.last_output_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        self.output_sequence
+        PaneOutputRecord { reset }
     }
 
     pub fn last_output_at(&self) -> u64 {
@@ -747,6 +778,17 @@ mod tests {
         assert!(pane.last_output_at() > 0);
     }
 
+    #[test]
+    fn cold_restore_scrollback_preserves_history_and_marks_new_process_boundary() {
+        let snapshot = cold_restore_scrollback(b"saved output".to_vec(), 2);
+
+        assert!(snapshot.starts_with(b"saved output"));
+        assert!(snapshot
+            .windows(COLD_RESTORE_NOTICE.len())
+            .any(|window| window == COLD_RESTORE_NOTICE));
+        assert!(snapshot.ends_with(b"\r\n\r\n"));
+    }
+
     fn test_config(shell: Option<&str>) -> PaneConfig {
         PaneConfig {
             pane_id: Uuid::new_v4(),
@@ -758,6 +800,7 @@ mod tests {
             icon: None,
             profile_id: None,
             role: None,
+            restore_on_start: false,
             cols: 80,
             rows: 24,
         }

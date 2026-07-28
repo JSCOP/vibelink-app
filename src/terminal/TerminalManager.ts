@@ -19,8 +19,11 @@ import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, ty
 import { PaneTitleCoalescer } from './titleCoalescing'
 
 const MAX_FIT_ATTEMPTS = 120
-const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
+const MAX_OUTPUT_BYTES_PER_FRAME = 64 * 1024
+const MAX_OUTPUT_WRITES_PER_DRAIN = 2
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024
+const BACKGROUND_OUTPUT_COALESCE_MS = 50
+const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
 // A real terminal is never this small. If FitAddon proposes fewer than these,
@@ -81,10 +84,10 @@ type Entry = {
   clickRepairTimer?: number
   lastClickRepairAt?: number
 
-  outputFrame?: number
-  outputTimer?: number
   pendingOutput?: Uint8Array[]
   pendingOutputBytes?: number
+  outputHighPriority?: boolean
+  visible?: boolean
   fitForcePending?: boolean
   measureState?: TerminalHostMeasureState
   forceFitOnNextMeasure?: boolean
@@ -129,6 +132,12 @@ class TerminalManagerImpl {
   private dividerResizePaneIds = new Set<string>()
   private windowResizeTimer: number | undefined
   private viewportViable = true
+  private outputQueue: Entry[] = []
+  private queuedOutputPaneIds = new Set<string>()
+  private outputFrame: number | undefined
+  private outputDelayTimer: number | undefined
+  private outputDelayDueAt: number | undefined
+  private outputFallbackTimer: number | undefined
   private titleCoalescer = new PaneTitleCoalescer()
 
   constructor() {
@@ -349,7 +358,7 @@ class TerminalManagerImpl {
       return true
     })
 
-    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]) }
+    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false }
     this.entries.set(paneId, entry)
     entry.linkDisposables = [
       term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
@@ -452,10 +461,12 @@ class TerminalManagerImpl {
     })
     entry.observer.observe(container)
     // Output held while the terminal was unopened parses now, after the
-    // synchronous fit above sized the grid to the real host.
+    // synchronous fit above sized the grid to the real host. Route every pane
+    // through the shared drain so restoring a busy workspace cannot make all
+    // xterm instances parse and paint their replay in the same frame.
     if (entry.pendingOutput?.length) {
       this.safeFit(entry)
-      this.flushAllOutput(entry)
+      this.enqueueOutput(entry, this.isForegroundOutput(entry))
     }
     this.scheduleLayoutPass({ paneIds: [paneId], force: true })
     this.fitAfterFontsLoad(entry)
@@ -542,7 +553,7 @@ class TerminalManagerImpl {
     }
   }
 
-  write(paneId: string, bytes: Uint8Array): void {
+  write(paneId: string, bytes: Uint8Array, options: { foreground?: boolean } = {}): void {
     if (bytes.byteLength === 0) return
     agentActivityTracker.noteOutput(paneId, bytes)
     const entry = this.getOrCreate(paneId)
@@ -557,9 +568,9 @@ class TerminalManagerImpl {
       if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.trimPendingOutput(entry)
       return
     }
-    if (bytes.byteLength < INSTANT_OUTPUT_BYTES
-      && entry.outputFrame === undefined
-      && entry.outputTimer === undefined
+    const foreground = options.foreground ?? this.isForegroundOutput(entry)
+    if (foreground
+      && bytes.byteLength < INSTANT_OUTPUT_BYTES
       && (entry.pendingOutputBytes ?? 0) === 0
       && !entry.pendingOutput?.length) {
       this.writeTerminalOutput(entry, bytes)
@@ -570,7 +581,7 @@ class TerminalManagerImpl {
     entry.pendingOutput.push(bytes)
     entry.pendingOutputBytes = (entry.pendingOutputBytes ?? 0) + bytes.byteLength
     if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.trimPendingOutput(entry)
-    this.scheduleOutputFlush(entry)
+    this.enqueueOutput(entry, foreground)
   }
 
   copyContentsToClipboard(paneId: string): void {
@@ -663,10 +674,19 @@ class TerminalManagerImpl {
     this.scheduleLayoutPass({ paneIds: [paneId] })
   }
 
-  notifyPaneVisible(paneId: string): void {
+  setPaneVisible(paneId: string, visible: boolean): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    entry.visible = visible
+    if (!visible) return
     // A pane that was hidden may have missed output-driven draws entirely, so
     // becoming visible is one of the few genuine repaint triggers.
     this.scheduleLayoutPass({ paneIds: [paneId], force: true, repaint: true, syncPty: true })
+    if (entry.pendingOutput?.length) this.enqueueOutput(entry, this.isForegroundOutput(entry))
+  }
+
+  notifyPaneVisible(paneId: string): void {
+    this.setPaneVisible(paneId, true)
   }
 
   recoverAllVisiblePanes(): void {
@@ -878,7 +898,7 @@ class TerminalManagerImpl {
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadPending = false
     clearTimeout(entry.clickRepairTimer)
-    this.cancelScheduledOutputFlush(entry)
+    this.removeQueuedOutput(entry)
     entry.titleDisposable?.dispose()
     this.titleCoalescer.clear(paneId)
     entry.linkDisposables?.forEach((d) => d.dispose())
@@ -1124,26 +1144,96 @@ class TerminalManagerImpl {
     void fonts.ready.then(() => this.fit(entry, 0, true))
   }
 
-  private scheduleOutputFlush(entry: Entry): void {
-    if (entry.outputFrame !== undefined || entry.outputTimer !== undefined) return
-    const flush = () => {
-      this.cancelScheduledOutputFlush(entry)
-      this.flushOutput(entry)
-    }
-    if (typeof requestAnimationFrame !== 'undefined') entry.outputFrame = requestAnimationFrame(flush)
-    if (typeof window !== 'undefined') entry.outputTimer = window.setTimeout(flush, OUTPUT_FLUSH_FALLBACK_MS)
-    if (entry.outputFrame === undefined && entry.outputTimer === undefined) this.flushAllOutput(entry)
+  private isForegroundOutput(entry: Entry): boolean {
+    if (!entry.visible) return false
+    if (typeof document === 'undefined') return true
+    return document.visibilityState === 'visible'
+      && document.hasFocus()
+      && entry.container?.parentElement?.dataset.active === 'true'
   }
 
-  private cancelScheduledOutputFlush(entry: Entry): void {
-    if (entry.outputFrame !== undefined) {
-      cancelAnimationFrame(entry.outputFrame)
-      entry.outputFrame = undefined
+  private enqueueOutput(entry: Entry, foreground: boolean): void {
+    entry.outputHighPriority ||= foreground
+    if (!this.queuedOutputPaneIds.has(entry.paneId)) {
+      this.queuedOutputPaneIds.add(entry.paneId)
+      this.outputQueue.push(entry)
     }
-    if (entry.outputTimer !== undefined && typeof window !== 'undefined') {
-      window.clearTimeout(entry.outputTimer)
-      entry.outputTimer = undefined
+    this.scheduleOutputDrain(foreground ? 0 : BACKGROUND_OUTPUT_COALESCE_MS)
+  }
+
+  private scheduleOutputDrain(delayMs: number): void {
+    if (this.outputFrame !== undefined) return
+    if (delayMs <= 0) {
+      if (this.outputDelayTimer !== undefined && typeof window !== 'undefined') window.clearTimeout(this.outputDelayTimer)
+      this.outputDelayTimer = undefined
+      this.outputDelayDueAt = undefined
+      this.armOutputDrain()
+      return
     }
+    const dueAt = Date.now() + delayMs
+    if (this.outputDelayTimer !== undefined && (this.outputDelayDueAt ?? Number.POSITIVE_INFINITY) <= dueAt) return
+    if (this.outputDelayTimer !== undefined && typeof window !== 'undefined') window.clearTimeout(this.outputDelayTimer)
+    if (typeof window === 'undefined') {
+      this.armOutputDrain()
+      return
+    }
+    this.outputDelayDueAt = dueAt
+    this.outputDelayTimer = window.setTimeout(() => {
+      this.outputDelayTimer = undefined
+      this.outputDelayDueAt = undefined
+      this.armOutputDrain()
+    }, delayMs)
+  }
+
+  private armOutputDrain(): void {
+    if (this.outputFrame !== undefined) return
+    const drain = () => {
+      this.cancelOutputDrainSchedule()
+      this.drainOutputQueue()
+    }
+    if (typeof requestAnimationFrame !== 'undefined') this.outputFrame = requestAnimationFrame(drain)
+    if (typeof window !== 'undefined') this.outputFallbackTimer = window.setTimeout(drain, OUTPUT_FLUSH_FALLBACK_MS)
+    if (this.outputFrame === undefined && this.outputFallbackTimer === undefined) this.drainOutputQueue()
+  }
+
+  private cancelOutputDrainSchedule(): void {
+    if (this.outputDelayTimer !== undefined && typeof window !== 'undefined') window.clearTimeout(this.outputDelayTimer)
+    if (this.outputFrame !== undefined && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(this.outputFrame)
+    if (this.outputFallbackTimer !== undefined && typeof window !== 'undefined') window.clearTimeout(this.outputFallbackTimer)
+    this.outputDelayTimer = undefined
+    this.outputDelayDueAt = undefined
+    this.outputFrame = undefined
+    this.outputFallbackTimer = undefined
+  }
+
+  private removeQueuedOutput(entry: Entry): void {
+    if (!this.queuedOutputPaneIds.delete(entry.paneId)) return
+    this.outputQueue = this.outputQueue.filter((queued) => queued !== entry)
+    entry.outputHighPriority = false
+    if (this.outputQueue.length === 0) this.cancelOutputDrainSchedule()
+  }
+
+  private drainOutputQueue(): void {
+    let writes = 0
+    const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+    while (this.outputQueue.length > 0 && writes < MAX_OUTPUT_WRITES_PER_DRAIN) {
+      const priorityIndex = this.outputQueue.findIndex((entry) => entry.outputHighPriority)
+      const index = priorityIndex >= 0 ? priorityIndex : 0
+      const [entry] = this.outputQueue.splice(index, 1)
+      this.queuedOutputPaneIds.delete(entry.paneId)
+      entry.outputHighPriority = false
+      if (this.entries.get(entry.paneId) !== entry || !entry.pendingOutput?.length) continue
+      this.flushOutput(entry)
+      writes += 1
+      if (entry.pendingOutput?.length) {
+        entry.outputHighPriority = this.isForegroundOutput(entry)
+        this.queuedOutputPaneIds.add(entry.paneId)
+        this.outputQueue.push(entry)
+      }
+      const now = typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (now - startedAt >= OUTPUT_DRAIN_TIME_BUDGET_MS) break
+    }
+    if (this.outputQueue.length > 0) this.scheduleOutputDrain(0)
   }
 
   private trimPendingOutput(entry: Entry): void {
@@ -1178,7 +1268,7 @@ class TerminalManagerImpl {
   }
 
   private flushAllOutput(entry: Entry): void {
-    this.cancelScheduledOutputFlush(entry)
+    this.removeQueuedOutput(entry)
     while (entry.pendingOutput?.length) {
       this.flushOutput(entry, Number.MAX_SAFE_INTEGER)
     }
@@ -1205,8 +1295,11 @@ class TerminalManagerImpl {
     const chunks = pending.splice(0, chunkCount)
     entry.pendingOutputBytes = Math.max(0, (entry.pendingOutputBytes ?? bytesToWrite) - bytesToWrite)
     this.writeTerminalOutput(entry, concatUint8Arrays(chunks, bytesToWrite))
-    if (pending.length > 0) this.scheduleOutputFlush(entry)
-    else entry.outputTrimNoticeWritten = false
+    if (pending.length === 0) {
+      entry.outputTrimNoticeWritten = false
+      this.removeQueuedOutput(entry)
+    }
+
   }
 
   private writeTerminalOutput(entry: Entry, bytes: Uint8Array): void {

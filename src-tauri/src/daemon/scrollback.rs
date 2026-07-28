@@ -17,6 +17,7 @@ pub struct ScrollbackRing {
     buf: VecDeque<u8>,
     cap: usize,
     pending_clear_prefix: Vec<u8>,
+    protected_prefix_len: usize,
 }
 
 impl ScrollbackRing {
@@ -25,10 +26,11 @@ impl ScrollbackRing {
             buf: VecDeque::with_capacity(cap.min(8192)),
             cap,
             pending_clear_prefix: Vec::new(),
+            protected_prefix_len: 0,
         }
     }
 
-    pub fn push(&mut self, bytes: &[u8]) {
+    pub fn push(&mut self, bytes: &[u8]) -> bool {
         let combined;
         let detection_bytes = if self.pending_clear_prefix.is_empty() {
             bytes
@@ -37,9 +39,16 @@ impl ScrollbackRing {
             combined.as_slice()
         };
 
-        let bytes_to_store = if let Some(start) = start_after_last_clear(detection_bytes) {
-            self.clear();
-            &detection_bytes[start..]
+        let mut reset = false;
+        let bytes_to_store = if let Some((start, end)) = find_last_clear_span(detection_bytes) {
+            reset = true;
+            let preserve_restored_prefix = self.protected_prefix_len > 0;
+            self.clear_live_output();
+            if preserve_restored_prefix {
+                &detection_bytes[end..]
+            } else {
+                &detection_bytes[include_adjacent_clear_prefix(detection_bytes, start)..]
+            }
         } else {
             bytes
         };
@@ -50,7 +59,15 @@ impl ScrollbackRing {
         let overflow = self.buf.len().saturating_sub(self.cap);
         if overflow > 0 {
             self.buf.drain(..overflow);
+            self.protected_prefix_len = self.protected_prefix_len.saturating_sub(overflow);
         }
+        reset
+    }
+
+    pub fn seed_protected(&mut self, bytes: &[u8]) {
+        self.clear();
+        self.push(bytes);
+        self.protected_prefix_len = self.buf.len();
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
@@ -64,11 +81,14 @@ impl ScrollbackRing {
     pub fn clear(&mut self) {
         self.buf.clear();
         self.pending_clear_prefix.clear();
+        self.protected_prefix_len = 0;
     }
-}
 
-fn start_after_last_clear(bytes: &[u8]) -> Option<usize> {
-    find_last_clear_span(bytes).map(|(start, _end)| include_adjacent_clear_prefix(bytes, start))
+    fn clear_live_output(&mut self) {
+        self.buf
+            .truncate(self.protected_prefix_len.min(self.buf.len()));
+        self.pending_clear_prefix.clear();
+    }
 }
 
 fn find_last_clear_span(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -209,6 +229,20 @@ mod tests {
         ring.push(b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[Hafter");
 
         assert_eq!(ring.snapshot(), b"\x1b[2J\x1b[3J\x1b[Hafter");
+    }
+
+    #[test]
+    fn protected_seed_survives_live_process_clear_and_ages_out() {
+        let mut ring = ScrollbackRing::new(16);
+        ring.seed_protected(b"old\r\n");
+
+        assert!(ring.push(b"\x1b[2Jnew"));
+        assert_eq!(ring.snapshot(), b"old\r\nnew");
+
+        ring.push(b"-0123456789abcdef");
+        assert_eq!(ring.snapshot(), b"0123456789abcdef");
+        assert!(ring.push(b"\x1b[2Jfresh"));
+        assert_eq!(ring.snapshot(), b"\x1b[2Jfresh");
     }
 
     #[test]

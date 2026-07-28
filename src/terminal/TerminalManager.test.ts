@@ -211,6 +211,53 @@ describe('TerminalManager pre-session input buffering', () => {
   })
 })
 
+describe('TerminalManager animated title coalescing', () => {
+  it('collapses an agent spinner storm into a single title update', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-spinner-title'
+    const container = makeContainer()
+    const titles: string[] = []
+    try {
+      TerminalManager.attach(paneId, container, { sessionId: 'session-title', onTitleChange: (title) => titles.push(title) })
+
+      // An animated agent title over ~8s of spinner frames. Before coalescing
+      // each frame became one blocking set_pane_title on the socket that also
+      // carries every keystroke.
+      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+      for (let i = 0; i < 100; i += 1) {
+        emitTerminalTitle(paneId, `π ${frames[i % frames.length]} Orca Logic Analysis`)
+        vi.advanceTimersByTime(80)
+      }
+
+      expect(titles).toEqual(['π ⠋ Orca Logic Analysis'])
+    } finally {
+      TerminalManager.dispose(paneId)
+      vi.useRealTimers()
+    }
+  })
+
+  it('still delivers a genuinely new title, settling on the final one', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-real-title'
+    const container = makeContainer()
+    const titles: string[] = []
+    try {
+      TerminalManager.attach(paneId, container, { sessionId: 'session-title', onTitleChange: (title) => titles.push(title) })
+
+      emitTerminalTitle(paneId, 'π ⠋ Build')
+      expect(titles).toEqual(['π ⠋ Build'])
+
+      emitTerminalTitle(paneId, 'π ⠙ Deploy')
+      vi.advanceTimersByTime(500)
+
+      expect(titles[titles.length - 1]).toBe('π ⠙ Deploy')
+    } finally {
+      TerminalManager.dispose(paneId)
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('TerminalManager remote pane leases', () => {
   it('restores an unleased daemon resize to desktop fit geometry and syncs the PTY back', async () => {
     const paneId = 'pane-unleased-resize'
@@ -298,7 +345,7 @@ describe('TerminalManager remote pane leases', () => {
     TerminalManager.focus(paneId)
     TerminalManager.reflow(paneId)
     TerminalManager.syncPtySize(paneId)
-    TerminalManager.write(paneId, new TextEncoder().encode('remote output'))
+    TerminalManager.write(paneId, new TextEncoder().encode('remote output'), { foreground: true })
 
     expect(invokeMock.mock.calls.some(([command]) => command === 'write_pane' || command === 'resize_pane')).toBe(false)
     expect(entry.term.focusCalls).toBe(0)
@@ -315,6 +362,119 @@ describe('TerminalManager remote pane leases', () => {
     expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-mobile', paneId, data: 'restored input' })
     expect(entry.term.focusCalls).toBe(1)
     TerminalManager.dispose(paneId)
+  })
+})
+
+describe('TerminalManager output scheduling', () => {
+  it('keeps focused active-pane echo on the immediate path', () => {
+    const paneId = 'pane-foreground-output'
+    const shell = document.createElement('div')
+    shell.dataset.active = 'true'
+    const container = document.createElement('div')
+    shell.appendChild(container)
+    document.body.appendChild(shell)
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    TerminalManager.attach(paneId, container, { sessionId: 'session-output' })
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { writes: unknown[] } }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing foreground output entry')
+
+    try {
+      TerminalManager.write(paneId, new TextEncoder().encode('typed echo'))
+      expect(entry.term.writes).toHaveLength(1)
+    } finally {
+      TerminalManager.dispose(paneId)
+      hasFocus.mockRestore()
+      shell.remove()
+    }
+  })
+
+  it('coalesces inactive TUI redraws before parsing them', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-background-output'
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 1
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame
+      nextFrame += 1
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { opened: boolean; term: { writes: unknown[] } }>
+    }
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; term: { writes: unknown[] } }
+    entry.opened = true
+
+    try {
+      TerminalManager.write(paneId, new TextEncoder().encode('obsolete frame'), { foreground: false })
+      TerminalManager.write(paneId, new TextEncoder().encode('\x1b[2Jlatest frame'), { foreground: false })
+      expect(entry.term.writes).toHaveLength(0)
+
+      vi.advanceTimersByTime(50)
+      expect(frames.size).toBe(1)
+      const callback = frames.values().next().value
+      if (!callback) throw new Error('missing scheduled output frame')
+      frames.clear()
+      callback(performance.now())
+
+      expect(entry.term.writes).toHaveLength(1)
+      expect(new TextDecoder().decode(entry.term.writes[0] as Uint8Array)).toBe('\x1b[2Jlatest frame')
+      expect(manager.entries.get(paneId)).toBeDefined()
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('shares each frame budget fairly across busy panes', () => {
+    vi.useFakeTimers()
+    const paneIds = ['pane-output-a', 'pane-output-b', 'pane-output-c']
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 1
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame
+      nextFrame += 1
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const entries = paneIds.map((paneId) => {
+      const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; term: { writes: unknown[] } }
+      entry.opened = true
+      return entry
+    })
+    const runNextFrame = () => {
+      const callback = frames.values().next().value
+      if (!callback) throw new Error('missing scheduled output frame')
+      frames.clear()
+      callback(performance.now())
+    }
+
+    try {
+      paneIds.forEach((paneId) => TerminalManager.write(paneId, new TextEncoder().encode(paneId), { foreground: false }))
+      vi.advanceTimersByTime(50)
+      runNextFrame()
+      expect(entries.map((entry) => entry.term.writes.length)).toEqual([1, 1, 0])
+
+      runNextFrame()
+      expect(entries.map((entry) => entry.term.writes.length)).toEqual([1, 1, 1])
+    } finally {
+      paneIds.forEach((paneId) => TerminalManager.dispose(paneId))
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -465,52 +625,5 @@ describe('TerminalManager recent output capture', () => {
 
     expect(TerminalManager.getRecentOutput(paneId, 3)).toBe('two\nthree\nfour')
     manager.entries.delete(paneId)
-  })
-})
-
-describe('TerminalManager animated title coalescing', () => {
-  it('collapses an agent spinner storm into a single title update', () => {
-    vi.useFakeTimers()
-    const paneId = 'pane-spinner-title'
-    const container = makeContainer()
-    const titles: string[] = []
-    try {
-      TerminalManager.attach(paneId, container, { sessionId: 'session-title', onTitleChange: (title) => titles.push(title) })
-
-      // An animated agent title over ~8s of spinner frames. Before coalescing
-      // each frame became one blocking set_pane_title on the socket that also
-      // carries every keystroke.
-      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-      for (let i = 0; i < 100; i += 1) {
-        emitTerminalTitle(paneId, `π ${frames[i % frames.length]} Orca Logic Analysis`)
-        vi.advanceTimersByTime(80)
-      }
-
-      expect(titles).toEqual(['π ⠋ Orca Logic Analysis'])
-    } finally {
-      TerminalManager.dispose(paneId)
-      vi.useRealTimers()
-    }
-  })
-
-  it('still delivers a genuinely new title, settling on the final one', () => {
-    vi.useFakeTimers()
-    const paneId = 'pane-real-title'
-    const container = makeContainer()
-    const titles: string[] = []
-    try {
-      TerminalManager.attach(paneId, container, { sessionId: 'session-title', onTitleChange: (title) => titles.push(title) })
-
-      emitTerminalTitle(paneId, 'π ⠋ Build')
-      expect(titles).toEqual(['π ⠋ Build'])
-
-      emitTerminalTitle(paneId, 'π ⠙ Deploy')
-      vi.advanceTimersByTime(500)
-
-      expect(titles[titles.length - 1]).toBe('π ⠙ Deploy')
-    } finally {
-      TerminalManager.dispose(paneId)
-      vi.useRealTimers()
-    }
   })
 })
