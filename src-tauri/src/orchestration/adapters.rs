@@ -59,8 +59,10 @@ pub struct AgentRuntimeStatus {
 #[serde(rename_all = "camelCase")]
 pub struct AgentCollectedResult {
     pub summary: String,
-    pub files_modified: Vec<String>,
-    pub report_path: Option<String>,
+    pub files: Vec<String>,
+    pub tests: Vec<String>,
+    pub commit: Option<String>,
+    pub checkpoint: Option<String>,
     pub metadata: Value,
 }
 
@@ -640,8 +642,10 @@ mod tests {
             self.set_status(instance_id, AgentLifecycleStatus::Completed);
             Ok(AgentCollectedResult {
                 summary: "done".to_string(),
-                files_modified: vec!["src/lib.rs".to_string()],
-                report_path: None,
+                files: vec!["src/lib.rs".to_string()],
+                tests: vec!["cargo test focused".to_string()],
+                commit: Some("abc123".to_string()),
+                checkpoint: Some("review_ready".to_string()),
                 metadata: Value::Null,
             })
         }

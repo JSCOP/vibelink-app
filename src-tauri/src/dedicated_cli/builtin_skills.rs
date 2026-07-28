@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_SKILL_VERSION: &str = "1.0.0";
+pub const BUILTIN_SKILL_VERSION: &str = "1.2.0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,41 +22,35 @@ Use the dedicated `vibelink` console program. Do not invoke GUI executable compa
 ## Contract
 
 - Use `--json` for automation. Stdout is one versioned result or error envelope; diagnostics and 15-second wait keepalives are stderr-only.
-- Scope explicitly with `--workspace`, `--pane`, `--agent`, `--page`, `--tab`, `--app`, or `--window`. An ambiguous selector is an error; never fall back to the focused target.
-- Mutations carry an operation UUID automatically. Supply `--operation-id <uuid>` when retrying the same operation and `--expected-revision <n>` for compare-and-swap updates.
-- Recover `not_found`, `stale_target`, and `ambiguous_selector` by listing targets and selecting a unique stable ID. Do not guess.
+- Worktree selection is deterministic: explicit `--worktree <stable-id-or-exact-selector>`, then explicit `--workspace <unique-bound-session>`, then the CLI process's canonical caller cwd and its deepest containing checkout. `--worktree` and `--workspace` are mutually exclusive. Focus, recent tabs, and fuzzy names are never fallback selectors.
+- Mutations carry an operation UUID automatically. Reuse `--operation-id <uuid>` only to replay the identical request after an unknown outcome; the same UUID with different input is a conflict. Use a new UUID for a new decision.
+- `worktree move|remove|set` require `--expected-instance-id`. Removal additionally requires `--confirm`; `--force` works only for the exact acknowledged soft blockers. Main checkout, Git lock, and identity mismatch are hard blockers and cannot be forced.
+- Recover `not_found`, `stale_target`, and `ambiguous_selector` by listing targets and selecting a unique stable ID. Do not guess, use focused UI state, or substitute a path for destructive identity.
 
-## Command families
+## Worktree commands
 
-`vibelink status`
-`vibelink workspace list|create|show|open|sleep|wake|delete`
-`vibelink terminal list|show|read|send|wait|create|split|close`
-`vibelink orchestration ...`
-`vibelink automation list|create|update|delete|run|runs|precheck`
-`vibelink browser ...`
-`vibelink computer ...`
-`vibelink skill list|show|apply|delete|doctor`
-`vibelink remote status|pair|devices|revoke`
-`vibelink mcp serve`
+`vibelink worktree list|show|current|create|import|move|preflight-remove|remove|set|checkpoint|comment`
 
-Treat `denied_capability`, `conflict`, `timeout`, and `unavailable_runtime` as explicit outcomes. Never parse human diagnostics from stderr as command results.
+Create uses `--repo`, required `--name`, optional `--base-ref`, `--branch`, `--profile`, `--prompt`, `--fetch`, `--setup run|skip|inherit`, `--sparse-preset`, repeated `--linked-file`, `--parent-worktree`, or `--no-parent`. `current` is CLI-only and resolves from the captured caller cwd. MCP exposes only the direct worktree list/show/create/import/preflight-remove/remove/set/checkpoint/comment tools; move remains CLI-only.
+
+Other command families remain `status`, `workspace`, `terminal`, `orchestration`, `automation`, `browser`, `computer`, `skill`, `remote`, and `mcp serve`. Treat `denied_capability`, `conflict`, `timeout`, and `unavailable_runtime` as explicit outcomes. Never parse human diagnostics from stderr as command results.
 "#;
 
 const ORCHESTRATION_CONTENT: &str = r#"# VibeLink Orchestration
 
-The desktop Control Plane owns missions, tasks, dependencies, dispatches, messages, gates, revisions, and replay. Agents report through the dedicated CLI or workspace-bound MCP tools; terminal focus is never lifecycle authority.
+The desktop Control Plane owns missions, tasks, dependencies, dispatches, messages, gates, revisions, durable resource identity, and operation replay. Agents report through the dedicated CLI or workspace-bound MCP tools; terminal focus, a remembered path, and a branch name are never lifecycle authority.
 
-## Commands
+## Context capsule
 
-Use `vibelink orchestration run` to submit a mission. Inspect with `check`, `inbox`, `task-list`, `dispatch-show`, and `gate-list`. Communicate with `send`, `reply`, and `ask`. Coordinators create and update DAG nodes through `task-create` and `task-update`, dispatch ready work through `dispatch`, and stop a mission with `run-stop`. Use `gate-create` and `gate-resolve` for approvals. `reset` is explicit and policy-gated.
+Every worker launch receives a bounded context capsule containing the root request, task and dependencies, repository rules and bounded memory references, parent session, repository identity/path, exact base SHA, branch, stable worktree ID and instance ID, allowed task/file scope, run/task/dispatch/agent/pane IDs, and progress/report commands. Large contained content lives in an app-owned artifact; environment variables contain stable IDs and the capsule path, not an unbounded prompt copy.
 
-## Lifecycle identity
+The capsule contract explicitly forbids the worker from merging, deleting a branch, deleting a checkout, or recursively cleaning a path. Workers may edit only their allowed scope and report evidence.
 
-Preserve `VIBELINK_RUN_ID`, `VIBELINK_TASK_ID`, `VIBELINK_DISPATCH_ID`, `VIBELINK_AGENT_INSTANCE_ID`, `VIBELINK_SESSION_ID`, and the exact worktree path. A `worker_done` or `merge_ready` report is valid only for the active task, dispatch, agent instance, and pane/process generation.
+## Completion and decisions
 
-`worker_done` records a result; it never authorizes merge. Merge into the user's branch, destructive cleanup, deployment, publishing, purchases, authenticated business actions, and sensitive computer actions require an explicit decision gate.
+`worker_done` records first-class `files`, `tests`, `commit`, and `checkpoint` fields plus the bounded result. It never authorizes merge or cleanup. Merge approval is one durable decision gate. A rejected merge preserves the worktree. After an approved merge is recorded as `merge.applied`, the coordinator creates a separate cleanup decision gate. Only an approved cleanup gate may call shared worktree preflight/remove with the stored worktree ID, current instance ID, explicit confirmation, and exact soft-blocker acknowledgements.
 
-On a revision conflict, reload the run/task and retry with a new operation ID unless the prior operation's outcome is unknown; in that case retry the same operation ID. On stale dispatch identity, stop and reconcile rather than selecting a focused terminal.
+Use `vibelink orchestration run` to submit a mission. Inspect with `check`, `inbox`, `task-list`, `dispatch-show`, and `gate-list`; communicate with `send`, `reply`, and `ask`; mutate the DAG with `task-create`, `task-update`, `dispatch`, `run-stop`, `gate-create`, and `gate-resolve`. Preserve operation IDs only for identical replay. On revision, identity, or restart-recovery conflict, reload durable run/task/dispatch/worktree records and stop rather than selecting a focused terminal or deleting a path.
 "#;
 
 const BROWSER_CONTENT: &str = r#"# VibeLink Browser
@@ -205,7 +199,7 @@ mod tests {
         );
         assert!(builtin_skills()
             .iter()
-            .all(|skill| skill.version == "1.0.0" && skill.content.len() > 500));
+            .all(|skill| skill.version == BUILTIN_SKILL_VERSION && skill.content.len() > 500));
         assert!(builtin_skill("vibelink-cli")
             .expect("CLI skill")
             .content
@@ -214,6 +208,14 @@ mod tests {
             .expect("orchestration skill")
             .content
             .contains("worker_done"));
+        assert!(builtin_skill("vibelink-orchestration")
+            .expect("orchestration skill")
+            .content
+            .contains("separate cleanup decision gate"));
+        assert!(builtin_skill("vibelink-cli")
+            .expect("CLI skill")
+            .content
+            .contains("canonical caller cwd"));
         assert!(builtin_skill("vibelink-browser")
             .expect("browser skill")
             .content

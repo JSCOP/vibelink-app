@@ -37,6 +37,20 @@ action_enum!(WorkspaceAction {
     Delete => "delete",
 });
 
+action_enum!(WorktreeAction {
+    List => "list",
+    Show => "show",
+    Current => "current",
+    Create => "create",
+    Import => "import",
+    Move => "move",
+    PreflightRemove => "preflight-remove",
+    Remove => "remove",
+    Set => "set",
+    Checkpoint => "checkpoint",
+    Comment => "comment",
+});
+
 action_enum!(TerminalAction {
     List => "list",
     Show => "show",
@@ -177,6 +191,8 @@ pub struct SelectorSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
@@ -214,6 +230,7 @@ pub struct ActionCommand<A> {
 pub enum Command {
     Status,
     Workspace(ActionCommand<WorkspaceAction>),
+    Worktree(ActionCommand<WorktreeAction>),
     Terminal(ActionCommand<TerminalAction>),
     Orchestration(ActionCommand<OrchestrationAction>),
     Automation(ActionCommand<AutomationAction>),
@@ -280,6 +297,8 @@ pub fn parse_args(
         }
         "workspace" => parse_action_command(&tokens, "workspace", WorkspaceAction::parse)
             .map(Command::Workspace)?,
+        "worktree" => parse_action_command(&tokens, "worktree", WorktreeAction::parse)
+            .map(Command::Worktree)?,
         "terminal" => parse_action_command(&tokens, "terminal", TerminalAction::parse)
             .map(Command::Terminal)?,
         "orchestration" => {
@@ -470,6 +489,7 @@ fn parse_operation_arguments(
         match name {
             "--workspace" => set_selector(&mut selectors.workspace, value, name)?,
             "--pane" => set_selector(&mut selectors.pane, value, name)?,
+            "--worktree" => set_selector(&mut selectors.worktree, value, name)?,
             "--agent" => set_selector(&mut selectors.agent, value, name)?,
             "--page" => set_selector(&mut selectors.page, value, name)?,
             "--tab" => set_selector(&mut selectors.tab, value, name)?,
@@ -555,6 +575,14 @@ fn is_switch(flag: &str) -> bool {
             | "--disable"
             | "--enable-lan"
             | "--disable-lan"
+            | "--include-external"
+            | "--include-hidden"
+            | "--fetch"
+            | "--delete-branch"
+            | "--clear-parent"
+            | "--clear-comment"
+            | "--clear-review-target"
+            | "--no-parent"
     )
 }
 
@@ -567,7 +595,7 @@ fn arguments_are_empty(arguments: &OperationArguments) -> bool {
 }
 
 pub fn usage() -> &'static str {
-    "usage: vibelink [--json] [--flavor dev|prod] [--request-timeout-seconds N] [--operation-id UUID] [--expected-revision N] <status|workspace|terminal|orchestration|automation|browser|computer|skill|remote|mcp> ..."
+    "usage: vibelink [--json] [--flavor dev|prod] [--request-timeout-seconds N] [--operation-id UUID] [--expected-revision N] <status|workspace|worktree|terminal|orchestration|automation|browser|computer|skill|remote|mcp> ..."
 }
 
 #[cfg(test)]
@@ -593,6 +621,7 @@ mod tests {
             (vec!["skill", "doctor"], "skill"),
             (vec!["remote", "devices"], "remote"),
             (vec!["mcp", "serve"], "mcp"),
+            (vec!["worktree", "current"], "worktree"),
         ];
         for (args, expected_domain) in cases {
             let invocation = parse_args(args).expect("parse command family");
@@ -607,6 +636,22 @@ mod tests {
             (
                 "workspace",
                 &["list", "create", "show", "open", "sleep", "wake", "delete"],
+            ),
+            (
+                "worktree",
+                &[
+                    "list",
+                    "show",
+                    "current",
+                    "create",
+                    "import",
+                    "move",
+                    "preflight-remove",
+                    "remove",
+                    "set",
+                    "checkpoint",
+                    "comment",
+                ],
             ),
             (
                 "terminal",
@@ -727,12 +772,23 @@ mod tests {
                 if let Some(contract) = crate::dedicated_cli::find_contract(domain, action) {
                     for option in contract.options.iter().filter(|option| option.required) {
                         args.push(format!("--{}", option.name));
-                        args.push(match option.kind {
-                            crate::dedicated_cli::ValueKind::Uuid => Uuid::nil().to_string(),
-                            crate::dedicated_cli::ValueKind::Integer
-                            | crate::dedicated_cli::ValueKind::UnsignedInteger => "1".to_string(),
-                            crate::dedicated_cli::ValueKind::String => "value".to_string(),
-                        });
+                        args.push(
+                            option
+                                .enum_values
+                                .first()
+                                .copied()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| match option.kind {
+                                    crate::dedicated_cli::ValueKind::Uuid => {
+                                        Uuid::nil().to_string()
+                                    }
+                                    crate::dedicated_cli::ValueKind::Integer
+                                    | crate::dedicated_cli::ValueKind::UnsignedInteger => {
+                                        "1".to_string()
+                                    }
+                                    crate::dedicated_cli::ValueKind::String => "value".to_string(),
+                                }),
+                        );
                     }
                     if let Some(id) = contract.positional_satisfies {
                         if !args.iter().any(|value| value == &format!("--{id}")) {
@@ -741,6 +797,9 @@ mod tests {
                     }
                     if contract.requires_expected_revision {
                         args.extend(["--expected-revision".to_string(), "1".to_string()]);
+                    }
+                    if contract.domain == "worktree" && contract.action == "remove" {
+                        args.push("--confirm".to_string());
                     }
                 }
                 parse_args(args)
@@ -931,6 +990,52 @@ mod tests {
             error.code,
             crate::dedicated_cli::ErrorCode::InvalidArguments
         );
+    }
+
+    #[test]
+    fn worktree_grammar_uses_exact_instance_and_parent_flags() {
+        let instance_id = Uuid::new_v4().to_string();
+        let operation = parse_args([
+            "worktree",
+            "remove",
+            "--worktree",
+            "worktree-1",
+            "--expected-instance-id",
+            instance_id.as_str(),
+            "--acknowledge-blocker",
+            "dirty",
+            "--confirm",
+        ])
+        .expect("parse exact removal grammar");
+        let Command::Worktree(command) = operation.command else {
+            panic!("expected worktree command")
+        };
+        assert_eq!(
+            command.arguments.options["expected-instance-id"],
+            [instance_id.as_str()]
+        );
+        assert!(parse_args([
+            "worktree",
+            "remove",
+            "--worktree",
+            "worktree-1",
+            "--instance",
+            instance_id.as_str(),
+            "--confirm",
+        ])
+        .is_err());
+        assert!(parse_args([
+            "worktree",
+            "create",
+            "--repo",
+            ".",
+            "--name",
+            "child",
+            "--parent-worktree",
+            "parent",
+            "--no-parent",
+        ])
+        .is_err());
     }
 
     #[test]

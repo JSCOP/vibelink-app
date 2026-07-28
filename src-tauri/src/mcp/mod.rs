@@ -431,6 +431,28 @@ fn scope_mcp_invocation(
     }
     match command {
         crate::dedicated_cli::Command::Workspace(value) => scope!(value, "workspace"),
+        crate::dedicated_cli::Command::Worktree(value) => {
+            if matches!(
+                value.action,
+                crate::dedicated_cli::WorktreeAction::Current
+                    | crate::dedicated_cli::WorktreeAction::Move
+            ) {
+                return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
+                    crate::dedicated_cli::ErrorCode::DeniedCapability,
+                    "worktree current and move are CLI-only",
+                )));
+            }
+            if value.action == crate::dedicated_cli::WorktreeAction::Create {
+                scope!(value, "worktree");
+            } else if let Some(workspace) = value.selectors.workspace.as_deref() {
+                if workspace != session_id.to_string() {
+                    return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
+                        crate::dedicated_cli::ErrorCode::DeniedCapability,
+                        "MCP tools cannot target a different workspace",
+                    )));
+                }
+            }
+        }
         crate::dedicated_cli::Command::Terminal(value) => scope!(value, "terminal"),
         crate::dedicated_cli::Command::Orchestration(value) => scope!(value, "orchestration"),
         crate::dedicated_cli::Command::Automation(value) => scope!(value, "automation"),
@@ -655,6 +677,7 @@ fn tool_schemas() -> Vec<Value> {
     tools.extend(
         command_contracts()
             .into_iter()
+            .filter(mcp_exposes_contract)
             .map(cli_contract_tool_schema)
             .filter(|tool| {
                 tool.get("name")
@@ -677,6 +700,22 @@ fn cli_contract_tool_name(contract: &CommandContract) -> String {
     )
 }
 
+fn mcp_exposes_contract(contract: &CommandContract) -> bool {
+    contract.domain == "worktree"
+        && matches!(
+            contract.action,
+            "list"
+                | "show"
+                | "create"
+                | "import"
+                | "preflight-remove"
+                | "remove"
+                | "set"
+                | "checkpoint"
+                | "comment"
+        )
+}
+
 fn mcp_cli_contract(name: &str) -> Option<CommandContract> {
     if matches!(
         name,
@@ -686,25 +725,40 @@ fn mcp_cli_contract(name: &str) -> Option<CommandContract> {
     }
     command_contracts()
         .into_iter()
+        .filter(mcp_exposes_contract)
         .find(|contract| cli_contract_tool_name(contract) == name)
 }
 
 fn cli_contract_tool_schema(contract: CommandContract) -> Value {
     let mut properties = Map::new();
     for selector in contract.selectors {
+        if contract.domain == "worktree" && *selector == "workspace" {
+            continue;
+        }
         properties.insert(
             kebab_to_camel(selector),
             json!({ "type": "string", "minLength": 1 }),
         );
     }
     let mut required = Vec::new();
+    if contract.domain == "worktree"
+        && matches!(
+            contract.action,
+            "show" | "preflight-remove" | "checkpoint" | "remove" | "set" | "comment"
+        )
+    {
+        required.push(Value::String("worktree".to_string()));
+    }
     for option in &contract.options {
         let property = kebab_to_camel(option.name);
-        let scalar = match option.kind {
+        let mut scalar = match option.kind {
             ValueKind::String | ValueKind::Uuid => json!({ "type": "string", "minLength": 1 }),
             ValueKind::Integer => json!({ "type": "integer" }),
             ValueKind::UnsignedInteger => json!({ "type": "integer", "minimum": 0 }),
         };
+        if !option.enum_values.is_empty() {
+            scalar["enum"] = json!(option.enum_values);
+        }
         properties.insert(
             property.clone(),
             if option.repeatable {
@@ -718,7 +772,18 @@ fn cli_contract_tool_schema(contract: CommandContract) -> Value {
         }
     }
     for switch in contract.switches {
-        properties.insert(kebab_to_camel(switch), json!({ "type": "boolean" }));
+        properties.insert(
+            kebab_to_camel(switch),
+            if contract.domain == "worktree" && contract.action == "remove" && *switch == "confirm"
+            {
+                json!({ "type": "boolean", "const": true })
+            } else {
+                json!({ "type": "boolean" })
+            },
+        );
+    }
+    if contract.domain == "worktree" && contract.action == "remove" {
+        required.push(Value::String("confirm".to_string()));
     }
     properties.insert(
         "operationId".to_string(),
@@ -762,6 +827,10 @@ fn call_cli_contract(session_id: Uuid, contract: CommandContract, args: &Value) 
     let object = args
         .as_object()
         .ok_or_else(|| anyhow!("tool arguments must be an object"))?;
+    let allowed = mcp_contract_property_names(&contract);
+    if let Some(unknown) = object.keys().find(|key| !allowed.contains(key.as_str())) {
+        return Err(anyhow!("unknown tool argument: {unknown}"));
+    }
     if contract.selectors.contains(&"workspace") {
         if let Some(workspace) = object.get("workspace").and_then(Value::as_str) {
             if workspace != session_id.to_string() {
@@ -779,7 +848,10 @@ fn call_cli_contract(session_id: Uuid, contract: CommandContract, args: &Value) 
             push_cli_scalar(&mut argv, selector, value)?;
         }
     }
-    if contract.selectors.contains(&"workspace") && !object.contains_key("workspace") {
+    if contract.selectors.contains(&"workspace")
+        && !object.contains_key("workspace")
+        && (contract.domain != "worktree" || contract.action == "create")
+    {
         argv.extend(["--workspace".to_string(), session_id.to_string()]);
     }
     for option in &contract.options {
@@ -825,6 +897,33 @@ fn call_cli_contract(session_id: Uuid, contract: CommandContract, args: &Value) 
     let mut executor = SocketExecutor;
     let result = executor.execute(invocation).map_err(anyhow::Error::new)?;
     Ok(serde_json::to_string(&result)?)
+}
+fn mcp_contract_property_names(contract: &CommandContract) -> std::collections::HashSet<String> {
+    let mut allowed = std::collections::HashSet::new();
+    for selector in contract.selectors {
+        if contract.domain != "worktree" || *selector != "workspace" {
+            allowed.insert(kebab_to_camel(selector));
+        }
+    }
+    allowed.extend(
+        contract
+            .options
+            .iter()
+            .map(|option| kebab_to_camel(option.name)),
+    );
+    allowed.extend(
+        contract
+            .switches
+            .iter()
+            .map(|switch| kebab_to_camel(switch)),
+    );
+    allowed.extend([
+        "operationId".to_string(),
+        "expectedRevision".to_string(),
+        "requestTimeoutSeconds".to_string(),
+        "flavor".to_string(),
+    ]);
+    allowed
 }
 
 fn push_cli_scalar(argv: &mut Vec<String>, name: &str, value: &Value) -> Result<()> {
@@ -1518,7 +1617,10 @@ mod tests {
             "vibelink_computer_get_app_state",
             "vibelink_remote_revoke",
         ] {
-            assert!(names.contains(&name), "missing generated MCP tool {name}");
+            assert!(
+                !names.contains(&name),
+                "unexpected generated MCP tool {name}"
+            );
         }
         assert_eq!(
             names.len(),
@@ -1531,30 +1633,55 @@ mod tests {
     }
 
     #[test]
-    fn generated_mcp_schemas_preserve_types_revisions_and_risk() {
+    fn direct_worktree_inventory_and_remove_schema_are_strict() {
         let tools = tool_schemas();
-        let gate = tools
+        let worktree_names = tools
             .iter()
-            .find(|tool| tool["name"] == "vibelink_orchestration_gate_resolve")
-            .expect("gate resolve tool");
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| name.starts_with("vibelink_worktree_"))
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            gate["inputSchema"]["properties"]["expectedRevision"]["type"],
-            "integer"
+            worktree_names,
+            std::collections::BTreeSet::from([
+                "vibelink_worktree_checkpoint",
+                "vibelink_worktree_comment",
+                "vibelink_worktree_create",
+                "vibelink_worktree_import",
+                "vibelink_worktree_list",
+                "vibelink_worktree_preflight_remove",
+                "vibelink_worktree_remove",
+                "vibelink_worktree_set",
+                "vibelink_worktree_show",
+            ])
         );
-        assert!(gate["inputSchema"]["required"]
-            .as_array()
-            .expect("required array")
-            .contains(&json!("expectedRevision")));
-        assert!(gate["description"]
+        let remove = tools
+            .iter()
+            .find(|tool| tool["name"] == "vibelink_worktree_remove")
+            .expect("remove tool");
+        assert_eq!(
+            remove["inputSchema"]["properties"]["confirm"]["const"],
+            true
+        );
+        assert_eq!(
+            remove["inputSchema"]["properties"]["acknowledgeBlocker"]["items"]["enum"],
+            json!([
+                "main_checkout",
+                "git_locked",
+                "identity_mismatch",
+                "dirty",
+                "conflicted",
+                "unpushed",
+                "live_session",
+                "live_panes",
+                "missing_registration",
+                "orphan_directory"
+            ])
+        );
+        assert_eq!(remove["inputSchema"]["additionalProperties"], false);
+        assert!(remove["description"]
             .as_str()
             .expect("description")
-            .contains("High-risk"));
-
-        let list = tools
-            .iter()
-            .find(|tool| tool["name"] == "vibelink_workspace_list")
-            .expect("workspace list tool");
-        assert_eq!(list["inputSchema"]["additionalProperties"], false);
+            .contains("hard blockers"));
     }
 
     #[test]

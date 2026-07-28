@@ -12,7 +12,18 @@ pub use generated::GENERATED_CONTRACT_SHA256 as CONTRACT_SHA256;
 pub const CONTRACT_JSON: &str = include_str!("../../../../contracts/remote-v2.json");
 
 pub fn contract_hash() -> String {
-    Sha256::digest(CONTRACT_JSON.as_bytes())
+    let bytes = CONTRACT_JSON.as_bytes();
+    let mut digest = Sha256::new();
+    let mut cursor = 0;
+    while let Some(relative) = bytes[cursor..].windows(2).position(|pair| pair == b"\r\n") {
+        let newline = cursor + relative;
+        digest.update(&bytes[cursor..newline]);
+        digest.update(b"\n");
+        cursor = newline + 2;
+    }
+    digest.update(&bytes[cursor..]);
+    digest
+        .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()

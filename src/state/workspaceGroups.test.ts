@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import type { SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import { useWorkspaceStore } from './store'
+import type { WorktreeProjection, WorktreeRecord } from './worktrees'
 import { flattenWorkspaceRows, workspaceRows, type WorkspaceGroup } from './workspaceGroups'
 
 function session(id: string): SessionMeta {
@@ -15,6 +16,25 @@ function session(id: string): SessionMeta {
 }
 
 const group: WorkspaceGroup = { id: 'group-a', name: 'Monorepo', collapsed: false }
+
+function worktree(id: string, parentSessionId: string, branch: string): WorktreeProjection & { record: WorktreeRecord } {
+  return {
+    id: `record-${id}`,
+    instanceId: `instance-${id}`,
+    state: 'managed',
+    parentWorktreeId: null,
+    childWorktreeIds: [],
+    native: null,
+    record: {
+      id: `record-${id}`, instanceId: `instance-${id}`, repositoryId: 'repository-1', repositoryPath: 'E:/repo',
+      worktreePath: `E:/worktrees/${id}`, branch, head: 'abc', baseRef: 'HEAD', sessionId: id, parentSessionId,
+      parentWorktreeId: null, parentInstanceId: null, origin: 'manual', lifecycle: 'active', locked: false, lockReason: null,
+      prunable: false, prunableReason: null, dirty: false, untracked: false, hasConflicts: false, ahead: 0, behind: 0,
+      exists: true, setupPolicy: 'inherit', sparsePreset: null, linkedFiles: [], initialAgent: null, initialPrompt: null,
+      comment: null, reviewTarget: null, createdAt: 1, updatedAt: 1, lastActivityAt: 1,
+    },
+  }
+}
 
 describe('workspace groups', () => {
   test('renders groups before ungrouped sessions and orders members by workspaceOrder', () => {
@@ -61,35 +81,82 @@ describe('workspace groups', () => {
     expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['member-a', 'member-b', 'ungrouped'])
   })
 
-  test('nests persisted worktree sessions under their repository and keeps shortcut order parent-first', () => {
+  test('nests registry worktree sessions under their repository and keeps shortcut order parent-first', () => {
     const rows = workspaceRows(
       [session('worktree-b'), session('repo'), session('ungrouped'), session('worktree-a')],
       [group],
       { repo: group.id },
       ['worktree-a', 'repo', 'worktree-b', 'ungrouped'],
-      {
-        'worktree-a': {
-          parentSessionId: 'repo',
-          sourceWorkspaceFolder: 'E:/repo',
-          worktreePath: 'E:/worktrees/a',
-          branch: 'vibelink/a',
-          startRef: 'HEAD',
-          createdAt: '2026-07-27T00:00:00.000Z',
-        },
-        'worktree-b': {
-          parentSessionId: 'repo',
-          sourceWorkspaceFolder: 'E:/repo',
-          worktreePath: 'E:/worktrees/b',
-          branch: 'vibelink/b',
-          startRef: 'main',
-          createdAt: '2026-07-27T00:00:01.000Z',
-        },
-      },
+      [worktree('worktree-a', 'repo', 'vibelink/a'), worktree('worktree-b', 'repo', 'vibelink/b')],
     )
 
     expect(rows[0].kind === 'group' ? rows[0].sessions[0]?.session.id : null).toBe('repo')
     expect(rows[0].kind === 'group' ? rows[0].sessions[0]?.worktrees.map(({ session: child }) => child.id) : []).toEqual(['worktree-a', 'worktree-b'])
     expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['repo', 'worktree-a', 'worktree-b', 'ungrouped'])
+  })
+
+  test('nests a child under its parent worktree through the registry lineage edge', () => {
+    const parent = worktree('worktree-a', 'repo', 'vibelink/a')
+    const child = { ...worktree('worktree-b', 'worktree-a', 'vibelink/b'), parentWorktreeId: parent.id }
+    const rows = workspaceRows(
+      [session('repo'), session('worktree-a'), session('worktree-b')],
+      [],
+      {},
+      ['repo', 'worktree-a', 'worktree-b'],
+      [parent, child],
+    )
+
+    const repoNode = rows[0].kind === 'session' ? rows[0].node : null
+    expect(repoNode?.worktrees.map(({ session: node }) => node.id)).toEqual(['worktree-a'])
+    expect(repoNode?.worktrees[0]?.worktrees.map(({ session: node }) => node.id)).toEqual(['worktree-b'])
+    expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['repo', 'worktree-a', 'worktree-b'])
+  })
+
+  test('does not nest a child whose lineage edge the registry rejected', () => {
+    // The daemon strips `parentWorktreeId` from cycle-participating or
+    // instance-mismatched edges, so the child must surface under its repository.
+    const parent = worktree('worktree-a', 'repo', 'vibelink/a')
+    const child = worktree('worktree-b', 'repo', 'vibelink/b')
+    const rows = workspaceRows(
+      [session('repo'), session('worktree-a'), session('worktree-b')],
+      [],
+      {},
+      ['repo', 'worktree-a', 'worktree-b'],
+      [parent, child],
+    )
+
+    const repoNode = rows[0].kind === 'session' ? rows[0].node : null
+    expect(repoNode?.worktrees.map(({ session: node }) => node.id)).toEqual(['worktree-a', 'worktree-b'])
+    expect(repoNode?.worktrees.every((node) => node.worktrees.length === 0)).toBe(true)
+  })
+
+  test('orders child worktrees by the provided visible order, not projection order', () => {
+    const rows = workspaceRows(
+      [session('repo'), session('worktree-a'), session('worktree-b')],
+      [],
+      {},
+      ['repo', 'worktree-b', 'worktree-a'],
+      [worktree('worktree-a', 'repo', 'vibelink/a'), worktree('worktree-b', 'repo', 'vibelink/b')],
+    )
+
+    const repoNode = rows[0].kind === 'session' ? rows[0].node : null
+    expect(repoNode?.worktrees.map(({ session: node }) => node.id)).toEqual(['worktree-b', 'worktree-a'])
+  })
+
+  test('surfaces registry rows with no workspace session as detached repository rows', () => {
+    const missing = worktree('gone', 'repo', 'vibelink/gone')
+    const detached: WorktreeProjection = {
+      ...missing,
+      state: 'missing',
+      record: { ...missing.record, sessionId: null, exists: false, lifecycle: 'missing' },
+    }
+    const rows = workspaceRows([session('repo')], [], {}, ['repo'], [detached])
+
+    const repoNode = rows[0].kind === 'session' ? rows[0].node : null
+    expect(repoNode?.detached.map(({ id }) => id)).toEqual([detached.id])
+    expect(repoNode?.worktrees).toEqual([])
+    // Detached rows have no workspace, so they never enter shortcut ordering.
+    expect(flattenWorkspaceRows(rows).map(({ id }) => id)).toEqual(['repo'])
   })
 
   test('settings round-trip preserves normalized group roots and drops malformed groups and assignments', () => {
@@ -109,24 +176,7 @@ describe('workspace groups', () => {
         'session-b': 'missing-group',
         'session-c': 42,
       },
-      workspaceWorktrees: {
-        ' worktree-a ': {
-          parentSessionId: ' repo ',
-          sourceWorkspaceFolder: ' E:/repo ',
-          worktreePath: ' E:/worktrees/a ',
-          branch: ' vibelink/a ',
-          startRef: ' HEAD ',
-          createdAt: ' 2026-07-27T00:00:00.000Z ',
-        },
-        repo: {
-          parentSessionId: 'repo',
-          sourceWorkspaceFolder: 'E:/repo',
-          worktreePath: 'E:/worktrees/self',
-          branch: 'vibelink/self',
-          startRef: 'HEAD',
-        },
-        invalid: { parentSessionId: 'repo' },
-      },
+
     })
 
     expect(normalized.workspaceGroups).toEqual([
@@ -137,20 +187,9 @@ describe('workspace groups', () => {
     ])
     expect(normalized.workspaceGroupIds).toEqual({ 'session-a': 'group-a' })
 
-    expect(normalized.workspaceWorktrees).toEqual({
-      'worktree-a': {
-        parentSessionId: 'repo',
-        sourceWorkspaceFolder: 'E:/repo',
-        worktreePath: 'E:/worktrees/a',
-        branch: 'vibelink/a',
-        startRef: 'HEAD',
-        createdAt: '2026-07-27T00:00:00.000Z',
-      },
-    })
     const roundTripped = normalizeSettings(JSON.parse(JSON.stringify(normalized)))
     expect(roundTripped.workspaceGroups).toEqual(normalized.workspaceGroups)
     expect(roundTripped.workspaceGroupIds).toEqual(normalized.workspaceGroupIds)
-    expect(roundTripped.workspaceWorktrees).toEqual(normalized.workspaceWorktrees)
   })
 
   test('store actions create, update, assign, and delete groups without deleting sessions', () => {

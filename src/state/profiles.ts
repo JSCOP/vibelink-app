@@ -4,11 +4,13 @@ import { defaultTerminalThemeId, isTerminalThemeId, type TerminalThemeId } from 
 import { preferredFontFamily } from './fonts'
 import { defaultCompletionSoundId, isCompletionSoundId, type CompletionSoundId } from '../notifications/completionSounds'
 import type { WorkspaceGroup } from './workspaceGroups'
+import type { LegacyWorkspaceWorktree } from './worktrees'
 
 export type ProfileKind = 'local' | 'ssh' | 'command'
 export type ChatPersonality = 'direct' | 'balanced' | 'concise' | 'exploratory'
 export type ChatImageAttachmentMode = 'auto' | 'always' | 'never'
 export type TerminalCursorStyle = 'bar' | 'block' | 'underline'
+export type WorkspaceSortMode = 'smart' | 'recent' | 'name' | 'repository' | 'manual'
 export type SetupWizardSettings = {
   completedAt: string | null
   skippedSteps: string[]
@@ -40,15 +42,6 @@ export type WorkspaceDetails = {
   githubPullRequest: string
   notes: string
 }
-export type WorkspaceWorktree = {
-  parentSessionId: string
-  sourceWorkspaceFolder: string
-  worktreePath: string
-  branch: string
-  startRef: string
-  createdAt: string
-}
-
 
 const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
 const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
@@ -101,10 +94,11 @@ export type Settings = {
   workspaceDetails: Record<string, WorkspaceDetails>
   workspaceGroups: WorkspaceGroup[]
   workspaceGroupIds: Record<string, string>
-  workspaceWorktrees: Record<string, WorkspaceWorktree>
   worktreeStorage: WorktreeStorage
   paneRoles: Record<string, string>
   workspaceOrder: string[]
+  workspaceSortMode: WorkspaceSortMode
+  worktreeRegistryMigrationVersion: number
   rolePresets: string[]
   keybindings: KeybindingSettings
   hermesCommand: string
@@ -280,7 +274,6 @@ export const defaultSettings: Settings = {
   workspaceDetails: {},
   workspaceGroups: [],
   workspaceGroupIds: {},
-  workspaceWorktrees: {},
   worktreeStorage: {
     mode: 'drive',
     drive: '',
@@ -290,6 +283,8 @@ export const defaultSettings: Settings = {
   },
   paneRoles: {},
   workspaceOrder: [],
+  workspaceSortMode: 'smart',
+  worktreeRegistryMigrationVersion: 1,
   hermesCommand: '',
   externalEditorCommand: 'code',
   rolePresets: ['Planner', 'Frontend', 'Backend', 'Reviewer', 'Tester', 'Docs'],
@@ -314,10 +309,11 @@ export function normalizeSettings(value: unknown): Settings {
   const workspaceDetails = normalizeWorkspaceDetails(record?.workspaceDetails)
   const workspaceGroups = normalizeWorkspaceGroups(record?.workspaceGroups)
   const workspaceGroupIds = normalizeWorkspaceGroupIds(record?.workspaceGroupIds, workspaceGroups)
-  const workspaceWorktrees = normalizeWorkspaceWorktrees(record?.workspaceWorktrees)
   const worktreeStorage = normalizeWorktreeStorage(record?.worktreeStorage)
   const paneRoles = normalizePaneRoles(record?.paneRoles)
   const workspaceOrder = normalizeWorkspaceOrder(record?.workspaceOrder)
+  const workspaceSortMode = normalizeWorkspaceSortMode(record?.workspaceSortMode, record !== undefined)
+  const worktreeRegistryMigrationVersion = record?.worktreeRegistryMigrationVersion === 1 ? 1 : 0
   const rolePresets = normalizeRolePresets(record?.rolePresets)
   const setupWizard = normalizeSetupWizard(record?.setupWizard)
 
@@ -351,10 +347,11 @@ export function normalizeSettings(value: unknown): Settings {
     workspaceDetails,
     workspaceGroups,
     workspaceGroupIds,
-    workspaceWorktrees,
     worktreeStorage,
     paneRoles,
     workspaceOrder,
+    workspaceSortMode,
+    worktreeRegistryMigrationVersion,
     hermesCommand: readString(record?.hermesCommand, defaultSettings.hermesCommand),
     externalEditorCommand: readString(record?.externalEditorCommand, defaultSettings.externalEditorCommand),
     chatPersonality: readChatPersonality(record?.chatPersonality),
@@ -634,9 +631,9 @@ function normalizeWorktreeStorage(value: unknown): WorktreeStorage {
   }
 }
 
-function normalizeWorkspaceWorktrees(value: unknown): Record<string, WorkspaceWorktree> {
+export function normalizeLegacyWorkspaceWorktrees(value: unknown): Record<string, LegacyWorkspaceWorktree> {
   if (!isRecord(value)) return {}
-  const worktrees: Record<string, WorkspaceWorktree> = {}
+  const worktrees: Record<string, LegacyWorkspaceWorktree> = {}
   for (const [rawSessionId, rawWorktree] of Object.entries(value)) {
     const sessionId = rawSessionId.trim()
     if (!sessionId || !isRecord(rawWorktree)) continue
@@ -690,6 +687,11 @@ function normalizePaneRoles(value: unknown): Record<string, string> {
         entry[0].trim().length > 0 && typeof entry[1] === 'string' && entry[1].trim().length > 0,
     ),
   )
+}
+
+function normalizeWorkspaceSortMode(value: unknown, persistedSettingsExist: boolean): WorkspaceSortMode {
+  if (value === 'smart' || value === 'recent' || value === 'name' || value === 'repository' || value === 'manual') return value
+  return persistedSettingsExist ? 'manual' : 'smart'
 }
 
 function normalizeWorkspaceOrder(value: unknown): string[] {

@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
-import { loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
+import type { WorktreeProjection, WorktreeRecord } from './worktrees'
+import { loadPaneCompletionHighlights, loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneCompletionHighlights, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
 
 const spawnedPane: PaneMeta = {
   id: 'pane-test',
@@ -58,6 +59,21 @@ const profileSession: SessionMeta = {
   workspaceFolder: null,
 }
 
+function worktreeFixture(session: SessionMeta = {
+  id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login',
+}, overrides: Partial<WorktreeRecord> = {}): WorktreeProjection {
+  const record: WorktreeRecord = {
+    id: 'worktree-1', instanceId: 'instance-1', repositoryId: 'repository-1', repositoryPath: 'E:/repo',
+    worktreePath: session.workspaceFolder ?? '', branch: 'vibelink/fix-login', head: 'abc123', baseRef: 'origin/main',
+    sessionId: session.id, parentSessionId: createdSession.id, parentWorktreeId: null, parentInstanceId: null,
+    origin: 'manual', lifecycle: 'active', locked: false, lockReason: null, prunable: false, prunableReason: null,
+    dirty: false, untracked: false, hasConflicts: false, ahead: 0, behind: 0, exists: true,
+    setupPolicy: 'inherit', sparsePreset: null, linkedFiles: [], initialAgent: null, initialPrompt: null,
+    comment: null, reviewTarget: null, createdAt: 1, updatedAt: 1, lastActivityAt: 1, ...overrides,
+  }
+  return { id: record.id, instanceId: record.instanceId, state: 'managed', record, native: null, parentWorktreeId: record.parentWorktreeId, childWorktreeIds: [] }
+}
+
 const unlicensedStatus: LicenseStatus = {
   state: 'unlicensed',
   entitled: false,
@@ -75,9 +91,9 @@ const unlicensedStatus: LicenseStatus = {
 }
 
 const localStorageStub = {
-  getItem: vi.fn(() => null),
-  setItem: vi.fn(),
-  removeItem: vi.fn(),
+  getItem: vi.fn((key: string): string | null => { void key; return null }),
+  setItem: vi.fn((key: string, value: string): void => { void key; void value }),
+  removeItem: vi.fn((key: string): void => { void key }),
   clear: vi.fn(),
 }
 
@@ -104,16 +120,16 @@ describe('workspace store profiles', () => {
     resetWorkspaceSessionOwnershipForTests()
     vi.stubGlobal('window', { localStorage: localStorageStub })
     vi.stubGlobal('document', { hasFocus: () => false })
-    localStorageStub.getItem.mockReturnValue(null)
-    localStorageStub.setItem.mockClear()
-    localStorageStub.removeItem.mockClear()
+    localStorageStub.getItem.mockReset().mockReturnValue(null)
+    localStorageStub.setItem.mockReset()
+    localStorageStub.removeItem.mockReset()
     localStorageStub.clear.mockClear()
     vi.mocked(invoke).mockClear()
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'license_status') return unlicensedStatus
       if (command === 'spawn_pane') return spawnedPane
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
-      if (command === 'list_sessions') return []
+      if (command === 'list_sessions') return useWorkspaceStore.getState().sessions
       return null
     })
     useWorkspaceStore.setState({
@@ -260,187 +276,338 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
   })
 
-  test('creates a named Git worktree and launches the chosen agent inside its child workspace', async () => {
-    const childSession: SessionMeta = {
-      id: 'session-worktree',
-      name: 'Fix Login',
-      paneCount: 0,
-      createdAt: 126,
-      workspaceFolder: 'E:/managed-worktrees/fix-login-abcd1234',
-    }
-    const worktreeStorage = {
-      mode: 'custom' as const,
-      drive: 'E:',
-      folderName: 'TeamWorktrees',
-      customRoot: 'E:/managed-worktrees',
-      groupByRepository: false,
-    }
+  test('creates a registered worktree transaction and launches its bound child workspace', async () => {
+    const childSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(childSession)
     useWorkspaceStore.setState({
       sessions: [createdSession],
-      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceOrder: [createdSession.id], worktreeStorage }),
+      settings: normalizeSettings({
+        ...useWorkspaceStore.getState().settings,
+        profiles: [...useWorkspaceStore.getState().settings.profiles, defaultSettings.profiles.find((profile) => profile.id === 'claude')!],
+        workspaceSortMode: 'manual',
+        workspaceOrder: [createdSession.id],
+      }),
     })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'git_worktree_create_named') return {
-        worktreePath: childSession.workspaceFolder,
-        branch: 'vibelink/fix-login',
-      }
-      if (command === 'create_session') return childSession
+      if (command === 'worktree_lifecycle_create') return { worktree: projection.record, sessionId: childSession.id }
       if (command === 'list_sessions') return [createdSession, childSession]
+      if (command === 'worktree_registry_list') return [projection]
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'spawn_pane') return { ...spawnedPane, id: 'pane-worktree', config: { ...spawnedPane.config, paneId: 'pane-worktree' } }
       return null
     })
 
     const created = await useWorkspaceStore.getState().createWorktreeSession({
-      parentSessionId: createdSession.id,
-      name: 'Fix Login',
-      startRef: 'origin/main',
-      branch: 'vibelink/fix-login',
-      profileId: 'agent',
+      parentSessionId: createdSession.id, name: 'Fix Login', startRef: 'origin/main', branch: 'vibelink/fix-login', profileId: 'codex', initialAgent: 'claude', initialPrompt: 'Fix the login redirect',
     })
 
     expect(created).toEqual(childSession)
-    expect(invoke).toHaveBeenCalledWith('git_worktree_create_named', {
-      workspaceFolder: 'E:/repo',
-      name: 'Fix Login',
-      startRef: 'origin/main',
-      branch: 'vibelink/fix-login',
-      storage: worktreeStorage,
-    })
-    expect(invoke).toHaveBeenCalledWith('spawn_pane', {
-      sessionId: childSession.id,
-      cfg: expect.objectContaining({ cwd: childSession.workspaceFolder, profileId: 'agent' }),
-    })
-    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[childSession.id]).toMatchObject({
-      parentSessionId: createdSession.id,
-      sourceWorkspaceFolder: createdSession.workspaceFolder,
-      worktreePath: childSession.workspaceFolder,
-      branch: 'vibelink/fix-login',
-      startRef: 'origin/main',
-    })
+    expect(invoke).toHaveBeenCalledWith('worktree_lifecycle_create', { request: expect.objectContaining({ parentSessionId: createdSession.id, branch: 'vibelink/fix-login', origin: 'manual' }) })
+    expect(useWorkspaceStore.getState().worktreeProjections).toEqual([projection])
     expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual([createdSession.id, childSession.id])
-    expect(localStorageStub.setItem).toHaveBeenCalledWith('vibelink:settings', expect.stringContaining('"folderName":"TeamWorktrees"'))
+    expect(useWorkspaceStore.getState().settings.workspaceProfileIds[childSession.id]).toBe('claude')
+    expect(invoke).toHaveBeenCalledWith('write_pane', { sessionId: childSession.id, paneId: 'pane-worktree', data: 'Fix the login redirect' })
+    expect(invoke).toHaveBeenCalledWith('write_pane', { sessionId: childSession.id, paneId: 'pane-worktree', data: '\r' })
   })
 
-  test('removes a recorded worktree before deleting its workspace session', async () => {
-    const worktreeSession: SessionMeta = {
-      id: 'session-worktree',
-      name: 'Fix Login',
+  test('refreshes the daemon-created workspace session after importing an external worktree', async () => {
+    const importedSession: SessionMeta = {
+      id: 'session-imported',
+      name: 'external-feature',
       paneCount: 0,
-      createdAt: 126,
-      workspaceFolder: 'E:/managed-worktrees/fix-login',
+      createdAt: 127,
+      workspaceFolder: 'E:/external-worktrees/feature',
     }
-    const relation = {
+    const projection = worktreeFixture(importedSession, {
+      branch: 'feature/external',
+      origin: 'external_import',
+      worktreePath: importedSession.workspaceFolder!,
+    })
+    useWorkspaceStore.setState({ sessions: [createdSession], worktreeProjections: [] })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_registry_import') return projection
+      if (command === 'list_sessions') return [createdSession, importedSession]
+      if (command === 'worktree_registry_list') return [projection]
+      return null
+    })
+
+    const imported = await useWorkspaceStore.getState().importExternalWorktree({
+      repositoryPath: 'E:/repo',
+      worktreePath: importedSession.workspaceFolder!,
       parentSessionId: createdSession.id,
-      sourceWorkspaceFolder: 'E:/repo',
-      worktreePath: worktreeSession.workspaceFolder as string,
-      branch: 'vibelink/fix-login',
-      startRef: 'origin/main',
-      createdAt: '2026-07-27T00:00:00.000Z',
-    }
+    })
+
+    expect(imported).toEqual(projection)
+    expect(invoke).toHaveBeenCalledWith('worktree_registry_import', {
+      request: {
+        repositoryPath: 'E:/repo',
+        worktreePath: importedSession.workspaceFolder,
+        parentSessionId: createdSession.id,
+        sessionId: null,
+      },
+    })
+    expect(useWorkspaceStore.getState().sessions).toEqual([createdSession, importedSession])
+    expect(useWorkspaceStore.getState().worktreeProjections).toEqual([projection])
+  })
+
+  test('does not overwrite manual workspace order when a smart-sorted worktree is created', async () => {
+    const childSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(childSession)
+    const workspaceOrder = ['manual-preserved', createdSession.id]
     useWorkspaceStore.setState({
-      sessions: [createdSession, worktreeSession],
-      activeSessionId: createdSession.id,
-      settings: normalizeSettings({
-        ...useWorkspaceStore.getState().settings,
-        workspaceWorktrees: { [worktreeSession.id]: relation },
-        workspaceOrder: [createdSession.id, worktreeSession.id],
-      }),
+      sessions: [createdSession],
+      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceSortMode: 'smart', workspaceOrder }),
     })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_lifecycle_create') return { worktree: projection.record, sessionId: childSession.id }
+      if (command === 'list_sessions') return [createdSession, childSession]
+      if (command === 'worktree_registry_list') return [projection]
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      if (command === 'spawn_pane') return { ...spawnedPane, id: 'pane-worktree', config: { ...spawnedPane.config, paneId: 'pane-worktree' } }
+      return null
+    })
+
+    await useWorkspaceStore.getState().createWorktreeSession({
+      parentSessionId: createdSession.id, name: 'Fix Login', startRef: 'origin/main', branch: 'vibelink/fix-login', profileId: 'agent',
+    })
+
+    expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual(workspaceOrder)
+  })
+
+  test('removes a registered worktree only after blocker preflight succeeds', async () => {
+    const worktreeSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(worktreeSession)
+    useWorkspaceStore.setState({ sessions: [createdSession, worktreeSession], worktreeProjections: [projection], activeSessionId: createdSession.id })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_removal_preflight') return { worktreeId: projection.id, instanceId: projection.instanceId, repositoryPath: 'E:/repo', worktreePath: worktreeSession.workspaceFolder, branch: 'vibelink/fix-login', blockers: [], warnings: [] }
+      if (command === 'worktree_lifecycle_remove') return { checkoutRemoved: true, branchDeleted: true, branchPreservedReason: null, sessionRemoved: true, metadataRemoved: true }
       if (command === 'list_sessions') return [createdSession]
+      if (command === 'worktree_registry_list') return []
       return null
     })
 
-    await useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: true, force: false })
+    await useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: true, acknowledgedBlockers: [] })
 
-    expect(invoke).toHaveBeenCalledWith('git_worktree_remove', {
-      workspaceFolder: relation.sourceWorkspaceFolder,
-      worktreePath: relation.worktreePath,
-      branch: relation.branch,
-      force: false,
-      deleteBranch: true,
-    })
-    expect(invoke).toHaveBeenCalledWith('delete_session', { sessionId: worktreeSession.id })
+    expect(invoke).toHaveBeenCalledWith('worktree_lifecycle_remove', { request: expect.objectContaining({ worktreeId: projection.id, expectedInstanceId: projection.instanceId, deleteBranch: true }) })
     expect(useWorkspaceStore.getState().sessions).toEqual([createdSession])
-    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[worktreeSession.id]).toBeUndefined()
+    expect(useWorkspaceStore.getState().worktreeProjections).toEqual([])
   })
 
-  test('keeps a worktree session when Git removal fails', async () => {
-    const worktreeSession: SessionMeta = {
-      id: 'session-worktree',
-      name: 'Fix Login',
-      paneCount: 0,
-      createdAt: 126,
-      workspaceFolder: 'E:/managed-worktrees/fix-login',
-    }
-    const relation = {
-      parentSessionId: createdSession.id,
-      sourceWorkspaceFolder: 'E:/repo',
-      worktreePath: worktreeSession.workspaceFolder as string,
-      branch: 'vibelink/fix-login',
-      startRef: 'origin/main',
-      createdAt: '2026-07-27T00:00:00.000Z',
-    }
-    useWorkspaceStore.setState({
-      sessions: [createdSession, worktreeSession],
-      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceWorktrees: { [worktreeSession.id]: relation } }),
-    })
+  test('keeps the registered session and metadata when lifecycle removal fails', async () => {
+    const worktreeSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(worktreeSession)
+    useWorkspaceStore.setState({ sessions: [createdSession, worktreeSession], worktreeProjections: [projection] })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'git_worktree_remove') throw new Error('worktree is locked')
+      if (command === 'worktree_removal_preflight') return { worktreeId: projection.id, instanceId: projection.instanceId, repositoryPath: 'E:/repo', worktreePath: worktreeSession.workspaceFolder, branch: 'vibelink/fix-login', blockers: [], warnings: [] }
+      if (command === 'worktree_lifecycle_remove') throw new Error('worktree is locked')
       return null
     })
 
-    await expect(useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: false, force: true }))
-      .rejects.toThrow('worktree is locked')
-
-    expect(invoke).not.toHaveBeenCalledWith('delete_session', expect.anything())
+    await expect(useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: false, acknowledgedBlockers: [] })).rejects.toThrow('worktree is locked')
     expect(useWorkspaceStore.getState().sessions).toContainEqual(worktreeSession)
-    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[worktreeSession.id]).toEqual(relation)
+    expect(useWorkspaceStore.getState().worktreeProjections).toEqual([projection])
   })
 
-  test('moves a recorded worktree and updates its workspace folder metadata', async () => {
-    const worktreeSession: SessionMeta = {
-      id: 'session-worktree',
-      name: 'Fix Login',
-      paneCount: 0,
-      createdAt: 126,
-      workspaceFolder: 'E:/managed-worktrees/fix-login',
-    }
-    const relation = {
-      parentSessionId: createdSession.id,
-      sourceWorkspaceFolder: 'E:/repo',
-      worktreePath: worktreeSession.workspaceFolder as string,
-      branch: 'vibelink/fix-login',
-      startRef: 'origin/main',
-      createdAt: '2026-07-27T00:00:00.000Z',
-    }
+  test('refuses removal and skips GUI cleanup when a live blocker was not acknowledged', async () => {
+    const worktreeSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(worktreeSession)
+    useWorkspaceStore.setState({ sessions: [createdSession, worktreeSession], worktreeProjections: [projection] })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_removal_preflight') return { worktreeId: projection.id, instanceId: projection.instanceId, repositoryPath: 'E:/repo', worktreePath: worktreeSession.workspaceFolder, branch: 'vibelink/fix-login', blockers: [{ kind: 'dirty', hard: false, message: 'Uncommitted changes are present.' }], warnings: [] }
+      return null
+    })
+
+    await expect(useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: false, acknowledgedBlockers: [] }))
+      .rejects.toThrow('Uncommitted changes are present.')
+    expect(invoke).not.toHaveBeenCalledWith('browser_cleanup_workspace', expect.anything())
+    expect(invoke).not.toHaveBeenCalledWith('worktree_lifecycle_remove', expect.anything())
+    expect(useWorkspaceStore.getState().sessions).toContainEqual(worktreeSession)
+  })
+
+  test('refuses removal on a hard blocker even when it was passed as acknowledged', async () => {
+    const worktreeSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(worktreeSession)
+    useWorkspaceStore.setState({ sessions: [createdSession, worktreeSession], worktreeProjections: [projection] })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_removal_preflight') return { worktreeId: projection.id, instanceId: projection.instanceId, repositoryPath: 'E:/repo', worktreePath: worktreeSession.workspaceFolder, branch: 'vibelink/fix-login', blockers: [{ kind: 'git_locked', hard: true, message: 'The checkout is locked by Git.' }], warnings: [] }
+      return null
+    })
+
+    await expect(useWorkspaceStore.getState().removeWorktreeSession(worktreeSession.id, { deleteBranch: false, acknowledgedBlockers: ['git_locked'] }))
+      .rejects.toThrow('The checkout is locked by Git.')
+    expect(invoke).not.toHaveBeenCalledWith('worktree_lifecycle_remove', expect.anything())
+  })
+
+  test('moves a registered worktree by stable id and refreshes its bound session', async () => {
+    const worktreeSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(worktreeSession)
     const movedPath = 'E:/target/fix-login-normalized'
     const movedSession = { ...worktreeSession, workspaceFolder: movedPath }
-    useWorkspaceStore.setState({
-      sessions: [createdSession, worktreeSession],
-      settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, workspaceWorktrees: { [worktreeSession.id]: relation } }),
-    })
+    const movedProjection = worktreeFixture(movedSession, { worktreePath: movedPath })
+    useWorkspaceStore.setState({ sessions: [createdSession, worktreeSession], worktreeProjections: [projection] })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'git_worktree_move') return { worktreePath: movedPath, branch: relation.branch }
+      if (command === 'worktree_lifecycle_move') return { worktree: movedProjection.record, previousPath: projection.record?.worktreePath }
       if (command === 'list_sessions') return [createdSession, movedSession]
+      if (command === 'worktree_registry_list') return [movedProjection]
       return null
     })
 
     await useWorkspaceStore.getState().moveWorktreeSession(worktreeSession.id, '  E:/target/fix-login  ')
 
-    expect(invoke).toHaveBeenCalledWith('git_worktree_move', {
-      workspaceFolder: relation.sourceWorkspaceFolder,
-      worktreePath: relation.worktreePath,
-      destinationPath: 'E:/target/fix-login',
-    })
-    expect(invoke).toHaveBeenCalledWith('set_session_workspace_folder', {
-      sessionId: worktreeSession.id,
-      workspaceFolder: movedPath,
-    })
+    expect(invoke).toHaveBeenCalledWith('worktree_lifecycle_move', { request: expect.objectContaining({ worktreeId: projection.id, expectedInstanceId: projection.instanceId, destinationPath: 'E:/target/fix-login' }) })
     expect(useWorkspaceStore.getState().sessions).toContainEqual(movedSession)
-    expect(useWorkspaceStore.getState().settings.workspaceWorktrees[worktreeSession.id].worktreePath).toBe(movedPath)
-    expect(localStorageStub.setItem).toHaveBeenCalledWith('vibelink:settings', expect.stringContaining(movedPath))
+    expect(useWorkspaceStore.getState().worktreeProjections).toEqual([movedProjection])
+  })
+
+  test('writes the registry migration marker only after every legacy row reconciles', async () => {
+    const worktreeSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(worktreeSession)
+    // The shared stub is call-recording only; back it with real storage so the
+    // migration's read → reconcile → delete round-trip is actually observable.
+    const stored = new Map<string, string>([['vibelink:settings', JSON.stringify({
+      workspaceWorktrees: {
+        'session-worktree': {
+          parentSessionId: createdSession.id,
+          sourceWorkspaceFolder: 'E:/repo',
+          worktreePath: 'E:/managed-worktrees/fix-login',
+          branch: 'vibelink/fix-login',
+          startRef: 'HEAD',
+          createdAt: '2026-07-01T00:00:00.000Z',
+        },
+      },
+    })]])
+    localStorageStub.getItem.mockImplementation((key: string) => stored.get(key) ?? null)
+    localStorageStub.setItem.mockImplementation((key: string, value: string) => { stored.set(key, value) })
+    useWorkspaceStore.setState({ settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, worktreeRegistryMigrationVersion: 0 }) })
+    const reconcileRequests: unknown[] = []
+    vi.mocked(invoke).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'list_sessions') return [createdSession, worktreeSession]
+      if (command === 'worktree_registry_reconcile') {
+        reconcileRequests.push(args && typeof args === 'object' && 'request' in args ? args.request : null)
+        return [projection]
+      }
+      if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      return null
+    })
+
+    await useWorkspaceStore.getState().bootstrap()
+
+    expect(reconcileRequests).toContainEqual(expect.objectContaining({
+      repositoryPath: 'E:/repo',
+      legacyRows: [expect.objectContaining({ sessionId: 'session-worktree', branch: 'vibelink/fix-login', startRef: 'HEAD' })],
+    }))
+    expect(useWorkspaceStore.getState().settings.worktreeRegistryMigrationVersion).toBe(1)
+    expect(JSON.parse(stored.get('vibelink:settings') ?? '{}')).not.toHaveProperty('workspaceWorktrees')
+  })
+
+  test('keeps the migration marker unset when a legacy reconcile fails', async () => {
+    const stored = new Map<string, string>([['vibelink:settings', JSON.stringify({
+      workspaceWorktrees: {
+        'session-worktree': {
+          parentSessionId: createdSession.id,
+          sourceWorkspaceFolder: 'E:/repo',
+          worktreePath: 'E:/managed-worktrees/fix-login',
+          branch: 'vibelink/fix-login',
+          startRef: 'HEAD',
+          createdAt: '2026-07-01T00:00:00.000Z',
+        },
+      },
+    })]])
+    localStorageStub.getItem.mockImplementation((key: string) => stored.get(key) ?? null)
+    localStorageStub.setItem.mockImplementation((key: string, value: string) => { stored.set(key, value) })
+    useWorkspaceStore.setState({ settings: normalizeSettings({ ...useWorkspaceStore.getState().settings, worktreeRegistryMigrationVersion: 0 }) })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'list_sessions') return [createdSession]
+      if (command === 'worktree_registry_reconcile') throw new Error('repository identity is unavailable')
+      if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
+      return null
+    })
+
+    await useWorkspaceStore.getState().bootstrap()
+
+    expect(useWorkspaceStore.getState().settings.worktreeRegistryMigrationVersion).toBe(0)
+    expect(JSON.parse(stored.get('vibelink:settings') ?? '{}')).toHaveProperty('workspaceWorktrees')
+  })
+
+  test('keeps a failed creation pending with its recovery detail instead of discarding it', async () => {
+    useWorkspaceStore.setState({ sessions: [createdSession], pendingWorktreeCreations: {} })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_lifecycle_create') throw new Error('setup failed; retained E:/managed-worktrees/fix-login')
+      return null
+    })
+
+    await expect(useWorkspaceStore.getState().createWorktreeSession({
+      parentSessionId: createdSession.id, name: 'Fix Login', startRef: 'HEAD', branch: 'vibelink/fix-login', profileId: 'agent',
+    })).rejects.toThrow('setup failed')
+
+    const pending = Object.values(useWorkspaceStore.getState().pendingWorktreeCreations)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ stage: 'failed', name: 'Fix Login' })
+    expect(pending[0].error).toContain('retained E:/managed-worktrees/fix-login')
+  })
+
+  test('retries a failed creation under a fresh operation id', async () => {
+    const childSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const projection = worktreeFixture(childSession)
+    useWorkspaceStore.setState({ sessions: [createdSession], pendingWorktreeCreations: {} })
+    let attempt = 0
+    const operationIds: string[] = []
+    vi.mocked(invoke).mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'worktree_lifecycle_create') {
+        const request = args && typeof args === 'object' && 'request' in args ? args.request : null
+        if (request && typeof request === 'object' && 'operationId' in request && typeof request.operationId === 'string') {
+          operationIds.push(request.operationId)
+        }
+        attempt += 1
+        if (attempt === 1) throw new Error('transient failure')
+        return { worktree: projection.record, sessionId: childSession.id }
+      }
+      if (command === 'list_sessions') return [createdSession, childSession]
+      if (command === 'worktree_registry_list') return [projection]
+      if (command === 'attach_session') return { layoutJson: null, panes: [] }
+      if (command === 'spawn_pane') return { ...spawnedPane, id: 'pane-worktree', config: { ...spawnedPane.config, paneId: 'pane-worktree' } }
+      return null
+    })
+
+    await expect(useWorkspaceStore.getState().createWorktreeSession({
+      parentSessionId: createdSession.id, name: 'Fix Login', startRef: 'HEAD', branch: 'vibelink/fix-login', profileId: 'agent',
+    })).rejects.toThrow('transient failure')
+    const [failedOperationId] = Object.keys(useWorkspaceStore.getState().pendingWorktreeCreations)
+
+    await useWorkspaceStore.getState().retryPendingWorktreeCreation(failedOperationId)
+
+    expect(operationIds).toHaveLength(2)
+    expect(operationIds[0]).not.toBe(operationIds[1])
+    expect(useWorkspaceStore.getState().sessions).toContainEqual(childSession)
+  })
+
+  test('finishes a creation in the background without stealing focus from another workspace', async () => {
+    const childSession: SessionMeta = { id: 'session-worktree', name: 'Fix Login', paneCount: 0, createdAt: 126, workspaceFolder: 'E:/managed-worktrees/fix-login' }
+    const otherSession: SessionMeta = { id: 'session-other', name: 'Other', paneCount: 0, createdAt: 127, workspaceFolder: 'E:/repo-other' }
+    const projection = worktreeFixture(childSession)
+    useWorkspaceStore.setState({ sessions: [createdSession, otherSession], activeSessionId: createdSession.id, pendingWorktreeCreations: {} })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'worktree_lifecycle_create') {
+        // The user navigates away while the checkout is still provisioning.
+        useWorkspaceStore.setState({ activeSessionId: otherSession.id })
+        return { worktree: projection.record, sessionId: childSession.id }
+      }
+      if (command === 'list_sessions') return [createdSession, otherSession, childSession]
+      if (command === 'worktree_registry_list') return [projection]
+      return null
+    })
+
+    const created = await useWorkspaceStore.getState().createWorktreeSession({
+      parentSessionId: createdSession.id, name: 'Fix Login', startRef: 'HEAD', branch: 'vibelink/fix-login', profileId: 'agent',
+    })
+
+    expect(created).toEqual(childSession)
+    expect(useWorkspaceStore.getState().activeSessionId).toBe(otherSession.id)
+    expect(invoke).not.toHaveBeenCalledWith('attach_session', { sessionId: childSession.id })
+    const pending = Object.values(useWorkspaceStore.getState().pendingWorktreeCreations)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ stage: 'complete', sessionId: childSession.id })
   })
 
   test('adds a local folder to an existing folderless workspace', async () => {
@@ -801,6 +968,35 @@ describe('workspace store profiles', () => {
 
     persistPaneReviewMarkers({}, storage)
     expect(storage.removeItem).toHaveBeenCalledWith('vibelink:paneReviewMarkers')
+  })
+
+  test('completion markers persist valid entries until explicit acknowledgement', () => {
+    const stored = loadPaneCompletionHighlights({
+      getItem: () => JSON.stringify({
+        'pane-valid': { completedAt: 123, source: 'agent-hook', sessionId: 'session-1' },
+        'pane-invalid-source': { completedAt: 124, source: 'unknown', sessionId: 'session-1' },
+        'pane-invalid-time': { completedAt: 'now', source: 'task-done', sessionId: 'session-1' },
+      }),
+    })
+    expect(stored).toEqual({ 'pane-valid': { completedAt: 123, source: 'agent-hook', sessionId: 'session-1' } })
+    expect(loadPaneCompletionHighlights({ getItem: () => '{broken' })).toEqual({})
+
+    const storage = { setItem: vi.fn(), removeItem: vi.fn() }
+    persistPaneCompletionHighlights(stored, storage)
+    expect(storage.setItem).toHaveBeenCalledWith('vibelink:paneCompletionHighlights', JSON.stringify(stored))
+
+    persistPaneCompletionHighlights({}, storage)
+    expect(storage.removeItem).toHaveBeenCalledWith('vibelink:paneCompletionHighlights')
+  })
+
+  test('only manual mode can overwrite persisted workspace order', () => {
+    useWorkspaceStore.setState({ settings: normalizeSettings({ workspaceSortMode: 'smart', workspaceOrder: ['a', 'b'] }) })
+    useWorkspaceStore.getState().reorderWorkspaces(['b', 'a'])
+    expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual(['a', 'b'])
+
+    useWorkspaceStore.setState({ settings: normalizeSettings({ workspaceSortMode: 'manual', workspaceOrder: ['a', 'b'] }) })
+    useWorkspaceStore.getState().reorderWorkspaces(['b', 'a'])
+    expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual(['b', 'a'])
   })
 
   test('pane completion highlights the active agent pane while the app is unfocused', () => {

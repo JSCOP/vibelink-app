@@ -11,9 +11,9 @@ function props(overrides: Partial<PullRequestsTabViewProps> = {}): PullRequestsT
   return {
     provider: 'github', host: 'github.com', tokenPresent: true, loading: false, error: null,
     prs: [{ number: 42, title: 'Ship hosting', author: 'octocat', sourceBranch: 'feature/hosting', targetBranch: 'main', draft: false, url: 'https://github.com/JSCOP/vibelink-app/pull/42', state: 'open' }],
-    ciByNumber: { 42: { state: 'success', checks: [] } }, selectedNumber: null, detail: null, files: [], selectedPath: null, contents: null, diffLoading: false,
+    ciByNumber: { 42: { state: 'success', checks: [] } }, selectedNumber: null, detail: null, files: [], selectedPath: null, contents: null, diffLoading: false, reviewHunks: null, selectedReviewHunkId: null, reviewHunkComments: [],
     mode: 'list', token: '', deviceCode: null, created: null, createTitle: '', createBody: '', createTarget: 'main', createTargets: ['main'], createDraft: false, sourceBranch: 'feature/hosting', needsPush: false,
-    onRefresh: vi.fn(), onTokenChange: vi.fn(), onSaveToken: vi.fn(), onDeviceSignIn: vi.fn(), onOpenUrl: vi.fn(), onCopyUrl: (url) => { void navigator.clipboard.writeText(url) }, onSelectPr: vi.fn(), onSelectFile: vi.fn(), onModeChange: vi.fn(), onCreateTitleChange: vi.fn(), onCreateBodyChange: vi.fn(), onCreateTargetChange: vi.fn(), onCreateDraftChange: vi.fn(), onPushBranch: vi.fn(), onCreate: vi.fn(),
+    onRefresh: vi.fn(), onTokenChange: vi.fn(), onSaveToken: vi.fn(), onDeviceSignIn: vi.fn(), onOpenUrl: vi.fn(), onCopyUrl: (url) => { void navigator.clipboard.writeText(url) }, onSelectPr: vi.fn(), onSelectFile: vi.fn(), onSelectReviewHunk: vi.fn(), onCommentReviewHunk: vi.fn(), onCommentReviewLine: vi.fn(), onModeChange: vi.fn(), onCreateTitleChange: vi.fn(), onCreateBodyChange: vi.fn(), onCreateTargetChange: vi.fn(), onCreateDraftChange: vi.fn(), onPushBranch: vi.fn(), onCreate: vi.fn(), onMergeAndCleanup: vi.fn(),
     ...overrides,
   }
 }
@@ -43,4 +43,13 @@ describe('PullRequestsTabView', () => {
     expect(screen.getByText('Sign in to github.com')).toBeTruthy()
     expect(screen.getByText('token rejected')).toBeTruthy()
   })
+
+  test('exposes merge and cleanup only for a concrete non-draft provider head', () => {
+    const onMergeAndCleanup = vi.fn()
+    const detail = { ...props().prs[0], body: '', headSha: 'abc123', checks: [] }
+    render(<PullRequestsTabView {...props({ selectedNumber: 42, detail, onMergeAndCleanup })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Merge and clean up' }))
+    expect(onMergeAndCleanup).toHaveBeenCalledOnce()
+  })
+
 })

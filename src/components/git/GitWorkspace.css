@@ -534,3 +534,53 @@
 .git-branch-detail-projection {
   border-left: 0;
 }
+
+.git-hunk-review-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--vibelink-border);
+  background: var(--vibelink-panel);
+}
+
+.git-hunk-review-navigation,
+.git-hunk-review-actions {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.git-hunk-review-actions { margin-left: auto; }
+.git-hunk-review-toolbar button {
+  border: 1px solid var(--vibelink-border);
+  border-radius: 5px;
+  padding: 4px 7px;
+  color: var(--vibelink-text);
+  background: var(--vibelink-input);
+}
+.git-hunk-review-toolbar button[data-selected] { border-color: var(--vibelink-accent); color: var(--vibelink-accent); }
+.git-hunk-review-toolbar button.danger { color: var(--vibelink-danger); }
+.git-hunk-review-toolbar select {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 5px;
+  color: var(--vibelink-text);
+  padding: 4px 7px;
+}
+.git-hunk-review-comments {
+  background: var(--vibelink-panel);
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 7px 10px;
+}
+.git-hunk-review-comments li { display: flex; gap: 8px; }
+.git-hunk-review-comments blockquote { margin: 0; }
+.git-hunk-review-comments small { color: var(--vibelink-muted); margin-left: auto; }

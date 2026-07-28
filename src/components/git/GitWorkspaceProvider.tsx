@@ -15,6 +15,8 @@ import type {
   StashInfo,
   TagInfo,
   WorkingStatus,
+  UnifiedFileDiff,
+  GitHunkAction,
 } from '../../ipc/types'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { useExplorerStore } from '../../state/explorer'
@@ -28,6 +30,7 @@ import {
   type GitTab,
 } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
+import { worktreeBySession, type WorktreeCheckpoint, type WorktreeReviewComment } from '../../state/worktrees'
 import { QuickPick } from '../QuickPick'
 import { confirmDialog, promptDialog } from '../appDialogStore'
 import type { PickerEntry } from '../pickerModel'
@@ -42,6 +45,7 @@ import type {
   StashRowView,
 } from './gitWorkspaceModel'
 import { sourceControlPrimaryAction } from './gitWorkspaceModel'
+import { isCurrentReviewComment, reviewCommentAnchorKey, type WorktreeReviewIdentity } from '../workspaces/worktreeReview'
 import './GitWorkspace.css'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
@@ -137,6 +141,21 @@ export type GitWorkspaceController = {
   contents: FileContents | null
   diffLoading: boolean
   diffError: string | null
+  diffHunks: UnifiedFileDiff | null
+  selectedHunkId: string | null
+  reviewWarning: string | null
+  reviewIdentity: WorktreeReviewIdentity | null
+  reviewComments: WorktreeReviewComment[]
+  reviewCheckpoints: WorktreeCheckpoint[]
+  reviewAnchorKeys: ReadonlySet<string>
+  selectedHunkComments: WorktreeReviewComment[]
+  reviewLoading: boolean
+  reviewError: string | null
+  refreshReview: () => Promise<void>
+  selectHunk: (hunkId: string) => void
+  applyHunk: (action: GitHunkAction) => void
+  commentHunk: () => void
+  commentLine: (line: number, side: 'old' | 'new') => void
   remoteComparisonActive: boolean
   remoteCompareLoading: boolean
   primaryAction: SourceControlPrimaryAction | null
@@ -192,6 +211,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   const contentActions = useWorkspaceContentActions()
   const sessionId = useWorkspaceStore((state) => state.activeSessionId ?? null)
   const sessions = useWorkspaceStore((state) => state.sessions)
+  const worktrees = useWorkspaceStore((state) => state.worktreeProjections)
   const entitled = useWorkspaceStore((state) => Boolean(state.license.ready && state.license.status?.entitled))
   const workspaceFolder = useMemo(() => sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null, [sessionId, sessions])
   const gitState = useGitStore((state) => sessionId ? state.sessions[sessionId] : undefined) ?? emptyGitSessionState
@@ -221,6 +241,15 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   const [diffContents, setDiffContents] = useState<FileContents | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
   const [diffError, setDiffError] = useState<string | null>(null)
+  const [diffHunks, setDiffHunks] = useState<UnifiedFileDiff | null>(null)
+  const [selectedHunkId, setSelectedHunkId] = useState<string | null>(null)
+  const [reviewWarning, setReviewWarning] = useState<string | null>(null)
+  const [reviewBaseHead, setReviewBaseHead] = useState<string | null>(null)
+  const [reviewComments, setReviewComments] = useState<WorktreeReviewComment[]>([])
+  const [reviewCheckpoints, setReviewCheckpoints] = useState<WorktreeCheckpoint[]>([])
+  const [reviewAnchorKeys, setReviewAnchorKeys] = useState<ReadonlySet<string>>(new Set<string>())
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [reviewError, setReviewError] = useState<string | null>(null)
   const [diffRefreshRevision, setDiffRefreshRevision] = useState(0)
   const diffRequestGeneration = useRef(0)
   const [remoteComparison, setRemoteComparison] = useState<RemoteComparison | null>(null)
@@ -233,6 +262,74 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   }, [activeRepoRoot, gitState.selectedPath, gitState.selectedRepoRoot])
   const selectedPath = activeRemoteComparison?.selectedPath ?? selectedRelativePath
   const selectedArea = activeRemoteComparison ? 'remote' : gitState.selectedArea ?? 'unstaged'
+  const activeWorktree = useMemo(() => sessionId ? worktreeBySession(worktrees, sessionId)?.record ?? null : null, [sessionId, worktrees])
+  const reviewIdentity = useMemo<WorktreeReviewIdentity | null>(() => activeWorktree && reviewBaseHead && repoInfo?.headSha ? {
+    worktreeId: activeWorktree.id,
+    instanceId: activeWorktree.instanceId,
+    baseHead: reviewBaseHead,
+    head: repoInfo.headSha,
+  } : null, [activeWorktree, repoInfo?.headSha, reviewBaseHead])
+
+  const refreshReview = useCallback(async () => {
+    if (!entitled || !activeWorktree || !activeWorkspaceFolder) {
+      setReviewBaseHead(null)
+      setReviewComments([])
+      setReviewCheckpoints([])
+      setReviewAnchorKeys(new Set<string>())
+      setReviewError(null)
+      return
+    }
+    setReviewLoading(true)
+    setReviewError(null)
+    let loadedCheckpoints: WorktreeCheckpoint[] = []
+    let loadedComments: WorktreeReviewComment[] = []
+    try {
+      const [checkpoints, comments] = await Promise.all([
+        invoke<WorktreeCheckpoint[]>('worktree_checkpoints_list', { worktreeId: activeWorktree.id }),
+        invoke<WorktreeReviewComment[]>('worktree_review_comments_list', { worktreeId: activeWorktree.id }),
+      ])
+      loadedCheckpoints = checkpoints
+      loadedComments = comments
+      const baseRef = activeWorktree.baseRef.trim() || activeWorktree.head
+      const basePage = await invoke<LogPage>('git_log', { workspaceFolder: activeWorkspaceFolder, options: { refName: baseRef, path: null, skip: 0, limit: 1, search: null, author: null } })
+      const baseHead = basePage.commits[0]?.sha ?? activeWorktree.head
+      const head = repoInfo?.headSha ?? activeWorktree.head
+      const paths = [...new Set(comments.filter((comment) => comment.worktreeId === activeWorktree.id && comment.instanceId === activeWorktree.instanceId && comment.baseHead === baseHead && comment.head === head).map((comment) => comment.path))]
+      const diffs = await Promise.all(paths.flatMap((path) => [
+        invoke<UnifiedFileDiff>('git_diff_hunks', { workspaceFolder: activeWorkspaceFolder, path, area: 'unstaged', baseRef: null, headRef: null }).catch(() => null),
+        invoke<UnifiedFileDiff>('git_diff_hunks', { workspaceFolder: activeWorkspaceFolder, path, area: 'staged', baseRef: null, headRef: null }).catch(() => null),
+        invoke<UnifiedFileDiff>('git_diff_hunks', { workspaceFolder: activeWorkspaceFolder, path, area: 'review', baseRef: baseHead, headRef: head }).catch(() => null),
+      ]))
+      const anchors = new Set<string>()
+      for (const diff of diffs) {
+        if (!diff) continue
+        for (const hunk of diff.hunks) {
+          anchors.add(`${diff.path}\0hunk\0${hunk.id}`)
+          for (const line of hunk.lines) {
+            if (line.oldLine !== null) anchors.add(reviewCommentAnchorKey({ path: diff.path, side: 'old', line: line.oldLine, hunkId: hunk.id }))
+            if (line.newLine !== null) anchors.add(reviewCommentAnchorKey({ path: diff.path, side: 'new', line: line.newLine, hunkId: hunk.id }))
+          }
+        }
+      }
+      setReviewBaseHead(baseHead)
+      setReviewCheckpoints(checkpoints)
+      setReviewComments(comments)
+      setReviewAnchorKeys(anchors)
+    } catch (reason) {
+      setReviewError(String(reason))
+      setReviewBaseHead(null)
+      setReviewComments(loadedComments)
+      setReviewCheckpoints(loadedCheckpoints)
+      setReviewAnchorKeys(new Set<string>())
+    } finally {
+      setReviewLoading(false)
+    }
+  }, [activeWorkspaceFolder, activeWorktree, entitled, repoInfo?.headSha])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refreshReview() }, 0)
+    return () => window.clearTimeout(timer)
+  }, [diffRefreshRevision, refreshReview])
 
   const refresh = useCallback(async () => {
     if (!entitled || !sessionId) return
@@ -307,6 +404,22 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       .finally(() => { if (diffRequestGeneration.current === generation) setDiffLoading(false) })
   }, [activeRemoteComparison, activeWorkspaceFolder, diffRefreshRevision, selectedArea, selectedPath])
 
+  useEffect(() => {
+    if (!activeWorkspaceFolder || !selectedPath || activeRemoteComparison || selectedArea === 'remote') {
+      setDiffHunks(null)
+      setSelectedHunkId(null)
+      return
+    }
+    const generation = diffRequestGeneration.current
+    void invoke<UnifiedFileDiff>('git_diff_hunks', { workspaceFolder: activeWorkspaceFolder, path: selectedPath, area: selectedArea, baseRef: null, headRef: null })
+      .then((next) => {
+        if (diffRequestGeneration.current !== generation || !next) return
+        setDiffHunks(next)
+        setSelectedHunkId((current) => next.hunks.some((hunk) => hunk.id === current) ? current : next.hunks[0]?.id ?? null)
+      })
+      .catch((reason) => { if (diffRequestGeneration.current === generation) setReviewWarning(String(reason)) })
+  }, [activeRemoteComparison, activeWorkspaceFolder, diffRefreshRevision, selectedArea, selectedPath])
+
   const runMutation = useCallback(async (operation: () => Promise<unknown>) => {
     if (!entitled || !sessionId || !workspaceFolder) return
     await runGitMutation(sessionId, workspaceFolder, operation, activeRepoRoot)
@@ -316,6 +429,55 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     void runMutation(operation).then(after).catch(() => {})
   }, [runMutation])
+
+  const applyHunk = useCallback((action: GitHunkAction) => {
+    if (!activeWorkspaceFolder || !selectedPath || !selectedHunkId || selectedArea === 'remote') return
+    setReviewWarning(null)
+    mutate(() => invoke('git_apply_hunk', { workspaceFolder: activeWorkspaceFolder, path: selectedPath, area: selectedArea, hunkId: selectedHunkId, action }))
+  }, [activeWorkspaceFolder, mutate, selectedArea, selectedHunkId, selectedPath])
+
+  const saveReviewComment = useCallback(async (body: string, side: 'hunk' | 'old' | 'new', line: number | null) => {
+    if (!activeWorktree || !reviewIdentity || !selectedPath || !selectedHunkId) {
+      setReviewWarning('Import this checkout and load its current review snapshot before adding comments.')
+      return
+    }
+    try {
+      const saved = await invoke<WorktreeReviewComment>('worktree_review_comment_create', {
+        request: {
+          worktreeId: activeWorktree.id,
+          expectedInstanceId: activeWorktree.instanceId,
+          baseHead: reviewIdentity.baseHead,
+          head: reviewIdentity.head,
+          path: selectedPath,
+          side,
+          line,
+          range: null,
+          hunkId: selectedHunkId,
+          body,
+        },
+      })
+      setReviewComments((current) => current.some((comment) => comment.id === saved.id) ? current.map((comment) => comment.id === saved.id ? saved : comment) : [...current, saved])
+      setReviewAnchorKeys((current) => new Set(current).add(reviewCommentAnchorKey(saved)))
+    } catch (reason) {
+      setReviewWarning(`Comment was not saved: ${String(reason)}`)
+    }
+  }, [activeWorktree, reviewIdentity, selectedHunkId, selectedPath])
+
+  const commentHunk = useCallback(() => {
+    if (!selectedPath || !selectedHunkId) return
+    void promptDialog({ title: 'Comment on hunk', message: selectedPath, label: 'Review comment', confirmLabel: 'Add comment' }).then((body) => {
+      if (body) return saveReviewComment(body, 'hunk', null)
+    })
+  }, [saveReviewComment, selectedHunkId, selectedPath])
+
+  const commentLine = useCallback((line: number, side: 'old' | 'new') => {
+    if (!selectedPath || !selectedHunkId) return
+    void promptDialog({ title: `Comment on ${side} line ${line}`, message: selectedPath, label: 'Review comment', confirmLabel: 'Add comment' }).then((body) => {
+      if (body) return saveReviewComment(body, side, line)
+    })
+  }, [saveReviewComment, selectedHunkId, selectedPath])
+
+  const selectedHunkComments = useMemo(() => reviewComments.filter((comment) => comment.path === selectedPath && comment.hunkId === selectedHunkId && isCurrentReviewComment(comment, reviewIdentity, reviewAnchorKeys)), [reviewAnchorKeys, reviewComments, reviewIdentity, selectedHunkId, selectedPath])
 
   // Clicking a change/commit/PR file is a DIFF gesture, not a navigation
   // gesture: it must not yank the left rail from Source Control over to
@@ -424,13 +586,27 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     stagePaths(paths)
   }, [stagePaths, status.unstaged, status.untracked])
 
+  const writeCheckpoint = useCallback(async (kind: 'committed' | 'pushed' | 'pr_opened' | 'merged', label: string, comment: string | null = null) => {
+    if (!activeWorktree) return
+    try {
+      const saved = await invoke<WorktreeCheckpoint>('worktree_checkpoint_create', { request: { worktreeId: activeWorktree.id, kind, label, comment } })
+      setReviewCheckpoints((current) => [...current, saved])
+    } catch (reason) {
+      setReviewWarning(`Git action succeeded, but its ${kind} checkpoint was not saved: ${String(reason)}`)
+    }
+  }, [activeWorktree])
+
   const commit = useCallback(() => {
     if (!activeWorkspaceFolder || !draft.message.trim()) return
     mutate(
-      () => invoke<string>('git_commit', { workspaceFolder: activeWorkspaceFolder, message: draft.message, amend: draft.amend, signoff: false }),
+      async () => {
+        const sha = await invoke<string>('git_commit', { workspaceFolder: activeWorkspaceFolder, message: draft.message, amend: draft.amend, signoff: false })
+        await writeCheckpoint('committed', draft.message.trim(), sha)
+        return sha
+      },
       () => setCommitMessage(''),
     )
-  }, [activeWorkspaceFolder, draft.amend, draft.message, mutate, setCommitMessage])
+  }, [activeWorkspaceFolder, draft.amend, draft.message, mutate, setCommitMessage, writeCheckpoint])
 
   const continueState = useMemo(() => repoInfo?.state === 'rebasing' && activeWorkspaceFolder
     ? () => mutate(() => invoke('git_rebase_continue', { workspaceFolder: activeWorkspaceFolder }))
@@ -449,9 +625,9 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       case 'stage-all': stageAll(); break
       case 'commit': commit(); break
       case 'pull': if (activeWorkspaceFolder) mutate(() => invoke('git_pull', { workspaceFolder: activeWorkspaceFolder, rebase: false })); break
-      case 'push': if (activeWorkspaceFolder) mutate(() => invoke('git_push', { workspaceFolder: activeWorkspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false })); break
+      case 'push': if (activeWorkspaceFolder) mutate(async () => { await invoke('git_push', { workspaceFolder: activeWorkspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false }); await writeCheckpoint('pushed', repoInfo?.branch ?? 'HEAD') }); break
     }
-  }, [activeWorkspaceFolder, commit, continueState, mutate, openWorkbench, primaryAction?.id, repoInfo?.branch, repoInfo?.upstream, stageAll])
+  }, [activeWorkspaceFolder, commit, continueState, mutate, openWorkbench, primaryAction?.id, repoInfo?.branch, repoInfo?.upstream, stageAll, writeCheckpoint])
 
   const activateRepository = useCallback((repoRoot: string) => {
     if (!sessionId || !workspaceFolder) return
@@ -468,8 +644,11 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     if (activeWorkspaceFolder) mutate(() => invoke('git_pull', { workspaceFolder: activeWorkspaceFolder, rebase: false }))
   }, [activeWorkspaceFolder, mutate])
   const push = useCallback(() => {
-    if (activeWorkspaceFolder) mutate(() => invoke('git_push', { workspaceFolder: activeWorkspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false }))
-  }, [activeWorkspaceFolder, mutate, repoInfo?.branch, repoInfo?.upstream])
+    if (activeWorkspaceFolder) mutate(async () => {
+      await invoke('git_push', { workspaceFolder: activeWorkspaceFolder, remote: null, branch: repoInfo?.branch ?? null, setUpstream: !repoInfo?.upstream, forceWithLease: false })
+      await writeCheckpoint('pushed', repoInfo?.branch ?? 'HEAD')
+    })
+  }, [activeWorkspaceFolder, mutate, repoInfo?.branch, repoInfo?.upstream, writeCheckpoint])
 
   const compareRemote = useCallback(() => {
     if (!activeWorkspaceFolder || !repoInfo?.upstream) return
@@ -901,6 +1080,21 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     contents: diffContents,
     diffLoading,
     diffError,
+    diffHunks,
+    selectedHunkId,
+    reviewWarning,
+    reviewIdentity,
+    reviewComments,
+    reviewCheckpoints,
+    reviewAnchorKeys,
+    selectedHunkComments,
+    reviewLoading,
+    reviewError,
+    refreshReview,
+    selectHunk: setSelectedHunkId,
+    applyHunk,
+    commentHunk,
+    commentLine,
     remoteComparisonActive: activeRemoteComparison !== null,
     remoteCompareLoading,
     primaryAction,
@@ -931,7 +1125,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     selectInExplorer,
     revealFile,
     runMutation,
-  }), [abortState, activateRepository, activeRemoteComparison, activeRepoRoot, activeWorkspaceFolder, branchesModel, commit, compareRemote, continueState, diffContents, diffError, diffLoading, discardPaths, draft.amend, draft.message, entitled, fetchRepo, gitState.activeTab, groups, historyModel, openAssigned, openBranchPicker, openWorkbench, primaryAction, pull, push, refresh, refreshHostingNow, refreshRepositoryNow, remoteCompareLoading, repoInfo, repository, revealFile, runMutation, runPrimaryAction, selectChange, selectInExplorer, selectedArea, selectedPath, sessionId, setAmend, setCommitMessage, showWorkingChanges, stageAll, stagePaths, status, unstagePaths, workspaceFolder])
+  }), [abortState, activateRepository, applyHunk, activeRemoteComparison, activeRepoRoot, activeWorkspaceFolder, branchesModel, commentHunk, commentLine, commit, compareRemote, continueState, diffContents, diffError, diffHunks, diffLoading, discardPaths, draft.amend, draft.message, entitled, fetchRepo, gitState.activeTab, groups, historyModel, openAssigned, openBranchPicker, openWorkbench, primaryAction, pull, push, refresh, refreshHostingNow, refreshRepositoryNow, refreshReview, remoteCompareLoading, repoInfo, reviewAnchorKeys, reviewCheckpoints, reviewComments, reviewError, reviewIdentity, reviewLoading, reviewWarning, repository, revealFile, runMutation, runPrimaryAction, selectChange, selectInExplorer, selectedArea, selectedHunkComments, selectedHunkId, selectedPath, sessionId, setAmend, setCommitMessage, showWorkingChanges, stageAll, stagePaths, status, unstagePaths, workspaceFolder])
 
   const refNames = Array.from(new Set(['HEAD', ...branches.map((branch) => branch.name), ...tags.map((tag) => tag.name)]))
   const refEntries = (filter: string): PickerEntry<string>[] => refNames

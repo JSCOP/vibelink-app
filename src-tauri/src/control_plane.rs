@@ -11,7 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const CONTROL_SCHEMA_VERSION: i64 = 6;
+const CONTROL_SCHEMA_VERSION: i64 = 7;
 const MAX_BACKUPS: usize = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -406,6 +406,11 @@ impl ControlPlane {
         }
         Ok(())
     }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub(crate) fn with_connection<T>(&self, operation: impl FnOnce(&Connection) -> T) -> T {
         let connection = self
             .connection
@@ -613,7 +618,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             PRAGMA user_version = 6;
             COMMIT;",
         )?;
-        version = CONTROL_SCHEMA_VERSION;
+        version = 6;
     }
     if version == 1 {
         connection.execute_batch(
@@ -670,7 +675,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         version = 3;
     }
-    if version == 3 || version == 5 {
+    if matches!(version, 3 | 4 | 5) {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
             CREATE TABLE automations_v6 (
@@ -872,10 +877,133 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             COMMIT;",
         )?;
     }
-    if version == 4 {
-        connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
-    }
+    migrate_worktree_schema_v4(connection)?;
+    migrate_worktree_identity_v5(connection)?;
+    connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
     Ok(())
+}
+
+fn migrate_worktree_schema_v4(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS worktrees (
+          id TEXT PRIMARY KEY,
+          instance_id TEXT NOT NULL,
+          repository_id TEXT NOT NULL,
+          repository_path TEXT NOT NULL,
+          worktree_path TEXT NOT NULL,
+          branch TEXT NOT NULL DEFAULT '',
+          head TEXT NOT NULL DEFAULT '',
+          base_ref TEXT NOT NULL DEFAULT '',
+          session_id TEXT,
+          parent_session_id TEXT,
+          parent_worktree_id TEXT,
+          parent_instance_id TEXT,
+          origin TEXT NOT NULL,
+          lifecycle TEXT NOT NULL,
+          locked INTEGER NOT NULL DEFAULT 0,
+          lock_reason TEXT,
+          prunable INTEGER NOT NULL DEFAULT 0,
+          prunable_reason TEXT,
+          dirty INTEGER NOT NULL DEFAULT 0,
+          untracked INTEGER NOT NULL DEFAULT 0,
+          has_conflicts INTEGER NOT NULL DEFAULT 0,
+          ahead INTEGER NOT NULL DEFAULT 0,
+          behind INTEGER NOT NULL DEFAULT 0,
+          \"exists\" INTEGER NOT NULL DEFAULT 0,
+          setup_policy TEXT NOT NULL DEFAULT 'inherit',
+          sparse_preset TEXT,
+          linked_files_json TEXT NOT NULL DEFAULT '[]',
+          initial_agent TEXT,
+          initial_prompt TEXT,
+          comment TEXT,
+          review_target TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_activity_at INTEGER NOT NULL,
+          normalized_repository_path TEXT NOT NULL,
+          normalized_worktree_path TEXT NOT NULL,
+          git_dir_identity TEXT NOT NULL,
+          UNIQUE(repository_id, normalized_worktree_path)
+        );
+        CREATE INDEX IF NOT EXISTS worktrees_repository_id ON worktrees(repository_id);
+        CREATE INDEX IF NOT EXISTS worktrees_repository_path ON worktrees(normalized_repository_path);
+        CREATE INDEX IF NOT EXISTS worktrees_worktree_path ON worktrees(normalized_worktree_path);
+        CREATE INDEX IF NOT EXISTS worktrees_session_id ON worktrees(session_id);
+        CREATE INDEX IF NOT EXISTS worktrees_lifecycle ON worktrees(lifecycle);
+        CREATE INDEX IF NOT EXISTS worktrees_parent_id ON worktrees(parent_worktree_id);
+        CREATE TABLE IF NOT EXISTS worktree_operations (
+          operation_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          stage TEXT NOT NULL,
+          status TEXT NOT NULL,
+          request_hash TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          result_json TEXT,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          completed_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS worktree_checkpoints (
+          id TEXT PRIMARY KEY,
+          worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL,
+          label TEXT NOT NULL,
+          head TEXT NOT NULL,
+          comment TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS worktree_checkpoints_worktree_created
+          ON worktree_checkpoints(worktree_id, created_at, id);
+        CREATE TABLE IF NOT EXISTS worktree_review_comments (
+          id TEXT PRIMARY KEY,
+          worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+          instance_id TEXT NOT NULL,
+          base_head TEXT NOT NULL,
+          head TEXT NOT NULL,
+          path TEXT NOT NULL,
+          side TEXT NOT NULL,
+          line INTEGER,
+          range_json TEXT,
+          hunk_id TEXT,
+          body TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        PRAGMA user_version = 4;
+        COMMIT;",
+    )?;
+    Ok(())
+}
+
+fn migrate_worktree_identity_v5(connection: &Connection) -> Result<()> {
+    let mut migration = String::from("BEGIN IMMEDIATE;\n");
+    for (table, column) in [
+        ("dispatches", "worktree_id"),
+        ("dispatches", "worktree_instance_id"),
+        ("automation_runs", "worktree_id"),
+        ("automation_runs", "worktree_instance_id"),
+    ] {
+        if !table_has_column(connection, table, column)? {
+            migration.push_str(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;\n"));
+        }
+    }
+    migration.push_str("PRAGMA user_version = 5;\nCOMMIT;");
+    connection.execute_batch(&migration)?;
+    Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let escaped_table = table.replace('"', "\"\"");
+    let mut statement = connection.prepare(&format!("PRAGMA table_info(\"{escaped_table}\")"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn execute_read(connection: &Connection, command: ControlCommand) -> Result<ControlResponse> {
@@ -1367,6 +1495,46 @@ mod tests {
             .expect("seed version five automation schema");
     }
 
+    fn assert_worktree_schema_complete(connection: &Connection) {
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema version");
+        assert_eq!(version, CONTROL_SCHEMA_VERSION);
+        for object in [
+            "worktrees",
+            "worktree_operations",
+            "worktree_checkpoints",
+            "worktree_review_comments",
+            "worktrees_repository_id",
+            "worktrees_repository_path",
+            "worktrees_worktree_path",
+            "worktrees_session_id",
+            "worktrees_lifecycle",
+            "worktrees_parent_id",
+            "worktree_checkpoints_worktree_created",
+        ] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name=?1",
+                    [object],
+                    |row| row.get(0),
+                )
+                .expect("query worktree schema object");
+            assert_eq!(exists, 1, "missing {object}");
+        }
+        for (table, column) in [
+            ("dispatches", "worktree_id"),
+            ("dispatches", "worktree_instance_id"),
+            ("automation_runs", "worktree_id"),
+            ("automation_runs", "worktree_instance_id"),
+        ] {
+            assert!(
+                table_has_column(connection, table, column).expect("inspect identity column"),
+                "missing {table}.{column}"
+            );
+        }
+    }
+
     #[test]
     fn board_mutations_are_revisioned_and_idempotent() {
         let (directory, plane) = plane();
@@ -1446,6 +1614,10 @@ mod tests {
             "automations",
             "automation_runs",
             "notifications",
+            "worktrees",
+            "worktree_operations",
+            "worktree_checkpoints",
+            "worktree_review_comments",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -1456,6 +1628,7 @@ mod tests {
                 .expect("query table");
             assert_eq!(exists, 1, "missing {table}");
         }
+        assert_worktree_schema_complete(&connection);
         drop(connection);
         drop(plane);
         fs::remove_dir_all(directory).expect("cleanup control plane");
@@ -1955,6 +2128,7 @@ mod tests {
                 [],
             )
             .expect("insert orchestration run");
+        assert_worktree_schema_complete(&connection);
         connection
             .execute(
                 "INSERT INTO messages(id,run_id,sender_kind,message_type,payload_json,unread,created_at) VALUES('message','run','cli','chat','{}',1,1)",
@@ -1991,6 +2165,9 @@ mod tests {
                   precheck_json TEXT, policy_json TEXT NOT NULL DEFAULT '{}',
                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE dispatches (
+                  id TEXT PRIMARY KEY
+                );
                 CREATE TABLE automation_runs (
                   id TEXT PRIMARY KEY, automation_id TEXT NOT NULL,
                   orchestration_run_id TEXT, status TEXT NOT NULL,
@@ -2007,6 +2184,7 @@ mod tests {
             .expect("seed version one database");
 
         migrate_schema(&connection).expect("migrate version one database");
+        assert_worktree_schema_complete(&connection);
 
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

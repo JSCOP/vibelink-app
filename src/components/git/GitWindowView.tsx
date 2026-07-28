@@ -5,6 +5,7 @@ import { BranchesTab } from './BranchesTab'
 import { DiffPane } from './DiffPane'
 import { useGitWorkspace } from './GitWorkspaceProvider'
 import { HistoryTab } from './HistoryTab'
+import { WorktreeReviewPanel } from '../workspaces/WorktreeReviewPanel'
 
 export type GitWindowViewProps = {
   assignedContent: ReactNode
@@ -49,7 +50,8 @@ export function GitWindowView({ assignedContent }: GitWindowViewProps) {
       <nav className="git-window-tabs" role="tablist" aria-label="Workbench views">{tabs.map((tab) => <button key={tab.id} type="button" role="tab" aria-selected={git.activeTab === tab.id} onClick={() => { void git.openWorkbench(tab.id) }}>{tab.label}</button>)}</nav>
       {git.activeTab === 'changes' ? <section className="git-window-changes git-workbench-changes-detail" data-git-tab="changes">
         {git.remoteComparisonActive ? <div className="git-window-remote-compare" data-active><div><strong>Remote comparison</strong><span>Exact local HEAD → {repoInfo.upstream}</span></div><button type="button" onClick={git.showWorkingChanges}><ArrowLeft size={13} aria-hidden="true" /> Working changes</button></div> : repoInfo.upstream ? <div className="git-window-remote-compare"><div><strong>Remote changes</strong><span>Fetch and compare {repoInfo.upstream}</span></div><button type="button" disabled={git.remoteCompareLoading} onClick={git.compareRemote}>{git.remoteCompareLoading ? 'Comparing…' : <><GitCompare size={13} aria-hidden="true" /> Compare</>}</button></div> : null}
-        <DiffPane files={[]} selectedPath={git.selectedPath} onSelect={() => {}} contents={git.contents} loading={git.diffLoading} splitView error={git.diffError} hideFileList />
+        <DiffPane files={[]} selectedPath={git.selectedPath} onSelect={() => {}} contents={git.contents} loading={git.diffLoading} splitView error={git.diffError} hideFileList hunkDiff={git.diffHunks} selectedHunkId={git.selectedHunkId} onSelectHunk={git.selectHunk} onHunkAction={git.applyHunk} onCommentHunk={git.commentHunk} onCommentLine={git.commentLine} hunkComments={git.selectedHunkComments} reviewWarning={git.reviewWarning} />
+        {git.reviewIdentity || git.reviewLoading || git.reviewComments.length > 0 || git.reviewCheckpoints.length > 0 || git.reviewError ? <WorktreeReviewPanel identity={git.reviewIdentity} comments={git.reviewComments} checkpoints={git.reviewCheckpoints} currentAnchorKeys={git.reviewAnchorKeys} loading={git.reviewLoading} error={git.reviewError} onRefresh={() => { void git.refreshReview() }} /> : null}
       </section> : git.activeTab === 'history' ? <HistoryTab /> : git.activeTab === 'branches' ? <BranchesTab /> : assignedContent}
     </div>
   )

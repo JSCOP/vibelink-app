@@ -463,6 +463,12 @@ pub enum ClientToDaemon {
         operation_id: Uuid,
         command_json: String,
     },
+    Worktree {
+        req: Req,
+        operation_id: Uuid,
+        method: String,
+        payload_json: String,
+    },
     Orchestration {
         req: Req,
         operation_id: Uuid,
@@ -519,6 +525,9 @@ pub enum ClientToDaemon {
     ResourceSnapshot {
         req: Req,
     },
+    AttentionSnapshot {
+        req: Req,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,6 +559,10 @@ pub enum DaemonToClient {
     },
     SessionChanged {
         session_id: Uuid,
+    },
+    WorktreeChanged {
+        method: String,
+        operation_id: Uuid,
     },
     TaskEvent {
         session_id: Uuid,
@@ -617,6 +630,7 @@ pub enum ReplyResult {
     TerminalSnapshot(TerminalSnapshot),
     Ok,
     Control(String),
+    Worktree(String),
     Orchestration(String),
     Cli(String),
     Computer(String),
@@ -624,6 +638,7 @@ pub enum ReplyResult {
     Browser(String),
     RemotePaneLease(RemotePaneLeaseResult),
     ResourceSnapshot(ResourceSnapshotData),
+    AttentionSnapshot(AttentionSnapshotData),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +688,39 @@ pub struct PaneResource {
     pub root_pid: Option<u32>,
     pub mem_bytes: u64,
     pub process_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionPaneState {
+    Idle,
+    Working,
+    Waiting,
+    Blocked,
+    Error,
+    Done,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionPane {
+    pub workspace_id: Uuid,
+    pub pane_id: Uuid,
+    pub state: AttentionPaneState,
+    pub state_updated_at: u64,
+    pub last_output_at: u64,
+    pub unread_count: u32,
+    pub interrupted: bool,
+    pub source: String,
+    pub alive: bool,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionSnapshotData {
+    pub captured_at: u64,
+    pub panes: Vec<AttentionPane>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -839,6 +887,37 @@ mod tests {
         write_frame(&mut bytes, &message).expect("encode frame");
 
         let decoded: DaemonToClient = read_frame(&mut Cursor::new(bytes)).expect("decode frame");
+
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_all_workspace_attention_snapshot() {
+        let workspace_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        let message = DaemonToClient::Reply {
+            req: 10,
+            result: ReplyResult::AttentionSnapshot(AttentionSnapshotData {
+                captured_at: 1_234,
+                panes: vec![AttentionPane {
+                    workspace_id,
+                    pane_id,
+                    state: AttentionPaneState::Done,
+                    state_updated_at: 1_200,
+                    last_output_at: 1_210,
+                    unread_count: 2,
+                    interrupted: true,
+                    source: "orchestration".to_string(),
+                    alive: true,
+                    title: "Agent complete".to_string(),
+                }],
+            }),
+        };
+
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).expect("encode attention frame");
+        let decoded: DaemonToClient =
+            read_frame(&mut Cursor::new(bytes)).expect("decode attention frame");
 
         assert_eq!(decoded, message);
     }

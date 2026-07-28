@@ -3039,6 +3039,7 @@ fn dispatch_v2_cli(
             .payload
             .get("expectedRevision")
             .and_then(Value::as_u64),
+        caller_cwd: None,
         command: invocation.command,
     };
     let request_json = serde_json::to_string(&json!({ "kind": "cli", "request": cli_request }))?;

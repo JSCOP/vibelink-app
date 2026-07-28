@@ -31,7 +31,11 @@ pub use worktree::{
     AutomationWorktreeController, CleanupOutcome, CleanupReason, PreparedWorkspace,
 };
 
-use crate::{agent_runtime::WorktreeManager, orchestration::CoordinatorService};
+use crate::{
+    agent_runtime::WorktreeManager,
+    app::git::worktree_registry::WorktreeRegistry,
+    orchestration::{CoordinatorService, WorktreeAssignment},
+};
 use anyhow::{anyhow, bail, Context, Result};
 use model::{apply_patch, parse_create};
 use rusqlite::{Connection, TransactionBehavior};
@@ -44,6 +48,13 @@ use std::{
 };
 use store::AutomationStore;
 use uuid::Uuid;
+
+
+#[derive(Clone, Debug)]
+pub struct AutomationWorktreeProvision {
+    pub session_id: String,
+    pub assignment: WorktreeAssignment,
+}
 
 pub struct AutomationService {
     connection: Mutex<Connection>,
@@ -59,6 +70,7 @@ impl AutomationService {
         database_path: &Path,
         artifact_root: PathBuf,
         coordinator: Arc<CoordinatorService>,
+        registry: Arc<WorktreeRegistry>,
     ) -> Result<Self> {
         if let Some(parent) = database_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -90,7 +102,8 @@ impl AutomationService {
             coordinator,
             worktrees: AutomationWorktreeController::new(WorktreeManager::new(
                 artifact_root.join("worktrees"),
-            )?),
+                Arc::clone(&registry),
+            )?, registry),
             process_registry,
             runner,
             draft_root,
@@ -318,6 +331,25 @@ impl AutomationService {
         claim: &AutomationRunRecord,
         workspace: &Path,
     ) -> Result<AutomationRunRecord> {
+        self.execute_with_worktree(claim, workspace, |_, _, _, _| {
+            bail!("automation worktree provisioning requires the daemon lifecycle service")
+        })
+    }
+
+    pub(crate) fn execute_with_worktree<F>(
+        &self,
+        claim: &AutomationRunRecord,
+        workspace: &Path,
+        create_worktree: F,
+    ) -> Result<AutomationRunRecord>
+    where
+        F: FnOnce(
+            &AutomationRecord,
+            &AutomationRunRecord,
+            &Path,
+            &WorktreeAssignment,
+        ) -> Result<AutomationWorktreeProvision>,
+    {
         let automation = self.get(&claim.automation_id)?;
         if automation.requires_review {
             bail!("automation must be reviewed and saved before it can run");
@@ -358,11 +390,13 @@ impl AutomationService {
             }
         }
 
-        let prepared =
-            match self
-                .worktrees
-                .prepare(&claim.id, claim.run_number, &automation, workspace)
-            {
+        let prepared = match self.worktrees.prepare_with_worktree(
+            &claim.id,
+            claim.run_number,
+            &automation,
+            workspace,
+            |planned| create_worktree(&automation, claim, workspace, planned),
+        ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     return self.finish_prepare_failure(
@@ -478,7 +512,26 @@ impl AutomationService {
         claim: &AutomationRunRecord,
         workspace: &Path,
     ) -> Result<AutomationRunRecord> {
-        let run = self.execute(claim, workspace)?;
+        self.execute_and_notify_with_worktree(claim, workspace, |_, _, _, _| {
+            bail!("automation worktree provisioning requires the daemon lifecycle service")
+        })
+    }
+
+    pub(crate) fn execute_and_notify_with_worktree<F>(
+        &self,
+        claim: &AutomationRunRecord,
+        workspace: &Path,
+        create_worktree: F,
+    ) -> Result<AutomationRunRecord>
+    where
+        F: FnOnce(
+            &AutomationRecord,
+            &AutomationRunRecord,
+            &Path,
+            &WorktreeAssignment,
+        ) -> Result<AutomationWorktreeProvision>,
+    {
+        let run = self.execute_with_worktree(claim, workspace, create_worktree)?;
         if model::is_final_status(&run.status) {
             if let Err(error) = self.create_final_notification(&run) {
                 tracing::warn!(automation_run_id = %run.id, ?error, "failed to persist automation notification");
@@ -962,19 +1015,26 @@ mod lifecycle_tests {
     use crate::control_plane::ControlPlane;
     use serde_json::json;
 
-    fn fixture() -> (PathBuf, Arc<CoordinatorService>, AutomationService) {
+    fn fixture() -> (
+        PathBuf,
+        Arc<CoordinatorService>,
+        Arc<WorktreeRegistry>,
+        AutomationService,
+    ) {
         let root =
             std::env::temp_dir().join(format!("vibelink-automation-service-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("create automation service fixture");
         let control = Arc::new(ControlPlane::open(&root).expect("open control plane"));
+        let registry = Arc::new(WorktreeRegistry::new(Arc::clone(&control)));
         let coordinator = Arc::new(CoordinatorService::new(control));
         let service = AutomationService::open(
             &root.join("control").join("vibelink-control.sqlite3"),
             root.join("automation-artifacts"),
             Arc::clone(&coordinator),
+            Arc::clone(&registry),
         )
         .expect("open automation service");
-        (root, coordinator, service)
+        (root, coordinator, registry, service)
     }
 
     fn create_payload(enabled: bool, requires_review: bool) -> Value {
@@ -991,7 +1051,7 @@ mod lifecycle_tests {
 
     #[test]
     fn review_gate_blocks_enable_and_manual_run_until_saved() {
-        let (root, _coordinator, service) = fixture();
+        let (root, _coordinator, _registry, service) = fixture();
         let session_id = Uuid::new_v4().to_string();
         let error = service
             .create(&session_id, &create_payload(true, true))
@@ -1026,7 +1086,7 @@ mod lifecycle_tests {
 
     #[test]
     fn restart_marks_pending_run_failed_and_emits_one_durable_notification() {
-        let (root, coordinator, service) = fixture();
+        let (root, coordinator, registry, service) = fixture();
         let session_id = Uuid::new_v4().to_string();
         let automation = service
             .create(&session_id, &create_payload(false, false))
@@ -1038,6 +1098,7 @@ mod lifecycle_tests {
             &root.join("control").join("vibelink-control.sqlite3"),
             root.join("automation-artifacts"),
             Arc::clone(&coordinator),
+            Arc::clone(&registry),
         )
         .expect("reopen automation service");
         let recovered = reopened

@@ -3,6 +3,7 @@ pub(crate) mod detect;
 pub(crate) mod github;
 pub(crate) mod gitlab;
 
+use crate::app::git::exec::git_read;
 use crate::app::license::LicenseService;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -77,7 +78,37 @@ pub struct PrDetail {
     pub draft: bool,
     pub url: String,
     pub state: String,
+    pub head_sha: Option<String>,
     pub checks: Vec<CiCheck>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderMergeState {
+    pub number: u64,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub head_sha: String,
+    pub conflict_free: Option<bool>,
+    pub required_checks_known: bool,
+    pub required_checks: Vec<CiCheck>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePrRequest {
+    pub number: u64,
+    pub expected_head_sha: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePrResult {
+    pub number: u64,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub head_sha: String,
+    pub merge_sha: Option<String>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -94,6 +125,8 @@ pub(crate) trait HostingClient {
     fn create_pr(&self, request: &CreatePrRequest) -> Result<PrCreated>;
     fn pr_detail(&self, number: u64) -> Result<PrDetail>;
     fn ci_status(&self, ref_name: &str) -> Result<CiStatus>;
+    fn merge_state(&self, number: u64) -> Result<ProviderMergeState>;
+    fn merge_pr(&self, number: u64, expected_head_sha: &str) -> Result<(Option<String>, String)>;
 }
 
 #[tauri::command]
@@ -198,6 +231,105 @@ pub async fn hosting_pr_detail(
 }
 
 #[tauri::command]
+pub async fn hosting_pr_merge(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    request: MergePrRequest,
+) -> Result<MergePrResult, String> {
+    entitled_spawn(license, move || {
+        with_client(&workspace_folder, |client| {
+            let state = client.merge_state(request.number)?;
+            validate_merge_gate(&workspace_folder, &request, &state)?;
+            let (merge_sha, message) = client.merge_pr(request.number, &state.head_sha)?;
+            Ok(MergePrResult {
+                number: state.number,
+                source_branch: state.source_branch,
+                target_branch: state.target_branch,
+                head_sha: state.head_sha,
+                merge_sha,
+                message,
+            })
+        })
+    })
+    .await
+}
+
+fn validate_merge_gate(
+    workspace_folder: &str,
+    request: &MergePrRequest,
+    state: &ProviderMergeState,
+) -> Result<()> {
+    if state.number != request.number {
+        bail!("stale_view: provider returned a different review identity")
+    }
+    let expected = request.expected_head_sha.trim();
+    if expected.is_empty() || state.head_sha != expected {
+        bail!("stale_view: provider head changed before merge")
+    }
+    let branch = String::from_utf8(git_read(workspace_folder, ["branch", "--show-current"])?)
+        .context("decode current branch")?
+        .trim()
+        .to_string();
+    if branch != state.source_branch {
+        bail!(
+            "merge blocked: active branch {branch:?} does not match review source {:?}",
+            state.source_branch
+        )
+    }
+    let status = git_read(
+        workspace_folder,
+        ["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?;
+    if status.split(|byte| *byte == b'\n').any(|line| {
+        if line.len() < 2 {
+            return false;
+        }
+        let code = &line[..2];
+        code == b"DD"
+            || code == b"AU"
+            || code == b"UD"
+            || code == b"UA"
+            || code == b"DU"
+            || code == b"AA"
+            || code == b"UU"
+    }) {
+        bail!("merge blocked: conflicts remain; open Workbench Changes")
+    }
+    if !status.is_empty() {
+        bail!("merge blocked: staged, unstaged, or untracked files remain")
+    }
+    let local_head = String::from_utf8(git_read(workspace_folder, ["rev-parse", "HEAD"])?)
+        .context("decode local HEAD")?
+        .trim()
+        .to_string();
+    if local_head != state.head_sha {
+        bail!("merge blocked: local HEAD does not equal provider head SHA")
+    }
+    let upstream_head =
+        String::from_utf8(git_read(workspace_folder, ["rev-parse", "@{upstream}"])?)
+            .context("decode upstream HEAD")?
+            .trim()
+            .to_string();
+    if upstream_head != local_head {
+        bail!("merge blocked: upstream remote ref does not equal local HEAD")
+    }
+    if state.conflict_free != Some(true) {
+        bail!("merge blocked: provider conflict status is not conclusively clean")
+    }
+    if !state.required_checks_known {
+        bail!("merge blocked: required CI metadata is unavailable")
+    }
+    if state
+        .required_checks
+        .iter()
+        .any(|check| check.state != "success")
+    {
+        bail!("merge blocked: required CI is failing or pending")
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn hosting_ci_status(
     license: State<'_, Arc<LicenseService>>,
     workspace_folder: String,
@@ -259,4 +391,135 @@ where
 
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::git::exec::git_write_output;
+    use crate::app::git::test_support::{file_url, run_git, run_git_at, test_repo, unique_path};
+
+    fn merge_state(head_sha: String) -> ProviderMergeState {
+        ProviderMergeState {
+            number: 42,
+            source_branch: "feature/review".into(),
+            target_branch: "main".into(),
+            head_sha,
+            conflict_free: Some(true),
+            required_checks_known: true,
+            required_checks: vec![CiCheck {
+                name: "required/build".into(),
+                state: "success".into(),
+                url: None,
+            }],
+        }
+    }
+
+    fn head(repo: &std::path::Path) -> String {
+        String::from_utf8(run_git(repo, &["rev-parse", "HEAD"]))
+            .expect("decode head")
+            .trim()
+            .to_string()
+    }
+
+    fn merge_gate_repo() -> (std::path::PathBuf, std::path::PathBuf) {
+        let repo = test_repo();
+        let remote = unique_path("merge-gate-remote");
+        std::fs::create_dir_all(&remote).expect("create bare remote");
+        run_git_at(&remote, &["init", "--bare"]);
+        std::fs::write(repo.join("guard.txt"), "base\n").expect("write base");
+        run_git(&repo, &["add", "guard.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+        run_git(&repo, &["branch", "-M", "feature/review"]);
+        run_git(&repo, &["remote", "add", "origin", &file_url(&remote)]);
+        run_git(&repo, &["push", "-u", "origin", "feature/review"]);
+        (repo, remote)
+    }
+
+    #[test]
+    fn hosting_merge_gate_refuses_stale_dirty_unpushed_conflicted_and_pending_required_ci() {
+        let (repo, remote) = merge_gate_repo();
+        let repo_text = repo.to_str().expect("utf8 repo");
+        let clean_head = head(&repo);
+        let request = MergePrRequest {
+            number: 42,
+            expected_head_sha: clean_head.clone(),
+        };
+        validate_merge_gate(repo_text, &request, &merge_state(clean_head.clone()))
+            .expect("clean synchronized checkout passes gate");
+
+        let changed_provider = merge_state("b".repeat(40));
+        assert!(validate_merge_gate(repo_text, &request, &changed_provider)
+            .unwrap_err()
+            .to_string()
+            .contains("provider head changed"));
+
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("write dirty file");
+        assert!(
+            validate_merge_gate(repo_text, &request, &merge_state(clean_head.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("files remain")
+        );
+        std::fs::remove_file(repo.join("dirty.txt")).expect("remove dirty file");
+
+        std::fs::write(repo.join("unpushed.txt"), "local\n").expect("write unpushed file");
+        run_git(&repo, &["add", "unpushed.txt"]);
+        run_git(&repo, &["commit", "-m", "unpushed"]);
+        let unpushed_head = head(&repo);
+        let unpushed_request = MergePrRequest {
+            number: 42,
+            expected_head_sha: unpushed_head.clone(),
+        };
+        assert!(validate_merge_gate(
+            repo_text,
+            &unpushed_request,
+            &merge_state(unpushed_head.clone())
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("upstream remote ref"));
+        run_git(&repo, &["push", "origin", "feature/review"]);
+
+        let mut pending = merge_state(unpushed_head.clone());
+        pending.required_checks[0].state = "pending".into();
+        assert!(validate_merge_gate(repo_text, &unpushed_request, &pending)
+            .unwrap_err()
+            .to_string()
+            .contains("required CI"));
+        let mut unknown = merge_state(unpushed_head);
+        unknown.required_checks_known = false;
+        assert!(validate_merge_gate(repo_text, &unpushed_request, &unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("metadata is unavailable"));
+
+        run_git(&repo, &["checkout", "-b", "conflict-side"]);
+        std::fs::write(repo.join("guard.txt"), "side\n").expect("write side");
+        run_git(&repo, &["add", "guard.txt"]);
+        run_git(&repo, &["commit", "-m", "side"]);
+        run_git(&repo, &["checkout", "feature/review"]);
+        std::fs::write(repo.join("guard.txt"), "feature\n").expect("write feature");
+        run_git(&repo, &["add", "guard.txt"]);
+        run_git(&repo, &["commit", "-m", "feature"]);
+        run_git(&repo, &["push", "origin", "feature/review"]);
+        let conflict_head = head(&repo);
+        let conflict_request = MergePrRequest {
+            number: 42,
+            expected_head_sha: conflict_head.clone(),
+        };
+        let conflict_output =
+            git_write_output(repo_text, ["merge", "conflict-side"]).expect("run conflicting merge");
+        assert!(!conflict_output.status.success());
+        assert!(
+            validate_merge_gate(repo_text, &conflict_request, &merge_state(conflict_head))
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts remain")
+        );
+        git_write_output(repo_text, ["merge", "--abort"]).expect("abort conflict");
+
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+        std::fs::remove_dir_all(remote).expect("cleanup remote");
+    }
 }

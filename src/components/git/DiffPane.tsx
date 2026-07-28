@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react'
 import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
-import type { ChangedFile, FileContents } from '../../ipc/types'
+import type { ChangedFile, FileContents, GitDiffArea, GitHunkAction, UnifiedFileDiff } from '../../ipc/types'
 import { buildDiffHighlightMap, expandDiffTabs, type DiffHighlightMap } from './diffSyntaxHighlight'
 import { gitChangeMeta } from '../../state/gitChangeMeta'
 import { useWorkspaceStore } from '../../state/store'
+import type { WorktreeReviewComment } from '../../state/worktrees'
 
 export type DiffPaneProps = {
   files: ChangedFile[]
@@ -16,18 +17,29 @@ export type DiffPaneProps = {
   error?: string | null
   onOpenInEditor?: (() => void) | null
   hideFileList?: boolean
+  hunkDiff?: UnifiedFileDiff | null
+  selectedHunkId?: string | null
+  onSelectHunk?: (hunkId: string) => void
+  onHunkAction?: (action: GitHunkAction) => void
+  onCommentHunk?: (() => void) | null
+  onCommentLine?: ((line: number, side: 'old' | 'new') => void) | null
+  hunkComments?: WorktreeReviewComment[]
+  reviewWarning?: string | null
 }
+
+type ReviewLineAnchor = { value: string; side: 'old' | 'new'; line: number; label: string }
 
 const MIN_SPLIT_DIFF_WIDTH = 900
 const MAX_RENDERED_DIFF_CHARACTERS = 512 * 1024
 const MAX_RENDERED_DIFF_LINES = 20_000
 
-export function DiffPane({ files, selectedPath, onSelect, contents, loading, splitView, title, error = null, onOpenInEditor = null, hideFileList = false }: DiffPaneProps) {
+export function DiffPane({ files, selectedPath, onSelect, contents, loading, splitView, title, error = null, onOpenInEditor = null, hideFileList = false, hunkDiff = null, selectedHunkId = null, onSelectHunk, onHunkAction, onCommentHunk = null, onCommentLine = null, hunkComments = [], reviewWarning = null }: DiffPaneProps) {
   const [listWidth, setListWidth] = useState(260)
   const [contentWidth, setContentWidth] = useState<number | null>(null)
   const contentRef = useRef<HTMLElement | null>(null)
   const [highlightState, setHighlightState] = useState<{ contents: FileContents | null; path: string | null; themeId: string; map: DiffHighlightMap | null } | null>(null)
   const terminalThemeId = useWorkspaceStore((state) => state.settings.terminalThemeId)
+  const [lineAnchor, setLineAnchor] = useState('')
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -104,6 +116,13 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
   const noDifferences = Boolean(normalizedContents && !normalizedContents.binary && normalizedContents.old === normalizedContents.new)
   const noFiles = !hideFileList && files.length === 0 && !selectedPath
   const noContents = !loading && !error && !contents && !showSelectHint && !noFiles && !renderLimitExceeded
+  const selectedHunk = hunkDiff?.hunks.find((hunk) => hunk.id === selectedHunkId) ?? null
+  const lineAnchors: ReviewLineAnchor[] = selectedHunk ? selectedHunk.lines.flatMap<ReviewLineAnchor>((line): ReviewLineAnchor[] => {
+    if (line.kind === 'deletion' && line.oldLine !== null) return [{ value: `old:${line.oldLine}`, side: 'old', line: line.oldLine, label: `Old line ${line.oldLine}` }]
+    if (line.newLine !== null) return [{ value: `new:${line.newLine}`, side: 'new', line: line.newLine, label: `New line ${line.newLine}` }]
+    return []
+  }) : []
+  const activeLineAnchor = lineAnchors.find((anchor) => anchor.value === lineAnchor) ?? lineAnchors[0] ?? null
 
   return (
     <div className="task-diff-view git-diff-pane" data-file-list-hidden={hideFileList || undefined} style={{ '--file-list-width': `${listWidth}px` } as CSSProperties}>
@@ -138,6 +157,24 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
         </>
       ) : null}
       <main ref={contentRef} className="task-diff-content git-diff-content" data-diff-layout={effectiveSplitView ? 'split' : 'unified'}>
+        {hunkDiff && hunkDiff.hunks.length > 0 ? (
+          <>
+            <div className="git-hunk-review-toolbar" aria-label="Diff hunk review">
+            <div className="git-hunk-review-navigation">
+              {hunkDiff.hunks.map((hunk, index) => <button key={hunk.id} type="button" data-selected={hunk.id === selectedHunkId || undefined} title={hunk.header} onClick={() => onSelectHunk?.(hunk.id)}>Hunk {index + 1}</button>)}
+            </div>
+            <div className="git-hunk-review-actions">
+              {hunkDiff.area === ('unstaged' satisfies GitDiffArea) ? <button type="button" disabled={!selectedHunkId} onClick={() => onHunkAction?.('stage')}>Stage hunk</button> : null}
+              {hunkDiff.area === ('staged' satisfies GitDiffArea) ? <button type="button" disabled={!selectedHunkId} onClick={() => onHunkAction?.('unstage')}>Unstage hunk</button> : null}
+              {hunkDiff.area === 'unstaged' ? <button type="button" className="danger" disabled={!selectedHunkId} onClick={() => onHunkAction?.('discard')}>Discard hunk</button> : null}
+              {onCommentHunk ? <button type="button" disabled={!selectedHunkId} onClick={onCommentHunk}>Comment</button> : null}
+              {onCommentLine && activeLineAnchor ? <><select aria-label="Review comment line" value={activeLineAnchor.value} onChange={(event) => setLineAnchor(event.target.value)}>{lineAnchors.map((anchor) => <option key={anchor.value} value={anchor.value}>{anchor.label}</option>)}</select><button type="button" onClick={() => onCommentLine(activeLineAnchor.line, activeLineAnchor.side)}>Comment line</button></> : null}
+            </div>
+            </div>
+            {hunkComments.length > 0 ? <ol className="git-hunk-review-comments" aria-label="Current hunk comments">{hunkComments.map((comment) => <li key={comment.id}><blockquote>{comment.body}</blockquote><small>{comment.line === null ? 'Hunk comment' : `${comment.side} line ${comment.line}`}</small></li>)}</ol> : null}
+          </>
+        ) : null}
+        {reviewWarning ? <div className="kanban-error" role="alert">{reviewWarning}</div> : null}
         {loading ? <div className="task-diff-empty git-diff-empty">Loading diff…</div> : null}
         {!loading && normalizedContents?.binary ? <div className="task-diff-empty git-diff-empty">binary — not shown</div> : null}
         {!loading && error && !contents ? (

@@ -22,90 +22,74 @@ pub enum ValueKind {
 pub struct OptionSpec {
     pub name: &'static str,
     pub kind: ValueKind,
+    pub enum_values: &'static [&'static str],
     pub required: bool,
     pub repeatable: bool,
 }
 
 impl OptionSpec {
-    pub const fn string(name: &'static str) -> Self {
+    const fn new(
+        name: &'static str,
+        kind: ValueKind,
+        enum_values: &'static [&'static str],
+        required: bool,
+        repeatable: bool,
+    ) -> Self {
         Self {
             name,
-            kind: ValueKind::String,
-            required: false,
-            repeatable: false,
+            kind,
+            enum_values,
+            required,
+            repeatable,
         }
+    }
+
+    pub const fn string(name: &'static str) -> Self {
+        Self::new(name, ValueKind::String, &[], false, false)
     }
 
     pub const fn required_string(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::String,
-            required: true,
-            repeatable: false,
-        }
+        Self::new(name, ValueKind::String, &[], true, false)
+    }
+
+    pub const fn enum_string(name: &'static str, values: &'static [&'static str]) -> Self {
+        Self::new(name, ValueKind::String, values, false, false)
+    }
+
+    pub const fn required_enum(name: &'static str, values: &'static [&'static str]) -> Self {
+        Self::new(name, ValueKind::String, values, true, false)
     }
 
     pub const fn integer(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::Integer,
-            required: false,
-            repeatable: false,
-        }
+        Self::new(name, ValueKind::Integer, &[], false, false)
     }
 
     pub const fn unsigned(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::UnsignedInteger,
-            required: false,
-            repeatable: false,
-        }
+        Self::new(name, ValueKind::UnsignedInteger, &[], false, false)
     }
 
     pub const fn required_unsigned(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::UnsignedInteger,
-            required: true,
-            repeatable: false,
-        }
+        Self::new(name, ValueKind::UnsignedInteger, &[], true, false)
     }
 
     pub const fn uuid(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::Uuid,
-            required: false,
-            repeatable: false,
-        }
+        Self::new(name, ValueKind::Uuid, &[], false, false)
     }
 
     pub const fn required_uuid(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::Uuid,
-            required: true,
-            repeatable: false,
-        }
+        Self::new(name, ValueKind::Uuid, &[], true, false)
     }
 
     pub const fn repeated(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::String,
-            required: false,
-            repeatable: true,
-        }
+        Self::new(name, ValueKind::String, &[], false, true)
+    }
+
+    pub const fn repeated_enum(name: &'static str, values: &'static [&'static str]) -> Self {
+        Self::new(name, ValueKind::String, values, false, true)
     }
 
     pub const fn required_repeated(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: ValueKind::String,
-            required: true,
-            repeatable: true,
-        }
+        Self::new(name, ValueKind::String, &[], true, true)
     }
 }
 
@@ -126,6 +110,7 @@ pub struct CommandContract {
 const NONE: &[&str] = &[];
 const WORKSPACE: &[&str] = &["workspace"];
 const WORKSPACE_PANE: &[&str] = &["workspace", "pane"];
+const WORKTREE_OR_WORKSPACE: &[&str] = &["worktree", "workspace"];
 const WORKSPACE_PAGE_TAB: &[&str] = &["workspace", "page", "tab"];
 const APP_WINDOW: &[&str] = &["app", "window"];
 
@@ -232,6 +217,204 @@ pub fn command_contracts() -> Vec<CommandContract> {
             None,
             false,
             HighRisk
+        ),
+        contract!(
+            "worktree",
+            "list",
+            "List reconciled worktrees.",
+            NONE,
+            &[O::string("repo")],
+            &["include-external", "include-hidden"],
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "worktree",
+            "show",
+            "Show one exact worktree selected by stable ID, bound workspace, or caller cwd.",
+            WORKTREE_OR_WORKSPACE,
+            &[],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "worktree",
+            "current",
+            "Show the deepest registered checkout containing the caller cwd.",
+            NONE,
+            &[],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "worktree",
+            "create",
+            "Create a managed worktree and workspace session.",
+            WORKSPACE,
+            &[
+                O::required_string("repo"),
+                O::required_string("name"),
+                O::string("base-ref"),
+                O::string("branch"),
+                O::string("profile"),
+                O::string("prompt"),
+                O::enum_string("setup", &["run", "skip", "inherit"]),
+                O::string("sparse-preset"),
+                O::repeated("linked-file"),
+                O::string("parent-worktree")
+            ],
+            &["fetch", "no-parent"],
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "worktree",
+            "import",
+            "Import an existing native worktree.",
+            NONE,
+            &[
+                O::required_string("repo"),
+                O::required_string("path"),
+                O::string("parent-session"),
+                O::string("session")
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "worktree",
+            "move",
+            "Move a managed checkout with current-instance protection.",
+            WORKTREE_OR_WORKSPACE,
+            &[
+                O::required_uuid("expected-instance-id"),
+                O::required_string("destination")
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            HighRisk
+        ),
+        contract!(
+            "worktree",
+            "preflight-remove",
+            "Inspect blockers before checkout removal.",
+            WORKTREE_OR_WORKSPACE,
+            &[],
+            &["delete-branch"],
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "worktree",
+            "remove",
+            "Remove a checkout only after exact confirmation; main checkout, Git lock, and identity mismatch are hard blockers that force cannot override.",
+            WORKTREE_OR_WORKSPACE,
+            &[
+                O::required_uuid("expected-instance-id"),
+                O::repeated_enum(
+                    "acknowledge-blocker",
+                    &[
+                        "main_checkout",
+                        "git_locked",
+                        "identity_mismatch",
+                        "dirty",
+                        "conflicted",
+                        "unpushed",
+                        "live_session",
+                        "live_panes",
+                        "missing_registration",
+                        "orphan_directory"
+                    ]
+                )
+            ],
+            &["confirm", "force", "delete-branch"],
+            Some(0),
+            None,
+            false,
+            HighRisk
+        ),
+        contract!(
+            "worktree",
+            "set",
+            "Update worktree metadata with current-instance protection.",
+            WORKTREE_OR_WORKSPACE,
+            &[
+                O::required_uuid("expected-instance-id"),
+                O::string("comment"),
+                O::string("review-target"),
+                O::string("parent-worktree")
+            ],
+            &["clear-comment", "clear-review-target", "clear-parent"],
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "worktree",
+            "checkpoint",
+            "Create a worktree lifecycle checkpoint.",
+            WORKTREE_OR_WORKSPACE,
+            &[
+                O::required_enum(
+                    "kind",
+                    &[
+                        "creation_complete",
+                        "review_ready",
+                        "committed",
+                        "pushed",
+                        "pr_opened",
+                        "merged",
+                        "manual"
+                    ]
+                ),
+                O::required_string("label"),
+                O::string("comment")
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "worktree",
+            "comment",
+            "Upsert a line or hunk review comment.",
+            WORKTREE_OR_WORKSPACE,
+            &[
+                O::required_uuid("expected-instance-id"),
+                O::required_string("base-head"),
+                O::required_string("head"),
+                O::required_string("path"),
+                O::required_enum("side", &["left", "right"]),
+                O::unsigned("line"),
+                O::string("range-json"),
+                O::string("hunk-id"),
+                O::required_string("body")
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
         ),
         contract!(
             "terminal",
@@ -556,9 +739,24 @@ pub fn command_contracts() -> Vec<CommandContract> {
             NONE,
             &[
                 O::required_string("gate-id"),
-                O::required_string("resolution")
+                O::required_string("resolution"),
+                O::repeated_enum(
+                    "acknowledge-blocker",
+                    &[
+                        "main_checkout",
+                        "git_locked",
+                        "identity_mismatch",
+                        "dirty",
+                        "conflicted",
+                        "unpushed",
+                        "live_session",
+                        "live_panes",
+                        "missing_registration",
+                        "orphan_directory"
+                    ]
+                )
             ],
-            &["confirm"],
+            &["confirm", "force", "delete-branch"],
             Some(0),
             None,
             true,
@@ -1439,6 +1637,7 @@ fn command_parts(
     }
     match command {
         Command::Workspace(command) => parts!("workspace", command),
+        Command::Worktree(command) => parts!("worktree", command),
         Command::Terminal(command) => parts!("terminal", command),
         Command::Orchestration(command) => parts!("orchestration", command),
         Command::Automation(command) => parts!("automation", command),
@@ -1483,7 +1682,7 @@ fn validate_against_contract(
             )));
         }
         for value in values {
-            validate_value(spec.kind, name, value)?;
+            validate_value(spec, value)?;
         }
     }
 
@@ -1540,6 +1739,36 @@ fn validate_against_contract(
             contract.domain, contract.action
         )));
     }
+    if contract.domain == "worktree"
+        && contract.action == "remove"
+        && !arguments.switches.contains("confirm")
+    {
+        return Err(CliError::invalid(
+            "--confirm is required for worktree remove",
+        ));
+    }
+    if selectors.worktree.is_some() && selectors.workspace.is_some() {
+        return Err(CliError::invalid(
+            "--worktree and --workspace are mutually exclusive",
+        ));
+    }
+    if arguments.options.contains_key("parent-worktree") && arguments.switches.contains("no-parent")
+    {
+        return Err(CliError::invalid(
+            "--parent-worktree and --no-parent are mutually exclusive",
+        ));
+    }
+    for (option, switch) in [
+        ("comment", "clear-comment"),
+        ("review-target", "clear-review-target"),
+        ("parent-worktree", "clear-parent"),
+    ] {
+        if arguments.options.contains_key(option) && arguments.switches.contains(switch) {
+            return Err(CliError::invalid(format!(
+                "--{option} and --{switch} are mutually exclusive"
+            )));
+        }
+    }
     for (left, right) in [("enable", "disable"), ("enable-lan", "disable-lan")] {
         if arguments.switches.contains(left) && arguments.switches.contains(right) {
             return Err(CliError::invalid(format!(
@@ -1550,26 +1779,33 @@ fn validate_against_contract(
     Ok(())
 }
 
-fn validate_value(kind: ValueKind, name: &str, value: &str) -> Result<(), CliError> {
-    let valid = match kind {
+fn validate_value(spec: &OptionSpec, value: &str) -> Result<(), CliError> {
+    let valid_kind = match spec.kind {
         ValueKind::String => true,
         ValueKind::Integer => value.parse::<i64>().is_ok(),
         ValueKind::UnsignedInteger => value.parse::<u64>().is_ok(),
         ValueKind::Uuid => uuid::Uuid::parse_str(value).is_ok(),
     };
-    if valid {
-        Ok(())
-    } else {
-        Err(CliError::invalid(format!(
-            "--{name} has an invalid {} value",
-            match kind {
+    if !valid_kind {
+        return Err(CliError::invalid(format!(
+            "--{} has an invalid {} value",
+            spec.name,
+            match spec.kind {
                 ValueKind::String => "string",
                 ValueKind::Integer => "integer",
                 ValueKind::UnsignedInteger => "unsigned integer",
                 ValueKind::Uuid => "UUID",
             }
-        )))
+        )));
     }
+    if !spec.enum_values.is_empty() && !spec.enum_values.contains(&value) {
+        return Err(CliError::invalid(format!(
+            "--{} must be one of: {}",
+            spec.name,
+            spec.enum_values.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn supplied_selectors(selectors: &SelectorSet) -> BTreeSet<&'static str> {
@@ -1579,6 +1815,9 @@ fn supplied_selectors(selectors: &SelectorSet) -> BTreeSet<&'static str> {
     }
     if selectors.pane.is_some() {
         supplied.insert("pane");
+    }
+    if selectors.worktree.is_some() {
+        supplied.insert("worktree");
     }
     if selectors.agent.is_some() {
         supplied.insert("agent");
@@ -1651,6 +1890,41 @@ mod tests {
         let decoded: crate::dedicated_cli::Command =
             serde_json::from_str(&json).expect("daemon must decode the same bytes");
         assert_eq!(decoded, invocation.command);
+    }
+
+    #[test]
+    fn worktree_enums_and_selector_conflicts_fail_before_ipc() {
+        assert!(parse_args([
+            "worktree",
+            "create",
+            "--repo",
+            ".",
+            "--name",
+            "child",
+            "--setup",
+            "sometimes",
+        ])
+        .is_err());
+        assert!(parse_args([
+            "worktree",
+            "show",
+            "--worktree",
+            "one",
+            "--workspace",
+            "two",
+        ])
+        .is_err());
+        assert!(parse_args([
+            "worktree",
+            "checkpoint",
+            "--worktree",
+            "one",
+            "--kind",
+            "unknown",
+            "--label",
+            "label",
+        ])
+        .is_err());
     }
 
     #[test]

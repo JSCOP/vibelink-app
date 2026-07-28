@@ -176,4 +176,30 @@ describe('DiffPane', () => {
     expect(screen.getByText('Diff is too large to render safely. Narrow the comparison or open the file from Explorer.')).toBeTruthy()
     expect(screen.queryByTestId('diff-viewer')).toBeNull()
   })
+
+  it('offers native hunk actions and line-anchored comments without accepting patch bodies', () => {
+    const onHunkAction = vi.fn()
+    const onCommentLine = vi.fn()
+    render(
+      <DiffPane
+        files={[]}
+        selectedPath="review.ts"
+        onSelect={vi.fn()}
+        contents={{ old: 'old\n', new: 'new\n', binary: false }}
+        loading={false}
+        splitView={false}
+        hideFileList
+        hunkDiff={{ path: 'review.ts', area: 'unstaged', binary: false, hunks: [{ id: 'native-hunk-id', header: '@@ -1 +1 @@', oldStart: 1, oldCount: 1, newStart: 1, newCount: 1, lines: [{ kind: 'deletion', text: 'old', oldLine: 1, newLine: null }, { kind: 'addition', text: 'new', oldLine: null, newLine: 1 }] }] }}
+        selectedHunkId="native-hunk-id"
+        onHunkAction={onHunkAction}
+        onCommentLine={onCommentLine}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stage hunk' }))
+    expect(onHunkAction).toHaveBeenCalledWith('stage')
+    fireEvent.change(screen.getByRole('combobox', { name: 'Review comment line' }), { target: { value: 'new:1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment line' }))
+    expect(onCommentLine).toHaveBeenCalledWith(1, 'new')
+  })
 })

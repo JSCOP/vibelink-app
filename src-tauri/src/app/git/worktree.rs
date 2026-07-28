@@ -1,12 +1,13 @@
-use super::exec::{git_read, git_read_allow_fail, git_write};
+use super::exec::{git_read, git_read_allow_fail, git_read_output, git_write, stderr_or_status};
 use super::paths::validate_base_ref;
 #[cfg(test)]
 pub use crate::worktree_storage::DEFAULT_WORKTREE_FOLDER;
 use crate::worktree_storage::{drive_root, requested_root};
 pub use crate::worktree_storage::{WorktreeStorage, WorktreeStorageMode};
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
-use std::path::{Component, Path, PathBuf};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::{Component, Path, PathBuf, Prefix};
 use uuid::Uuid;
 
 /// Folder created inside the app data root when worktrees are stored there.
@@ -46,6 +47,322 @@ pub struct WorktreeEntry {
     pub prunable: bool,
     pub dirty: bool,
     pub exists: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryIdentity {
+    pub repository_id: String,
+    pub repository_path: String,
+    pub common_dir: String,
+    pub normalized_common_dir: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeWorktree {
+    pub worktree_path: String,
+    pub normalized_path: String,
+    pub git_dir_identity: String,
+    pub head: String,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub bare: bool,
+    pub locked: bool,
+    pub lock_reason: Option<String>,
+    pub prunable: bool,
+    pub prunable_reason: Option<String>,
+    pub exists: bool,
+    pub is_main: bool,
+    pub dirty: bool,
+    pub untracked: bool,
+    pub has_conflicts: bool,
+    pub ahead: u64,
+    pub behind: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct NativeWorktreeRow {
+    worktree_path: String,
+    head: String,
+    branch: Option<String>,
+    detached: bool,
+    bare: bool,
+    locked: bool,
+    lock_reason: Option<String>,
+    prunable: bool,
+    prunable_reason: Option<String>,
+    is_main: bool,
+}
+
+pub fn resolve_repository_identity(repository_path: &str) -> Result<RepositoryIdentity> {
+    let root = git_read(repository_path, ["rev-parse", "--show-toplevel"])
+        .context("resolve repository top level")?;
+    let root = String::from_utf8(root).context("repository top level is not UTF-8")?;
+    let root = resolve_git_path(Path::new(repository_path), root.trim());
+    let common = git_read(repository_path, ["rev-parse", "--git-common-dir"])
+        .context("resolve repository common dir")?;
+    let common = String::from_utf8(common).context("repository common dir is not UTF-8")?;
+    let common = resolve_git_path(&root, common.trim());
+    let repository_path = comparison_path(&root).to_string_lossy().to_string();
+    let common_dir = comparison_path(&common).to_string_lossy().to_string();
+    let normalized_common_dir = normalize_path_for_comparison(&common_dir);
+    Ok(RepositoryIdentity {
+        repository_id: sha256_hex(normalized_common_dir.as_bytes()),
+        repository_path,
+        common_dir,
+        normalized_common_dir,
+    })
+}
+
+pub fn normalize_path_for_comparison(path: &str) -> String {
+    let path = comparison_path(Path::new(path));
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        normalized = format!("//{rest}");
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = rest.to_string();
+    }
+    while normalized.len() > 1 && normalized.ends_with('/') && !is_drive_root_text(&normalized) {
+        normalized.pop();
+    }
+    #[cfg(windows)]
+    {
+        normalized.make_ascii_lowercase();
+    }
+    normalized
+}
+
+pub fn paths_equal(left: &str, right: &str) -> bool {
+    normalize_path_for_comparison(left) == normalize_path_for_comparison(right)
+}
+
+pub fn scan_native_worktrees(repository_path: &str) -> Result<Vec<NativeWorktree>> {
+    let repository = resolve_repository_identity(repository_path)?;
+    let output = git_read_output(repository_path, ["worktree", "list", "--porcelain", "-z"])?;
+    let rows = if output.status.success() {
+        parse_worktree_list_nul(&output.stdout)
+    } else if worktree_porcelain_z_is_unsupported(&output.stderr) {
+        let legacy = git_read(repository_path, ["worktree", "list", "--porcelain"])
+            .context("list git worktrees without -z fallback")?;
+        parse_worktree_rows_line(&String::from_utf8_lossy(&legacy))
+    } else {
+        bail!("list git worktrees: {}", stderr_or_status(&output));
+    };
+
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, mut row)| {
+            row.is_main = index == 0;
+            native_worktree_from_row(&repository, row)
+        })
+        .collect()
+}
+
+fn worktree_porcelain_z_is_unsupported(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    (stderr.contains("unknown option") || stderr.contains("unknown switch"))
+        && (stderr.contains("-z") || stderr.contains("`z'") || stderr.contains("'z'"))
+}
+
+fn native_worktree_from_row(
+    repository: &RepositoryIdentity,
+    row: NativeWorktreeRow,
+) -> Result<NativeWorktree> {
+    let path = PathBuf::from(&row.worktree_path);
+    let exists = std::fs::symlink_metadata(&path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    let normalized_path = normalize_path_for_comparison(&row.worktree_path);
+    let is_main = row.is_main;
+    let mut git_dir_identity = String::new();
+    let mut dirty = false;
+    let mut untracked = false;
+    let mut has_conflicts = false;
+    let mut ahead = 0;
+    let mut behind = 0;
+
+    if exists && !row.bare {
+        let git_dir = git_read(&row.worktree_path, ["rev-parse", "--git-dir"])
+            .with_context(|| format!("resolve git dir for {}", row.worktree_path))?;
+        let git_dir = String::from_utf8(git_dir).context("worktree git dir is not UTF-8")?;
+        let resolved = resolve_git_path(&path, git_dir.trim());
+        git_dir_identity = sha256_hex(
+            normalize_path_for_comparison(&comparison_path(&resolved).to_string_lossy()).as_bytes(),
+        );
+
+        let status = git_read(
+            &row.worktree_path,
+            [
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--branch",
+                "--untracked-files=all",
+            ],
+        )
+        .with_context(|| format!("read worktree status for {}", row.worktree_path))?;
+        let summary = parse_status_summary(&status);
+        dirty = summary.0;
+        untracked = summary.1;
+        has_conflicts = summary.2;
+        ahead = summary.3;
+        behind = summary.4;
+    }
+
+    Ok(NativeWorktree {
+        worktree_path: row.worktree_path,
+        normalized_path,
+        git_dir_identity,
+        head: row.head,
+        branch: row.branch,
+        detached: row.detached,
+        bare: row.bare,
+        locked: row.locked,
+        lock_reason: row.lock_reason,
+        prunable: row.prunable,
+        prunable_reason: row.prunable_reason,
+        exists,
+        is_main,
+        dirty,
+        untracked,
+        has_conflicts,
+        ahead,
+        behind,
+    })
+}
+
+fn parse_status_summary(bytes: &[u8]) -> (bool, bool, bool, u64, u64) {
+    let mut dirty = false;
+    let mut untracked = false;
+    let mut conflicts = false;
+    let mut ahead = 0;
+    let mut behind = 0;
+    for record in bytes.split(|byte| *byte == 0 || *byte == b'\n') {
+        let line = String::from_utf8_lossy(record);
+        if line.starts_with("1 ") || line.starts_with("2 ") {
+            dirty = true;
+        } else if line.starts_with("u ") {
+            dirty = true;
+            conflicts = true;
+        } else if line.starts_with("? ") {
+            untracked = true;
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut parts = ab.split_ascii_whitespace();
+            ahead = parts
+                .next()
+                .and_then(|part| part.strip_prefix('+'))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            behind = parts
+                .next()
+                .and_then(|part| part.strip_prefix('-'))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+        }
+    }
+    (dirty, untracked, conflicts, ahead, behind)
+}
+
+fn parse_worktree_list_nul(output: &[u8]) -> Vec<NativeWorktreeRow> {
+    let mut rows = Vec::new();
+    let mut current: Option<NativeWorktreeRow> = None;
+    for field in output.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if let Some(row) = current.take() {
+                rows.push(row);
+            }
+            continue;
+        }
+        let field = String::from_utf8_lossy(field);
+        parse_worktree_field(&mut current, &field);
+    }
+    if let Some(row) = current {
+        rows.push(row);
+    }
+    rows
+}
+
+fn parse_worktree_rows_line(output: &str) -> Vec<NativeWorktreeRow> {
+    let mut rows = Vec::new();
+    let mut current: Option<NativeWorktreeRow> = None;
+    for field in output.lines() {
+        if field.is_empty() {
+            if let Some(row) = current.take() {
+                rows.push(row);
+            }
+        } else {
+            parse_worktree_field(&mut current, field);
+        }
+    }
+    if let Some(row) = current {
+        rows.push(row);
+    }
+    rows
+}
+
+fn parse_worktree_field(current: &mut Option<NativeWorktreeRow>, field: &str) {
+    if let Some(path) = field.strip_prefix("worktree ") {
+        if current.is_some() {
+            *current = None;
+        }
+        *current = Some(NativeWorktreeRow {
+            worktree_path: path.to_string(),
+            ..NativeWorktreeRow::default()
+        });
+        return;
+    }
+    let Some(row) = current.as_mut() else {
+        return;
+    };
+    if let Some(head) = field.strip_prefix("HEAD ") {
+        row.head = head.to_string();
+    } else if let Some(branch) = field.strip_prefix("branch ") {
+        row.branch = Some(branch.trim_start_matches("refs/heads/").to_string());
+    } else if field == "detached" {
+        row.detached = true;
+    } else if field == "bare" {
+        row.bare = true;
+    } else if field == "locked" || field.starts_with("locked ") {
+        row.locked = true;
+        row.lock_reason = field
+            .strip_prefix("locked ")
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
+    } else if field == "prunable" || field.starts_with("prunable ") {
+        row.prunable = true;
+        row.prunable_reason = field
+            .strip_prefix("prunable ")
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string);
+    }
+}
+
+fn resolve_git_path(base: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn comparison_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_drive_root_text(path: &str) -> bool {
+    path.len() == 3 && path.as_bytes()[1] == b':' && path.ends_with('/')
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut text = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 pub(crate) fn app_data_worktree_root() -> Result<PathBuf> {
@@ -173,13 +490,19 @@ pub fn create_for_task(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
 }
 
 pub fn list(repo: &str) -> Result<Vec<WorktreeEntry>> {
-    let output = git_read(repo, ["worktree", "list", "--porcelain"])?;
-    let mut entries = parse_worktree_list(&String::from_utf8_lossy(&output));
-    for entry in entries.iter_mut() {
-        entry.exists = Path::new(&entry.worktree_path).is_dir();
-        entry.dirty = entry.exists && is_dirty(&entry.worktree_path);
-    }
-    Ok(entries)
+    Ok(scan_native_worktrees(repo)?
+        .into_iter()
+        .map(|entry| WorktreeEntry {
+            worktree_path: entry.worktree_path,
+            branch: entry.branch.unwrap_or_default(),
+            head: entry.head,
+            is_main: entry.is_main,
+            locked: entry.locked,
+            prunable: entry.prunable,
+            dirty: entry.dirty || entry.untracked || entry.has_conflicts,
+            exists: entry.exists,
+        })
+        .collect())
 }
 
 pub fn remove(
@@ -385,15 +708,6 @@ fn validate_destination(destination: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn is_dirty(worktree_path: &str) -> bool {
-    git_read(
-        worktree_path,
-        ["status", "--porcelain", "--untracked-files=all"],
-    )
-    .map(|bytes| !String::from_utf8_lossy(&bytes).trim().is_empty())
-    .unwrap_or(false)
-}
-
 fn is_missing_worktree_error(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("is not a working tree") || message.contains("no such file or directory")
@@ -448,6 +762,7 @@ fn short_task_id(task_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::git::test_support::{run_git, test_repo, unique_path};
 
     fn storage(mode: WorktreeStorageMode) -> WorktreeStorage {
         WorktreeStorage {
@@ -539,6 +854,85 @@ mod tests {
         assert!(entries[0].is_main && entries[0].branch == "main");
         assert!(!entries[1].is_main && entries[1].locked && entries[1].branch == "vibelink/one");
         assert!(entries[2].prunable && entries[2].branch.is_empty());
+    }
+
+    #[test]
+    fn nul_porcelain_preserves_paths_and_reasons() {
+        let rows = parse_worktree_list_nul(
+            b"worktree C:/repo space\nline\0HEAD aaaa\0branch refs/heads/main\0locked portable reason\0\0worktree C:/wt/two\0HEAD bbbb\0detached\0prunable stale git dir\0\0",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].worktree_path, "C:/repo space\nline");
+        assert_eq!(rows[0].lock_reason.as_deref(), Some("portable reason"));
+        assert_eq!(rows[1].prunable_reason.as_deref(), Some("stale git dir"));
+        assert!(rows[1].detached);
+    }
+
+    #[test]
+    fn status_summary_separates_tracked_untracked_conflicts_and_upstream_distance() {
+        let summary = parse_status_summary(
+            b"# branch.oid abcdef\n# branch.upstream origin/main\n# branch.ab +3 -2\n1 .M N... 100644 100644 100644 abc abc file.txt\0? untracked.txt\0u UU N... 100644 100644 100644 100644 abc abc abc conflict.txt\0",
+        );
+        assert_eq!(summary, (true, true, true, 3, 2));
+    }
+
+    #[test]
+    fn porcelain_z_fallback_is_only_for_an_unsupported_option() {
+        assert!(worktree_porcelain_z_is_unsupported(
+            b"error: unknown option `z'"
+        ));
+        assert!(!worktree_porcelain_z_is_unsupported(
+            b"fatal: not a git repository"
+        ));
+        assert!(!worktree_porcelain_z_is_unsupported(
+            b"fatal: unable to access repository"
+        ));
+    }
+
+    #[test]
+    fn repository_identity_is_stable_across_linked_worktrees() {
+        let repo = test_repo();
+        std::fs::write(repo.join("README.md"), "identity\n").expect("write fixture");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+        let linked = unique_path("identity-linked");
+        let linked_text = linked.to_str().expect("utf8 linked path");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "identity-linked",
+                linked_text,
+                "HEAD",
+            ],
+        );
+
+        let repo_identity =
+            resolve_repository_identity(repo.to_str().expect("utf8 repo")).expect("main identity");
+        let linked_identity = resolve_repository_identity(linked_text).expect("linked identity");
+        assert_eq!(repo_identity.repository_id, linked_identity.repository_id);
+        assert_eq!(
+            repo_identity.normalized_common_dir,
+            linked_identity.normalized_common_dir
+        );
+
+        let scan = scan_native_worktrees(linked_text).expect("scan linked worktrees");
+        assert_eq!(scan.len(), 2);
+        assert!(scan.iter().all(|entry| !entry.git_dir_identity.is_empty()));
+        let main = scan
+            .iter()
+            .find(|entry| entry.is_main)
+            .expect("main checkout");
+        assert!(paths_equal(
+            &main.worktree_path,
+            repo.to_str().expect("utf8 repo")
+        ));
+
+        run_git(&repo, &["worktree", "remove", linked_text]);
+        run_git(&repo, &["branch", "-D", "identity-linked"]);
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
     }
 
     #[test]

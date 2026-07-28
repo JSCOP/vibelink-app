@@ -596,10 +596,12 @@ fn worktrees_for_run(
     connection: &Connection,
     run_id: &str,
 ) -> CoordinatorResult<Vec<WorktreeAssignment>> {
-    let mut statement = connection.prepare("SELECT DISTINCT d.base_revision,d.branch,d.worktree_path FROM dispatches d JOIN orchestration_tasks t ON t.id=d.task_id WHERE t.run_id=?1 AND d.base_revision IS NOT NULL AND d.branch IS NOT NULL AND d.worktree_path IS NOT NULL ORDER BY d.worktree_path")?;
+    let mut statement = connection.prepare("SELECT DISTINCT d.base_revision,d.branch,d.worktree_path,d.worktree_id,d.worktree_instance_id FROM dispatches d JOIN orchestration_tasks t ON t.id=d.task_id WHERE t.run_id=?1 AND d.base_revision IS NOT NULL AND d.branch IS NOT NULL AND d.worktree_path IS NOT NULL ORDER BY d.worktree_path")?;
     let worktrees = statement
         .query_map([run_id], |row| {
             Ok(WorktreeAssignment {
+                worktree_id: row.get(3)?,
+                instance_id: row.get(4)?,
                 base_revision: row.get(0)?,
                 branch: row.get(1)?,
                 worktree_path: row.get(2)?,

@@ -2,9 +2,12 @@
  * xterm 6 renders each terminal's scrollbar with VS Code's
  * `SmoothScrollableElement`, constructed in `Viewport` with
  * `vertical: ScrollbarVisibility.Auto` — the slider fades out shortly after the
- * pointer leaves the pane. Every VibeLink pane must keep its own persistent
- * scrollbar, and xterm exposes no public option for that, so we flip the
- * scrollable element to `ScrollbarVisibility.Visible`.
+ * pointer leaves the pane, which makes it disappear mid-read on the pane the
+ * user is actually working in. We flip the scrollable element to
+ * `ScrollbarVisibility.Visible` so xterm never fades it, and App.css hides it
+ * again on panes that are not the active one
+ * (`.terminal-panel-shell:not([data-active='true'])`). Net effect: the focused
+ * pane keeps a stable scrollbar, every other pane shows none.
  *
  * The slider still hides itself while the buffer fits the viewport
  * (`ScrollbarState.isNeeded`), so a pane with no scrollback shows nothing.

@@ -12,20 +12,36 @@ pub(crate) mod submodule;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod worktree;
+pub(crate) mod worktree_copy;
+pub(crate) mod worktree_lifecycle;
+pub(crate) mod worktree_operation;
+pub(crate) mod worktree_registry;
 
 use self::exec::{
     git_exit_status, git_read as git_output, git_read_allow_fail as git_output_allow_fail,
     git_write,
 };
 use self::paths::{resolve_repo_file_path, validate_base_ref};
-use self::worktree::{
-    WorktreeEntry, WorktreeInfo, WorktreeStorage, WorktreeStorageOptions, WorktreeStorageResolution,
+use self::worktree::{WorktreeStorage, WorktreeStorageOptions, WorktreeStorageResolution};
+use self::worktree_lifecycle::{WorktreeCreateResult, WorktreeMoveResult};
+use self::worktree_registry::{
+    WorktreeCheckpoint, WorktreeCheckpointRequest, WorktreeCreateRequest, WorktreeIdRequest,
+    WorktreeImportRequest, WorktreeListRequest, WorktreeMoveRequest, WorktreeOperationIdRequest,
+    WorktreeProjection, WorktreeReconcileRequest, WorktreeRemovalPreflight,
+    WorktreeRemovalPreflightRequest, WorktreeRemovalResult, WorktreeRemoveRequest,
+    WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetRequest,
+    WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT, WORKTREE_METHOD_CHECKPOINTS,
+    WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT, WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE,
+    WORKTREE_METHOD_PREFLIGHT_REMOVE, WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE,
+    WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
 };
+use super::daemon_client::DaemonClient;
 use super::license::LicenseService;
 use anyhow::{anyhow, Context, Result};
-use serde::Serialize;
-use std::sync::Arc;
+use serde::{de::DeserializeOwned, Serialize};
+use std::{sync::Arc, time::Duration};
 use tauri::State;
+use uuid::Uuid;
 
 #[cfg(test)]
 use self::exec::CREATE_NO_WINDOW;
@@ -89,6 +105,217 @@ pub async fn git_worktree_resolve_root(
     .map_err(to_string)
 }
 
+fn daemon_worktree_timeout(method: &str) -> Duration {
+    match method {
+        WORKTREE_METHOD_CREATE => Duration::from_secs(1_200),
+        WORKTREE_METHOD_MOVE | WORKTREE_METHOD_REMOVE => Duration::from_secs(300),
+        WORKTREE_METHOD_RECONCILE | WORKTREE_METHOD_IMPORT => Duration::from_secs(120),
+        WORKTREE_METHOD_LIST
+        | WORKTREE_METHOD_PREFLIGHT_REMOVE
+        | WORKTREE_METHOD_SET
+        | WORKTREE_METHOD_CHECKPOINT
+        | WORKTREE_METHOD_CHECKPOINTS
+        | WORKTREE_METHOD_REVIEW_COMMENT_PUT
+        | WORKTREE_METHOD_REVIEW_COMMENTS => Duration::from_secs(60),
+        _ => Duration::from_secs(10),
+    }
+}
+
+fn daemon_worktree_request<T: Serialize, R: DeserializeOwned>(
+    client: &DaemonClient,
+    operation_id: Uuid,
+    method: &str,
+    request: &T,
+) -> Result<R, String> {
+    let response = client
+        .worktree_rpc_with_timeout(
+            operation_id,
+            method,
+            request,
+            daemon_worktree_timeout(method),
+        )
+        .map_err(to_string)?;
+    serde_json::from_str(&response).map_err(to_string)
+}
+
+#[tauri::command]
+pub fn worktree_registry_list(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeListRequest,
+) -> Result<Vec<WorktreeProjection>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_LIST, &request)
+}
+
+#[tauri::command]
+pub fn worktree_registry_reconcile(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeReconcileRequest,
+) -> Result<Vec<WorktreeProjection>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_RECONCILE, &request)
+}
+
+#[tauri::command]
+pub fn worktree_registry_import(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeImportRequest,
+) -> Result<WorktreeProjection, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_IMPORT, &request)
+}
+
+#[tauri::command]
+pub fn worktree_lifecycle_create(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeCreateRequest,
+) -> Result<WorktreeCreateResult, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        request.operation_id,
+        WORKTREE_METHOD_CREATE,
+        &request,
+    )
+}
+
+/// Signals cancellation for a running create/move/remove operation. Returns
+/// false when the operation already settled, so the caller keeps trusting the
+/// originating request's own result rather than assuming a rollback happened.
+#[tauri::command]
+pub fn worktree_lifecycle_cancel(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeOperationIdRequest,
+) -> Result<bool, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        request.operation_id,
+        WORKTREE_METHOD_CANCEL,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_lifecycle_move(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeMoveRequest,
+) -> Result<WorktreeMoveResult, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        request.operation_id,
+        WORKTREE_METHOD_MOVE,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_removal_preflight(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeRemovalPreflightRequest,
+) -> Result<WorktreeRemovalPreflight, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        Uuid::new_v4(),
+        WORKTREE_METHOD_PREFLIGHT_REMOVE,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_lifecycle_remove(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeRemoveRequest,
+) -> Result<WorktreeRemovalResult, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        request.operation_id,
+        WORKTREE_METHOD_REMOVE,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_registry_set(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeSetRequest,
+) -> Result<worktree_registry::WorktreeRecord, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_SET, &request)
+}
+
+#[tauri::command]
+pub fn worktree_checkpoint_create(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeCheckpointRequest,
+) -> Result<WorktreeCheckpoint, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        Uuid::new_v4(),
+        WORKTREE_METHOD_CHECKPOINT,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_checkpoints_list(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    worktree_id: String,
+) -> Result<Vec<WorktreeCheckpoint>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        Uuid::new_v4(),
+        WORKTREE_METHOD_CHECKPOINTS,
+        &WorktreeIdRequest { worktree_id },
+    )
+}
+
+#[tauri::command]
+pub fn worktree_review_comment_create(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeReviewCommentRequest,
+) -> Result<WorktreeReviewComment, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        Uuid::new_v4(),
+        WORKTREE_METHOD_REVIEW_COMMENT_PUT,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_review_comments_list(
+    license: State<'_, Arc<LicenseService>>,
+    client: State<'_, DaemonClient>,
+    worktree_id: String,
+) -> Result<Vec<WorktreeReviewComment>, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        Uuid::new_v4(),
+        WORKTREE_METHOD_REVIEW_COMMENTS,
+        &WorktreeIdRequest { worktree_id },
+    )
+}
+
 #[tauri::command]
 pub async fn git_is_available(
     license: State<'_, Arc<LicenseService>>,
@@ -139,91 +366,6 @@ pub async fn git_file_contents(
     license.require_entitled_cached().map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         file_contents_native(&workspace_folder, &base_ref, &path)
-    })
-    .await
-    .map_err(to_string)?
-    .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn git_worktree_create(
-    license: State<'_, Arc<LicenseService>>,
-    workspace_folder: String,
-    task_id: String,
-) -> Result<WorktreeInfo, String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        worktree::create_for_task(&workspace_folder, &task_id)
-    })
-    .await
-    .map_err(to_string)?
-    .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn git_worktree_create_named(
-    license: State<'_, Arc<LicenseService>>,
-    workspace_folder: String,
-    name: String,
-    start_ref: String,
-    branch: String,
-    storage: WorktreeStorage,
-) -> Result<WorktreeInfo, String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        worktree::create_named(&workspace_folder, &name, &start_ref, &branch, &storage)
-    })
-    .await
-    .map_err(to_string)?
-    .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn git_worktree_list(
-    license: State<'_, Arc<LicenseService>>,
-    workspace_folder: String,
-) -> Result<Vec<WorktreeEntry>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(move || worktree::list(&workspace_folder))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn git_worktree_remove(
-    license: State<'_, Arc<LicenseService>>,
-    workspace_folder: String,
-    worktree_path: String,
-    branch: String,
-    force: bool,
-    delete_branch: bool,
-) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        worktree::remove(
-            &workspace_folder,
-            &worktree_path,
-            &branch,
-            force,
-            delete_branch,
-        )
-    })
-    .await
-    .map_err(to_string)?
-    .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn git_worktree_move(
-    license: State<'_, Arc<LicenseService>>,
-    workspace_folder: String,
-    worktree_path: String,
-    destination_path: String,
-) -> Result<WorktreeInfo, String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        worktree::move_to(&workspace_folder, &worktree_path, &destination_path)
     })
     .await
     .map_err(to_string)?
@@ -415,6 +557,34 @@ pub(crate) fn to_string(err: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn worktree_rpc_timeouts_cover_declared_lifecycle_stages() {
+        assert_eq!(
+            daemon_worktree_timeout(WORKTREE_METHOD_CREATE),
+            Duration::from_secs(1_200)
+        );
+        assert_eq!(
+            daemon_worktree_timeout(WORKTREE_METHOD_MOVE),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            daemon_worktree_timeout(WORKTREE_METHOD_REMOVE),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            daemon_worktree_timeout(WORKTREE_METHOD_RECONCILE),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            daemon_worktree_timeout(WORKTREE_METHOD_LIST),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            daemon_worktree_timeout(WORKTREE_METHOD_CANCEL),
+            Duration::from_secs(10)
+        );
+    }
 
     #[test]
     fn snapshot_and_diff_return_old_and_new_contents() {

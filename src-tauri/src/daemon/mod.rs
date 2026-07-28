@@ -10,13 +10,26 @@ pub mod session;
 mod terminal_history;
 
 use crate::agent_runtime::WorktreeManager;
+use crate::app::git::worktree::{WorktreeStorage, WorktreeStorageMode};
+use crate::app::git::worktree_lifecycle::{WorktreeCreateResult, WorktreeLifecycleService};
+use crate::app::git::worktree_registry::{
+    WorktreeBlockerKind, WorktreeCheckpointRequest, WorktreeCreateRequest, WorktreeIdRequest,
+    WorktreeImportRequest, WorktreeListRequest, WorktreeMoveRequest, WorktreeOperationIdRequest,
+    WorktreeOrigin, WorktreeProjection, WorktreeReconcileRequest, WorktreeRegistry,
+    WorktreeRemovalPreflightRequest, WorktreeRemovalResult, WorktreeRemoveRequest,
+    WorktreeReviewCommentRequest, WorktreeRuntimeBlockers, WorktreeSetRequest,
+    WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT, WORKTREE_METHOD_CHECKPOINTS,
+    WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT, WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE,
+    WORKTREE_METHOD_PREFLIGHT_REMOVE, WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE,
+    WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
+};
 use crate::computer_use::{
     ActionRequest, ActionTarget, ApprovalRequest, ComputerAction as ProviderComputerAction,
     HostRequest, HostResponseBody, Point, ProviderError, ProviderHostSupervisor, SnapshotLimits,
     SnapshotRequest, WindowIdentity, WindowsProcessSpawner,
 };
 use crate::control_plane::{ControlCommand, ControlPlane};
-use crate::daemon::automation::AutomationService;
+use crate::daemon::automation::{AutomationService, AutomationWorktreeProvision};
 use crate::daemon::persistence::{load_sessions, save_sessions};
 use crate::daemon::pty::{Pane, SharedChild};
 use crate::daemon::session::{
@@ -28,18 +41,19 @@ use crate::daemon::terminal_history::{
 use crate::dedicated_cli::{
     AutomationAction, CliControlRequest, Command as DedicatedCommand, ComputerAction,
     OrchestrationAction, RemoteAction, SkillAction, TerminalAction, WorkspaceAction,
+    WorktreeAction,
 };
 use crate::orchestration::adapters::AgentProvider;
 use crate::orchestration::{
-    AcknowledgeEventsRequest, AgentLaunchFailureRequest, BindDispatchRequest, CoordinatorError,
-    CoordinatorService, CreateGateRequest, CreateRunRequest, CreateTaskRequest,
-    DispatchCleanupTarget, DispatchLaunchOutcome, DispatchLaunchPreparation, DispatchLaunchRequest,
-    DispatchLaunchResult, DispatchLaunchStatus, DispatchResourceRecord,
-    DispatchResourceReservation, DispatchStatus, GateStatus, HeartbeatRequest,
-    LaunchFailureRequest, LifecycleIdentity, MergeAppliedRequest, MessageType, PostMessageRequest,
-    ReconcileLivenessRequest, RegisterAgentRequest, ResolveGateRequest, ResourceDisposition,
-    RetryTaskRequest, RunDecisionRequest, RunRevisionRequest, UpdateTaskRequest, WorkerDoneRequest,
-    WorktreeMode,
+    AcknowledgeEventsRequest, AgentLaunchFailureRequest, BindDispatchRequest,
+    CleanupAppliedRequest, CoordinatorError, CoordinatorService, CreateGateRequest,
+    CreateRunRequest, CreateTaskRequest, DispatchCleanupTarget, DispatchLaunchOutcome,
+    DispatchLaunchPreparation, DispatchLaunchRequest, DispatchLaunchResult, DispatchLaunchStatus,
+    DispatchResourceRecord, DispatchResourceReservation, DispatchStatus, GateMutationResult,
+    GateStatus, HeartbeatRequest, LaunchFailureRequest, LifecycleIdentity, MergeAppliedRequest,
+    MessageType, PostMessageRequest, ReconcileLivenessRequest, RegisterAgentRequest,
+    ResolveGateRequest, ResourceDisposition, RetryTaskRequest, RunDecisionRequest,
+    RunRevisionRequest, UpdateTaskRequest, WorkerDoneRequest, WorktreeAssignment, WorktreeMode,
 };
 use crate::protocol::{
     read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneConfig,
@@ -53,10 +67,11 @@ use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions}
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, LazyLock, Mutex, MutexGuard,
@@ -231,12 +246,17 @@ fn run_inner() -> Result<()> {
     let state = Arc::new(Mutex::new(DaemonState::new()));
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
     let control = Arc::new(ControlPlane::open(&paths.data_dir)?);
+    let worktree_registry = Arc::new(WorktreeRegistry::new(Arc::clone(&control)));
+    let worktree_lifecycle = Arc::new(WorktreeLifecycleService::native(Arc::clone(
+        &worktree_registry,
+    )));
     let coordinator = Arc::new(CoordinatorService::new(Arc::clone(&control)));
     let worktrees = Arc::new(WorktreeManager::new(
         paths
             .data_dir
             .join("automation-artifacts")
             .join("worktrees"),
+        Arc::clone(&worktree_registry),
     )?);
     reconcile_orchestration_startup(&state, &coordinator, &worktrees)?;
     let automation = Arc::new(AutomationService::open(
@@ -246,6 +266,7 @@ fn run_inner() -> Result<()> {
             .join("vibelink-control.sqlite3"),
         paths.data_dir.join("automation-artifacts"),
         Arc::clone(&coordinator),
+        Arc::clone(&worktree_registry),
     )?);
     let computer_host_executable = std::env::var_os("VIBELINK_COMPUTER_HOST_EXE")
         .map(PathBuf::from)
@@ -269,6 +290,9 @@ fn run_inner() -> Result<()> {
         Arc::clone(&automation),
         Arc::clone(&state),
         Arc::clone(&shutdown),
+        Arc::clone(&sessions_path),
+        Arc::clone(&worktree_lifecycle),
+        Arc::clone(&worktrees),
     )?;
     start_remote_pane_lease_expiry_sweep(Arc::clone(&state), Arc::clone(&shutdown))?;
     let socket_name = paths::socket_name_string();
@@ -287,6 +311,8 @@ fn run_inner() -> Result<()> {
                 let shutdown = Arc::clone(&shutdown);
                 let control = Arc::clone(&control);
                 let coordinator = Arc::clone(&coordinator);
+                let worktree_registry = Arc::clone(&worktree_registry);
+                let worktree_lifecycle = Arc::clone(&worktree_lifecycle);
                 let computer = computer.clone();
                 let automation = Arc::clone(&automation);
                 let worktrees = Arc::clone(&worktrees);
@@ -302,6 +328,8 @@ fn run_inner() -> Result<()> {
                             sessions_path,
                             control,
                             coordinator,
+                            worktree_registry,
+                            worktree_lifecycle,
                             worktrees,
                             automation,
                             remote,
@@ -322,6 +350,7 @@ fn run_inner() -> Result<()> {
     }
     drop(lock_file);
 
+
     Ok(())
 }
 
@@ -329,12 +358,21 @@ fn start_automation_scheduler(
     automation: Arc<AutomationService>,
     state: SharedState,
     shutdown: Arc<AtomicBool>,
+    sessions_path: Arc<PathBuf>,
+    worktree_lifecycle: Arc<WorktreeLifecycleService>,
+    worktrees: Arc<WorktreeManager>,
 ) -> Result<()> {
     thread::Builder::new()
         .name("vibelink-automation-scheduler".to_string())
         .spawn(move || {
             automation_scheduler_loop(&shutdown, || {
-                run_automation_scheduler_tick(&automation, &state);
+                run_automation_scheduler_tick(
+                    &automation,
+                    &state,
+                    &sessions_path,
+                    &worktree_lifecycle,
+                    &worktrees,
+                );
             });
         })?;
     Ok(())
@@ -370,7 +408,13 @@ fn wait_for_automation_scheduler_shutdown(shutdown: &AtomicBool, timeout: Durati
     }
 }
 
-fn run_automation_scheduler_tick(automation: &Arc<AutomationService>, state: &SharedState) {
+fn run_automation_scheduler_tick(
+    automation: &Arc<AutomationService>,
+    state: &SharedState,
+    sessions_path: &Arc<PathBuf>,
+    worktree_lifecycle: &Arc<WorktreeLifecycleService>,
+    worktrees: &Arc<WorktreeManager>,
+) {
     let claims = match automation.claim_due(orchestration_now_millis()) {
         Ok(claims) => claims,
         Err(error) => {
@@ -386,6 +430,10 @@ fn run_automation_scheduler_tick(automation: &Arc<AutomationService>, state: &Sh
             .and_then(|record| automation_workspace(state, &record.session_id).ok())
             .unwrap_or_else(|| PathBuf::from("__vibelink_missing_workspace__"));
         let automation = Arc::clone(automation);
+        let state = Arc::clone(state);
+        let sessions_path = Arc::clone(sessions_path);
+        let worktree_lifecycle = Arc::clone(worktree_lifecycle);
+        let worktrees = Arc::clone(worktrees);
         let spawn_run_id = claim.id.clone();
         let execution_run_id = spawn_run_id.clone();
         let thread_name = format!(
@@ -393,7 +441,22 @@ fn run_automation_scheduler_tick(automation: &Arc<AutomationService>, state: &Sh
             spawn_run_id.get(..8).unwrap_or(&spawn_run_id)
         );
         if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
-            if let Err(error) = automation.execute_and_notify(&claim, &workspace) {
+            if let Err(error) = automation.execute_and_notify_with_worktree(
+                &claim,
+                &workspace,
+                |record, claim, workspace, planned| {
+                    provision_automation_worktree(
+                        &state,
+                        &sessions_path,
+                        &worktree_lifecycle,
+                        &worktrees,
+                        record,
+                        claim,
+                        workspace,
+                        planned,
+                    )
+                },
+            ) {
                 error!(automation_run_id = %execution_run_id, ?error, "automation run failed");
             }
         }) {
@@ -579,7 +642,6 @@ fn cleanup_dispatch_target(
     worktrees: &WorktreeManager,
     target: &DispatchCleanupTarget,
     reason: &str,
-    cleanup_worktree: bool,
 ) -> (Option<DispatchResourceRecord>, Vec<String>) {
     let mut resource = target.resources.clone().unwrap_or_else(|| {
         let repository_root = automation_workspace(state, &target.session_id)
@@ -755,76 +817,6 @@ fn cleanup_dispatch_target(
         }
     }
 
-    if cleanup_worktree
-        && matches!(
-            resource.pane_disposition,
-            ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
-        )
-    {
-        if let (Some(repository_root), Some(assignment)) = (
-            resource.repository_root.clone(),
-            resource
-                .worktree
-                .clone()
-                .or_else(|| target.dispatch.worktree.clone()),
-        ) {
-            match worktrees.cleanup(Path::new(&repository_root), &assignment, true) {
-                Ok(()) => {
-                    resource.worktree_disposition = ResourceDisposition::Cleaned;
-                    resource.worktree = None;
-                    resource.launch_path = None;
-                    if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
-                        &target.dispatch.id,
-                        None,
-                        Some(ResourceDisposition::Cleaned),
-                        false,
-                        true,
-                        Some(reason),
-                        None,
-                    ) {
-                        resource = updated;
-                    }
-                }
-                Err(error) => {
-                    let message = bounded_launch_error(&error.to_string());
-                    errors.push(format!("worktree cleanup failed: {message}"));
-                    resource.worktree_disposition = ResourceDisposition::CleanupFailed;
-                    resource.cleanup_error = Some(message.clone());
-                    if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
-                        &target.dispatch.id,
-                        None,
-                        Some(ResourceDisposition::CleanupFailed),
-                        false,
-                        false,
-                        Some(reason),
-                        Some(&message),
-                    ) {
-                        resource = updated;
-                    }
-                }
-            }
-        }
-        if resource.worktree_disposition != ResourceDisposition::Cleaned
-            && resource.repository_root.is_none()
-            && (resource.worktree.is_some() || target.dispatch.worktree.is_some())
-        {
-            let message = "worktree cleanup lacks durable Git-root authority".to_string();
-            errors.push(message.clone());
-            resource.worktree_disposition = ResourceDisposition::CleanupFailed;
-            resource.cleanup_error = Some(message.clone());
-            if let Ok(updated) = coordinator.mark_dispatch_resource_disposition(
-                &target.dispatch.id,
-                None,
-                Some(ResourceDisposition::CleanupFailed),
-                false,
-                false,
-                Some(reason),
-                Some(&message),
-            ) {
-                resource = updated;
-            }
-        }
-    }
     (Some(resource), errors)
 }
 
@@ -834,19 +826,12 @@ fn cleanup_run_resources(
     worktrees: &WorktreeManager,
     run_id: &str,
     reason: &str,
-    cleanup_worktrees: bool,
 ) -> Result<(Vec<DispatchResourceRecord>, Vec<String>)> {
     let mut resources = Vec::new();
     let mut errors = Vec::new();
     for target in coordinator.cleanup_targets_for_run(run_id)? {
-        let (resource, mut target_errors) = cleanup_dispatch_target(
-            state,
-            coordinator,
-            worktrees,
-            &target,
-            reason,
-            cleanup_worktrees,
-        );
+        let (resource, mut target_errors) =
+            cleanup_dispatch_target(state, coordinator, worktrees, &target, reason);
         if let Some(resource) = resource {
             resources.push(resource);
         }
@@ -878,16 +863,9 @@ fn reconcile_orchestration_startup(
                         | "retry_cleanup"
                 )
             });
-        let cleanup_worktree = retained_reason.is_some();
         let cleanup_reason = retained_reason.unwrap_or("daemon_restart");
-        let (resource, mut errors) = cleanup_dispatch_target(
-            state,
-            coordinator,
-            worktrees,
-            &target,
-            cleanup_reason,
-            cleanup_worktree,
-        );
+        let (resource, mut errors) =
+            cleanup_dispatch_target(state, coordinator, worktrees, &target, cleanup_reason);
         if let Some(resource) = resource {
             resources.push(resource);
         }
@@ -980,6 +958,8 @@ fn handle_connection(
     sessions_path: Arc<PathBuf>,
     control: Arc<ControlPlane>,
     coordinator: Arc<CoordinatorService>,
+    worktree_registry: Arc<WorktreeRegistry>,
+    worktree_lifecycle: Arc<WorktreeLifecycleService>,
     worktrees: Arc<WorktreeManager>,
     automation: Arc<AutomationService>,
     remote: Arc<RemoteServer>,
@@ -1070,6 +1050,8 @@ fn handle_connection(
             &tx,
             Arc::clone(&control),
             Arc::clone(&coordinator),
+            Arc::clone(&worktree_registry),
+            Arc::clone(&worktree_lifecycle),
             Arc::clone(&worktrees),
             Arc::clone(&automation),
             Arc::clone(&remote),
@@ -1160,6 +1142,8 @@ fn orchestration_rpc_response(
     state: &SharedState,
     sessions_path: &Path,
     coordinator: &CoordinatorService,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
     worktrees: &WorktreeManager,
     operation_id: Uuid,
     method: &str,
@@ -1169,6 +1153,8 @@ fn orchestration_rpc_response(
         state,
         sessions_path,
         coordinator,
+        registry,
+        lifecycle,
         worktrees,
         operation_id,
         method,
@@ -1215,6 +1201,8 @@ fn dispatch_orchestration_rpc(
     state: &SharedState,
     sessions_path: &Path,
     coordinator: &CoordinatorService,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
     worktrees: &WorktreeManager,
     operation_id: Uuid,
     method: &str,
@@ -1251,15 +1239,9 @@ fn dispatch_orchestration_rpc(
                 &request.run_id,
                 request.expected_run_revision,
             )?;
-            let (resources, cleanup_errors) = cleanup_run_resources(
-                state,
-                coordinator,
-                worktrees,
-                &request.run_id,
-                "cancel",
-                true,
-            )
-            .map_err(orchestration_internal_error)?;
+            let (resources, cleanup_errors) =
+                cleanup_run_resources(state, coordinator, worktrees, &request.run_id, "cancel")
+                    .map_err(orchestration_internal_error)?;
             require_workers_stopped(&resources, &cleanup_errors)?;
             persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
             let run = coordinator
@@ -1269,24 +1251,6 @@ fn dispatch_orchestration_rpc(
         }
         "run.accept" => {
             let request: RunDecisionRequest = parse_orchestration_payload(payload_json)?;
-            let cleanup_pending = coordinator
-                .cleanup_targets_for_run(&request.run_id)
-                .map_err(orchestration_coordinator_error)?
-                .into_iter()
-                .any(|target| {
-                    target.dispatch.worktree.is_some()
-                        && !target.resources.as_ref().is_some_and(|resource| {
-                            resource.worktree_disposition == ResourceDisposition::Cleaned
-                        })
-                });
-            if cleanup_pending {
-                return Err(OrchestrationRpcError {
-                    code: "cleanup_pending".to_string(),
-                    message:
-                        "Run worktrees must be merged or rejected and cleaned before acceptance."
-                            .to_string(),
-                });
-            }
             coordinator_value(coordinator.accept_run(operation_id, request))
         }
         "run.reject" => {
@@ -1313,15 +1277,9 @@ fn dispatch_orchestration_rpc(
                 &request.run_id,
                 request.expected_run_revision,
             )?;
-            let (resources, cleanup_errors) = cleanup_run_resources(
-                state,
-                coordinator,
-                worktrees,
-                &request.run_id,
-                "reject",
-                true,
-            )
-            .map_err(orchestration_internal_error)?;
+            let (resources, cleanup_errors) =
+                cleanup_run_resources(state, coordinator, worktrees, &request.run_id, "reject")
+                    .map_err(orchestration_internal_error)?;
             require_workers_stopped(&resources, &cleanup_errors)?;
             persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
             let decision = coordinator
@@ -1340,6 +1298,8 @@ fn dispatch_orchestration_rpc(
                 state,
                 sessions_path,
                 coordinator,
+                registry,
+                lifecycle,
                 worktrees,
                 operation_id,
                 request,
@@ -1380,14 +1340,8 @@ fn dispatch_orchestration_rpc(
                         .to_string(),
                 });
             }
-            let (resource, cleanup_errors) = cleanup_dispatch_target(
-                state,
-                coordinator,
-                worktrees,
-                &target,
-                "retry_cleanup",
-                true,
-            );
+            let (resource, cleanup_errors) =
+                cleanup_dispatch_target(state, coordinator, worktrees, &target, "retry_cleanup");
             let resources = resource.into_iter().collect::<Vec<_>>();
             require_workers_stopped(&resources, &cleanup_errors)?;
             persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
@@ -1399,113 +1353,90 @@ fn dispatch_orchestration_rpc(
         "gate.create" => mutation!(CreateGateRequest, create_gate),
         "gate.resolve" => {
             let request: ResolveGateRequest = parse_orchestration_payload(payload_json)?;
-            let gate = coordinator
+            let prior_gate = coordinator
                 .gate(&request.gate_id)
                 .map_err(orchestration_coordinator_error)?;
-            if gate.status != GateStatus::Pending {
-                let mutation = coordinator
-                    .resolve_gate(operation_id, request)
+            let mutation = if prior_gate.status == GateStatus::Pending {
+                coordinator
+                    .resolve_gate(operation_id, request.clone())
+                    .map_err(orchestration_coordinator_error)?
+            } else {
+                let mut recorded_resolution = prior_gate.resolution.clone().unwrap_or(Value::Null);
+                if let Some(object) = recorded_resolution.as_object_mut() {
+                    object.remove("applied");
+                }
+                if recorded_resolution != request.resolution {
+                    return Err(OrchestrationRpcError {
+                        code: "conflict".to_string(),
+                        message: "gate was already resolved with a different decision".to_string(),
+                    });
+                }
+                let run = coordinator
+                    .run(&prior_gate.run_id)
                     .map_err(orchestration_coordinator_error)?;
-                let resources = gate
+                let dispatch = prior_gate
                     .dispatch_id
                     .as_deref()
-                    .and_then(|dispatch_id| {
-                        coordinator.cleanup_target_for_dispatch(dispatch_id).ok()
+                    .map(|dispatch_id| {
+                        coordinator
+                            .dispatches(&prior_gate.run_id)
+                            .map_err(orchestration_coordinator_error)?
+                            .into_iter()
+                            .find(|dispatch| dispatch.id == dispatch_id)
+                            .ok_or_else(|| OrchestrationRpcError {
+                                code: "not_found".to_string(),
+                                message: format!("dispatch not found: {dispatch_id}"),
+                            })
                     })
-                    .and_then(|target| target.resources)
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                return Ok(
-                    json!({ "mutation": mutation, "resources": resources, "cleanupErrors": [] }),
-                );
-            }
-            validate_run_cleanup_revision(
-                coordinator,
-                &gate.run_id,
-                request.expected_run_revision,
-            )?;
-            let decision = request.resolution.get("decision").and_then(Value::as_str);
-            let mut resources = Vec::new();
-            let mut cleanup_errors = Vec::new();
-            if gate.gate_type == "merge" && decision == Some("reject") {
-                if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
-                    let target = coordinator
-                        .cleanup_target_for_dispatch(dispatch_id)
-                        .map_err(orchestration_coordinator_error)?;
-                    let (resource, errors) = cleanup_dispatch_target(
-                        state,
-                        coordinator,
-                        worktrees,
-                        &target,
-                        "gate_reject",
-                        true,
-                    );
-                    if let Some(resource) = resource {
-                        resources.push(resource);
-                    }
-                    cleanup_errors.extend(errors);
-                    require_workers_stopped(&resources, &cleanup_errors)?;
-                    persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+                    .transpose()?;
+                GateMutationResult {
+                    run,
+                    gate: prior_gate,
+                    dispatch,
+                    cleanup_gate: None,
                 }
+            };
+            let decision = mutation
+                .gate
+                .resolution
+                .as_ref()
+                .and_then(|value| value.get("decision"))
+                .and_then(Value::as_str);
+            if mutation.gate.gate_type != "cleanup" || decision != Some("approve") {
+                return Ok(json!({
+                    "mutation": mutation,
+                    "resources": [],
+                    "cleanupErrors": [],
+                }));
             }
-            let mutation = coordinator
-                .resolve_gate(operation_id, request)
-                .map_err(orchestration_coordinator_error)?;
-            Ok(
-                json!({ "mutation": mutation, "resources": resources, "cleanupErrors": cleanup_errors }),
-            )
+            let (mutation, resources, removal) = apply_approved_cleanup(
+                state,
+                sessions_path,
+                coordinator,
+                registry,
+                lifecycle,
+                worktrees,
+                operation_id,
+                mutation,
+            )?;
+            Ok(json!({
+                "mutation": mutation,
+                "resources": resources,
+                "removal": removal,
+                "cleanupErrors": [],
+            }))
         }
         "merge.applied" => {
             let request: MergeAppliedRequest = parse_orchestration_payload(payload_json)?;
-            let gate = coordinator
-                .gate(&request.gate_id)
+            coordinator
+                .merge_authorization(&request.gate_id)
                 .map_err(orchestration_coordinator_error)?;
-            let applied_commit = gate
-                .resolution
-                .as_ref()
-                .filter(|resolution| {
-                    resolution.get("applied").and_then(Value::as_bool) == Some(true)
-                })
-                .and_then(|resolution| resolution.get("commitId"))
-                .and_then(Value::as_str);
-            if let Some(applied_commit) = applied_commit {
-                if applied_commit != request.commit_id {
-                    return Err(OrchestrationRpcError {
-                        code: "conflict".to_string(),
-                        message: "Merge gate was already applied with a different commit identity."
-                            .to_string(),
-                    });
-                }
-            } else {
-                validate_run_cleanup_revision(
-                    coordinator,
-                    &gate.run_id,
-                    request.expected_run_revision,
-                )?;
-                let cleanup_already_completed = gate
-                    .dispatch_id
-                    .as_deref()
-                    .and_then(|dispatch_id| {
-                        coordinator.cleanup_target_for_dispatch(dispatch_id).ok()
-                    })
-                    .and_then(|target| target.resources)
-                    .is_some_and(|resource| {
-                        resource.cleanup_reason.as_deref() == Some("merge_applied")
-                            && resource.worktree_disposition == ResourceDisposition::Cleaned
-                            && matches!(
-                                resource.pane_disposition,
-                                ResourceDisposition::Cleaned | ResourceDisposition::NotCreated
-                            )
-                    });
-                if !cleanup_already_completed {
-                    coordinator
-                        .merge_authorization(&request.gate_id)
-                        .map_err(orchestration_coordinator_error)?;
-                }
-            }
+            let mutation = coordinator
+                .mark_merge_applied(operation_id, request)
+                .map_err(orchestration_coordinator_error)?;
             let mut resources = Vec::new();
             let mut cleanup_errors = Vec::new();
-            if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
+            if let Some(dispatch_id) = mutation.gate.dispatch_id.as_deref() {
                 let target = coordinator
                     .cleanup_target_for_dispatch(dispatch_id)
                     .map_err(orchestration_coordinator_error)?;
@@ -1514,22 +1445,17 @@ fn dispatch_orchestration_rpc(
                     coordinator,
                     worktrees,
                     &target,
-                    "merge_applied",
-                    true,
+                    "merge_applied_worker_stop",
                 );
-                if let Some(resource) = resource {
-                    resources.push(resource);
-                }
+                resources.extend(resource);
                 cleanup_errors.extend(errors);
+                persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
             }
-            require_workers_stopped(&resources, &cleanup_errors)?;
-            persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
-            let mutation = coordinator
-                .mark_merge_applied(operation_id, request)
-                .map_err(orchestration_coordinator_error)?;
-            Ok(
-                json!({ "mutation": mutation, "resources": resources, "cleanupErrors": cleanup_errors }),
-            )
+            Ok(json!({
+                "mutation": mutation,
+                "resources": resources,
+                "cleanupErrors": cleanup_errors,
+            }))
         }
         "message.post" => mutation!(PostMessageRequest, post_message),
         "events.acknowledge" => mutation!(AcknowledgeEventsRequest, acknowledge_events),
@@ -1601,6 +1527,179 @@ fn dispatch_orchestration_rpc(
             message: format!("unknown orchestration method: {method}"),
         }),
     }
+}
+
+fn apply_approved_cleanup(
+    state: &SharedState,
+    sessions_path: &Path,
+    coordinator: &CoordinatorService,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
+    worktrees: &WorktreeManager,
+    operation_id: Uuid,
+    mutation: GateMutationResult,
+) -> std::result::Result<
+    (
+        GateMutationResult,
+        Vec<DispatchResourceRecord>,
+        Option<WorktreeRemovalResult>,
+    ),
+    OrchestrationRpcError,
+> {
+    if mutation
+        .gate
+        .resolution
+        .as_ref()
+        .and_then(|value| value.get("applied"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Ok((mutation, Vec::new(), None));
+    }
+    let authorization = coordinator
+        .cleanup_authorization(&mutation.gate.id)
+        .map_err(orchestration_coordinator_error)?;
+    let dispatch_id =
+        mutation
+            .gate
+            .dispatch_id
+            .as_deref()
+            .ok_or_else(|| OrchestrationRpcError {
+                code: "conflict".to_string(),
+                message: "cleanup gate has no dispatch".to_string(),
+            })?;
+    let target = coordinator
+        .cleanup_target_for_dispatch(dispatch_id)
+        .map_err(orchestration_coordinator_error)?;
+    let (resource, cleanup_errors) =
+        cleanup_dispatch_target(state, coordinator, worktrees, &target, "cleanup_approved");
+    let mut resources = resource.into_iter().collect::<Vec<_>>();
+    require_workers_stopped(&resources, &cleanup_errors)?;
+    persist_state(state, sessions_path).map_err(orchestration_internal_error)?;
+
+    let worktree_id = authorization
+        .worktree
+        .worktree_id
+        .as_deref()
+        .ok_or_else(|| OrchestrationRpcError {
+            code: "conflict".to_string(),
+            message: "cleanup requires a stable worktree id".to_string(),
+        })?;
+    let expected_instance_id = authorization
+        .worktree
+        .instance_id
+        .as_deref()
+        .ok_or_else(|| OrchestrationRpcError {
+            code: "conflict".to_string(),
+            message: "cleanup requires an expected worktree instance id".to_string(),
+        })?;
+    let acknowledged_blockers = authorization
+        .acknowledged_blockers
+        .iter()
+        .map(|blocker| {
+            serde_json::from_value::<WorktreeBlockerKind>(Value::String(blocker.clone())).map_err(
+                |error| OrchestrationRpcError {
+                    code: "invalid_argument".to_string(),
+                    message: format!("invalid cleanup blocker acknowledgement {blocker}: {error}"),
+                },
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let acknowledged_set = acknowledged_blockers
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    if acknowledged_set.len() != acknowledged_blockers.len() {
+        return Err(OrchestrationRpcError {
+            code: "invalid_argument".to_string(),
+            message: "cleanup blocker acknowledgements must not contain duplicates".to_string(),
+        });
+    }
+    let preflight_request = WorktreeRemovalPreflightRequest {
+        worktree_id: worktree_id.to_string(),
+        delete_branch: authorization.delete_branch,
+    };
+    let runtime = worktree_runtime_blockers(state, registry, worktree_id)
+        .map_err(orchestration_internal_error)?;
+    let preflight = registry
+        .removal_preflight(&preflight_request, runtime)
+        .map_err(orchestration_internal_error)?;
+    if authorization.delete_branch
+        && preflight
+            .blockers
+            .iter()
+            .any(|blocker| blocker.kind == WorktreeBlockerKind::Unpushed)
+    {
+        return Err(OrchestrationRpcError {
+            code: "conflict".to_string(),
+            message: "cleanup will not delete an unpushed branch; approve cleanup with deleteBranch false"
+                .to_string(),
+        });
+    }
+    let expected_acknowledgements = if authorization.force {
+        preflight
+            .blockers
+            .iter()
+            .filter(|blocker| !blocker.hard)
+            .map(|blocker| blocker.kind)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    if acknowledged_set != expected_acknowledgements {
+        return Err(OrchestrationRpcError {
+            code: "conflict".to_string(),
+            message: "cleanup blocker acknowledgements do not exactly match current preflight"
+                .to_string(),
+        });
+    }
+    let remove_operation_id = derived_operation_id(operation_id, dispatch_id, "worktree-remove");
+    let remove_request = WorktreeRemoveRequest {
+        operation_id: remove_operation_id,
+        worktree_id: worktree_id.to_string(),
+        expected_instance_id: expected_instance_id.to_string(),
+        force: authorization.force,
+        delete_branch: authorization.delete_branch,
+        provider_merged_head: None,
+        acknowledged_blockers,
+    };
+    let removal: WorktreeRemovalResult = serde_json::from_value(
+        dispatch_worktree_request(
+            state,
+            registry,
+            lifecycle,
+            sessions_path,
+            remove_operation_id,
+            WORKTREE_METHOD_REMOVE,
+            &serde_json::to_string(&remove_request)
+                .map_err(|error| orchestration_internal_error(error.into()))?,
+        )
+        .map_err(orchestration_internal_error)?,
+    )
+    .map_err(|error| orchestration_internal_error(error.into()))?;
+    let resource = coordinator
+        .mark_dispatch_resource_disposition(
+            dispatch_id,
+            None,
+            Some(ResourceDisposition::Cleaned),
+            false,
+            true,
+            Some("cleanup_approved"),
+            None,
+        )
+        .map_err(orchestration_coordinator_error)?;
+    resources.clear();
+    resources.push(resource);
+    let mutation = coordinator
+        .mark_cleanup_applied(
+            derived_operation_id(operation_id, dispatch_id, "cleanup-applied"),
+            CleanupAppliedRequest {
+                gate_id: mutation.gate.id,
+                expected_run_revision: mutation.run.revision,
+            },
+        )
+        .map_err(orchestration_coordinator_error)?;
+    Ok((mutation, resources, Some(removal)))
 }
 
 fn parse_orchestration_payload<T: for<'de> Deserialize<'de>>(
@@ -1696,6 +1795,8 @@ fn launch_ready_dispatches(
     state: &SharedState,
     sessions_path: &Path,
     coordinator: &CoordinatorService,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
     worktrees: &WorktreeManager,
     operation_id: Uuid,
     mut request: DispatchLaunchRequest,
@@ -1715,7 +1816,7 @@ fn launch_ready_dispatches(
         DispatchLaunchPreparation::Replay(result) => return Ok(result),
         DispatchLaunchPreparation::Intent(plan) => plan,
     };
-    let session_id =
+    let parent_session_id =
         Uuid::parse_str(&plan.run.session_id).map_err(|error| OrchestrationRpcError {
             code: "internal".to_string(),
             message: format!("run session identity is invalid: {error}"),
@@ -1772,34 +1873,106 @@ fn launch_ready_dispatches(
                 .map_err(|message| anyhow::anyhow!(message.clone()))?
                 .canonicalize()
                 .context("canonicalize orchestration workspace authority")?;
-            let (authority, planned_worktree, planned_launch_path) =
-                if spec.worktree_mode == WorktreeMode::Worktree {
-                    failure_code = "worktree_authority";
-                    let authority = worktrees.authority(&workspace)?;
-                    let assignment = current
-                        .resources
-                        .as_ref()
-                        .and_then(|resource| resource.worktree.clone())
-                        .unwrap_or(worktrees.plan(
-                            &authority,
-                            &request.run_id,
-                            &task.id,
-                            current.attempt,
-                        )?);
-                    let launch_path = PathBuf::from(&assignment.worktree_path)
-                        .join(&authority.relative_prefix)
-                        .to_string_lossy()
-                        .to_string();
-                    (Some(authority), Some(assignment), launch_path)
-                } else {
-                    (None, None, workspace.to_string_lossy().to_string())
-                };
+            let resolved_authority = worktrees.authority(&workspace)?;
+            let (authority, mut planned_worktree) = if spec.worktree_mode == WorktreeMode::Worktree
+            {
+                failure_code = "worktree_authority";
+                let mut assignment = current
+                    .resources
+                    .as_ref()
+                    .and_then(|resource| resource.worktree.clone())
+                    .unwrap_or(worktrees.plan(
+                        &resolved_authority,
+                        &request.run_id,
+                        &task.id,
+                        current.attempt,
+                    )?);
+                if assignment.base_revision.trim().is_empty() {
+                    assignment.base_revision =
+                        exact_worktree_base_snapshot(&resolved_authority.repository_root)?;
+                }
+                (Some(resolved_authority), Some(assignment))
+            } else {
+                (None, None)
+            };
+
+            let mut dispatch_session_id = parent_session_id;
+            if let (Some(authority), Some(assignment)) =
+                (authority.as_ref(), planned_worktree.as_ref())
+            {
+                failure_code = "worktree_create";
+                if assignment.worktree_id.is_none() || assignment.instance_id.is_none() {
+                    let create_operation_id =
+                        derived_operation_id(operation_id, &current.id, "worktree-create");
+                    let create_request = WorktreeCreateRequest {
+                        operation_id: create_operation_id,
+                        repository_path: authority.repository_root_string(),
+                        parent_session_id: parent_session_id.to_string(),
+                        parent_worktree_id: None,
+                        name: format!(
+                            "run-{}-task-{}",
+                            short_identity(&request.run_id),
+                            short_identity(&task.id)
+                        ),
+                        start_ref: assignment.base_revision.clone(),
+                        branch: Some(assignment.branch.clone()),
+                        storage: WorktreeStorage {
+                            mode: WorktreeStorageMode::Custom,
+                            drive: String::new(),
+                            folder_name: String::new(),
+                            custom_root: worktrees.root().to_string_lossy().to_string(),
+                            group_by_repository: false,
+                        },
+                        fetch: false,
+                        setup_policy: "skip".to_string(),
+                        sparse_preset: None,
+                        linked_files: Vec::new(),
+                        profile_id: spec.profile.clone(),
+                        initial_agent: None,
+                        initial_prompt: Some(task.description.clone()),
+                        origin: WorktreeOrigin::Orchestration,
+                    };
+                    let created: WorktreeCreateResult =
+                        serde_json::from_value(dispatch_worktree_request(
+                            state,
+                            registry,
+                            lifecycle,
+                            sessions_path,
+                            create_operation_id,
+                            WORKTREE_METHOD_CREATE,
+                            &serde_json::to_string(&create_request)?,
+                        )?)?;
+                    dispatch_session_id = Uuid::parse_str(&created.session_id)
+                        .context("parse created worktree session id")?;
+                    planned_worktree = Some(WorktreeAssignment {
+                        worktree_id: Some(created.worktree.id),
+                        instance_id: Some(created.worktree.instance_id),
+                        base_revision: assignment.base_revision.clone(),
+                        branch: created.worktree.branch,
+                        worktree_path: created.worktree.worktree_path,
+                    });
+                } else if let Some(resource) = current.resources.as_ref() {
+                    dispatch_session_id = Uuid::parse_str(&resource.session_id)
+                        .context("parse persisted dispatch session id")?;
+                }
+            }
+
+            let cwd = if let (Some(authority), Some(assignment)) =
+                (authority.as_ref(), planned_worktree.as_ref())
+            {
+                worktrees
+                    .launch_path(authority, assignment)?
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                workspace.to_string_lossy().to_string()
+            };
             let mut resource = coordinator
                 .reserve_dispatch_resources(
                     operation_id,
                     DispatchResourceReservation {
                         dispatch_id: current.id.clone(),
-                        session_id: session_id.to_string(),
+                        session_id: dispatch_session_id.to_string(),
                         repository_root: authority
                             .as_ref()
                             .map(|value| value.repository_root_string()),
@@ -1807,7 +1980,7 @@ fn launch_ready_dispatches(
                             .as_ref()
                             .map(|value| value.relative_prefix_string())
                             .unwrap_or_default(),
-                        launch_path: Some(planned_launch_path),
+                        launch_path: Some(cwd.clone()),
                         worktree: planned_worktree.clone(),
                     },
                 )
@@ -1822,13 +1995,10 @@ fn launch_ready_dispatches(
                     "prior dispatch resources require successful cleanup before relaunch"
                 );
             }
-
-            let cwd = if let (Some(authority), Some(assignment)) =
-                (authority.as_ref(), planned_worktree.as_ref())
-            {
-                failure_code = "worktree_create";
-                worktrees.materialize(authority, assignment)?;
-                let launch_path = worktrees.launch_path(authority, assignment)?;
+            if let Some(assignment) = planned_worktree.as_ref() {
+                resource = coordinator
+                    .update_dispatch_worktree(&current.id, operation_id, assignment)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 resource = coordinator
                     .mark_dispatch_resource_disposition(
                         &current.id,
@@ -1840,10 +2010,7 @@ fn launch_ready_dispatches(
                         None,
                     )
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                launch_path.to_string_lossy().to_string()
-            } else {
-                workspace.to_string_lossy().to_string()
-            };
+            }
 
             failure_code = "agent_register";
             let agent = coordinator
@@ -1877,8 +2044,36 @@ fn launch_ready_dispatches(
                     1,
                 )
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let capsule = orchestration_context_capsule(
+                &plan.run,
+                task,
+                &tasks,
+                &current.id,
+                &agent.id,
+                &next_pane_id.to_string(),
+                &parent_session_id.to_string(),
+                &dispatch_session_id.to_string(),
+                authority
+                    .as_ref()
+                    .map(|value| value.repository_root_string())
+                    .as_deref(),
+                authority
+                    .as_ref()
+                    .map(|value| value.relative_prefix_string())
+                    .as_deref(),
+                planned_worktree.as_ref(),
+                &coordinator
+                    .gates(&request.run_id)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            )?;
+            let context_capsule_path = write_orchestration_context_capsule(
+                worktrees.root(),
+                &current.id,
+                operation_id,
+                &capsule,
+            )?;
             let existing_pane = lock_state(state)
-                .pane_metas(session_id)?
+                .pane_metas(dispatch_session_id)?
                 .into_iter()
                 .find(|pane| pane.id == next_pane_id && pane.alive);
             let pane = if let Some(pane) = existing_pane {
@@ -1888,7 +2083,7 @@ fn launch_ready_dispatches(
                 spawn_orchestration_pane_for_session(
                     Arc::clone(state),
                     sessions_path.to_path_buf(),
-                    session_id,
+                    dispatch_session_id,
                     PaneConfig {
                         pane_id: next_pane_id,
                         shell: Some("cmd.exe".to_string()),
@@ -1904,7 +2099,14 @@ fn launch_ready_dispatches(
                             ("VIBELINK_TASK_ID".to_string(), task.id.clone()),
                             ("VIBELINK_DISPATCH_ID".to_string(), current.id.clone()),
                             ("VIBELINK_AGENT_INSTANCE_ID".to_string(), agent.id.clone()),
-                            ("VIBELINK_SESSION_ID".to_string(), session_id.to_string()),
+                            (
+                                "VIBELINK_SESSION_ID".to_string(),
+                                dispatch_session_id.to_string(),
+                            ),
+                            (
+                                "VIBELINK_CONTEXT_CAPSULE_PATH".to_string(),
+                                context_capsule_path,
+                            ),
                         ],
                         title: Some(task.title.clone()),
                         icon: Some("bot".to_string()),
@@ -1921,7 +2123,7 @@ fn launch_ready_dispatches(
                 .resource_targets()
                 .into_iter()
                 .find(|(owner_session, pane_id, _)| {
-                    *owner_session == session_id && *pane_id == pane.id
+                    *owner_session == dispatch_session_id && *pane_id == pane.id
                 })
                 .and_then(|(_, _, root_pid)| root_pid)
                 .context("orchestration pane has no project-owned root process identity")?;
@@ -1939,7 +2141,7 @@ fn launch_ready_dispatches(
                 )
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             if !lock_state(state)
-                .pane_metas(session_id)?
+                .pane_metas(dispatch_session_id)?
                 .into_iter()
                 .any(|current_pane| current_pane.id == pane.id && current_pane.alive)
             {
@@ -1995,7 +2197,6 @@ fn launch_ready_dispatches(
                             worktrees,
                             &target,
                             "launch_failure",
-                            true,
                         );
                         resource = cleaned;
                         if !cleanup_errors.is_empty() {
@@ -2078,10 +2279,7 @@ fn launch_ready_dispatches(
         message: error.to_string(),
     })?;
     if spawned_any {
-        notify_session_changed(state, session_id).map_err(|error| OrchestrationRpcError {
-            code: "internal".to_string(),
-            message: error.to_string(),
-        })?;
+        notify_all_sessions_changed(state);
     }
     let result = DispatchLaunchResult {
         run: coordinator
@@ -2094,6 +2292,195 @@ fn launch_ready_dispatches(
     coordinator
         .complete_dispatch_launch(operation_id, &request, &result)
         .map_err(orchestration_coordinator_error)
+}
+const ORCHESTRATION_CONTEXT_CAPSULE_MAX_BYTES: usize = 16 * 1024;
+fn exact_worktree_base_snapshot(repository: &Path) -> Result<String> {
+    let run = |arguments: &[&str]| -> Result<String> {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(repository)
+            .output()
+            .with_context(|| format!("run git {}", arguments.join(" ")))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {} failed: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let snapshot = run(&["stash", "create"])?;
+    if snapshot.is_empty() {
+        run(&["rev-parse", "HEAD"])
+    } else {
+        Ok(snapshot)
+    }
+}
+
+fn short_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(8)
+        .collect()
+}
+
+fn bounded_context_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn orchestration_context_capsule(
+    run: &crate::orchestration::RunRecord,
+    task: &crate::orchestration::TaskRecord,
+    tasks: &[crate::orchestration::TaskRecord],
+    dispatch_id: &str,
+    agent_instance_id: &str,
+    pane_id: &str,
+    parent_session_id: &str,
+    session_id: &str,
+    repository_root: Option<&str>,
+    relative_prefix: Option<&str>,
+    worktree: Option<&WorktreeAssignment>,
+    gates: &[crate::orchestration::DecisionGateRecord],
+) -> Result<String> {
+    let dependency_results = task
+        .dependencies
+        .iter()
+        .filter_map(|dependency_id| {
+            tasks
+                .iter()
+                .find(|candidate| candidate.id == *dependency_id)
+        })
+        .take(8)
+        .map(|dependency| {
+            json!({
+                "taskId": dependency.id,
+                "status": dependency.status,
+                "result": dependency.result.as_ref().map(|result| {
+                    bounded_context_text(&result.to_string(), 512)
+                }),
+            })
+        })
+        .collect::<Vec<_>>();
+    let gate_state = gates
+        .iter()
+        .filter(|gate| {
+            gate.task_id.as_deref() == Some(task.id.as_str()) || gate.dispatch_id.is_none()
+        })
+        .take(16)
+        .map(|gate| {
+            json!({
+                "gateId": gate.id,
+                "gateType": gate.gate_type,
+                "status": gate.status,
+            })
+        })
+        .collect::<Vec<_>>();
+    let repository_rules = worktree
+        .map(|assignment| Path::new(&assignment.worktree_path))
+        .into_iter()
+        .flat_map(|root| {
+            ["AGENTS.md", "docs/KNOWHOW.md", "PROJECT_MEMORY.md"]
+                .into_iter()
+                .map(move |relative| (root, relative))
+        })
+        .filter(|(root, relative)| root.join(relative).is_file())
+        .map(|(_, relative)| relative.to_string())
+        .collect::<Vec<_>>();
+    let memory_references = repository_rules
+        .iter()
+        .filter(|path| path.contains("MEMORY") || path.contains("KNOWHOW"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let capsule = json!({
+        "schemaVersion": 1,
+        "identity": {
+            "runId": run.id,
+            "taskId": task.id,
+            "dispatchId": dispatch_id,
+            "agentInstanceId": agent_instance_id,
+            "paneId": pane_id,
+            "parentSessionId": parent_session_id,
+            "sessionId": session_id,
+        },
+        "objective": {
+            "rootRequest": bounded_context_text(&run.goal, 2_000),
+            "title": bounded_context_text(&task.title, 512),
+            "description": bounded_context_text(&task.description, 4_000),
+        },
+        "dependencies": task.dependencies,
+        "dependencyResults": dependency_results,
+        "repository": {
+            "root": repository_root,
+            "relativePrefix": relative_prefix,
+            "rules": repository_rules,
+            "memoryReferences": memory_references,
+        },
+        "gateState": gate_state,
+        "refs": worktree.map(|assignment| json!({
+            "worktreeId": assignment.worktree_id,
+            "instanceId": assignment.instance_id,
+            "baseSha": assignment.base_revision,
+            "branch": assignment.branch,
+            "worktreePath": assignment.worktree_path,
+        })),
+        "allowedScope": {
+            "taskId": task.id,
+            "relativePrefix": relative_prefix,
+            "files": [],
+        },
+        "commands": {
+            "progress": "vibelink orchestration send --run-id <run-id> --task-id <task-id> --message <text>",
+            "completionFields": ["files", "tests", "commit", "checkpoint", "result"],
+        },
+        "workerContract": {
+            "mayMerge": false,
+            "mayDeleteBranch": false,
+            "mayDeleteCheckout": false,
+            "mayRecursivelyCleanPath": false,
+        },
+    });
+    let serialized = serde_json::to_string(&capsule)?;
+    if serialized.len() > ORCHESTRATION_CONTEXT_CAPSULE_MAX_BYTES {
+        anyhow::bail!(
+            "bounded orchestration context capsule exceeded {} bytes",
+            ORCHESTRATION_CONTEXT_CAPSULE_MAX_BYTES
+        );
+    }
+    Ok(serialized)
+}
+
+fn write_orchestration_context_capsule(
+    worktree_root: &Path,
+    dispatch_id: &str,
+    operation_id: Uuid,
+    content: &str,
+) -> Result<String> {
+    let artifact_root = worktree_root
+        .parent()
+        .unwrap_or(worktree_root)
+        .join("context-capsules");
+    fs::create_dir_all(&artifact_root)
+        .with_context(|| format!("create context capsule root {}", artifact_root.display()))?;
+    let path = artifact_root.join(format!(
+        "{}-{}.json",
+        short_identity(dispatch_id),
+        operation_id.simple()
+    ));
+    if path.exists() {
+        return Ok(path.to_string_lossy().to_string());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("create context capsule {}", path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("write context capsule {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("flush context capsule {}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn existing_launch_outcome(
@@ -2177,6 +2564,8 @@ fn dispatch_cli_request(
     state: &SharedState,
     sessions_path: &Path,
     control: &ControlPlane,
+    worktree_registry: &WorktreeRegistry,
+    worktree_lifecycle: &WorktreeLifecycleService,
     coordinator: &CoordinatorService,
     worktrees: &WorktreeManager,
     automation: &AutomationService,
@@ -2194,6 +2583,7 @@ fn dispatch_cli_request(
         anyhow::bail!("conflict: inner and outer operation ids differ");
     }
     let expected_revision = envelope.request.expected_revision;
+    let caller_cwd = envelope.request.caller_cwd.clone();
     match envelope.request.command {
         DedicatedCommand::Status => Ok(serde_json::json!({ "state": "running" })),
         DedicatedCommand::Workspace(command) => match command.action {
@@ -2299,6 +2689,231 @@ fn dispatch_cli_request(
                 Ok(json!({ "workspaceId": session_id, "lifecycle": "awake" }))
             }
         },
+        DedicatedCommand::Worktree(command) => {
+            let selected_worktree = || {
+                resolve_cli_worktree(
+                    state,
+                    worktree_registry,
+                    command.selectors.worktree.as_deref(),
+                    command.selectors.workspace.as_deref(),
+                    caller_cwd.as_deref(),
+                )
+            };
+            let selected_by_cwd = || {
+                resolve_cli_worktree(state, worktree_registry, None, None, caller_cwd.as_deref())
+            };
+            let expected_instance = || {
+                required_cli_option(&command.arguments, "expected-instance-id")
+                    .context("--expected-instance-id is required for this worktree action")
+            };
+            let option = |name: &str| {
+                cli_option(&command.arguments, name).map(|value| value.map(str::to_string))
+            };
+            match command.action {
+                WorktreeAction::List => dispatch_worktree_request(
+                    state,
+                    worktree_registry,
+                    worktree_lifecycle,
+                    sessions_path,
+                    outer_operation_id,
+                    WORKTREE_METHOD_LIST,
+                    &json!({
+                        "repositoryPath": option("repo")?,
+                        "includeExternal": command.arguments.switches.contains("include-external"),
+                        "includeHidden": command.arguments.switches.contains("include-hidden"),
+                    })
+                    .to_string(),
+                ),
+                WorktreeAction::Show => Ok(serde_json::to_value(selected_worktree()?)?),
+                WorktreeAction::Current => Ok(serde_json::to_value(selected_by_cwd()?)?),
+                WorktreeAction::Create => {
+                    let parent_session_id =
+                        if let Some(workspace) = command.selectors.workspace.as_deref() {
+                            resolve_cli_session(state, Some(workspace))?
+                        } else {
+                            selected_by_cwd()?
+                            .record
+                            .and_then(|record| record.session_id)
+                            .and_then(|session_id| Uuid::parse_str(&session_id).ok())
+                            .context(
+                                "caller cwd is not bound to a workspace session; use --workspace",
+                            )?
+                        };
+                    let payload = json!({
+                        "operationId": outer_operation_id,
+                        "repositoryPath": required_cli_option(&command.arguments, "repo")?,
+                        "parentSessionId": parent_session_id,
+                        "parentWorktreeId": if command.arguments.switches.contains("no-parent") { None } else { option("parent-worktree")? },
+                        "name": required_cli_option(&command.arguments, "name")?,
+                        "startRef": option("base-ref")?.unwrap_or_else(|| "HEAD".to_string()),
+                        "branch": option("branch")?,
+                        "storage": {
+                            "mode": "drive",
+                            "drive": "",
+                            "folderName": "VibeLinkWorktrees",
+                            "customRoot": "",
+                            "groupByRepository": true
+                        },
+                        "fetch": command.arguments.switches.contains("fetch"),
+                        "setupPolicy": option("setup")?.unwrap_or_else(|| "inherit".to_string()),
+                        "sparsePreset": option("sparse-preset")?,
+                        "linkedFiles": command.arguments.options.get("linked-file").cloned().unwrap_or_default(),
+                        "profileId": option("profile")?,
+                        "initialAgent": Value::Null,
+                        "initialPrompt": option("prompt")?,
+                        "origin": "cli"
+                    });
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_CREATE,
+                        &payload.to_string(),
+                    )
+                }
+                WorktreeAction::Import => dispatch_worktree_request(
+                    state,
+                    worktree_registry,
+                    worktree_lifecycle,
+                    sessions_path,
+                    outer_operation_id,
+                    WORKTREE_METHOD_IMPORT,
+                    &json!({
+                        "repositoryPath": required_cli_option(&command.arguments, "repo")?,
+                        "worktreePath": required_cli_option(&command.arguments, "path")?,
+                        "parentSessionId": option("parent-session")?,
+                        "sessionId": option("session")?,
+                    })
+                    .to_string(),
+                ),
+                WorktreeAction::Move => {
+                    let selected = selected_worktree()?;
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_MOVE,
+                        &json!({
+                            "operationId": outer_operation_id,
+                            "worktreeId": selected.id,
+                            "expectedInstanceId": expected_instance()?,
+                            "destinationPath": required_cli_option(&command.arguments, "destination")?,
+                        })
+                        .to_string(),
+                    )
+                }
+                WorktreeAction::PreflightRemove => {
+                    let selected = selected_worktree()?;
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_PREFLIGHT_REMOVE,
+                        &json!({
+                            "worktreeId": selected.id,
+                            "deleteBranch": command.arguments.switches.contains("delete-branch"),
+                        })
+                        .to_string(),
+                    )
+                }
+                WorktreeAction::Remove => {
+                    let selected = selected_worktree()?;
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_REMOVE,
+                        &json!({
+                            "operationId": outer_operation_id,
+                            "worktreeId": selected.id,
+                            "expectedInstanceId": expected_instance()?,
+                            "force": command.arguments.switches.contains("force"),
+                            "deleteBranch": command.arguments.switches.contains("delete-branch"),
+                            "acknowledgedBlockers": command.arguments.options.get("acknowledge-blocker").cloned().unwrap_or_default(),
+                        })
+                        .to_string(),
+                    )
+                }
+                WorktreeAction::Set => {
+                    let selected = selected_worktree()?;
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_SET,
+                        &json!({
+                            "worktreeId": selected.id,
+                            "expectedInstanceId": expected_instance()?,
+                            "comment": if command.arguments.switches.contains("clear-comment") { Some(String::new()) } else { option("comment")? },
+                            "reviewTarget": if command.arguments.switches.contains("clear-review-target") { Some(String::new()) } else { option("review-target")? },
+                            "parentWorktreeId": option("parent-worktree")?,
+                            "clearParent": command.arguments.switches.contains("clear-parent"),
+                        })
+                        .to_string(),
+                    )
+                }
+                WorktreeAction::Checkpoint => {
+                    let selected = selected_worktree()?;
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_CHECKPOINT,
+                        &json!({
+                            "worktreeId": selected.id,
+                            "kind": required_cli_option(&command.arguments, "kind")?,
+                            "label": required_cli_option(&command.arguments, "label")?,
+                            "comment": option("comment")?,
+                        })
+                        .to_string(),
+                    )
+                }
+                WorktreeAction::Comment => {
+                    let selected = selected_worktree()?;
+                    let line = option("line")?
+                        .map(|value| value.parse::<u32>().context("parse --line"))
+                        .transpose()?;
+                    let range = option("range-json")?
+                        .map(|value| {
+                            serde_json::from_str::<Value>(&value).context("parse --range-json")
+                        })
+                        .transpose()?;
+                    dispatch_worktree_request(
+                        state,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        sessions_path,
+                        outer_operation_id,
+                        WORKTREE_METHOD_REVIEW_COMMENT_PUT,
+                        &json!({
+                            "worktreeId": selected.id,
+                            "expectedInstanceId": expected_instance()?,
+                            "baseHead": required_cli_option(&command.arguments, "base-head")?,
+                            "head": required_cli_option(&command.arguments, "head")?,
+                            "path": required_cli_option(&command.arguments, "path")?,
+                            "side": required_cli_option(&command.arguments, "side")?,
+                            "line": line,
+                            "range": range,
+                            "hunkId": option("hunk-id")?,
+                            "body": required_cli_option(&command.arguments, "body")?,
+                        })
+                        .to_string(),
+                    )
+                }
+            }
+        }
         DedicatedCommand::Terminal(command) => {
             let session_id = resolve_cli_session(state, command.selectors.workspace.as_deref())?;
             match command.action {
@@ -2507,7 +3122,6 @@ fn dispatch_cli_request(
                         worktrees,
                         &run_id,
                         "cancel",
-                        true,
                     )?;
                     require_workers_stopped(&resources, &cleanup_errors)
                         .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -2637,8 +3251,10 @@ fn dispatch_cli_request(
                         state,
                         sessions_path,
                         coordinator,
+                        worktree_registry,
+                        worktree_lifecycle,
                         worktrees,
-                        outer_operation_id,
+                        envelope.request.operation_id,
                         DispatchLaunchRequest {
                             run_id,
                             expected_run_revision: expected_revision
@@ -2657,68 +3273,40 @@ fn dispatch_cli_request(
                     Ok(serde_json::to_value(coordinator.gates(&run_id.context("--run-id is required")?)?)?)
                 }
                 OrchestrationAction::GateResolve => {
+                    let gate_id = required_cli_option(&command.arguments, "gate-id")?.to_string();
+                    let gate = coordinator.gate(&gate_id)?;
+                    let decision = required_cli_option(&command.arguments, "resolution")?;
+                    let resolution = if gate.gate_type == "cleanup" && decision == "approve" {
+                        json!({
+                            "decision": decision,
+                            "force": command.arguments.switches.contains("force"),
+                            "deleteBranch": command.arguments.switches.contains("delete-branch"),
+                            "acknowledgedBlockers": command.arguments.options
+                                .get("acknowledge-blocker")
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                    } else {
+                        json!({ "decision": decision })
+                    };
                     let request = ResolveGateRequest {
-                        gate_id: required_cli_option(&command.arguments, "gate-id")?.to_string(),
-                        resolution: json!({
-                            "decision": required_cli_option(&command.arguments, "resolution")?,
-                        }),
+                        gate_id,
+                        resolution,
                         expected_run_revision: expected_revision
                             .context("--expected-revision is required")?,
                     };
-                    let gate = coordinator.gate(&request.gate_id)?;
-                    if gate.status != GateStatus::Pending {
-                        let mutation = coordinator.resolve_gate(outer_operation_id, request)?;
-                        let resources = gate
-                            .dispatch_id
-                            .as_deref()
-                            .and_then(|dispatch_id| coordinator.cleanup_target_for_dispatch(dispatch_id).ok())
-                            .and_then(|target| target.resources)
-                            .into_iter()
-                            .collect::<Vec<_>>();
-                        return Ok(json!({
-                            "mutation": mutation,
-                            "resources": resources,
-                            "cleanupErrors": [],
-                        }));
-                    }
-                    validate_run_cleanup_revision(
+                    dispatch_orchestration_rpc(
+                        state,
+                        sessions_path,
                         coordinator,
-                        &gate.run_id,
-                        request.expected_run_revision,
+                        worktree_registry,
+                        worktree_lifecycle,
+                        worktrees,
+                        outer_operation_id,
+                        "gate.resolve",
+                        &serde_json::to_string(&request)?,
                     )
-                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-                    let decision = request
-                        .resolution
-                        .get("decision")
-                        .and_then(Value::as_str);
-                    let mut resources = Vec::new();
-                    let mut cleanup_errors = Vec::new();
-                    if gate.gate_type == "merge" && decision == Some("reject") {
-                        if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
-                            let target = coordinator.cleanup_target_for_dispatch(dispatch_id)?;
-                            let (resource, errors) = cleanup_dispatch_target(
-                                state,
-                                coordinator,
-                                worktrees,
-                                &target,
-                                "gate_reject",
-                                true,
-                            );
-                            if let Some(resource) = resource {
-                                resources.push(resource);
-                            }
-                            cleanup_errors.extend(errors);
-                            require_workers_stopped(&resources, &cleanup_errors)
-                                .map_err(|error| anyhow::anyhow!(error.message))?;
-                            persist_state(state, sessions_path)?;
-                        }
-                    }
-                    let mutation = coordinator.resolve_gate(outer_operation_id, request)?;
-                    Ok(json!({
-                        "mutation": mutation,
-                        "resources": resources,
-                        "cleanupErrors": cleanup_errors,
-                    }))
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
                 }
                 OrchestrationAction::GateCreate => {
                     let run_id = run_id.context("--run-id is required")?;
@@ -2792,9 +3380,14 @@ fn dispatch_cli_request(
             }
         }
         DedicatedCommand::Skill(command) => dispatch_skill_cli(state, command),
-        DedicatedCommand::Automation(command) => {
-            dispatch_automation_cli(state, automation, command)
-        }
+        DedicatedCommand::Automation(command) => dispatch_automation_cli(
+            state,
+            sessions_path,
+            worktree_lifecycle,
+            worktrees,
+            automation,
+            command,
+        ),
         DedicatedCommand::Browser(command) => browser_cdp::execute(
             command,
             &sessions_path
@@ -2868,6 +3461,9 @@ fn dispatch_cli_request(
 
 fn dispatch_automation_cli(
     state: &SharedState,
+    sessions_path: &Path,
+    worktree_lifecycle: &WorktreeLifecycleService,
+    worktrees: &WorktreeManager,
     automation: &AutomationService,
     command: crate::dedicated_cli::ActionCommand<AutomationAction>,
 ) -> Result<Value> {
@@ -2905,9 +3501,22 @@ fn dispatch_automation_cli(
             let record = automation.get(id)?;
             let workspace = automation_workspace(state, &record.session_id)?;
             let claim = automation.trigger(id)?;
-            Ok(serde_json::to_value(
-                automation.execute_and_notify(&claim, &workspace)?,
-            )?)
+            Ok(serde_json::to_value(automation.execute_and_notify_with_worktree(
+                &claim,
+                &workspace,
+                |record, claim, workspace, planned| {
+                    provision_automation_worktree(
+                        state,
+                        sessions_path,
+                        worktree_lifecycle,
+                        worktrees,
+                        record,
+                        claim,
+                        workspace,
+                        planned,
+                    )
+                },
+            )?)?)
         }
         AutomationAction::Runs => {
             let id = automation_cli_id(&command.arguments, "automation id")?;
@@ -3000,6 +3609,75 @@ fn automation_workspace(state: &SharedState, session_id: &str) -> Result<PathBuf
         .and_then(|session| session.workspace_folder)
         .map(PathBuf::from)
         .context("automation workspace folder is unavailable")
+}
+
+fn provision_automation_worktree(
+    state: &SharedState,
+    sessions_path: &Path,
+    lifecycle: &WorktreeLifecycleService,
+    worktrees: &WorktreeManager,
+    automation: &crate::daemon::automation::AutomationRecord,
+    claim: &crate::daemon::automation::AutomationRunRecord,
+    workspace: &Path,
+    planned: &WorktreeAssignment,
+) -> Result<AutomationWorktreeProvision> {
+    let authority = worktrees.authority(workspace)?;
+    let operation_id = derived_operation_id(
+        Uuid::parse_str(&claim.id).context("automation run id is invalid")?,
+        &automation.id,
+        "worktree-create",
+    );
+    let base_sha = planned.base_revision.clone();
+    let custom_root = PathBuf::from(&planned.worktree_path)
+        .parent()
+        .context("automation worktree path has no managed root")?
+        .to_string_lossy()
+        .to_string();
+    let request = WorktreeCreateRequest {
+        operation_id,
+        repository_path: authority.repository_root_string(),
+        parent_session_id: automation.session_id.clone(),
+        parent_worktree_id: None,
+        name: format!("automation-{}", short_identity(&claim.id)),
+        start_ref: base_sha,
+        branch: Some(planned.branch.clone()),
+        storage: WorktreeStorage {
+            mode: WorktreeStorageMode::Custom,
+            drive: String::new(),
+            folder_name: String::new(),
+            custom_root,
+            group_by_repository: false,
+        },
+        fetch: false,
+        setup_policy: "skip".to_string(),
+        sparse_preset: None,
+        linked_files: Vec::new(),
+        profile_id: None,
+        initial_agent: None,
+        initial_prompt: None,
+        origin: WorktreeOrigin::Automation,
+    };
+    let session_name = format!("{} run", automation.name);
+    let created = lifecycle.create(
+        request,
+        |record| {
+            let session =
+                lock_state(state).create_session(session_name, Some(record.worktree_path.clone()));
+            persist_state(state, sessions_path)?;
+            Ok(session.id.to_string())
+        },
+        |session_id| remove_worktree_session(state, sessions_path, session_id).map(|_| ()),
+    )?;
+    Ok(AutomationWorktreeProvision {
+        session_id: created.session_id,
+        assignment: WorktreeAssignment {
+            worktree_id: Some(created.worktree.id),
+            instance_id: Some(created.worktree.instance_id),
+            base_revision: created.base_sha,
+            branch: created.worktree.branch,
+            worktree_path: created.worktree.worktree_path,
+        },
+    })
 }
 
 fn dispatch_skill_cli(
@@ -3349,6 +4027,213 @@ fn resolve_computer_window(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CliWorktreeCandidate {
+    id: String,
+    branch: Option<String>,
+    paths: Vec<String>,
+    session_id: Option<String>,
+}
+
+fn resolve_cli_worktree(
+    state: &SharedState,
+    registry: &WorktreeRegistry,
+    worktree_selector: Option<&str>,
+    workspace_selector: Option<&str>,
+    caller_cwd: Option<&str>,
+) -> Result<WorktreeProjection> {
+    if worktree_selector.is_some() && workspace_selector.is_some() {
+        anyhow::bail!("ambiguous worktree selector: --worktree and --workspace are exclusive");
+    }
+    let workspace_session_id = workspace_selector
+        .map(|selector| resolve_cli_session(state, Some(selector)).map(|id| id.to_string()))
+        .transpose()?;
+    let projections = registry.list(WorktreeListRequest {
+        repository_path: None,
+        include_external: true,
+        include_hidden: true,
+    })?;
+    let candidates = projections
+        .iter()
+        .map(|projection| {
+            let mut paths = Vec::new();
+            if let Some(record) = projection.record.as_ref() {
+                paths.push(record.worktree_path.clone());
+            }
+            if let Some(native) = projection.native.as_ref() {
+                if !paths
+                    .iter()
+                    .any(|path| crate::app::git::worktree::paths_equal(path, &native.worktree_path))
+                {
+                    paths.push(native.worktree_path.clone());
+                }
+            }
+            CliWorktreeCandidate {
+                id: projection.id.clone(),
+                branch: projection
+                    .record
+                    .as_ref()
+                    .map(|record| record.branch.clone())
+                    .or_else(|| {
+                        projection
+                            .native
+                            .as_ref()
+                            .and_then(|native| native.branch.clone())
+                    }),
+                session_id: projection
+                    .record
+                    .as_ref()
+                    .and_then(|record| record.session_id.clone()),
+                paths,
+            }
+        })
+        .collect::<Vec<_>>();
+    let selected_id = select_cli_worktree_candidate(
+        &candidates,
+        worktree_selector,
+        workspace_session_id.as_deref(),
+        caller_cwd,
+    )?;
+    projections
+        .into_iter()
+        .find(|projection| projection.id == selected_id)
+        .context("selected worktree projection disappeared")
+}
+
+fn select_cli_worktree_candidate(
+    candidates: &[CliWorktreeCandidate],
+    worktree_selector: Option<&str>,
+    workspace_session_id: Option<&str>,
+    caller_cwd: Option<&str>,
+) -> Result<String> {
+    if let Some(selector) = worktree_selector {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            anyhow::bail!("worktree selector is empty");
+        }
+        let stable_id = Uuid::parse_str(selector).is_ok();
+        let matches = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.id == selector
+                    || (!stable_id
+                        && (candidate.branch.as_deref() == Some(selector)
+                            || candidate.paths.iter().any(|path| {
+                                crate::app::git::worktree::paths_equal(path, selector)
+                            })))
+            })
+            .collect::<Vec<_>>();
+        return match matches.as_slice() {
+            [candidate] => Ok(candidate.id.clone()),
+            [] => anyhow::bail!("worktree not found: {selector}"),
+            _ => anyhow::bail!("ambiguous worktree selector: {selector}"),
+        };
+    }
+    if let Some(session_id) = workspace_session_id {
+        let matches = candidates
+            .iter()
+            .filter(|candidate| candidate.session_id.as_deref() == Some(session_id))
+            .collect::<Vec<_>>();
+        return match matches.as_slice() {
+            [candidate] => Ok(candidate.id.clone()),
+            [] => anyhow::bail!("workspace is not bound to a worktree: {session_id}"),
+            _ => anyhow::bail!("ambiguous workspace worktree binding: {session_id}"),
+        };
+    }
+    let cwd = caller_cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("caller cwd is unavailable; use --worktree or --workspace")?;
+    let normalized_cwd = crate::app::git::worktree::normalize_path_for_comparison(cwd);
+    let mut containing = candidates
+        .iter()
+        .flat_map(|candidate| {
+            let normalized_cwd = &normalized_cwd;
+            candidate.paths.iter().filter_map(move |path| {
+                let normalized = crate::app::git::worktree::normalize_path_for_comparison(path);
+                let contains = normalized_cwd.as_str() == normalized
+                    || normalized_cwd
+                        .strip_prefix(&normalized)
+                        .is_some_and(|suffix| suffix.starts_with('/'));
+                contains.then_some((candidate, normalized.matches('/').count(), normalized.len()))
+            })
+        })
+        .collect::<Vec<_>>();
+    containing.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.2.cmp(&left.2)));
+    let Some((selected, depth, length)) = containing.first().copied() else {
+        anyhow::bail!("caller cwd is not inside a registered worktree: {cwd}");
+    };
+    if containing
+        .iter()
+        .skip(1)
+        .any(|(candidate, other_depth, other_length)| {
+            *other_depth == depth && *other_length == length && candidate.id != selected.id
+        })
+    {
+        anyhow::bail!("ambiguous caller cwd worktree: {cwd}");
+    }
+    Ok(selected.id.clone())
+}
+
+#[cfg(test)]
+mod worktree_cli_selector_tests {
+    use super::*;
+
+    fn candidate(id: &str, path: &str, session_id: Option<&str>) -> CliWorktreeCandidate {
+        CliWorktreeCandidate {
+            id: id.to_string(),
+            branch: None,
+            paths: vec![path.to_string()],
+            session_id: session_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn caller_cwd_uses_deepest_containing_checkout_without_focus_fallback() {
+        let candidates = vec![
+            candidate("root", "C:/repo", Some("root-session")),
+            candidate("child", "C:/repo/children/task", Some("child-session")),
+        ];
+        assert_eq!(
+            select_cli_worktree_candidate(
+                &candidates,
+                None,
+                None,
+                Some("C:/repo/children/task/src")
+            )
+            .expect("deepest checkout"),
+            "child"
+        );
+        assert!(
+            select_cli_worktree_candidate(&candidates, None, None, Some("C:/elsewhere"))
+                .expect_err("no focus fallback")
+                .to_string()
+                .contains("not inside")
+        );
+    }
+
+    #[test]
+    fn exact_and_workspace_selectors_reject_ambiguity() {
+        let mut first = candidate("one", "C:/one", Some("shared"));
+        first.branch = Some("feature".to_string());
+        let mut second = candidate("two", "C:/two", Some("shared"));
+        second.branch = Some("feature".to_string());
+        let candidates = vec![first, second];
+        assert!(
+            select_cli_worktree_candidate(&candidates, Some("feature"), None, None)
+                .expect_err("ambiguous exact branch")
+                .to_string()
+                .contains("ambiguous")
+        );
+        assert!(
+            select_cli_worktree_candidate(&candidates, None, Some("shared"), None)
+                .expect_err("ambiguous binding")
+                .to_string()
+                .contains("ambiguous")
+        );
+    }
+}
+
 fn resolve_cli_session(state: &SharedState, selector: Option<&str>) -> Result<Uuid> {
     let selector = selector
         .map(str::to_string)
@@ -3425,6 +4310,8 @@ fn dispatch_message(
     tx: &Sender<DaemonToClient>,
     control: Arc<ControlPlane>,
     coordinator: Arc<CoordinatorService>,
+    worktree_registry: Arc<WorktreeRegistry>,
+    worktree_lifecycle: Arc<WorktreeLifecycleService>,
     worktrees: Arc<WorktreeManager>,
     automation: Arc<AutomationService>,
     remote: Arc<RemoteServer>,
@@ -3804,6 +4691,29 @@ fn dispatch_message(
                 },
             )
         }
+        ClientToDaemon::Worktree {
+            req,
+            operation_id,
+            method,
+            payload_json,
+        } => {
+            let response = dispatch_worktree_request(
+                &state,
+                &worktree_registry,
+                &worktree_lifecycle,
+                sessions_path,
+                operation_id,
+                &method,
+                &payload_json,
+            )?;
+            send(
+                tx,
+                DaemonToClient::Reply {
+                    req,
+                    result: ReplyResult::Worktree(serde_json::to_string(&response)?),
+                },
+            )
+        }
         ClientToDaemon::Orchestration {
             req,
             operation_id,
@@ -3817,6 +4727,8 @@ fn dispatch_message(
                     &state,
                     sessions_path,
                     &coordinator,
+                    &worktree_registry,
+                    &worktree_lifecycle,
                     &worktrees,
                     operation_id,
                     &method,
@@ -3833,6 +4745,8 @@ fn dispatch_message(
                 &state,
                 sessions_path,
                 &control,
+                &worktree_registry,
+                &worktree_lifecycle,
                 &coordinator,
                 &worktrees,
                 &automation,
@@ -3936,10 +4850,10 @@ fn dispatch_message(
             send_remote_connection_cleanup(&state, tx, req, transitions)
         }
         ClientToDaemon::ResourceSnapshot { req } => {
+            let daemon_pid = std::process::id();
             let targets = lock_state(&state).resource_targets();
             let mut sys = sysinfo::System::new();
             sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-            let daemon_pid = std::process::id();
             let daemon_mem_bytes = sys
                 .process(sysinfo::Pid::from_u32(daemon_pid))
                 .map(|process| process.memory())
@@ -3971,6 +4885,22 @@ fn dispatch_message(
                 },
             )
         }
+        ClientToDaemon::AttentionSnapshot { req } => {
+            let pane_ids = lock_state(&state)
+                .resource_targets()
+                .into_iter()
+                .map(|(_, pane_id, _)| pane_id.to_string())
+                .collect::<Vec<_>>();
+            let pane_states = coordinator.pane_projection_states(&pane_ids)?;
+            let snapshot = lock_state(&state).attention_snapshot(&pane_states);
+            send(
+                tx,
+                DaemonToClient::Reply {
+                    req,
+                    result: ReplyResult::AttentionSnapshot(snapshot),
+                },
+            )
+        }
         ClientToDaemon::Shutdown { req, clean_exit } => {
             info!(clean_exit, "daemon received shutdown request");
             send_ok(tx, req)?;
@@ -3993,6 +4923,469 @@ fn dispatch_message(
             std::process::exit(0);
         }
     }
+}
+
+fn dispatch_worktree_request(
+    state: &SharedState,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
+    sessions_path: &Path,
+    operation_id: Uuid,
+    method: &str,
+    payload_json: &str,
+) -> Result<Value> {
+    let response = dispatch_worktree_request_inner(
+        state,
+        registry,
+        lifecycle,
+        sessions_path,
+        operation_id,
+        method,
+        payload_json,
+    )?;
+    if matches!(
+        method,
+        WORKTREE_METHOD_RECONCILE
+            | WORKTREE_METHOD_IMPORT
+            | WORKTREE_METHOD_CREATE
+            | WORKTREE_METHOD_MOVE
+            | WORKTREE_METHOD_REMOVE
+            | WORKTREE_METHOD_SET
+            | WORKTREE_METHOD_CHECKPOINT
+            | WORKTREE_METHOD_REVIEW_COMMENT_PUT
+    ) {
+        for sender in lock_state(state).all_senders() {
+            let _ = sender.send(DaemonToClient::WorktreeChanged {
+                method: method.to_string(),
+                operation_id,
+            });
+        }
+    }
+    Ok(response)
+}
+
+fn import_external_worktree(
+    state: &SharedState,
+    registry: &WorktreeRegistry,
+    sessions_path: &Path,
+    request: WorktreeImportRequest,
+) -> Result<WorktreeProjection> {
+    if let Some(parent_session_id) = request.parent_session_id.as_deref() {
+        let parent_session_id =
+            Uuid::parse_str(parent_session_id).context("parse import parent session id")?;
+        if !lock_state(state)
+            .list_sessions()
+            .iter()
+            .any(|session| session.id == parent_session_id)
+        {
+            anyhow::bail!("parent workspace session not found");
+        }
+    }
+
+    let mut projection = registry.import_external(request)?;
+    let Some(record) = projection.record.as_ref() else {
+        anyhow::bail!("imported worktree record is unavailable");
+    };
+    if record.session_id.is_some() {
+        return Ok(projection);
+    }
+
+    let session_name = record
+        .branch
+        .trim()
+        .rsplit('/')
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            Path::new(&record.worktree_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "Worktree".to_string());
+    let session =
+        lock_state(state).create_session(session_name, Some(record.worktree_path.clone()));
+    if let Err(error) = persist_state(state, sessions_path) {
+        let _ = lock_state(state).delete_session(session.id);
+        return Err(error.context("persist imported worktree session"));
+    }
+
+    let bound = match registry.bind_session(
+        &record.id,
+        &record.instance_id,
+        &session.id.to_string(),
+    ) {
+        Ok(bound) => bound,
+        Err(error) => {
+            let _ = lock_state(state).delete_session(session.id);
+            if let Err(rollback_error) = persist_state(state, sessions_path) {
+                return Err(error.context(format!(
+                    "bind imported worktree session; session rollback also failed: {rollback_error:#}"
+                )));
+            }
+            return Err(error.context("bind imported worktree session"));
+        }
+    };
+    projection.record = Some(bound);
+    notify_session_changed(state, session.id)?;
+    Ok(projection)
+}
+
+fn dispatch_worktree_request_inner(
+    state: &SharedState,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
+    sessions_path: &Path,
+    operation_id: Uuid,
+    method: &str,
+    payload_json: &str,
+) -> Result<Value> {
+    match method {
+        WORKTREE_METHOD_CANCEL => {
+            let request: WorktreeOperationIdRequest =
+                serde_json::from_str(payload_json).context("parse worktree cancel request")?;
+            Ok(serde_json::to_value(
+                registry.request_cancel(request.operation_id)?,
+            )?)
+        }
+        WORKTREE_METHOD_LIST => Ok(serde_json::to_value(
+            registry.list(
+                serde_json::from_str::<WorktreeListRequest>(payload_json)
+                    .context("parse worktree list request")?,
+            )?,
+        )?),
+        WORKTREE_METHOD_RECONCILE => Ok(serde_json::to_value(
+            registry.reconcile(
+                serde_json::from_str::<WorktreeReconcileRequest>(payload_json)
+                    .context("parse worktree reconcile request")?,
+            )?,
+        )?),
+        WORKTREE_METHOD_IMPORT => {
+            let request = serde_json::from_str::<WorktreeImportRequest>(payload_json)
+                .context("parse worktree import request")?;
+            Ok(serde_json::to_value(import_external_worktree(
+                state,
+                registry,
+                sessions_path,
+                request,
+            )?)?)
+        }
+        WORKTREE_METHOD_SET => Ok(serde_json::to_value(
+            registry.set(
+                serde_json::from_str::<WorktreeSetRequest>(payload_json)
+                    .context("parse worktree metadata request")?,
+            )?,
+        )?),
+        WORKTREE_METHOD_CHECKPOINT => Ok(serde_json::to_value(
+            registry.checkpoint(
+                serde_json::from_str::<WorktreeCheckpointRequest>(payload_json)
+                    .context("parse worktree checkpoint request")?,
+            )?,
+        )?),
+        WORKTREE_METHOD_CHECKPOINTS => {
+            let request: WorktreeIdRequest =
+                serde_json::from_str(payload_json).context("parse worktree checkpoints request")?;
+            Ok(serde_json::to_value(
+                registry.list_checkpoints(&request.worktree_id)?,
+            )?)
+        }
+        WORKTREE_METHOD_REVIEW_COMMENT_PUT => Ok(serde_json::to_value(
+            registry.put_review_comment(
+                serde_json::from_str::<WorktreeReviewCommentRequest>(payload_json)
+                    .context("parse worktree review comment request")?,
+            )?,
+        )?),
+        WORKTREE_METHOD_REVIEW_COMMENTS => {
+            let request: WorktreeIdRequest = serde_json::from_str(payload_json)
+                .context("parse worktree review comments request")?;
+            Ok(serde_json::to_value(
+                registry.list_review_comments(&request.worktree_id)?,
+            )?)
+        }
+        WORKTREE_METHOD_PREFLIGHT_REMOVE => {
+            let request: WorktreeRemovalPreflightRequest = serde_json::from_str(payload_json)
+                .context("parse worktree removal preflight request")?;
+            let runtime = worktree_runtime_blockers(state, registry, &request.worktree_id)?;
+            Ok(serde_json::to_value(
+                registry.removal_preflight(&request, runtime)?,
+            )?)
+        }
+        WORKTREE_METHOD_CREATE => {
+            let request: WorktreeCreateRequest =
+                serde_json::from_str(payload_json).context("parse worktree create request")?;
+            if request.operation_id != operation_id {
+                anyhow::bail!("worktree create operation id mismatch");
+            }
+            let parent_session_id =
+                Uuid::parse_str(&request.parent_session_id).context("parse parent session id")?;
+            if !lock_state(state)
+                .list_sessions()
+                .iter()
+                .any(|session| session.id == parent_session_id)
+            {
+                anyhow::bail!("parent workspace session not found");
+            }
+            let session_name = request.name.clone();
+            let headless_launch =
+                matches!(request.origin, WorktreeOrigin::Cli | WorktreeOrigin::Mcp);
+            let profile_id = request.profile_id.clone();
+            let initial_agent = request.initial_agent.clone();
+            let initial_prompt = request.initial_prompt.clone();
+            let result = lifecycle.create(
+                request,
+                |record| {
+                    let session = lock_state(state)
+                        .create_session(session_name, Some(record.worktree_path.clone()));
+                    if headless_launch {
+                        let (config, agent_profile) = worktree_initial_pane_config(
+                            &record.worktree_path,
+                            profile_id.as_deref(),
+                            initial_agent.as_deref(),
+                            initial_prompt.is_some(),
+                        )?;
+                        let pane = spawn_pane_for_session(
+                            Arc::clone(state),
+                            sessions_path.to_path_buf(),
+                            session.id,
+                            config,
+                            None,
+                        )?;
+                        if let Some(prompt) = initial_prompt.as_deref() {
+                            if !agent_profile {
+                                anyhow::bail!("an initial prompt requires an agent profile");
+                            }
+                            let mut input = prompt.trim().as_bytes().to_vec();
+                            input.push(b'\r');
+                            write_pane_authorized(
+                                state,
+                                session.id,
+                                pane.id,
+                                &input,
+                                &PaneCommandOrigin::Desktop,
+                            )?;
+                        }
+                    }
+                    persist_state(state, sessions_path)?;
+                    notify_session_changed(state, session.id)?;
+                    Ok(session.id.to_string())
+                },
+                |session_id| remove_worktree_session(state, sessions_path, session_id).map(|_| ()),
+            )?;
+            Ok(serde_json::to_value(result)?)
+        }
+        WORKTREE_METHOD_MOVE => {
+            let request: WorktreeMoveRequest =
+                serde_json::from_str(payload_json).context("parse worktree move request")?;
+            if request.operation_id != operation_id {
+                anyhow::bail!("worktree move operation id mismatch");
+            }
+            let result = lifecycle.move_checkout(request)?;
+            if let Some(session_id) = result.worktree.session_id.as_deref() {
+                let session_id =
+                    Uuid::parse_str(session_id).context("parse moved worktree session id")?;
+                lock_state(state).set_session_workspace_folder(
+                    session_id,
+                    result.worktree.worktree_path.clone(),
+                )?;
+                persist_state(state, sessions_path)?;
+                notify_session_changed(state, session_id)?;
+            }
+            Ok(serde_json::to_value(result)?)
+        }
+        WORKTREE_METHOD_REMOVE => {
+            let request: WorktreeRemoveRequest =
+                serde_json::from_str(payload_json).context("parse worktree remove request")?;
+            if request.operation_id != operation_id {
+                anyhow::bail!("worktree remove operation id mismatch");
+            }
+            Ok(serde_json::to_value(execute_shared_worktree_removal(
+                state,
+                registry,
+                lifecycle,
+                sessions_path,
+                request,
+            )?)?)
+        }
+        _ => anyhow::bail!("unsupported worktree method {method} for operation {operation_id}"),
+    }
+}
+
+fn worktree_initial_pane_config(
+    worktree_path: &str,
+    profile_id: Option<&str>,
+    initial_agent: Option<&str>,
+    has_prompt: bool,
+) -> Result<(PaneConfig, bool)> {
+    let selected = initial_agent
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| profile_id.map(str::trim).filter(|value| !value.is_empty()))
+        .unwrap_or(if has_prompt { "omp" } else { "default" });
+    let pane_id = Uuid::new_v4();
+    let (shell, args, title, icon, agent_profile) = match selected {
+        "default" | "powershell" => (
+            "pwsh.exe".to_string(),
+            vec!["-NoLogo".to_string()],
+            "PowerShell".to_string(),
+            "powershell".to_string(),
+            false,
+        ),
+        "cmd" => (
+            "cmd.exe".to_string(),
+            vec!["/D".to_string()],
+            "CMD".to_string(),
+            "square-terminal".to_string(),
+            false,
+        ),
+        "claude" | "codex" | "omp" => {
+            let reset =
+                "`e[?1049l`e[2J`e[3J`e[H`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m";
+            (
+                "pwsh.exe".to_string(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoExit".to_string(),
+                    "-Command".to_string(),
+                    format!(
+                        "try {{ & {selected} }} finally {{ [Console]::Out.Write(\"{reset}\") }}"
+                    ),
+                ],
+                selected.to_string(),
+                selected.to_string(),
+                true,
+            )
+        }
+        _ => anyhow::bail!("headless worktree create cannot resolve profile: {selected}"),
+    };
+    Ok((
+        PaneConfig {
+            pane_id,
+            shell: Some(shell),
+            args,
+            cwd: Some(worktree_path.to_string()),
+            env: Vec::new(),
+            title: Some(title),
+            icon: Some(icon),
+            profile_id: Some(selected.to_string()),
+            role: agent_profile.then(|| "agent".to_string()),
+            cols: 120,
+            rows: 32,
+            restore_on_start: false,
+        },
+        agent_profile,
+    ))
+}
+
+fn execute_shared_worktree_removal(
+    state: &SharedState,
+    registry: &WorktreeRegistry,
+    lifecycle: &WorktreeLifecycleService,
+    sessions_path: &Path,
+    request: WorktreeRemoveRequest,
+) -> Result<WorktreeRemovalResult> {
+    let runtime = worktree_runtime_blockers(state, registry, &request.worktree_id)?;
+    lifecycle.remove(
+        request,
+        runtime,
+        |record| cleanup_worktree_session_resources(state, sessions_path, record),
+        |session_id| remove_worktree_session(state, sessions_path, session_id),
+    )
+}
+
+fn worktree_runtime_blockers(
+    state: &SharedState,
+    registry: &WorktreeRegistry,
+    worktree_id: &str,
+) -> Result<WorktreeRuntimeBlockers> {
+    let record = registry.record(worktree_id)?;
+    Ok(record
+        .session_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .map(|session_id| {
+            let guard = lock_state(state);
+            WorktreeRuntimeBlockers {
+                live_session: guard
+                    .list_sessions()
+                    .iter()
+                    .any(|session| session.id == session_id),
+                live_panes: guard
+                    .pane_metas(session_id)
+                    .map(|panes| !panes.is_empty())
+                    .unwrap_or(false),
+            }
+        })
+        .unwrap_or_default())
+}
+
+fn cleanup_worktree_session_resources(
+    state: &SharedState,
+    sessions_path: &Path,
+    record: &crate::app::git::worktree_registry::WorktreeRecord,
+) -> Result<()> {
+    let Some(session_id) = record.session_id.as_deref() else {
+        return Ok(());
+    };
+    let session_id = Uuid::parse_str(session_id).context("parse bound worktree session id")?;
+    let pane_ids = {
+        let guard = lock_state(state);
+        if !guard
+            .list_sessions()
+            .iter()
+            .any(|session| session.id == session_id)
+        {
+            return Ok(());
+        }
+        guard
+            .pane_metas(session_id)?
+            .into_iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>()
+    };
+    for pane_id in &pane_ids {
+        if !kill_pane_processes_until_exit(*pane_id) {
+            anyhow::bail!("pane {pane_id} process tree remained alive during worktree cleanup");
+        }
+    }
+    let panes = lock_state(state).close_session_panes(session_id)?;
+    let mut failures = Vec::new();
+    for mut pane in panes {
+        if let Err(error) = pane.kill() {
+            failures.push(error.to_string());
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "failed to terminate worktree panes: {}",
+            failures.join("; ")
+        );
+    }
+    persist_state(state, sessions_path)?;
+    notify_session_changed(state, session_id)?;
+    Ok(())
+}
+
+fn remove_worktree_session(
+    state: &SharedState,
+    sessions_path: &Path,
+    session_id: &str,
+) -> Result<bool> {
+    let session_id = Uuid::parse_str(session_id).context("parse bound worktree session id")?;
+    let exists = lock_state(state)
+        .list_sessions()
+        .iter()
+        .any(|session| session.id == session_id);
+    if !exists {
+        return Ok(false);
+    }
+    let panes = lock_state(state).delete_session(session_id)?;
+    for mut pane in panes {
+        pane.kill()
+            .context("terminate worktree pane before checkout removal")?;
+    }
+    persist_state(state, sessions_path)?;
+    notify_session_changed(state, session_id)?;
+    Ok(true)
 }
 
 fn dispatch_remote_request(
@@ -4115,6 +5508,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::GetScrollback { req, .. }
         | ClientToDaemon::TaskEvent { req, .. }
         | ClientToDaemon::Control { req, .. }
+        | ClientToDaemon::Worktree { req, .. }
         | ClientToDaemon::Orchestration { req, .. }
         | ClientToDaemon::Cli { req, .. }
         | ClientToDaemon::Computer { req, .. }
@@ -4127,6 +5521,7 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::RemotePaneLeaseAdminReclaim { req, .. }
         | ClientToDaemon::RemoteConnectionCleanup { req, .. }
         | ClientToDaemon::ResourceSnapshot { req }
+        | ClientToDaemon::AttentionSnapshot { req }
         | ClientToDaemon::Shutdown { req, .. } => Some(*req),
         ClientToDaemon::Hello { .. }
         | ClientToDaemon::RegisterBrowserHost
@@ -4637,6 +6032,25 @@ fn kill_all_panes(state: &SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_worktree_prompt_defaults_to_omp_and_rejects_unknown_profiles() {
+        let (config, agent_profile) =
+            worktree_initial_pane_config("E:/repo/worktree", None, None, true)
+                .expect("default prompt profile");
+        assert!(agent_profile);
+        assert_eq!(config.profile_id.as_deref(), Some("omp"));
+        assert_eq!(config.cwd.as_deref(), Some("E:/repo/worktree"));
+        assert!(worktree_initial_pane_config(
+            "E:/repo/worktree",
+            Some("custom-profile"),
+            None,
+            false,
+        )
+        .expect_err("unknown headless profile")
+        .to_string()
+        .contains("cannot resolve profile"));
+    }
 
     fn state_with_test_pane(cols: u16, rows: u16) -> (SharedState, Uuid, Uuid) {
         let state = Arc::new(Mutex::new(DaemonState::new()));

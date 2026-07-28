@@ -1,13 +1,18 @@
-use super::types::{AutomationRecord, AutomationRunWorktree};
+use super::{
+    types::{AutomationRecord, AutomationRunWorktree},
+    AutomationWorktreeProvision,
+};
 use crate::{
     agent_runtime::WorktreeManager,
+    app::git::worktree_registry::WorktreeRegistry,
     orchestration::WorktreeAssignment,
     worktree_storage::{requested_root, WorktreeStorage},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
+    sync::Arc,
 };
 use uuid::Uuid;
 
@@ -45,7 +50,7 @@ impl CleanupReason {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PreparedWorkspace {
     pub cwd: PathBuf,
     pub worktree: AutomationRunWorktree,
@@ -53,11 +58,10 @@ pub struct PreparedWorkspace {
     ownership: PreparedOwnership,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum PreparedOwnership {
     Existing,
     NewPerRun {
-        manager: WorktreeManager,
         repository_root: PathBuf,
         assignment: WorktreeAssignment,
     },
@@ -69,23 +73,28 @@ pub struct CleanupOutcome {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AutomationWorktreeController {
     manager: WorktreeManager,
+    registry: Arc<WorktreeRegistry>,
 }
 
 impl AutomationWorktreeController {
-    pub fn new(manager: WorktreeManager) -> Self {
-        Self { manager }
+    pub fn new(manager: WorktreeManager, registry: Arc<WorktreeRegistry>) -> Self {
+        Self { manager, registry }
     }
 
-    pub fn prepare(
+    pub fn prepare_with_worktree<F>(
         &self,
         run_id: &str,
         run_number: u64,
         automation: &AutomationRecord,
         base_workspace: &Path,
-    ) -> Result<PreparedWorkspace> {
+        create_worktree: F,
+    ) -> Result<PreparedWorkspace>
+    where
+        F: FnOnce(&WorktreeAssignment) -> Result<AutomationWorktreeProvision>,
+    {
         if !base_workspace.is_dir() {
             bail!(
                 "automation workspace is unavailable: {}",
@@ -94,11 +103,56 @@ impl AutomationWorktreeController {
         }
         match automation.workspace_mode.as_str() {
             "existing" => self.prepare_existing(automation, base_workspace),
-            "new_per_run" => self.prepare_new(run_id, run_number, automation, base_workspace),
+            "new_per_run" => self.prepare_new(
+                run_id,
+                run_number,
+                automation,
+                base_workspace,
+                create_worktree,
+            ),
             mode => bail!("unsupported automation workspace mode '{mode}'"),
         }
     }
 
+    #[cfg(test)]
+    pub fn prepare(
+        &self,
+        run_id: &str,
+        run_number: u64,
+        automation: &AutomationRecord,
+        base_workspace: &Path,
+    ) -> Result<PreparedWorkspace> {
+        self.prepare_with_worktree(
+            run_id,
+            run_number,
+            automation,
+            base_workspace,
+            |planned| {
+                let output = Command::new("git")
+                    .args([
+                        "worktree",
+                        "add",
+                        "-b",
+                        &planned.branch,
+                        &planned.worktree_path,
+                        &planned.base_revision,
+                    ])
+                    .current_dir(base_workspace)
+                    .output()
+                    .context("create test automation worktree")?;
+                if !output.status.success() {
+                    bail!(
+                        "create test automation worktree failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                Ok(AutomationWorktreeProvision {
+                    session_id: "test-session".into(),
+                    assignment: planned.clone(),
+                })
+            },
+        )
+    }
     pub fn cleanup_if_safe(
         &self,
         prepared: &PreparedWorkspace,
@@ -106,7 +160,6 @@ impl AutomationWorktreeController {
     ) -> CleanupOutcome {
         let mut record = prepared.worktree.clone();
         let PreparedOwnership::NewPerRun {
-            manager,
             repository_root,
             assignment,
         } = &prepared.ownership
@@ -142,15 +195,12 @@ impl AutomationWorktreeController {
             };
         }
 
-        match manager.cleanup(repository_root, assignment, false) {
-            Ok(()) => {
-                record.disposition = "cleaned".into();
-                CleanupOutcome {
-                    worktree: record,
-                    error: None,
-                }
-            }
-            Err(error) => cleanup_failed(record, reason, error),
+        // Lifecycle-managed automation worktrees stay registered and visible until the
+        // user removes them through the shared preflight/acknowledgement flow.
+        record.disposition = "retained".into();
+        CleanupOutcome {
+            worktree: record,
+            error: None,
         }
     }
 
@@ -179,6 +229,9 @@ impl AutomationWorktreeController {
         Ok(PreparedWorkspace {
             cwd: cwd.clone(),
             worktree: AutomationRunWorktree {
+                worktree_id: None,
+                instance_id: None,
+                session_id: None,
                 path: cwd.to_string_lossy().into_owned(),
                 branch,
                 base_revision,
@@ -189,13 +242,17 @@ impl AutomationWorktreeController {
         })
     }
 
-    fn prepare_new(
+    fn prepare_new<F>(
         &self,
         run_id: &str,
         run_number: u64,
         automation: &AutomationRecord,
         workspace: &Path,
-    ) -> Result<PreparedWorkspace> {
+        create_worktree: F,
+    ) -> Result<PreparedWorkspace>
+    where
+        F: FnOnce(&WorktreeAssignment) -> Result<AutomationWorktreeProvision>,
+    {
         if run_id.trim().is_empty() {
             bail!("automation run id must not be empty");
         }
@@ -217,8 +274,8 @@ impl AutomationWorktreeController {
         if storage.group_by_repository {
             root = root.join(repository_folder(&authority.repository_root));
         }
-        let manager =
-            WorktreeManager::new(root).context("initialize automation worktree storage")?;
+        let manager = WorktreeManager::new(root, Arc::clone(&self.registry))
+            .context("initialize automation worktree storage")?;
         let branch = format!("vibelink/automation/{automation_short}/run-{run_number}-{run_short}");
         git_text(
             &authority.repository_root,
@@ -226,40 +283,35 @@ impl AutomationWorktreeController {
         )
         .context("validate automation worktree branch")?;
         let unique = Uuid::new_v4().simple().to_string();
-        let assignment = WorktreeAssignment {
+        let planned = WorktreeAssignment {
+            worktree_id: None,
+            instance_id: None,
             base_revision: base_revision.clone(),
-            branch: branch.clone(),
+            branch,
             worktree_path: manager
                 .root()
                 .join(format!("{name}-{}", &unique[..8]))
                 .to_string_lossy()
                 .into_owned(),
         };
-        manager
-            .materialize(&authority, &assignment)
-            .context("create automation worktree")?;
-        let cwd = match manager.launch_path(&authority, &assignment) {
-            Ok(path) => path,
-            Err(error) => {
-                return match manager.cleanup(&authority.repository_root, &assignment, false) {
-                    Ok(()) => Err(error.context("resolve automation worktree workspace")),
-                    Err(cleanup) => Err(anyhow!(
-                    "resolve automation worktree workspace: {error:#}; cleanup failed: {cleanup:#}"
-                )),
-                }
-            }
-        };
+        let provision = create_worktree(&planned).context("create automation worktree")?;
+        let assignment = provision.assignment;
+        let cwd = manager
+            .launch_path(&authority, &assignment)
+            .context("resolve automation worktree workspace")?;
         Ok(PreparedWorkspace {
             cwd,
             worktree: AutomationRunWorktree {
+                worktree_id: assignment.worktree_id.clone(),
+                instance_id: assignment.instance_id.clone(),
+                session_id: Some(provision.session_id),
                 path: assignment.worktree_path.clone(),
-                branch,
-                base_revision,
+                branch: assignment.branch.clone(),
+                base_revision: assignment.base_revision.clone(),
                 disposition: "live".into(),
             },
             owned: true,
             ownership: PreparedOwnership::NewPerRun {
-                manager,
                 repository_root: authority.repository_root,
                 assignment,
             },
@@ -482,8 +534,18 @@ mod tests {
             fs::write(repo.join("tracked.txt"), "base\n").expect("file");
             git(&repo, &["add", "tracked.txt"]);
             git(&repo, &["commit", "-m", "base"]);
+            let control = Arc::new(
+                crate::control_plane::ControlPlane::open(&root.join("control"))
+                    .expect("control plane"),
+            );
+            let registry = Arc::new(WorktreeRegistry::new(control));
             let controller = AutomationWorktreeController::new(
-                WorktreeManager::new(root.join("default-managed")).expect("manager"),
+                WorktreeManager::new(
+                    root.join("default-managed"),
+                    Arc::clone(&registry),
+                )
+                .expect("manager"),
+                registry,
             );
             Self {
                 root,
@@ -556,7 +618,11 @@ mod tests {
                 .cleanup_if_safe(prepared, CleanupReason::SetupUnavailable)
                 .worktree
                 .disposition,
-            "cleaned"
+            "retained"
+        );
+        git(
+            &f.repo,
+            &["worktree", "remove", "--force", &prepared.worktree.path],
         );
     }
 
@@ -681,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_worktree_reports_cleanup_failure_and_preserves_path() {
+    fn locked_worktree_is_retained_for_shared_removal_flow() {
         let f = Fixture::new();
         let prepared = f
             .controller
@@ -691,12 +757,9 @@ mod tests {
         let outcome = f
             .controller
             .cleanup_if_safe(&prepared, CleanupReason::SetupUnavailable);
-        assert_eq!(outcome.worktree.disposition, "cleanup_failed");
+        assert_eq!(outcome.worktree.disposition, "retained");
         assert!(Path::new(&outcome.worktree.path).is_dir());
-        assert!(outcome
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("setup unavailable")));
+        assert!(outcome.error.is_none());
         git(&f.repo, &["worktree", "unlock", &prepared.worktree.path]);
         clean(&f, &prepared);
         f.remove();

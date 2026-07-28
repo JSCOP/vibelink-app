@@ -1152,6 +1152,20 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             {activeSection === 'worktrees' ? (
               <SettingsCard icon={GitBranch} title="Worktree storage" hint="Where VibeLink creates managed Git worktrees for the active repository workspace.">
                 <SettingsRow
+                  icon={ArrowUpDown}
+                  label="Workspace ordering"
+                  sub="Smart prioritizes blocked, waiting, errored, and completed workspaces. Drag reordering is available only in Manual mode."
+                  control={(
+                    <SettingsSelect label="Workspace ordering" value={draft.workspaceSortMode} onChange={(workspaceSortMode) => patchDraft({ workspaceSortMode: workspaceSortMode as Settings['workspaceSortMode'] })}>
+                      <option value="smart">Smart attention</option>
+                      <option value="recent">Recent activity</option>
+                      <option value="name">Name</option>
+                      <option value="repository">Repository</option>
+                      <option value="manual">Manual</option>
+                    </SettingsSelect>
+                  )}
+                />
+                <SettingsRow
                   icon={HardDrive}
                   label="Location"
                   control={(

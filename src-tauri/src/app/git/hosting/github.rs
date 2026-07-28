@@ -3,7 +3,10 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
-use super::{CiCheck, CiStatus, CreatePrRequest, HostingClient, PrCreated, PrDetail, PrInfo};
+use super::{
+    CiCheck, CiStatus, CreatePrRequest, HostingClient, PrCreated, PrDetail, PrInfo,
+    ProviderMergeState,
+};
 
 const GITHUB_API_URL: &str = "https://api.github.com";
 
@@ -70,6 +73,14 @@ impl GithubClient {
         )
     }
 
+    fn put(&self, url: &str, body: serde_json::Value) -> Result<String> {
+        response_body(
+            self.request("PUT", url).send_json(body),
+            "GitHub",
+            &self.token,
+        )
+    }
+
     fn ci_for_ref(&self, ref_name: &str) -> Result<CiStatus> {
         let encoded_ref = percent_encode_segment(ref_name);
         let check_runs =
@@ -110,6 +121,104 @@ impl HostingClient for GithubClient {
     fn ci_status(&self, ref_name: &str) -> Result<CiStatus> {
         self.ci_for_ref(ref_name)
     }
+
+    fn merge_state(&self, number: u64) -> Result<ProviderMergeState> {
+        let body = self.get(&self.repo_url(&format!("/pulls/{number}")))?;
+        let pull: serde_json::Value =
+            serde_json::from_str(&body).context("parse GitHub pull request merge state")?;
+        let source_branch = json_string(&pull, &["head", "ref"])
+            .context("GitHub pull request has no source branch")?;
+        let target_branch = json_string(&pull, &["base", "ref"])
+            .context("GitHub pull request has no target branch")?;
+        let head_sha =
+            json_string(&pull, &["head", "sha"]).context("GitHub pull request has no head SHA")?;
+        let conflict_free = pull.get("mergeable").and_then(serde_json::Value::as_bool);
+        let protection = self.get(&self.repo_url(&format!(
+            "/branches/{}/protection/required_status_checks",
+            percent_encode_segment(&target_branch)
+        )))?;
+        let protection: serde_json::Value =
+            serde_json::from_str(&protection).context("parse GitHub required status checks")?;
+        let mut required_names = protection
+            .get("contexts")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        required_names.extend(
+            protection
+                .get("checks")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|check| check.get("context").and_then(serde_json::Value::as_str))
+                .map(str::to_string),
+        );
+        required_names.sort();
+        required_names.dedup();
+        let ci = self.ci_for_ref(&head_sha)?;
+        let required_checks = required_names
+            .into_iter()
+            .map(|name| {
+                ci.checks
+                    .iter()
+                    .find(|check| check.name == name)
+                    .cloned()
+                    .unwrap_or(CiCheck {
+                        name,
+                        state: "pending".into(),
+                        url: None,
+                    })
+            })
+            .collect();
+        Ok(ProviderMergeState {
+            number,
+            source_branch,
+            target_branch,
+            head_sha,
+            conflict_free,
+            required_checks_known: true,
+            required_checks,
+        })
+    }
+
+    fn merge_pr(&self, number: u64, expected_head_sha: &str) -> Result<(Option<String>, String)> {
+        let body = self.put(
+            &self.repo_url(&format!("/pulls/{number}/merge")),
+            json!({ "sha": expected_head_sha }),
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&body).context("parse GitHub merge response")?;
+        if value.get("merged").and_then(serde_json::Value::as_bool) != Some(true) {
+            anyhow::bail!(
+                "GitHub refused merge: {}",
+                value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown reason")
+            );
+        }
+        Ok((
+            value
+                .get("sha")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("merged")
+                .to_string(),
+        ))
+    }
+}
+
+fn json_string(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 fn response_body(
@@ -239,6 +348,7 @@ impl GithubPrDetailBase {
             draft: self.pull.draft,
             url: self.pull.html_url,
             state: self.pull.state,
+            head_sha: Some(self.head_sha),
             checks,
         }
     }

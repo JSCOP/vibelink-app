@@ -772,6 +772,13 @@
 
 /* Narrow-pane behavior */
 
+.git-pr-detail-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 @container git-pr (max-width: 640px) {
   .git-pr-workbench {
     flex-direction: column;

@@ -121,7 +121,7 @@ function scheduleSessionReload(sessionId: string): void {
 async function reloadSession(sessionId: string): Promise<void> {
   try {
     const state = useWorkspaceStore.getState()
-    await state.refreshSessions()
+    await Promise.all([state.refreshSessions(), state.refreshWorktrees(), state.refreshAttentionSnapshot()])
     if (useWorkspaceStore.getState().activeSessionId === sessionId) {
       await useWorkspaceStore.getState().refreshAttachedSession(sessionId)
     }

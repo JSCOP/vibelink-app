@@ -16,7 +16,7 @@ pub use client::{socket_name_for_user, ControlSocketClient, ControlSocketConfig,
 pub use command::{
     is_command_domain, parse_args, ActionCommand, AutomationAction, BrowserAction, Command,
     ComputerAction, Invocation, McpAction, OperationArguments, OrchestrationAction, RemoteAction,
-    SelectorSet, SkillAction, TerminalAction, WorkspaceAction, COMMAND_DOMAINS,
+    SelectorSet, SkillAction, TerminalAction, WorkspaceAction, WorktreeAction, COMMAND_DOMAINS,
     COMMAND_SCHEMA_VERSION,
 };
 pub use contract::{
