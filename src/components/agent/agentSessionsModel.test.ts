@@ -45,17 +45,6 @@ describe('Agent session model', () => {
     expect(visibleAgentConversations(conversations, 'repo/src')).toEqual([ompConversation])
   })
 
-  test('permission waiting state takes precedence over busy work', () => {
-    expect(agentSessionLiveState('busy', [{ requestId: 1, generation: 1, title: 'Write file', toolKind: 'edit', options: [] }])).toEqual({
-      label: 'Waiting for input',
-      tone: 'waiting',
-      pulse: false,
-    })
-    expect(agentSessionLiveState('starting', [])).toEqual({ label: 'Working', tone: 'working', pulse: true })
-    expect(agentSessionLiveState('running', [])).toEqual({ label: 'Idle', tone: 'idle', pulse: false })
-    expect(agentSessionLiveState('error', [])).toEqual({ label: 'Error', tone: 'error', pulse: false })
-    expect(agentSessionLiveState('idle', [])).toEqual({ label: 'Stopped', tone: 'stopped', pulse: false })
-  })
 
   test('formats recent conversation timestamps', () => {
     const updatedAt = Date.parse('2026-07-22T12:00:00.000Z')

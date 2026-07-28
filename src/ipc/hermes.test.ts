@@ -111,6 +111,7 @@ describe('Hermes ACP startup', () => {
       hermesTranscript: { 'session-a': [{ role: 'user', text: 'old', thoughts: '', toolCalls: [] }] },
       hermesPermissions: { 'session-a': [{ requestId: 7, generation: 1, title: 'Old permission', toolKind: 'edit', options: [] }] },
       hermesUsage: { 'session-a': { size: 100, used: 90 } },
+      hermesGenerations: { 'session-a': 1 },
     })
     const { hermesNewSession } = await import('./hermes')
 
@@ -129,6 +130,7 @@ describe('Hermes ACP startup', () => {
       if (command === 'hermes_list_sessions') await new Promise<void>((resolve) => { releaseList = resolve })
       return []
     })
+    useWorkspaceStore.setState({ hermesGenerations: { 'session-a': 1 } })
     const { hermesRefreshSessions } = await import('./hermes')
 
     const first = hermesRefreshSessions('session-a')

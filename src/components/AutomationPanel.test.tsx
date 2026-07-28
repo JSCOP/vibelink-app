@@ -166,4 +166,20 @@ describe('AutomationPanel', () => {
       })
     })
   })
+
+  it('closes only the open picker on the first Escape, then the dialog', async () => {
+    render(<AutomationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Hermes/ }))
+    expect(screen.getByRole('listbox', { name: 'Automation agent' })).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('listbox', { name: 'Automation agent' })).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: /Schedule agent work/ })).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: /Schedule agent work/ })).not.toBeInTheDocument()
+    })
+  })
 })

@@ -18,10 +18,16 @@ $CargoToml = Join-Path $RepoRoot 'src-tauri\Cargo.toml'
 $CargoLock = Join-Path $RepoRoot 'src-tauri\Cargo.lock'
 $TauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
 $DevVitePort = 1420
+$DevVitePortEnd = 1439
 $ProdWebViewCdpPort = 9333
 $DevWebViewCdpPort = 19333
+$DevWebViewCdpPortEnd = 19363
+$DevBrowserProfilePort = 19400
+$DevBrowserProfilePortEnd = 19655
 $ProdRemotePort = 42811
 $DevRemotePort = 42812
+$DebugAppExe = Join-Path $RepoRoot 'src-tauri\target\debug\app.exe'
+$GeneratedDevConfig = Join-Path $RepoRoot 'src-tauri\target\vibelink-dev-runtime.conf.json'
 
 function Write-Section([string]$Title) {
   Write-Host ''
@@ -129,20 +135,89 @@ function Show-PortOwner([int]$Port, [string]$Label) {
   $owners | Format-List
 }
 
-function Assert-DevPortAvailable([int]$Port, [string]$Label) {
-  $owners = @(Get-PortOwners $Port)
-  if ($owners.Count -eq 0) { return }
-  Write-Host "$Label port $Port is already listening:" -ForegroundColor Yellow
-  $owners | Format-List
-  throw "Development runtime port $Port is occupied. Stop only the exact proven owner; never stop the release runtime to free a dev port."
+function Test-ProjectDevPortOwner([object]$Owner, [string]$Kind) {
+  if ($Kind -eq 'Vite') {
+    $commandLine = [string]$Owner.CommandLine
+    return $commandLine -like "*$RepoRoot*" -and $commandLine -match '(?i)[\\/]vite(\.js)?([\s\"'']|$)'
+  }
+
+  if ($Kind -eq 'WebView2Cdp') {
+    $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($Owner.ParentProcessId)" -ErrorAction SilentlyContinue
+    return $null -ne $parent -and $parent.ExecutablePath -eq $DebugAppExe
+  }
+
+  return $false
+}
+
+function Select-DevPort([int]$Start, [int]$End, [string]$Label, [string]$OwnerKind) {
+  for ($port = $Start; $port -le $End; $port++) {
+    $owners = @(Get-PortOwners $port)
+    if ($owners.Count -eq 0) {
+      if ($port -ne $Start) {
+        Write-Host "$Label preferred port $Start is occupied by another program; using fallback $port." -ForegroundColor Yellow
+      }
+      return $port
+    }
+
+    $existingDevOwners = @($owners | Where-Object { Test-ProjectDevPortOwner $_ $OwnerKind })
+    if ($existingDevOwners.Count -gt 0) {
+      Write-Host "An existing VibeLink development runtime owns $Label port $port`:" -ForegroundColor Yellow
+      $existingDevOwners | Format-List | Out-Host
+      throw "VibeLink development is already running on $Label port $port. Refusing to start a second dev runtime."
+    }
+
+    if ($port -eq $Start) {
+      Write-Host "$Label preferred port $Start is occupied by another program:" -ForegroundColor Yellow
+      $owners | Format-List | Out-Host
+    }
+  }
+
+  throw "No free $Label port remains in the development fallback range $Start-$End. No process was stopped."
+}
+
+function Show-DevPortRange([int]$Start, [int]$End, [string]$Label, [string]$OwnerKind) {
+  Write-Host "$Label`: $Start-$End (preferred $Start)" -ForegroundColor Cyan
+  $occupied = @()
+  for ($port = $Start; $port -le $End; $port++) {
+    foreach ($owner in @(Get-PortOwners $port)) {
+      $occupied += [pscustomobject]@{
+        Port = $port
+        Scope = if (Test-ProjectDevPortOwner $owner $OwnerKind) { 'VibeLink dev' } else { 'other process' }
+        Name = $owner.Name
+        ProcessId = $owner.ProcessId
+        ParentProcessId = $owner.ParentProcessId
+        ExecutablePath = $owner.ExecutablePath
+        CommandLine = $owner.CommandLine
+      }
+    }
+  }
+  if ($occupied.Count -eq 0) {
+    Write-Host '  all free' -ForegroundColor DarkGray
+  } else {
+    $occupied | Format-List
+  }
+}
+
+function New-DevRuntimeConfig([int]$VitePort) {
+  $config = Get-Content -LiteralPath $DevConfig -Raw | ConvertFrom-Json
+  $build = [pscustomobject]@{}
+  $build | Add-Member -NotePropertyName 'devUrl' -NotePropertyValue "http://localhost:$VitePort"
+  $build | Add-Member -NotePropertyName 'beforeDevCommand' -NotePropertyValue "pnpm exec vite --port $VitePort --strictPort"
+  $config | Add-Member -NotePropertyName 'build' -NotePropertyValue $build -Force
+  $directory = Split-Path -Parent $GeneratedDevConfig
+  New-Item -ItemType Directory -Path $directory -Force | Out-Null
+  $json = $config | ConvertTo-Json -Depth 20
+  [System.IO.File]::WriteAllText($GeneratedDevConfig, $json, [System.Text.UTF8Encoding]::new($false))
+  return $GeneratedDevConfig
 }
 
 function Invoke-DevStatus {
   Write-Section 'Runtime isolation status'
   Write-Host 'Development endpoints' -ForegroundColor Green
-  Show-PortOwner $DevVitePort '  Vite'
-  Show-PortOwner $DevWebViewCdpPort '  WebView2 CDP'
-  Show-PortOwner $DevRemotePort '  Remote (on demand)'
+  Show-DevPortRange $DevVitePort $DevVitePortEnd '  Vite' 'Vite'
+  Show-DevPortRange $DevWebViewCdpPort $DevWebViewCdpPortEnd '  WebView2 CDP' 'WebView2Cdp'
+  Write-Host "  Browser profiles: $DevBrowserProfilePort-$DevBrowserProfilePortEnd (allocated automatically)" -ForegroundColor Cyan
+  Show-PortOwner $DevRemotePort '  Remote default (user-configurable)'
   Write-Host 'Protected release endpoints (observe only; never clean up during development)' -ForegroundColor Yellow
   Show-PortOwner $ProdWebViewCdpPort '  WebView2 CDP'
   Show-PortOwner $ProdRemotePort '  Remote'
@@ -306,17 +381,23 @@ function Invoke-DevRun {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
-  Assert-DevPortAvailable $DevVitePort 'Vite'
+  $vitePort = Select-DevPort $DevVitePort $DevVitePortEnd 'Vite' 'Vite'
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
   }
-  Assert-DevPortAvailable $DevWebViewCdpPort 'WebView2 CDP'
-  $env:VIBELINK_BROWSER_CDP_PORT = $DevWebViewCdpPort.ToString()
-  Write-Host "Development only: Vite=$DevVitePort, WebView2 CDP=$DevWebViewCdpPort, Remote=$DevRemotePort." -ForegroundColor Green
+  $webViewCdpPort = Select-DevPort $DevWebViewCdpPort $DevWebViewCdpPortEnd 'WebView2 CDP' 'WebView2Cdp'
+  $env:VIBELINK_DEV_VITE_PORT = $vitePort.ToString()
+  $env:VIBELINK_BROWSER_CDP_PORT = $webViewCdpPort.ToString()
+  $runtimeConfig = New-DevRuntimeConfig $vitePort
+  Write-Host "Development only: Vite=$vitePort, WebView2 CDP=$webViewCdpPort, browser profiles=$DevBrowserProfilePort-$DevBrowserProfilePortEnd, Remote default=$DevRemotePort." -ForegroundColor Green
   Write-Host "Release remains protected: WebView2 CDP=$ProdWebViewCdpPort, Remote=$ProdRemotePort." -ForegroundColor Yellow
   & $StageSidecars -Profile debug
   if ($LASTEXITCODE -ne 0) { throw "Sidecar staging failed with exit code $LASTEXITCODE" }
-  Invoke-Checked 'pnpm' @('exec', 'tauri', 'dev', '--config', $DevConfig)
+  try {
+    Invoke-Checked 'pnpm' @('exec', 'tauri', 'dev', '--config', $runtimeConfig)
+  } finally {
+    Remove-Item -LiteralPath $runtimeConfig -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Invoke-ReleaseRun {
@@ -413,12 +494,15 @@ Actions:
   version-bump       Promotes package.json/Cargo.toml/Cargo.lock/tauri.conf.json (patch bump, or -Version x.y.z) without building.
 
 Debug vs release:
-  Debug/dev uses Vite 1420, WebView2 CDP 19333 (profiles 19334-19589),
-  Remote 42812, the Dev data root, and the debug executable path.
-  Release uses WebView2 CDP 9333 (profiles 9334-9589), Remote 42811,
-  the production data root, and the installed/release executable path.
-  Release is a protected user runtime during development; never attach a dev
-  smoke to its ports or stop it to make a development command succeed.
+  Debug/dev prefers Vite 1420 and WebView2 CDP 19333. If another program
+  occupies either port, the launcher chooses the first free port in the bounded
+  dev-only ranges 1420-1439 and 19333-19363. Browser profiles use 19400-19655;
+  Remote defaults to user-configurable 42812. The Dev data root and debug
+  executable path remain separate. Release stays fixed on WebView2 CDP 9333
+  (profiles 9334-9589), Remote 42811, the production data root, and the
+  installed/release executable path. Release is a protected user runtime during
+  development; never attach a dev smoke to its ports or stop it to make a
+  development command succeed.
 
 Versioning:
   Installer actions update package.json, src-tauri/Cargo.toml,
@@ -435,10 +519,11 @@ Embedded frontend assets:
   preventing Cargo incremental state from pairing a fresh index.html with stale JavaScript.
 
 Safety:
-  Development preflight fails closed when 1420 or 19333 is occupied. This
-  script never stops a release process or frees release ports. Dev run/build
-  only delegates to scripts\stop-legacy-dev-locks.ps1, which stops exact
-  src-tauri\target\debug\app.exe PIDs.
+  Development preflight automatically bypasses unrelated listeners only inside
+  the bounded dev ranges. It fails closed if an existing VibeLink dev runtime
+  owns any candidate, if every candidate is occupied, or if strict binding later
+  loses a race. This script never stops another program or a release process.
+  Dev run/build cleanup is limited to exact src-tauri\target\debug\app.exe PIDs.
 '@ -ForegroundColor Gray
 }
 

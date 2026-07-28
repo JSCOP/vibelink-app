@@ -1148,6 +1148,7 @@ describe('workspace store profiles', () => {
   test('cancels a pane closed before its spawn reply arrives', async () => {
     let resolveSpawn: ((pane: PaneMeta) => void) | undefined
     vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'attach_session') return { layoutJson: null, panes: [nonAgentPane] }
       if (command === 'spawn_pane') {
         return await new Promise<PaneMeta>((resolve) => { resolveSpawn = resolve })
       }
@@ -1155,7 +1156,7 @@ describe('workspace store profiles', () => {
       if (command === 'list_sessions') return []
       return null
     })
-    useWorkspaceStore.setState({ activeSessionId: 'session-1' })
+    await useWorkspaceStore.getState().attachSession('session-1')
 
     const spawning = useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
     expect(useWorkspaceStore.getState().paneLifecycle['pane-test']).toBe('spawning')

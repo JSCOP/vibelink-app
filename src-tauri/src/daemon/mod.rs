@@ -6206,13 +6206,12 @@ fn read_pane_loop(
                     output_sequence,
                     senders,
                     snapshot,
-                }) = lock_state(&state)
-                    .record_output_and_push_for_generation(
-                        pane_id,
-                        generation,
-                        bytes,
-                        capture_snapshot,
-                    )
+                }) = lock_state(&state).record_output_and_push_for_generation(
+                    pane_id,
+                    generation,
+                    bytes,
+                    capture_snapshot,
+                )
                 else {
                     continue;
                 };

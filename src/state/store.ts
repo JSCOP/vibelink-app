@@ -665,7 +665,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({ workspaceEpoch: workspaceSessionEpoch })
     }
     try {
-      await invoke('browser_cleanup_workspace', { workspaceId: sessionId })
+      await releaseSessionResources(sessionId, deletedWorkspaceFolder)
       await invoke('delete_session', { sessionId })
     } catch (error) {
       if (deletingActiveSession && get().activeSessionId === sessionId) {
@@ -673,7 +673,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
       throw error
     }
-    await releaseSessionResources(sessionId, deletedWorkspaceFolder)
     let sessions = await invoke<SessionMeta[]>('list_sessions')
     if (sessions.length === 0) {
       const created = await invoke<SessionMeta>('create_session', { name: 'Workspace 1' })

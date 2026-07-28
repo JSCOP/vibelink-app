@@ -319,10 +319,7 @@ mod tests {
         ring.push(b"before");
         ring.push(b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[Hafter");
 
-        assert_eq!(
-            ring.snapshot(),
-            b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[Hafter",
-        );
+        assert_eq!(ring.snapshot(), b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[Hafter",);
     }
 
     #[test]

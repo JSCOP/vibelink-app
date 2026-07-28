@@ -1468,9 +1468,10 @@ fn select_target<'a>(
             target.page_id.is_some()
                 || (!target.url.starts_with("tauri://")
                     && !target.url.contains("tauri.localhost")
-                    && !target.url.contains("localhost:1420"))
+                    && !runtime_ports::is_dev_vite_url(&target.url))
         })
         .collect::<Vec<_>>();
+
     match candidates.as_slice() {
         [target] => Ok(*target),
         [] if targets.len() == 1 => Ok(&targets[0]),

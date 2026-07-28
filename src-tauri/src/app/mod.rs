@@ -462,12 +462,26 @@ pub fn run() {
         let port = runtime_ports::current_main_webview_cdp_port();
         std::env::set_var("VIBELINK_APP_FLAVOR", flavor);
         std::env::set_var("VIBELINK_BROWSER_CDP_PORT", port.to_string());
+        if cfg!(debug_assertions) {
+            let vite_port = std::env::var("VIBELINK_DEV_VITE_PORT")
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|port| {
+                    (runtime_ports::DEV_VITE_PORT_START..=runtime_ports::DEV_VITE_PORT_END)
+                        .contains(port)
+                })
+                .unwrap_or(runtime_ports::DEV_VITE_PORT_START);
+            std::env::set_var("VIBELINK_DEV_VITE_PORT", vite_port.to_string());
+        } else {
+            std::env::remove_var("VIBELINK_DEV_VITE_PORT");
+        }
         let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
             fixed_remote_debugging_arguments(&existing, port),
         );
     }
+
 }
 
 fn fixed_remote_debugging_arguments(existing: &str, port: u16) -> String {
