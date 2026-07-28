@@ -130,24 +130,20 @@ describe('AgentSessionsSidebar', () => {
     expect(mocks.controller.refreshSessions).not.toHaveBeenCalled()
   })
 
-  test('resumes a closed conversation in the selected pane and keeps Ctrl+click as a new window', async () => {
+  test('resumes a closed conversation in a new terminal window without replacing the highlighted pane', async () => {
     mocks.store.activePaneId = 'pane-selected'
     mocks.store.panes = { 'pane-selected': pane('pane-selected', ['pwsh']) }
+    openContent.mockResolvedValueOnce(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-resumed' }))
     renderSidebar()
-    const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
 
-    fireEvent.click(row)
+    fireEvent.click(screen.getByText('Resumable omp').closest('button') as HTMLButtonElement)
+
     await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'terminal', replacePaneId: 'pane-selected', newWindow: false, shell: 'pwsh.exe',
+      kind: 'terminal', newWindow: true, shell: 'pwsh.exe',
     })))
-    expect(activateContent).toHaveBeenCalledWith(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-selected' }))
-
-    openContent.mockClear()
-    activateContent.mockClear()
-    openContent.mockResolvedValueOnce(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-3' }))
-    fireEvent.click(row, { ctrlKey: true })
-    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', newWindow: true })))
     expect(openContent.mock.calls.at(-1)?.[0]).not.toHaveProperty('replacePaneId')
+    expect(activateContent).toHaveBeenCalledWith(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-resumed' }))
+    expect(mocks.store.panes['pane-selected']?.alive).toBe(true)
   })
 
   test('marks an open conversation with its pane number and reveals the active pane without resuming', () => {

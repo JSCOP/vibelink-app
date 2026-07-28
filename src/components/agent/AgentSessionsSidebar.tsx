@@ -49,9 +49,9 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
     flashAgentSessionPane(paneId)
   }, [contentActions])
 
-  const resumeConversation = useCallback(async (conversation: AgentConversationInfo, newWindow: boolean) => {
+  const resumeConversation = useCallback(async (conversation: AgentConversationInfo) => {
     const openPaneIds = conversationPaneIds(conversation)
-    if (!newWindow && openPaneIds.length > 0) {
+    if (openPaneIds.length > 0) {
       revealPane(activePaneId && openPaneIds.includes(activePaneId) ? activePaneId : openPaneIds[0])
       return
     }
@@ -61,16 +61,13 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
       return
     }
     try {
-      // Plain click replaces the highlighted terminal only when this conversation
-      // is not already open. Ctrl/Cmd+click explicitly creates another window.
       const panelId = await contentActions.openContent({
         kind: 'terminal',
         cwd: conversation.cwd,
         shell: launch.shell,
         args: launch.args,
         title: launch.title,
-        newWindow,
-        ...(!newWindow && activePaneId ? { replacePaneId: activePaneId } : {}),
+        newWindow: true,
       })
       if (!panelId) return
       contentActions.activateContent(panelId)
@@ -140,8 +137,8 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
               })
               const paneLabel = paneNumbers.length === 1 ? `Pane ${paneNumbers[0]}` : paneNumbers.length > 1 ? `Panes ${paneNumbers.join(', ')}` : null
               const actionTitle = paneLabel
-                ? `${active ? 'Active in' : 'Open in'} terminal ${paneLabel.toLocaleLowerCase()}. Click to reveal · Ctrl+click for a new window · ${conversation.path}`
-                : `Resume in the highlighted terminal · Ctrl+click for a new window · ${conversation.path}`
+                ? `${active ? 'Active in' : 'Open in'} terminal ${paneLabel.toLocaleLowerCase()}. Click to reveal · ${conversation.path}`
+                : `Resume in a new terminal window · ${conversation.path}`
               return (
                 <button
                   key={`${conversation.agent}:${conversation.path}`}
@@ -150,7 +147,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
                   role="listitem"
                   aria-current={active ? 'true' : undefined}
                   title={actionTitle}
-                  onClick={(event) => { void resumeConversation(conversation, event.ctrlKey || event.metaKey) }}
+                  onClick={() => { void resumeConversation(conversation) }}
                 >
                   <span className="agent-session-row-title">
                     <ProfileIcon name={agentIconName(conversation.agent)} size={13} className="agent-conversation-brand" />
