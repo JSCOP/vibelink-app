@@ -11,6 +11,7 @@ use crate::dedicated_cli::browser_cdp::{
     BrowserInspectSnapshot, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
     BrowserPageScale, BrowserPointerInput,
 };
+use crate::runtime_ports::browser_profile_port_candidates;
 
 #[cfg(windows)]
 fn append_resolved_renderer_argument(arguments: &str) -> String {
@@ -475,8 +476,7 @@ impl NativeBrowserProvider {
         if let Some(port) = ports.get(profile_id) {
             return Ok(*port);
         }
-        let start = self.main_cdp_port.saturating_add(1);
-        let port = (start..start.saturating_add(256))
+        let port = browser_profile_port_candidates(self.main_cdp_port)
             .find(|candidate| {
                 !ports.values().any(|port| port == candidate)
                     && TcpListener::bind(("127.0.0.1", *candidate)).is_ok()

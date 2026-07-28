@@ -15,6 +15,7 @@ if (isOverlay) {
 }
 
 if (import.meta.env.DEV) {
+  document.title = 'VibeLink Dev'
   // Live-debug handle for the WebView2 devtools (Ctrl+Shift+I in dev builds):
   // lets a stuck pane be inspected in place, e.g.
   //   __vibelinkDebug.TerminalManager.getOrCreate('<pane-id>').term.buffer.active.type

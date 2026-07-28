@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vibelink.ps1 -Action dev-run",
+    "tauri:dev:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vibelink.ps1 -Action dev-status",
     "tauri:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vibelink.ps1 -Action installer-release",
     "tauri:build:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/vibelink.ps1 -Action installer-ci",
     "release:validate:local": "node scripts/release-contract.mjs validate-local --web-root ../vibelink-web",

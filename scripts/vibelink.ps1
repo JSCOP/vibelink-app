@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'dev-release', 'installers', 'open-installers', 'version-preview', 'version-bump')]
+  [ValidateSet('menu', 'help', 'build', 'release-build', 'dev-run', 'dev-status', 'release-run', 'installer-dev', 'installer-release', 'installer-ci', 'dev-release', 'installers', 'open-installers', 'version-preview', 'version-bump')]
   [string]$Action = 'menu',
   [string]$Version = '',
   [string]$ConfigOverlay = ''
@@ -17,6 +17,11 @@ $PackageJson = Join-Path $RepoRoot 'package.json'
 $CargoToml = Join-Path $RepoRoot 'src-tauri\Cargo.toml'
 $CargoLock = Join-Path $RepoRoot 'src-tauri\Cargo.lock'
 $TauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
+$DevVitePort = 1420
+$ProdWebViewCdpPort = 9333
+$DevWebViewCdpPort = 19333
+$ProdRemotePort = 42811
+$DevRemotePort = 42812
 
 function Write-Section([string]$Title) {
   Write-Host ''
@@ -96,16 +101,51 @@ function Enter-RepoRoot {
   Set-Location -LiteralPath $RepoRoot
 }
 
-function Show-PortOwner([int]$Port) {
-  $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-  if (-not $connections) { return }
+function Get-PortOwners([int]$Port) {
+  $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+  if ($connections.Count -eq 0) { return }
 
-  Write-Host "Port $Port is already listening:" -ForegroundColor Yellow
-  Get-CimInstance Win32_Process |
-    Where-Object { $connections.OwningProcess -contains $_.ProcessId } |
-    Select-Object Name, ProcessId, ParentProcessId, ExecutablePath, CommandLine |
-    Format-List
-  Write-Host 'Not stopping anything automatically. Close the shown owner if it is not this dev run.' -ForegroundColor Yellow
+  foreach ($connection in $connections) {
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)" -ErrorAction SilentlyContinue
+    [pscustomobject]@{
+      Port = $Port
+      Address = $connection.LocalAddress
+      Name = $process.Name
+      ProcessId = $connection.OwningProcess
+      ParentProcessId = $process.ParentProcessId
+      ExecutablePath = $process.ExecutablePath
+      CommandLine = $process.CommandLine
+    }
+  }
+}
+
+function Show-PortOwner([int]$Port, [string]$Label) {
+  $owners = @(Get-PortOwners $Port)
+  Write-Host "$Label`: $Port" -ForegroundColor Cyan
+  if ($owners.Count -eq 0) {
+    Write-Host '  free' -ForegroundColor DarkGray
+    return
+  }
+  $owners | Format-List
+}
+
+function Assert-DevPortAvailable([int]$Port, [string]$Label) {
+  $owners = @(Get-PortOwners $Port)
+  if ($owners.Count -eq 0) { return }
+  Write-Host "$Label port $Port is already listening:" -ForegroundColor Yellow
+  $owners | Format-List
+  throw "Development runtime port $Port is occupied. Stop only the exact proven owner; never stop the release runtime to free a dev port."
+}
+
+function Invoke-DevStatus {
+  Write-Section 'Runtime isolation status'
+  Write-Host 'Development endpoints' -ForegroundColor Green
+  Show-PortOwner $DevVitePort '  Vite'
+  Show-PortOwner $DevWebViewCdpPort '  WebView2 CDP'
+  Show-PortOwner $DevRemotePort '  Remote (on demand)'
+  Write-Host 'Protected release endpoints (observe only; never clean up during development)' -ForegroundColor Yellow
+  Show-PortOwner $ProdWebViewCdpPort '  WebView2 CDP'
+  Show-PortOwner $ProdRemotePort '  Remote'
 }
 
 function Show-Bundles([string]$Profile) {
@@ -266,10 +306,14 @@ function Invoke-DevRun {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
-  Show-PortOwner 1420
+  Assert-DevPortAvailable $DevVitePort 'Vite'
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
   }
+  Assert-DevPortAvailable $DevWebViewCdpPort 'WebView2 CDP'
+  $env:VIBELINK_BROWSER_CDP_PORT = $DevWebViewCdpPort.ToString()
+  Write-Host "Development only: Vite=$DevVitePort, WebView2 CDP=$DevWebViewCdpPort, Remote=$DevRemotePort." -ForegroundColor Green
+  Write-Host "Release remains protected: WebView2 CDP=$ProdWebViewCdpPort, Remote=$ProdRemotePort." -ForegroundColor Yellow
   & $StageSidecars -Profile debug
   if ($LASTEXITCODE -ne 0) { throw "Sidecar staging failed with exit code $LASTEXITCODE" }
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'dev', '--config', $DevConfig)
@@ -358,6 +402,7 @@ Actions:
   build              Debug/dev flavor executable only. Fast local compile; no installer.
   release-build      Optimized production executable only; no installer.
   dev-run            Tauri dev mode using tauri.dev.conf.json and Vite hot reload.
+  dev-status         Shows dev endpoints and protected release endpoints without stopping anything.
   release-run        Starts src-tauri\target\release\app.exe; builds first if missing.
   installer-dev      Dev-flavor installer; auto-bumps patch version first.
   installer-release  Production installer; auto-bumps patch version first.
@@ -368,9 +413,12 @@ Actions:
   version-bump       Promotes package.json/Cargo.toml/Cargo.lock/tauri.conf.json (patch bump, or -Version x.y.z) without building.
 
 Debug vs release:
-  Debug/dev is for fast iteration and uses the Dev flavor/data directory.
-  Release is optimized and is what users should install/run.
-  You do not need both every time; keep debug for development, release for distribution.
+  Debug/dev uses Vite 1420, WebView2 CDP 19333 (profiles 19334-19589),
+  Remote 42812, the Dev data root, and the debug executable path.
+  Release uses WebView2 CDP 9333 (profiles 9334-9589), Remote 42811,
+  the production data root, and the installed/release executable path.
+  Release is a protected user runtime during development; never attach a dev
+  smoke to its ports or stop it to make a development command succeed.
 
 Versioning:
   Installer actions update package.json, src-tauri/Cargo.toml,
@@ -387,8 +435,10 @@ Embedded frontend assets:
   preventing Cargo incremental state from pairing a fresh index.html with stale JavaScript.
 
 Safety:
-  This script does not broad-kill processes. Dev run/build only delegates to
-  scripts\stop-legacy-dev-locks.ps1, which stops exact src-tauri\target\debug\app.exe PIDs.
+  Development preflight fails closed when 1420 or 19333 is occupied. This
+  script never stops a release process or frees release ports. Dev run/build
+  only delegates to scripts\stop-legacy-dev-locks.ps1, which stops exact
+  src-tauri\target\debug\app.exe PIDs.
 '@ -ForegroundColor Gray
 }
 
@@ -398,6 +448,7 @@ function Invoke-Action([string]$Name) {
     'build' { Invoke-DevBuild }
     'release-build' { Invoke-ReleaseBuild }
     'dev-run' { Invoke-DevRun }
+    'dev-status' { Invoke-DevStatus }
     'release-run' { Invoke-ReleaseRun }
     'installer-dev' { Invoke-DevInstaller }
     'installer-release' { Invoke-ReleaseInstaller }

@@ -10,6 +10,8 @@ pub mod daemon_paths;
 pub mod dedicated_cli;
 #[path = "../src/protocol.rs"]
 mod protocol;
+#[path = "../src/runtime_ports.rs"]
+mod runtime_ports;
 #[path = "../src/app/spawn_daemon.rs"]
 pub mod spawn_daemon;
 pub mod daemon {

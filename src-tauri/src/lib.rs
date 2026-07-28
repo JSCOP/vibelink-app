@@ -11,6 +11,7 @@ pub mod orchestration;
 pub mod persistence;
 pub mod protocol;
 pub mod remote;
+pub mod runtime_ports;
 pub mod storage;
 pub mod worktree_storage;
 

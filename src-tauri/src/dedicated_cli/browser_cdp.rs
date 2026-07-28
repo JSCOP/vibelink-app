@@ -1,6 +1,7 @@
 use crate::{
     browser::{BrowserDeviceMetrics, BrowserPolicy, BrowserRiskCapability},
     dedicated_cli::{ActionCommand, BrowserAction},
+    runtime_ports,
 };
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -485,7 +486,7 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .filter(|port| *port != 0)
-        .unwrap_or(9333);
+        .unwrap_or_else(runtime_ports::current_main_webview_cdp_port);
     let registry = read_registry(artifact_root)?;
     let mut ports = vec![main_port];
     if let Some(registry) = &registry {

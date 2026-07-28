@@ -28,7 +28,10 @@ mod webview_renderer;
 #[cfg(windows)]
 mod window_chrome;
 
-use crate::browser::{BrowserManager, BrowserPolicy, NativeBrowserProvider};
+use crate::{
+    browser::{BrowserManager, BrowserPolicy, NativeBrowserProvider},
+    runtime_ports,
+};
 use daemon_client::DaemonClient;
 use std::sync::Arc;
 use tauri::Manager;
@@ -456,27 +459,59 @@ pub fn run() {
     });
     fn configure_browser_cdp() {
         let flavor = crate::daemon::paths::app_flavor();
-        let port = if flavor == "dev" { 9334 } else { 9333 };
+        let port = runtime_ports::current_main_webview_cdp_port();
+        std::env::set_var("VIBELINK_APP_FLAVOR", flavor);
         std::env::set_var("VIBELINK_BROWSER_CDP_PORT", port.to_string());
-        let flag = format!("--remote-debugging-port={port}");
         let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        if !existing
-            .split_whitespace()
-            .any(|argument| argument.starts_with("--remote-debugging-port="))
-        {
-            let arguments = if existing.trim().is_empty() {
-                flag
-            } else {
-                format!("{} {}", existing.trim(), flag)
-            };
-            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", arguments);
-        }
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            fixed_remote_debugging_arguments(&existing, port),
+        );
     }
+}
+
+fn fixed_remote_debugging_arguments(existing: &str, port: u16) -> String {
+    let mut arguments = Vec::new();
+    let mut skip_port_value = false;
+    for argument in existing.split_whitespace() {
+        if skip_port_value {
+            skip_port_value = false;
+            continue;
+        }
+        if argument == "--remote-debugging-port" {
+            skip_port_value = true;
+            continue;
+        }
+        if argument.starts_with("--remote-debugging-port=") {
+            continue;
+        }
+        arguments.push(argument.to_string());
+    }
+    arguments.push(format!("--remote-debugging-port={port}"));
+    arguments.join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_cdp_port_replaces_inherited_chrome_or_release_ports() {
+        assert_eq!(
+            fixed_remote_debugging_arguments(
+                "--remote-debugging-port=9222 --remote-allow-origins=*",
+                runtime_ports::DEV_MAIN_WEBVIEW_CDP_PORT,
+            ),
+            "--remote-allow-origins=* --remote-debugging-port=19333"
+        );
+        assert_eq!(
+            fixed_remote_debugging_arguments(
+                "--disable-gpu --remote-debugging-port 9333",
+                runtime_ports::DEV_MAIN_WEBVIEW_CDP_PORT,
+            ),
+            "--disable-gpu --remote-debugging-port=19333"
+        );
+    }
 
     #[test]
     fn terminal_processes_survive_app_exit_by_default() {

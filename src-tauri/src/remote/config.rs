@@ -1,11 +1,15 @@
-use crate::storage::{
-    load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError, LoadSource,
+use crate::{
+    runtime_ports,
+    storage::{
+        load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError,
+        LoadSource,
+    },
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const DEFAULT_REMOTE_PORT: u16 = 42_811;
+pub const DEFAULT_REMOTE_PORT: u16 = runtime_ports::default_remote_port(cfg!(debug_assertions));
 const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
