@@ -16,6 +16,7 @@ import type {
   TagInfo,
   WorkingStatus,
 } from '../../ipc/types'
+import { discoverRepos, type DiscoveredRepo } from '../../ipc/gitDiscovery'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { useExplorerStore } from '../../state/explorer'
 import {
@@ -45,6 +46,73 @@ import { sourceControlPrimaryAction } from './gitWorkspaceModel'
 import './GitWorkspace.css'
 
 const EMPTY_STATUS: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+
+const REPOSITORY_DISCOVERY_DEPTH = 4
+const REPOSITORY_STATUS_PREFETCH_LIMIT = 64
+
+type GitRepositoryTargetDefinition = {
+  root: string
+  name: string
+  isSubmodule: boolean
+}
+
+export type GitRepositoryTarget = GitRepositoryTargetDefinition & {
+  repository: GitRepositoryState
+}
+
+function normalizeRepositoryPath(value: string): string {
+  const normalized = value.trim().replace(/\\/g, '/')
+  if (normalized === '/') return normalized
+  if (/^[A-Za-z]:\/+$/u.test(normalized)) return `${normalized.slice(0, 2)}/`
+  return normalized.replace(/\/+$/u, '')
+}
+
+function repositoryPathKey(value: string): string {
+  const normalized = normalizeRepositoryPath(value)
+  return /^(?:[A-Za-z]:\/|\/\/)/u.test(normalized) ? normalized.toLowerCase() : normalized
+}
+
+function repositoryPathsEqual(left: string, right: string): boolean {
+  return repositoryPathKey(left) === repositoryPathKey(right)
+}
+
+function repositoryPathWithin(path: string, parent: string): boolean {
+  const normalizedParent = normalizeRepositoryPath(parent)
+  if (!normalizedParent) return false
+  const prefix = normalizedParent.endsWith('/') ? normalizedParent : `${normalizedParent}/`
+  const pathKey = repositoryPathKey(path)
+  return pathKey === repositoryPathKey(normalizedParent) || pathKey.startsWith(repositoryPathKey(prefix))
+}
+
+function relativeRepositoryRoot(workspaceFolder: string, repositoryPath: string): string | null {
+  const workspace = normalizeRepositoryPath(workspaceFolder)
+  const repository = normalizeRepositoryPath(repositoryPath)
+  if (repositoryPathsEqual(workspace, repository)) return ''
+  const prefix = workspace.endsWith('/') ? workspace : `${workspace}/`
+  if (!repositoryPathKey(repository).startsWith(repositoryPathKey(prefix))) return null
+  return repository.slice(prefix.length)
+}
+
+function repositoryTargetDefinitions(
+  workspaceFolder: string,
+  repositories: DiscoveredRepo[],
+  allowedRepositoryFolders: string[] | null,
+): GitRepositoryTargetDefinition[] {
+  const targets = new Map<string, GitRepositoryTargetDefinition>()
+  for (const repository of repositories) {
+    const root = relativeRepositoryRoot(workspaceFolder, repository.path)
+    if (root === null) continue
+    if (root && allowedRepositoryFolders && !allowedRepositoryFolders.some((folder) => repositoryPathWithin(repository.path, folder))) continue
+    const name = repository.name.trim() || root.split('/').pop() || 'Workspace repository'
+    targets.set(root, { root, name, isSubmodule: repository.isSubmodule })
+  }
+  return [...targets.values()].sort((left, right) => {
+    if (!left.root) return right.root ? -1 : 0
+    if (!right.root) return 1
+    return left.root.localeCompare(right.root, undefined, { sensitivity: 'base' })
+  })
+}
+
 
 type RemoteComparison = {
   repoRoot: string
@@ -126,6 +194,10 @@ export type GitWorkspaceController = {
   repository: GitRepositoryState
   repoInfo: RepoInfo | null
   status: WorkingStatus
+  repositoryTargets: GitRepositoryTarget[]
+  repositoryDiscoveryLoading: boolean
+  repositoryDiscoveryError: string | null
+  repositoryScopeName: string | null
   activeTab: GitTab
   commitMessage: string
   amend: boolean
@@ -193,7 +265,25 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   const sessionId = useWorkspaceStore((state) => state.activeSessionId ?? null)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const entitled = useWorkspaceStore((state) => Boolean(state.license.ready && state.license.status?.entitled))
+  const workspaceGroups = useWorkspaceStore((state) => state.settings.workspaceGroups)
+  const workspaceGroupIds = useWorkspaceStore((state) => state.settings.workspaceGroupIds)
   const workspaceFolder = useMemo(() => sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null, [sessionId, sessions])
+  const workspaceGroup = useMemo(() => {
+    const directGroupId = sessionId ? workspaceGroupIds[sessionId] : null
+    const directGroup = directGroupId ? workspaceGroups.find((group) => group.id === directGroupId) : null
+    if (directGroup) return directGroup
+    return workspaceGroups.find((group) => group.rootFolder && workspaceFolder && repositoryPathsEqual(group.rootFolder, workspaceFolder)) ?? null
+  }, [sessionId, workspaceFolder, workspaceGroupIds, workspaceGroups])
+  const workspaceGroupRootActive = Boolean(workspaceGroup?.rootFolder && workspaceFolder && repositoryPathsEqual(workspaceGroup.rootFolder, workspaceFolder))
+  const repositoryScopeName = workspaceGroupRootActive ? workspaceGroup?.name ?? null : null
+  const repositoryDiscoveryFolders = useMemo(() => {
+    if (!workspaceGroupRootActive || !workspaceGroup) return null
+    const memberFolders = sessions.flatMap((session) => {
+      if (session.id === sessionId || workspaceGroupIds[session.id] !== workspaceGroup.id || !session.workspaceFolder) return []
+      return [session.workspaceFolder]
+    })
+    return memberFolders.length > 0 ? memberFolders : null
+  }, [sessionId, sessions, workspaceGroup, workspaceGroupIds, workspaceGroupRootActive])
   const gitState = useGitStore((state) => sessionId ? state.sessions[sessionId] : undefined) ?? emptyGitSessionState
   const activeRepoRoot = gitState.activeRepoRoot
   const repository = repositoryStateFor(gitState, activeRepoRoot)
@@ -227,6 +317,52 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   const activeRemoteComparison = remoteComparison?.repoRoot === activeRepoRoot ? remoteComparison : null
   const [remoteCompareLoading, setRemoteCompareLoading] = useState(false)
 
+  const [discoveredRepositoryTargets, setDiscoveredRepositoryTargets] = useState<GitRepositoryTargetDefinition[]>([])
+  const [repositoryDiscoveryLoading, setRepositoryDiscoveryLoading] = useState(false)
+  const [repositoryDiscoveryError, setRepositoryDiscoveryError] = useState<string | null>(null)
+  const repositoryDiscoveryGeneration = useRef(0)
+  const repositoryTargets = useMemo<GitRepositoryTarget[]>(() => {
+    const workspace = workspaceFolder ? normalizeRepositoryPath(workspaceFolder) : ''
+    const workspaceRepositoryName = workspace.split('/').pop() || 'Workspace repository'
+    const targets = new Map(discoveredRepositoryTargets.map((target) => [target.root, target]))
+    for (const [root, cachedRepository] of Object.entries(gitState.repositories)) {
+      if (!cachedRepository.repoInfo?.isRepo || targets.has(root)) continue
+      targets.set(root, {
+        root,
+        name: root ? root.split('/').pop() || root : workspaceRepositoryName,
+        isSubmodule: false,
+      })
+    }
+    return [...targets.values()]
+      .sort((left, right) => {
+        if (!left.root) return right.root ? -1 : 0
+        if (!right.root) return 1
+        return left.root.localeCompare(right.root, undefined, { sensitivity: 'base' })
+      })
+      .map((target) => ({ ...target, repository: repositoryStateFor(gitState, target.root) }))
+  }, [discoveredRepositoryTargets, gitState, workspaceFolder])
+
+  const refreshRepositoryDiscovery = useCallback(async () => {
+    if (!entitled || !sessionId || !workspaceFolder) return
+    const generation = repositoryDiscoveryGeneration.current + 1
+    repositoryDiscoveryGeneration.current = generation
+    setRepositoryDiscoveryLoading(true)
+    setRepositoryDiscoveryError(null)
+    try {
+      const discovered = await discoverRepos(workspaceFolder, REPOSITORY_DISCOVERY_DEPTH)
+      if (repositoryDiscoveryGeneration.current !== generation) return
+      const targets = repositoryTargetDefinitions(workspaceFolder, Array.isArray(discovered) ? discovered : [], repositoryDiscoveryFolders)
+      setDiscoveredRepositoryTargets(targets)
+      void Promise.all(targets.slice(0, REPOSITORY_STATUS_PREFETCH_LIMIT).map((target) => (
+        refreshRepository(sessionId, workspaceFolder, target.root)
+      )))
+    } catch (reason) {
+      if (repositoryDiscoveryGeneration.current === generation) setRepositoryDiscoveryError(String(reason))
+    } finally {
+      if (repositoryDiscoveryGeneration.current === generation) setRepositoryDiscoveryLoading(false)
+    }
+  }, [entitled, refreshRepository, repositoryDiscoveryFolders, sessionId, workspaceFolder])
+
   const selectedRelativePath = useMemo(() => {
     if (!gitState.selectedPath || gitState.selectedRepoRoot !== activeRepoRoot) return null
     return activeRepoRoot ? gitState.selectedPath.slice(activeRepoRoot.length).replace(/^\/+/, '') : gitState.selectedPath
@@ -255,6 +391,16 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       window.removeEventListener('focus', refreshVisible)
     }
   }, [entitled, pollIntervalMs, refresh, sessionId])
+
+  useEffect(() => {
+    setDiscoveredRepositoryTargets([])
+    setRepositoryDiscoveryError(null)
+    setRepositoryDiscoveryLoading(false)
+    if (entitled && sessionId && workspaceFolder) void refreshRepositoryDiscovery()
+    return () => {
+      repositoryDiscoveryGeneration.current += 1
+    }
+  }, [entitled, refreshRepositoryDiscovery, sessionId, workspaceFolder])
 
   const orderedEntries = useMemo(
     () => [...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked],
@@ -880,6 +1026,10 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     if (!entitled || !sessionId) return
     await refreshHosting(sessionId, workspaceFolder, 'HEAD', force, activeRepoRoot)
   }, [activeRepoRoot, entitled, refreshHosting, sessionId, workspaceFolder])
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refresh(), refreshRepositoryDiscovery()])
+    setDiffRefreshRevision((current) => current + 1)
+  }, [refresh, refreshRepositoryDiscovery])
 
   const value = useMemo<GitWorkspaceController>(() => ({
     entitled,
@@ -890,6 +1040,10 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     repository,
     repoInfo,
     status,
+    repositoryTargets,
+    repositoryDiscoveryLoading,
+    repositoryDiscoveryError,
+    repositoryScopeName,
     activeTab: gitState.activeTab,
     commitMessage: draft.message,
     amend: draft.amend,
@@ -906,7 +1060,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     primaryAction,
     history: historyModel,
     branches: branchesModel,
-    refresh: async () => { await refresh(); setDiffRefreshRevision((current) => current + 1) },
+    refresh: refreshAll,
     refreshRepository: refreshRepositoryNow,
     refreshHosting: refreshHostingNow,
     activateRepository,
@@ -931,7 +1085,60 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     selectInExplorer,
     revealFile,
     runMutation,
-  }), [abortState, activateRepository, activeRemoteComparison, activeRepoRoot, activeWorkspaceFolder, branchesModel, commit, compareRemote, continueState, diffContents, diffError, diffLoading, discardPaths, draft.amend, draft.message, entitled, fetchRepo, gitState.activeTab, groups, historyModel, openAssigned, openBranchPicker, openWorkbench, primaryAction, pull, push, refresh, refreshHostingNow, refreshRepositoryNow, remoteCompareLoading, repoInfo, repository, revealFile, runMutation, runPrimaryAction, selectChange, selectInExplorer, selectedArea, selectedPath, sessionId, setAmend, setCommitMessage, showWorkingChanges, stageAll, stagePaths, status, unstagePaths, workspaceFolder])
+  }), [
+    abortState,
+    activateRepository,
+    activeRemoteComparison,
+    activeRepoRoot,
+    activeWorkspaceFolder,
+    branchesModel,
+    commit,
+    compareRemote,
+    continueState,
+    diffContents,
+    diffError,
+    diffLoading,
+    discardPaths,
+    draft.amend,
+    draft.message,
+    entitled,
+    fetchRepo,
+    gitState.activeTab,
+    groups,
+    historyModel,
+    openAssigned,
+    openBranchPicker,
+    openWorkbench,
+    primaryAction,
+    pull,
+    push,
+    refreshAll,
+    refreshHostingNow,
+    refreshRepositoryNow,
+    remoteCompareLoading,
+    repoInfo,
+    repository,
+    repositoryDiscoveryError,
+    repositoryDiscoveryLoading,
+    repositoryScopeName,
+    repositoryTargets,
+    revealFile,
+    runMutation,
+    runPrimaryAction,
+    selectChange,
+    selectInExplorer,
+    selectedArea,
+    selectedPath,
+    sessionId,
+    setAmend,
+    setCommitMessage,
+    showWorkingChanges,
+    stageAll,
+    stagePaths,
+    status,
+    unstagePaths,
+    workspaceFolder,
+  ])
 
   const refNames = Array.from(new Set(['HEAD', ...branches.map((branch) => branch.name), ...tags.map((tag) => tag.name)]))
   const refEntries = (filter: string): PickerEntry<string>[] => refNames

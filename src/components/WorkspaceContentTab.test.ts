@@ -9,6 +9,8 @@ import { buildWorkspaceContentTabContextMenu } from '../layout/workspaceContentT
 import { createSingletonContentParams, createTerminalContentParams, createTerminalWindowParams } from '../layout/workspaceLayoutModel'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../layout/contentActions'
 import { registerTerminalWindow } from '../layout/terminalWindowRegistry'
+import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../state/git'
+import { useWorkspaceStore } from '../state/store'
 
 const actions = {
   openContent: vi.fn(async () => ''),
@@ -54,6 +56,8 @@ function renderWithActions(element: ReactElement) {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  useGitStore.setState({ sessions: {} })
+  useWorkspaceStore.setState({ activeSessionId: undefined })
 })
 
 describe('WorkspaceContentTab', () => {
@@ -74,6 +78,33 @@ describe('WorkspaceContentTab', () => {
     } as never, actions)
 
     expect(items).toEqual([])
+  })
+
+  it('aggregates the Source Control badge across repositories in the active workspace group', () => {
+    const changedEntry = { path: 'src/app.ts', oldPath: null, changeType: 'modified' as const }
+    useWorkspaceStore.setState({ activeSessionId: 'group-root' })
+    useGitStore.setState({
+      sessions: {
+        'group-root': {
+          ...emptyGitSessionState,
+          activeRepoRoot: 'vibelink-app',
+          repositories: {
+            'vibelink-app': { ...emptyGitRepositoryState, status: { staged: [], unstaged: [changedEntry], untracked: [], conflicted: [], truncated: false } },
+            'vibelink-mobile': { ...emptyGitRepositoryState, status: { staged: [], unstaged: [], untracked: [], conflicted: [changedEntry], truncated: false } },
+          },
+        },
+      },
+    })
+
+    const api = panelApi('content:sourceControl:sourceControl', 'Source Control')
+    api.location = { type: 'edge' }
+    renderWithActions(createElement(WorkspaceContentTab, {
+      api,
+      containerApi,
+      params: createSingletonContentParams('sourceControl'),
+    } as never))
+
+    expect(screen.getByLabelText('2 changed paths, 1 conflicted').textContent).toBe('2')
   })
 
   it('keeps central terminal actions targeted at the owning grid group', () => {

@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { AlertTriangle, Check, ChevronRight, CloudDownload, CloudUpload, FileDiff, FolderGit2, GitBranch, GitCommit, GitCompareArrows, MoreHorizontal, RefreshCw, RotateCcw } from 'lucide-react'
+import { AlertTriangle, Check, ChevronRight, CloudDownload, CloudUpload, FileDiff, FolderGit2, GitBranch, GitCommit, GitCompareArrows, GitFork, MoreHorizontal, RefreshCw, RotateCcw } from 'lucide-react'
 import { memo, useMemo, useRef } from 'react'
 import { gitChangeMeta } from '../../state/gitChangeMeta'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
-import { useGitWorkspace } from './GitWorkspaceProvider'
+import { useGitWorkspace, type GitRepositoryTarget } from './GitWorkspaceProvider'
 import { flattenGitChangeRows, gitChangeRowHeight } from './gitChangeRows'
 import type { GitChangeItem } from './gitWorkspaceModel'
 
@@ -12,6 +12,12 @@ export type SourceControlSidebarProps = {
   active?: boolean
   collapsed?: boolean
   onCollapse?: () => void
+}
+
+function repositoryChangeCount(target: GitRepositoryTarget): number {
+  const status = target.repository.status
+  if (!status) return 0
+  return new Set([...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked].map((entry) => entry.path)).size
 }
 
 export function SourceControlSidebar({ active = true, collapsed = false, onCollapse }: SourceControlSidebarProps) {
@@ -31,11 +37,16 @@ export function SourceControlSidebar({ active = true, collapsed = false, onColla
     overscan: 12,
   })
   const repoInfo = git.repoInfo
-  const repositoryDescription = git.activeRepoRoot ? `nested repository ${git.activeRepoRoot}` : 'workspace repository'
+  const hasRepositoryTargets = git.repositoryTargets.length > 0
+  const workspaceRootIsRepository = git.repositoryTargets.some((target) => target.root === '')
+  const workspaceTargetLabel = workspaceRootIsRepository ? 'Workspace repo' : 'Workspace root'
+  const repositoryScopeLabel = git.repositoryScopeName ? `${git.repositoryScopeName} repositories` : 'Repositories'
+  const repositoryDescription = git.activeRepoRoot ? `repository ${git.activeRepoRoot}` : 'workspace repository'
+  const refreshPending = git.repository.refreshing || git.repositoryDiscoveryLoading
   const shellState = !git.workspaceFolder
     ? { kind: 'empty' as const, message: 'No workspace folder', detail: 'Set a local workspace folder to use Git.' }
-    : !repoInfo
-      ? { kind: git.repository.error ? 'error' as const : 'loading' as const, message: git.repository.error ?? 'Loading repository…' }
+    : !repoInfo && !hasRepositoryTargets
+      ? { kind: git.repository.error || git.repositoryDiscoveryError ? 'error' as const : 'loading' as const, message: git.repository.error ?? git.repositoryDiscoveryError ?? (git.repositoryDiscoveryLoading ? 'Scanning repositories…' : 'Loading repository…') }
       : null
 
   const footer = repoInfo?.isRepo && git.primaryAction ? (
@@ -53,15 +64,59 @@ export function SourceControlSidebar({ active = true, collapsed = false, onColla
       state={shellState}
       className="git-sidebar git-source-control-sidebar"
       actions={<>
-        <button type="button" title="Refresh Source Control" aria-label="Refresh Source Control" onClick={() => { void git.refresh() }} disabled={git.repository.refreshing}><RefreshCw size={13} className={git.repository.refreshing ? 'spin' : undefined} aria-hidden="true" /></button>
-        <details className="git-sidebar-overflow"><summary role="button" aria-label="More Source Control actions" title="More actions"><MoreHorizontal size={14} aria-hidden="true" /></summary><div role="menu"><button type="button" role="menuitem" onClick={() => { void git.openAssigned() }}>Assigned / Pull Requests</button><button type="button" role="menuitem" onClick={git.fetch}>Fetch</button><button type="button" role="menuitem" onClick={git.pull}>Pull</button><button type="button" role="menuitem" onClick={git.push}>Push</button></div></details>
+        <button type="button" title="Refresh Source Control" aria-label="Refresh Source Control" onClick={() => { void git.refresh() }} disabled={refreshPending}><RefreshCw size={13} className={refreshPending ? 'spin' : undefined} aria-hidden="true" /></button>
+        <details className="git-sidebar-overflow">
+          <summary role="button" aria-label="More Source Control actions" title="More actions"><MoreHorizontal size={14} aria-hidden="true" /></summary>
+          <div role="menu">
+            <button type="button" role="menuitem" onClick={() => { void git.openAssigned() }}>Assigned / Pull Requests</button>
+            <button type="button" role="menuitem" disabled={!repoInfo?.isRepo} onClick={git.fetch}>Fetch</button>
+            <button type="button" role="menuitem" disabled={!repoInfo?.isRepo} onClick={git.pull}>Pull</button>
+            <button type="button" role="menuitem" disabled={!repoInfo?.isRepo} onClick={git.push}>Push</button>
+          </div>
+        </details>
       </>}
       footer={footer}
     >
-      {repoInfo && !repoInfo.isRepo ? (
+      {git.workspaceFolder && (hasRepositoryTargets || git.repositoryDiscoveryLoading || git.repositoryDiscoveryError) ? (
+        <section className="git-sidebar-repositories" aria-label={repositoryScopeLabel}>
+          <header title={git.repositoryScopeName ? `Git repositories in workspace group ${git.repositoryScopeName}` : 'Git repositories under the workspace root'}>
+            <span>{repositoryScopeLabel}</span>
+            <b>{git.repositoryTargets.length}</b>
+            {git.repositoryDiscoveryLoading ? <RefreshCw size={11} className="spin" aria-label="Scanning repositories" /> : null}
+          </header>
+          <div className="git-sidebar-repository-list">
+            {git.repositoryTargets.map((target) => {
+              const TargetIcon = target.isSubmodule ? GitFork : FolderGit2
+              const branch = target.repository.repoInfo?.branch ?? target.repository.repoInfo?.detachedSha?.slice(0, 8) ?? null
+              const changed = repositoryChangeCount(target)
+              const activeTarget = target.root === git.activeRepoRoot
+              return (
+                <button
+                  key={target.root || '__workspace__'}
+                  type="button"
+                  aria-label={`Open Git repository ${target.root || target.name}`}
+                  aria-pressed={activeTarget}
+                  data-active={activeTarget || undefined}
+                  title={target.repository.error ? `${target.root || 'Workspace root'}: ${target.repository.error}` : `Use ${target.root || 'workspace root'} as the Git target`}
+                  onClick={() => git.activateRepository(target.root)}
+                >
+                  <TargetIcon size={13} strokeWidth={1.8} aria-hidden="true" />
+                  <span><strong>{target.name}</strong><small>{target.root || 'Workspace root'}{branch ? ` · ${branch}` : ''}</small></span>
+                  <em data-kind={target.isSubmodule ? 'submodule' : 'repository'}>{target.isSubmodule ? 'SUB' : 'REPO'}</em>
+                  <span className="git-sidebar-repository-state">{target.repository.refreshing ? <RefreshCw size={11} className="spin" aria-label={`Refreshing ${target.name}`} /> : target.repository.error ? <AlertTriangle size={12} aria-label={`${target.name} repository error`} /> : changed > 0 ? <b title={`${changed} changed path${changed === 1 ? '' : 's'}`}>{changed}</b> : target.repository.repoInfo?.isRepo ? <Check size={12} aria-label={`${target.name} clean`} /> : null}</span>
+                </button>
+              )
+            })}
+          </div>
+          {git.repositoryDiscoveryError ? <div className="git-sidebar-repository-error">{git.repositoryDiscoveryError}</div> : null}
+        </section>
+      ) : null}
+      {!repoInfo?.isRepo && hasRepositoryTargets ? (
+        <div className="git-sidebar-empty-actions"><FolderGit2 size={24} aria-hidden="true" /><strong>Select a Git repository</strong><span>{git.repositoryTargets.length} repositories are available without changing the workspace, terminal, or AI scope.</span></div>
+      ) : repoInfo && !repoInfo.isRepo ? (
         <div className="git-sidebar-empty-actions"><FolderGit2 size={24} aria-hidden="true" /><strong>No Git repository</strong><span>Initialize this Git target or clone into another folder.</span>{git.repository.error ? <div className="git-window-error">{git.repository.error}</div> : null}<button type="button" onClick={() => { if (git.activeWorkspaceFolder) void git.runMutation(() => invoke('git_init', { workspaceFolder: git.activeWorkspaceFolder })) }}><GitCommit size={13} aria-hidden="true" /> Initialize Repository</button><button type="button" onClick={git.openClone}><CloudDownload size={13} aria-hidden="true" /> Clone Repository…</button></div>
       ) : repoInfo?.isRepo ? <>
-        <div className="git-sidebar-repository-context" title={`Git target: ${repositoryDescription}. Workspace, terminals, and AI scope stay unchanged.`}><span>Git target</span><button type="button" onClick={() => git.activateRepository('')} disabled={!git.activeRepoRoot}><FolderGit2 size={12} aria-hidden="true" /> Workspace repo</button>{git.activeRepoRoot ? <><ChevronRight size={11} aria-hidden="true" /><code>{git.activeRepoRoot}</code></> : null}</div>
+        <div className="git-sidebar-repository-context" title={`Git target: ${repositoryDescription}. Workspace, terminals, and AI scope stay unchanged.`}><span>Git target</span><button type="button" onClick={() => git.activateRepository('')} disabled={!git.activeRepoRoot}><FolderGit2 size={12} aria-hidden="true" /> {workspaceTargetLabel}</button>{git.activeRepoRoot ? <><ChevronRight size={11} aria-hidden="true" /><code>{git.activeRepoRoot}</code></> : null}</div>
         <div className="git-sidebar-branch-row"><button type="button" onClick={git.openBranchPicker} title={`Switch branch in ${repositoryDescription}`}><GitBranch size={13} aria-hidden="true" /><strong>{repoInfo.branch ?? repoInfo.detachedSha?.slice(0, 8) ?? 'Detached'}</strong></button><span title={repoInfo.upstream ?? 'No upstream'}>{repoInfo.upstream ?? 'No upstream'}</span>{git.repository.ciStatus ? <i className="git-window-ci-dot" data-state={git.repository.ciStatus.state} title={`CI: ${git.repository.ciStatus.state}`} /> : null}<em title="Ahead">↑{repoInfo.ahead}</em><em title="Behind">↓{repoInfo.behind}</em><button type="button" title={repoInfo.upstream ? `Compare with ${repoInfo.upstream}` : 'No upstream branch'} disabled={!repoInfo.upstream || git.remoteCompareLoading} onClick={git.compareRemote}><GitCompareArrows size={12} aria-hidden="true" /></button></div>
         {repoInfo.state !== 'clean' ? <div className="git-sidebar-operation" data-repo-state={repoInfo.state}><AlertTriangle size={13} aria-hidden="true" /><span>Repository is {repoInfo.state}.</span>{git.continueState ? <button type="button" onClick={git.continueState}><Check size={12} aria-hidden="true" /> Continue</button> : null}{git.abortState ? <button type="button" onClick={git.abortState}>Abort</button> : null}</div> : null}
         {git.repository.error ? <div className="git-window-error">{git.repository.error}</div> : null}
