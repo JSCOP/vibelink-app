@@ -149,7 +149,7 @@ describe('AutomationPanel', () => {
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'Weekly audit' } })
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Audit weekly' } })
 
-    fireEvent.click(screen.getByRole('button', { name: /Every day at 09:00/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Daily at 09:00/ }))
     fireEvent.change(screen.getByLabelText('Repeat'), { target: { value: 'weekly' } })
     fireEvent.change(screen.getByLabelText('Day'), { target: { value: 'WED' } })
     fireEvent.change(screen.getByLabelText('Hour'), { target: { value: '18' } })
@@ -163,6 +163,33 @@ describe('AutomationPanel', () => {
       expect(JSON.parse(args[args.indexOf('--json') + 1])).toMatchObject({
         scheduleKind: 'weekly',
         scheduleValue: 'WED@18:00',
+      })
+    })
+  })
+
+  it('creates a one-time automation from the date and time pickers', async () => {
+    render(<AutomationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New' }))
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'One-off hello' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Say hello' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Daily at 09:00/ }))
+    fireEvent.change(screen.getByLabelText('Repeat'), { target: { value: 'once' } })
+    fireEvent.change(screen.getByLabelText('Date'), { target: { value: '2026-07-30' } })
+    fireEvent.change(screen.getByLabelText('Hour'), { target: { value: '05' } })
+    fireEvent.change(screen.getByLabelText('Minute'), { target: { value: '49' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create automation' }))
+
+    await waitFor(() => {
+      const createCall = invoke.mock.calls.find(([, payload]) => payload?.args?.[1] === 'create')
+      expect(createCall).toBeDefined()
+      const args = createCall?.[1]?.args
+      if (!args) throw new Error('missing automation create argv')
+      // The daemon resolves this wall clock in the automation timezone; epoch
+      // milliseconds here were rejected as an invalid one-time schedule.
+      expect(JSON.parse(args[args.indexOf('--json') + 1])).toMatchObject({
+        scheduleKind: 'once',
+        scheduleValue: '2026-07-30T05:49',
       })
     })
   })

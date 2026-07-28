@@ -23,7 +23,7 @@ export const weekdayOptions = [
 ]
 
 export type ScheduleParts = {
-  /** 24-hour `HH:MM`, used by daily/weekdays/weekly. */
+  /** 24-hour `HH:MM`, used by daily/weekdays/weekly/once. */
   time: string
   /** Minute past the hour, used by hourly. */
   minute: number
@@ -33,8 +33,8 @@ export type ScheduleParts = {
   interval: string
   /** Five-field cron expression, used by cron. */
   cron: string
-  /** Epoch milliseconds, used by once. */
-  onceAt: number
+  /** `YYYY-MM-DD` in the schedule timezone, used by once. */
+  onceDate: string
 }
 
 export const defaultScheduleParts: ScheduleParts = {
@@ -43,12 +43,41 @@ export const defaultScheduleParts: ScheduleParts = {
   weekday: 'MON',
   interval: '6h',
   cron: '0 9 * * 1-5',
-  onceAt: 0,
+  onceDate: '',
+}
+
+const ONCE_LOCAL = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2})?$/
+
+/** Wall clock of `timestamp` inside `timeZone`. The timezone field is free
+ *  text, so an unusable zone falls back to the browser's own rather than
+ *  letting `Intl` throw while the user is still typing. */
+export function wallClock(timestamp: number, timeZone: string): { date: string; time: string } {
+  const options: Intl.DateTimeFormatOptions = {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }
+  let parts: Intl.DateTimeFormatPart[]
+  try {
+    parts = new Intl.DateTimeFormat('en-CA', { ...options, timeZone }).formatToParts(new Date(timestamp))
+  } catch {
+    parts = new Intl.DateTimeFormat('en-CA', options).formatToParts(new Date(timestamp))
+  }
+  const field = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? ''
+  return { date: `${field('year')}-${field('month')}-${field('day')}`, time: `${field('hour')}:${field('minute')}` }
+}
+
+/** Seed for a fresh one-time schedule: the next hour, in the schedule's zone. */
+export function defaultOnceParts(timezone: string): { onceDate: string; time: string } {
+  const { date, time } = wallClock(Date.now() + 3_600_000, timezone)
+  return { onceDate: date, time }
 }
 
 /** Split a stored `scheduleValue` into the editor's per-cadence fields so
  *  switching cadence never loses the values the other cadences were using. */
-export function partsFromSchedule(kind: AutomationScheduleKind, value: string): ScheduleParts {
+export function partsFromSchedule(
+  kind: AutomationScheduleKind,
+  value: string,
+  timezone: string,
+): ScheduleParts {
   const parts = { ...defaultScheduleParts }
   const trimmed = value.trim()
   if (!trimmed) return parts
@@ -76,15 +105,29 @@ export function partsFromSchedule(kind: AutomationScheduleKind, value: string): 
       parts.cron = trimmed
       return parts
     case 'once': {
-      const timestamp = Number(trimmed)
-      if (Number.isFinite(timestamp)) parts.onceAt = timestamp
+      // Authored values are a zone-local wall clock; Hermes imports and drafts
+      // still arrive as epoch millis or RFC3339, so both are projected back.
+      const local = ONCE_LOCAL.exec(trimmed)
+      if (local) {
+        parts.onceDate = local[1]
+        parts.time = local[2]
+        return parts
+      }
+      const instant = /^\d+$/.test(trimmed) ? Number(trimmed) : Date.parse(trimmed)
+      const { date, time } = wallClock(Number.isFinite(instant) ? instant : Date.now() + 3_600_000, timezone)
+      parts.onceDate = date
+      parts.time = time
       return parts
     }
   }
 }
 
 /** Compose the daemon-facing `scheduleValue` for the active cadence. */
-export function scheduleValueFromParts(kind: AutomationScheduleKind, parts: ScheduleParts): string {
+export function scheduleValueFromParts(
+  kind: AutomationScheduleKind,
+  parts: ScheduleParts,
+  timezone: string,
+): string {
   switch (kind) {
     case 'hourly': return String(parts.minute)
     case 'daily':
@@ -92,32 +135,24 @@ export function scheduleValueFromParts(kind: AutomationScheduleKind, parts: Sche
     case 'weekly': return `${parts.weekday}@${parts.time}`
     case 'interval': return parts.interval
     case 'cron': return parts.cron
-    case 'once': return String(parts.onceAt || Date.now() + 3_600_000)
+    case 'once': return `${parts.onceDate || defaultOnceParts(timezone).onceDate}T${parts.time}`
   }
 }
 
-/** Plain-language summary shown on the schedule trigger. */
-export function scheduleSummary(kind: AutomationScheduleKind, parts: ScheduleParts, timezone: string): string {
+/** Plain-language summary shown on the schedule trigger. It stays short and
+ *  timezone-free so the trigger never wraps past the pickers beside it; the
+ *  zone lives in the popover and in the resolved next-run line. */
+export function scheduleSummary(kind: AutomationScheduleKind, parts: ScheduleParts): string {
   switch (kind) {
-    case 'hourly': return `Every hour at :${String(parts.minute).padStart(2, '0')} (${timezone})`
-    case 'daily': return `Every day at ${parts.time} (${timezone})`
-    case 'weekdays': return `Mon–Fri at ${parts.time} (${timezone})`
+    case 'hourly': return `Hourly at :${String(parts.minute).padStart(2, '0')}`
+    case 'daily': return `Daily at ${parts.time}`
+    case 'weekdays': return `Weekdays at ${parts.time}`
     case 'weekly': {
       const label = weekdayOptions.find((option) => option.code === parts.weekday)?.label ?? parts.weekday
-      return `Every ${label} at ${parts.time} (${timezone})`
+      return `${label}s at ${parts.time}`
     }
-    case 'interval': return `Every ${parts.interval}, anchored when saved`
-    case 'cron': return `Cron ${parts.cron} (${timezone})`
-    case 'once': {
-      const at = parts.onceAt || Date.now() + 3_600_000
-      return `Once on ${new Date(at).toLocaleString()} (${timezone})`
-    }
+    case 'interval': return `Every ${parts.interval}`
+    case 'cron': return `Cron ${parts.cron}`
+    case 'once': return parts.onceDate ? `Once on ${parts.onceDate} ${parts.time}` : 'Once — pick a date'
   }
-}
-
-/** `datetime-local` needs a zone-free `YYYY-MM-DDTHH:MM`, so the epoch is
- *  shifted by the local offset before slicing the ISO string. */
-export function toDateTimeLocal(timestamp: number): string {
-  const at = timestamp || Date.now() + 3_600_000
-  return new Date(at - new Date(at).getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
 }

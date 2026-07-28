@@ -27,6 +27,7 @@ import { AgentPicker } from './AgentPicker'
 import { SchedulePicker } from './SchedulePicker'
 import { automationAgentEntry, defaultAutomationAgent } from './agentCatalog'
 import {
+  defaultOnceParts,
   partsFromSchedule,
   scheduleValueFromParts,
   type ScheduleParts,
@@ -62,9 +63,12 @@ export function AutomationEditorDialog({ sessionId, automation, onClose, onSave,
   const [prompt, setPrompt] = useState(automation?.prompt ?? '')
   const [agent, setAgent] = useState<AutomationAgent>(automation?.agent ?? defaultAutomationAgent)
   const [scheduleKind, setScheduleKind] = useState<AutomationScheduleKind>(automation?.scheduleKind ?? 'daily')
-  const [scheduleParts, setScheduleParts] = useState<ScheduleParts>(() =>
-    partsFromSchedule(automation?.scheduleKind ?? 'daily', automation?.scheduleValue ?? '09:00'))
   const [timezone, setTimezone] = useState(automation?.timezone ?? (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'))
+  const [scheduleParts, setScheduleParts] = useState<ScheduleParts>(() => partsFromSchedule(
+    automation?.scheduleKind ?? 'daily',
+    automation?.scheduleValue ?? '09:00',
+    automation?.timezone ?? (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'),
+  ))
   const [enabled, setEnabled] = useState(automation?.enabled ?? true)
   const [workspaceMode, setWorkspaceMode] = useState<'new_per_run' | 'existing'>(automation?.workspaceMode ?? 'new_per_run')
   const [storage, setStorage] = useState<WorktreeStorage>(automation?.worktreeStorage ?? DEFAULT_STORAGE)
@@ -92,8 +96,8 @@ export function AutomationEditorDialog({ sessionId, automation, onClose, onSave,
 
   const agentEntry = automationAgentEntry(agent)
   const scheduleValue = useMemo(
-    () => scheduleValueFromParts(scheduleKind, scheduleParts),
-    [scheduleKind, scheduleParts],
+    () => scheduleValueFromParts(scheduleKind, scheduleParts, timezone),
+    [scheduleKind, scheduleParts, timezone],
   )
   const agentStatusById = useMemo(
     () => Object.fromEntries(agentClis.map((status) => [status.id.toLowerCase(), status])),
@@ -172,11 +176,20 @@ export function AutomationEditorDialog({ sessionId, automation, onClose, onSave,
     : null
   const canSubmit = name.trim().length > 0 && prompt.trim().length > 0 && !scheduleError && !busy && !draftBusy
 
+  // Why: `once` is the only cadence whose default would sit in the past, so
+  // selecting it seeds the next hour instead of today's stale 09:00.
+  const changeScheduleKind = (next: AutomationScheduleKind) => {
+    setScheduleKind(next)
+    if (next === 'once') {
+      setScheduleParts((current) => (current.onceDate ? current : { ...current, ...defaultOnceParts(timezone) }))
+    }
+  }
+
   const applyDraft = (draft: AutomationDraftPreview) => {
     setName(draft.name)
     setPrompt(draft.prompt)
     setScheduleKind(draft.schedule.kind)
-    setScheduleParts(partsFromSchedule(draft.schedule.kind, draft.schedule.value))
+    setScheduleParts(partsFromSchedule(draft.schedule.kind, draft.schedule.value, draft.schedule.timezone))
     setTimezone(draft.schedule.timezone)
     setPrecheckCommand(draft.precheckCommand ?? '')
     setDraftNotes(draft.notes)
@@ -321,7 +334,7 @@ export function AutomationEditorDialog({ sessionId, automation, onClose, onSave,
                 parts={scheduleParts}
                 timezone={timezone}
                 labelledBy="automation-schedule-label"
-                onKindChange={setScheduleKind}
+                onKindChange={changeScheduleKind}
                 onPartsChange={(patch) => setScheduleParts((current) => ({ ...current, ...patch }))}
                 onTimezoneChange={setTimezone}
               />
@@ -338,8 +351,10 @@ export function AutomationEditorDialog({ sessionId, automation, onClose, onSave,
           {scheduleError
             ? <div className="automation-inline-error">{scheduleError}</div>
             : occurrences.length > 0
-              ? <p className="automation-next-runs">Next: {occurrences.map((value) => new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })).join(' · ')}</p>
-              : null}
+              ? <p className="automation-next-runs">Next: {occurrences.map((value) => new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })).join(' · ')} · {timezone}</p>
+              : scheduleKind === 'once'
+                ? <div className="automation-inline-error">That time has already passed in {timezone}. Pick a later date or time.</div>
+                : null}
 
           {workspaceMode === 'existing' ? <div className="automation-callout warning">Runs here modify the open checkout. Use only for tasks that must not be isolated.</div> : null}
 

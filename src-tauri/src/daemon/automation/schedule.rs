@@ -121,7 +121,7 @@ fn parse_schedule(kind: &str, value: &str, timezone: &str) -> Result<ParsedSched
         bail!("schedule value is required");
     }
     let kind = match kind {
-        "once" => ScheduleKind::Once(parse_once(value)?),
+        "once" => ScheduleKind::Once(parse_once(value, timezone)?),
         "interval" => ScheduleKind::Interval {
             period_ms: parse_interval(value)?,
             anchor_ms: 0,
@@ -265,22 +265,57 @@ fn parse_timezone(value: &str) -> Result<Tz> {
         .map_err(|_| anyhow!("invalid IANA timezone '{value}'"))
 }
 
-fn parse_once(value: &str) -> Result<u64> {
-    let instant = DateTime::parse_from_rfc3339(value)
-        .with_context(|| format!("invalid RFC3339 one-time schedule '{value}'"))?;
-    datetime_to_millis(&instant)
-        .context("one-time schedule is outside the supported timestamp range")
+/// One-time schedules are authored as a local wall clock in the automation's
+/// timezone, matching every other cadence. RFC3339 instants and the epoch
+/// milliseconds emitted by Hermes imports and older drafts stay accepted so
+/// stored rows and imported jobs keep resolving.
+fn parse_once(value: &str, timezone: Tz) -> Result<u64> {
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let millis = value
+            .parse::<u64>()
+            .with_context(|| format!("invalid epoch-millisecond one-time schedule '{value}'"))?;
+        millis_to_utc(millis)
+            .context("one-time schedule is outside the supported timestamp range")?;
+        return Ok(millis);
+    }
+    if let Ok(instant) = DateTime::parse_from_rfc3339(value) {
+        return datetime_to_millis(&instant)
+            .context("one-time schedule is outside the supported timestamp range");
+    }
+    let local = parse_naive_local(value)?;
+    resolve_local_after(timezone, local, 0)?
+        .ok_or_else(|| anyhow!("one-time schedule '{value}' resolves before the Unix epoch"))
 }
 
-fn parse_interval(value: &str) -> Result<u64> {
-    let seconds = value
-        .parse::<u64>()
-        .with_context(|| format!("interval must be a positive number of seconds, got '{value}'"))?;
-    if seconds == 0 {
-        bail!("interval must be a positive number of seconds");
+fn parse_naive_local(value: &str) -> Result<NaiveDateTime> {
+    for format in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"] {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, format) {
+            return Ok(parsed);
+        }
     }
-    seconds
-        .checked_mul(1_000)
+    bail!(
+        "one-time schedule must be local YYYY-MM-DDTHH:MM, RFC3339, or epoch milliseconds, got '{value}'"
+    )
+}
+
+/// Bare numbers stay seconds for stored rows; `s`/`m`/`h`/`d` suffixes cover the
+/// editor and Hermes imports, which author intervals as durations.
+fn parse_interval(value: &str) -> Result<u64> {
+    let (amount, unit_ms) = match value.as_bytes().last() {
+        Some(b's') => (&value[..value.len() - 1], 1_000_u64),
+        Some(b'm') => (&value[..value.len() - 1], 60_000),
+        Some(b'h') => (&value[..value.len() - 1], 3_600_000),
+        Some(b'd') => (&value[..value.len() - 1], 86_400_000),
+        _ => (value, 1_000),
+    };
+    let amount = amount.parse::<u64>().with_context(|| {
+        format!("interval must be a positive duration such as 45s, 15m, or 6h, got '{value}'")
+    })?;
+    if amount == 0 {
+        bail!("interval must be a positive duration, got '{value}'");
+    }
+    amount
+        .checked_mul(unit_ms)
         .ok_or_else(|| anyhow!("interval milliseconds overflowed"))
 }
 
@@ -405,6 +440,62 @@ mod tests {
         let instant = ms("2024-01-01T18:04:05Z");
         assert_eq!(next_after(&record, instant - 1).unwrap(), Some(instant));
         assert_eq!(next_after(&record, instant).unwrap(), None);
+    }
+
+    #[test]
+    fn editor_one_time_payload_previews_instead_of_failing_validation() {
+        // Repro: the editor's one-time payload was rejected with "invalid
+        // RFC3339 one-time schedule '1785271740000'", so Create automation
+        // could never save a `once` schedule.
+        let after = ms("2026-07-28T00:00:00Z");
+        let instant = ms("2026-07-28T20:49:00Z");
+        validate_schedule("once", "2026-07-29T05:49", "Asia/Seoul", None).unwrap();
+        assert_eq!(
+            preview_occurrences("once", "2026-07-29T05:49", "Asia/Seoul", None, after, 3).unwrap(),
+            vec![instant]
+        );
+        assert_eq!(
+            preview_occurrences("once", "1785271740000", "Asia/Seoul", None, after, 3).unwrap(),
+            vec![instant]
+        );
+    }
+
+    #[test]
+    fn once_accepts_local_wall_clock_rfc3339_and_epoch_millis() {
+        let instant = ms("2024-01-01T18:04:05Z");
+        let local = record("once", "2024-01-02T03:04:05", "Asia/Seoul");
+        assert_eq!(next_after(&local, instant - 1).unwrap(), Some(instant));
+        let minutes = record("once", "2024-01-02T03:04", "Asia/Seoul");
+        assert_eq!(
+            next_after(&minutes, 0).unwrap(),
+            Some(ms("2024-01-01T18:04:00Z"))
+        );
+        let epoch = record("once", &instant.to_string(), "Asia/Seoul");
+        assert_eq!(next_after(&epoch, instant - 1).unwrap(), Some(instant));
+        // Why: a local wall clock inside the spring-forward gap must still resolve.
+        let gap = record("once", "2024-03-10T02:30", "America/New_York");
+        assert_eq!(
+            next_after(&gap, 0).unwrap(),
+            Some(ms("2024-03-10T07:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn interval_accepts_duration_units_and_bare_seconds() {
+        for (value, expected_ms) in [
+            ("90", 90_000_u64),
+            ("45s", 45_000),
+            ("15m", 900_000),
+            ("6h", 21_600_000),
+            ("1d", 86_400_000),
+        ] {
+            let mut record = record("interval", value, "UTC");
+            record.dtstart = Some(0);
+            assert_eq!(next_after(&record, 0).unwrap(), Some(expected_ms));
+        }
+        for value in ["6hours", "0m", "-1", "h"] {
+            assert!(validate_schedule("interval", value, "UTC", None).is_err());
+        }
     }
 
     #[test]

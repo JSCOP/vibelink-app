@@ -380,6 +380,17 @@
   text-align: left;
 }
 
+/* The summary is the only elastic part of a trigger: it ellipsizes so a long
+ * cadence (or a long agent name) can never wrap the picker onto a second line
+ * and break the height of the Agent/Schedule/Run-in row. */
+.automation-picker-value {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Rendered into document.body and pinned to its trigger, so the automation
  * form's scroll container cannot clip it. Coordinates come from the component.
  * It must stack above `.automation-dialog-backdrop`, which is also portalled. */
@@ -451,6 +462,7 @@
 
 .automation-picker-menu button:hover { background: var(--vibelink-panel-2); }
 .automation-clock { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 5px; }
+.automation-picker-menu input[type='date'] { color-scheme: dark; }
 .automation-clock > span { color: var(--vibelink-muted); }
 
 .automation-advanced-toggle {

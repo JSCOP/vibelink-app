@@ -3,9 +3,9 @@ import { CalendarClock, ChevronsUpDown } from 'lucide-react'
 import type { AutomationScheduleKind } from '../../ipc/automations'
 import { AnchoredPopover } from './AnchoredPopover'
 import {
+  defaultOnceParts,
   scheduleCadences,
   scheduleSummary,
-  toDateTimeLocal,
   weekdayOptions,
   type ScheduleParts,
 } from './schedulePresets'
@@ -39,7 +39,7 @@ export function SchedulePicker({
   const [hour, minute] = parts.time.split(':')
   const dismiss = useCallback(() => setOpen(false), [])
 
-  const showClock = kind === 'daily' || kind === 'weekdays' || kind === 'weekly'
+  const showClock = kind === 'daily' || kind === 'weekdays' || kind === 'weekly' || kind === 'once'
 
   return (
     <div className="automation-picker">
@@ -53,7 +53,7 @@ export function SchedulePicker({
         onClick={() => setOpen((current) => !current)}
       >
         <CalendarClock size={14} aria-hidden="true" />
-        <span className="automation-picker-value" id="automation-schedule-value">{scheduleSummary(kind, parts, timezone)}</span>
+        <span className="automation-picker-value" id="automation-schedule-value">{scheduleSummary(kind, parts)}</span>
         <ChevronsUpDown size={14} aria-hidden="true" />
       </button>
       {open ? (
@@ -93,6 +93,17 @@ export function SchedulePicker({
             </label>
           ) : null}
 
+          {kind === 'once' ? (
+            <label>
+              Date
+              <input
+                type="date"
+                value={parts.onceDate || defaultOnceParts(timezone).onceDate}
+                onChange={(event) => onPartsChange({ onceDate: event.target.value })}
+              />
+            </label>
+          ) : null}
+
           {showClock ? (
             <label>
               Time
@@ -119,17 +130,6 @@ export function SchedulePicker({
             <label>
               Cron expression
               <input value={parts.cron} onChange={(event) => onPartsChange({ cron: event.target.value })} placeholder="0 9 * * 1-5" />
-            </label>
-          ) : null}
-
-          {kind === 'once' ? (
-            <label>
-              Run at
-              <input
-                type="datetime-local"
-                value={toDateTimeLocal(parts.onceAt)}
-                onChange={(event) => onPartsChange({ onceAt: new Date(event.target.value).getTime() })}
-              />
             </label>
           ) : null}
 
