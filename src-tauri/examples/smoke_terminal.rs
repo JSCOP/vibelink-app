@@ -360,6 +360,7 @@ fn collect_output(
             Some(DaemonToClient::Output {
                 pane_id: out_pane,
                 data,
+                ..
             }) if out_pane == pane_id => {
                 collected.extend_from_slice(&data);
                 if data

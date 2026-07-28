@@ -33,13 +33,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(10);
 // A renderer can stop reading while WebView2 is busy or suspended. Keep each
-// local client bounded by frames AND bytes; overflow is counted and surfaced
-// after it catches up.
+// local client bounded by frames AND bytes. Every frame carries its pane
+// cursor, so a later frame makes any overflow observable and recoverable.
 const TERMINAL_WS_QUEUE_FRAMES: usize = 1024;
 const TERMINAL_WS_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
-// Repeat trim notices for the same pane are throttled so a recovering stream
-// is not drowned in notice lines.
-const TRIM_NOTICE_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -112,41 +109,13 @@ struct ClientShared {
 struct TerminalWsClient {
     sender: Sender<Arc<[u8]>>,
     queued_bytes: Arc<AtomicUsize>,
-    trims: HashMap<String, PaneTrimState>,
-}
-
-#[derive(Default)]
-struct PaneTrimState {
-    dropped_bytes: u64,
-    last_notice_at: Option<Instant>,
 }
 
 impl TerminalWsClient {
-    /// Delivers one pane output frame, prepending a throttled trim notice
-    /// after a lag. Returns `false` when the client is gone and must be
-    /// removed.
-    fn deliver_output(
-        &mut self,
-        pane_id: &str,
-        data: &[u8],
-        base_frame: &Arc<[u8]>,
-        now: Instant,
-    ) -> bool {
-        let notice = self.pending_notice(pane_id, now);
-        let frame: Arc<[u8]> = match notice.as_deref() {
-            // Merge the notice into the SAME frame as the data. A separate
-            // notice frame competes with real output for the last free queue
-            // slot; under sustained backpressure every delivered frame then
-            // becomes a notice while every data frame is dropped, filling the
-            // terminal with notices and starving actual output.
-            Some(text) => {
-                let mut body = Vec::with_capacity(text.len() + data.len());
-                body.extend_from_slice(text.as_bytes());
-                body.extend_from_slice(data);
-                Arc::from(frame_output(pane_id, &body).into_boxed_slice())
-            }
-            None => Arc::clone(base_frame),
-        };
+    /// Delivers one pane output frame. A full queue drops the frame instead of
+    /// blocking the daemon; the next delivered cursor exposes the gap so the
+    /// renderer can replace the pane from an atomic daemon snapshot.
+    fn deliver_output(&self, frame: Arc<[u8]>) -> bool {
         let frame_len = frame.len();
         if self
             .queued_bytes
@@ -154,58 +123,16 @@ impl TerminalWsClient {
             .saturating_add(frame_len)
             > TERMINAL_WS_QUEUE_MAX_BYTES
         {
-            self.record_dropped(pane_id, data.len());
             return true;
         }
         match self.sender.try_send(frame) {
             Ok(()) => {
                 self.queued_bytes.fetch_add(frame_len, Ordering::AcqRel);
-                if notice.is_some() {
-                    self.mark_notice_reported(pane_id, now);
-                }
                 true
             }
-            Err(TrySendError::Full(_)) => {
-                self.record_dropped(pane_id, data.len());
-                true
-            }
+            Err(TrySendError::Full(_)) => true,
             Err(TrySendError::Disconnected(_)) => false,
         }
-    }
-
-    fn pending_notice(&self, pane_id: &str, now: Instant) -> Option<String> {
-        let state = self.trims.get(pane_id)?;
-        if state.dropped_bytes == 0 {
-            return None;
-        }
-        if let Some(last) = state.last_notice_at {
-            if now.duration_since(last) < TRIM_NOTICE_MIN_INTERVAL {
-                return None;
-            }
-        }
-        let dropped_bytes = state.dropped_bytes;
-        Some(format!(
-            "\r\n\x1b[33m[VibeLink: terminal output trimmed ({dropped_bytes} bytes) to keep the app responsive]\x1b[0m\r\n"
-        ))
-    }
-
-    fn mark_notice_reported(&mut self, pane_id: &str, now: Instant) {
-        if let Some(state) = self.trims.get_mut(pane_id) {
-            state.dropped_bytes = 0;
-            state.last_notice_at = Some(now);
-        }
-    }
-
-    fn record_dropped(&mut self, pane_id: &str, bytes: usize) {
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        let state = self.trims.entry(pane_id.to_string()).or_default();
-        if state.dropped_bytes == 0 {
-            warn!(
-                pane_id,
-                "terminal websocket client fell behind; trimming output"
-            );
-        }
-        state.dropped_bytes = state.dropped_bytes.saturating_add(bytes);
     }
 }
 
@@ -602,8 +529,19 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
         }
     } else {
         match msg {
-            DaemonToClient::Output { pane_id, data } => {
-                broadcast_output(shared, &pane_id.to_string(), &data);
+            DaemonToClient::Output {
+                pane_id,
+                pane_generation,
+                output_sequence,
+                data,
+            } => {
+                broadcast_output(
+                    shared,
+                    &pane_id.to_string(),
+                    pane_generation,
+                    output_sequence,
+                    &data,
+                );
             }
             DaemonToClient::RemotePaneLease { event } => {
                 if let Some(app_handle) = &shared.app_handle {
@@ -715,7 +653,6 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
                             .push(TerminalWsClient {
                                 sender: tx,
                                 queued_bytes: Arc::clone(&queued_bytes),
-                                trims: HashMap::new(),
                             });
                         while let Ok(frame) = rx.recv() {
                             queued_bytes.fetch_sub(frame.len(), Ordering::AcqRel);
@@ -739,21 +676,29 @@ fn websocket_token_matches(expected: &[u8; 32], encoded: &str) -> bool {
     constant_time_eq(expected, &provided)
 }
 
-fn frame_output(pane_id: &str, data: &[u8]) -> Vec<u8> {
+fn frame_output(pane_id: &str, pane_generation: u64, output_sequence: u64, data: &[u8]) -> Vec<u8> {
     let id = pane_id.as_bytes();
     let id_len = u16::try_from(id.len()).expect("pane id too long for output frame");
-    let mut frame = Vec::with_capacity(2 + id.len() + data.len());
+    let mut frame = Vec::with_capacity(2 + id.len() + 16 + data.len());
     frame.extend_from_slice(&id_len.to_be_bytes());
     frame.extend_from_slice(id);
+    frame.extend_from_slice(&pane_generation.to_be_bytes());
+    frame.extend_from_slice(&output_sequence.to_be_bytes());
     frame.extend_from_slice(data);
     frame
 }
 
-fn broadcast_output(shared: &ClientShared, pane_id: &str, data: &[u8]) {
-    let base_frame: Arc<[u8]> = Arc::from(frame_output(pane_id, data).into_boxed_slice());
-    let now = Instant::now();
+fn broadcast_output(
+    shared: &ClientShared,
+    pane_id: &str,
+    pane_generation: u64,
+    output_sequence: u64,
+    data: &[u8],
+) {
+    let base_frame: Arc<[u8]> =
+        Arc::from(frame_output(pane_id, pane_generation, output_sequence, data).into_boxed_slice());
     let mut clients = shared.ws_clients.lock().expect("ws clients mutex poisoned");
-    clients.retain_mut(|client| client.deliver_output(pane_id, data, &base_frame, now));
+    clients.retain_mut(|client| client.deliver_output(Arc::clone(&base_frame)));
 }
 
 fn remove_pending_request(shared: &ClientShared, req: Req) {
@@ -930,12 +875,25 @@ mod tests {
         let pane_id = Uuid::new_v4().to_string();
         let data = b"\x1b[31mhello\x1b[0m";
 
-        let frame = frame_output(&pane_id, data);
+        let frame = frame_output(&pane_id, 7, 42, data);
         let id_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
-        let decoded_id = std::str::from_utf8(&frame[2..2 + id_len]).expect("utf8 pane id");
-        let decoded_data = &frame[2 + id_len..];
+        let cursor_start = 2 + id_len;
+        let decoded_id = std::str::from_utf8(&frame[2..cursor_start]).expect("utf8 pane id");
+        let decoded_generation = u64::from_be_bytes(
+            frame[cursor_start..cursor_start + 8]
+                .try_into()
+                .expect("generation bytes"),
+        );
+        let decoded_sequence = u64::from_be_bytes(
+            frame[cursor_start + 8..cursor_start + 16]
+                .try_into()
+                .expect("sequence bytes"),
+        );
+        let decoded_data = &frame[cursor_start + 16..];
 
         assert_eq!(decoded_id, pane_id);
+        assert_eq!(decoded_generation, 7);
+        assert_eq!(decoded_sequence, 42);
         assert_eq!(decoded_data, data);
     }
 
@@ -952,16 +910,26 @@ mod tests {
             TerminalWsClient {
                 sender: tx,
                 queued_bytes: Arc::clone(&queued_bytes),
-                trims: HashMap::new(),
             },
             rx,
             queued_bytes,
         )
     }
 
-    fn frame_text(frame: &[u8]) -> String {
+    fn frame_cursor(frame: &[u8]) -> (u64, u64, usize) {
         let id_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
-        String::from_utf8(frame[2 + id_len..].to_vec()).expect("frame utf8")
+        let cursor_start = 2 + id_len;
+        let generation = u64::from_be_bytes(
+            frame[cursor_start..cursor_start + 8]
+                .try_into()
+                .expect("generation bytes"),
+        );
+        let sequence = u64::from_be_bytes(
+            frame[cursor_start + 8..cursor_start + 16]
+                .try_into()
+                .expect("sequence bytes"),
+        );
+        (generation, sequence, cursor_start + 16)
     }
 
     #[test]
@@ -981,6 +949,8 @@ mod tests {
             &client.shared,
             DaemonToClient::Output {
                 pane_id,
+                pane_generation: 7,
+                output_sequence: 42,
                 data: data.clone(),
             },
         );
@@ -988,12 +958,15 @@ mod tests {
         let frame = rx.recv_timeout(Duration::from_secs(1)).expect("ws frame");
         let id_len = u16::from_be_bytes([frame[0], frame[1]]) as usize;
         let decoded_id = std::str::from_utf8(&frame[2..2 + id_len]).expect("pane id");
+        let (generation, sequence, data_start) = frame_cursor(&frame);
         assert_eq!(decoded_id, pane_id.to_string());
-        assert_eq!(&frame[2 + id_len..], data.as_slice());
+        assert_eq!(generation, 7);
+        assert_eq!(sequence, 42);
+        assert_eq!(&frame[data_start..], data.as_slice());
     }
 
     #[test]
-    fn slow_websocket_client_queue_is_bounded() {
+    fn slow_websocket_client_queue_is_bounded_and_exposes_sequence_gap() {
         let (client, _peer) = test_client();
         let (ws_client, rx, queued_bytes) = test_ws_client(TERMINAL_WS_QUEUE_FRAMES);
         client
@@ -1005,99 +978,60 @@ mod tests {
         let pane_id = Uuid::new_v4();
         let data = vec![b'x'; 64 * 1024];
 
-        for _ in 0..300 {
+        for output_sequence in 1..=300 {
             route_daemon_message(
                 &client.shared,
                 DaemonToClient::Output {
                     pane_id,
+                    pane_generation: 7,
+                    output_sequence,
                     data: data.clone(),
                 },
             );
         }
 
-        // The byte budget bounds the queue well below the 300 sent frames.
         assert!(rx.len() < 300);
         assert!(queued_bytes.load(Ordering::Acquire) <= TERMINAL_WS_QUEUE_MAX_BYTES);
-        let dropped_bytes = client.shared.ws_clients.lock().expect("ws clients mutex")[0]
-            .trims
-            .get(&pane_id.to_string())
-            .map(|state| state.dropped_bytes)
-            .expect("dropped output count");
-        assert!(dropped_bytes > 0);
-
-        // Simulate the connection thread catching up.
-        while rx.try_recv().is_ok() {}
+        let queued = rx.try_iter().collect::<Vec<_>>();
+        let (_, last_delivered_sequence, _) =
+            frame_cursor(queued.last().expect("at least one queued frame"));
+        assert!(last_delivered_sequence < 300);
         queued_bytes.store(0, Ordering::Release);
 
         route_daemon_message(
             &client.shared,
             DaemonToClient::Output {
                 pane_id,
+                pane_generation: 7,
+                output_sequence: 301,
                 data: b"tail".to_vec(),
             },
         );
 
-        // ONE merged frame carries the notice AND the live data; the notice
-        // never occupies a queue slot of its own.
         let frame = rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("merged frame");
-        let text = frame_text(&frame);
-        assert!(text.contains("terminal output trimmed"));
-        assert!(text.ends_with("tail"));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn trim_notice_is_merged_and_throttled() {
-        let (mut client, rx, _queued_bytes) = test_ws_client(8);
-        let pane_id = "pane-1";
-        let now = Instant::now();
-
-        client.record_dropped(pane_id, 512);
-        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, b"data").into_boxed_slice());
-        assert!(client.deliver_output(pane_id, b"data", &base, now));
-        let text = frame_text(&rx.try_recv().expect("merged frame"));
-        assert!(text.contains("terminal output trimmed (512 bytes)"));
-        assert!(text.ends_with("data"));
-
-        // Within the throttle window a new lag stays silent...
-        client.record_dropped(pane_id, 64);
-        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, b"more").into_boxed_slice());
-        assert!(client.deliver_output(pane_id, b"more", &base, now));
-        let text = frame_text(&rx.try_recv().expect("plain frame"));
-        assert!(!text.contains("terminal output trimmed"));
-        assert_eq!(text, "more");
-
-        // ...and reports the accumulated total once the window elapses.
-        client
-            .trims
-            .get_mut(pane_id)
-            .expect("trim state")
-            .last_notice_at = now.checked_sub(TRIM_NOTICE_MIN_INTERVAL);
-        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, b"late").into_boxed_slice());
-        assert!(client.deliver_output(pane_id, b"late", &base, now));
-        let text = frame_text(&rx.try_recv().expect("late merged frame"));
-        assert!(text.contains("terminal output trimmed (64 bytes)"));
-        assert!(text.ends_with("late"));
+            .expect("post-overflow frame");
+        let (generation, sequence, data_start) = frame_cursor(&frame);
+        assert_eq!(generation, 7);
+        assert_eq!(sequence, 301);
+        assert!(last_delivered_sequence.saturating_add(1) < sequence);
+        assert_eq!(&frame[data_start..], b"tail");
     }
 
     #[test]
     fn websocket_queue_is_byte_bounded() {
-        let (mut client, rx, _queued_bytes) = test_ws_client(TERMINAL_WS_QUEUE_FRAMES);
+        let (client, rx, _queued_bytes) = test_ws_client(TERMINAL_WS_QUEUE_FRAMES);
         let pane_id = "pane-1";
         let data = vec![b'x'; 1024 * 1024];
-        let base: Arc<[u8]> = Arc::from(frame_output(pane_id, &data).into_boxed_slice());
-        let now = Instant::now();
 
-        for _ in 0..10 {
-            assert!(client.deliver_output(pane_id, &data, &base, now));
+        for output_sequence in 1..=10 {
+            let frame: Arc<[u8]> =
+                Arc::from(frame_output(pane_id, 1, output_sequence, &data).into_boxed_slice());
+            assert!(client.deliver_output(frame));
         }
 
         assert!(rx.len() >= 1);
         assert!(rx.len() < 10);
-        let dropped = client.trims.get(pane_id).expect("trim state").dropped_bytes;
-        assert!(dropped > 0);
     }
 
     #[test]
@@ -1235,6 +1169,8 @@ mod tests {
         assert_eq!(
             response_req(&DaemonToClient::Output {
                 pane_id: Uuid::new_v4(),
+                pane_generation: 1,
+                output_sequence: 1,
                 data: vec![1, 2, 3],
             }),
             None

@@ -4,6 +4,7 @@ import type { PaneMeta, SessionMeta } from './types'
 import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../state/store'
 import { agentActivityTracker } from '../terminal/agentActivity'
 import { startTerminalOutputStream } from './output'
+import { TerminalManager } from '../terminal/TerminalManager'
 
 type TestTerminalEvent =
   | { kind: 'sessionChanged'; sessionId: string }
@@ -26,6 +27,7 @@ vi.mock('../terminal/TerminalManager', () => ({
     markExited: vi.fn(),
     reattachToDaemon: vi.fn(),
     write: vi.fn(),
+    writeSequenced: vi.fn(),
   },
 }))
 
@@ -53,6 +55,8 @@ const pane: PaneMeta = {
 }
 
 class MockWebSocket {
+  static instances: MockWebSocket[] = []
+
   binaryType: BinaryType = 'blob'
   onclose: (() => void) | null = null
   onmessage: ((event: MessageEvent) => void) | null = null
@@ -61,6 +65,7 @@ class MockWebSocket {
 
   constructor(url: string) {
     this.url = url
+    MockWebSocket.instances.push(this)
   }
 
   close(): void {
@@ -75,11 +80,25 @@ const localStorageStub = {
   clear: vi.fn(),
 }
 
+function terminalFrame(paneId: string, paneGeneration: bigint, outputSequence: bigint, text: string): ArrayBuffer {
+  const paneBytes = new TextEncoder().encode(paneId)
+  const body = new TextEncoder().encode(text)
+  const frame = new Uint8Array(2 + paneBytes.byteLength + 16 + body.byteLength)
+  const view = new DataView(frame.buffer)
+  view.setUint16(0, paneBytes.byteLength, false)
+  frame.set(paneBytes, 2)
+  view.setBigUint64(2 + paneBytes.byteLength, paneGeneration, false)
+  view.setBigUint64(10 + paneBytes.byteLength, outputSequence, false)
+  frame.set(body, 18 + paneBytes.byteLength)
+  return frame.buffer
+}
+
 describe('terminal session change reloads', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     resetWorkspaceSessionOwnershipForTests()
     emitTerminalEvent = undefined
+    MockWebSocket.instances = []
     vi.stubGlobal('window', {
       localStorage: localStorageStub,
       setTimeout: globalThis.setTimeout.bind(globalThis),
@@ -189,5 +208,21 @@ describe('terminal session change reloads', () => {
     await vi.advanceTimersByTimeAsync(20)
 
     expect(fallbackCompletions).toEqual([])
+  })
+  test('passes pane generation and output sequence from websocket frames', async () => {
+    await startTerminalOutputStream({ force: true })
+    const socket = MockWebSocket.instances.at(-1)
+    if (!socket?.onmessage) throw new Error('terminal websocket was not initialized')
+
+    socket.onmessage({ data: terminalFrame(pane.id, 7n, 42n, 'live output') } as MessageEvent)
+
+    expect(TerminalManager.writeSequenced).toHaveBeenCalledWith(
+      pane.id,
+      7n,
+      42n,
+      expect.any(Uint8Array),
+    )
+    const bytes = vi.mocked(TerminalManager.writeSequenced).mock.calls.at(-1)?.[3]
+    expect(bytes ? new TextDecoder().decode(bytes) : '').toBe('live output')
   })
 })

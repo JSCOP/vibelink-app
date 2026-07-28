@@ -49,6 +49,7 @@ pub struct SpawnedPane {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PaneOutputRecord {
     pub reset: bool,
+    pub sequence: u64,
 }
 
 pub struct Pane {
@@ -215,14 +216,17 @@ impl Pane {
         lock_scrollback(&self.scrollback).snapshot()
     }
 
-    pub fn record_output(&mut self, bytes: &[u8]) -> PaneOutputRecord {
+    pub(crate) fn record_output(&mut self, bytes: &[u8]) -> PaneOutputRecord {
         let reset = lock_scrollback(&self.scrollback).push(bytes);
         self.output_sequence = self.output_sequence.saturating_add(1);
         self.last_output_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        PaneOutputRecord { reset }
+        PaneOutputRecord {
+            reset,
+            sequence: self.output_sequence,
+        }
     }
 
     pub fn last_output_at(&self) -> u64 {

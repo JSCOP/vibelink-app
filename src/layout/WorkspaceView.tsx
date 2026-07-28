@@ -1484,6 +1484,13 @@ export function WorkspaceView({
       TerminalManager.pruneStale(new Set(livePanes.map((pane) => pane.id)))
       await settleLayout({ syncPty: true }, owner)
       if (!ownsLayout(owner)) return
+      const paneIds = livePanes.map((pane) => pane.id)
+      TerminalManager.reattachToDaemon(sessionId, paneIds, { force: false })
+      await TerminalManager.waitForReplay(sessionId, paneIds)
+      if (!ownsLayout(owner)) return
+      await settleLayout({ syncPty: true, paneIds }, owner)
+      if (!ownsLayout(owner)) return
+      TerminalManager.recoverAllVisiblePanes(paneIds)
       setApiVersion((value) => value + 1)
       if (!restore || serializeCurrentLayout() !== raw) persistLayoutSoon()
     }
