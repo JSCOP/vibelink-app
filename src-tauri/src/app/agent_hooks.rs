@@ -21,6 +21,18 @@ const STOP_EVENT: &[&str] = &["Stop"];
 const GEMINI_EVENTS: &[&str] = &["AfterAgent"];
 const CURSOR_EVENTS: &[&str] = &["stop"];
 
+/// Executable that generated completion hooks must invoke.
+///
+/// This MUST be the dedicated CLI (`vibelink.exe`), never `current_exe()`.
+/// The GUI binary treats every argv it does not recognise as a normal launch,
+/// so a hook baking in `app.exe` starts a SECOND full desktop instance on each
+/// agent turn. Those instances attach to the same daemon session and refit
+/// every pane to their own default 800x600 window, which makes the visible
+/// grid oscillate between two column counts ("screen shaking").
+fn hook_cli_path() -> Result<PathBuf> {
+    super::cli_path::dedicated_cli_path()
+}
+
 #[derive(Clone, Copy)]
 enum ConfigLocation {
     Home(&'static str),
@@ -933,7 +945,7 @@ fn write_managed_script(spec: &AgentHookSpec, path: &Path) -> Result<()> {
 }
 
 fn render_batch_script(spec: &AgentHookSpec) -> Result<String> {
-    let cli = std::env::current_exe().context("resolve VibeLink executable")?;
+    let cli = hook_cli_path()?;
     let output = if spec.id == "gemini" {
         "echo {}\r\n"
     } else {
@@ -947,7 +959,7 @@ fn render_batch_script(spec: &AgentHookSpec) -> Result<String> {
 }
 
 fn render_powershell_script(spec: &AgentHookSpec) -> Result<String> {
-    let cli = std::env::current_exe().context("resolve VibeLink executable")?;
+    let cli = hook_cli_path()?;
     Ok(format!(
         "# {HOOK_MARKER}\n[Console]::In.ReadToEnd() | Out-Null\nif ($env:VIBELINK_SESSION_ID -and $env:VIBELINK_PANE_ID) {{\n  & {} terminal complete --session $env:VIBELINK_SESSION_ID --pane $env:VIBELINK_PANE_ID --agent {} *> $null\n}}\nexit 0\n",
         quote_powershell(&cli.to_string_lossy()),
@@ -956,7 +968,7 @@ fn render_powershell_script(spec: &AgentHookSpec) -> Result<String> {
 }
 
 fn render_antigravity_batch(spec: &AgentHookSpec) -> Result<String> {
-    let cli = std::env::current_exe().context("resolve VibeLink executable")?;
+    let cli = hook_cli_path()?;
     let powershell = format!(
         "$raw=[Console]::In.ReadToEnd(); Write-Output '{{\"decision\":\"\"}}'; try {{ $payload=if ([string]::IsNullOrWhiteSpace($raw)) {{ @{{}} }} else {{ $raw | ConvertFrom-Json }} }} catch {{ exit 0 }}; if ($payload.fullyIdle -eq $false -or $payload.fully_idle -eq $false) {{ exit 0 }}; if ($env:VIBELINK_SESSION_ID -and $env:VIBELINK_PANE_ID) {{ & {} terminal complete --session $env:VIBELINK_SESSION_ID --pane $env:VIBELINK_PANE_ID --agent {} *> $null }}; exit 0",
         quote_powershell(&cli.to_string_lossy()),
@@ -969,7 +981,7 @@ fn render_antigravity_batch(spec: &AgentHookSpec) -> Result<String> {
 }
 
 fn render_posix_script(spec: &AgentHookSpec) -> Result<String> {
-    let cli = std::env::current_exe().context("resolve VibeLink executable")?;
+    let cli = hook_cli_path()?;
     let cli_path = if cfg!(windows) {
         to_git_bash_path(&cli.to_string_lossy())
     } else {
@@ -1021,7 +1033,7 @@ fn inspect_drop_in_hook(path: &Path) -> Result<HookInspection> {
 
 fn install_drop_in_hook(spec: &AgentHookSpec, kind: DropInKind, path: &Path) -> Result<()> {
     ensure_generated_file_writable(path)?;
-    let cli = std::env::current_exe().context("resolve VibeLink executable")?;
+    let cli = hook_cli_path()?;
     let source = match kind {
         DropInKind::Amp => render_amp_plugin(&cli, spec.id),
         DropInKind::OpenCode => render_opencode_plugin(&cli, spec.id),
@@ -1233,7 +1245,7 @@ fn install_hermes_hook(config_path: &Path) -> Result<()> {
     fs::create_dir_all(&plugin_dir).with_context(|| format!("create {}", plugin_dir.display()))?;
     fs::write(&manifest, render_hermes_manifest())
         .with_context(|| format!("write {}", manifest.display()))?;
-    let cli = std::env::current_exe().context("resolve VibeLink executable")?;
+    let cli = hook_cli_path()?;
     fs::write(&init, render_hermes_plugin(&cli))
         .with_context(|| format!("write {}", init.display()))?;
     let mut config = read_hermes_config(config_path)?;
@@ -1964,6 +1976,25 @@ mod tests {
         assert!(source.contains("ctx.isIdle()"));
         assert!(source.contains("agent_end"));
         assert!(!source.contains("input:pre"));
+    }
+
+    /// Generated hooks must invoke the dedicated CLI, never the GUI binary.
+    /// Pointing a hook at the desktop executable starts an extra full instance
+    /// per agent turn; every instance attaches to the same daemon session and
+    /// refits the shared panes to its own window, which is what made the live
+    /// terminal grid visibly oscillate between two column counts.
+    #[test]
+    fn generated_hooks_invoke_the_dedicated_cli_binary() {
+        let cli = hook_cli_path().expect("resolve hook cli");
+        let name = cli
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("cli file name");
+        assert_eq!(name, if cfg!(windows) { "vibelink.exe" } else { "vibelink" });
+
+        let script = render_batch_script(spec("codex")).expect("batch script");
+        assert!(script.contains(&cli.display().to_string()));
+        assert!(script.contains("terminal complete"));
     }
 
     #[test]

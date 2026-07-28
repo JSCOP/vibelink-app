@@ -14,9 +14,10 @@ pub use builtin_skills::{
 };
 pub use client::{socket_name_for_user, ControlSocketClient, ControlSocketConfig, Flavor};
 pub use command::{
-    parse_args, ActionCommand, AutomationAction, BrowserAction, Command, ComputerAction,
-    Invocation, McpAction, OperationArguments, OrchestrationAction, RemoteAction, SelectorSet,
-    SkillAction, TerminalAction, WorkspaceAction, COMMAND_SCHEMA_VERSION,
+    is_command_domain, parse_args, ActionCommand, AutomationAction, BrowserAction, Command,
+    ComputerAction, Invocation, McpAction, OperationArguments, OrchestrationAction, RemoteAction,
+    SelectorSet, SkillAction, TerminalAction, WorkspaceAction, COMMAND_DOMAINS,
+    COMMAND_SCHEMA_VERSION,
 };
 pub use contract::{
     command_contracts, contract_for_command, find_contract, CommandContract, OptionSpec, RiskLevel,

@@ -228,6 +228,32 @@ pub struct Invocation {
     pub command: Command,
 }
 
+/// Top-level command domains this parser accepts.
+///
+/// The GUI binary consults this to REFUSE a CLI invocation instead of falling
+/// through to a normal desktop launch. A generated agent-completion hook that
+/// still points at the desktop executable would otherwise start an extra full
+/// instance on every agent turn; each one attaches to the same daemon session
+/// and refits the shared panes to its own window geometry, which makes the live
+/// terminal grid oscillate between two column counts.
+pub const COMMAND_DOMAINS: &[&str] = &[
+    "status",
+    "workspace",
+    "terminal",
+    "orchestration",
+    "automation",
+    "browser",
+    "computer",
+    "skill",
+    "remote",
+    "mcp",
+];
+
+/// Whether `argument` names a CLI command domain rather than a launch argument.
+pub fn is_command_domain(argument: &str) -> bool {
+    COMMAND_DOMAINS.contains(&argument)
+}
+
 pub fn parse_args(
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> Result<Invocation, CliError> {
@@ -780,5 +806,38 @@ mod tests {
         .expect("parse gate resolve");
         let json = serde_json::to_value(invocation.command).expect("serialize command");
         assert_eq!(json["request"]["action"], "gate-resolve");
+    }
+
+    /// `COMMAND_DOMAINS` gates whether the GUI binary refuses an argv, so it
+    /// must stay in sync with what the parser actually accepts. A domain the
+    /// parser knows but this list omits would let a hook boot a second desktop
+    /// instance again; the extra instance then refits the shared panes to its
+    /// own window and the live terminal grid visibly shakes.
+    #[test]
+    fn command_domains_cover_every_domain_the_parser_accepts() {
+        for domain in COMMAND_DOMAINS {
+            assert!(is_command_domain(domain));
+            let error = parse_args([*domain]).err();
+            // Each domain must be RECOGNISED: it either parses or fails for a
+            // reason other than "unknown command domain".
+            if let Some(error) = error {
+                assert!(
+                    !error.to_string().contains("unknown command domain"),
+                    "{domain} is listed but the parser does not know it"
+                );
+            }
+        }
+
+        assert!(parse_args(["definitely-not-a-domain"])
+            .expect_err("unknown domain rejected")
+            .to_string()
+            .contains("unknown command domain"));
+    }
+
+    #[test]
+    fn ordinary_launch_arguments_are_not_command_domains() {
+        for argument in ["", "--daemon", "vibelink://open", "C:/some/path", "--flag"] {
+            assert!(!is_command_domain(argument));
+        }
     }
 }
