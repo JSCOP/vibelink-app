@@ -96,7 +96,11 @@ export function useExplorerController({ sessionId, workspaceFolder }: ExplorerCo
   }, [workspaceFolder])
   const activeRepositoryLabel = gitSession.activeRepoRoot || 'Workspace root'
 
-  useEffect(() => { void loadChildren(sessionId, workspaceFolder, '') }, [loadChildren, sessionId, workspaceFolder])
+  useEffect(() => {
+    const current = useExplorerStore.getState().sessions[sessionId]
+    if (current?.loadingPaths.has('')) return
+    void loadChildren(sessionId, workspaceFolder, '')
+  }, [loadChildren, sessionId, workspaceFolder])
 
   const refreshVisibleTree = useCallback(async () => {
     const ownership = captureWorkspaceOwnership()

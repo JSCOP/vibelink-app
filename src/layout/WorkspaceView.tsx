@@ -30,7 +30,7 @@ import type { PickerEntry } from '../components/pickerModel'
 import { KanbanBoard } from '../components/KanbanBoard'
 import { TaskDiffView } from '../components/TaskDiffView'
 import { WorkbenchContentPanel as WorkbenchPanel } from '../components/git/GitWindow'
-import { ExplorerSidebarPanel } from '../components/explorer/ExplorerWindow'
+import { ExplorerSidebarPanel, WorkspaceFilesSidebarPanel } from '../components/explorer/ExplorerWindow'
 import { PreviewContentPanel } from '../components/explorer/PreviewContentPanel'
 import { SourceControlSidebar } from '../components/git/SourceControlSidebar'
 import { WorkspacesSidebar } from '../components/workspaces/WorkspacesSidebar'
@@ -359,7 +359,9 @@ function WorkbenchContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-git"><ProPanelBoundary feature="Workbench"><ErrorBoundary label="Workbench panel"><WorkspaceContentActionsContext.Provider value={scopedActions}><WorkbenchPanel onWorkspaceInput={onWorkspaceInput} /></WorkspaceContentActionsContext.Provider></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
-function ExplorerContentPanel(props: WorkspaceContentPanelProps) {
+type ContextualExplorerContentPanelProps = WorkspaceContentPanelProps & { variant: 'explorer' | 'workspaceFiles' }
+
+function ContextualExplorerContentPanel({ variant, ...props }: ContextualExplorerContentPanelProps) {
   const actions = useContext(WorkspaceContentActionsContext)
   const { layoutOwner } = useContext(WorkspaceIntegrationContext)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
@@ -374,11 +376,24 @@ function ExplorerContentPanel(props: WorkspaceContentPanelProps) {
     openContent: (request) => actions.openContent({ ...request, ...ownership }),
     requestCloseContent: (panelId) => actions.requestCloseContent(panelId, ownership),
   } : null, [actions, ownership])
+  const workspaceFiles = variant === 'workspaceFiles'
+  const Sidebar = workspaceFiles ? WorkspaceFilesSidebarPanel : ExplorerSidebarPanel
+  const panelClass = workspaceFiles ? 'workspace-window-workspace-files' : 'workspace-window-explorer'
+  const errorLabel = workspaceFiles ? 'Workspace files panel' : 'Explorer panel'
+  const placeholder = workspaceFiles ? 'Select a workspace or worktree to browse its files.' : 'Select a workspace to browse files.'
   return (
-    <WindowPanelShell panelId={props.api.id} className="workspace-window-explorer">
-      <ProPanelBoundary feature="Explorer"><ErrorBoundary label="Explorer panel">{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><ExplorerSidebarPanel sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">Select a workspace to browse files.</div>}</ErrorBoundary></ProPanelBoundary>
+    <WindowPanelShell panelId={props.api.id} className={panelClass}>
+      <ProPanelBoundary feature="Explorer"><ErrorBoundary label={errorLabel}>{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><Sidebar sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">{placeholder}</div>}</ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
+}
+
+function ExplorerContentPanel(props: WorkspaceContentPanelProps) {
+  return <ContextualExplorerContentPanel {...props} variant="explorer" />
+}
+
+function WorkspaceFilesContentPanel(props: WorkspaceContentPanelProps) {
+  return <ContextualExplorerContentPanel {...props} variant="workspaceFiles" />
 }
 
 function PreviewWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
@@ -409,6 +424,7 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   preview: PreviewWorkspaceContentPanel,
   workspaces: WorkspacesContentPanel,
   explorer: ExplorerContentPanel,
+  workspaceFiles: WorkspaceFilesContentPanel,
   sourceControl: SourceControlContentPanel,
   gitHistory: GitHistoryContentPanel,
   gitBranches: GitBranchesContentPanel,

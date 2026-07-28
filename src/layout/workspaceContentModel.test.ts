@@ -106,9 +106,13 @@ describe('workspace content model', () => {
   it('classifies structural edge and central content kinds', () => {
     expect(isLeftStructuralWorkspaceContentKind('workspaces')).toBe(true)
     expect(isLeftStructuralWorkspaceContentKind('explorer')).toBe(true)
-    expect(isLeftStructuralWorkspaceContentKind('gitBranches')).toBe(true)
+    expect(isLeftStructuralWorkspaceContentKind('gitBranches')).toBe(false)
+    expect(isLeftStructuralWorkspaceContentKind('sourceControl')).toBe(false)
+    expect(isRightStructuralWorkspaceContentKind('workspaceFiles')).toBe(true)
+    expect(isRightStructuralWorkspaceContentKind('sourceControl')).toBe(true)
     expect(isRightStructuralWorkspaceContentKind('agentSessions')).toBe(true)
     expect(isStructuralWorkspaceContentKind('sourceControl')).toBe(true)
+
     expect(isStructuralWorkspaceContentKind('preview')).toBe(false)
     expect(isCentralWorkspaceContentKind('preview')).toBe(true)
     expect(isCentralWorkspaceContentKind('terminal')).toBe(true)

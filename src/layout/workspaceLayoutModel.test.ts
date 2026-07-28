@@ -92,7 +92,7 @@ describe('workspaceLayoutModel v3', () => {
 
   it('defines every built-in content descriptor and Preview singleton identity', () => {
     expect(Object.keys(workspaceContentDescriptors)).toEqual([
-      'terminal', 'terminalWindow', 'browser', 'editor', 'preview', 'workspaces', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions',
+      'terminal', 'terminalWindow', 'browser', 'editor', 'preview', 'workspaces', 'explorer', 'workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions',
     ])
     expect(createSingletonContentParams('workspaces')).toEqual({
       schema: 1,
@@ -101,6 +101,14 @@ describe('workspaceLayoutModel v3', () => {
       title: 'Workspaces',
       icon: 'folder',
     })
+    expect(createSingletonContentParams('workspaceFiles')).toEqual({
+      schema: 1,
+      kind: 'workspaceFiles',
+      instanceId: 'workspaceFiles',
+      title: 'Workspace Files',
+      icon: 'file-search',
+    })
+
     expect(createSingletonContentParams('sourceControl')).toEqual({
       schema: 1,
       kind: 'sourceControl',

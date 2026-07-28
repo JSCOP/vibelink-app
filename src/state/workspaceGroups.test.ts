@@ -31,6 +31,16 @@ describe('workspace groups', () => {
     expect(rows.slice(1).map((row) => row.kind === 'session' ? row.node.session.id : row.group.id)).toEqual(['ungrouped-a', 'ungrouped-b'])
   })
 
+  test('assigns a group root workspace by normalized folder even before its persisted group id catches up', () => {
+    const rootedGroup: WorkspaceGroup = { ...group, rootFolder: 'E:\\repos\\mono\\' }
+    const root = { ...session('root'), workspaceFolder: 'E:/repos/mono' }
+    const rows = workspaceRows([root, session('member'), session('ungrouped')], [rootedGroup], { member: group.id }, [])
+
+    expect(rows[0].kind === 'group' ? rows[0].sessions.map(({ session: item }) => item.id) : []).toEqual(['root', 'member'])
+    expect(rows.slice(1).map((row) => row.kind === 'session' ? row.node.session.id : row.group.id)).toEqual(['ungrouped'])
+  })
+
+
   test('keeps empty groups in group order', () => {
     const emptyGroup: WorkspaceGroup = { id: 'group-empty', name: 'Empty', collapsed: false }
     const rows = workspaceRows([session('member-a')], [emptyGroup, group], { 'member-a': group.id }, [])

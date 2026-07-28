@@ -10,7 +10,7 @@ import { useExplorerStore } from '../../state/explorer'
 import { useGitStore } from '../../state/git'
 import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../../state/store'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../../layout/contentActions'
-import { ExplorerWindow } from './ExplorerWindow'
+import { ExplorerWindow, WorkspaceFilesSidebarPanel } from './ExplorerWindow'
 
 function workspaceContentActions(openContent: WorkspaceContentActions['openContent'] = openWorkspaceContent): WorkspaceContentActions {
   return {
@@ -140,6 +140,22 @@ describe('ExplorerWindow Git integration', () => {
     expect(document.querySelector('[data-explorer-window="true"]')).toBeTruthy()
     expect(document.querySelector('.explorer-viewer')).toBeNull()
   })
+  test('renders a distinct right-side workspace file list without duplicating the initial directory load', async () => {
+    render(
+      <>
+        <ExplorerWindow sessionId="session-1" workspaceFolder="C:/repo" />
+        <WorkspaceFilesSidebarPanel sessionId="session-1" workspaceFolder="C:/repo" />
+      </>,
+    )
+
+    expect(screen.getByText('Explorer')).toBeTruthy()
+    expect(screen.getByText('Workspace Files')).toBeTruthy()
+    const trees = screen.getAllByRole('tree', { name: 'Files in repo' })
+    expect(trees).toHaveLength(2)
+    expect(trees[0].id).not.toBe(trees[1].id)
+    await waitFor(() => expect(invoke.mock.calls.filter(([command, args]) => command === 'fs_list_dir' && (args as { relPath?: string } | undefined)?.relPath === '')).toHaveLength(1))
+  })
+
 })
 
 test('discovers an uninitialized submodule and separates repository from pointer history actions', async () => {

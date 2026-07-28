@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderGit2, FolderOpen, FolderPlus, GitBranch, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { SessionMeta, WorktreeEntry } from '../../ipc/types'
 import { paneCompletionCountsBySession, useWorkspaceStore } from '../../state/store'
-import { flattenWorkspaceRows, workspaceRootSessions, workspaceRows, type WorkspaceGroup, type WorkspaceSessionNode, type WorkspaceWorktreeNode } from '../../state/workspaceGroups'
+import { flattenWorkspaceRows, workspaceGroupRootNode, workspaceRootSessions, workspaceRows, type WorkspaceGroup, type WorkspaceSessionNode, type WorkspaceWorktreeNode } from '../../state/workspaceGroups'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { choiceDialog, promptDialog } from '../appDialogStore'
 import { OpenWorkspaceItems } from './OpenWorkspaceItems'
@@ -289,6 +289,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         return workspaceFolder.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === normalizedRootFolder
       })
       if (existing) {
+        setWorkspaceGroup(existing.id, group.id)
         await selectWorkspace(existing.id)
         return
       }
@@ -480,26 +481,55 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           const dropInside = membershipDropTarget?.kind === 'group' && membershipDropTarget.groupId === group.id
           const rootFolder = group.rootFolder?.trim() || null
           const rootFolderName = workspaceFolderBasename(rootFolder)
-          const normalizedRootFolder = rootFolder?.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() ?? null
-          const groupWorktreeSource = normalizedRootFolder
-            ? groupSessions.find(({ session }) => session.workspaceFolder?.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === normalizedRootFolder)?.session ?? null
-            : null
+          const groupRootNode = workspaceGroupRootNode(group, groupSessions)
+          const groupRootSession = groupRootNode?.session ?? null
+          const groupRootActive = groupRootSession?.id === activeSessionId
+          const groupRootHasActiveWorktree = groupRootNode?.worktrees.some((worktree) => worktree.session.id === activeSessionId) ?? false
+          const groupRootCompletionCount = groupRootSession ? completionCounts[groupRootSession.id] ?? 0 : 0
+          const openOrToggleGroup = () => {
+            if (!rootFolder) {
+              toggleWorkspaceGroupCollapsed(group.id)
+              return
+            }
+            if (group.collapsed) toggleWorkspaceGroupCollapsed(group.id)
+            void openGroupRoot(group)
+          }
+          const visibleMembers = groupRootNode
+            ? groupSessions.filter((node) => node.session.id !== groupRootNode.session.id)
+            : groupSessions
+          const visibleRootWorktrees = groupRootNode
+            ? (group.collapsed ? groupRootNode.worktrees.filter((worktree) => worktree.session.id === activeSessionId) : groupRootNode.worktrees)
+            : []
+          const visibleSessions = group.collapsed
+            ? visibleMembers.filter(({ session, worktrees }) => session.id === activeSessionId || worktrees.some((worktree) => worktree.session.id === activeSessionId))
+            : visibleMembers
+          const groupRowClass = [
+            'workspaces-group-row',
+            groupRootActive ? 'active' : '',
+            groupRootHasActiveWorktree ? 'has-active-worktree' : '',
+            groupRootCompletionCount > 0 ? 'has-completions' : '',
+          ].filter(Boolean).join(' ')
           return (
             <div key={group.id} className={`workspaces-group${dropInside ? ' is-drop-target' : ''}`}>
               <div
-                className="workspaces-group-row"
+                className={groupRowClass}
                 data-workspace-group-row={group.id}
+                data-session-id={groupRootSession?.id}
+                data-completion-count={groupRootCompletionCount || undefined}
                 role="button"
                 tabIndex={0}
+                aria-current={groupRootActive ? 'true' : undefined}
                 aria-expanded={!group.collapsed}
-                onClick={() => {
-                  if (rootFolder) void openGroupRoot(group)
-                  else toggleWorkspaceGroupCollapsed(group.id)
+                onClick={openOrToggleGroup}
+                onContextMenu={(event) => {
+                  if (!groupRootSession) return
+                  event.preventDefault()
+                  setContextMenu({ kind: 'repository', session: groupRootSession, x: event.clientX, y: event.clientY })
                 }}
                 onKeyDown={(event) => {
                   if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
                   event.preventDefault()
-                  toggleWorkspaceGroupCollapsed(group.id)
+                  openOrToggleGroup()
                 }}
               >
                 <span
@@ -518,7 +548,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
                   {rootFolderName ? <span className="workspaces-session-folder" title={rootFolder ?? undefined}>{rootFolderName}</span> : null}
                 </span>
                 <div className="workspaces-row-actions">
-                  <button type="button" title={groupWorktreeSource ? `Create worktree from ${groupWorktreeSource.name}` : 'Open the group repository before creating a worktree'} aria-label={`Create worktree in ${group.name} group`} className="session-small-action worktree-add-action" disabled={!groupWorktreeSource} onClick={(event) => { event.stopPropagation(); if (groupWorktreeSource) void requestWorktree(groupWorktreeSource) }}>
+                  <button type="button" title={groupRootSession ? `Create worktree from ${groupRootSession.name}` : 'Open the group repository before creating a worktree'} aria-label={`Create worktree in ${group.name} group`} className="session-small-action worktree-add-action" disabled={!groupRootSession} onClick={(event) => { event.stopPropagation(); if (groupRootSession) void requestWorktree(groupRootSession) }}>
                     <Plus size={12} strokeWidth={2} aria-hidden="true" />
                   </button>
                   {!rootFolder ? (
@@ -534,16 +564,13 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
                   </button>
                 </div>
               </div>
-              {(() => {
-                // Collapsing hides a group's members, but never the workspace
-                // you are standing in: otherwise the active row and its open
-                // items vanish and the panel cannot say where you are.
-                const visible = group.collapsed
-                  ? groupSessions.filter(({ session, worktrees }) => session.id === activeSessionId || worktrees.some((worktree) => worktree.session.id === activeSessionId))
-                  : groupSessions
-                if (visible.length === 0) return null
-                return <div className="workspaces-group-members" role="group" aria-label={`${group.name} workspaces`}>{visible.map(renderSession)}</div>
-              })()}
+              {groupRootActive && !group.collapsed ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
+              {visibleRootWorktrees.length > 0 || visibleSessions.length > 0 ? (
+                <div className="workspaces-group-members" role="group" aria-label={`${group.name} workspaces`}>
+                  {groupRootSession ? visibleRootWorktrees.map((worktree) => renderWorktree(worktree, groupRootSession)) : null}
+                  {visibleSessions.map(renderSession)}
+                </div>
+              ) : null}
             </div>
           )
         })}

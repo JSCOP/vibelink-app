@@ -1,4 +1,4 @@
-import { Eye, FilePlus2, FolderPlus, FolderTree, RefreshCw } from 'lucide-react'
+import { Eye, FilePlus2, FileSearch, FolderTree, FolderPlus, RefreshCw } from 'lucide-react'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { ChangeSummaryBadges, ExplorerTreeView } from './ExplorerTreeView'
 import { useExplorerController, type ExplorerControllerOptions } from './useExplorerController'
@@ -7,7 +7,11 @@ export type ExplorerSidebarPanelProps = ExplorerControllerOptions & {
   onCollapse?: () => void
 }
 
-export function ExplorerSidebarPanel({ sessionId, workspaceFolder, onCollapse }: ExplorerSidebarPanelProps) {
+function ExplorerPanel({ sessionId, workspaceFolder, onCollapse, variant }: ExplorerSidebarPanelProps & { variant: 'explorer' | 'workspaceFiles' }) {
+  const workspaceFiles = variant === 'workspaceFiles'
+  const title = workspaceFiles ? 'Workspace Files' : 'Explorer'
+  const collapseLabel = workspaceFiles ? 'Collapse Workspace Files' : 'Collapse Explorer'
+  const TreeIcon = workspaceFiles ? FileSearch : FolderTree
   const controller = useExplorerController({ sessionId, workspaceFolder })
 
   const canOpenPreview = Boolean(controller.selectedNode && !controller.selectedNode.entry.isDir && !controller.selectedNode.gitOnly)
@@ -29,7 +33,7 @@ export function ExplorerSidebarPanel({ sessionId, workspaceFolder, onCollapse }:
 
   return (
     <div className="explorer-window" data-explorer-window="true">
-      <WorkspaceSidebarPanelShell title="Explorer" icon={<FolderTree size={15} />} actions={actions} filter={context} onCollapse={onCollapse} collapseLabel="Collapse Explorer">
+      <WorkspaceSidebarPanelShell title={title} icon={<TreeIcon size={15} />} actions={actions} filter={context} onCollapse={onCollapse} collapseLabel={collapseLabel}>
         <ExplorerTreeView
           nodes={controller.nodes}
           selectedPath={controller.session.selectedPath}
@@ -39,7 +43,7 @@ export function ExplorerSidebarPanel({ sessionId, workspaceFolder, onCollapse }:
           statusPresentation={controller.statusPresentation}
           canOpenPreview={canOpenPreview}
           showHeader={false}
-          treeId={`explorer-tree-${sessionId}`}
+          treeId={`${workspaceFiles ? 'workspace-files-tree' : 'explorer-tree'}-${sessionId}`}
           workspaceLabel={controller.workspaceLabel}
           workspacePath={controller.workspaceFolder}
           repositoryLabel={controller.activeRepositoryLabel}
@@ -68,6 +72,14 @@ export function ExplorerSidebarPanel({ sessionId, workspaceFolder, onCollapse }:
       </WorkspaceSidebarPanelShell>
     </div>
   )
+}
+
+export function ExplorerSidebarPanel(props: ExplorerSidebarPanelProps) {
+  return <ExplorerPanel {...props} variant="explorer" />
+}
+
+export function WorkspaceFilesSidebarPanel(props: ExplorerSidebarPanelProps) {
+  return <ExplorerPanel {...props} variant="workspaceFiles" />
 }
 
 export function ExplorerWindow(props: ExplorerSidebarPanelProps) {

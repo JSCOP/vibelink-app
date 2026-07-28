@@ -26,10 +26,11 @@ type StructuralWorkspaceContentKind = typeof workspaceLeftStructuralKinds[number
 const workspaceStructuralPlacement: Record<StructuralWorkspaceContentKind, { groupId: string; index: number }> = {
   workspaces: { groupId: workspaceLeftEdgeGroupId, index: 0 },
   explorer: { groupId: workspaceLeftEdgeGroupId, index: 1 },
-  sourceControl: { groupId: workspaceLeftEdgeGroupId, index: 2 },
-  gitHistory: { groupId: workspaceLeftEdgeGroupId, index: 3 },
-  gitBranches: { groupId: workspaceLeftEdgeGroupId, index: 4 },
-  agentSessions: { groupId: workspaceRightEdgeGroupId, index: 0 },
+  workspaceFiles: { groupId: workspaceRightEdgeGroupId, index: 0 },
+  sourceControl: { groupId: workspaceRightEdgeGroupId, index: 1 },
+  gitHistory: { groupId: workspaceRightEdgeGroupId, index: 2 },
+  gitBranches: { groupId: workspaceRightEdgeGroupId, index: 3 },
+  agentSessions: { groupId: workspaceRightEdgeGroupId, index: 4 },
 }
 
 export type WorkspaceResizeCoordinator = {
@@ -264,6 +265,7 @@ export function ensureWorkspaceEdgeShell(api: DockviewApi): void {
     const group = edgeGroup(groupId)
     if (group) previousActiveIds.set(groupId, group.activePanel?.id)
   }
+  let addedWorkspaceFiles: IDockviewPanel | null = null
   for (const kind of [...workspaceLeftStructuralKinds, ...workspaceRightStructuralKinds]) {
     const placement = workspaceStructuralPlacement[kind]
     const group = api.groups.find((candidate) => candidate.id === placement.groupId && candidate.api.location.type === 'edge')
@@ -285,11 +287,14 @@ export function ensureWorkspaceEdgeShell(api: DockviewApi): void {
         inactive: true,
         position: { referenceGroup: group },
       })
+      if (kind === 'workspaceFiles') addedWorkspaceFiles = panel
     }
     if (panel.group.id !== group.id || group.panels[placement.index]?.id !== panel.id) {
       panel.api.moveTo({ group, position: 'center', index: placement.index, skipSetActive: true })
     }
   }
+  addedWorkspaceFiles?.api.setActive()
+
   for (const groupId of edgeGroupIds) {
     const group = edgeGroup(groupId)
     if (!group || group.panels.length === 0 || group.activePanel) continue

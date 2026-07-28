@@ -246,6 +246,29 @@ describe('WorkspacesSidebar', () => {
     expect(screen.getAllByRole('list', { name: 'Open workspace items' })).toHaveLength(1)
   })
 
+  test('uses the group row as the root workspace and renders its open work directly below the group', () => {
+    mocks.state.settings.workspaceGroups = [
+      { id: 'core', name: 'Core', collapsed: false, rootFolder: 'E:\\repos\\beta\\' },
+      { id: 'tools', name: 'Tools', collapsed: false, rootFolder: null },
+    ]
+    mocks.state.activeSessionId = 'beta'
+    publishOpenContentSnapshot([
+      { panelId: 'content:terminalWindow:root', kind: 'terminalWindow', title: 'Terminal', icon: 'terminal', active: true },
+      { panelId: 'content:terminal:pane-1', kind: 'terminal', title: 'Codex', icon: 'codex', active: true },
+    ])
+
+    renderSidebar()
+
+    const group = screen.getByText('Core').closest('.workspaces-group') as HTMLElement
+    const groupRow = within(group).getByText('Core').closest('[data-workspace-group-row]') as HTMLElement
+    expect(groupRow).toHaveClass('active')
+    expect(groupRow).toHaveAttribute('data-session-id', 'beta')
+    expect(within(group).queryByText('Beta')).not.toBeInTheDocument()
+    expect(within(group).getByRole('list', { name: 'Open workspace items' })).toBeInTheDocument()
+    expect(within(group).getByText('Codex')).toBeInTheDocument()
+  })
+
+
   test('nests worktree sessions and opens creation from the repository context menu', async () => {
     seedBetaWorktree()
     renderSidebar()
@@ -343,7 +366,8 @@ describe('WorkspacesSidebar', () => {
 
     await waitFor(() => expect(mocks.state.openSession).toHaveBeenCalledExactlyOnceWith('beta'))
     expect(mocks.state.createSession).not.toHaveBeenCalled()
-    expect(mocks.state.setWorkspaceGroup).not.toHaveBeenCalled()
+    expect(mocks.state.setWorkspaceGroup).toHaveBeenCalledExactlyOnceWith('beta', 'core')
+
   })
 
   test('uses the chevron only for collapse without opening the group root', () => {

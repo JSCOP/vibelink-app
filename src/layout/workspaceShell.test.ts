@@ -179,11 +179,11 @@ describe('WorkspaceView shell primitives', () => {
 
     const left = groups.find((group) => group.id === 'workspace-left-tools')!
     const right = groups.find((group) => group.id === 'workspace-right-tools')!
-    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches'])
-    expect(right.panels.map((panel) => panel.params.kind)).toEqual(['agentSessions'])
+    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer'])
+    expect(right.panels.map((panel) => panel.params.kind)).toEqual(['workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'agentSessions'])
+    expect(right.activePanel?.params.kind).toBe('workspaceFiles')
     expect(groups[0].panels).toEqual([])
   })
-
   it('leaves every edge group with an active panel so the rail cannot render blank', () => {
     const { api, groups, makePanel } = fakeDock(['grid-main'])
     registerWorkspaceEdgeGroups(api, 1600)
@@ -213,7 +213,8 @@ describe('WorkspaceView shell primitives', () => {
     setActiveGroup(groups.find((group) => group.id === 'workspace-left-tools'))
 
     expect(resolveWorkspaceContentGroup(api, 'editor', 'workspace-left-tools', 'grid-b')?.id).toBe('grid-b')
-    expect(resolveWorkspaceContentGroup(api, 'sourceControl', 'grid-a', 'grid-b')?.id).toBe('workspace-left-tools')
+    expect(resolveWorkspaceContentGroup(api, 'workspaceFiles', 'grid-a', 'grid-b')?.id).toBe('workspace-right-tools')
+    expect(resolveWorkspaceContentGroup(api, 'sourceControl', 'grid-a', 'grid-b')?.id).toBe('workspace-right-tools')
     expect(resolveWorkspaceContentGroup(api, 'workspaces', 'grid-a', 'grid-b')?.id).toBe('workspace-left-tools')
   })
 

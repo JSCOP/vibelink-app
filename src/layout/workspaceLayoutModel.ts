@@ -30,6 +30,7 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   preview: { kind: 'preview', component: 'preview', title: 'Preview', icon: 'file-search' },
   workspaces: { kind: 'workspaces', component: 'workspaces', title: 'Workspaces', icon: 'folder' },
   explorer: { kind: 'explorer', component: 'explorer', title: 'Explorer', icon: 'folder-tree' },
+  workspaceFiles: { kind: 'workspaceFiles', component: 'workspaceFiles', title: 'Workspace Files', icon: 'file-search' },
   sourceControl: { kind: 'sourceControl', component: 'sourceControl', title: 'Source Control', icon: 'git-compare-arrows' },
   gitHistory: { kind: 'gitHistory', component: 'gitHistory', title: 'Git History', icon: 'history' },
   gitBranches: { kind: 'gitBranches', component: 'gitBranches', title: 'Branches', icon: 'git-branch' },
@@ -47,8 +48,8 @@ export const workspaceRightEdgeGroupId = 'workspace-right-tools'
 export const workspaceEdgeCollapsedSize = 38
 export const workspaceMinimumCenterWidth = 640
 
-export const workspaceLeftStructuralKinds = ['workspaces', 'explorer', 'sourceControl', 'gitHistory', 'gitBranches'] as const
-export const workspaceRightStructuralKinds = ['agentSessions'] as const
+export const workspaceLeftStructuralKinds = ['workspaces', 'explorer'] as const
+export const workspaceRightStructuralKinds = ['workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'agentSessions'] as const
 
 export const workspaceEdgeGroupOptions = {
   left: { id: workspaceLeftEdgeGroupId, initialSize: 300, minimumSize: 240, maximumSize: 440, collapsedSize: workspaceEdgeCollapsedSize },
@@ -231,8 +232,8 @@ function createWorkspaceDockview(terminalParams: Array<Extract<WorkspaceContentP
   }]
 
   const collapsed = workspaceDefaultEdgeCollapse(rootWidth)
-  const explorerId = workspaceContentPanelId(leftParams[0])
-  const agentSessionsId = workspaceContentPanelId(rightParams[0])
+  const workspacesId = workspaceContentPanelId(leftParams[0])
+  const workspaceFilesId = workspaceContentPanelId(rightParams[0])
   return {
     panels,
     grid: {
@@ -250,7 +251,7 @@ function createWorkspaceDockview(terminalParams: Array<Extract<WorkspaceContentP
         group: {
           id: workspaceLeftEdgeGroupId,
           views: leftParams.map(workspaceContentPanelId),
-          activeView: explorerId,
+          activeView: workspacesId,
         },
       },
       right: {
@@ -260,7 +261,7 @@ function createWorkspaceDockview(terminalParams: Array<Extract<WorkspaceContentP
         group: {
           id: workspaceRightEdgeGroupId,
           views: rightParams.map(workspaceContentPanelId),
-          activeView: agentSessionsId,
+          activeView: workspaceFilesId,
         },
       },
     },

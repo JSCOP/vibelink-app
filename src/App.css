@@ -5798,6 +5798,24 @@ button.git-window-primary-action,
   background: var(--vibelink-hover);
 }
 
+.workspaces-group-row.active {
+  background: var(--vibelink-accent-muted);
+  box-shadow: inset 2px 0 0 var(--vibelink-accent);
+}
+
+.workspaces-group-row.has-active-worktree:not(.active) {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--vibelink-accent) 65%, transparent);
+}
+
+.workspaces-group-row.has-completions {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 7%, transparent);
+  box-shadow: inset 2px 0 0 var(--vibelink-alarm-highlight), 0 0 14px color-mix(in srgb, var(--vibelink-alarm-highlight) 10%, transparent);
+}
+
+.workspaces-group-row.has-completions .session-name {
+  color: var(--vibelink-alarm-highlight);
+}
+
 .workspaces-group-row > svg,
 .workspaces-group-chevron {
   color: var(--vibelink-muted);

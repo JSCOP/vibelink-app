@@ -12,6 +12,7 @@ export type WorkspaceContentKind =
   | 'preview'
   | 'workspaces'
   | 'explorer'
+  | 'workspaceFiles'
   | 'sourceControl'
   | 'gitHistory'
   | 'gitBranches'
@@ -29,7 +30,7 @@ export type WorkspaceContentParams =
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
   | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
-  | { schema: 1; kind: 'workspaces' | 'explorer' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
+  | { schema: 1; kind: 'workspaces' | 'explorer' | 'workspaceFiles' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
 
 export type WorkspaceLayoutEnvelope = {
   version: 3
@@ -46,6 +47,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
   preview: 'singleton',
   workspaces: 'singleton',
   explorer: 'singleton',
+  workspaceFiles: 'singleton',
   sourceControl: 'singleton',
   gitHistory: 'singleton',
   gitBranches: 'singleton',
@@ -61,6 +63,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
 const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
   workspaces: true,
   explorer: true,
+  workspaceFiles: true,
   sourceControl: true,
   gitHistory: true,
   gitBranches: true,
@@ -80,6 +83,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
   preview: true,
   workspaces: true,
   explorer: true,
+  workspaceFiles: true,
   sourceControl: true,
   gitHistory: true,
   gitBranches: true,
@@ -95,14 +99,16 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
 const leftStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {
   workspaces: true,
   explorer: true,
-  sourceControl: true,
-  gitHistory: true,
-  gitBranches: true,
 }
 
 const rightStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {
+  workspaceFiles: true,
+  sourceControl: true,
+  gitHistory: true,
+  gitBranches: true,
   agentSessions: true,
 }
+
 
 export function isLeftStructuralWorkspaceContentKind(kind: WorkspaceContentKind): boolean {
   return Boolean(leftStructuralKinds[kind])

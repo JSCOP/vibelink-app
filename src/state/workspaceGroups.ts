@@ -15,6 +15,17 @@ export type WorkspaceRow =
   | { kind: 'group'; group: WorkspaceGroup; sessions: WorkspaceSessionNode[] }
   | { kind: 'session'; node: WorkspaceSessionNode }
 
+
+function workspaceFolderKey(folder: string | null | undefined): string | null {
+  const normalized = folder?.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return normalized || null
+}
+
+export function workspaceGroupRootNode(group: WorkspaceGroup, nodes: readonly WorkspaceSessionNode[]): WorkspaceSessionNode | null {
+  const rootFolder = workspaceFolderKey(group.rootFolder)
+  if (!rootFolder) return null
+  return nodes.find((node) => workspaceFolderKey(node.session.workspaceFolder) === rootFolder) ?? null
+}
 export function workspaceRows(
   sessions: SessionMeta[],
   groups: WorkspaceGroup[],
@@ -38,12 +49,20 @@ export function workspaceRows(
     attachedWorktreeIds.add(session.id)
   }
 
+  const groupIdByRootFolder = new Map<string, string>()
+  for (const group of groups) {
+    const rootFolder = workspaceFolderKey(group.rootFolder)
+    if (rootFolder && !groupIdByRootFolder.has(rootFolder)) groupIdByRootFolder.set(rootFolder, group.id)
+  }
+
   const membersByGroup = new Map(groups.map((group) => [group.id, [] as WorkspaceSessionNode[]]))
   const ungrouped: WorkspaceSessionNode[] = []
   for (const session of ordered) {
     if (attachedWorktreeIds.has(session.id)) continue
     const node = { session, worktrees: worktreesByParent.get(session.id) ?? [] }
-    const members = membersByGroup.get(groupIds[session.id])
+    const rootGroupId = workspaceFolderKey(session.workspaceFolder)
+    const members = membersByGroup.get((rootGroupId && groupIdByRootFolder.get(rootGroupId)) || groupIds[session.id])
+
     if (members) members.push(node)
     else ungrouped.push(node)
   }
