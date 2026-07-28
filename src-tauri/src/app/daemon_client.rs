@@ -365,11 +365,20 @@ impl DaemonClient {
         match rx.recv_timeout(timeout) {
             Ok(msg) => Ok(msg),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                remove_pending_request(&self.shared, req);
-                Err(anyhow!(
+                let message = format!(
                     "daemon request {req} timed out after {}ms",
                     timeout.as_millis()
-                ))
+                );
+                remove_pending_request(&self.shared, req);
+                // A live pipe can still have a stalled reader. Retrying on that
+                // connection only queues another ten-second timeout, so fail
+                // every correlated waiter and replace the client connection.
+                fail_pending(
+                    &self.shared,
+                    format!("daemon connection stalled: {message}"),
+                );
+                start_background_reconnect(&self.shared, message.clone());
+                Err(anyhow!(message))
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 remove_pending_request(&self.shared, req);
@@ -1095,9 +1104,10 @@ mod tests {
     }
 
     #[test]
-    fn request_timeout_removes_only_own_pending_request() {
+    fn request_timeout_fails_other_pending_requests_before_reconnect() {
         let (client, _peer) = test_client();
-        let (other_tx, _other_rx) = bounded(1);
+        client.shared.shutting_down.store(true, Ordering::Release);
+        let (other_tx, other_rx) = bounded(1);
         client
             .shared
             .pending
@@ -1114,9 +1124,19 @@ mod tests {
             .expect_err("request should time out");
 
         assert!(error.to_string().contains("timed out"));
-        let pending = client.shared.pending.lock().expect("pending mutex");
-        assert!(!pending.contains_key(&42));
-        assert!(pending.contains_key(&99));
+        assert!(client
+            .shared
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .is_empty());
+        let other_error = other_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("other pending request should fail with the stalled connection");
+        assert!(matches!(
+            other_error,
+            DaemonToClient::Error { req: Some(99), .. }
+        ));
         assert!(!client.shared.reconnecting.load(Ordering::Acquire));
     }
 
