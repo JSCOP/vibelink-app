@@ -1,20 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod agent_runtime;
-mod app;
-mod browser;
-mod computer_use;
-mod control_plane;
-mod daemon;
-mod dedicated_cli;
-mod orchestration;
-mod persistence;
-mod protocol;
-mod remote;
-mod runtime_ports;
-mod storage;
-mod worktree_storage;
+use app_lib::{app, daemon, dedicated_cli};
 
 fn main() {
     let first = std::env::args().nth(1);

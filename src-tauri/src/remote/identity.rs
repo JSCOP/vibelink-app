@@ -131,6 +131,7 @@ impl RemoteIdentity {
     }
 }
 
+#[cfg(test)]
 pub fn verify_certificate_fingerprint(cert_der: &[u8], expected: &str) -> Result<()> {
     let actual = STANDARD.encode(Sha256::digest(cert_der));
     if expected.len() != actual.len()

@@ -1,13 +1,19 @@
-use super::exec::{git_read, git_read_allow_fail, git_read_output, git_write, stderr_or_status};
-use super::paths::validate_base_ref;
+use super::exec::{git_read, git_read_output, stderr_or_status};
 #[cfg(test)]
-pub use crate::worktree_storage::DEFAULT_WORKTREE_FOLDER;
-use crate::worktree_storage::{drive_root, requested_root};
+use super::{
+    exec::{git_read_allow_fail, git_write},
+    paths::validate_base_ref,
+};
+#[cfg(test)]
+use crate::worktree_storage::drive_root;
+use crate::worktree_storage::requested_root;
 pub use crate::worktree_storage::{WorktreeStorage, WorktreeStorageMode};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf, Prefix};
+#[cfg(test)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Folder created inside the app data root when worktrees are stored there.
@@ -29,6 +35,7 @@ pub struct WorktreeStorageResolution {
     pub fallback_reason: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeInfo {
@@ -36,6 +43,7 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeEntry {
@@ -138,7 +146,6 @@ pub fn paths_equal(left: &str, right: &str) -> bool {
 }
 
 pub fn scan_native_worktrees(repository_path: &str) -> Result<Vec<NativeWorktree>> {
-    let repository = resolve_repository_identity(repository_path)?;
     let output = git_read_output(repository_path, ["worktree", "list", "--porcelain", "-z"])?;
     let rows = if output.status.success() {
         parse_worktree_list_nul(&output.stdout)
@@ -154,7 +161,7 @@ pub fn scan_native_worktrees(repository_path: &str) -> Result<Vec<NativeWorktree
         .enumerate()
         .map(|(index, mut row)| {
             row.is_main = index == 0;
-            native_worktree_from_row(&repository, row)
+            native_worktree_from_row(row)
         })
         .collect()
 }
@@ -165,10 +172,7 @@ fn worktree_porcelain_z_is_unsupported(stderr: &[u8]) -> bool {
         && (stderr.contains("-z") || stderr.contains("`z'") || stderr.contains("'z'"))
 }
 
-fn native_worktree_from_row(
-    repository: &RepositoryIdentity,
-    row: NativeWorktreeRow,
-) -> Result<NativeWorktree> {
+fn native_worktree_from_row(row: NativeWorktreeRow) -> Result<NativeWorktree> {
     let path = PathBuf::from(&row.worktree_path);
     let exists = std::fs::symlink_metadata(&path)
         .map(|metadata| metadata.is_dir())
@@ -420,6 +424,7 @@ pub fn resolve_root(
     })
 }
 
+#[cfg(test)]
 pub fn create_named(
     repo: &str,
     name: &str,
@@ -431,6 +436,7 @@ pub fn create_named(
     create_named_at(repo, name, start_ref, branch, &root)
 }
 
+#[cfg(test)]
 pub(crate) fn create_named_at(
     repo: &str,
     name: &str,
@@ -469,26 +475,7 @@ pub(crate) fn create_named_at(
     })
 }
 
-pub fn create_for_task(repo: &str, task_id: &str) -> Result<WorktreeInfo> {
-    let short = short_task_id(task_id);
-    let branch = format!("vibelink/task-{short}");
-    let worktree_path = app_data_worktree_root()?.join("tasks").join(&short);
-    std::fs::create_dir_all(
-        worktree_path
-            .parent()
-            .ok_or_else(|| anyhow!("task worktree path has no parent"))?,
-    )?;
-    let path_string = worktree_path.to_string_lossy().to_string();
-    git_write(
-        repo,
-        ["worktree", "add", "-b", &branch, &path_string, "HEAD"],
-    )?;
-    Ok(WorktreeInfo {
-        worktree_path: path_string,
-        branch,
-    })
-}
-
+#[cfg(test)]
 pub fn list(repo: &str) -> Result<Vec<WorktreeEntry>> {
     Ok(scan_native_worktrees(repo)?
         .into_iter()
@@ -505,6 +492,7 @@ pub fn list(repo: &str) -> Result<Vec<WorktreeEntry>> {
         .collect())
 }
 
+#[cfg(test)]
 pub fn remove(
     repo: &str,
     worktree_path: &str,
@@ -531,6 +519,7 @@ pub fn remove(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn move_to(repo: &str, worktree_path: &str, destination: &str) -> Result<WorktreeInfo> {
     let destination_path = validate_destination(destination)?;
     if let Some(parent) = destination_path.parent() {
@@ -690,6 +679,7 @@ fn storage_smoke_over_a_real_repository() {
     );
 }
 
+#[cfg(test)]
 fn validate_destination(destination: &str) -> Result<PathBuf> {
     let trimmed = destination.trim();
     if trimmed.is_empty() {
@@ -708,11 +698,13 @@ fn validate_destination(destination: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(test)]
 fn is_missing_worktree_error(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("is not a working tree") || message.contains("no such file or directory")
 }
 
+#[cfg(test)]
 pub(crate) fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
     let mut entries: Vec<WorktreeEntry> = Vec::new();
     for line in output.lines() {
@@ -744,19 +736,6 @@ pub(crate) fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
         }
     }
     entries
-}
-
-fn short_task_id(task_id: &str) -> String {
-    let short: String = task_id
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-        .take(12)
-        .collect();
-    if short.is_empty() {
-        "task".to_string()
-    } else {
-        short
-    }
 }
 
 #[cfg(test)]

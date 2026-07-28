@@ -324,49 +324,6 @@ impl AutomationStore {
         Self::get_run(transaction, &record.id)
     }
 
-    pub fn save_run(
-        transaction: &Transaction<'_>,
-        record: &AutomationRunRecord,
-    ) -> Result<AutomationRunRecord> {
-        let runtime_identity = optional_json(
-            record.runtime_identity.as_ref(),
-            "automation runtime identity",
-        )?;
-        let worktree = optional_json(record.worktree.as_ref(), "automation run worktree")?;
-        let precheck_result = optional_json(
-            record.precheck_result.as_ref(),
-            "automation precheck result",
-        )?;
-        let output_snapshot = optional_json(
-            record.output_snapshot.as_ref(),
-            "automation output snapshot",
-        )?;
-        let usage = optional_json(record.usage.as_ref(), "automation usage")?;
-        let started_at = optional_u64_to_i64(record.started_at, "automation run start time")?;
-        let finished_at = optional_u64_to_i64(record.finished_at, "automation run finish time")?;
-
-        let changed = transaction
-            .execute(
-                "UPDATE automation_runs SET status=?2,runtime_identity_json=?3,worktree_json=?4,precheck_result_json=?5,output_snapshot_json=?6,usage_json=?7,error=?8,started_at=?9,finished_at=?10 WHERE id=?1",
-                params![
-                    record.id,
-                    record.status,
-                    runtime_identity,
-                    worktree,
-                    precheck_result,
-                    output_snapshot,
-                    usage,
-                    record.error,
-                    started_at,
-                    finished_at,
-                ],
-            )
-            .with_context(|| format!("save automation run {}", record.id))?;
-        if changed == 0 {
-            bail!("automation run not found: {}", record.id);
-        }
-        Self::get_run(transaction, &record.id)
-    }
     pub fn save_run_if_status(
         transaction: &Transaction<'_>,
         record: &AutomationRunRecord,
@@ -527,33 +484,6 @@ impl AutomationStore {
             .with_context(|| format!("claim due automation occurrence: {}", source.id))?;
         Self::prune_final_runs(transaction, &source.id)?;
         Ok(inserted)
-    }
-
-    pub fn claim_scheduled(
-        transaction: &Transaction<'_>,
-        automation_id: &str,
-        scheduled_for: u64,
-        created_at: u64,
-    ) -> Result<AutomationRunRecord> {
-        let record = AutomationRunRecord {
-            id: Uuid::new_v4().to_string(),
-            automation_id: automation_id.to_string(),
-            run_number: Self::next_run_number(transaction, automation_id)?,
-            trigger: "scheduled".to_string(),
-            scheduled_for,
-            status: "pending".to_string(),
-            runtime_identity: None,
-            worktree: None,
-            precheck_result: None,
-            output_snapshot: None,
-            usage: None,
-            error: None,
-            started_at: None,
-            finished_at: None,
-            created_at,
-        };
-        Self::insert_run(transaction, &record)
-            .with_context(|| format!("claim scheduled automation occurrence: {automation_id}"))
     }
 
     pub fn prune_final_runs(transaction: &Transaction<'_>, automation_id: &str) -> Result<usize> {

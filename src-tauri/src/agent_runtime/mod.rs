@@ -260,6 +260,7 @@ mod tests {
         git(&repository, &["init"]);
         git(&repository, &["config", "user.email", "test@example.com"]);
         git(&repository, &["config", "user.name", "VibeLink Test"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
         fs::write(selected_workspace.join("file.txt"), "base\n").expect("write file");
         git(&repository, &["add", "subproject/file.txt"]);
         git(&repository, &["commit", "-m", "base"]);

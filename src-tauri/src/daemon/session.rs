@@ -1,4 +1,3 @@
-use super::scrollback::ScrollbackRing;
 use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
 use crate::orchestration::PaneProjectionState;
@@ -18,7 +17,7 @@ use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -76,12 +75,6 @@ pub struct DaemonState {
     next_pane_lease_revision: u64,
     desktop_selection: DesktopSelection,
     spawn_cancellations: HashMap<(Uuid, Uuid), Instant>,
-}
-
-fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, ScrollbackRing> {
-    scrollback
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl DaemonState {

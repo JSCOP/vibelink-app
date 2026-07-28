@@ -1,5 +1,4 @@
-#[path = "../src/computer_use/mod.rs"]
-mod computer_use;
+use app_lib::computer_use;
 
 use computer_use::{
     frame::{

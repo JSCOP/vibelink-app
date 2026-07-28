@@ -93,12 +93,7 @@ fn parse_config(bytes: &[u8]) -> std::result::Result<LoadedConfig, DocumentError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use uuid::Uuid;
-
-    fn directory(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("vibelink-remote-config-{label}-{}", Uuid::new_v4()))
-    }
 
     #[test]
     fn config_defaults_and_round_trips() {

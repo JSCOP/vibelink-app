@@ -98,6 +98,7 @@ fn handle_line_with_authorizer(
     )
 }
 
+#[cfg(test)]
 fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
     handle_line_with_authorizer(client, session_id, line, None)
 }
@@ -161,6 +162,7 @@ fn handle_message_with_authorizer(
     }
 }
 
+#[cfg(test)]
 fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
     handle_message_with_authorizer(client, session_id, request, None)
 }

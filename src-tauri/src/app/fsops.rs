@@ -413,10 +413,12 @@ fn read_revision_bytes_from_file(
     Ok((bytes, revision))
 }
 
+#[cfg(not(windows))]
 fn text_document_revision_for_path(path: &Path) -> Result<TextDocumentRevision> {
     read_revision_bytes(path).map(|(_, revision)| revision)
 }
 
+#[cfg(not(windows))]
 fn revision_if_file(path: &Path) -> Result<Option<TextDocumentRevision>> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -520,6 +522,7 @@ fn encode_text_document(
     Ok(bytes)
 }
 
+#[cfg(not(windows))]
 fn write_flushed_sibling_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     let parent = path
         .parent()
@@ -796,16 +799,6 @@ impl WindowsConditionalSave {
         if temporary_bytes != intended_bytes {
             bail!("editor sibling temporary file changed before replacement");
         }
-
-        let parent_handle = &self
-            .directories
-            .last()
-            .expect("a target parent always has an ancestor chain")
-            .file;
-        let target_name = self
-            .target
-            .file_name()
-            .with_context(|| format!("{} has no file name", self.target.display()))?;
 
         match (
             self.expected_revision.as_ref(),
@@ -1269,6 +1262,7 @@ fn windows_error_is_conflict(error: &anyhow::Error) -> bool {
     })
 }
 
+#[cfg(not(windows))]
 fn install_new_without_replace(temporary: &Path, target: &Path) -> Result<()> {
     std::fs::hard_link(temporary, target).with_context(|| {
         format!(

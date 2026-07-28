@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -552,56 +554,6 @@ impl WorktreeRegistry {
             WorktreeReconcileState::Managed,
             Some(native),
         ))
-    }
-
-    pub(crate) fn register_existing(
-        &self,
-        repository_path: &str,
-        worktree_path: &str,
-        parent_session_id: Option<String>,
-        origin: WorktreeOrigin,
-        base_ref: &str,
-    ) -> Result<WorktreeRecord> {
-        let repository = resolve_repository_identity(repository_path)?;
-        let normalized = normalize_path_for_comparison(worktree_path);
-        let native_rows = scan_native_worktrees(repository_path)?;
-        let native = native_rows
-            .iter()
-            .find(|entry| entry.normalized_path == normalized)
-            .cloned()
-            .ok_or_else(|| anyhow!("worktree is not registered with Git: {worktree_path}"))?;
-        if native.git_dir_identity.is_empty() {
-            bail!("worktree identity is unavailable");
-        }
-        let parent = self.validated_parent_for_session(
-            &repository,
-            &native_rows,
-            &normalized,
-            parent_session_id.as_deref(),
-        )?;
-        if let Some(record) = self.read_record_by_path(&repository.repository_id, &normalized)? {
-            let projection = self.reconcile_matched_record(&repository, record, native)?;
-            if projection.state != WorktreeReconcileState::Managed {
-                bail!("existing worktree registration does not match the native checkout");
-            }
-            return projection
-                .record
-                .ok_or_else(|| anyhow!("managed worktree record is missing"));
-        }
-        self.insert_native_record(
-            &repository,
-            &native,
-            None,
-            parent_session_id,
-            parent.as_ref(),
-            origin,
-            "inherit",
-            None,
-            Vec::new(),
-            None,
-            None,
-            base_ref,
-        )
     }
 
     pub fn removal_preflight(

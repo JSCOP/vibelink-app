@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    net::{IpAddr, Shutdown, TcpListener, TcpStream},
+    net::{IpAddr, TcpListener},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -876,8 +876,7 @@ pub(crate) fn local_hosts() -> Vec<String> {
 mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
-    use crossbeam_channel::bounded;
-    use std::{io::Read, net::TcpStream, sync::atomic::AtomicBool};
+    use std::net::TcpStream;
 
     fn snapshot(entitled: bool, lease_until: chrono::DateTime<Utc>) -> AuthorizationSnapshot {
         AuthorizationSnapshot {

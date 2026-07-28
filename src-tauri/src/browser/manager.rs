@@ -373,23 +373,6 @@ impl<P: BrowserProvider> BrowserManager<P> {
         )
     }
 
-    fn create_page_locked(
-        &self,
-        page_id: impl Into<String>,
-        workspace_id: impl Into<String>,
-        profile_id: &str,
-        bounds: PhysicalBounds,
-    ) -> BrowserResult<BrowserPage> {
-        self.create_page_locked_with_url(
-            page_id,
-            workspace_id,
-            profile_id,
-            bounds,
-            DEFAULT_URL,
-            "New Tab",
-        )
-    }
-
     fn create_page_locked_with_url(
         &self,
         page_id: impl Into<String>,

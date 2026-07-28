@@ -24,7 +24,7 @@ use std::{
     collections::BTreeMap,
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,

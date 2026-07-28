@@ -1,37 +1,7 @@
-#![allow(dead_code, unused_imports)]
-
-#[path = "../src/agent_runtime/mod.rs"]
-mod agent_runtime;
-#[path = "../src/app/mod.rs"]
-mod app;
-#[path = "../src/browser/mod.rs"]
-mod browser;
-#[path = "../src/computer_use/mod.rs"]
-mod computer_use;
-#[path = "../src/control_plane.rs"]
-mod control_plane;
-#[path = "../src/daemon/mod.rs"]
-mod daemon;
-#[path = "../src/dedicated_cli/mod.rs"]
-mod dedicated_cli;
-#[path = "../src/mcp/mod.rs"]
-mod mcp;
-#[path = "../src/orchestration/mod.rs"]
-mod orchestration;
-#[path = "../src/persistence.rs"]
-mod persistence;
-#[path = "../src/protocol.rs"]
-mod protocol;
-#[path = "../src/remote/mod.rs"]
-mod remote;
-#[path = "../src/runtime_ports.rs"]
-mod runtime_ports;
-#[path = "../src/storage.rs"]
-mod storage;
-#[path = "../src/worktree_storage.rs"]
-mod worktree_storage;
-
-use dedicated_cli::{run_with_io, CliError, SocketExecutor};
+use app_lib::{
+    dedicated_cli::{run_with_io, CliError, SocketExecutor},
+    mcp,
+};
 
 fn main() {
     let mut executor = SocketExecutor;

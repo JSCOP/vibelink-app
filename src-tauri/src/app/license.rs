@@ -20,7 +20,6 @@ const LEGACY_CREDENTIAL_ACCOUNT: &str = "active-license";
 const ACCOUNT_CLIENT_ID: &str = "vibelink-desktop";
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const ACCOUNT_PROVIDER: &str = "moobang";
-const PRO_REQUIRED_ERROR: &str = "VibeLink Pro license required.";
 const TRIAL_LOCK_ERROR: &str =
     "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.";
 const DEVICE_IDENTITY_SCHEMA_VERSION: u64 = 1;
@@ -745,14 +744,14 @@ impl HeadlessLicenseCache {
         )
     }
 
-    pub fn require_capability(&self, capability: super::authorization::Capability) -> Result<()> {
+    pub fn require_capability(&self, capability: Capability) -> Result<()> {
         self.authorization_snapshot(0)
             .authorize(capability, Utc::now())
             .map_err(|denied| anyhow!(denied.code.as_str()))
     }
 
     pub fn require_entitled(&self) -> Result<()> {
-        self.require_capability(super::authorization::Capability::CliControl)
+        self.require_capability(Capability::CliControl)
             .map_err(|_| anyhow!(TRIAL_LOCK_ERROR))
     }
 

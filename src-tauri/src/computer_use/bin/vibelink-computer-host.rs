@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[path = "../mod.rs"]
-mod computer_use;
+use app_lib::computer_use;
 
 #[cfg(windows)]
 fn main() {

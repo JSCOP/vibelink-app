@@ -235,6 +235,7 @@ pub fn enabled_skill_context_for_capabilities<'a>(
     enabled_skill_context_with_capabilities_at(&data_dir, session_id, granted_capabilities)
 }
 
+#[cfg(test)]
 fn enabled_skill_context_at(data_dir: &Path, session_id: Option<&str>) -> Result<Option<String>> {
     enabled_skill_context_with_capabilities_at(data_dir, session_id, std::iter::empty::<&str>())
 }

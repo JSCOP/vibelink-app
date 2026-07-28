@@ -67,11 +67,6 @@ pub struct WorktreeCommandOutput {
     pub elapsed_millis: u64,
 }
 
-impl WorktreeCommandOutput {
-    pub(crate) fn success(&self) -> bool {
-        self.exit_code == Some(0)
-    }
-}
 impl std::fmt::Display for WorktreeCommandOutput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -165,6 +160,7 @@ impl WorktreeCancellation {
         Self { cancelled }
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
@@ -193,13 +189,6 @@ impl Default for NativeWorktreeCommandRunner {
         Self {
             clock: Arc::new(MonotonicWorktreeClock::default()),
         }
-    }
-}
-
-impl NativeWorktreeCommandRunner {
-    #[cfg(test)]
-    pub(crate) fn with_clock(clock: Arc<dyn WorktreeClock>) -> Self {
-        Self { clock }
     }
 }
 

@@ -510,11 +510,6 @@ mod tests {
             .join("devices.json")
     }
 
-    fn pair(store: &mut DeviceStore, name: &str) -> (DeviceRecord, String) {
-        let pairing = store.create_pairing_code();
-        store.consume_pairing(&pairing.code, name).unwrap()
-    }
-
     #[test]
     fn pairing_consumes_once_and_tokens_verify() {
         let path = path("pairing");

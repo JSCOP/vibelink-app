@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) fn validate_base_ref(base_ref: &str) -> Result<()> {
@@ -61,10 +61,4 @@ pub(crate) fn validate_repo_relative_path(path: &str) -> Result<&Path> {
         bail!("git file path must stay within the workspace");
     }
     Ok(relative)
-}
-
-pub(crate) fn parent_dir(path: &Path) -> Result<PathBuf> {
-    path.parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))
 }

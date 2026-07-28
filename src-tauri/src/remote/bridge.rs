@@ -499,9 +499,6 @@ pub fn handle_connection(
     shared
         .authorize(Capability::RemoteConnect)
         .map_err(|denied| anyhow!(denied.code.as_str()))?;
-    let disconnect_socket = stream
-        .try_clone()
-        .context("clone remote socket for live revocation")?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
@@ -3880,20 +3877,6 @@ fn authorize_client_message(
         shared.authorize(capability)?;
     }
     Ok(())
-}
-
-fn message_req_id(message: &ClientMessage) -> Option<u64> {
-    match message {
-        ClientMessage::ListWorkspaces { req_id }
-        | ClientMessage::AttachWorkspace { req_id, .. }
-        | ClientMessage::DetachWorkspace { req_id, .. }
-        | ClientMessage::WritePane { req_id, .. }
-        | ClientMessage::RefreshPane { req_id, .. }
-        | ClientMessage::ClaimPane { req_id, .. }
-        | ClientMessage::ReleasePane { req_id, .. }
-        | ClientMessage::Ping { req_id } => *req_id,
-        ClientMessage::Hello { .. } | ClientMessage::Unknown => None,
-    }
 }
 
 fn handle_daemon_control(

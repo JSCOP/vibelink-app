@@ -94,15 +94,6 @@ pub enum OrchestrationTaskStatus {
     Cancelled,
 }
 
-impl OrchestrationTaskStatus {
-    fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Blocked | Self::Cancelled
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchStatus {

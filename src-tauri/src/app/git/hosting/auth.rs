@@ -360,6 +360,7 @@ fn parse_stored_token_record(json: &str) -> Result<StoredToken> {
     Ok(stored)
 }
 
+#[cfg(test)]
 fn parse_stored_token(json: &str) -> Result<String> {
     Ok(parse_stored_token_record(json)?.token)
 }

@@ -294,7 +294,10 @@ where
     };
     Ok(match parse(&bytes) {
         Ok(value) => Parsed::Valid(value),
-        Err(DocumentError::Invalid(_)) => Parsed::Invalid,
+        Err(DocumentError::Invalid(error)) => {
+            tracing::warn!(path = %path.display(), ?error, "invalid storage document");
+            Parsed::Invalid
+        }
         Err(DocumentError::UnsupportedSchema { found, supported }) => {
             Parsed::Unsupported { found, supported }
         }

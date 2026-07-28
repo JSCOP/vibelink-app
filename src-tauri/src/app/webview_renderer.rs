@@ -60,14 +60,6 @@ pub(crate) fn configure_main_webview() {
     }
 }
 
-pub(crate) fn append_resolved_renderer_argument(arguments: &str) -> String {
-    if std::env::var(RESOLVED_RENDERER_ENV).as_deref() == Ok("software") {
-        append_unique_argument(arguments, SOFTWARE_RENDERING_FLAG)
-    } else {
-        arguments.trim().to_string()
-    }
-}
-
 impl RendererPreference {
     fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {

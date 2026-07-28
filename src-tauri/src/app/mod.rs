@@ -378,6 +378,7 @@ pub fn run() {
             git::stage::git_stash_pop,
             git::stage::git_stash_save,
             git::branch::git_tag_create,
+            git::branch::git_tag_delete,
             git::branch::git_tag_list,
             git::stage::git_unstage,
             git::stage::git_unstage_all,

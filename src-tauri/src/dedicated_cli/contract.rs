@@ -1844,7 +1844,6 @@ pub fn contract_for_command(command: &Command) -> Option<CommandContract> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::dedicated_cli::parse_args;
     use uuid::Uuid;
 

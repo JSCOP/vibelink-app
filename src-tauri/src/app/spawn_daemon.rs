@@ -147,7 +147,6 @@ fn authenticate_daemon_stream_with_client_id<S: Read + Write>(
 }
 
 const STARTUP_PING_REQ: Req = 0;
-const AUTHENTICATE_REQ: Req = u64::MAX;
 const STARTUP_PING_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);

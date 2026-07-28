@@ -1,4 +1,4 @@
-mod automation;
+pub mod automation;
 mod browser_cdp;
 pub mod paths;
 pub mod persistence;
@@ -2463,7 +2463,7 @@ fn launch_ready_dispatches(
             } else {
                 workspace.to_string_lossy().to_string()
             };
-            let mut resource = coordinator
+            let resource = coordinator
                 .reserve_dispatch_resources(
                     operation_id,
                     DispatchResourceReservation {
@@ -2492,10 +2492,10 @@ fn launch_ready_dispatches(
                 );
             }
             if let Some(assignment) = planned_worktree.as_ref() {
-                resource = coordinator
+                coordinator
                     .update_dispatch_worktree(&current.id, operation_id, assignment)
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                resource = coordinator
+                coordinator
                     .mark_dispatch_resource_disposition(
                         &current.id,
                         None,
@@ -2524,13 +2524,13 @@ fn launch_ready_dispatches(
                 )
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             agent_instance_id = Some(agent.id.clone());
-            resource = coordinator
+            coordinator
                 .record_dispatch_agent_resource(&current.id, operation_id, &agent.id)
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
             failure_code = "pane_spawn";
             let next_pane_id = derived_operation_id(operation_id, &current.id, "pane");
-            resource = coordinator
+            coordinator
                 .record_dispatch_pane_resource(
                     &current.id,
                     operation_id,
@@ -2626,7 +2626,7 @@ fn launch_ready_dispatches(
             let started_at = process_start_time(root_pid)
                 .context("orchestration pane root process exited before identity capture")?;
             let process_generation = 1;
-            resource = coordinator
+            coordinator
                 .record_dispatch_pane_resource(
                     &current.id,
                     operation_id,
@@ -6329,18 +6329,6 @@ fn send_output_to_clients(
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
     }
-}
-
-fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
 }
 
 fn send(tx: &Sender<DaemonToClient>, msg: DaemonToClient) -> Result<()> {
