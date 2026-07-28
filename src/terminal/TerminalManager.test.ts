@@ -35,8 +35,10 @@ vi.mock('@xterm/xterm', () => {
       this.resizeHandler = handler
       return { dispose() {} }
     }
-    onTitleChange(): { dispose(): void } {
-      return { dispose() {} }
+    titleHandler: ((title: string) => void) | undefined
+    onTitleChange(handler: (title: string) => void): { dispose(): void } {
+      this.titleHandler = handler
+      return { dispose: () => { this.titleHandler = undefined } }
     }
     open(container: HTMLElement): void {
       this.element = document.createElement('div')
@@ -99,6 +101,13 @@ function emitTerminalData(paneId: string, data: string): void {
   const entry = manager.entries.get(paneId)
   if (!entry?.term.dataHandler) throw new Error(`no data handler wired for pane ${paneId}`)
   entry.term.dataHandler(data)
+}
+
+function emitTerminalTitle(paneId: string, title: string): void {
+  const manager = TerminalManager as unknown as { entries: Map<string, { term: { titleHandler?: (title: string) => void } }> }
+  const entry = manager.entries.get(paneId)
+  if (!entry?.term.titleHandler) throw new Error(`no title handler wired for pane ${paneId}`)
+  entry.term.titleHandler(title)
 }
 
 function makeContainer(): HTMLElement {
@@ -456,5 +465,52 @@ describe('TerminalManager recent output capture', () => {
 
     expect(TerminalManager.getRecentOutput(paneId, 3)).toBe('two\nthree\nfour')
     manager.entries.delete(paneId)
+  })
+})
+
+describe('TerminalManager animated title coalescing', () => {
+  it('collapses an agent spinner storm into a single title update', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-spinner-title'
+    const container = makeContainer()
+    const titles: string[] = []
+    try {
+      TerminalManager.attach(paneId, container, { sessionId: 'session-title', onTitleChange: (title) => titles.push(title) })
+
+      // An animated agent title over ~8s of spinner frames. Before coalescing
+      // each frame became one blocking set_pane_title on the socket that also
+      // carries every keystroke.
+      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+      for (let i = 0; i < 100; i += 1) {
+        emitTerminalTitle(paneId, `π ${frames[i % frames.length]} Orca Logic Analysis`)
+        vi.advanceTimersByTime(80)
+      }
+
+      expect(titles).toEqual(['π ⠋ Orca Logic Analysis'])
+    } finally {
+      TerminalManager.dispose(paneId)
+      vi.useRealTimers()
+    }
+  })
+
+  it('still delivers a genuinely new title, settling on the final one', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-real-title'
+    const container = makeContainer()
+    const titles: string[] = []
+    try {
+      TerminalManager.attach(paneId, container, { sessionId: 'session-title', onTitleChange: (title) => titles.push(title) })
+
+      emitTerminalTitle(paneId, 'π ⠋ Build')
+      expect(titles).toEqual(['π ⠋ Build'])
+
+      emitTerminalTitle(paneId, 'π ⠙ Deploy')
+      vi.advanceTimersByTime(500)
+
+      expect(titles[titles.length - 1]).toBe('π ⠙ Deploy')
+    } finally {
+      TerminalManager.dispose(paneId)
+      vi.useRealTimers()
+    }
   })
 })

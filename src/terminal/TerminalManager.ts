@@ -16,6 +16,7 @@ import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clea
 import { agentActivityTracker, type AgentActivityActions } from './agentActivity'
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
+import { PaneTitleCoalescer } from './titleCoalescing'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 256 * 1024
@@ -128,6 +129,7 @@ class TerminalManagerImpl {
   private dividerResizePaneIds = new Set<string>()
   private windowResizeTimer: number | undefined
   private viewportViable = true
+  private titleCoalescer = new PaneTitleCoalescer()
 
   constructor() {
     if (typeof document !== 'undefined') {
@@ -419,8 +421,13 @@ class TerminalManagerImpl {
     if (entry.titleHandler !== options?.onTitleChange) {
       entry.titleDisposable?.dispose()
       entry.titleHandler = options?.onTitleChange
+      // Agent spinners rewrite the OSC title every animation frame. Route them
+      // through the coalescer so an animated title cannot generate blocking
+      // `set_pane_title` IPC per frame on the socket that also carries typing.
       entry.titleDisposable = options?.onTitleChange
-        ? entry.term.onTitleChange((title) => options.onTitleChange?.(title))
+        ? entry.term.onTitleChange((title) => {
+          this.titleCoalescer.submit(paneId, title, (coalesced) => entry.titleHandler?.(coalesced))
+        })
         : undefined
     }
 
@@ -873,6 +880,7 @@ class TerminalManagerImpl {
     clearTimeout(entry.clickRepairTimer)
     this.cancelScheduledOutputFlush(entry)
     entry.titleDisposable?.dispose()
+    this.titleCoalescer.clear(paneId)
     entry.linkDisposables?.forEach((d) => d.dispose())
     entry.webglContextLossDisposable?.dispose()
     entry.webgl?.dispose()
