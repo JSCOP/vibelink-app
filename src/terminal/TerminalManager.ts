@@ -28,6 +28,8 @@ const BACKGROUND_OUTPUT_COALESCE_MS = 50
 const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
+const MAX_REPLAY_BYTES_PER_FRAME = 64 * 1024
+const MAX_CACHED_BACKGROUND_TERMINALS = 16
 // A real terminal is never this small. If FitAddon proposes fewer than these,
 // the container is mid-layout (transiently ~1px during a dockview maximize/
 // restore) and fitting would reflow-corrupt the buffer — skip and retry.
@@ -147,6 +149,7 @@ type Entry = {
   replayAgain?: boolean
   replayedContainer?: HTMLElement
   visible?: boolean
+  lastUsedAt: number
   fitForcePending?: boolean
   measureState?: TerminalHostMeasureState
   forceFitOnNextMeasure?: boolean
@@ -420,7 +423,7 @@ class TerminalManagerImpl {
       return true
     })
 
-    const entry: Entry = { paneId, term, fit, search, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false }
+    const entry: Entry = { paneId, term, fit, search, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false, lastUsedAt: Date.now() }
     this.entries.set(paneId, entry)
     entry.linkDisposables = [
       term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
@@ -432,6 +435,7 @@ class TerminalManagerImpl {
 
   attach(paneId: string, container: HTMLElement, options: { sessionId?: string; onTitleChange?: (title: string) => void } = {}): void {
     const entry = this.getOrCreate(paneId)
+    entry.lastUsedAt = Date.now()
     const previousSessionId = entry.sessionId
     entry.sessionId = options.sessionId
     const sessionChanged = previousSessionId !== options.sessionId
@@ -548,16 +552,16 @@ class TerminalManagerImpl {
       .filter((entry): entry is Entry => entry !== undefined)
       .sort((left, right) => Number(this.isForegroundOutput(right)) - Number(this.isForegroundOutput(left)))
     for (const entry of entries) {
-      const currentReplayIsEnough = !force
-        && entry.sessionId === sessionId
-        && (entry.replayPending || (entry.paneGeneration !== undefined && entry.replayedContainer === entry.container))
+      const sameSession = entry.sessionId === sessionId
+      const replayAlreadyPending = !force && sameSession && entry.replayPending
       entry.sessionId = sessionId
-      if (!currentReplayIsEnough) {
+      entry.lastUsedAt = Date.now()
+      if (force || !sameSession) {
         entry.paneGeneration = undefined
         entry.outputSequence = undefined
         entry.replayRevision = (entry.replayRevision ?? 0) + 1
       }
-      this.beginDaemonAttach(entry, sessionId, !currentReplayIsEnough)
+      this.beginDaemonAttach(entry, sessionId, !replayAlreadyPending)
     }
   }
 
@@ -760,7 +764,9 @@ class TerminalManagerImpl {
 
       const paneGeneration = BigInt(snapshot.paneGeneration)
       const outputSequence = BigInt(snapshot.outputSequence)
-      const snapshotBytes = decodeBase64Bytes(snapshot.dataBase64)
+      const retainedSnapshotCurrent = entry.opened
+        && entry.paneGeneration === paneGeneration
+        && entry.outputSequence === outputSequence
       this.removeQueuedOutput(entry)
       entry.pendingOutput = undefined
       entry.pendingOutputBytes = 0
@@ -770,11 +776,13 @@ class TerminalManagerImpl {
       if (entry.term.cols !== snapshot.cols || entry.term.rows !== snapshot.rows) {
         entry.term.resize(snapshot.cols, snapshot.rows)
       }
-      entry.term.reset()
       entry.paneGeneration = paneGeneration
       entry.outputSequence = outputSequence
       entry.daemonAttached = true
-      await this.writeReplayBytes(entry, snapshotBytes)
+      if (!retainedSnapshotCurrent) {
+        entry.term.reset()
+        await this.writeReplayBytes(entry, decodeBase64Bytes(snapshot.dataBase64))
+      }
 
       for (;;) {
         const frames = entry.pendingSequencedOutput ?? []
@@ -822,15 +830,15 @@ class TerminalManagerImpl {
 
       entry.replayedContainer = entry.container
       entry.forceFitOnNextMeasure = true
-      entry.rendererResetPending = true
+      if (!retainedSnapshotCurrent) entry.rendererResetPending = true
       this.scheduleLayoutPass({
         paneIds: [entry.paneId],
         force: true,
         repaint: true,
         syncPty: true,
-        clearWebglTextureAtlas: true,
+        clearWebglTextureAtlas: !retainedSnapshotCurrent,
       })
-      this.nudgeAlternateBuffer(entry)
+      if (!retainedSnapshotCurrent) this.nudgeAlternateBuffer(entry)
       if (!snapshot.alive) this.markExited(entry.paneId)
     } catch {
       if (this.entries.get(entry.paneId) === entry && entry.sessionId === sessionId) {
@@ -839,14 +847,39 @@ class TerminalManagerImpl {
     }
   }
 
-  private writeReplayBytes(entry: Entry, bytes: Uint8Array): Promise<void> {
-    if (bytes.byteLength === 0) return Promise.resolve()
-    const output = terminalOutputAfterLastHardClear(bytes)
+  private async writeReplayBytes(entry: Entry, bytes: Uint8Array): Promise<void> {
+    if (bytes.byteLength === 0) return
+    const replayBytes = terminalOutputAfterLastHardClear(bytes).bytes
+    for (let offset = 0; offset < replayBytes.byteLength; offset += MAX_REPLAY_BYTES_PER_FRAME) {
+      if (this.entries.get(entry.paneId) !== entry) return
+      const chunk = replayBytes.subarray(offset, Math.min(offset + MAX_REPLAY_BYTES_PER_FRAME, replayBytes.byteLength))
+      const { promise, resolve } = Promise.withResolvers<void>()
+      entry.term.write(chunk, () => {
+        if (entry.rendererReloadPending) this.performRendererReload(entry)
+        resolve()
+      })
+      await promise
+      if (offset + chunk.byteLength < replayBytes.byteLength) await this.yieldReplayFrame()
+    }
+  }
+
+  private yieldReplayFrame(): Promise<void> {
     const { promise, resolve } = Promise.withResolvers<void>()
-    entry.term.write(output.bytes, () => {
-      if (entry.rendererReloadPending) this.performRendererReload(entry)
+    if (typeof window === 'undefined' || typeof requestAnimationFrame === 'undefined') {
+      setTimeout(resolve, 0)
+      return promise
+    }
+    let settled = false
+    let frame = 0
+    const finish = () => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      if (frame) cancelAnimationFrame(frame)
       resolve()
-    })
+    }
+    const timeout = window.setTimeout(finish, 32)
+    frame = requestAnimationFrame(finish)
     return promise
   }
 
@@ -1066,6 +1099,7 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.visible = visible
+    if (visible) entry.lastUsedAt = Date.now()
     if (!visible) return
     // A pane that was hidden may have missed output-driven draws entirely, so
     // becoming visible is one of the few genuine repaint triggers.
@@ -1315,10 +1349,15 @@ class TerminalManagerImpl {
     this.entries.delete(paneId)
   }
 
-  pruneStale(livePaneIds: Set<string>): void {
-    for (const paneId of [...this.entries.keys()]) {
-      if (!livePaneIds.has(paneId)) this.dispose(paneId)
+  pruneWorkspaceCache(activeSessionId: string, livePaneIds: Set<string>): void {
+    for (const [paneId, entry] of [...this.entries]) {
+      if (entry.sessionId === activeSessionId && !livePaneIds.has(paneId)) this.dispose(paneId)
     }
+    const background = [...this.entries.values()]
+      .filter((entry) => entry.sessionId !== activeSessionId && !entry.visible)
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt)
+    const overflow = background.length - MAX_CACHED_BACKGROUND_TERMINALS
+    for (let index = 0; index < overflow; index += 1) this.dispose(background[index].paneId)
   }
 
   private loadWebglRenderer(entry: Entry): void {

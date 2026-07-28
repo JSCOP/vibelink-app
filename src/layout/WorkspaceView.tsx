@@ -1417,7 +1417,7 @@ export function WorkspaceView({
       if (!ownsLayout(owner)) return
       await reconcileRestoredBrowserPanels(api, sessionId, suppressPanelRemovalRef, addContentPanel, () => ownsLayout(owner))
       if (!ownsLayout(owner)) return
-      TerminalManager.pruneStale(new Set(livePanes.map((pane) => pane.id)))
+      TerminalManager.pruneWorkspaceCache(sessionId, new Set(livePanes.map((pane) => pane.id)))
       await settleLayout({ syncPty: true }, owner)
       if (!ownsLayout(owner)) return
       const paneIds = livePanes.map((pane) => pane.id)

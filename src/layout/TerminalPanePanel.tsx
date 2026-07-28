@@ -26,6 +26,30 @@ type ContextMenuState = {
 const CONTEXT_MENU_WIDTH = 232
 const CONTEXT_MENU_HEIGHT = 416
 
+type DeferredTerminalMount = { cancelled: boolean; mount: () => void }
+
+const deferredTerminalMounts: DeferredTerminalMount[] = []
+let deferredTerminalMountFrame: number | undefined
+
+function flushDeferredTerminalMount(): void {
+  deferredTerminalMountFrame = undefined
+  let next = deferredTerminalMounts.shift()
+  while (next?.cancelled) next = deferredTerminalMounts.shift()
+  next?.mount()
+  if (deferredTerminalMounts.length > 0) deferredTerminalMountFrame = requestAnimationFrame(flushDeferredTerminalMount)
+}
+
+function scheduleTerminalMount(mount: () => void): () => void {
+  const task: DeferredTerminalMount = { cancelled: false, mount }
+  if (deferredTerminalMountFrame === undefined && deferredTerminalMounts.length === 0) {
+    mount()
+    deferredTerminalMountFrame = requestAnimationFrame(flushDeferredTerminalMount)
+  } else {
+    deferredTerminalMounts.push(task)
+  }
+  return () => { task.cancelled = true }
+}
+
 export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockviewPanelProps<TerminalPanelParams>) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const paneId = props.params?.paneId
@@ -191,26 +215,34 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   useLayoutEffect(() => {
     if (!paneId || !hostRef.current || !activeSessionId) return
     const host = hostRef.current
+    let mounted = false
+    let firstFrame: number | undefined
     let secondFrame: number | undefined
-    TerminalManager.attach(paneId, host, { sessionId: paneExists ? activeSessionId : undefined, onTitleChange })
-    const firstFrame = requestAnimationFrame(() => {
-      TerminalManager.reflow(paneId)
-      secondFrame = requestAnimationFrame(() => {
+    let timeout: number | undefined
+    const cancelMount = scheduleTerminalMount(() => {
+      mounted = true
+      TerminalManager.attach(paneId, host, { sessionId: paneExists ? activeSessionId : undefined, onTitleChange })
+      TerminalManager.setPaneVisible(paneId, panelApi.isVisible)
+      firstFrame = requestAnimationFrame(() => {
+        TerminalManager.reflow(paneId)
+        secondFrame = requestAnimationFrame(() => {
+          TerminalManager.reflow(paneId)
+          if (paneExists) TerminalManager.syncPtySize(paneId)
+        })
+      })
+      timeout = window.setTimeout(() => {
         TerminalManager.reflow(paneId)
         if (paneExists) TerminalManager.syncPtySize(paneId)
-      })
+      }, 250)
     })
-    const timeout = window.setTimeout(() => {
-      TerminalManager.reflow(paneId)
-      if (paneExists) TerminalManager.syncPtySize(paneId)
-    }, 250)
     return () => {
-      cancelAnimationFrame(firstFrame)
+      cancelMount()
+      if (firstFrame !== undefined) cancelAnimationFrame(firstFrame)
       if (secondFrame !== undefined) cancelAnimationFrame(secondFrame)
-      window.clearTimeout(timeout)
-      if (host.parentElement) TerminalManager.reflow(paneId)
+      if (timeout !== undefined) window.clearTimeout(timeout)
+      if (mounted && host.parentElement) TerminalManager.reflow(paneId)
     }
-  }, [activeSessionId, onTitleChange, paneExists, paneId])
+  }, [activeSessionId, onTitleChange, paneExists, paneId, panelApi])
 
   if (!paneId) {
     return <div className="placeholder-panel">Terminal pane metadata is missing. Reset this layout page and open the terminal grid again.</div>

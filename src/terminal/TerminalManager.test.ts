@@ -381,6 +381,81 @@ describe('TerminalManager atomic snapshot replay', () => {
     expect(entry?.term.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['healed'])
     TerminalManager.dispose(paneId)
   })
+
+  it('keeps a retained terminal buffer when a workspace reattach snapshot is unchanged', async () => {
+    const paneId = 'pane-retained-replay'
+    const sessionId = 'session-retained-replay'
+    const firstContainer = makeContainer()
+    const secondContainer = makeContainer()
+    const snapshots = [
+      terminalSnapshot(paneId, 7n, 'retained transcript', sessionId),
+      terminalSnapshot(paneId, 7n, 'must not replay', sessionId),
+    ]
+    invokeMock.mockImplementation((command) => {
+      if (command === 'subscribe_pane') return Promise.resolve(snapshots.shift())
+      return Promise.resolve()
+    })
+
+    TerminalManager.attach(paneId, firstContainer, { sessionId })
+    await TerminalManager.waitForReplay(sessionId, [paneId])
+    TerminalManager.attach(paneId, secondContainer, { sessionId })
+    TerminalManager.reattachToDaemon(sessionId, [paneId], { force: false })
+    await TerminalManager.waitForReplay(sessionId, [paneId])
+
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { element?: HTMLElement; writes: Uint8Array[]; resetCalls: number } }>
+    }
+    const entry = manager.entries.get(paneId)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'subscribe_pane')).toHaveLength(2)
+    expect(entry?.term.resetCalls).toBe(1)
+    expect(entry?.term.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['retained transcript'])
+    expect(entry?.term.element?.parentElement).toBe(secondContainer)
+    TerminalManager.dispose(paneId)
+  })
+
+  it('chunks a large cold snapshot so replay yields between bounded writes', async () => {
+    const paneId = 'pane-chunked-replay'
+    const sessionId = 'session-chunked-replay'
+    const transcript = 'x'.repeat(200 * 1024)
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      queueMicrotask(() => callback(performance.now()))
+      return 1
+    })
+    invokeMock.mockImplementation((command) => command === 'subscribe_pane'
+      ? Promise.resolve(terminalSnapshot(paneId, 1n, transcript, sessionId))
+      : Promise.resolve())
+
+    try {
+      TerminalManager.attach(paneId, makeContainer(), { sessionId })
+      await TerminalManager.waitForReplay(sessionId, [paneId])
+
+      const manager = TerminalManager as unknown as {
+        entries: Map<string, { term: { writes: Uint8Array[] } }>
+      }
+      const writes = manager.entries.get(paneId)?.term.writes ?? []
+      expect(writes.length).toBeGreaterThan(1)
+      expect(writes.map((bytes) => new TextDecoder().decode(bytes)).join('')).toBe(transcript)
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+    }
+  })
+})
+
+describe('TerminalManager workspace cache', () => {
+  it('prunes stale panes only from the active workspace and retains background terminals', () => {
+    TerminalManager.getOrCreate('pane-active-live').sessionId = 'session-active'
+    TerminalManager.getOrCreate('pane-active-stale').sessionId = 'session-active'
+    TerminalManager.getOrCreate('pane-background').sessionId = 'session-background'
+
+    TerminalManager.pruneWorkspaceCache('session-active', new Set(['pane-active-live']))
+
+    const manager = TerminalManager as unknown as { entries: Map<string, unknown> }
+    expect([...manager.entries.keys()]).toEqual(expect.arrayContaining(['pane-active-live', 'pane-background']))
+    expect(manager.entries.has('pane-active-stale')).toBe(false)
+    TerminalManager.dispose('pane-active-live')
+    TerminalManager.dispose('pane-background')
+  })
 })
 
 describe('TerminalManager animated title coalescing', () => {
