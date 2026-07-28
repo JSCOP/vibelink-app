@@ -54,8 +54,11 @@ const defaultScheduling: Scheduling = {
 
 export class PaneTitleCoalescer {
   private states = new Map<string, PaneTitleState>()
+  private scheduling: Scheduling
 
-  constructor(private scheduling: Scheduling = defaultScheduling) {}
+  constructor(scheduling: Scheduling = defaultScheduling) {
+    this.scheduling = scheduling
+  }
 
   /** Feed one raw OSC title. `emit` runs at most once per `TITLE_COALESCE_MS`
    *  per pane, and never at all for a spinner-only change. */

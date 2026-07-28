@@ -199,8 +199,10 @@ impl AdapterRuntime for PtyProcessRuntime {
             let summary = String::from_utf8_lossy(&bytes).to_string();
             Ok(AgentCollectedResult {
                 summary,
-                files_modified: Vec::new(),
-                report_path: None,
+                files: Vec::new(),
+                tests: Vec::new(),
+                commit: None,
+                checkpoint: None,
                 metadata: json!({
                     "runtimeIdentity": instance.runtime_identity,
                     "generation": instance.generation,

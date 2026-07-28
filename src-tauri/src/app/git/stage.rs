@@ -1,9 +1,12 @@
-use super::exec::{ensure_success, git_read, git_read_output, git_write, git_write_output};
+use super::exec::{
+    ensure_success, git_read, git_read_output, git_write, git_write_output, git_write_stdin,
+};
 use super::paths::{resolve_repo_file_path, validate_repo_relative_path};
 use super::to_string;
 use crate::app::license::LicenseService;
 use anyhow::{bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
@@ -267,6 +270,299 @@ where
         .map_err(to_string)
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitDiffArea {
+    Unstaged,
+    Staged,
+    Review,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHunkAction {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedDiffLine {
+    pub kind: String,
+    pub text: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedDiffHunk {
+    pub id: String,
+    pub header: String,
+    pub old_start: u32,
+    pub old_count: u32,
+    pub new_start: u32,
+    pub new_count: u32,
+    pub lines: Vec<UnifiedDiffLine>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedFileDiff {
+    pub path: String,
+    pub area: GitDiffArea,
+    pub binary: bool,
+    pub hunks: Vec<UnifiedDiffHunk>,
+}
+
+struct ParsedFileDiff {
+    public: UnifiedFileDiff,
+    preamble: String,
+    raw_hunks: Vec<(String, String)>,
+    whole_file_only: bool,
+}
+
+#[tauri::command]
+pub async fn git_diff_hunks(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    path: String,
+    area: GitDiffArea,
+    base_ref: Option<String>,
+    head_ref: Option<String>,
+) -> Result<UnifiedFileDiff, String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        diff_hunks_native(
+            &workspace_folder,
+            &path,
+            area,
+            base_ref.as_deref(),
+            head_ref.as_deref(),
+        )
+        .map(|parsed| parsed.public)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn git_apply_hunk(
+    license: State<'_, Arc<LicenseService>>,
+    workspace_folder: String,
+    path: String,
+    area: GitDiffArea,
+    hunk_id: String,
+    action: GitHunkAction,
+) -> Result<(), String> {
+    license.require_entitled_cached().map_err(to_string)?;
+    spawn_unit(move || apply_hunk_native(&workspace_folder, &path, area, &hunk_id, action)).await
+}
+
+fn diff_hunks_native(
+    repo: &str,
+    path: &str,
+    area: GitDiffArea,
+    base_ref: Option<&str>,
+    head_ref: Option<&str>,
+) -> Result<ParsedFileDiff> {
+    validate_repo_relative_path(path)?;
+    let mut args = vec![
+        "diff".to_string(),
+        "--no-ext-diff".to_string(),
+        "--no-color".to_string(),
+        "--unified=3".to_string(),
+    ];
+    match area {
+        GitDiffArea::Staged => args.push("--cached".to_string()),
+        GitDiffArea::Review => match (
+            base_ref.filter(|value| !value.trim().is_empty()),
+            head_ref.filter(|value| !value.trim().is_empty()),
+        ) {
+            (Some(base), Some(head)) => args.push(format!("{}..{}", base.trim(), head.trim())),
+            (Some(base), None) => args.push(base.trim().to_string()),
+            (None, Some(_)) => bail!("review diff requires baseRef when headRef is provided"),
+            (None, None) => bail!("review diff requires baseRef"),
+        },
+        GitDiffArea::Unstaged => {}
+    }
+    args.push("--".to_string());
+    args.push(path.to_string());
+    let bytes = git_read(repo, args)?;
+    parse_unified_diff(path, area, &String::from_utf8_lossy(&bytes))
+}
+
+fn parse_unified_diff(path: &str, area: GitDiffArea, diff: &str) -> Result<ParsedFileDiff> {
+    let binary = diff.contains("GIT binary patch")
+        || diff.lines().any(|line| line.starts_with("Binary files "));
+    let whole_file_only = binary
+        || diff.lines().any(|line| {
+            line.starts_with("rename from ")
+                || line.starts_with("rename to ")
+                || line.starts_with("copy from ")
+                || line.starts_with("copy to ")
+                || line.starts_with("old mode ")
+                || line.starts_with("new mode ")
+        });
+    let lines = diff.split_inclusive('\n').collect::<Vec<_>>();
+    let first_hunk = lines
+        .iter()
+        .position(|line| line.starts_with("@@ "))
+        .unwrap_or(lines.len());
+    let preamble = lines[..first_hunk].concat();
+    let mut hunks = Vec::new();
+    let mut raw_hunks = Vec::new();
+    let mut index = first_hunk;
+    while index < lines.len() {
+        if !lines[index].starts_with("@@ ") {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < lines.len() && !lines[index].starts_with("@@ ") {
+            index += 1;
+        }
+        let raw = lines[start..index].concat();
+        let header = lines[start].trim_end_matches(['\r', '\n']).to_string();
+        let (old_start, old_count, new_start, new_count) = parse_hunk_header(&header)?;
+        let mut old_line = old_start;
+        let mut new_line = new_start;
+        let mut parsed_lines = Vec::new();
+        for line in &lines[start + 1..index] {
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if let Some(text) = trimmed.strip_prefix('+') {
+                parsed_lines.push(UnifiedDiffLine {
+                    kind: "addition".into(),
+                    text: text.into(),
+                    old_line: None,
+                    new_line: Some(new_line),
+                });
+                new_line = new_line.saturating_add(1);
+            } else if let Some(text) = trimmed.strip_prefix('-') {
+                parsed_lines.push(UnifiedDiffLine {
+                    kind: "deletion".into(),
+                    text: text.into(),
+                    old_line: Some(old_line),
+                    new_line: None,
+                });
+                old_line = old_line.saturating_add(1);
+            } else if let Some(text) = trimmed.strip_prefix(' ') {
+                parsed_lines.push(UnifiedDiffLine {
+                    kind: "context".into(),
+                    text: text.into(),
+                    old_line: Some(old_line),
+                    new_line: Some(new_line),
+                });
+                old_line = old_line.saturating_add(1);
+                new_line = new_line.saturating_add(1);
+            } else if trimmed.starts_with("\\ No newline") {
+                parsed_lines.push(UnifiedDiffLine {
+                    kind: "noNewline".into(),
+                    text: trimmed.into(),
+                    old_line: None,
+                    new_line: None,
+                });
+            }
+        }
+        let area_name = match area {
+            GitDiffArea::Unstaged => "unstaged",
+            GitDiffArea::Staged => "staged",
+            GitDiffArea::Review => "review",
+        };
+        let digest = Sha256::digest(format!("{area_name}\0{path}\0{raw}").as_bytes());
+        let id = format!("{:x}", digest);
+        if !whole_file_only {
+            hunks.push(UnifiedDiffHunk {
+                id: id.clone(),
+                header,
+                old_start,
+                old_count,
+                new_start,
+                new_count,
+                lines: parsed_lines,
+            });
+        }
+        raw_hunks.push((id, raw));
+    }
+    Ok(ParsedFileDiff {
+        public: UnifiedFileDiff {
+            path: path.to_string(),
+            area,
+            binary,
+            hunks,
+        },
+        preamble,
+        raw_hunks,
+        whole_file_only,
+    })
+}
+
+fn parse_hunk_header(header: &str) -> Result<(u32, u32, u32, u32)> {
+    let marker_end = header[3..]
+        .find(" @@")
+        .map(|index| index + 3)
+        .ok_or_else(|| anyhow::anyhow!("invalid unified diff hunk header"))?;
+    let ranges = header[3..marker_end].split_whitespace().collect::<Vec<_>>();
+    if ranges.len() != 2 {
+        bail!("invalid unified diff hunk ranges")
+    }
+    let parse_range = |value: &str, sign: char| -> Result<(u32, u32)> {
+        let value = value
+            .strip_prefix(sign)
+            .ok_or_else(|| anyhow::anyhow!("invalid unified diff range"))?;
+        let mut pieces = value.split(',');
+        let start = pieces.next().unwrap_or_default().parse::<u32>()?;
+        let count = pieces
+            .next()
+            .map(str::parse::<u32>)
+            .transpose()?
+            .unwrap_or(1);
+        Ok((start, count))
+    };
+    let (old_start, old_count) = parse_range(ranges[0], '-')?;
+    let (new_start, new_count) = parse_range(ranges[1], '+')?;
+    Ok((old_start, old_count, new_start, new_count))
+}
+
+fn apply_hunk_native(
+    repo: &str,
+    path: &str,
+    area: GitDiffArea,
+    hunk_id: &str,
+    action: GitHunkAction,
+) -> Result<()> {
+    let parsed = diff_hunks_native(repo, path, area, None, None)?;
+    if parsed.whole_file_only {
+        bail!("binary, rename, copy, and type-change diffs require a whole-file action")
+    }
+    let raw = parsed
+        .raw_hunks
+        .iter()
+        .find(|(id, _)| id == hunk_id)
+        .map(|(_, raw)| raw)
+        .ok_or_else(|| {
+            anyhow::anyhow!("stale_view: hunk is no longer present in the current diff")
+        })?;
+    let patch = format!("{}{}", parsed.preamble, raw);
+    let args: Vec<&str> = match (area, action) {
+        (GitDiffArea::Unstaged, GitHunkAction::Stage) => {
+            vec!["apply", "--cached", "--whitespace=nowarn", "-"]
+        }
+        (GitDiffArea::Staged, GitHunkAction::Unstage) => {
+            vec!["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"]
+        }
+        (GitDiffArea::Unstaged, GitHunkAction::Discard) => {
+            vec!["apply", "--reverse", "--whitespace=nowarn", "-"]
+        }
+        _ => bail!("hunk action is incompatible with the selected diff area"),
+    };
+    ensure_success(git_write_stdin(repo, args, patch.as_bytes())?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +595,110 @@ mod tests {
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].sha, sha);
         std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn git_diff_hunks_actions_regenerate_current_diff_and_reject_stale_ids() {
+        let repo = test_repo();
+        let repo_text = repo.to_str().expect("utf8 repo");
+        let original = (1..=20)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        std::fs::write(repo.join("notes.txt"), &original).expect("write original");
+        stage_native(repo_text, &["notes.txt".to_string()]).expect("stage original");
+        commit_native(repo_text, "initial", false, false).expect("commit original");
+        let changed = original
+            .replace("line 2\n", "line two\n")
+            .replace("line 18\n", "line eighteen\n");
+        std::fs::write(repo.join("notes.txt"), changed).expect("write changes");
+
+        let unstaged = diff_hunks_native(repo_text, "notes.txt", GitDiffArea::Unstaged, None, None)
+            .expect("unstaged diff");
+        assert_eq!(unstaged.public.hunks.len(), 2);
+        let first_id = unstaged.public.hunks[0].id.clone();
+        apply_hunk_native(
+            repo_text,
+            "notes.txt",
+            GitDiffArea::Unstaged,
+            &first_id,
+            GitHunkAction::Stage,
+        )
+        .expect("stage hunk");
+        let staged = diff_hunks_native(repo_text, "notes.txt", GitDiffArea::Staged, None, None)
+            .expect("staged diff");
+        assert_eq!(staged.public.hunks.len(), 1);
+        apply_hunk_native(
+            repo_text,
+            "notes.txt",
+            GitDiffArea::Staged,
+            &staged.public.hunks[0].id,
+            GitHunkAction::Unstage,
+        )
+        .expect("unstage hunk");
+        let unstaged = diff_hunks_native(repo_text, "notes.txt", GitDiffArea::Unstaged, None, None)
+            .expect("unstaged after reverse");
+        assert_eq!(unstaged.public.hunks.len(), 2);
+        let first_id = unstaged.public.hunks[0].id.clone();
+        apply_hunk_native(
+            repo_text,
+            "notes.txt",
+            GitDiffArea::Unstaged,
+            &first_id,
+            GitHunkAction::Stage,
+        )
+        .expect("restage hunk");
+        let remaining =
+            diff_hunks_native(repo_text, "notes.txt", GitDiffArea::Unstaged, None, None)
+                .expect("remaining unstaged diff");
+        assert_eq!(remaining.public.hunks.len(), 1);
+        apply_hunk_native(
+            repo_text,
+            "notes.txt",
+            GitDiffArea::Unstaged,
+            &remaining.public.hunks[0].id,
+            GitHunkAction::Discard,
+        )
+        .expect("discard hunk");
+        assert!(
+            diff_hunks_native(repo_text, "notes.txt", GitDiffArea::Unstaged, None, None)
+                .expect("clean unstaged diff")
+                .public
+                .hunks
+                .is_empty()
+        );
+        assert!(apply_hunk_native(
+            repo_text,
+            "notes.txt",
+            GitDiffArea::Unstaged,
+            &first_id,
+            GitHunkAction::Discard
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("stale_view"));
+        std::fs::remove_dir_all(repo).expect("cleanup repo");
+    }
+
+    #[test]
+    fn git_diff_hunks_binary_and_rename_fall_back_to_whole_file_actions() {
+        let binary = parse_unified_diff(
+            "asset.bin",
+            GitDiffArea::Unstaged,
+            "diff --git a/asset.bin b/asset.bin\nBinary files a/asset.bin and b/asset.bin differ\n",
+        )
+        .expect("parse binary diff");
+        assert!(binary.public.binary);
+        assert!(binary.public.hunks.is_empty());
+        assert!(binary.whole_file_only);
+
+        let renamed = parse_unified_diff(
+            "new.txt",
+            GitDiffArea::Unstaged,
+            "diff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .expect("parse rename diff");
+        assert!(!renamed.public.binary);
+        assert!(renamed.public.hunks.is_empty());
+        assert!(renamed.whole_file_only);
     }
 }

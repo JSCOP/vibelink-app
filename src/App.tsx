@@ -31,8 +31,8 @@ import { getWorkspaceSessionEpoch, paneCompletionCountsBySession, useWorkspaceSt
 import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
 import { openTerminalLinkTarget } from './terminal/fileLinkNavigation'
-import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
-import { flattenWorkspaceRows, workspaceRows } from './state/workspaceGroups'
+import { isAgentPane, selectedProfileForWorkspace } from './state/profiles'
+import { buildAttentionByWorkspace, deriveVisibleWorkspaceOrder } from './state/worktreeAttention'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
 import { isAppLocked } from './state/licenseGate'
@@ -52,6 +52,7 @@ type FfmpegDownloadProgress = { downloaded: number; total?: number | null }
 type CaptureRecordingState = { startedAtMs: number }
 type CaptureRecordingEvent = { startedAtMs: number; path: string }
 type AgentPromptEvent = { sessionId: string; prompt: string }
+type WorktreeChangedEvent = { method: string; operationId: string }
 type DirtyEditorDecision = 'saveAll' | 'discard' | 'cancel'
 type DirtyEditorPrompt = { title: string; files: string[]; resolve: (decision: DirtyEditorDecision) => void }
 
@@ -118,9 +119,31 @@ function App() {
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const prepareSetupWizardRun = useWorkspaceStore((state) => state.prepareSetupWizardRun)
   const settings = useWorkspaceStore((state) => state.settings)
+  const worktrees = useWorkspaceStore((state) => state.worktreeProjections)
+  const attentionSnapshot = useWorkspaceStore((state) => state.attentionSnapshot)
+  const hermesStatus = useWorkspaceStore((state) => state.hermesStatus)
+  const hermesPermissions = useWorkspaceStore((state) => state.hermesPermissions)
+  const paneReviewMarkers = useWorkspaceStore((state) => state.paneReviewMarkers)
   const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
-  const orderedSessions = orderSessions(sessions, settings.workspaceOrder)
-  const shortcutSessions = useMemo(() => flattenWorkspaceRows(workspaceRows(sessions, settings.workspaceGroups, settings.workspaceGroupIds, settings.workspaceOrder, settings.workspaceWorktrees)), [sessions, settings.workspaceGroupIds, settings.workspaceGroups, settings.workspaceOrder, settings.workspaceWorktrees])
+  const attentionByWorkspace = useMemo(() => buildAttentionByWorkspace(sessions, worktrees, attentionSnapshot, {
+    completionHighlights: paneCompletionHighlights,
+    hermesStatus,
+    hermesPermissions,
+    reviewedPaneIds: new Set(Object.keys(paneReviewMarkers)),
+    conflictSessionIds: new Set(worktrees.flatMap((projection) => projection.native?.hasConflicts && projection.record?.sessionId ? [projection.record.sessionId] : [])),
+  }), [attentionSnapshot, hermesPermissions, hermesStatus, paneCompletionHighlights, paneReviewMarkers, sessions, worktrees])
+  const visibleWorkspaceOrder = useMemo(() => deriveVisibleWorkspaceOrder(
+    sessions,
+    settings.workspaceGroups,
+    settings.workspaceGroupIds,
+    worktrees,
+    settings.workspaceSortMode,
+    attentionByWorkspace,
+    settings.workspaceOrder,
+  ), [attentionByWorkspace, sessions, settings.workspaceGroupIds, settings.workspaceGroups, settings.workspaceOrder, settings.workspaceSortMode, worktrees])
+  const orderedSessions = visibleWorkspaceOrder.sessions
+  const orderedSessionIds = visibleWorkspaceOrder.sessionIds
+  const shortcutSessions = visibleWorkspaceOrder.sessions
   const completionCounts = useMemo(() => paneCompletionCountsBySession(paneCompletionHighlights), [paneCompletionHighlights])
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const editingWorkspace = sessions.find((session) => session.id === editingWorkspaceId) ?? null
@@ -169,15 +192,23 @@ function App() {
   }), [])
 
   useEffect(() => {
+    if (status !== 'ready') return undefined
+    const refresh = () => void useWorkspaceStore.getState().refreshAttentionSnapshot().catch(() => {})
+    refresh()
+    const timer = window.setInterval(refresh, 5_000)
+    return () => window.clearInterval(timer)
+  }, [status])
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       void invoke('set_remote_appearance', {
         appearance: buildRemoteAppearance(settings),
-        workspaceOrder: settings.workspaceOrder,
+        workspaceOrder: orderedSessionIds,
         workspaceAlerts: completionCounts,
       }).catch((caught) => console.warn('Failed to update remote appearance', caught))
     }, 300)
     return () => window.clearTimeout(timer)
-  }, [completionCounts, settings])
+  }, [completionCounts, orderedSessionIds, settings])
 
   useEffect(() => {
     if (status !== 'ready') return
@@ -244,10 +275,30 @@ function App() {
       onResponseStart: () => {},
       onResponseComplete: (paneId) => useWorkspaceStore.getState().markPaneResponseComplete(paneId),
     })
+    let worktreeRefresh = Promise.resolve()
     const unlisteners = [
       listen<RemotePaneLeaseEvent>('remote://pane-lease', (event) => {
         const lease = applyRemotePaneLeaseEvent(event.payload)
         TerminalManager.setRemotePaneLease(event.payload.paneId, lease)
+      }),
+      listen<WorktreeChangedEvent>('worktree://changed', () => {
+        worktreeRefresh = worktreeRefresh.then(async () => {
+          const before = useWorkspaceStore.getState()
+          const activeSessionId = before.activeSessionId
+          const parentSessionId = activeSessionId
+            ? before.worktreeProjections.find((projection) => projection.record?.sessionId === activeSessionId)?.record?.parentSessionId ?? null
+            : null
+          // A worktree removed by CLI, MCP, or another window takes its session
+          // with it. `refreshSessions` runs the same per-session teardown
+          // `deleteSession` uses for every session that vanished, so browser,
+          // editor, Hermes, completion, and layout maps never outlive it.
+          await Promise.all([before.refreshSessions(), before.refreshWorktrees()])
+          const after = useWorkspaceStore.getState()
+          if (!after.activeSessionId && after.sessions.length > 0) {
+            const fallback = after.sessions.find((session) => session.id === parentSessionId) ?? after.sessions[0]
+            await after.openSession(fallback.id)
+          }
+        }).catch((caught) => useWorkspaceStore.getState().setError(String(caught)))
       }),
       listen<AgentPromptEvent>('vibelink://agent-prompt', (event) => {
         void (async () => {

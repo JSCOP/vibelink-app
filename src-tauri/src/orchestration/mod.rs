@@ -230,6 +230,10 @@ pub struct TaskRecord {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeAssignment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     pub base_revision: String,
     pub branch: String,
     pub worktree_path: String,
@@ -357,6 +361,9 @@ pub struct LifecycleIdentity {
 pub struct PaneProjectionState {
     pub activity: RemotePaneActivity,
     pub unread_count: u32,
+    pub state_updated_at: u64,
+    pub blocked: bool,
+    pub interrupted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -617,8 +624,11 @@ pub struct WorkerDoneRequest {
     pub identity: LifecycleIdentity,
     pub expected_task_revision: u64,
     #[serde(default)]
-    pub files_modified: Vec<String>,
-    pub report_path: Option<String>,
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub tests: Vec<String>,
+    pub commit: Option<String>,
+    pub checkpoint: Option<String>,
     pub result: Value,
 }
 
@@ -660,6 +670,7 @@ pub struct GateMutationResult {
     pub run: RunRecord,
     pub gate: DecisionGateRecord,
     pub dispatch: Option<DispatchRecord>,
+    pub cleanup_gate: Option<DecisionGateRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -680,6 +691,30 @@ pub struct MergeAppliedRequest {
     pub gate_id: String,
     pub expected_run_revision: u64,
     pub commit_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupAppliedRequest {
+    pub gate_id: String,
+    pub expected_run_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanupDecision {
+    pub decision: String,
+    pub force: bool,
+    pub delete_branch: bool,
+    pub acknowledged_blockers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CleanupAuthorization {
+    pub worktree: WorktreeAssignment,
+    pub force: bool,
+    pub delete_branch: bool,
+    pub acknowledged_blockers: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -714,16 +749,17 @@ impl CoordinatorService {
              ranked AS (
                SELECT d.id AS dispatch_id,d.task_id,d.agent_instance_id,d.pane_id,
                       d.status AS dispatch_status,t.status AS task_status,a.status AS agent_status,
+                      MAX(d.updated_at,t.updated_at,COALESCE(a.updated_at,0)) AS state_updated_at,
                       ROW_NUMBER() OVER (PARTITION BY d.pane_id ORDER BY d.updated_at DESC,d.attempt DESC,d.id DESC) AS rank
                FROM dispatches d
                JOIN orchestration_tasks t ON t.id=d.task_id
                LEFT JOIN agent_instances a ON a.id=d.agent_instance_id
                WHERE d.pane_id IN (SELECT pane_id FROM requested)
              ), current AS (
-               SELECT dispatch_id,task_id,agent_instance_id,pane_id,dispatch_status,task_status,agent_status
+               SELECT dispatch_id,task_id,agent_instance_id,pane_id,dispatch_status,task_status,agent_status,state_updated_at
                FROM ranked WHERE rank=1
              )
-             SELECT r.pane_id,c.dispatch_status,c.task_status,c.agent_status,
+             SELECT r.pane_id,c.dispatch_status,c.task_status,c.agent_status,c.state_updated_at,
                     EXISTS(SELECT 1 FROM decision_gates g WHERE g.status='pending' AND (g.dispatch_id=c.dispatch_id OR g.task_id=c.task_id)),
                     (SELECT COUNT(*) FROM messages m WHERE m.unread=1 AND (m.dispatch_id=c.dispatch_id OR m.task_id=c.task_id)),
                     (SELECT COUNT(*) FROM notifications n WHERE n.unread=1 AND n.entity_id IN (c.dispatch_id,c.task_id,c.agent_instance_id))
@@ -736,12 +772,19 @@ impl CoordinatorService {
                 let dispatch_status: Option<String> = row.get(1)?;
                 let task_status: Option<String> = row.get(2)?;
                 let agent_status: Option<String> = row.get(3)?;
-                let pending_gate = row.get::<_, i64>(4)? != 0;
-                let unread_messages = row.get::<_, i64>(5)?.max(0) as u64;
-                let unread_notifications = row.get::<_, i64>(6)?.max(0) as u64;
+                let state_updated_at =
+                    row.get::<_, Option<i64>>(4)?.unwrap_or_default().max(0) as u64;
+                let pending_gate = row.get::<_, i64>(5)? != 0;
+                let unread_messages = row.get::<_, i64>(6)?.max(0) as u64;
+                let unread_notifications = row.get::<_, i64>(7)?.max(0) as u64;
                 let unread_count = unread_messages
                     .saturating_add(unread_notifications)
                     .min(u64::from(u32::MAX)) as u32;
+                let interrupted = pane_interrupted(
+                    dispatch_status.as_deref(),
+                    task_status.as_deref(),
+                    agent_status.as_deref(),
+                );
                 Ok((
                     pane_id,
                     PaneProjectionState {
@@ -752,6 +795,9 @@ impl CoordinatorService {
                             pending_gate,
                         ),
                         unread_count,
+                        state_updated_at,
+                        blocked: pending_gate,
+                        interrupted,
                     },
                 ))
             })?;
@@ -1131,6 +1177,32 @@ impl CoordinatorService {
         })
     }
 
+    pub fn update_dispatch_worktree(
+        &self,
+        dispatch_id: &str,
+        operation_id: Uuid,
+        worktree: &WorktreeAssignment,
+    ) -> CoordinatorResult<DispatchResourceRecord> {
+        self.control.with_connection_mut(|connection| {
+            ensure_orchestration_runtime_schema(connection)?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if read_dispatch_resource(&transaction, dispatch_id)?.is_none() {
+                return Err(CoordinatorError::NotFound("dispatch resource reservation not found".to_string()));
+            }
+            let worktree_json = serde_json::to_string(worktree)?;
+            let changed = transaction.execute(
+                "UPDATE dispatch_resources SET worktree_json=?2,updated_at=?3 WHERE dispatch_id=?1 AND operation_id=?4",
+                params![dispatch_id, worktree_json, now_millis() as i64, operation_id.to_string()],
+            )?;
+            if changed != 1 {
+                return Err(CoordinatorError::Conflict("worktree identity update does not own the dispatch launch claim".to_string()));
+            }
+            let updated = read_dispatch_resource(&transaction, dispatch_id)?.ok_or_else(|| CoordinatorError::Storage("updated dispatch resource disappeared".to_string()))?;
+            transaction.commit()?;
+            Ok(updated)
+        })
+    }
+
     pub fn record_dispatch_agent_resource(
         &self,
         dispatch_id: &str,
@@ -1253,7 +1325,7 @@ impl CoordinatorService {
             }
             if clear_worktree_identity {
                 transaction.execute(
-                    "UPDATE dispatches SET base_revision=NULL,branch=NULL,worktree_path=NULL,updated_at=?2 WHERE id=?1",
+                    "UPDATE dispatches SET base_revision=NULL,branch=NULL,worktree_path=NULL,worktree_id=NULL,worktree_instance_id=NULL,updated_at=?2 WHERE id=?1",
                     params![dispatch_id, updated_at as i64],
                 )?;
             }
@@ -1715,7 +1787,7 @@ impl CoordinatorService {
         }
         let now = now_millis();
         transaction.execute(
-            "UPDATE dispatches SET agent_instance_id=?2, status='dispatched', pane_id=?3, process_generation=?4, base_revision=?5, branch=?6, worktree_path=?7, updated_at=?8 WHERE id=?1",
+            "UPDATE dispatches SET agent_instance_id=?2, status='dispatched', pane_id=?3, process_generation=?4, base_revision=?5, branch=?6, worktree_path=?7, worktree_id=?8, worktree_instance_id=?9, updated_at=?10 WHERE id=?1",
             params![
                 dispatch.id,
                 agent.id,
@@ -1724,6 +1796,8 @@ impl CoordinatorService {
                 request.worktree.as_ref().map(|value| value.base_revision.as_str()),
                 request.worktree.as_ref().map(|value| value.branch.as_str()),
                 request.worktree.as_ref().map(|value| value.worktree_path.as_str()),
+                request.worktree.as_ref().and_then(|value| value.worktree_id.as_deref()),
+                request.worktree.as_ref().and_then(|value| value.instance_id.as_deref()),
                 now as i64,
             ],
         )?;
@@ -1959,11 +2033,18 @@ impl CoordinatorService {
         require_task_revision(&task, request.expected_task_revision)?;
         let mut run = read_run(transaction, &task.run_id)?;
         let now = now_millis();
+        let completion = json!({
+            "files": request.files,
+            "tests": request.tests,
+            "commit": request.commit,
+            "checkpoint": request.checkpoint,
+            "result": request.result,
+        });
         transaction.execute(
             "UPDATE dispatches SET status='completed', updated_at=?2 WHERE id=?1",
             params![dispatch.id, now as i64],
         )?;
-        set_task_status(transaction, &task.id, OrchestrationTaskStatus::Completed, Some(request.result.clone()))?;
+        set_task_status(transaction, &task.id, OrchestrationTaskStatus::Completed, Some(completion.clone()))?;
         transaction.execute(
             "UPDATE agent_instances SET status='completed', updated_at=?2 WHERE id=?1",
             params![request.identity.agent_instance_id, now as i64],
@@ -1980,9 +2061,11 @@ impl CoordinatorService {
                 "taskId": task.id,
                 "dispatchId": dispatch.id,
                 "agentInstanceId": request.identity.agent_instance_id,
-                "filesModified": request.files_modified,
-                "reportPath": request.report_path,
-                "result": request.result,
+                "files": completion["files"],
+                "tests": completion["tests"],
+                "commit": completion["commit"],
+                "checkpoint": completion["checkpoint"],
+                "result": completion["result"],
             }),
             now,
         )?;
@@ -2050,7 +2133,7 @@ impl CoordinatorService {
         update_run_status(transaction, &mut run, RunStatus::Waiting)?;
         insert_message(transaction, &run.id, request.task_id.as_deref(), request.dispatch_id.as_deref(), None, "coordinator", MessageType::DecisionGate, json!({"gateId": gate.id, "gateType": gate.gate_type, "prompt": gate.prompt, "options": gate.options}), now)?;
         insert_event(transaction, Some(&run.id), "orchestration", "gate.created", Some(&gate.id), operation_id, json!({"gateType": gate.gate_type}))?;
-        Ok(GateMutationResult { run, gate, dispatch }) })
+        Ok(GateMutationResult { run, gate, dispatch, cleanup_gate: None }) })
     }
 
     pub fn resolve_gate(
@@ -2067,10 +2150,20 @@ impl CoordinatorService {
         let mut run = read_run(transaction, &gate.run_id)?;
         require_run_revision(&run, request.expected_run_revision)?;
         let decision = request.resolution.get("decision").and_then(Value::as_str).unwrap_or_default();
-        if gate.gate_type == "merge" && !matches!(decision, "approve" | "reject") {
-            return Err(CoordinatorError::InvalidArgument(
-                "merge gate resolution decision must be approve or reject".to_string(),
-            ));
+        if matches!(gate.gate_type.as_str(), "merge" | "cleanup")
+            && !matches!(decision, "approve" | "reject")
+        {
+            return Err(CoordinatorError::InvalidArgument(format!(
+                "{} gate resolution decision must be approve or reject",
+                gate.gate_type
+            )));
+        }
+        if gate.gate_type == "cleanup" && decision == "approve" {
+            serde_json::from_value::<CleanupDecision>(request.resolution.clone()).map_err(|error| {
+                CoordinatorError::InvalidArgument(format!(
+                    "cleanup approval requires force, deleteBranch, and acknowledgedBlockers: {error}"
+                ))
+            })?;
         }
         let now = now_millis();
         transaction.execute(
@@ -2079,7 +2172,7 @@ impl CoordinatorService {
         )?;
         gate = read_gate(transaction, &gate.id)?;
         let mut dispatch = gate.dispatch_id.as_deref().map(|id| read_dispatch(transaction, id)).transpose()?;
-        if gate.gate_type == "merge" {
+        if gate.gate_type == "merge" || gate.gate_type == "cleanup" {
             if decision == "reject" {
                 bump_run_revision(transaction, &mut run)?;
                 refresh_terminal_run_status(transaction, &mut run)?;
@@ -2112,7 +2205,7 @@ impl CoordinatorService {
             }
         }
         insert_event(transaction, Some(&run.id), "orchestration", "gate.resolved", Some(&gate.id), operation_id, json!({"resolution": gate.resolution}))?;
-        Ok(GateMutationResult { run, gate, dispatch }) })
+        Ok(GateMutationResult { run, gate, dispatch, cleanup_gate: None }) })
     }
 
     pub fn merge_authorization(&self, gate_id: &str) -> CoordinatorResult<WorktreeAssignment> {
@@ -2143,6 +2236,65 @@ impl CoordinatorService {
                 .ok_or_else(|| {
                     CoordinatorError::Conflict("merge dispatch has no worktree record".to_string())
                 })
+        })
+    }
+
+    pub fn cleanup_authorization(&self, gate_id: &str) -> CoordinatorResult<CleanupAuthorization> {
+        self.control.with_connection(|connection| {
+            let gate = read_gate(connection, gate_id)?;
+            if gate.gate_type != "cleanup" || gate.status != GateStatus::Resolved {
+                return Err(CoordinatorError::InvalidTransition(format!(
+                    "gate {} is not an approved cleanup gate",
+                    gate.id
+                )));
+            }
+            let decision = gate
+                .resolution
+                .clone()
+                .ok_or_else(|| CoordinatorError::Conflict("cleanup has no decision".to_string()))?;
+            let decision: CleanupDecision = serde_json::from_value(decision).map_err(|error| {
+                CoordinatorError::Conflict(format!("cleanup decision is invalid: {error}"))
+            })?;
+            if decision.decision != "approve" {
+                return Err(CoordinatorError::Conflict(
+                    "cleanup was not approved".to_string(),
+                ));
+            }
+            let dispatch_id = gate.dispatch_id.ok_or_else(|| {
+                CoordinatorError::Conflict("cleanup gate has no dispatch".to_string())
+            })?;
+            let merge_applied = connection
+                .query_row(
+                    "SELECT resolution_json FROM decision_gates WHERE dispatch_id=?1 AND gate_type='merge' AND status='resolved' ORDER BY created_at DESC LIMIT 1",
+                    [&dispatch_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+                .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+                .is_some_and(|value| {
+                    value.get("decision").and_then(Value::as_str) == Some("approve")
+                        && value.get("applied").and_then(Value::as_bool) == Some(true)
+                });
+            if !merge_applied {
+                return Err(CoordinatorError::Conflict(
+                    "cleanup requires a recorded applied merge".to_string(),
+                ));
+            }
+            let worktree = read_dispatch(connection, &dispatch_id)?
+                .worktree
+                .ok_or_else(|| {
+                    CoordinatorError::Conflict(
+                        "cleanup dispatch has no worktree record".to_string(),
+                    )
+                })?;
+            validate_worktree(&worktree)?;
+            Ok(CleanupAuthorization {
+                worktree,
+                force: decision.force,
+                delete_branch: decision.delete_branch,
+                acknowledged_blockers: decision.acknowledged_blockers,
+            })
         })
     }
 
@@ -2184,8 +2336,44 @@ impl CoordinatorService {
                     params![gate.id, serde_json::to_string(&resolution)?, now as i64],
                 )?;
                 gate = read_gate(transaction, &gate.id)?;
-                bump_run_revision(transaction, &mut run)?;
-                refresh_terminal_run_status(transaction, &mut run)?;
+                let dispatch = gate
+                    .dispatch_id
+                    .as_deref()
+                    .map(|id| read_dispatch(transaction, id))
+                    .transpose()?;
+                let cleanup_gate = create_gate_record(
+                    transaction,
+                    &run.id,
+                    gate.task_id.as_deref(),
+                    gate.dispatch_id.as_deref(),
+                    "cleanup",
+                    "Approve cleanup of the merged worktree through shared removal preflight?",
+                    vec!["approve".to_string(), "reject".to_string()],
+                    None,
+                    now,
+                )?;
+                if let Some(dispatch_id) = gate.dispatch_id.as_deref() {
+                    transaction.execute(
+                        "UPDATE dispatch_resources SET worktree_disposition='retained',cleanup_reason='cleanup_decision',cleanup_error=NULL,updated_at=?2 WHERE dispatch_id=?1",
+                        params![dispatch_id, now as i64],
+                    )?;
+                }
+                update_run_status(transaction, &mut run, RunStatus::Waiting)?;
+                insert_message(
+                    transaction,
+                    &run.id,
+                    gate.task_id.as_deref(),
+                    gate.dispatch_id.as_deref(),
+                    None,
+                    "coordinator",
+                    MessageType::DecisionGate,
+                    json!({
+                        "gateId": cleanup_gate.id,
+                        "gateType": "cleanup",
+                        "worktree": dispatch.as_ref().and_then(|value| value.worktree.as_ref()),
+                    }),
+                    now,
+                )?;
                 insert_event(
                     transaction,
                     Some(&run.id),
@@ -2193,17 +2381,74 @@ impl CoordinatorService {
                     "merge.applied",
                     gate.dispatch_id.as_deref(),
                     operation_id,
-                    json!({"gateId": gate.id, "commitId": commit_id}),
+                    json!({
+                        "gateId": gate.id,
+                        "commitId": commit_id,
+                        "cleanupGateId": cleanup_gate.id,
+                    }),
                 )?;
+                Ok(GateMutationResult {
+                    run,
+                    gate,
+                    dispatch,
+                    cleanup_gate: Some(cleanup_gate),
+                })
+            },
+        )
+    }
+
+    pub fn mark_cleanup_applied(
+        &self,
+        operation_id: Uuid,
+        request: CleanupAppliedRequest,
+    ) -> CoordinatorResult<GateMutationResult> {
+        self.mutate(
+            operation_id,
+            "orchestration.cleanup.applied",
+            request,
+            move |transaction, request| {
+                let mut gate = read_gate(transaction, &request.gate_id)?;
+                let mut run = read_run(transaction, &gate.run_id)?;
+                require_run_revision(&run, request.expected_run_revision)?;
+                if gate.gate_type != "cleanup" || gate.status != GateStatus::Resolved {
+                    return Err(CoordinatorError::InvalidTransition(
+                        "cleanup gate is not resolved".to_string(),
+                    ));
+                }
+                let mut resolution = gate.resolution.clone().unwrap_or_else(|| json!({}));
+                if resolution.get("decision").and_then(Value::as_str) != Some("approve") {
+                    return Err(CoordinatorError::Conflict(
+                        "cleanup was not approved".to_string(),
+                    ));
+                }
+                resolution["applied"] = Value::Bool(true);
+                let now = now_millis();
+                transaction.execute(
+                    "UPDATE decision_gates SET resolution_json=?2,updated_at=?3 WHERE id=?1",
+                    params![gate.id, serde_json::to_string(&resolution)?, now as i64],
+                )?;
+                gate = read_gate(transaction, &gate.id)?;
+                bump_run_revision(transaction, &mut run)?;
+                refresh_terminal_run_status(transaction, &mut run)?;
                 let dispatch = gate
                     .dispatch_id
                     .as_deref()
                     .map(|id| read_dispatch(transaction, id))
                     .transpose()?;
+                insert_event(
+                    transaction,
+                    Some(&run.id),
+                    "orchestration",
+                    "cleanup.applied",
+                    gate.dispatch_id.as_deref(),
+                    operation_id,
+                    json!({"gateId": gate.id}),
+                )?;
                 Ok(GateMutationResult {
                     run,
                     gate,
                     dispatch,
+                    cleanup_gate: None,
                 })
             },
         )
@@ -2488,6 +2733,14 @@ fn validate_scope(
 }
 
 fn validate_worktree(worktree: &WorktreeAssignment) -> CoordinatorResult<()> {
+    required(
+        worktree.worktree_id.as_deref().unwrap_or_default(),
+        "worktree id",
+    )?;
+    required(
+        worktree.instance_id.as_deref().unwrap_or_default(),
+        "worktree instance id",
+    )?;
     required(&worktree.base_revision, "base revision")?;
     required(&worktree.branch, "worktree branch")?;
     required(&worktree.worktree_path, "worktree path")?;
@@ -2975,23 +3228,27 @@ fn read_dispatch(connection: &Connection, dispatch_id: &str) -> CoordinatorResul
     ensure_orchestration_runtime_schema(connection)?;
     let row = connection
         .query_row(
-            "SELECT id, task_id, attempt, agent_instance_id, status, pane_id, process_generation, base_revision, branch, worktree_path, failure_code, created_at, updated_at FROM dispatches WHERE id=?1",
+            "SELECT id, task_id, attempt, agent_instance_id, status, pane_id, process_generation, base_revision, branch, worktree_path, worktree_id, worktree_instance_id, failure_code, created_at, updated_at FROM dispatches WHERE id=?1",
             [dispatch_id],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<i64>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, i64>(11)?, row.get::<_, i64>(12)?,
+                    row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<i64>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, i64>(13)?, row.get::<_, i64>(14)?,
                 ))
             },
         )
         .optional()?
         .ok_or_else(|| CoordinatorError::NotFound(format!("dispatch {dispatch_id}")))?;
-    let worktree = match (row.7, row.8, row.9) {
-        (Some(base_revision), Some(branch), Some(worktree_path)) => Some(WorktreeAssignment {
-            base_revision,
-            branch,
-            worktree_path,
-        }),
-        (None, None, None) => None,
+    let worktree = match (row.7, row.8, row.9, row.10, row.11) {
+        (Some(base_revision), Some(branch), Some(worktree_path), worktree_id, instance_id) => {
+            Some(WorktreeAssignment {
+                worktree_id,
+                instance_id,
+                base_revision,
+                branch,
+                worktree_path,
+            })
+        }
+        (None, None, None, None, None) => None,
         _ => {
             return Err(CoordinatorError::Storage(
                 "partial worktree record".to_string(),
@@ -3009,9 +3266,9 @@ fn read_dispatch(connection: &Connection, dispatch_id: &str) -> CoordinatorResul
         worktree,
         launch_claim: read_dispatch_claim(connection, dispatch_id)?,
         resources: read_dispatch_resource(connection, dispatch_id)?,
-        failure_code: row.10,
-        created_at: nonnegative(row.11),
-        updated_at: nonnegative(row.12),
+        failure_code: row.12,
+        created_at: nonnegative(row.13),
+        updated_at: nonnegative(row.14),
     })
 }
 
@@ -3105,6 +3362,16 @@ fn read_gate(connection: &Connection, gate_id: &str) -> CoordinatorResult<Decisi
                 updated_at: nonnegative(row.11),
             })
         })
+}
+
+fn pane_interrupted(
+    dispatch_status: Option<&str>,
+    task_status: Option<&str>,
+    agent_status: Option<&str>,
+) -> bool {
+    matches!(dispatch_status, Some("cancelled"))
+        || matches!(task_status, Some("cancelled"))
+        || matches!(agent_status, Some("cancelled" | "stopped"))
 }
 
 fn pane_activity(
@@ -3569,8 +3836,10 @@ mod tests {
                     WorkerDoneRequest {
                         identity,
                         expected_task_revision: running_task.revision,
-                        files_modified: vec![],
-                        report_path: None,
+                        files: vec![],
+                        tests: vec![],
+                        commit: None,
+                        checkpoint: None,
                         result: json!({"ok": true}),
                     },
                 )
@@ -3628,8 +3897,10 @@ mod tests {
                 WorkerDoneRequest {
                     identity,
                     expected_task_revision: running_task.revision,
-                    files_modified: vec![],
-                    report_path: None,
+                    files: vec![],
+                    tests: vec![],
+                    commit: None,
+                    checkpoint: None,
                     result: json!({"ok": true}),
                 },
             )
@@ -3903,6 +4174,8 @@ mod tests {
             process_generation: 3,
         };
         let worktree = WorktreeAssignment {
+            worktree_id: Some("worktree-merge".to_string()),
+            instance_id: Some("instance-merge".to_string()),
             base_revision: "base-commit".to_string(),
             branch: "vibelink/task-merge".to_string(),
             worktree_path: "C:/worktrees/merge".to_string(),
@@ -3933,8 +4206,10 @@ mod tests {
                 WorkerDoneRequest {
                     identity,
                     expected_task_revision: running.task.revision,
-                    files_modified: vec!["src/lib.rs".to_string()],
-                    report_path: Some("report.json".to_string()),
+                    files: vec!["src/lib.rs".to_string()],
+                    tests: vec!["cargo test focused".to_string()],
+                    commit: Some("abc123".to_string()),
+                    checkpoint: Some("review_ready".to_string()),
                     result: json!({"summary": "ready"}),
                 },
             )
@@ -3982,7 +4257,7 @@ mod tests {
                 },
             )
             .expect("record applied merge");
-        assert_eq!(applied.run.status, RunStatus::Completed);
+        assert_eq!(applied.run.status, RunStatus::Waiting);
         assert_eq!(
             applied
                 .gate
@@ -3992,6 +4267,66 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
+        let cleanup_gate = applied.cleanup_gate.expect("separate cleanup gate");
+        assert_eq!(cleanup_gate.gate_type, "cleanup");
+        assert_eq!(
+            fixture
+                .service
+                .cleanup_authorization(&cleanup_gate.id)
+                .expect_err("cleanup approval required")
+                .code(),
+            "invalid_transition"
+        );
+        assert_eq!(
+            fixture
+                .service
+                .resolve_gate(
+                    Uuid::new_v4(),
+                    ResolveGateRequest {
+                        gate_id: cleanup_gate.id.clone(),
+                        resolution: json!({"decision": "approve"}),
+                        expected_run_revision: applied.run.revision,
+                    },
+                )
+                .expect_err("cleanup decision fields are required")
+                .code(),
+            "invalid_argument"
+        );
+        let cleanup_approved = fixture
+            .service
+            .resolve_gate(
+                Uuid::new_v4(),
+                ResolveGateRequest {
+                    gate_id: cleanup_gate.id.clone(),
+                    resolution: json!({
+                        "decision": "approve",
+                        "force": false,
+                        "deleteBranch": true,
+                        "acknowledgedBlockers": [],
+                    }),
+                    expected_run_revision: applied.run.revision,
+                },
+            )
+            .expect("approve cleanup");
+        assert_eq!(
+            fixture
+                .service
+                .cleanup_authorization(&cleanup_gate.id)
+                .expect("cleanup authorization")
+                .worktree,
+            worktree
+        );
+        let cleaned = fixture
+            .service
+            .mark_cleanup_applied(
+                Uuid::new_v4(),
+                CleanupAppliedRequest {
+                    gate_id: cleanup_gate.id,
+                    expected_run_revision: cleanup_approved.run.revision,
+                },
+            )
+            .expect("record cleanup");
+        assert_eq!(cleaned.run.status, RunStatus::Completed);
     }
 
     #[test]
@@ -4056,7 +4391,7 @@ mod tests {
     }
 
     #[test]
-    fn destroyed_resources_clear_runtime_and_worktree_identities() {
+    fn daemon_restart_preserves_worktree_identity_until_authorized_cleanup() {
         let fixture = Fixture::new();
         let mut run = fixture.create_run(1);
         fixture.create_task(&mut run, "cleanup", vec![]);
@@ -4080,6 +4415,8 @@ mod tests {
             DispatchLaunchPreparation::Replay(_) => panic!("unexpected final replay"),
         };
         let worktree = WorktreeAssignment {
+            worktree_id: Some("worktree-cleanup".to_string()),
+            instance_id: Some("instance-cleanup".to_string()),
             base_revision: "base".to_string(),
             branch: "vibelink/run-cleanup/task-cleanup-attempt-1".to_string(),
             worktree_path: "C:/managed/cleanup".to_string(),
@@ -4139,10 +4476,27 @@ mod tests {
                     runtime_identity: format!("pane:{pane_id}:1"),
                     pane_id: Some(pane_id),
                     process_generation: 1,
-                    worktree: Some(worktree),
+                    worktree: Some(worktree.clone()),
                 },
             )
             .expect("bind dispatch");
+
+        fixture
+            .service
+            .reconcile_daemon_restart(Uuid::new_v4(), 2_000)
+            .expect("reconcile daemon restart");
+        let after_restart = fixture
+            .service
+            .cleanup_target_for_dispatch(&dispatch.id)
+            .expect("restart cleanup target");
+        assert_eq!(
+            after_restart
+                .resources
+                .as_ref()
+                .and_then(|resource| resource.worktree.as_ref()),
+            Some(&worktree)
+        );
+        assert_eq!(after_restart.dispatch.worktree.as_ref(), Some(&worktree));
 
         let resource = fixture
             .service
@@ -4259,6 +4613,14 @@ mod tests {
             pane_activity(None, None, None, false),
             RemotePaneActivity::Idle
         );
+
+        assert!(pane_interrupted(Some("completed"), None, Some("stopped")));
+        assert!(pane_interrupted(None, Some("cancelled"), None));
+        assert!(!pane_interrupted(
+            Some("completed"),
+            None,
+            Some("completed")
+        ));
     }
 
     #[test]
@@ -4321,6 +4683,9 @@ mod tests {
             Some(&PaneProjectionState {
                 activity: RemotePaneActivity::Waiting,
                 unread_count: 2,
+                state_updated_at: 2,
+                blocked: true,
+                interrupted: false,
             })
         );
         assert_eq!(
@@ -4328,6 +4693,9 @@ mod tests {
             Some(&PaneProjectionState {
                 activity: RemotePaneActivity::Idle,
                 unread_count: 0,
+                state_updated_at: 0,
+                blocked: false,
+                interrupted: false,
             })
         );
     }

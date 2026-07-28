@@ -73,6 +73,12 @@ struct AgentPromptEvent {
     session_id: String,
     prompt: String,
 }
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorktreeChangedEvent {
+    method: String,
+    operation_id: String,
+}
 
 #[derive(Clone)]
 pub struct DaemonClient {
@@ -248,6 +254,43 @@ impl DaemonClient {
             DaemonToClient::Pong { req: reply_req } if reply_req == req => Ok(()),
             DaemonToClient::Error { message, .. } => bail!(message),
             other => bail!("unexpected ping response: {other:?}"),
+        }
+    }
+
+    pub fn worktree_rpc<T: Serialize>(
+        &self,
+        operation_id: Uuid,
+        method: &str,
+        payload: &T,
+    ) -> Result<String> {
+        self.worktree_rpc_with_timeout(operation_id, method, payload, REQUEST_TIMEOUT)
+    }
+
+    pub fn worktree_rpc_with_timeout<T: Serialize>(
+        &self,
+        operation_id: Uuid,
+        method: &str,
+        payload: &T,
+        timeout: Duration,
+    ) -> Result<String> {
+        let payload_json = serde_json::to_string(payload).context("serialize worktree request")?;
+        let req = self.next_req();
+        match self.request_with_timeout(
+            req,
+            ClientToDaemon::Worktree {
+                req,
+                operation_id,
+                method: method.to_string(),
+                payload_json,
+            },
+            timeout,
+        )? {
+            DaemonToClient::Reply {
+                req: reply_req,
+                result: ReplyResult::Worktree(response),
+            } if reply_req == req => Ok(response),
+            DaemonToClient::Error { message, .. } => bail!(message),
+            other => bail!("unexpected worktree response: {other:?}"),
         }
     }
 
@@ -521,6 +564,20 @@ fn route_daemon_message(shared: &Arc<ClientShared>, msg: DaemonToClient) {
                     let _ = app_handle.emit("remote://pane-lease", event);
                 }
             }
+            DaemonToClient::WorktreeChanged {
+                method,
+                operation_id,
+            } => {
+                if let Some(app_handle) = &shared.app_handle {
+                    let _ = app_handle.emit(
+                        "worktree://changed",
+                        WorktreeChangedEvent {
+                            method,
+                            operation_id: operation_id.to_string(),
+                        },
+                    );
+                }
+            }
             DaemonToClient::RemoteBrowserRequest { request } => {
                 handle_remote_browser_request(shared, request);
             }
@@ -733,6 +790,7 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
         | DaemonToClient::PaneExited { .. }
         | DaemonToClient::PaneResized { .. }
         | DaemonToClient::SessionChanged { .. }
+        | DaemonToClient::WorktreeChanged { .. }
         | DaemonToClient::RemotePaneLease { .. }
         | DaemonToClient::RemoteBrowserRequest { .. }
         | DaemonToClient::TaskEvent { .. } => None,

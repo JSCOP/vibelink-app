@@ -1,8 +1,9 @@
 use crate::{
     agent_runtime::WorktreeManager,
+    app::git::worktree_registry::WorktreeRegistry,
     orchestration::{
         CoordinatorService, CreateRunRequest, CreateTaskRequest, RunPolicy, RunRevisionRequest,
-        ScheduleRequest,
+        ScheduleRequest, WorktreeAssignment,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -56,6 +57,8 @@ pub struct AutomationRunRecord {
     pub precheck: Option<Value>,
     pub worktree_path: Option<String>,
     pub branch: Option<String>,
+    pub worktree_id: Option<String>,
+    pub worktree_instance_id: Option<String>,
     pub started_at: Option<u64>,
     pub finished_at: Option<u64>,
     pub created_at: u64,
@@ -84,6 +87,12 @@ pub struct PrecheckResult {
     pub output_truncated: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AutomationWorktreeProvision {
+    pub assignment: WorktreeAssignment,
+    pub session_id: String,
+}
+
 pub struct AutomationService {
     connection: Mutex<Connection>,
     coordinator: Arc<CoordinatorService>,
@@ -95,6 +104,7 @@ impl AutomationService {
         database_path: &Path,
         artifact_root: PathBuf,
         coordinator: Arc<CoordinatorService>,
+        registry: Arc<WorktreeRegistry>,
     ) -> Result<Self> {
         fs::create_dir_all(&artifact_root)?;
         let connection = Connection::open(database_path)?;
@@ -105,7 +115,7 @@ impl AutomationService {
         Ok(Self {
             connection: Mutex::new(connection),
             coordinator,
-            worktrees: WorktreeManager::new(artifact_root.join("worktrees"))?,
+            worktrees: WorktreeManager::new(artifact_root.join("worktrees"), registry)?,
         })
     }
 
@@ -208,7 +218,7 @@ impl AutomationService {
     pub fn runs(&self, automation_id: &str, limit: u32) -> Result<Vec<AutomationRunRecord>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,output_truncated,precheck_json,worktree_path,branch,started_at,finished_at,created_at FROM automation_runs WHERE automation_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2",
+            "SELECT id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,output_truncated,precheck_json,worktree_path,branch,worktree_id,worktree_instance_id,started_at,finished_at,created_at FROM automation_runs WHERE automation_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2",
         )?;
         let runs = statement
             .query_map(params![automation_id, limit.clamp(1, 500)], read_run)?
@@ -257,6 +267,25 @@ impl AutomationService {
         claim: &AutomationRunRecord,
         workspace: &Path,
     ) -> Result<AutomationRunRecord> {
+        self.execute_with_worktree(claim, workspace, |_, _, _, _| {
+            bail!("automation worktree provisioning requires the daemon lifecycle service")
+        })
+    }
+
+    pub(crate) fn execute_with_worktree<F>(
+        &self,
+        claim: &AutomationRunRecord,
+        workspace: &Path,
+        create_worktree: F,
+    ) -> Result<AutomationRunRecord>
+    where
+        F: FnOnce(
+            &AutomationRecord,
+            &AutomationRunRecord,
+            &Path,
+            &WorktreeAssignment,
+        ) -> Result<AutomationWorktreeProvision>,
+    {
         let automation = self.get(&claim.automation_id)?;
         let precheck = self.precheck(&automation, workspace);
         if !precheck.ok {
@@ -271,12 +300,16 @@ impl AutomationService {
         }
 
         let mut worktree = None;
+        let mut run_session_id = automation.session_id.clone();
         let run_workspace = if automation.workspace_mode == "worktree" {
-            let assignment = self
+            let authority = self.worktrees.authority(workspace)?;
+            let planned = self
                 .worktrees
-                .create(workspace, &claim.id, &automation.id, 1)?;
-            let path = PathBuf::from(&assignment.worktree_path);
-            worktree = Some(assignment);
+                .plan(&authority, &automation.id, &claim.id, 1)?;
+            let provision = create_worktree(&automation, claim, workspace, &planned)?;
+            let path = PathBuf::from(&provision.assignment.worktree_path);
+            run_session_id = provision.session_id;
+            worktree = Some(provision.assignment);
             path
         } else {
             workspace.to_path_buf()
@@ -299,7 +332,7 @@ impl AutomationService {
             .create_run(
                 Uuid::new_v4(),
                 CreateRunRequest {
-                    session_id: automation.session_id.clone(),
+                    session_id: run_session_id,
                     goal: goal.clone(),
                     policy: RunPolicy { max_concurrent },
                 },
@@ -369,13 +402,13 @@ impl AutomationService {
 
         let now = now_millis();
         self.lock()?.execute(
-            "UPDATE automation_runs SET orchestration_run_id=?2,status='running',precheck_json=?3,worktree_path=?4,branch=?5,started_at=?6,output_summary=?7 WHERE id=?1",
-            params![claim.id,run.id,serde_json::to_string(&precheck)?,worktree.as_ref().map(|value| value.worktree_path.as_str()),worktree.as_ref().map(|value| value.branch.as_str()),now as i64,format!("Mission launched in {}",run_workspace.display())],
+            "UPDATE automation_runs SET orchestration_run_id=?2,status='running',precheck_json=?3,worktree_path=?4,branch=?5,worktree_id=?6,worktree_instance_id=?7,started_at=?8,output_summary=?9 WHERE id=?1",
+            params![claim.id,run.id,serde_json::to_string(&precheck)?,worktree.as_ref().map(|value| value.worktree_path.as_str()),worktree.as_ref().map(|value| value.branch.as_str()),worktree.as_ref().and_then(|value| value.worktree_id.as_deref()),worktree.as_ref().and_then(|value| value.instance_id.as_deref()),now as i64,format!("Mission launched in {}",run_workspace.display())],
         )?;
         self.run(&claim.id)
     }
 
-    pub fn sync_run(&self, run_id: &str, workspace: &Path) -> Result<AutomationRunRecord> {
+    pub fn sync_run(&self, run_id: &str, _workspace: &Path) -> Result<AutomationRunRecord> {
         let record = self.run(run_id)?;
         if record.status != "running" {
             return Ok(record);
@@ -401,24 +434,6 @@ impl AutomationService {
                 false,
                 record.precheck.as_ref(),
             )?;
-            let automation = self.get(&record.automation_id)?;
-            if automation
-                .policy
-                .get("cleanupOnFinish")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                if let (Some(path), Some(branch)) =
-                    (record.worktree_path.as_deref(), record.branch.as_deref())
-                {
-                    let assignment = crate::orchestration::WorktreeAssignment {
-                        base_revision: String::new(),
-                        branch: branch.to_string(),
-                        worktree_path: path.to_string(),
-                    };
-                    self.worktrees.cleanup(workspace, &assignment, true)?;
-                }
-            }
         }
         self.run(run_id)
     }
@@ -494,7 +509,7 @@ impl AutomationService {
 
     fn run(&self, id: &str) -> Result<AutomationRunRecord> {
         self.lock()?.query_row(
-            "SELECT id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,output_truncated,precheck_json,worktree_path,branch,started_at,finished_at,created_at FROM automation_runs WHERE id=?1",
+            "SELECT id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,output_truncated,precheck_json,worktree_path,branch,worktree_id,worktree_instance_id,started_at,finished_at,created_at FROM automation_runs WHERE id=?1",
             [id],read_run,
         ).optional()?.with_context(||format!("automation run not found: {id}"))
     }
@@ -901,13 +916,15 @@ fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRunRecord> {
         precheck: precheck.and_then(|value| serde_json::from_str(&value).ok()),
         worktree_path: row.get(8)?,
         branch: row.get(9)?,
+        worktree_id: row.get(10)?,
+        worktree_instance_id: row.get(11)?,
         started_at: row
-            .get::<_, Option<i64>>(10)?
+            .get::<_, Option<i64>>(12)?
             .map(|value| value.max(0) as u64),
         finished_at: row
-            .get::<_, Option<i64>>(11)?
+            .get::<_, Option<i64>>(13)?
             .map(|value| value.max(0) as u64),
-        created_at: row.get::<_, i64>(12)?.max(0) as u64,
+        created_at: row.get::<_, i64>(14)?.max(0) as u64,
     })
 }
 fn now_millis() -> u64 {
@@ -934,11 +951,13 @@ mod tests {
             let workspace = root.join("workspace");
             fs::create_dir_all(&workspace).expect("workspace");
             let control = Arc::new(ControlPlane::open(&root).expect("control"));
-            let coordinator = Arc::new(CoordinatorService::new(control));
+            let coordinator = Arc::new(CoordinatorService::new(Arc::clone(&control)));
+            let registry = Arc::new(WorktreeRegistry::new(control));
             let service = AutomationService::open(
                 &root.join("control").join("vibelink-control.sqlite3"),
                 root.join("artifacts"),
                 Arc::clone(&coordinator),
+                registry,
             )
             .expect("automation");
             Self {

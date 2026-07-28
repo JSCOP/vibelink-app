@@ -3,10 +3,16 @@ import { sendToPane, submitAgentPrompt } from '../ipc/panes'
 import { deactivateLicenseDevice, getLicenseStatus, revalidateLicense, signOutAccount as signOutAccountIpc } from '../ipc/license'
 import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
 import { create } from 'zustand'
-import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief, WorktreeInfo } from '../ipc/types'
-import { defaultSettings, isAgentPane, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
+import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief } from '../ipc/types'
+import { defaultSettings, isAgentPane, normalizeLegacyWorkspaceWorktrees, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import type { Settings } from './profiles'
+import type { AttentionSnapshot } from './worktreeAttention'
+import type { WorktreeBlockerKind, WorktreeCheckpoint, WorktreeCheckpointKind, WorktreeCreateRequest, WorktreeCreateResult, WorktreeProjection, WorktreeRecord, WorktreeRemovalPreflight, WorktreeRemovalResult, WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetupPolicy } from '../ipc/worktrees'
+import { cancelWorktreeOperation, createWorktree, createWorktreeCheckpoint, importWorktree, listWorktrees, moveWorktree, preflightWorktreeRemoval as preflightWorktreeRemovalIpc, putWorktreeReviewComment as putWorktreeReviewCommentIpc, reconcileWorktrees, removeWorktree, setWorktreeMetadata as setWorktreeMetadataIpc } from '../ipc/worktrees'
+import type { LegacyWorkspaceWorktree, PendingWorktreeCreation } from './worktrees'
+import { indexWorktrees, legacyRowsByRepository, worktreeBySession } from './worktrees'
+import { useGitStore } from './git'
 import type { WorkspaceGroup } from './workspaceGroups'
 import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
@@ -21,6 +27,7 @@ import {
 
 const initialKanban = loadKanban()
 const migratedLegacySessions = new Set<string>()
+const paneCompletionHighlightsStorageKey = 'vibelink:paneCompletionHighlights'
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 let workspaceSessionEpoch = 0
 let workspaceSessionReadyEpoch = 0
@@ -64,11 +71,22 @@ export type CreateWorkspaceWorktreeInput = {
   startRef: string
   branch: string
   profileId: string
+  fetch?: boolean
+  setupPolicy?: WorktreeSetupPolicy
+  sparsePreset?: string | null
+  linkedFiles?: string[]
+  initialAgent?: string | null
+  initialPrompt?: string | null
 }
 
 
 type WorkspaceState = {
   sessions: SessionMeta[]
+  worktreeProjections: WorktreeProjection[]
+  worktreesById: Record<string, WorktreeProjection>
+  worktreeIdsBySessionId: Record<string, string>
+  pendingWorktreeCreations: Record<string, PendingWorktreeCreation>
+  attentionSnapshot: AttentionSnapshot | null
   workspaceEpoch: number
   workspaceReadyEpoch: number
   activeSessionId?: string
@@ -114,12 +132,24 @@ type WorkspaceState = {
   bootstrap: () => Promise<void>
   refreshAgentClis: () => Promise<AgentCliStatus[]>
   refreshSessions: () => Promise<void>
+  refreshWorktrees: () => Promise<WorktreeProjection[]>
+  reconcileRepositoryWorktrees: (repositoryPath: string) => Promise<WorktreeProjection[]>
+  importExternalWorktree: (input: { repositoryPath: string; worktreePath: string; parentSessionId: string | null }) => Promise<WorktreeProjection>
+  setWorktreeMetadata: (worktreeId: string, patch: { comment?: string | null; reviewTarget?: string | null; parentWorktreeId?: string | null; clearParent?: boolean }) => Promise<WorktreeRecord>
+  recordWorktreeCheckpoint: (worktreeId: string, kind: WorktreeCheckpointKind, label: string, comment?: string | null) => Promise<WorktreeCheckpoint>
+  putWorktreeReviewComment: (request: WorktreeReviewCommentRequest) => Promise<WorktreeReviewComment>
+  preflightWorktreeRemoval: (worktreeId: string, deleteBranch: boolean) => Promise<WorktreeRemovalPreflight>
+  removeWorktreeById: (worktreeId: string, options: { deleteBranch: boolean; acknowledgedBlockers: WorktreeBlockerKind[]; providerMergedHead?: string | null }) => Promise<WorktreeRemovalResult>
+  refreshAttentionSnapshot: () => Promise<AttentionSnapshot>
   openSession: (sessionId: string) => Promise<AttachedSession>
   attachSession: (sessionId: string, requestEpoch?: number) => Promise<AttachedSession>
   refreshAttachedSession: (sessionId: string) => Promise<AttachedSession | null>
   createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
   createWorktreeSession: (input: CreateWorkspaceWorktreeInput) => Promise<SessionMeta>
-  removeWorktreeSession: (sessionId: string, options: { deleteBranch: boolean; force: boolean }) => Promise<void>
+  cancelPendingWorktreeCreation: (operationId: string) => Promise<void>
+  retryPendingWorktreeCreation: (operationId: string) => Promise<SessionMeta>
+  dismissPendingWorktreeCreation: (operationId: string) => void
+  removeWorktreeSession: (sessionId: string, options: { deleteBranch: boolean; acknowledgedBlockers: WorktreeBlockerKind[]; providerMergedHead?: string | null }) => Promise<WorktreeRemovalResult>
   moveWorktreeSession: (sessionId: string, destinationPath: string) => Promise<void>
   renameSession: (sessionId: string, name: string) => Promise<void>
   setSessionWorkspaceFolder: (sessionId: string, workspaceFolder: string) => Promise<void>
@@ -185,6 +215,11 @@ type WorkspaceState = {
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   sessions: [],
+  worktreeProjections: [],
+  worktreesById: {},
+  worktreeIdsBySessionId: {},
+  pendingWorktreeCreations: {},
+  attentionSnapshot: null,
   workspaceEpoch: 0,
   workspaceReadyEpoch: 0,
   panes: {},
@@ -210,7 +245,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   hermesSessions: {},
   selectedTaskId: {},
   activePaneId: undefined,
-  paneCompletionHighlights: {},
+  paneCompletionHighlights: loadPaneCompletionHighlights(),
   paneReviewMarkers: loadPaneReviewMarkers(),
   capturesByPane: {},
   recentCaptures: [],
@@ -229,7 +264,30 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         sessions = [created]
       }
 
-      set({ sessions, activeSessionId: undefined, panes: {}, layoutJson: null, status: 'ready' })
+      const [migration, attentionSnapshot] = await Promise.all([
+        reconcileWorkspaceWorktrees(sessions, get().settings.worktreeRegistryMigrationVersion),
+        invoke<AttentionSnapshot>('attention_snapshot'),
+      ])
+      // The migration marker is only durable proof once the daemon accepted
+      // every legacy payload. A partial failure leaves the marker at 0 so the
+      // next launch replays the same rows under the same operation hash.
+      const settings = migration.migrated
+        ? { ...get().settings, worktreeRegistryMigrationVersion: 1 }
+        : get().settings
+      if (migration.migrated) {
+        persistSettings(settings)
+        forgetLegacyWorkspaceWorktrees()
+      }
+      set({
+        sessions,
+        ...projectionState(migration.projections),
+        attentionSnapshot,
+        settings,
+        activeSessionId: undefined,
+        panes: {},
+        layoutJson: null,
+        status: 'ready',
+      })
       if (licenseStatus.email) void get().revalidateLicense()
     } catch (error) {
       set({ status: 'error', error: String(error) })
@@ -268,8 +326,113 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   refreshSessions: async () => {
+    const previousSessions = get().sessions
     const sessions = await invoke<SessionMeta[]>('list_sessions')
-    set({ sessions })
+    const remainingIds = new Set(sessions.map((session) => session.id))
+    const removed = previousSessions.filter((session) => !remainingIds.has(session.id))
+    // Sessions can vanish because CLI, MCP, or another window removed their
+    // worktree. Their GUI-owned resources are torn down with the same helpers
+    // deleteSession uses, so no orphan browser/editor/Hermes/layout state is
+    // left behind for a workspace the daemon no longer knows about.
+    const failures: string[] = []
+    for (const session of removed) {
+      try {
+        await releaseSessionResources(session.id, session.workspaceFolder)
+      } catch (caught) {
+        failures.push(String(caught))
+      }
+      set((state) => stateWithoutSession(state, session.id, sessions))
+    }
+    if (removed.length === 0) set({ sessions })
+    if (removed.length > 0) {
+      persistSettings(get().settings)
+      persistCurrentKanban(get())
+    }
+    if (failures.length > 0) throw new Error(`Workspace resource cleanup failed: ${failures.join('; ')}`)
+  },
+
+  refreshWorktrees: async () => {
+    const projections = await listWorktrees({ repositoryPath: null, includeExternal: true, includeHidden: true })
+    set(projectionState(projections))
+    return projections
+  },
+
+  reconcileRepositoryWorktrees: async (repositoryPath: string) => {
+    const normalized = normalizeWorkspaceFolder(repositoryPath)
+    if (!normalized) throw new Error('A repository workspace folder is required to reconcile worktrees.')
+    const projections = await reconcileWorktrees({ repositoryPath: normalized, legacyRows: [] })
+    // Reconcile is repository-scoped: merge its rows over the global projection
+    // instead of replacing rows that belong to other repositories.
+    set((state) => {
+      const byId = new Map(state.worktreeProjections.map((projection) => [projection.id, projection]))
+      const stale = new Set(
+        state.worktreeProjections
+          .filter((projection) => sameRepository(projection, normalized))
+          .map((projection) => projection.id),
+      )
+      for (const projection of projections) {
+        byId.set(projection.id, projection)
+        stale.delete(projection.id)
+      }
+      for (const id of stale) byId.delete(id)
+      return projectionState([...byId.values()])
+    })
+    return projections
+  },
+
+  importExternalWorktree: async ({ repositoryPath, worktreePath, parentSessionId }) => {
+    const imported = await importWorktree({ repositoryPath, worktreePath, parentSessionId, sessionId: null })
+    if (!imported.record) throw new Error(`The checkout at "${worktreePath}" could not be imported into the registry.`)
+    await Promise.all([get().refreshSessions(), get().refreshWorktrees()])
+    return imported
+  },
+
+  setWorktreeMetadata: async (worktreeId, patch) => {
+    const record = requireRecord(get(), worktreeId)
+    const updated = await setWorktreeMetadataIpc({
+      worktreeId: record.id,
+      expectedInstanceId: record.instanceId,
+      comment: patch.comment ?? null,
+      reviewTarget: patch.reviewTarget ?? null,
+      parentWorktreeId: patch.parentWorktreeId ?? null,
+      clearParent: patch.clearParent ?? false,
+    })
+    await get().refreshWorktrees()
+    return updated
+  },
+
+  recordWorktreeCheckpoint: (worktreeId, kind, label, comment = null) =>
+    createWorktreeCheckpoint({ worktreeId, kind, label, comment }),
+
+  putWorktreeReviewComment: (request) => putWorktreeReviewCommentIpc(request),
+
+  preflightWorktreeRemoval: (worktreeId, deleteBranch) =>
+    preflightWorktreeRemovalIpc({ worktreeId, deleteBranch }),
+
+  removeWorktreeById: async (worktreeId, options) => {
+    const record = requireRecord(get(), worktreeId)
+    if (record.sessionId) return get().removeWorktreeSession(record.sessionId, options)
+    assertRemovalAcknowledged(
+      await preflightWorktreeRemovalIpc({ worktreeId: record.id, deleteBranch: options.deleteBranch }),
+      options.acknowledgedBlockers,
+    )
+    const result = await removeWorktree({
+      operationId: crypto.randomUUID(),
+      worktreeId: record.id,
+      expectedInstanceId: record.instanceId,
+      force: options.acknowledgedBlockers.length > 0,
+      deleteBranch: options.deleteBranch,
+      providerMergedHead: options.providerMergedHead ?? null,
+      acknowledgedBlockers: options.acknowledgedBlockers,
+    })
+    await get().refreshWorktrees()
+    return result
+  },
+
+  refreshAttentionSnapshot: async () => {
+    const attentionSnapshot = await invoke<AttentionSnapshot>('attention_snapshot')
+    set({ attentionSnapshot })
+    return attentionSnapshot
   },
 
   openSession: async (sessionId: string) => {
@@ -388,91 +551,86 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   createWorktreeSession: async (input: CreateWorkspaceWorktreeInput) => {
-    const parent = get().sessions.find((session) => session.id === input.parentSessionId)
-    const sourceWorkspaceFolder = normalizeWorkspaceFolder(parent?.workspaceFolder)
-    if (!parent || !sourceWorkspaceFolder) throw new Error('A repository workspace folder is required to create a worktree.')
-    const name = input.name.trim()
-    const startRef = input.startRef.trim()
-    const branch = input.branch.trim()
-    if (!name || !startRef || !branch) throw new Error('Worktree name, start ref, and branch are required.')
+    const request = buildWorktreeCreateRequest(get(), input)
+    return runWorktreeCreation(set, get, request, input.profileId)
+  },
 
-    const worktree = await invoke<WorktreeInfo>('git_worktree_create_named', {
-      workspaceFolder: sourceWorkspaceFolder,
-      name,
-      startRef,
-      branch,
-      storage: get().settings.worktreeStorage,
+  cancelPendingWorktreeCreation: async (operationId: string) => {
+    const pending = get().pendingWorktreeCreations[operationId]
+    if (!pending || isSettledStage(pending.stage)) return
+    set(patchPendingCreation(operationId, { cancelRequested: true }))
+    // The daemon owns the rollback. The pending row stays until the create
+    // promise settles, so a cancel that lost the race still reports the truth.
+    await cancelWorktreeOperation(operationId).catch((caught) => {
+      set(patchPendingCreation(operationId, { cancelRequested: false }))
+      throw caught
     })
-    try {
-      const created = await get().createSession(name, worktree.worktreePath, input.profileId)
-      const settings = get().settings
-      const workspaceWorktrees = {
-        ...settings.workspaceWorktrees,
-        [created.id]: {
-          parentSessionId: parent.id,
-          sourceWorkspaceFolder,
-          worktreePath: worktree.worktreePath,
-          branch: worktree.branch,
-          startRef,
-          createdAt: new Date().toISOString(),
-        },
-      }
-      const workspaceOrder = orderSessions(get().sessions, settings.workspaceOrder).map((session) => session.id).filter((sessionId) => sessionId !== created.id)
-      const siblingIds = new Set(Object.entries(settings.workspaceWorktrees)
-        .filter(([, relation]) => relation.parentSessionId === parent.id)
-        .map(([sessionId]) => sessionId))
-      let insertAt = workspaceOrder.indexOf(parent.id)
-      if (insertAt < 0) insertAt = workspaceOrder.length - 1
-      while (insertAt + 1 < workspaceOrder.length && siblingIds.has(workspaceOrder[insertAt + 1])) insertAt += 1
-      workspaceOrder.splice(insertAt + 1, 0, created.id)
-      get().updateSettings({ workspaceWorktrees, workspaceOrder })
-      return created
-    } catch (error) {
-      await invoke('git_worktree_remove', {
-        workspaceFolder: sourceWorkspaceFolder,
-        worktreePath: worktree.worktreePath,
-        branch: worktree.branch,
-        deleteBranch: true,
-        force: true,
-      }).catch(() => undefined)
-      throw error
-    }
+  },
+
+  retryPendingWorktreeCreation: async (operationId: string) => {
+    const pending = get().pendingWorktreeCreations[operationId]
+    if (!pending) throw new Error('That worktree creation is no longer pending.')
+    if (!isSettledStage(pending.stage)) throw new Error('That worktree creation is still running.')
+    set(withoutPendingCreation(operationId))
+    // A fresh operation id: the failed one stored a durable result, and
+    // replaying it would return that stored failure instead of retrying.
+    return runWorktreeCreation(set, get, { ...pending.request, operationId: crypto.randomUUID() }, pending.request.profileId)
+  },
+
+  dismissPendingWorktreeCreation: (operationId: string) => {
+    const pending = get().pendingWorktreeCreations[operationId]
+    if (!pending || !isSettledStage(pending.stage)) return
+    set(withoutPendingCreation(operationId))
   },
 
   removeWorktreeSession: async (sessionId, options) => {
-    const worktree = get().settings.workspaceWorktrees[sessionId]
-    if (!worktree) throw new Error(`Workspace session "${sessionId}" is not a recorded worktree.`)
-    await invoke('git_worktree_remove', {
-      workspaceFolder: worktree.sourceWorkspaceFolder,
-      worktreePath: worktree.worktreePath,
-      branch: worktree.branch,
-      force: options.force,
+    const worktree = worktreeBySession(get().worktreeProjections, sessionId)?.record
+    if (!worktree) throw new Error(`Workspace session "${sessionId}" is not a registered worktree.`)
+    // Nothing is torn down until the live blocker set is proven to match the
+    // set the caller acknowledged. A hard blocker always refuses, and a blocker
+    // that appeared after the user confirmed is never silently acknowledged.
+    assertRemovalAcknowledged(
+      await preflightWorktreeRemovalIpc({ worktreeId: worktree.id, deleteBranch: options.deleteBranch }),
+      options.acknowledgedBlockers,
+    )
+    // GUI-owned resources are torn down before the Git mutation is requested,
+    // and a teardown failure aborts here: the session, its panes, and the
+    // registry row all survive so the removal can be retried.
+    await releaseSessionResources(sessionId, worktree.worktreePath)
+    const result = await removeWorktree({
+      operationId: crypto.randomUUID(),
+      worktreeId: worktree.id,
+      expectedInstanceId: worktree.instanceId,
+      force: options.acknowledgedBlockers.length > 0,
       deleteBranch: options.deleteBranch,
+      providerMergedHead: options.providerMergedHead ?? null,
+      acknowledgedBlockers: options.acknowledgedBlockers,
     })
-    await get().deleteSession(sessionId)
+    if (!result.metadataRemoved) throw new Error('Worktree metadata cleanup did not complete.')
+    await Promise.all([get().refreshSessions(), get().refreshWorktrees()])
+    const sessions = get().sessions
+    set((state) => stateWithoutSession(state, sessionId, sessions))
+    persistSettings(get().settings)
+    persistCurrentKanban(get())
+    if (!get().activeSessionId || get().activeSessionId === sessionId) {
+      const next = sessions.find((session) => session.id === worktree.parentSessionId) ?? sessions[0]
+      if (next) await get().attachSession(next.id)
+    }
+    return result
   },
 
   moveWorktreeSession: async (sessionId, destinationPath) => {
-    const worktree = get().settings.workspaceWorktrees[sessionId]
-    if (!worktree) throw new Error(`Workspace session "${sessionId}" is not a recorded worktree.`)
-    const destination = normalizeWorkspaceFolder(destinationPath)
-    if (!destination) throw new Error('Worktree destination path is required.')
-    const moved = await invoke<WorktreeInfo>('git_worktree_move', {
-      workspaceFolder: worktree.sourceWorkspaceFolder,
-      worktreePath: worktree.worktreePath,
-      destinationPath: destination,
+    const worktree = worktreeBySession(get().worktreeProjections, sessionId)?.record
+    if (!worktree) throw new Error(`Workspace session "${sessionId}" is not a registered worktree.`)
+    const destinationPathNormalized = normalizeWorkspaceFolder(destinationPath)
+    if (!destinationPathNormalized) throw new Error('Worktree destination path is required.')
+    await moveWorktree({
+      operationId: crypto.randomUUID(),
+      worktreeId: worktree.id,
+      expectedInstanceId: worktree.instanceId,
+      destinationPath: destinationPathNormalized,
     })
-    await get().setSessionWorkspaceFolder(sessionId, moved.worktreePath)
-    const settings = get().settings
-    get().updateSettings({
-      workspaceWorktrees: {
-        ...settings.workspaceWorktrees,
-        [sessionId]: {
-          ...(settings.workspaceWorktrees[sessionId] ?? worktree),
-          worktreePath: moved.worktreePath,
-        },
-      },
-    })
+    await Promise.all([get().refreshSessions(), get().refreshWorktrees()])
   },
 
   renameSession: async (sessionId: string, name: string) => {
@@ -504,67 +662,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
       throw error
     }
-    if (deletedWorkspaceFolder) disposeEditorDocumentStore(sessionId, deletedWorkspaceFolder)
-    await invoke('agent_workspace_cleanup', { sessionId })
+    await releaseSessionResources(sessionId, deletedWorkspaceFolder)
     let sessions = await invoke<SessionMeta[]>('list_sessions')
     if (sessions.length === 0) {
       const created = await invoke<SessionMeta>('create_session', { name: 'Workspace 1' })
       sessions = [created]
     }
-    set((state) => {
-      const deletedPaneIds = state.activeSessionId === sessionId ? Object.keys(state.panes) : []
-      const taskIds = new Set(state.kanban.taskOrder[sessionId] ?? [])
-      const tasks = { ...state.kanban.tasks }
-      for (const taskId of taskIds) delete tasks[taskId]
-      const taskOrder = { ...state.kanban.taskOrder }
-      delete taskOrder[sessionId]
-      const viewModes = { ...state.viewModes }
-      const kanbanLayouts = { ...state.kanbanLayouts }
-      const orchestratorPaneIds = { ...state.orchestratorPaneIds }
-      const selectedTaskId = { ...state.selectedTaskId }
-      const workspaceTodos = { ...state.workspaceTodos }
-      const workspaceTodoNotes = { ...state.workspaceTodoNotes }
-      const workspaceBriefs = { ...state.workspaceBriefs }
-      const hermesStatus = { ...state.hermesStatus }
-      const hermesTranscript = { ...state.hermesTranscript }
-      const hermesPermissions = { ...state.hermesPermissions }
-      const hermesUsage = { ...state.hermesUsage }
-      const hermesModels = { ...state.hermesModels }
-      const hermesPendingPrompts = { ...state.hermesPendingPrompts }
-      const hermesCurrentSession = { ...state.hermesCurrentSession }
-      const hermesSessions = { ...state.hermesSessions }
-      const manualPaneTitles = withoutPaneKeys(state.manualPaneTitles, deletedPaneIds)
-      const capturesByPane = withoutPaneKeys(state.capturesByPane, deletedPaneIds)
-      const paneCompletionHighlights = withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId)
-      const paneReviewMarkers = withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId)
-      const paneRoles = withoutPaneKeys(state.settings.paneRoles, deletedPaneIds)
-      const workspaceProfileIds = { ...state.settings.workspaceProfileIds }
-      const workspaceDetails = { ...state.settings.workspaceDetails }
-      const workspaceGroupIds = { ...state.settings.workspaceGroupIds }
-      const workspaceWorktrees = Object.fromEntries(Object.entries(state.settings.workspaceWorktrees)
-        .filter(([worktreeSessionId, worktree]) => worktreeSessionId !== sessionId && worktree.parentSessionId !== sessionId))
-      const workspaceOrder = state.settings.workspaceOrder.filter((workspaceSessionId) => workspaceSessionId !== sessionId)
-      delete workspaceProfileIds[sessionId]
-      delete workspaceDetails[sessionId]
-      delete workspaceGroupIds[sessionId]
-      const settings = { ...state.settings, paneRoles, workspaceProfileIds, workspaceDetails, workspaceGroupIds, workspaceWorktrees, workspaceOrder }
-      delete viewModes[sessionId]
-      delete kanbanLayouts[sessionId]
-      delete orchestratorPaneIds[sessionId]
-      delete selectedTaskId[sessionId]
-      delete workspaceTodos[sessionId]
-      delete workspaceTodoNotes[sessionId]
-      delete workspaceBriefs[sessionId]
-      delete hermesStatus[sessionId]
-      delete hermesTranscript[sessionId]
-      delete hermesPermissions[sessionId]
-      delete hermesUsage[sessionId]
-      delete hermesModels[sessionId]
-      delete hermesPendingPrompts[sessionId]
-      delete hermesCurrentSession[sessionId]
-      delete hermesSessions[sessionId]
-      return { sessions, kanban: { tasks, taskOrder }, viewModes, kanbanLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions, manualPaneTitles, capturesByPane, paneCompletionHighlights, paneReviewMarkers, settings }
-    })
+    set((state) => stateWithoutSession(state, sessionId, sessions))
     persistSettings(get().settings)
     persistCurrentKanban(get())
     const currentSessionId = get().activeSessionId
@@ -752,6 +856,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }))
   },
   reorderWorkspaces: (orderedIds: string[]) => {
+    if (get().settings.workspaceSortMode !== 'manual') return
     get().updateSettings({ workspaceOrder: orderedIds })
   },
   createWorkspaceGroup: (name: string, rootFolder?: string | null) => {
@@ -957,8 +1062,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if (session?.workspaceFolder) {
         try {
           if (options?.isolated) {
-            const worktree = await invoke<WorktreeInfo>('git_worktree_create', { workspaceFolder: session.workspaceFolder, taskId })
-            await get().updateTask(taskId, { worktreePath: worktree.worktreePath, baselineRef: 'HEAD' })
+            const worktreePath = await createTaskWorktree(get, session, taskId)
+            await get().updateTask(taskId, { worktreePath, baselineRef: 'HEAD' })
           } else {
             const baselineRef = await invoke<string>('git_snapshot_baseline', { workspaceFolder: session.workspaceFolder })
             await get().updateTask(taskId, { baselineRef })
@@ -992,8 +1097,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (session?.workspaceFolder) {
       try {
         if (options?.isolated) {
-          const worktree = await invoke<WorktreeInfo>('git_worktree_create', { workspaceFolder: session.workspaceFolder, taskId })
-          await get().updateTask(taskId, { worktreePath: worktree.worktreePath, baselineRef: 'HEAD' })
+          const worktreePath = await createTaskWorktree(get, session, taskId)
+          await get().updateTask(taskId, { worktreePath, baselineRef: 'HEAD' })
         } else {
           const baselineRef = await invoke<string>('git_snapshot_baseline', { workspaceFolder: session.workspaceFolder })
           await get().updateTask(taskId, { baselineRef })
@@ -1251,6 +1356,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 }))
 
 useWorkspaceStore.subscribe((state, previousState) => {
+  if (state.paneCompletionHighlights !== previousState.paneCompletionHighlights) persistPaneCompletionHighlights(state.paneCompletionHighlights)
   if (state.paneReviewMarkers !== previousState.paneReviewMarkers) persistPaneReviewMarkers(state.paneReviewMarkers)
 })
 
@@ -1330,6 +1436,73 @@ function reconcilePaneReviewMarkers(
   return Object.fromEntries(nextEntries)
 }
 
+function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions: SessionMeta[]): Partial<WorkspaceState> {
+  const deletedPaneIds = state.activeSessionId === sessionId ? Object.keys(state.panes) : []
+  const taskIds = new Set(state.kanban.taskOrder[sessionId] ?? [])
+  const tasks = { ...state.kanban.tasks }
+  for (const taskId of taskIds) delete tasks[taskId]
+  const taskOrder = { ...state.kanban.taskOrder }
+  delete taskOrder[sessionId]
+  const viewModes = { ...state.viewModes }
+  const kanbanLayouts = { ...state.kanbanLayouts }
+  const orchestratorPaneIds = { ...state.orchestratorPaneIds }
+  const selectedTaskId = { ...state.selectedTaskId }
+  const workspaceTodos = { ...state.workspaceTodos }
+  const workspaceTodoNotes = { ...state.workspaceTodoNotes }
+  const workspaceBriefs = { ...state.workspaceBriefs }
+  const hermesStatus = { ...state.hermesStatus }
+  const hermesTranscript = { ...state.hermesTranscript }
+  const hermesPermissions = { ...state.hermesPermissions }
+  const hermesUsage = { ...state.hermesUsage }
+  const hermesModels = { ...state.hermesModels }
+  const hermesPendingPrompts = { ...state.hermesPendingPrompts }
+  const hermesCurrentSession = { ...state.hermesCurrentSession }
+  const hermesSessions = { ...state.hermesSessions }
+  const workspaceProfileIds = { ...state.settings.workspaceProfileIds }
+  const workspaceDetails = { ...state.settings.workspaceDetails }
+  const workspaceGroupIds = { ...state.settings.workspaceGroupIds }
+  delete workspaceProfileIds[sessionId]
+  delete workspaceDetails[sessionId]
+  delete workspaceGroupIds[sessionId]
+  for (const collection of [viewModes, kanbanLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions]) {
+    delete collection[sessionId]
+  }
+  return {
+    sessions,
+    activeSessionId: state.activeSessionId === sessionId ? undefined : state.activeSessionId,
+    panes: state.activeSessionId === sessionId ? {} : state.panes,
+    activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
+    kanban: { tasks, taskOrder },
+    viewModes,
+    kanbanLayouts,
+    orchestratorPaneIds,
+    selectedTaskId,
+    workspaceTodos,
+    workspaceTodoNotes,
+    workspaceBriefs,
+    hermesStatus,
+    hermesTranscript,
+    hermesPermissions,
+    hermesUsage,
+    hermesModels,
+    hermesPendingPrompts,
+    hermesCurrentSession,
+    hermesSessions,
+    manualPaneTitles: withoutPaneKeys(state.manualPaneTitles, deletedPaneIds),
+    capturesByPane: withoutPaneKeys(state.capturesByPane, deletedPaneIds),
+    paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
+    paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
+    settings: {
+      ...state.settings,
+      paneRoles: withoutPaneKeys(state.settings.paneRoles, deletedPaneIds),
+      workspaceProfileIds,
+      workspaceDetails,
+      workspaceGroupIds,
+      workspaceOrder: state.settings.workspaceOrder.filter((id) => id !== sessionId),
+    },
+  }
+}
+
 function withoutSessionReviewMarkers(
   markers: Record<string, PaneReviewMarker>,
   sessionId: string,
@@ -1337,6 +1510,39 @@ function withoutSessionReviewMarkers(
   const nextEntries = Object.entries(markers).filter(([, marker]) => marker.sessionId !== sessionId)
   if (nextEntries.length === Object.keys(markers).length) return markers
   return Object.fromEntries(nextEntries)
+}
+
+export function loadPaneCompletionHighlights(storage?: Pick<Storage, 'getItem'> | null): Record<string, PaneCompletionHighlight> {
+  const target = storage === undefined ? (typeof window === 'undefined' ? null : window.localStorage) : storage
+  if (!target) return {}
+  try {
+    const parsed = JSON.parse(target.getItem(paneCompletionHighlightsStorageKey) ?? '{}') as unknown
+    if (!isRecord(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, PaneCompletionHighlight] => {
+      const [paneId, highlight] = entry
+      return paneId.length > 0
+        && isRecord(highlight)
+        && typeof highlight.completedAt === 'number'
+        && Number.isFinite(highlight.completedAt)
+        && highlight.completedAt > 0
+        && (highlight.source === 'agent-response' || highlight.source === 'task-done' || highlight.source === 'agent-hook')
+        && typeof highlight.sessionId === 'string'
+        && highlight.sessionId.length > 0
+    }))
+  } catch {
+    return {}
+  }
+}
+
+export function persistPaneCompletionHighlights(highlights: Record<string, PaneCompletionHighlight>, storage?: Pick<Storage, 'setItem' | 'removeItem'> | null): void {
+  const target = storage === undefined ? (typeof window === 'undefined' ? null : window.localStorage) : storage
+  if (!target) return
+  try {
+    if (Object.keys(highlights).length === 0) target.removeItem(paneCompletionHighlightsStorageKey)
+    else target.setItem(paneCompletionHighlightsStorageKey, JSON.stringify(highlights))
+  } catch {
+    // Completion acknowledgements are durable convenience state; storage failures must not block terminal interaction.
+  }
 }
 
 export function loadPaneReviewMarkers(storage?: Pick<Storage, 'getItem'> | null): Record<string, PaneReviewMarker> {
@@ -1414,6 +1620,292 @@ function keepLastEnvValue(env: [string, string][]): [string, string][] {
 function normalizeWorkspaceFolder(folder: string | null | undefined): string | null {
   const trimmed = folder?.trim()
   return trimmed ? trimmed : null
+}
+
+export type WorktreeMigrationResult = { projections: WorktreeProjection[]; migrated: boolean }
+
+// Sends the raw pre-registry `workspaceWorktrees` map to the daemon exactly
+// once. `migrated` is true only when every repository reconciled, including
+// those carrying legacy rows; otherwise the caller keeps the marker at 0 and
+// the next launch replays the identical payload.
+async function reconcileWorkspaceWorktrees(
+  sessions: SessionMeta[],
+  migrationVersion: number,
+): Promise<WorktreeMigrationResult> {
+  const legacy = migrationVersion >= 1 ? {} : readLegacyWorkspaceWorktrees()
+  const legacyByRepository = legacyRowsByRepository(legacy)
+  const repositories = new Set<string>(legacyByRepository.keys())
+  for (const session of sessions) {
+    const folder = normalizeWorkspaceFolder(session.workspaceFolder)
+    if (folder) repositories.add(folder)
+  }
+  const byId = new Map<string, WorktreeProjection>()
+  let migrated = true
+  for (const repositoryPath of repositories) {
+    const legacyRows = legacyByRepository.get(repositoryPath) ?? []
+    try {
+      const projections = await reconcileWorktrees({ repositoryPath, legacyRows })
+      for (const projection of projections) byId.set(projection.id, projection)
+    } catch (error) {
+      migrated = false
+      // A repository that cannot be reconciled at all (deleted folder, not a
+      // repository any more) must not block startup, but it also must not let
+      // the migration marker claim success.
+      if (legacyRows.length > 0) {
+        throw new Error(`Legacy worktree migration failed for ${repositoryPath}: ${String(error)}`, { cause: error })
+      }
+    }
+  }
+  return { projections: [...byId.values()], migrated }
+}
+
+function readLegacyWorkspaceWorktrees(): Record<string, LegacyWorkspaceWorktree> {
+  try {
+    const raw = window.localStorage.getItem('vibelink:settings')
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {}
+    return normalizeLegacyWorkspaceWorktrees(parsed.workspaceWorktrees)
+  } catch {
+    return {}
+  }
+}
+
+// Drops the legacy key from persisted settings once the registry owns the
+// relations. Runs only after a fully successful reconcile.
+function forgetLegacyWorkspaceWorktrees(): void {
+  if (typeof window === 'undefined') return
+  try {
+    const raw = window.localStorage.getItem('vibelink:settings')
+    if (!raw) return
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (!('workspaceWorktrees' in parsed)) return
+    delete parsed.workspaceWorktrees
+    window.localStorage.setItem('vibelink:settings', JSON.stringify(parsed))
+  } catch {
+    // Losing the cleanup is harmless: the marker already suppresses re-migration.
+  }
+}
+
+function projectionState(projections: WorktreeProjection[]): Pick<WorkspaceState, 'worktreeProjections' | 'worktreesById' | 'worktreeIdsBySessionId'> {
+  return { worktreeProjections: projections, ...indexWorktrees(projections) }
+}
+
+function sameRepository(projection: WorktreeProjection, repositoryPath: string): boolean {
+  const candidate = projection.record?.repositoryPath
+  if (!candidate) return false
+  const normalize = (path: string) => path.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return normalize(candidate) === normalize(repositoryPath)
+}
+
+function requireRecord(state: WorkspaceState, worktreeId: string): WorktreeRecord {
+  const record = state.worktreesById[worktreeId]?.record
+  if (!record) throw new Error(`Worktree "${worktreeId}" has no managed registry record.`)
+  return record
+}
+
+// Removal consent is exact. Hard blockers can never be acknowledged, and a
+// forceable blocker the caller did not acknowledge — because it appeared after
+// the confirmation dialog closed — refuses the removal instead of inheriting
+// consent that was given for a different state.
+function assertRemovalAcknowledged(
+  preflight: WorktreeRemovalPreflight,
+  acknowledgedBlockers: WorktreeBlockerKind[],
+): void {
+  const hard = preflight.blockers.find((blocker) => blocker.hard)
+  if (hard) throw new Error(hard.message)
+  const acknowledged = new Set(acknowledgedBlockers)
+  const unacknowledged = preflight.blockers.filter((blocker) => !acknowledged.has(blocker.kind))
+  if (unacknowledged.length === 0) return
+  throw new Error(`Worktree removal was refused because these blockers were not acknowledged: ${unacknowledged.map((blocker) => blocker.message).join(' ')}`)
+}
+
+// Every GUI-owned resource keyed by a workspace session. deleteSession and the
+// externally-removed-session path both funnel through here so no caller can
+// forget one of the maps.
+async function releaseSessionResources(sessionId: string, workspaceFolder: string | null | undefined): Promise<void> {
+  if (workspaceFolder) disposeEditorDocumentStore(sessionId, workspaceFolder)
+  useGitStore.getState().clearSession(sessionId)
+  await invoke('browser_cleanup_workspace', { workspaceId: sessionId })
+  await invoke('agent_workspace_cleanup', { sessionId })
+}
+
+// Isolated task assignment creates a real registry-owned worktree rather than a
+// path-only checkout, so the task's worktree participates in the same identity,
+// preflight, and removal lifecycle as every other worktree.
+async function createTaskWorktree(get: StoreGet, session: SessionMeta, taskId: string): Promise<string> {
+  const repositoryPath = normalizeWorkspaceFolder(session.workspaceFolder)
+  if (!repositoryPath) throw new Error('An isolated task needs a repository workspace folder.')
+  const result = await createWorktree({
+    operationId: crypto.randomUUID(),
+    repositoryPath,
+    parentSessionId: session.id,
+    parentWorktreeId: worktreeBySession(get().worktreeProjections, session.id)?.record?.id ?? null,
+    name: `task-${taskId}`,
+    startRef: 'HEAD',
+    branch: null,
+    storage: get().settings.worktreeStorage,
+    fetch: false,
+    setupPolicy: 'inherit',
+    sparsePreset: null,
+    linkedFiles: [],
+    profileId: null,
+    initialAgent: null,
+    initialPrompt: null,
+    origin: 'automation',
+  })
+  await Promise.all([get().refreshSessions(), get().refreshWorktrees()])
+  return result.worktree.worktreePath
+}
+
+const settledCreationStages = new Set<PendingWorktreeCreation['stage']>(['complete', 'failed', 'cancelled'])
+
+function isSettledStage(stage: PendingWorktreeCreation['stage']): boolean {
+  return settledCreationStages.has(stage)
+}
+
+function buildWorktreeCreateRequest(state: WorkspaceState, input: CreateWorkspaceWorktreeInput): WorktreeCreateRequest {
+  const parent = state.sessions.find((session) => session.id === input.parentSessionId)
+  const repositoryPath = normalizeWorkspaceFolder(parent?.workspaceFolder)
+  if (!parent || !repositoryPath) throw new Error('A repository workspace folder is required to create a worktree.')
+  const name = input.name.trim()
+  const startRef = input.startRef.trim()
+  const branch = input.branch.trim()
+  if (!name || !startRef) throw new Error('Worktree name and start ref are required.')
+  const parentWorktree = worktreeBySession(state.worktreeProjections, parent.id)?.record ?? null
+  return {
+    operationId: crypto.randomUUID(),
+    repositoryPath,
+    parentSessionId: parent.id,
+    parentWorktreeId: parentWorktree?.id ?? null,
+    name,
+    startRef,
+    branch: branch || null,
+    storage: state.settings.worktreeStorage,
+    fetch: input.fetch ?? false,
+    setupPolicy: input.setupPolicy ?? 'inherit',
+    sparsePreset: input.sparsePreset ?? null,
+    linkedFiles: input.linkedFiles ?? [],
+    profileId: input.profileId || null,
+    initialAgent: input.initialAgent ?? null,
+    initialPrompt: input.initialPrompt ?? null,
+    origin: 'manual',
+  }
+}
+
+function patchPendingCreation(
+  operationId: string,
+  patch: Partial<PendingWorktreeCreation>,
+): (state: WorkspaceState) => Partial<WorkspaceState> {
+  return (state) => {
+    const pending = state.pendingWorktreeCreations[operationId]
+    if (!pending) return {}
+    return {
+      pendingWorktreeCreations: {
+        ...state.pendingWorktreeCreations,
+        [operationId]: { ...pending, ...patch, updatedAt: Date.now() },
+      },
+    }
+  }
+}
+
+function withoutPendingCreation(operationId: string): (state: WorkspaceState) => Partial<WorkspaceState> {
+  return (state) => {
+    if (!(operationId in state.pendingWorktreeCreations)) return {}
+    const pendingWorktreeCreations = { ...state.pendingWorktreeCreations }
+    delete pendingWorktreeCreations[operationId]
+    return { pendingWorktreeCreations }
+  }
+}
+
+type StoreSet = (partial: Partial<WorkspaceState> | ((state: WorkspaceState) => Partial<WorkspaceState>)) => void
+type StoreGet = () => WorkspaceState
+
+// Runs a create operation behind a pending row. The row is what the sidebar and
+// content panel render, so it exists before the first daemon round-trip and
+// survives failure/cancellation until the user retries or dismisses it.
+async function runWorktreeCreation(
+  set: StoreSet,
+  get: StoreGet,
+  request: WorktreeCreateRequest,
+  profileId?: string | null,
+): Promise<SessionMeta> {
+  const now = Date.now()
+  const pending: PendingWorktreeCreation = {
+    operationId: request.operationId,
+    parentSessionId: request.parentSessionId,
+    repositoryPath: request.repositoryPath,
+    name: request.name,
+    branch: request.branch ?? '',
+    startRef: request.startRef,
+    stage: 'validating',
+    startedAt: now,
+    updatedAt: now,
+    cancelRequested: false,
+    error: null,
+    sessionId: null,
+    request,
+  }
+  set((state) => ({ pendingWorktreeCreations: { ...state.pendingWorktreeCreations, [request.operationId]: pending } }))
+  // Where the user was when provisioning began. Completion only steals focus if
+  // they are still on the pending surface or its parent repository.
+  const focusOrigin = get().activeSessionId
+  let result: WorktreeCreateResult
+  try {
+    set(patchPendingCreation(request.operationId, { stage: 'creating' }))
+    result = await createWorktree(request)
+  } catch (caught) {
+    const cancelled = get().pendingWorktreeCreations[request.operationId]?.cancelRequested ?? false
+    set(patchPendingCreation(request.operationId, {
+      stage: cancelled ? 'cancelled' : 'failed',
+      error: String(caught),
+    }))
+    throw caught
+  }
+  set(patchPendingCreation(request.operationId, { stage: 'binding', sessionId: result.sessionId }))
+  await Promise.all([get().refreshSessions(), get().refreshWorktrees()])
+  const initialAgentProfile = request.initialAgent
+    ? get().settings.profiles.find((profile) => profile.id === request.initialAgent)?.id
+    : null
+  const launchProfileId = initialAgentProfile ?? profileId
+  if (launchProfileId) {
+    get().updateSettings({
+      workspaceProfileIds: { ...get().settings.workspaceProfileIds, [result.sessionId]: launchProfileId },
+    })
+  }
+  const settings = get().settings
+  if (settings.workspaceSortMode === 'manual') {
+    const workspaceOrder = orderSessions(get().sessions, settings.workspaceOrder)
+      .map((session) => session.id)
+      .filter((sessionId) => sessionId !== result.sessionId)
+    const siblingIds = new Set(get().worktreeProjections.flatMap((projection) => projection.record?.parentSessionId === request.parentSessionId && projection.record.sessionId ? [projection.record.sessionId] : []))
+    let insertAt = workspaceOrder.indexOf(request.parentSessionId)
+    if (insertAt < 0) insertAt = workspaceOrder.length - 1
+    while (insertAt + 1 < workspaceOrder.length && siblingIds.has(workspaceOrder[insertAt + 1])) insertAt += 1
+    workspaceOrder.splice(insertAt + 1, 0, result.sessionId)
+    get().updateSettings({ workspaceOrder })
+  }
+  const created = get().sessions.find((session) => session.id === result.sessionId)
+  if (!created) throw new Error('Created worktree session was not returned by the daemon.')
+  set(patchPendingCreation(request.operationId, { stage: 'complete' }))
+  // Background completion: the user moved to another workspace while the
+  // checkout was provisioning, so the finished worktree stays available in the
+  // sidebar instead of yanking them out of what they are doing.
+  const stillWatching = get().activeSessionId === focusOrigin
+    && (focusOrigin === undefined || focusOrigin === request.parentSessionId)
+  if (stillWatching) {
+    set(withoutPendingCreation(request.operationId))
+    const attached = await get().attachSession(result.sessionId)
+    const prompt = request.initialPrompt?.trim()
+    if (prompt) {
+      const paneId = get().activeSessionId === result.sessionId
+        ? get().activePaneId ?? Object.values(get().panes)[0]?.id
+        : attached.panes[0]?.id
+      if (!paneId) throw new Error('The initial agent pane was not created.')
+      await sendToPane(result.sessionId, paneId, prompt, false)
+      await delay(120)
+      await submitAgentPrompt(result.sessionId, paneId)
+    }
+  }
+  return created
 }
 
 function loadSettings(): Settings {

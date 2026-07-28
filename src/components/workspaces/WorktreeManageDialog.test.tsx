@@ -2,7 +2,8 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import type { SessionMeta, WorktreeEntry } from '../../ipc/types'
+import type { SessionMeta } from '../../ipc/types'
+import type { WorktreeProjection, WorktreeReconcileState, WorktreeRecord } from '../../ipc/worktrees'
 
 const { invoke, choiceDialog, confirmDialog, promptDialog } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -13,9 +14,11 @@ const { invoke, choiceDialog, confirmDialog, promptDialog } = vi.hoisted(() => (
 
 const mocks = vi.hoisted(() => ({
   state: {
-    settings: { workspaceWorktrees: {} as Record<string, { worktreePath: string }> },
+    reconcileRepositoryWorktrees: vi.fn(),
+    importExternalWorktree: vi.fn(),
+    preflightWorktreeRemoval: vi.fn(),
+    removeWorktreeById: vi.fn(),
     moveWorktreeSession: vi.fn(async () => undefined),
-    removeWorktreeSession: vi.fn(async () => undefined),
   },
 }))
 
@@ -35,38 +38,102 @@ const sourceSession: SessionMeta = {
   workspaceFolder: 'E:/repos/project',
 }
 
-const entries: WorktreeEntry[] = [
-  {
-    worktreePath: 'E:/repos/project',
-    branch: 'main',
+function record(overrides: Partial<WorktreeRecord> & Pick<WorktreeRecord, 'id' | 'worktreePath' | 'branch'>): WorktreeRecord {
+  return {
+    instanceId: `instance-${overrides.id}`,
+    repositoryId: 'repository-1',
+    repositoryPath: 'E:/repos/project',
     head: 'a'.repeat(40),
-    isMain: true,
+    baseRef: 'HEAD',
+    sessionId: null,
+    parentSessionId: 'repo-session',
+    parentWorktreeId: null,
+    parentInstanceId: null,
+    origin: 'manual',
+    lifecycle: 'active',
     locked: false,
+    lockReason: null,
     prunable: false,
+    prunableReason: null,
     dirty: false,
+    untracked: false,
+    hasConflicts: false,
+    ahead: 0,
+    behind: 0,
     exists: true,
-  },
-  {
-    worktreePath: 'E:/Worktrees/Feature',
-    branch: 'feature/login',
-    head: 'b'.repeat(40),
-    isMain: false,
-    locked: false,
-    prunable: false,
-    dirty: true,
-    exists: true,
-  },
-  {
-    worktreePath: 'E:/Worktrees/Missing',
-    branch: '',
-    head: 'c'.repeat(40),
-    isMain: false,
-    locked: true,
-    prunable: true,
-    dirty: false,
-    exists: false,
-  },
-]
+    setupPolicy: 'inherit',
+    sparsePreset: null,
+    linkedFiles: [],
+    initialAgent: null,
+    initialPrompt: null,
+    comment: null,
+    reviewTarget: null,
+    createdAt: 1,
+    updatedAt: 1,
+    lastActivityAt: 1,
+    ...overrides,
+  }
+}
+
+function projection(
+  id: string,
+  state: WorktreeReconcileState,
+  options: { record?: WorktreeRecord | null; native?: Partial<WorktreeProjection['native']> | null } = {},
+): WorktreeProjection {
+  return {
+    id,
+    instanceId: `instance-${id}`,
+    state,
+    parentWorktreeId: null,
+    childWorktreeIds: [],
+    record: options.record ?? null,
+    native: options.native === null ? null : {
+      worktreePath: `E:/Worktrees/${id}`,
+      normalizedPath: `e:/worktrees/${id}`,
+      gitDirIdentity: `git-${id}`,
+      head: 'a'.repeat(40),
+      branch: `feature/${id}`,
+      detached: false,
+      bare: false,
+      locked: false,
+      lockReason: null,
+      prunable: false,
+      prunableReason: null,
+      exists: true,
+      isMain: false,
+      dirty: false,
+      untracked: false,
+      hasConflicts: false,
+      ahead: 0,
+      behind: 0,
+      ...options.native,
+    } as WorktreeProjection['native'],
+  }
+}
+
+const mainRow = projection('main', 'managed', {
+  record: record({ id: 'main', worktreePath: 'E:/repos/project', branch: 'main', sessionId: 'repo-session' }),
+  native: { worktreePath: 'E:/repos/project', branch: 'main', isMain: true },
+})
+const featureRow = projection('feature', 'managed', {
+  record: record({ id: 'feature', worktreePath: 'E:/Worktrees/feature', branch: 'feature/login', sessionId: 'feature-session', dirty: true }),
+  native: { worktreePath: 'E:/Worktrees/feature', branch: 'feature/login', dirty: true },
+})
+const unboundRow = projection('unbound', 'managed', {
+  record: record({ id: 'unbound', worktreePath: 'E:/Worktrees/unbound', branch: 'feature/unbound', sessionId: null }),
+  native: { worktreePath: 'E:/Worktrees/unbound', branch: 'feature/unbound' },
+})
+const externalRow = projection('external', 'external', {
+  native: { worktreePath: 'E:/Worktrees/external', branch: 'feature/external' },
+})
+const missingRow = projection('missing', 'missing', {
+  record: record({ id: 'missing', worktreePath: 'E:/Worktrees/missing', branch: 'feature/missing', exists: false, lifecycle: 'missing' }),
+  native: null,
+})
+const conflictedRow = projection('conflicted', 'conflicted', {
+  record: record({ id: 'conflicted', worktreePath: 'E:/Worktrees/conflicted', branch: 'feature/conflicted' }),
+  native: { worktreePath: 'E:/Worktrees/conflicted', branch: 'feature/conflicted', locked: true, lockReason: 'in use by another tool' },
+})
 
 function renderDialog() {
   return render(<WorktreeManageDialog sourceSession={sourceSession} onClose={vi.fn()} />)
@@ -74,13 +141,27 @@ function renderDialog() {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.state.settings.workspaceWorktrees = {
-    'feature-session': { worktreePath: 'e:\\worktrees\\feature\\' },
-  }
-  invoke.mockImplementation(async (command: string) => {
-    if (command === 'git_worktree_list') return entries
-    return undefined
+  mocks.state.reconcileRepositoryWorktrees.mockResolvedValue([mainRow, featureRow, externalRow, missingRow, conflictedRow])
+  mocks.state.importExternalWorktree.mockResolvedValue(projection('external', 'managed', {
+    record: record({ id: 'external', worktreePath: 'E:/Worktrees/external', branch: 'feature/external' }),
+  }))
+  mocks.state.preflightWorktreeRemoval.mockResolvedValue({
+    worktreeId: 'feature',
+    instanceId: 'instance-feature',
+    repositoryPath: 'E:/repos/project',
+    worktreePath: 'E:/Worktrees/feature',
+    branch: 'feature/login',
+    blockers: [],
+    warnings: [],
   })
+  mocks.state.removeWorktreeById.mockResolvedValue({
+    checkoutRemoved: true,
+    branchDeleted: true,
+    branchPreservedReason: null,
+    sessionRemoved: true,
+    metadataRemoved: true,
+  })
+  invoke.mockResolvedValue(undefined)
   choiceDialog.mockResolvedValue(null)
   confirmDialog.mockResolvedValue(false)
   promptDialog.mockResolvedValue(null)
@@ -89,18 +170,61 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('WorktreeManageDialog', () => {
-  test('lists worktrees with paths and status badges', async () => {
+  test('renders every reconcile state with its status and lock recovery instruction', async () => {
     renderDialog()
 
     const dialog = screen.getByRole('dialog', { name: 'Manage worktrees' })
     expect(await within(dialog).findByText('feature/login')).toBeInTheDocument()
-    expect(within(dialog).getAllByText('main')).toHaveLength(2)
+    expect(mocks.state.reconcileRepositoryWorktrees).toHaveBeenCalledWith('E:/repos/project')
+    for (const state of ['managed', 'external', 'missing', 'conflicted']) {
+      expect(within(dialog).getAllByText(state).length).toBeGreaterThan(0)
+    }
     expect(within(dialog).getByText('dirty')).toBeInTheDocument()
-    expect(within(dialog).getByText('locked')).toBeInTheDocument()
-    expect(within(dialog).getByText('prunable')).toBeInTheDocument()
-    expect(within(dialog).getByText('missing')).toBeInTheDocument()
-    expect(within(dialog).getByText('E:/Worktrees/Feature')).toHaveAttribute('title', 'E:/Worktrees/Feature')
-    expect(invoke).toHaveBeenCalledWith('git_worktree_list', { workspaceFolder: 'E:/repos/project' })
+    expect(within(dialog).getByText(/git worktree unlock/)).toBeInTheDocument()
+    expect(within(dialog).getByText('E:/Worktrees/feature')).toHaveAttribute('title', 'E:/Worktrees/feature')
+  })
+
+  test('imports an external checkout only through the explicit import action', async () => {
+    renderDialog()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Import feature/external into VibeLink' }))
+
+    await waitFor(() => expect(mocks.state.importExternalWorktree).toHaveBeenCalledWith({
+      repositoryPath: 'E:/repos/project',
+      worktreePath: 'E:/Worktrees/external',
+      parentSessionId: 'repo-session',
+    }))
+  })
+
+  test('retries a managed import whose session binding was interrupted', async () => {
+    mocks.state.reconcileRepositoryWorktrees.mockResolvedValue([unboundRow])
+    mocks.state.importExternalWorktree.mockResolvedValue(projection('unbound', 'managed', {
+      record: record({ id: 'unbound', worktreePath: 'E:/Worktrees/unbound', branch: 'feature/unbound', sessionId: 'session-unbound' }),
+    }))
+    renderDialog()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Bind feature/unbound to a VibeLink workspace' }))
+
+    await waitFor(() => expect(mocks.state.importExternalWorktree).toHaveBeenCalledWith({
+      repositoryPath: 'E:/repos/project',
+      worktreePath: 'E:/Worktrees/unbound',
+      parentSessionId: 'repo-session',
+    }))
+  })
+
+  test('refuses to remove an external checkout that was never imported', async () => {
+    renderDialog()
+
+    const externalRemove = await screen.findByRole('button', { name: 'Remove feature/external worktree' })
+    expect(externalRemove).toBeDisabled()
+    expect(mocks.state.removeWorktreeById).not.toHaveBeenCalled()
+  })
+
+  test('refuses destructive actions on a conflicted checkout', async () => {
+    renderDialog()
+
+    expect(await screen.findByRole('button', { name: 'Remove feature/conflicted worktree' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Move feature/conflicted worktree' })).toBeDisabled()
   })
 
   test('reveals an existing checkout in File Explorer', async () => {
@@ -108,54 +232,117 @@ describe('WorktreeManageDialog', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Reveal feature/login in File Explorer' }))
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('reveal_path', { path: 'E:/Worktrees/Feature' }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('reveal_path', { path: 'E:/Worktrees/feature' }))
   })
 
-  test('moves a mapped VibeLink worktree and refreshes the list', async () => {
+  test('moves a session-bound worktree and refreshes the list', async () => {
     promptDialog.mockResolvedValue('F:/Moved/Feature')
     renderDialog()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Move feature/login worktree' }))
 
     await waitFor(() => expect(mocks.state.moveWorktreeSession).toHaveBeenCalledWith('feature-session', 'F:/Moved/Feature'))
-    expect(promptDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultValue: 'E:/Worktrees/Feature' }))
-    expect(invoke.mock.calls.filter(([command]) => command === 'git_worktree_list')).toHaveLength(2)
-  })
-
-  test('confirms the source and current branches before merging', async () => {
-    confirmDialog.mockResolvedValue(true)
-    invoke.mockImplementation(async (command: string) => {
-      if (command === 'git_worktree_list') return entries
-      if (command === 'git_branches') return [{ name: 'main', isHead: true }]
-      return undefined
-    })
-    renderDialog()
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Merge feature/login worktree' }))
-
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_merge', { workspaceFolder: 'E:/repos/project', refName: 'feature/login' }))
-    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringMatching(/feature\/login.*main/),
-    }))
+    expect(promptDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultValue: 'E:/Worktrees/feature' }))
+    await waitFor(() => expect(mocks.state.reconcileRepositoryWorktrees).toHaveBeenCalledTimes(2))
   })
 
   test.each([
     ['checkout', false],
     ['checkout-and-branch', true],
-  ] as const)('maps the %s remove choice to deleteBranch=%s', async (choice, deleteBranch) => {
+  ] as const)('maps the %s remove choice to deleteBranch=%s with no acknowledged blockers', async (choice, deleteBranch) => {
     choiceDialog.mockResolvedValue(choice)
     renderDialog()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Remove feature/login worktree' }))
 
-    await waitFor(() => expect(mocks.state.removeWorktreeSession).toHaveBeenCalledWith('feature-session', { deleteBranch, force: true }))
-    expect(choiceDialog).toHaveBeenCalledWith(expect.objectContaining({
-      message: expect.stringContaining('Uncommitted changes'),
-      choices: expect.arrayContaining([
-        expect.objectContaining({ id: 'checkout' }),
-        expect.objectContaining({ id: 'checkout-and-branch' }),
-      ]),
+    await waitFor(() => expect(mocks.state.removeWorktreeById).toHaveBeenCalledWith('feature', { deleteBranch, acknowledgedBlockers: [] }))
+    expect(confirmDialog).not.toHaveBeenCalled()
+  })
+
+  test('reports a preserved branch instead of retrying a forced delete', async () => {
+    choiceDialog.mockResolvedValue('checkout-and-branch')
+    mocks.state.removeWorktreeById.mockResolvedValue({
+      checkoutRemoved: true,
+      branchDeleted: false,
+      branchPreservedReason: 'branch has unmerged commits',
+      sessionRemoved: true,
+      metadataRemoved: true,
+    })
+    renderDialog()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove feature/login worktree' }))
+
+    // A preserved branch is a successful outcome the user must read, not an
+    // error, so it is announced politely rather than assertively.
+    expect(await screen.findByRole('status')).toHaveTextContent('branch has unmerged commits')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(mocks.state.removeWorktreeById).toHaveBeenCalledTimes(1)
+  })
+
+  test('refuses removal on a hard blocker without asking for a branch policy', async () => {
+    mocks.state.preflightWorktreeRemoval.mockResolvedValue({
+      worktreeId: 'feature',
+      instanceId: 'instance-feature',
+      repositoryPath: 'E:/repos/project',
+      worktreePath: 'E:/Worktrees/feature',
+      branch: 'feature/login',
+      blockers: [{ kind: 'identity_mismatch', hard: true, message: 'The checkout identity changed.' }],
+      warnings: [],
+    })
+    renderDialog()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove feature/login worktree' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The checkout identity changed.')
+    expect(choiceDialog).not.toHaveBeenCalled()
+    expect(mocks.state.removeWorktreeById).not.toHaveBeenCalled()
+  })
+
+  test('acknowledges exactly the blockers the user confirmed', async () => {
+    choiceDialog.mockResolvedValue('checkout')
+    confirmDialog.mockResolvedValue(true)
+    mocks.state.preflightWorktreeRemoval.mockResolvedValue({
+      worktreeId: 'feature',
+      instanceId: 'instance-feature',
+      repositoryPath: 'E:/repos/project',
+      worktreePath: 'E:/Worktrees/feature',
+      branch: 'feature/login',
+      blockers: [
+        { kind: 'dirty', hard: false, message: 'Uncommitted changes are present.' },
+        { kind: 'live_panes', hard: false, message: 'Terminal panes are live.' },
+      ],
+      warnings: [],
+    })
+    renderDialog()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove feature/login worktree' }))
+
+    await waitFor(() => expect(mocks.state.removeWorktreeById).toHaveBeenCalledWith('feature', { deleteBranch: false, acknowledgedBlockers: ['dirty', 'live_panes'] }))
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('Uncommitted changes are present.'),
     }))
-    expect(invoke).not.toHaveBeenCalledWith('git_worktree_remove', expect.anything())
+  })
+
+  test('refuses removal when a new blocker appears after confirmation', async () => {
+    choiceDialog.mockResolvedValue('checkout')
+    const clean = {
+      worktreeId: 'feature',
+      instanceId: 'instance-feature',
+      repositoryPath: 'E:/repos/project',
+      worktreePath: 'E:/Worktrees/feature',
+      branch: 'feature/login',
+      blockers: [],
+      warnings: [],
+    }
+    mocks.state.preflightWorktreeRemoval
+      .mockResolvedValueOnce(clean)
+      .mockResolvedValueOnce(clean)
+      .mockResolvedValueOnce({ ...clean, blockers: [{ kind: 'dirty', hard: false, message: 'Uncommitted changes are present.' }] })
+    renderDialog()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove feature/login worktree' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('changed while you were confirming')
+    expect(mocks.state.removeWorktreeById).not.toHaveBeenCalled()
   })
 })

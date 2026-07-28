@@ -2,14 +2,14 @@ use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
 use crate::orchestration::PaneProjectionState;
 use crate::protocol::{
-    DaemonToClient, DesktopSelection, PaneCommandOrigin, PaneMeta, RemoteConnectionCleanupRequest,
-    RemotePaneLease, RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseClaimRequest,
-    RemotePaneLeaseEvent, RemotePaneLeaseEventKind, RemotePaneLeaseEventReason,
-    RemotePaneLeaseReleaseOutcome, RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest,
-    RemotePaneLeaseRestoration, RemotePaneLeaseRestorationStatus, RemotePaneLeaseResult,
-    RemotePaneLeaseStaleReason, RemotePaneLeaseStatusRequest, RemoteWorkspaceProjection,
-    RemoteWorkspaceProjectionPane, RemoteWorkspaceProjectionWorkspace, SessionMeta,
-    TerminalSnapshot, REMOTE_PANE_LEASE_TTL_MS,
+    AttentionPane, AttentionPaneState, AttentionSnapshotData, DaemonToClient, DesktopSelection,
+    PaneCommandOrigin, PaneMeta, RemoteConnectionCleanupRequest, RemotePaneLease,
+    RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseClaimRequest, RemotePaneLeaseEvent,
+    RemotePaneLeaseEventKind, RemotePaneLeaseEventReason, RemotePaneLeaseReleaseOutcome,
+    RemotePaneLeaseReleaseRequest, RemotePaneLeaseRenewRequest, RemotePaneLeaseRestoration,
+    RemotePaneLeaseRestorationStatus, RemotePaneLeaseResult, RemotePaneLeaseStaleReason,
+    RemotePaneLeaseStatusRequest, RemoteWorkspaceProjection, RemoteWorkspaceProjectionPane,
+    RemoteWorkspaceProjectionWorkspace, SessionMeta, TerminalSnapshot, REMOTE_PANE_LEASE_TTL_MS,
 };
 use crate::remote::layout_order::pane_layout_positions;
 use crossbeam_channel::Sender;
@@ -217,6 +217,69 @@ impl DaemonState {
             attached_workspace_id: Some(workspace_id.to_string()),
             panes,
         })
+    }
+
+    pub fn attention_snapshot(
+        &self,
+        pane_states: &HashMap<String, PaneProjectionState>,
+    ) -> AttentionSnapshotData {
+        let mut panes = Vec::new();
+        for session in self.sessions.values() {
+            for pane in session.panes.values() {
+                let projection = pane_states.get(&pane.id.to_string());
+                let state = projection.map_or(AttentionPaneState::Idle, |projection| {
+                    if projection.blocked {
+                        AttentionPaneState::Blocked
+                    } else {
+                        match projection.activity {
+                            crate::protocol::RemotePaneActivity::Idle => AttentionPaneState::Idle,
+                            crate::protocol::RemotePaneActivity::Running => {
+                                AttentionPaneState::Working
+                            }
+                            crate::protocol::RemotePaneActivity::Waiting => {
+                                AttentionPaneState::Waiting
+                            }
+                            crate::protocol::RemotePaneActivity::Done => AttentionPaneState::Done,
+                            crate::protocol::RemotePaneActivity::Error => AttentionPaneState::Error,
+                        }
+                    }
+                });
+                panes.push(AttentionPane {
+                    workspace_id: session.meta.id,
+                    pane_id: pane.id,
+                    state,
+                    state_updated_at: projection
+                        .map(|value| value.state_updated_at)
+                        .unwrap_or_default(),
+                    last_output_at: pane.last_output_at(),
+                    unread_count: projection
+                        .map(|value| value.unread_count)
+                        .unwrap_or_default(),
+                    interrupted: projection.is_some_and(|value| value.interrupted),
+                    source: if projection.is_some_and(|value| value.state_updated_at > 0) {
+                        "orchestration"
+                    } else {
+                        "pty"
+                    }
+                    .to_string(),
+                    alive: pane.alive,
+                    title: pane
+                        .config
+                        .title
+                        .clone()
+                        .or_else(|| pane.config.shell.clone())
+                        .unwrap_or_else(|| "Shell".to_string()),
+                });
+            }
+        }
+        panes.sort_by_key(|pane| (pane.workspace_id, pane.pane_id));
+        AttentionSnapshotData {
+            captured_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or_default(),
+            panes,
+        }
     }
 
     pub fn set_desktop_selection(
@@ -2711,6 +2774,51 @@ mod tests {
         assert!(pane.alive);
         assert_eq!(pane.title, "Build");
         assert_eq!(pane.role, "implementation");
+    }
+
+    #[test]
+    fn attention_snapshot_projects_all_workspaces_and_interruption() {
+        let mut state = DaemonState::new();
+        let first = state.create_session("First".to_string(), None);
+        let second = state.create_session("Second".to_string(), None);
+        let first_pane = Uuid::new_v4();
+        let second_pane = Uuid::new_v4();
+        state
+            .insert_pane(first.id, Pane::for_test(test_config(first_pane), true))
+            .expect("insert first pane");
+        state
+            .insert_pane(second.id, Pane::for_test(test_config(second_pane), true))
+            .expect("insert second pane");
+        let pane_states = HashMap::from([(
+            second_pane.to_string(),
+            PaneProjectionState {
+                activity: crate::protocol::RemotePaneActivity::Done,
+                unread_count: 3,
+                state_updated_at: 42,
+                blocked: false,
+                interrupted: true,
+            },
+        )]);
+
+        let snapshot = state.attention_snapshot(&pane_states);
+
+        assert_eq!(snapshot.panes.len(), 2);
+        let first_row = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.workspace_id == first.id)
+            .expect("first workspace row");
+        assert_eq!(first_row.state, AttentionPaneState::Idle);
+        assert_eq!(first_row.source, "pty");
+        let second_row = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.workspace_id == second.id)
+            .expect("second workspace row");
+        assert_eq!(second_row.state, AttentionPaneState::Done);
+        assert_eq!(second_row.unread_count, 3);
+        assert!(second_row.interrupted);
+        assert_eq!(second_row.source, "orchestration");
     }
 
     fn test_config(pane_id: Uuid) -> crate::protocol::PaneConfig {

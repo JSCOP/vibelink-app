@@ -3,7 +3,10 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
-use super::{CiCheck, CiStatus, CreatePrRequest, HostingClient, PrCreated, PrDetail, PrInfo};
+use super::{
+    CiCheck, CiStatus, CreatePrRequest, HostingClient, PrCreated, PrDetail, PrInfo,
+    ProviderMergeState,
+};
 
 pub(crate) struct GitlabClient {
     agent: ureq::Agent,
@@ -70,10 +73,27 @@ impl GitlabClient {
         )
     }
 
+    fn put(&self, url: &str, body: serde_json::Value) -> Result<String> {
+        response_body(
+            self.request("PUT", url).send_json(body),
+            "GitLab",
+            &self.token,
+        )
+    }
+
     fn ci_for_ref(&self, ref_name: &str) -> Result<CiStatus> {
         let body = self.get(&self.project_url(&format!(
             "/pipelines?ref={}&per_page=100",
             percent_encode(ref_name)
+        )))?;
+        parse_gitlab_ci(&body)
+    }
+
+    fn ci_for_merge(&self, source_branch: &str, head_sha: &str) -> Result<CiStatus> {
+        let body = self.get(&self.project_url(&format!(
+            "/pipelines?ref={}&sha={}&per_page=100",
+            percent_encode(source_branch),
+            percent_encode(head_sha),
         )))?;
         parse_gitlab_ci(&body)
     }
@@ -115,6 +135,84 @@ impl HostingClient for GitlabClient {
 
     fn ci_status(&self, ref_name: &str) -> Result<CiStatus> {
         self.ci_for_ref(ref_name)
+    }
+
+    fn merge_state(&self, number: u64) -> Result<ProviderMergeState> {
+        let body = self.get(&self.project_url(&format!(
+            "/merge_requests/{number}?include_rebase_in_progress=true"
+        )))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&body).context("parse GitLab merge request state")?;
+        let source_branch = value
+            .get("source_branch")
+            .and_then(serde_json::Value::as_str)
+            .context("GitLab merge request has no source branch")?
+            .to_string();
+        let target_branch = value
+            .get("target_branch")
+            .and_then(serde_json::Value::as_str)
+            .context("GitLab merge request has no target branch")?
+            .to_string();
+        let head_sha = value
+            .get("sha")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                value
+                    .pointer("/diff_refs/head_sha")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .context("GitLab merge request has no head SHA")?
+            .to_string();
+        let detailed = value
+            .get("detailed_merge_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let has_conflicts = value
+            .get("has_conflicts")
+            .and_then(serde_json::Value::as_bool);
+        let conflict_free = match (has_conflicts, detailed) {
+            (Some(false), "mergeable" | "ci_must_pass" | "ci_still_running" | "not_approved") => {
+                Some(true)
+            }
+            (Some(true), _) => Some(false),
+            _ => None,
+        };
+        let ci = self.ci_for_merge(&source_branch, &head_sha)?;
+        let required_checks_known = !ci.checks.is_empty();
+        Ok(ProviderMergeState {
+            number,
+            source_branch,
+            target_branch,
+            head_sha,
+            conflict_free,
+            required_checks_known,
+            required_checks: ci.checks,
+        })
+    }
+
+    fn merge_pr(&self, number: u64, expected_head_sha: &str) -> Result<(Option<String>, String)> {
+        let body = self.put(
+            &self.project_url(&format!("/merge_requests/{number}/merge")),
+            json!({ "sha": expected_head_sha, "should_remove_source_branch": false }),
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&body).context("parse GitLab merge response")?;
+        if value.get("state").and_then(serde_json::Value::as_str) != Some("merged") {
+            anyhow::bail!(
+                "GitLab refused merge: {}",
+                value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown reason")
+            );
+        }
+        Ok((
+            value
+                .get("merge_commit_sha")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            "merged".to_string(),
+        ))
     }
 }
 
@@ -218,6 +316,8 @@ struct GitlabMergeRequest {
     work_in_progress: bool,
     web_url: String,
     state: String,
+    #[serde(default)]
+    sha: Option<String>,
 }
 
 impl GitlabMergeRequest {
@@ -261,6 +361,7 @@ impl GitlabPrDetailBase {
             draft,
             url: self.merge_request.web_url,
             state: self.merge_request.state,
+            head_sha: self.merge_request.sha,
             checks,
         }
     }

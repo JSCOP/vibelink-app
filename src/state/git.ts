@@ -39,6 +39,7 @@ type GitStore = {
   setSelectedPath: (sessionId: string, selectedPath: string | null, selectedRepoRoot?: string, selectedArea?: GitDiffArea | null) => void
   setActiveTab: (sessionId: string, activeTab: GitTab, pathFilter?: string | null) => void
   clearError: (sessionId: string) => void
+  clearSession: (sessionId: string) => void
 }
 
 const refreshGeneration = new Map<string, number>()
@@ -67,6 +68,17 @@ export const emptyGitSessionState: GitSessionState = {
 
 export const useGitStore = create<GitStore>((set, get) => ({
   sessions: {},
+  clearSession: (sessionId) => {
+    for (const key of refreshGeneration.keys()) {
+      if (key.startsWith(`${sessionId}:`)) refreshGeneration.delete(key)
+    }
+    set((state) => {
+      if (!(sessionId in state.sessions)) return state
+      const sessions = { ...state.sessions }
+      delete sessions[sessionId]
+      return { sessions }
+    })
+  },
   refreshGit: async (sessionId, workspaceFolder) => get().refreshRepository(sessionId, workspaceFolder, ''),
   refreshRepository: async (sessionId, workspaceFolder, repoRoot = '') => {
     if (!workspaceFolder) {

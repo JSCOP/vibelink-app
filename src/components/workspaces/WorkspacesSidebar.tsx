@@ -1,16 +1,20 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderGit2, FolderOpen, FolderPlus, GitBranch, Pencil, Plus, Trash2 } from 'lucide-react'
-import type { SessionMeta, WorktreeEntry } from '../../ipc/types'
+import { CheckCircle2, ChevronDown, ChevronRight, Folder, FolderGit2, FolderOpen, FolderPlus, GitBranch, Loader2, Pencil, Plus, RotateCcw, Trash2, TriangleAlert, X } from 'lucide-react'
+import type { SessionMeta } from '../../ipc/types'
+import type { PendingWorktreeCreation } from '../../state/worktrees'
+import { projectionLabel, worktreePathOf } from '../../state/worktrees'
 import { paneCompletionCountsBySession, useWorkspaceStore } from '../../state/store'
-import { flattenWorkspaceRows, workspaceRootSessions, workspaceRows, type WorkspaceGroup, type WorkspaceSessionNode, type WorkspaceWorktreeNode } from '../../state/workspaceGroups'
+import { buildAttentionByWorkspace, deriveVisibleWorkspaceOrder, type WorkspaceAttention } from '../../state/worktreeAttention'
+import { flattenWorktreeNodes, workspaceRootSessions, type WorkspaceGroup, type WorkspaceSessionNode, type WorkspaceWorktreeNode } from '../../state/workspaceGroups'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
-import { choiceDialog, promptDialog } from '../appDialogStore'
+import { promptDialog } from '../appDialogStore'
 import { OpenWorkspaceItems } from './OpenWorkspaceItems'
 import { WorktreeCreateDialog } from './WorktreeCreateDialog'
 import { WorktreeManageDialog } from './WorktreeManageDialog'
+import { runWorktreeRemovalFlow } from './worktreeRemovalFlow'
 
 export type WorkspacesSidebarIntegration = {
   onCreateWorkspaceRequested?: () => void
@@ -93,6 +97,39 @@ function workspaceFolderBasename(workspaceFolder: string | null | undefined): st
   return normalized.slice(separator + 1)
 }
 
+const worktreeStageDescriptions: Record<PendingWorktreeCreation['stage'], string> = {
+  validating: 'Validating…',
+  fetching: 'Fetching remote…',
+  creating: 'Creating checkout…',
+  copying: 'Copying linked files…',
+  sparse: 'Applying sparse checkout…',
+  setup: 'Running setup…',
+  binding: 'Binding workspace…',
+  launching: 'Opening terminal…',
+  complete: 'Ready',
+  rolling_back: 'Rolling back…',
+  failed: 'Creation failed',
+  cancelled: 'Cancelled',
+}
+
+function worktreeStageLabel(pending: PendingWorktreeCreation): string {
+  if (pending.cancelRequested && pending.stage !== 'cancelled' && pending.stage !== 'failed' && pending.stage !== 'complete') {
+    return 'Cancelling…'
+  }
+  return worktreeStageDescriptions[pending.stage]
+}
+
+function workspaceAttentionDescription(attention: WorkspaceAttention | undefined): string {
+  if (!attention) return 'Idle'
+  const label = attention.state === 'blocked' ? 'Needs attention' : attention.state === 'done' ? 'Done' : attention.state === 'working' ? 'Working' : 'Idle'
+  const details = [label]
+  if (attention.unreadCount > 0) details.push(`${attention.unreadCount} unread`)
+  if (attention.completionCount > 0) details.push(`${attention.completionCount} ${attention.completionCount === 1 ? 'completion' : 'completions'}`)
+  if (attention.source) details.push(`source ${attention.source}`)
+  if (attention.cause) details.push(attention.cause)
+  return details.join(' · ')
+}
+
 
 export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse, integration }: WorkspacesSidebarProps) {
   const sessions = useWorkspaceStore((state) => state.sessions)
@@ -100,15 +137,26 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const paneCompletionHighlights = useWorkspaceStore((state) => state.paneCompletionHighlights)
   const groups = useWorkspaceStore((state) => state.settings.workspaceGroups)
   const groupIds = useWorkspaceStore((state) => state.settings.workspaceGroupIds)
-  const order = useWorkspaceStore((state) => state.settings.workspaceOrder)
+  const manualOrder = useWorkspaceStore((state) => state.settings.workspaceOrder)
   const defaultProfileId = useWorkspaceStore((state) => state.settings.defaultProfileId)
   const profiles = useWorkspaceStore((state) => state.settings.profiles)
-  const workspaceWorktrees = useWorkspaceStore((state) => state.settings.workspaceWorktrees)
+  const worktrees = useWorkspaceStore((state) => state.worktreeProjections)
+  const pendingWorktreeCreations = useWorkspaceStore((state) => state.pendingWorktreeCreations)
+  const sortMode = useWorkspaceStore((state) => state.settings.workspaceSortMode)
+  const attentionSnapshot = useWorkspaceStore((state) => state.attentionSnapshot)
+  const hermesStatus = useWorkspaceStore((state) => state.hermesStatus)
+  const hermesPermissions = useWorkspaceStore((state) => state.hermesPermissions)
+  const paneReviewMarkers = useWorkspaceStore((state) => state.paneReviewMarkers)
   const workspaceProfileIds = useWorkspaceStore((state) => state.settings.workspaceProfileIds)
   const openSession = useWorkspaceStore((state) => state.openSession)
   const createSession = useWorkspaceStore((state) => state.createSession)
   const createWorktreeSession = useWorkspaceStore((state) => state.createWorktreeSession)
   const removeWorktreeSession = useWorkspaceStore((state) => state.removeWorktreeSession)
+  const removeWorktreeById = useWorkspaceStore((state) => state.removeWorktreeById)
+  const preflightWorktreeRemoval = useWorkspaceStore((state) => state.preflightWorktreeRemoval)
+  const cancelPendingWorktreeCreation = useWorkspaceStore((state) => state.cancelPendingWorktreeCreation)
+  const retryPendingWorktreeCreation = useWorkspaceStore((state) => state.retryPendingWorktreeCreation)
+  const dismissPendingWorktreeCreation = useWorkspaceStore((state) => state.dismissPendingWorktreeCreation)
   const reorderWorkspaces = useWorkspaceStore((state) => state.reorderWorkspaces)
   const renameWorkspaceGroup = useWorkspaceStore((state) => state.renameWorkspaceGroup)
   const deleteWorkspaceGroup = useWorkspaceStore((state) => state.deleteWorkspaceGroup)
@@ -116,8 +164,24 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const setWorkspaceGroupRootFolder = useWorkspaceStore((state) => state.setWorkspaceGroupRootFolder)
   const toggleWorkspaceGroupCollapsed = useWorkspaceStore((state) => state.toggleWorkspaceGroupCollapsed)
   const setError = useWorkspaceStore((state) => state.setError)
-  const rows = useMemo(() => workspaceRows(sessions, groups, groupIds, order, workspaceWorktrees), [groupIds, groups, order, sessions, workspaceWorktrees])
-  const flattenedSessions = useMemo(() => flattenWorkspaceRows(rows), [rows])
+  const attentionByWorkspace = useMemo(() => buildAttentionByWorkspace(sessions, worktrees, attentionSnapshot, {
+    completionHighlights: paneCompletionHighlights,
+    hermesStatus,
+    hermesPermissions,
+    reviewedPaneIds: new Set(Object.keys(paneReviewMarkers)),
+    conflictSessionIds: new Set(worktrees.flatMap((projection) => projection.native?.hasConflicts && projection.record?.sessionId ? [projection.record.sessionId] : [])),
+  }), [attentionSnapshot, hermesPermissions, hermesStatus, paneCompletionHighlights, paneReviewMarkers, sessions, worktrees])
+  const visibleWorkspaceOrder = useMemo(() => deriveVisibleWorkspaceOrder(
+    sessions,
+    groups,
+    groupIds,
+    worktrees,
+    sortMode,
+    attentionByWorkspace,
+    manualOrder,
+  ), [attentionByWorkspace, groupIds, groups, manualOrder, sessions, sortMode, worktrees])
+  const rows = visibleWorkspaceOrder.rows
+  const flattenedSessions = visibleWorkspaceOrder.sessions
   const rootSessions = useMemo(() => workspaceRootSessions(rows), [rows])
   const rootNodes = useMemo(() => rows.flatMap((row) => row.kind === 'group' ? row.sessions : [row.node]), [rows])
   const rootNodesById = useMemo(() => new Map(rootNodes.map((node) => [node.session.id, node])), [rootNodes])
@@ -126,6 +190,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const groupedRows = rows.flatMap((row) => row.kind === 'group' ? [row] : [])
   const ungroupedNodes = rows.flatMap((row) => row.kind === 'session' ? [row.node] : [])
   const listRef = useRef<HTMLDivElement | null>(null)
+  const focusedSessionIdRef = useRef<string | null>(null)
   const dragRef = useRef<DragState | null>(null)
   const openingGroupIdsRef = useRef(new Set<string>())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -134,6 +199,23 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const [worktreeSource, setWorktreeSource] = useState<SessionMeta | null>(null)
   const [worktreeManageSource, setWorktreeManageSource] = useState<SessionMeta | null>(null)
   const [contextMenu, setContextMenu] = useState<WorkspaceContextMenu | null>(null)
+
+  useEffect(() => {
+    const rememberFocusedWorkspace = (event: FocusEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('[data-session-id]') : null
+      focusedSessionIdRef.current = target?.dataset.sessionId ?? null
+    }
+    document.addEventListener('focusin', rememberFocusedWorkspace)
+    return () => document.removeEventListener('focusin', rememberFocusedWorkspace)
+  }, [])
+
+  useLayoutEffect(() => {
+    const sessionId = focusedSessionIdRef.current
+    if (!sessionId || !listRef.current) return
+    const row = [...listRef.current.querySelectorAll<HTMLElement>('[data-session-id]')]
+      .find((candidate) => candidate.dataset.sessionId === sessionId)
+    if (row && row !== document.activeElement && (!document.activeElement || document.activeElement === document.body)) row.focus()
+  }, [flattenedSessions])
 
   useEffect(() => {
     integration.setWorkspaceOverlayOpen?.('worktree-create', Boolean(worktreeSource))
@@ -191,33 +273,55 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   const removeWorktree = async (session: SessionMeta, worktree: WorkspaceWorktreeNode['worktree']) => {
     setContextMenu(null)
     try {
-      const entries = await invoke<WorktreeEntry[]>('git_worktree_list', { workspaceFolder: worktree.sourceWorkspaceFolder })
-      const path = worktree.worktreePath.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-      const dirty = entries.find((entry) => entry.worktreePath.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === path)?.dirty ?? false
-      const choice = await choiceDialog({
-        title: `Remove ${session.name} worktree`,
-        message: dirty
-          ? `Uncommitted changes in "${worktree.worktreePath}" will be lost. Removal uses force.`
-          : `Remove the checkout at "${worktree.worktreePath}"?`,
-        choices: [
-          { id: 'checkout', label: 'Remove checkout', tone: 'danger' },
-          { id: 'checkout-and-branch', label: 'Remove checkout and branch', tone: 'danger' },
-        ],
-        cancelLabel: 'Cancel',
-      })
-      if (!choice) return
-      await removeWorktreeSession(session.id, { deleteBranch: choice === 'checkout-and-branch', force: dirty })
+      const record = worktree.record
+      if (!record) throw new Error('This worktree has no managed registry record.')
+      await runWorktreeRemovalFlow(
+        { worktreeId: record.id, branch: record.branch, worktreePath: record.worktreePath, displayName: session.name },
+        {
+          preflight: preflightWorktreeRemoval,
+          execute: (options) => removeWorktreeSession(session.id, options),
+        },
+      )
     } catch (caught) {
       setError(String(caught))
     }
   }
 
+  const removeDetachedWorktree = async (projection: WorkspaceSessionNode['detached'][number]) => {
+    const record = projection.record
+    if (!record) return
+    try {
+      await runWorktreeRemovalFlow(
+        { worktreeId: record.id, branch: record.branch, worktreePath: record.worktreePath, displayName: projectionLabel(projection) },
+        {
+          preflight: preflightWorktreeRemoval,
+          execute: (options) => removeWorktreeById(record.id, options),
+        },
+      )
+    } catch (caught) {
+      setError(String(caught))
+    }
+  }
+
+  const pendingCreationsByParent = useMemo(() => {
+    const byParent = new Map<string, PendingWorktreeCreation[]>()
+    for (const pending of Object.values(pendingWorktreeCreations)) {
+      const rows = byParent.get(pending.parentSessionId) ?? []
+      rows.push(pending)
+      byParent.set(pending.parentSessionId, rows)
+    }
+    for (const rows of byParent.values()) rows.sort((left, right) => left.startedAt - right.startedAt)
+    return byParent
+  }, [pendingWorktreeCreations])
+
   const onRowPointerDown = (event: ReactPointerEvent<HTMLDivElement>, sessionId: string) => {
-    // Only a primary (left) button press starts a reorder; ignore the small
-    // action buttons so rename/delete keep working.
-    if (event.button !== 0) return
-    if ((event.target as HTMLElement).closest('.session-small-action')) return
-    dragRef.current = { id: sessionId, pointerId: event.pointerId, startY: event.clientY, active: false }
+    if (sortMode !== 'manual' || event.button !== 0) return
+    dragRef.current = {
+      id: sessionId,
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      active: false,
+    }
     // Capture immediately so a fast drag that leaves the source row before the
     // first move still routes its pointer events here and can activate.
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -239,6 +343,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
   }
 
   const finishDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (sortMode !== 'manual') return
     const drag = dragRef.current
     dragRef.current = null
     if (!drag) return
@@ -263,7 +368,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     const nextRootIds = reorderIds(rootSessions.map((session) => session.id), drag.id, target.id, target.place)
     const next = nextRootIds.flatMap((sessionId) => {
       const node = rootNodesById.get(sessionId)
-      return node ? [sessionId, ...node.worktrees.map((worktree) => worktree.session.id)] : [sessionId]
+      return node ? [sessionId, ...flattenWorktreeNodes(node.worktrees).map((worktree) => worktree.session.id)] : [sessionId]
     })
     if (next.some((id, index) => id !== flattenedSessions[index]?.id)) reorderWorkspaces(next)
     const targetGroupId = groupIds[target.id] ?? null
@@ -322,9 +427,15 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     void Promise.resolve(integration.onDeleteWorkspaceRequested(sessionId)).catch((caught) => setError(String(caught)))
   }
 
-  const renderWorktree = ({ session, worktree }: WorkspaceWorktreeNode, parentSession: SessionMeta) => {
+  const renderWorktree = ({ session, worktree, worktrees: childWorktrees }: WorkspaceWorktreeNode, parentSession: SessionMeta) => {
+    const record = worktree.record
+    if (!record) return null
     const position = orderBySessionId.get(session.id) ?? 0
     const completionCount = completionCounts[session.id] ?? 0
+    const attention = attentionByWorkspace[session.id]
+    const attentionDescription = workspaceAttentionDescription(attention)
+    const attentionCount = (attention?.unreadCount ?? 0) + (attention?.completionCount ?? 0)
+    const showAttention = (attention?.attentionClass ?? 4) < 4 || attentionCount > 0
     const folderName = workspaceFolderBasename(session.workspaceFolder)
     return (
       <div
@@ -354,11 +465,11 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           <span className={`workspaces-session-status${session.id === activeSessionId ? ' is-active' : ''}`} title={session.id === activeSessionId ? 'Active worktree' : 'Inactive worktree'} aria-label={session.id === activeSessionId ? 'Active worktree' : 'Inactive worktree'} />
           <span className="workspaces-session-copy">
             <strong className="session-name worktree-session-name"><GitBranch size={11} strokeWidth={1.8} aria-hidden="true" />{session.name}</strong>
-            <span className="workspaces-session-folder" title={`${worktree.branch} · ${session.workspaceFolder ?? ''}`}>{worktree.branch}{folderName ? ` · ${folderName}` : ''}</span>
+            <span className="workspaces-session-folder" title={`${record.branch} · ${session.workspaceFolder ?? ''}`}>{record.branch}{folderName ? ` · ${folderName}` : ''}</span>
           </span>
-          {completionCount > 0 ? (
-            <span className="session-completion-badge" title={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`}>
-              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />{completionCount}
+          {showAttention ? (
+            <span className={`session-completion-badge attention-class-${attention?.attentionClass ?? 4}`} title={attentionDescription} aria-label={attentionDescription}>
+              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />{attentionCount > 0 ? attentionCount : attention?.state}
             </span>
           ) : null}
           <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
@@ -375,6 +486,77 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           </button>
         </div>
         {session.id === activeSessionId ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
+        {childWorktrees.length > 0 ? (
+          <div className="workspace-worktree-list nested" role="group" aria-label={`${session.name} child worktrees`}>
+            {childWorktrees.map((child) => renderWorktree(child, session))}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  const renderPendingCreation = (pending: PendingWorktreeCreation) => {
+    const settled = pending.stage === 'complete' || pending.stage === 'failed' || pending.stage === 'cancelled'
+    const failed = pending.stage === 'failed' || pending.stage === 'cancelled'
+    return (
+      <div
+        key={pending.operationId}
+        className={`session-row worktree-session-row worktree-pending-row${failed ? ' is-failed' : ''}`}
+        data-pending-operation-id={pending.operationId}
+        role="status"
+        aria-live="polite"
+      >
+        <div className="session-main">
+          <span className="session-order" aria-hidden="true">
+            {failed ? <TriangleAlert size={12} strokeWidth={1.9} /> : <Loader2 size={12} strokeWidth={1.9} className="worktree-pending-spinner" />}
+          </span>
+          <span className="workspaces-session-copy">
+            <strong className="session-name worktree-session-name"><GitBranch size={11} strokeWidth={1.8} aria-hidden="true" />{pending.name}</strong>
+            <span className="workspaces-session-folder" title={pending.branch || undefined}>{worktreeStageLabel(pending)}</span>
+          </span>
+        </div>
+        <div className="workspaces-row-actions">
+          {settled ? (
+            <>
+              <button type="button" title="Retry worktree creation" aria-label={`Retry creating ${pending.name}`} className="session-small-action" onClick={() => void retryPendingWorktreeCreation(pending.operationId).catch((caught) => setError(String(caught)))}>
+                <RotateCcw size={13} strokeWidth={1.7} aria-hidden="true" />
+              </button>
+              <button type="button" title="Dismiss" aria-label={`Dismiss ${pending.name} creation`} className="session-small-action" onClick={() => dismissPendingWorktreeCreation(pending.operationId)}>
+                <X size={13} strokeWidth={1.7} aria-hidden="true" />
+              </button>
+            </>
+          ) : (
+            <button type="button" title="Cancel worktree creation" aria-label={`Cancel creating ${pending.name}`} className="session-small-action danger" disabled={pending.cancelRequested} onClick={() => void cancelPendingWorktreeCreation(pending.operationId).catch((caught) => setError(String(caught)))}>
+              <X size={13} strokeWidth={1.7} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+        {pending.error ? (
+          <p className="worktree-pending-recovery" role="alert">{pending.error}</p>
+        ) : null}
+      </div>
+    )
+  }
+
+  // Registry rows with no workspace session of their own. Rendering them keeps
+  // a missing/stale/conflicted checkout visible instead of silently absent.
+  const renderDetachedWorktree = (projection: WorkspaceSessionNode['detached'][number]) => {
+    const label = projectionLabel(projection)
+    const path = worktreePathOf(projection)
+    return (
+      <div key={projection.id} className="session-row worktree-session-row worktree-detached-row" data-worktree-id={projection.id}>
+        <div className="session-main">
+          <span className="session-order" aria-hidden="true"><TriangleAlert size={12} strokeWidth={1.9} /></span>
+          <span className="workspaces-session-copy">
+            <strong className="session-name worktree-session-name"><GitBranch size={11} strokeWidth={1.8} aria-hidden="true" />{label}</strong>
+            <span className="workspaces-session-folder" title={path || undefined}>{projection.state} · no workspace</span>
+          </span>
+        </div>
+        <div className="workspaces-row-actions">
+          <button type="button" title="Remove worktree" aria-label={`Remove worktree ${label}`} className="session-small-action danger" onClick={(event) => { event.stopPropagation(); void removeDetachedWorktree(projection) }}>
+            <Trash2 size={13} aria-hidden="true" />
+          </button>
+        </div>
       </div>
     )
   }
@@ -383,9 +565,13 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
     const session = node.session
     const position = orderBySessionId.get(session.id) ?? 0
     const completionCount = completionCounts[session.id] ?? 0
+    const attention = attentionByWorkspace[session.id]
+    const attentionDescription = workspaceAttentionDescription(attention)
+    const attentionCount = (attention?.unreadCount ?? 0) + (attention?.completionCount ?? 0)
+    const showAttention = (attention?.attentionClass ?? 4) < 4 || attentionCount > 0
     const folderName = workspaceFolderBasename(session.workspaceFolder)
     const isDropTarget = dropTarget?.id === session.id
-    const hasActiveWorktree = node.worktrees.some((worktree) => worktree.session.id === activeSessionId)
+    const hasActiveWorktree = flattenWorktreeNodes(node.worktrees).some((worktree) => worktree.session.id === activeSessionId)
     const rowClass = [
       'session-row',
       'repository-session-row',
@@ -393,6 +579,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
       hasActiveWorktree ? 'has-active-worktree' : '',
       completionCount > 0 ? 'has-completions' : '',
       draggingId === session.id ? 'dragging' : '',
+      sortMode !== 'manual' ? 'reorder-disabled' : '',
       isDropTarget ? `drop-${dropTarget.place}` : '',
     ].filter(Boolean).join(' ')
     return (
@@ -400,7 +587,7 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
         key={session.id}
         className={rowClass}
         data-session-id={session.id}
-        data-workspace-reorder-id={session.id}
+        data-workspace-reorder-id={sortMode === 'manual' ? session.id : undefined}
         data-completion-count={completionCount || undefined}
         role="button"
         tabIndex={0}
@@ -411,6 +598,9 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           setContextMenu({ kind: 'repository', session, x: event.clientX, y: event.clientY })
         }}
         onPointerDown={(event) => onRowPointerDown(event, session.id)}
+        onClick={(event) => {
+          if (sortMode !== 'manual' && !(event.target instanceof Element && event.target.closest('button'))) void selectWorkspace(session.id)
+        }}
         onPointerMove={onRowPointerMove}
         onPointerUp={finishDrag}
         onPointerCancel={onRowPointerCancel}
@@ -427,9 +617,9 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
             <strong className="session-name">{session.name}</strong>
             {folderName ? <span className="workspaces-session-folder" title={session.workspaceFolder ?? undefined}>{folderName}</span> : null}
           </span>
-          {completionCount > 0 ? (
-            <span className="session-completion-badge" title={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`} aria-label={`${completionCount} AI coding agent ${completionCount === 1 ? 'pane needs' : 'panes need'} attention`}>
-              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />{completionCount}
+          {showAttention ? (
+            <span className={`session-completion-badge attention-class-${attention?.attentionClass ?? 4}`} title={attentionDescription} aria-label={attentionDescription}>
+              <CheckCircle2 size={11} strokeWidth={2.2} aria-hidden="true" />{attentionCount > 0 ? attentionCount : attention?.state}
             </span>
           ) : null}
           <span className="session-badge" title={`${session.paneCount} terminal panes`}>{session.paneCount}</span>
@@ -446,7 +636,13 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
           </button>
         </div>
         {session.id === activeSessionId ? <OpenWorkspaceItems completionHighlights={paneCompletionHighlights} /> : null}
-        {node.worktrees.length > 0 ? <div className="workspace-worktree-list" role="group" aria-label={`${session.name} worktrees`}>{node.worktrees.map((worktree) => renderWorktree(worktree, session))}</div> : null}
+        {node.worktrees.length > 0 || node.detached.length > 0 || (pendingCreationsByParent.get(session.id)?.length ?? 0) > 0 ? (
+          <div className="workspace-worktree-list" role="group" aria-label={`${session.name} worktrees`}>
+            {node.worktrees.map((worktree) => renderWorktree(worktree, session))}
+            {(pendingCreationsByParent.get(session.id) ?? []).map(renderPendingCreation)}
+            {node.detached.map(renderDetachedWorktree)}
+          </div>
+        ) : null}
       </div>
     )
   }

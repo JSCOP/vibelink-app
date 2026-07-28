@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, expect, test, vi } from 'vitest'
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { RepoInfo, WorkingStatus } from '../../ipc/types'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
@@ -24,6 +24,10 @@ const status: WorkingStatus = { staged: [], unstaged: [{ path: 'file.ts', oldPat
 function Probe() {
   useGitWorkspace()
   return null
+}
+function HunkProbe() {
+  const git = useGitWorkspace()
+  return <button type="button" disabled={!git.selectedHunkId} onClick={() => git.applyHunk('stage')}>{git.selectedHunkId ?? 'waiting'}</button>
 }
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -49,7 +53,7 @@ beforeEach(() => {
     return null
   })
   useGitStore.setState({ sessions: {} })
-  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], license: { ready: true, status: { state: 'development', entitled: true } as never } })
+  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], worktreeProjections: [], license: { ready: true, status: { state: 'development', entitled: true } as never } })
 })
 
 test('mounts one interval and one focus listener regardless of consumer count', async () => {
@@ -88,6 +92,43 @@ test('does not schedule or invoke Git while entitlement is locked', () => {
   expect(invoke).not.toHaveBeenCalled()
 })
 
+test('falls back to the imported head when a legacy worktree base ref is empty', async () => {
+  useWorkspaceStore.setState({
+    worktreeProjections: [{
+      id: 'worktree-1',
+      instanceId: 'instance-1',
+      state: 'managed',
+      record: {
+        id: 'worktree-1', instanceId: 'instance-1', repositoryId: 'repository-1', repositoryPath: 'C:/repo', worktreePath: 'C:/repo',
+        branch: 'feature/imported', head: 'b'.repeat(40), baseRef: '', sessionId: 'session-1', parentSessionId: null, parentWorktreeId: null,
+        parentInstanceId: null, origin: 'external_import', lifecycle: 'active', locked: false, lockReason: null, prunable: false,
+        prunableReason: null, dirty: false, untracked: false, hasConflicts: false, ahead: 0, behind: 0, exists: true,
+        setupPolicy: 'inherit', sparsePreset: null, linkedFiles: [], initialAgent: null, initialPrompt: null, comment: null, reviewTarget: null,
+        createdAt: 1, updatedAt: 1, lastActivityAt: 1,
+      },
+      native: null,
+      parentWorktreeId: null,
+      childWorktreeIds: [],
+    }],
+  })
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'worktree_checkpoints_list' || command === 'worktree_review_comments_list') return []
+    if (command === 'git_log') return { commits: [{ sha: 'b'.repeat(40) }], hasMore: false }
+    if (command === 'git_working_file_contents') return { old: 'before', new: 'after', binary: false }
+    return null
+  })
+
+  render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider><Probe /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
+
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_log', {
+    workspaceFolder: 'C:/repo',
+    options: { refName: 'b'.repeat(40), path: null, skip: 0, limit: 1, search: null, author: null },
+  }))
+})
+
 test('computes bottom primary action precedence without implicit sync or force', () => {
   expect(sourceControlPrimaryAction({ ...repoInfo, state: 'merging' }, { ...status, conflicted: [{ path: 'conflict.ts', oldPath: null, changeType: 'modified' }] }, '', false).id).toBe('review-conflicts')
   expect(sourceControlPrimaryAction(repoInfo, status, '', false).id).toBe('stage-all')
@@ -95,4 +136,21 @@ test('computes bottom primary action precedence without implicit sync or force',
   expect(sourceControlPrimaryAction(repoInfo, { ...status, unstaged: [], staged: [{ path: 'file.ts', oldPath: null, changeType: 'modified' }] }, 'commit', false).id).toBe('commit')
   expect(sourceControlPrimaryAction({ ...repoInfo, ahead: 2, behind: 1 }, { ...status, unstaged: [] }, '', false).id).toBe('pull')
   expect(sourceControlPrimaryAction({ ...repoInfo, ahead: 2 }, { ...status, unstaged: [] }, '', false).id).toBe('push')
+})
+
+test('sends only native hunk identity and action, never a frontend patch body', async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_working_file_contents') return { old: 'before', new: 'after', binary: false }
+    if (command === 'git_diff_hunks') return { path: 'file.ts', area: 'unstaged', binary: false, hunks: [{ id: 'native-hunk-id', header: '@@ -1 +1 @@', oldStart: 1, oldCount: 1, newStart: 1, newCount: 1, lines: [] }] }
+    return null
+  })
+  render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider><HunkProbe /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
+  await waitFor(() => expect((screen.getByRole('button', { name: 'native-hunk-id' }) as HTMLButtonElement).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'native-hunk-id' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_apply_hunk', { workspaceFolder: 'C:/repo', path: 'file.ts', area: 'unstaged', hunkId: 'native-hunk-id', action: 'stage' }))
+  const request = invoke.mock.calls.find(([command]) => command === 'git_apply_hunk')?.[1]
+  expect(request).not.toHaveProperty('patch')
 })

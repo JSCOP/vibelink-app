@@ -1,8 +1,8 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
 use super::license::LicenseService;
 use crate::protocol::{
-    ClientToDaemon, DesktopSelection, PaneCommandOrigin, PaneConfig, PaneMeta,
-    RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseResult, ReplyResult, SessionMeta,
+    AttentionSnapshotData, ClientToDaemon, DesktopSelection, PaneCommandOrigin, PaneConfig,
+    PaneMeta, RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseResult, ReplyResult, SessionMeta,
 };
 use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
 use serde::de::DeserializeOwned;
@@ -301,6 +301,19 @@ pub async fn set_agent_hook_enabled(
         .map_err(|error| error.to_string())?;
     crate::app::agent_hooks::set_agent_hook_enabled_native(&app_data_dir, &agent_id, enabled)
         .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn attention_snapshot(
+    client: State<'_, DaemonClient>,
+) -> Result<AttentionSnapshotData, String> {
+    match client
+        .request_reply(|req| ClientToDaemon::AttentionSnapshot { req })
+        .map_err(to_string)?
+    {
+        ReplyResult::AttentionSnapshot(data) => Ok(data),
+        other => Err(format!("unexpected daemon response: {other:?}")),
+    }
 }
 
 #[tauri::command]

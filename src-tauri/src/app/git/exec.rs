@@ -1,8 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -11,6 +12,8 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+const MAX_GIT_STDIN_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) static REPO_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -70,6 +73,26 @@ where
     git_write_output_with_env(repo, args, &[])
 }
 
+pub(crate) fn git_write_stdin<I, S>(repo: &str, args: I, input: &[u8]) -> Result<Output>
+where
+    I: IntoIterator<Item = S> + Clone,
+    S: AsRef<OsStr>,
+{
+    if input.len() > MAX_GIT_STDIN_BYTES {
+        bail!("git stdin payload exceeds {MAX_GIT_STDIN_BYTES} bytes")
+    }
+    let lock = repo_lock(repo);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow!("git repository mutation lock is poisoned"))?;
+    let mut output = run_write_stdin(repo, args.clone(), input)?;
+    if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("index.lock") {
+        std::thread::sleep(Duration::from_millis(200));
+        output = run_write_stdin(repo, args, input)?;
+    }
+    Ok(output)
+}
+
 pub(crate) fn git_write_output_with_env<I, S>(
     repo: &str,
     args: I,
@@ -124,6 +147,25 @@ pub(crate) fn stderr_or_status(output: &Output) -> String {
 
 pub(crate) fn ensure_success(output: Output) -> Result<Vec<u8>> {
     output_stdout(output)
+}
+
+fn run_write_stdin<I, S>(repo: &str, args: I, input: &[u8]) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = git_command(repo, args, false);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("git stdin unavailable"))?
+        .write_all(input)?;
+    Ok(child.wait_with_output()?)
 }
 
 fn run_write<I, S>(repo: &str, args: I, env: &[(&str, &str)]) -> Result<Output>

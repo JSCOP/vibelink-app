@@ -2,7 +2,7 @@ use super::{
     client::{ControlSocketClient, ControlSocketConfig},
     command::{
         parse_args, ActionCommand, Command, Invocation, OrchestrationAction, TerminalAction,
-        COMMAND_SCHEMA_VERSION,
+        WorktreeAction, COMMAND_SCHEMA_VERSION,
     },
     contract::{contract_for_command, RiskLevel},
     error::CliError,
@@ -53,6 +53,8 @@ pub struct CliControlRequest {
     pub operation_id: uuid::Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_cwd: Option<String>,
     pub command: Command,
 }
 
@@ -166,10 +168,20 @@ fn control_command_json(
             schema_version: COMMAND_SCHEMA_VERSION,
             operation_id,
             expected_revision,
+            caller_cwd: Some(canonical_caller_cwd()?),
             command,
         },
     })
     .map_err(|error| CliError::internal(format!("serialize control request: {error}")))
+}
+
+fn canonical_caller_cwd() -> Result<String, CliError> {
+    let cwd = env::current_dir()
+        .map_err(|error| CliError::internal(format!("read caller cwd: {error}")))?;
+    let canonical = cwd
+        .canonicalize()
+        .map_err(|error| CliError::internal(format!("canonicalize caller cwd: {error}")))?;
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 fn apply_environment_scope(command: &mut Command) {
@@ -195,6 +207,11 @@ fn apply_environment_scope(command: &mut Command) {
                 command.selectors.workspace = workspace;
             }
         }
+        Command::Worktree(command) if command.action == WorktreeAction::Create => {
+            if command.selectors.workspace.is_none() {
+                command.selectors.workspace = workspace;
+            }
+        }
         Command::Terminal(command) => scope!(command),
         Command::Orchestration(command) => scope!(command),
         Command::Automation(command) => scope!(command),
@@ -202,7 +219,7 @@ fn apply_environment_scope(command: &mut Command) {
         Command::Computer(command) => scope!(command),
         Command::Skill(command) => scope!(command),
         Command::Remote(command) => scope!(command),
-        Command::Status | Command::Mcp(_) => {}
+        Command::Status | Command::Worktree(_) | Command::Mcp(_) => {}
     }
 }
 
@@ -398,16 +415,34 @@ mod tests {
             schema_version: COMMAND_SCHEMA_VERSION,
             operation_id: invocation.operation_id,
             expected_revision: invocation.expected_revision,
+            caller_cwd: Some("C:/caller/repository".to_string()),
             command: invocation.command,
         };
         let json = serde_json::to_value(&request).expect("serialize request");
         assert_eq!(json["schemaVersion"], 1);
         assert_eq!(json["expectedRevision"], 9);
+        assert_eq!(json["callerCwd"], "C:/caller/repository");
         assert_eq!(json["command"]["domain"], "workspace");
         assert_eq!(
             serde_json::from_value::<CliControlRequest>(json).expect("deserialize request"),
             request
         );
+    }
+
+    #[test]
+    fn caller_cwd_is_defaulted_for_older_control_requests() {
+        let invocation = parse_args(["worktree", "current"]).expect("parse current");
+        let request = CliControlRequest {
+            schema_version: COMMAND_SCHEMA_VERSION,
+            operation_id: invocation.operation_id,
+            expected_revision: None,
+            caller_cwd: None,
+            command: invocation.command,
+        };
+        let mut json = serde_json::to_value(&request).expect("serialize");
+        json.as_object_mut().expect("object").remove("callerCwd");
+        let decoded: CliControlRequest = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.caller_cwd, None);
     }
 
     #[test]

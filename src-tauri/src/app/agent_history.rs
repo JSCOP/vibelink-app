@@ -91,10 +91,7 @@ pub(crate) fn parse_conversation(
     }
 }
 
-fn parse_omp(
-    lines: impl Iterator<Item = String>,
-    path: &str,
-) -> Option<AgentConversationInfo> {
+fn parse_omp(lines: impl Iterator<Item = String>, path: &str) -> Option<AgentConversationInfo> {
     let mut id = None;
     let mut cwd = None;
     let mut title_record = None;
@@ -112,16 +109,14 @@ fn parse_omp(
         match value.get("type").and_then(Value::as_str) {
             Some("title") => {
                 title_record = title_record.or_else(|| title_field(&value, "title"));
-                title_updated_at =
-                    title_updated_at.or_else(|| string_field(&value, "updatedAt"));
+                title_updated_at = title_updated_at.or_else(|| string_field(&value, "updatedAt"));
             }
             Some("session") => {
                 saw_session = true;
                 id = id.or_else(|| string_field(&value, "id"));
                 cwd = cwd.or_else(|| string_field(&value, "cwd"));
                 session_title = session_title.or_else(|| title_field(&value, "title"));
-                session_timestamp =
-                    session_timestamp.or_else(|| string_field(&value, "timestamp"));
+                session_timestamp = session_timestamp.or_else(|| string_field(&value, "timestamp"));
             }
             _ => {
                 if first_user.is_none() {
@@ -156,10 +151,7 @@ fn parse_omp(
     })
 }
 
-fn parse_codex(
-    lines: impl Iterator<Item = String>,
-    path: &str,
-) -> Option<AgentConversationInfo> {
+fn parse_codex(lines: impl Iterator<Item = String>, path: &str) -> Option<AgentConversationInfo> {
     let mut id = None;
     let mut cwd = None;
     let mut updated_at = None;
@@ -241,9 +233,7 @@ fn parse_claude(
     }
 
     let id = id.or_else(|| file_stem(path))?;
-    let title = summary
-        .or(first_user)
-        .unwrap_or_else(|| id.clone());
+    let title = summary.or(first_user).unwrap_or_else(|| id.clone());
 
     Some(AgentConversationInfo {
         id,
@@ -341,7 +331,10 @@ fn collect_jsonl_files(
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"))
         {
             candidates.push(FileCandidate {
-                mtime: entry.metadata().ok().and_then(|metadata| metadata.modified().ok()),
+                mtime: entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok()),
                 path,
             });
         } else if file_type.is_dir() && depth < max_directory_depth {
@@ -630,18 +623,16 @@ mod tests {
 
     #[test]
     fn recency_sort_uses_timestamps_then_missing_file_mtime() {
-        let conversation = |id: &str, updated_at: Option<&str>, seconds: u64| {
-            ScannedConversation {
-                info: AgentConversationInfo {
-                    id: id.to_string(),
-                    title: id.to_string(),
-                    agent: "omp".to_string(),
-                    updated_at: updated_at.map(str::to_string),
-                    cwd: None,
-                    path: format!("C:/tmp/{id}.jsonl"),
-                },
-                mtime: Some(UNIX_EPOCH + Duration::from_secs(seconds)),
-            }
+        let conversation = |id: &str, updated_at: Option<&str>, seconds: u64| ScannedConversation {
+            info: AgentConversationInfo {
+                id: id.to_string(),
+                title: id.to_string(),
+                agent: "omp".to_string(),
+                updated_at: updated_at.map(str::to_string),
+                cwd: None,
+                path: format!("C:/tmp/{id}.jsonl"),
+            },
+            mtime: Some(UNIX_EPOCH + Duration::from_secs(seconds)),
         };
         let mut conversations = vec![
             conversation("missing-old", None, 10),

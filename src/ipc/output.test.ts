@@ -90,6 +90,8 @@ describe('terminal session change reloads', () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'attach_session') return { layoutJson: null, panes: [pane] }
       if (command === 'list_sessions') return [session]
+      if (command === 'worktree_registry_list') return []
+      if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
       if (command === 'terminal_ws_port') return 42800
       return null
     })

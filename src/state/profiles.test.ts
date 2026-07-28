@@ -250,6 +250,16 @@ describe('terminal profiles', () => {
     expect(fallback.terminalThemeId).toBe(defaultSettings.terminalThemeId)
   })
 
+  test('defaults clean installs to smart ordering and preserves existing installs as manual', () => {
+    expect(normalizeSettings(null).workspaceSortMode).toBe('smart')
+    expect(normalizeSettings({}).workspaceSortMode).toBe('manual')
+    expect(normalizeSettings({ workspaceSortMode: 'repository' }).workspaceSortMode).toBe('repository')
+    expect(normalizeSettings({ workspaceSortMode: 'manual', workspaceOrder: ['workspace-b', 'workspace-a'] })).toMatchObject({
+      workspaceSortMode: 'manual',
+      workspaceOrder: ['workspace-b', 'workspace-a'],
+    })
+  })
+
   test('normalizes the external editor command', () => {
     expect(defaultSettings.externalEditorCommand).toBe('code')
     expect(normalizeSettings({}).externalEditorCommand).toBe('code')

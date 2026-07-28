@@ -1,5 +1,6 @@
-import { AlertTriangle, Check, ClipboardCopy, ExternalLink, GitPullRequest, KeyRound, LoaderCircle, LogIn, Plus, RefreshCw, Rocket } from 'lucide-react'
-import type { ChangedFile, CiStatus, FileContents, PrCreated, PrDetail, PrInfo } from '../../ipc/types'
+import { AlertTriangle, Check, ClipboardCopy, ExternalLink, GitMerge, GitPullRequest, KeyRound, LoaderCircle, LogIn, Plus, RefreshCw, Rocket } from 'lucide-react'
+import type { ChangedFile, CiStatus, FileContents, PrCreated, PrDetail, PrInfo, UnifiedFileDiff } from '../../ipc/types'
+import type { WorktreeReviewComment } from '../../state/worktrees'
 import { DiffPane } from './DiffPane'
 import './PullRequestsTabView.css'
 
@@ -17,6 +18,9 @@ export type PullRequestsTabViewProps = {
   selectedPath: string | null
   contents: FileContents | null
   diffLoading: boolean
+  reviewHunks: UnifiedFileDiff | null
+  selectedReviewHunkId: string | null
+  reviewHunkComments: WorktreeReviewComment[]
   mode: 'list' | 'create'
   token: string
   deviceCode: { userCode: string; verificationUri: string } | null
@@ -36,6 +40,9 @@ export type PullRequestsTabViewProps = {
   onCopyUrl: (url: string) => void
   onSelectPr: (number: number) => void
   onSelectFile: (path: string) => void
+  onSelectReviewHunk: (hunkId: string) => void
+  onCommentReviewHunk: () => void
+  onCommentReviewLine: (line: number, side: 'old' | 'new') => void
   onModeChange: (mode: 'list' | 'create') => void
   onCreateTitleChange: (value: string) => void
   onCreateBodyChange: (value: string) => void
@@ -43,6 +50,7 @@ export type PullRequestsTabViewProps = {
   onCreateDraftChange: (value: boolean) => void
   onPushBranch: () => void
   onCreate: () => void
+  onMergeAndCleanup: () => void
 }
 
 function UrlActions({ url, onOpenUrl, onCopyUrl }: { url: string; onOpenUrl: (url: string) => void; onCopyUrl: (url: string) => void }) {
@@ -247,9 +255,14 @@ export function PullRequestsTabView(props: PullRequestsTabViewProps) {
                     <strong>#{props.detail.number} {props.detail.title}</strong>
                     <span>{props.detail.author} · {props.detail.sourceBranch} → {props.detail.targetBranch}</span>
                   </div>
-                  <button type="button" className="git-pr-secondary" onClick={() => props.onOpenUrl(props.detail!.url)}>
-                    <ExternalLink size={13} strokeWidth={1.9} aria-hidden="true" />Open
-                  </button>
+                  <div className="git-pr-detail-actions">
+                    <button type="button" className="git-pr-secondary" onClick={() => props.onOpenUrl(props.detail!.url)}>
+                      <ExternalLink size={13} strokeWidth={1.9} aria-hidden="true" />Open
+                    </button>
+                    <button type="button" className="git-pr-primary" disabled={props.loading || !props.detail.headSha || props.detail.draft} title={props.detail.draft ? 'Draft reviews cannot be merged' : 'Validate provider CI, SHA, conflicts, local cleanliness, and upstream before merge'} onClick={props.onMergeAndCleanup}>
+                      <GitMerge size={13} strokeWidth={1.9} aria-hidden="true" />Merge and clean up
+                    </button>
+                  </div>
                 </header>
                 {props.detail.body ? <p className="git-pr-body">{props.detail.body}</p> : null}
                 {props.detail.checks.length > 0 ? (
@@ -269,7 +282,7 @@ export function PullRequestsTabView(props: PullRequestsTabViewProps) {
                   </div>
                 ) : null}
                 <div className="git-pr-diff">
-                  <DiffPane files={props.files} selectedPath={props.selectedPath} onSelect={props.onSelectFile} contents={props.contents} loading={props.diffLoading} splitView error={null} />
+                  <DiffPane files={props.files} selectedPath={props.selectedPath} onSelect={props.onSelectFile} contents={props.contents} loading={props.diffLoading} splitView error={null} hunkDiff={props.reviewHunks} selectedHunkId={props.selectedReviewHunkId} onSelectHunk={props.onSelectReviewHunk} onCommentHunk={props.onCommentReviewHunk} onCommentLine={props.onCommentReviewLine} hunkComments={props.reviewHunkComments} />
                 </div>
               </>
             ) : (

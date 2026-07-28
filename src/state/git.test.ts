@@ -77,4 +77,18 @@ describe('git store', () => {
     await useGitStore.getState().refreshHosting('session-1', 'C:/repo', 'HEAD', true)
     expect(repositoryStateFor(useGitStore.getState().sessions['session-1'], '')).toMatchObject({ repoInfo, status, hostingInfo: { provider: 'github', tokenPresent: false }, ciStatus: null, hostingError: 'AUTH: token rejected' })
   })
+  test('clears deleted session state and ignores an in-flight refresh result', async () => {
+    let resolveRepoInfo!: (value: RepoInfo) => void
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'git_repo_info') return new Promise<RepoInfo>((resolve) => { resolveRepoInfo = resolve })
+      return status
+    })
+    const refreshing = useGitStore.getState().refreshGit('session-1', 'C:/repo')
+    expect(useGitStore.getState().sessions['session-1']?.repositories['']?.refreshing).toBe(true)
+    useGitStore.getState().clearSession('session-1')
+    resolveRepoInfo(repoInfo)
+    await refreshing
+    expect(useGitStore.getState().sessions['session-1']).toBeUndefined()
+  })
+
 })

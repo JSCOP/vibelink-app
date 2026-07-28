@@ -93,7 +93,7 @@ describe('WorktreeCreateDialog', () => {
     expect(screen.getByText(/must not already exist/)).toBeInTheDocument()
   })
 
-  test('submits the repository, ref, branch, and selected agent profile', async () => {
+  test('submits every lifecycle field the create transaction accepts', async () => {
     const onCreate = vi.fn(async () => undefined)
     render(
       <WorktreeCreateDialog
@@ -108,6 +108,12 @@ describe('WorktreeCreateDialog', () => {
     fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'Fix Login' } })
     fireEvent.change(screen.getByLabelText('Start ref'), { target: { value: 'origin/main' } })
     fireEvent.change(screen.getByLabelText('Start with'), { target: { value: 'claude' } })
+    fireEvent.click(screen.getByRole('switch', { name: 'Fetch remote before creating' }))
+    fireEvent.change(screen.getByLabelText('Setup policy'), { target: { value: 'run' } })
+    fireEvent.change(screen.getByLabelText('Sparse preset'), { target: { value: ' frontend ' } })
+    fireEvent.change(screen.getByLabelText('Linked files'), { target: { value: '.env\n config/local.json ,\n' } })
+    fireEvent.change(screen.getByLabelText('Initial agent'), { target: { value: ' claude ' } })
+    fireEvent.change(screen.getByLabelText('Initial prompt'), { target: { value: ' Fix the login redirect ' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create worktree' }))
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledWith({
@@ -116,6 +122,70 @@ describe('WorktreeCreateDialog', () => {
       startRef: 'origin/main',
       branch: 'vibelink/fix-login',
       profileId: 'claude',
+      fetch: true,
+      setupPolicy: 'run',
+      sparsePreset: 'frontend',
+      linkedFiles: ['.env', 'config/local.json'],
+      initialAgent: 'claude',
+      initialPrompt: 'Fix the login redirect',
     }))
+  })
+
+  test('omits optional lifecycle fields the user left empty', async () => {
+    const onCreate = vi.fn(async () => undefined)
+    render(
+      <WorktreeCreateDialog
+        sourceSession={sourceSession}
+        profiles={defaultSettings.profiles}
+        initialProfileId="codex"
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'Fix Login' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create worktree' }))
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      fetch: false,
+      setupPolicy: 'inherit',
+      sparsePreset: null,
+      linkedFiles: [],
+      initialAgent: null,
+      initialPrompt: null,
+    })))
+  })
+
+  test('discards a stale storage resolution that resolves after a newer keystroke', async () => {
+    const pending = new Map<string, (value: unknown) => void>()
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command !== 'git_worktree_resolve_root') return Promise.resolve(undefined)
+      const name = typeof args?.name === 'string' ? args.name : ''
+      const { promise, resolve } = Promise.withResolvers<unknown>()
+      pending.set(name, resolve)
+      return promise
+    })
+    render(
+      <WorktreeCreateDialog
+        sourceSession={sourceSession}
+        profiles={defaultSettings.profiles}
+        initialProfileId="codex"
+        onCreate={vi.fn(async () => undefined)}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'Old' } })
+    await waitFor(() => expect(pending.has('Old')).toBe(true))
+    fireEvent.change(screen.getByLabelText('Worktree name'), { target: { value: 'New' } })
+    await waitFor(() => expect(pending.has('New')).toBe(true))
+
+    // The newer request answers first, then the stale one arrives late.
+    pending.get('New')?.({ root: 'E:\\Roots', example: 'E:\\Roots\\new-abc12345', writable: true, fallbackReason: null })
+    expect(await screen.findByText('E:\\Roots\\new-abc12345')).toBeInTheDocument()
+    pending.get('Old')?.({ root: 'E:\\Roots', example: 'E:\\Roots\\old-abc12345', writable: true, fallbackReason: null })
+
+    await waitFor(() => expect(screen.queryByText('E:\\Roots\\old-abc12345')).not.toBeInTheDocument())
+    expect(screen.getByText('E:\\Roots\\new-abc12345')).toBeInTheDocument()
   })
 })

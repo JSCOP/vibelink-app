@@ -207,7 +207,7 @@ export type PrInfo = { number: number; title: string; author: string; sourceBran
 export type PrCreated = { number: number; url: string }
 export type CiCheck = { name: string; state: string; url: string | null }
 export type CiStatus = { state: 'success' | 'failure' | 'pending' | 'none'; checks: CiCheck[] }
-export type PrDetail = PrInfo & { body: string; checks: CiCheck[] }
+export type PrDetail = PrInfo & { body: string; headSha: string | null; checks: CiCheck[] }
 export type DeviceCodeInfo = { userCode: string; verificationUri: string; interval: number; deviceCodeHandle: string }
 
 export type HermesConfiguredModel = { provider: string; model: string; baseUrl?: string | null }
@@ -286,3 +286,11 @@ export type LicenseStatus = {
   purchaseUrl: string
   message: string
 }
+
+export type GitDiffArea = 'unstaged' | 'staged' | 'review'
+export type GitHunkAction = 'stage' | 'unstage' | 'discard'
+export type UnifiedDiffLine = { kind: 'context' | 'addition' | 'deletion' | 'noNewline'; text: string; oldLine: number | null; newLine: number | null }
+export type UnifiedDiffHunk = { id: string; header: string; oldStart: number; oldCount: number; newStart: number; newCount: number; lines: UnifiedDiffLine[] }
+export type UnifiedFileDiff = { path: string; area: GitDiffArea; binary: boolean; hunks: UnifiedDiffHunk[] }
+
+export type MergePrResult = { number: number; sourceBranch: string; targetBranch: string; headSha: string; mergeSha: string | null; message: string }
