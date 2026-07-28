@@ -61,3 +61,23 @@ export async function reclaimRemotePaneLease(sessionId: string, paneId: string):
   await invoke('remote_reclaim_pane_lease', { sessionId, paneId })
   useRemotePaneLeaseStore.getState().setLease(paneId, null)
 }
+
+/**
+ * A phone that walks through several panes leaves each of them phone-shaped.
+ * Reclaiming them one cover at a time is busywork, so the cover offers one
+ * action that takes every leased pane back; partial failures are reported.
+ */
+export async function reclaimAllRemotePaneLeases(): Promise<{ reclaimed: number; failures: string[] }> {
+  const leases = Object.values(useRemotePaneLeaseStore.getState().leases)
+  const failures: string[] = []
+  let reclaimed = 0
+  for (const lease of leases) {
+    try {
+      await reclaimRemotePaneLease(lease.sessionId, lease.paneId)
+      reclaimed += 1
+    } catch (error) {
+      failures.push(String(error))
+    }
+  }
+  return { reclaimed, failures }
+}

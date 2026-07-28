@@ -6,6 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 
 import {
   applyRemotePaneLeaseEvent,
+  reclaimAllRemotePaneLeases,
   reclaimRemotePaneLease,
   useRemotePaneLeaseStore,
   type RemotePaneLeaseStatus,
@@ -61,5 +62,22 @@ describe('remote pane lease projection', () => {
     await expect(reclaimRemotePaneLease(lease.sessionId, lease.paneId)).rejects.toThrow('lease is busy')
 
     expect(useRemotePaneLeaseStore.getState().leases[lease.paneId]).toEqual(lease)
+  })
+
+  it('takes every leased pane back and reports the panes that refused', async () => {
+    const second: RemotePaneLeaseStatus = { ...lease, paneId: 'pane-2', cols: 40, rows: 20 }
+    useRemotePaneLeaseStore.getState().setLease(lease.paneId, lease)
+    useRemotePaneLeaseStore.getState().setLease(second.paneId, second)
+    invokeMock.mockRejectedValueOnce(new Error('lease is busy'))
+
+    const result = await reclaimAllRemotePaneLeases()
+
+    expect(result.reclaimed).toBe(1)
+    expect(result.failures).toHaveLength(1)
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      'remote_reclaim_pane_lease',
+      'remote_reclaim_pane_lease',
+    ])
+    expect(Object.keys(useRemotePaneLeaseStore.getState().leases)).toEqual([lease.paneId])
   })
 })

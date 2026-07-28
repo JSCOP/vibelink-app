@@ -983,6 +983,59 @@ button {
   z-index: 6;
 }
 
+/* Collapsed: the phone keeps control, but the desktop keeps watching the output. */
+.remote-pane-lease-cover[data-collapsed='true'] {
+  align-items: flex-start;
+  backdrop-filter: none;
+  background: transparent;
+  justify-content: flex-end;
+  padding: 8px;
+  pointer-events: none;
+}
+
+.remote-pane-lease-badge {
+  align-items: center;
+  background: color-mix(in srgb, var(--vibelink-dialog) 92%, transparent);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 999px;
+  color: var(--vibelink-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 10px;
+  pointer-events: auto;
+}
+
+.remote-pane-lease-badge > span {
+  background: var(--vibelink-accent);
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+}
+
+.remote-pane-lease-body {
+  color: var(--vibelink-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.remote-pane-lease-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.remote-pane-lease-card button.remote-pane-lease-secondary {
+  background: transparent;
+  border-color: var(--vibelink-border);
+  color: var(--vibelink-text);
+}
+
 .remote-pane-lease-card {
   align-items: center;
   background: color-mix(in srgb, var(--vibelink-dialog) 94%, transparent);

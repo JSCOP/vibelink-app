@@ -10,7 +10,7 @@ import { pathFromTerminalSelection } from '../terminal/selectionPath'
 import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
 import type { WorkspaceContentParams } from './workspaceContentModel'
-import { reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
+import { reclaimAllRemotePaneLeases, reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { findTerminalWindowForPane } from './terminalWindowRegistry'
 import { toast } from '../components/toast/toastStore'
 
@@ -72,6 +72,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const [hermesDetected, setHermesDetected] = useState(false)
   const [reclaimingLease, setReclaimingLease] = useState(false)
   const [reclaimError, setReclaimError] = useState<string | null>(null)
+  const [leaseCoverCollapsed, setLeaseCoverCollapsed] = useState(false)
+  const leaseKey = remoteLease ? `${remoteLease.paneId}:${remoteLease.deviceId}` : ''
+  // A new lease always announces itself; only this lease stays collapsed.
+  useEffect(() => { setLeaseCoverCollapsed(false) }, [leaseKey])
   const onTitleChange = useCallback((title: string) => {
     if (!paneId) return
     void applyTerminalTitle(paneId, title)
@@ -182,6 +186,23 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     }
   }
 
+  const takeBackAllControl = async () => {
+    if (reclaimingLease) return
+    setReclaimingLease(true)
+    setReclaimError(null)
+    const leasedPaneIds = Object.keys(useRemotePaneLeaseStore.getState().leases)
+    try {
+      const result = await reclaimAllRemotePaneLeases()
+      for (const leasedPaneId of leasedPaneIds) TerminalManager.setRemotePaneLease(leasedPaneId, null)
+      if (paneId) TerminalManager.focus(paneId)
+      if (result.failures.length > 0) setReclaimError(result.failures[0] ?? 'unknown error')
+    } catch (error) {
+      setReclaimError(String(error))
+    } finally {
+      setReclaimingLease(false)
+    }
+  }
+
   useEffect(() => {
     if (!contextMenu) return
     const onKeyDown = (event: KeyboardEvent) => {
@@ -255,18 +276,44 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
       {remoteLease ? (
         <div
           className="remote-pane-lease-cover"
+          data-collapsed={leaseCoverCollapsed ? 'true' : undefined}
           aria-label="Remote terminal control"
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}
         >
-          <div className="remote-pane-lease-card">
-            <span className="remote-pane-lease-state"><span aria-hidden="true" /> Remote connection active</span>
-            <strong>Controlled from {shortRemoteDeviceId(remoteLease.deviceId)}</strong>
-            <span className="remote-pane-lease-geometry">Terminal size {remoteLease.cols} × {remoteLease.rows}</span>
-            <button type="button" disabled={reclaimingLease} onClick={() => void takeBackControl()}>
-              {reclaimingLease ? 'Taking Back Control…' : 'Take Back Control'}
+          {leaseCoverCollapsed ? (
+            <button type="button" className="remote-pane-lease-badge" onClick={() => setLeaseCoverCollapsed(false)}>
+              <span aria-hidden="true" /> On phone · {remoteLease.cols} × {remoteLease.rows}
             </button>
-            {reclaimError ? <span className="remote-pane-lease-error" role="alert">Could not take back control: {reclaimError}</span> : null}
-          </div>
+          ) : (
+            <div className="remote-pane-lease-card">
+              <span className="remote-pane-lease-state"><span aria-hidden="true" /> On phone</span>
+              <strong>Your phone is controlling this terminal</strong>
+              <span className="remote-pane-lease-body">
+                The desktop keyboard is paused. Take this terminal back to type here, or take back every
+                terminal your phone is holding. Collapse to keep watching the output.
+              </span>
+              <span className="remote-pane-lease-geometry">
+                {shortRemoteDeviceId(remoteLease.deviceId)} · phone size {remoteLease.cols} × {remoteLease.rows}
+              </span>
+              <div className="remote-pane-lease-actions">
+                <button type="button" className="remote-pane-lease-secondary" onClick={() => setLeaseCoverCollapsed(true)}>
+                  Collapse
+                </button>
+                <button
+                  type="button"
+                  className="remote-pane-lease-secondary"
+                  disabled={reclaimingLease}
+                  onClick={() => void takeBackAllControl()}
+                >
+                  Take back all terminals
+                </button>
+                <button type="button" disabled={reclaimingLease} onClick={() => void takeBackControl()}>
+                  {reclaimingLease ? 'Taking back…' : 'Take back this terminal'}
+                </button>
+              </div>
+              {reclaimError ? <span className="remote-pane-lease-error" role="alert">Could not take back control: {reclaimError}</span> : null}
+            </div>
+          )}
         </div>
       ) : null}
       {!remoteLease && contextMenu ? (
