@@ -375,9 +375,20 @@ impl RemoteServer {
     }
 
     pub fn start_if_enabled(&self) -> Result<()> {
-        let config = self.config.lock().expect("remote config mutex").clone();
         let env_value = std::env::var(REMOTE_AUTOSTART_ENV).ok();
-        if !should_autostart(config.enabled, cfg!(debug_assertions), env_value.as_deref()) {
+        self.start_if_enabled_for(cfg!(debug_assertions), env_value.as_deref())
+    }
+
+    fn start_if_enabled_for(&self, debug_build: bool, env_value: Option<&str>) -> Result<()> {
+        let config = self.config.lock().expect("remote config mutex").clone();
+        if !should_autostart(config.enabled, debug_build, env_value) {
+            return Ok(());
+        }
+        if let Err(denied) = self.shared.authorize(Capability::RemoteConnect) {
+            tracing::warn!(
+                code = denied.code.as_str(),
+                "remote autostart deferred until desktop authorization is available"
+            );
             return Ok(());
         }
         match self.start() {
@@ -936,6 +947,41 @@ mod tests {
             "AUTHORIZATION_STALE"
         );
         assert!(!server.status().running);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn release_autostart_waits_for_authorization_instead_of_failing_daemon_startup() {
+        let directory = temp_directory("locked-autostart");
+        let remote_dir = directory.join("remote");
+        std::fs::create_dir_all(&remote_dir).expect("create remote directory");
+        let port = available_port();
+        RemoteConfig {
+            enabled: true,
+            port,
+            lan_enabled: false,
+        }
+        .save(&remote_dir.join("config.json"))
+        .expect("persist enabled remote config");
+
+        let server = RemoteServer::new(directory.clone()).expect("create locked remote server");
+        server
+            .start_if_enabled_for(false, None)
+            .expect("locked release autostart is deferred");
+        assert!(!server.status().running);
+
+        *server
+            .shared
+            .authorization
+            .write()
+            .expect("remote authorization lock") =
+            snapshot(true, Utc::now() + ChronoDuration::minutes(1));
+        server
+            .start_if_enabled_for(false, None)
+            .expect("authorized release autostart starts listener");
+        assert!(server.status().running);
+
+        server.stop();
         let _ = std::fs::remove_dir_all(directory);
     }
 

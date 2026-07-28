@@ -312,6 +312,30 @@ fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+struct StartupPaneCleanup {
+    state: SharedState,
+    armed: bool,
+}
+
+impl StartupPaneCleanup {
+    fn new(state: SharedState) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupPaneCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            warn!("daemon startup failed after pane restoration; terminating reconstructed PTYs");
+            kill_all_panes(&self.state);
+        }
+    }
+}
+
 pub fn run() {
     if let Err(err) = run_inner() {
         eprintln!("daemon failed: {err:#}");
@@ -339,6 +363,7 @@ fn run_inner() -> Result<()> {
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
+    let mut startup_pane_cleanup = StartupPaneCleanup::new(Arc::clone(&state));
     let control = Arc::new(ControlPlane::open(&paths.data_dir)?);
     let worktree_registry = Arc::new(WorktreeRegistry::new(Arc::clone(&control)));
     let worktree_lifecycle = Arc::new(WorktreeLifecycleService::native(Arc::clone(
@@ -404,6 +429,7 @@ fn run_inner() -> Result<()> {
     let name = socket_name.as_str().to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
     info!(socket_name, app_flavor, data_dir = ?paths.data_dir, "daemon listening");
+    startup_pane_cleanup.disarm();
 
     for stream in listener.incoming() {
         if shutdown.load(Ordering::Acquire) {
@@ -6911,6 +6937,46 @@ mod tests {
 
         rx.recv_timeout(Duration::from_secs(1))
             .expect("kill_all_panes returned");
+    }
+
+    #[test]
+    fn startup_failure_cleanup_removes_reconstructed_panes() {
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let session_id;
+        {
+            let mut guard = state.lock().expect("state mutex");
+            let session = guard.create_session("Restored workspace".to_string(), None);
+            session_id = session.id;
+            guard
+                .insert_pane(
+                    session.id,
+                    Pane::for_test(
+                        crate::protocol::PaneConfig {
+                            pane_id: Uuid::new_v4(),
+                            shell: None,
+                            args: Vec::new(),
+                            cwd: None,
+                            env: Vec::new(),
+                            title: Some("restored".to_string()),
+                            icon: None,
+                            profile_id: None,
+                            role: None,
+                            restore_on_start: true,
+                            cols: 80,
+                            rows: 24,
+                        },
+                        true,
+                    ),
+                )
+                .expect("insert restored pane");
+        }
+
+        drop(StartupPaneCleanup::new(Arc::clone(&state)));
+
+        assert!(lock_state(&state)
+            .pane_metas(session_id)
+            .expect("pane metadata")
+            .is_empty());
     }
 
     #[test]
