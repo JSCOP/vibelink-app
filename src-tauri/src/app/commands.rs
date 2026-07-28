@@ -52,13 +52,34 @@ pub async fn ping(client: State<'_, DaemonClient>) -> Result<(), String> {
     client.ping().map_err(to_string)
 }
 
+/// Mirrors `settings.sessionRestore` / `settings.minimizeToTrayOnClose` into
+/// native state, because `RunEvent::Exit` cannot call into the WebView.
 #[tauri::command]
-pub async fn set_keep_terminals_alive_on_close(
-    prefs: State<'_, super::KeepAlivePrefs>,
-    value: bool,
+pub async fn set_exit_behavior(
+    prefs: State<'_, super::ExitPrefs>,
+    stop_terminals: bool,
+    minimize_to_tray: bool,
 ) -> Result<(), String> {
-    prefs.0.store(value, std::sync::atomic::Ordering::Release);
+    prefs.set_clean(stop_terminals);
+    prefs.set_minimize_to_tray(minimize_to_tray);
     Ok(())
+}
+
+/// Hides the main window to the tray. Returns `false` when tray minimize is
+/// disabled, so the caller proceeds with a real quit.
+#[tauri::command]
+pub async fn hide_to_tray(
+    app: tauri::AppHandle,
+    prefs: State<'_, super::ExitPrefs>,
+) -> Result<bool, String> {
+    if !prefs.minimizes_to_tray() {
+        return Ok(false);
+    }
+    let Some(window) = tauri::Manager::get_webview_window(&app, "main") else {
+        return Ok(false);
+    };
+    window.hide().map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]

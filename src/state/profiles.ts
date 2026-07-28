@@ -64,6 +64,14 @@ const builtInProfileIconMigrations: Record<string, { icon: string; legacy: reado
 
 export type GitStatusPresentation = 'icons' | 'letters' | 'words'
 
+/** What the next launch shows after the app is closed.
+ *
+ *  `resume`  — keep terminals running in the background daemon; reopening
+ *              reattaches the very same processes and agent sessions.
+ *  `clean`   — stop every terminal on exit and start from an initialized
+ *              screen. A crash still restores, so work is never lost silently. */
+export type SessionRestoreMode = 'resume' | 'clean'
+
 export type Settings = {
   fontFamily: string
   fontSize: number
@@ -80,7 +88,9 @@ export type Settings = {
   terminalScrollbarVisible: boolean
   cursorStyle: TerminalCursorStyle
   cursorWidth: number
-  keepTerminalsAliveOnClose: boolean
+  sessionRestore: SessionRestoreMode
+  minimizeToTrayOnClose: boolean
+  confirmExitWithRunningAgents: boolean
   resizeSnapTolerance: number
   paneHeaderHeight: number
   gitStatusPresentation: GitStatusPresentation
@@ -258,7 +268,9 @@ export const defaultSettings: Settings = {
   terminalScrollbarVisible: false,
   cursorStyle: 'bar',
   cursorWidth: 1,
-  keepTerminalsAliveOnClose: false,
+  sessionRestore: 'resume',
+  minimizeToTrayOnClose: false,
+  confirmExitWithRunningAgents: true,
   resizeSnapTolerance: 32,
   paneHeaderHeight: 28,
   gitStatusPresentation: 'words',
@@ -327,7 +339,9 @@ export function normalizeSettings(value: unknown): Settings {
     terminalScrollbarVisible: readBoolean(record?.terminalScrollbarVisible, defaultSettings.terminalScrollbarVisible),
     cursorStyle: readTerminalCursorStyle(record?.cursorStyle),
     cursorWidth: readNumberInRange(record?.cursorWidth, defaultSettings.cursorWidth, 1, 10),
-    keepTerminalsAliveOnClose: readBoolean(record?.keepTerminalsAliveOnClose, defaultSettings.keepTerminalsAliveOnClose),
+    sessionRestore: readSessionRestoreMode(record?.sessionRestore, record?.stopTerminalsOnAppExit),
+    minimizeToTrayOnClose: readBoolean(record?.minimizeToTrayOnClose, defaultSettings.minimizeToTrayOnClose),
+    confirmExitWithRunningAgents: readBoolean(record?.confirmExitWithRunningAgents, defaultSettings.confirmExitWithRunningAgents),
     resizeSnapTolerance: readNumberInRange(record?.resizeSnapTolerance, defaultSettings.resizeSnapTolerance, 0, 128),
     paneHeaderHeight: readNumberInRange(record?.paneHeaderHeight, defaultSettings.paneHeaderHeight, 24, 56),
     gitStatusPresentation: readGitStatusPresentation(record?.gitStatusPresentation),
@@ -882,6 +896,15 @@ function normalizeSetupWizard(value: unknown): SetupWizardSettings {
 
 function readTerminalThemeId(value: unknown): TerminalThemeId {
   return typeof value === 'string' && isTerminalThemeId(value) ? value : defaultSettings.terminalThemeId
+}
+
+/** Reads the restore mode, migrating the superseded `stopTerminalsOnAppExit`
+ *  boolean. That flag only stopped the processes — it still restored the panes
+ *  — so an opted-in user maps to `clean`, which now also skips restore. */
+function readSessionRestoreMode(value: unknown, legacyStopTerminals: unknown): SessionRestoreMode {
+  if (value === 'resume' || value === 'clean') return value
+  if (legacyStopTerminals === true) return 'clean'
+  return defaultSettings.sessionRestore
 }
 
 function readTerminalCursorStyle(value: unknown): TerminalCursorStyle {

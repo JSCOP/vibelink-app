@@ -271,6 +271,23 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ editorWordWrap: 'off', editorMinimap: 'on' })).toMatchObject({ editorWordWrap: true, editorMinimap: false })
   })
 
+  test('resumes the previous session by default and quits rather than hiding', () => {
+    expect(defaultSettings.sessionRestore).toBe('resume')
+    expect(defaultSettings.minimizeToTrayOnClose).toBe(false)
+    expect(defaultSettings.confirmExitWithRunningAgents).toBe(true)
+    expect(normalizeSettings({ sessionRestore: 'clean' })).toMatchObject({ sessionRestore: 'clean' })
+    expect(normalizeSettings({ sessionRestore: 'nonsense' })).toMatchObject({ sessionRestore: 'resume' })
+  })
+
+  test('migrates the superseded stop-terminals flag to the clean restore mode', () => {
+    // The old boolean stopped the processes but still restored the panes, so an
+    // opted-in user wanted an initialized screen: that is now `clean`.
+    expect(normalizeSettings({ stopTerminalsOnAppExit: true })).toMatchObject({ sessionRestore: 'clean' })
+    expect(normalizeSettings({ stopTerminalsOnAppExit: false })).toMatchObject({ sessionRestore: 'resume' })
+    // An explicit new value always wins over the legacy flag.
+    expect(normalizeSettings({ stopTerminalsOnAppExit: true, sessionRestore: 'resume' })).toMatchObject({ sessionRestore: 'resume' })
+  })
+
   test('normalizes configurable pane highlight colors', () => {
     expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')

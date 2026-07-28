@@ -91,6 +91,13 @@ export class AgentActivityTracker {
     this.inputStates.clear()
   }
 
+  /** Pane ids whose agent has an unfinished turn: a prompt was submitted and
+   *  neither a BEL nor the output-quiet window has completed it yet. Used by
+   *  the exit confirmation, which must only interrupt real in-flight work. */
+  respondingPaneIds(): string[] {
+    return [...this.pending.keys()]
+  }
+
   private startPendingResponse(paneId: string): void {
     if (!this.actions.isAgentPane(paneId)) return
     this.clear(paneId)

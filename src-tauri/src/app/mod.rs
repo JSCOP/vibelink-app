@@ -1,5 +1,5 @@
-pub mod agent_hooks;
 pub mod agent_history;
+pub mod agent_hooks;
 pub mod agents;
 pub mod android_device_lab;
 pub mod board;
@@ -19,6 +19,7 @@ pub mod orchestration;
 pub mod provider_integrations;
 pub mod skills;
 pub mod spawn_daemon;
+pub mod tray;
 #[cfg(windows)]
 mod webview_renderer;
 
@@ -30,11 +31,44 @@ use daemon_client::DaemonClient;
 use std::sync::Arc;
 use tauri::Manager;
 
-pub struct KeepAlivePrefs(pub std::sync::atomic::AtomicBool);
+/// Exit policy shared with the frontend `settings.sessionRestore`.
+///
+/// Orca parity: quitting is a real quit. `Resume` keeps the detached daemon
+/// alive so the next launch reattaches the very same processes; `Clean` stops
+/// every terminal and marks the workspaces clean so nothing is restored.
+pub struct ExitPrefs {
+    /// `true` => stop all terminals on quit (the `clean` restore mode).
+    clean: std::sync::atomic::AtomicBool,
+    /// `true` => the window close button hides to the tray instead of quitting.
+    minimize_to_tray: std::sync::atomic::AtomicBool,
+}
 
-impl Default for KeepAlivePrefs {
+impl Default for ExitPrefs {
     fn default() -> Self {
-        Self(std::sync::atomic::AtomicBool::new(false))
+        Self {
+            clean: std::sync::atomic::AtomicBool::new(false),
+            minimize_to_tray: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl ExitPrefs {
+    pub fn set_clean(&self, value: bool) {
+        self.clean.store(value, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn set_minimize_to_tray(&self, value: bool) {
+        self.minimize_to_tray
+            .store(value, std::sync::atomic::Ordering::Release);
+    }
+
+    fn should_stop(&self) -> bool {
+        self.clean.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn minimizes_to_tray(&self) -> bool {
+        self.minimize_to_tray
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -125,7 +159,13 @@ pub fn run() {
                 browser_root.join("profiles"),
             )));
             app.manage(capture::CaptureState::default());
-            app.manage(KeepAlivePrefs::default());
+            app.manage(ExitPrefs::default());
+            if let Err(error) = tray::build(app.handle()) {
+                // A missing tray must never block startup; it only removes the
+                // way back from a hidden window, which the close handler
+                // already guards by refusing to hide without a tray.
+                eprintln!("build tray icon: {error}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -299,7 +339,6 @@ pub fn run() {
             git::stage::git_stash_pop,
             git::stage::git_stash_save,
             git::branch::git_tag_create,
-            git::branch::git_tag_delete,
             git::branch::git_tag_list,
             git::stage::git_unstage,
             git::stage::git_unstage_all,
@@ -322,7 +361,8 @@ pub fn run() {
             commands::set_agent_hook_enabled,
             commands::set_pane_role,
             commands::restart_daemon,
-            commands::set_keep_terminals_alive_on_close,
+            commands::set_exit_behavior,
+            commands::hide_to_tray,
             commands::resize_pane,
             commands::save_layout,
             commands::set_pane_title,
@@ -357,12 +397,14 @@ pub fn run() {
             if let Some(manager) = app.try_state::<Arc<hermes::HermesManager>>() {
                 manager.shutdown_all();
             }
-            let keep_alive = app
-                .try_state::<KeepAlivePrefs>()
-                .map(|prefs| prefs.0.load(std::sync::atomic::Ordering::Acquire))
+            let stop_on_exit = app
+                .try_state::<ExitPrefs>()
+                .map(|prefs| prefs.should_stop())
                 .unwrap_or(false);
-            if !keep_alive {
-                let _ = spawn_daemon::shutdown_daemon();
+            if stop_on_exit {
+                // Clean mode: stop every terminal AND record the deliberate
+                // quit so the next launch opens an initialized screen.
+                let _ = spawn_daemon::shutdown_daemon_clean();
             }
         }
     });
@@ -383,5 +425,32 @@ pub fn run() {
             };
             std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", arguments);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_processes_survive_app_exit_by_default() {
+        assert!(!ExitPrefs::default().should_stop());
+    }
+
+    #[test]
+    fn terminal_processes_stop_only_after_explicit_opt_out() {
+        let prefs = ExitPrefs::default();
+        prefs.set_clean(true);
+
+        assert!(prefs.should_stop());
+    }
+
+    #[test]
+    fn window_close_quits_unless_tray_minimize_is_enabled() {
+        let prefs = ExitPrefs::default();
+        assert!(!prefs.minimizes_to_tray());
+
+        prefs.set_minimize_to_tray(true);
+        assert!(prefs.minimizes_to_tray());
     }
 }

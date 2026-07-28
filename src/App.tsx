@@ -18,7 +18,7 @@ import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
 import { AppDialogHost } from './components/AppDialog'
-import { confirmDialog, isAppDialogOpen } from './components/appDialogStore'
+import { choiceDialog, confirmDialog, isAppDialogOpen } from './components/appDialogStore'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
 import { isControlCharacterCode } from './layout/workspaceContentModel'
@@ -30,6 +30,7 @@ import type { WorkspaceCreationInput } from './ipc/providerIntegrations'
 import { getWorkspaceSessionEpoch, paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
 import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
+import { agentActivityTracker } from './terminal/agentActivity'
 import { openTerminalLinkTarget } from './terminal/fileLinkNavigation'
 import { isAgentPane, orderSessions, selectedProfileForWorkspace } from './state/profiles'
 import { flattenWorkspaceRows, workspaceRows } from './state/workspaceGroups'
@@ -186,8 +187,11 @@ function App() {
   }, [activePaneId, activeSessionId, status])
 
   useEffect(() => {
-    void invoke('set_keep_terminals_alive_on_close', { value: settings.keepTerminalsAliveOnClose }).catch(() => {})
-  }, [settings.keepTerminalsAliveOnClose])
+    void invoke('set_exit_behavior', {
+      stopTerminals: settings.sessionRestore === 'clean',
+      minimizeToTray: settings.minimizeToTrayOnClose,
+    }).catch(() => {})
+  }, [settings.sessionRestore, settings.minimizeToTrayOnClose])
 
   useEffect(() => {
     void Promise.all([startTerminalOutputStream(), startHermesOutputStream()]).then(() => bootstrap()).catch((caught) => {
@@ -429,6 +433,36 @@ function App() {
     await deleteSession(sessionId)
   }, [deleteSession, prepareDirtySessions])
 
+  /** Resolves `false` to cancel the quit. Only asks when quitting genuinely
+   *  destroys work: `resume` keeps every process alive, so it never prompts. */
+  const confirmExit = useCallback(async (): Promise<boolean> => {
+    const { settings: current } = useWorkspaceStore.getState()
+    if (current.sessionRestore !== 'clean' || !current.confirmExitWithRunningAgents) return true
+    const running = agentActivityTracker.respondingPaneIds()
+      .filter((paneId) => useWorkspaceStore.getState().panes[paneId])
+    if (running.length === 0) return true
+    const choice = await choiceDialog({
+      title: running.length === 1 ? 'An agent is still working' : `${running.length} agents are still working`,
+      message: 'Closing now stops every terminal, and this workspace starts fresh next launch.',
+      choices: [
+        { id: 'keep', label: 'Keep running in background' },
+        { id: 'quit', label: 'Stop and quit', tone: 'danger' },
+      ],
+    })
+    if (choice === 'keep') {
+      // One-shot override: honour the request without silently rewriting the
+      // user's saved restore preference.
+      await invoke('set_exit_behavior', { stopTerminals: false, minimizeToTray: false }).catch(() => {})
+      return true
+    }
+    return choice === 'quit'
+  }, [])
+
+  // Window close is the ONLY exit gate. Order matters and mirrors Orca:
+  // 1. hide to tray when the user asked for that (nothing is lost, no prompt);
+  // 2. confirm ONLY when quitting actually destroys work -- clean mode with an
+  //    agent mid-turn -- because prompting on a lossless quit is pure friction;
+  // 3. resolve dirty editors, which can still cancel the close.
   useEffect(() => {
     const appWindow = getCurrentWindow()
     let disposed = false
@@ -440,6 +474,14 @@ function App() {
       }
       windowClosePendingRef.current = true
       try {
+        if (await invoke<boolean>('hide_to_tray').catch(() => false)) {
+          event.preventDefault()
+          return
+        }
+        if (!await confirmExit()) {
+          event.preventDefault()
+          return
+        }
         const ready = await prepareDirtySessions(useWorkspaceStore.getState().sessions.map((session) => session.id), 'Close VibeLink?')
         if (!ready || disposed) event.preventDefault()
       } catch (caught) {
@@ -450,7 +492,7 @@ function App() {
       }
     }).then((dispose) => { if (disposed) dispose(); else unlisten = dispose })
     return () => { disposed = true; unlisten?.() }
-  }, [prepareDirtySessions])
+  }, [confirmExit, prepareDirtySessions])
 
   useEffect(() => {
     if (recordingStartedAtMs === null) return undefined

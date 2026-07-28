@@ -912,7 +912,34 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                   <SettingsRow icon={Scaling} label="Resize snap" hint="Pixel tolerance for snapping a divider to a neighbouring edge." control={<SettingsNumber label="Resize snap" value={draft.resizeSnapTolerance} min={0} max={128} onChange={(value) => patchDraft({ resizeSnapTolerance: value })} />} />
                   <SettingsRow icon={Rows3} label="Scrollback" hint="Lines of terminal history kept per pane." control={<SettingsNumber label="Scrollback" value={draft.scrollback} min={100} max={200000} step={100} onChange={(value) => patchDraft({ scrollback: value })} />} />
                   <SettingsRow icon={ScrollText} label="Terminal scrollbars" control={<SettingsSwitch label="Show terminal scrollbars" checked={draft.terminalScrollbarVisible} onChange={(checked) => patchDraft({ terminalScrollbarVisible: checked })} />} />
-                  <SettingsRow icon={MonitorCog} label="Stop terminals on exit" hint="Stop all processes when the window closes and restore the panes next launch." control={<SettingsSwitch label="Stop all processes on exit; restore panes next launch" checked={draft.stopTerminalsOnAppExit} onChange={(checked) => patchDraft({ stopTerminalsOnAppExit: checked })} />} />
+                </SettingsCard>
+                <SettingsCard icon={MonitorCog} title="Startup and exit" hint="Closing VibeLink is a real quit. Terminals only survive when you ask them to.">
+                  <SettingsRow
+                    icon={MonitorCog}
+                    label="When reopening"
+                    hint="Resume reattaches the same terminals and agent sessions. Start fresh stops them on exit and opens an initialized screen; a crash still restores your work."
+                    control={<SettingsSegmented
+                      label="When reopening"
+                      value={draft.sessionRestore}
+                      options={[
+                        { value: 'resume', label: 'Resume', hint: 'Keep terminals running in the background and reattach them.' },
+                        { value: 'clean', label: 'Start fresh', hint: 'Stop every terminal on exit and open an initialized screen.' },
+                      ]}
+                      onChange={(value) => patchDraft({ sessionRestore: value })}
+                    />}
+                  />
+                  <SettingsRow
+                    icon={PanelTop}
+                    label="Close button minimizes to tray"
+                    hint="Keeps VibeLink running in the notification area instead of quitting. Reopen it from the tray icon."
+                    control={<SettingsSwitch label="Minimize to the tray instead of quitting" checked={draft.minimizeToTrayOnClose} onChange={(checked) => patchDraft({ minimizeToTrayOnClose: checked })} />}
+                  />
+                  <SettingsRow
+                    icon={Info}
+                    label="Ask before stopping busy agents"
+                    hint="Only asks when Start fresh would interrupt an agent that is still working."
+                    control={<SettingsSwitch label="Confirm when agents are still working" checked={draft.confirmExitWithRunningAgents} disabled={draft.sessionRestore !== 'clean'} onChange={(checked) => patchDraft({ confirmExitWithRunningAgents: checked })} />}
+                  />
                 </SettingsCard>
                 <SettingsCard icon={Users} title="Agent roles" hint="Reusable responsibility labels for task assignment and terminal orchestration.">
                   <div className="vl-set-actions">
