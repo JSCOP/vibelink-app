@@ -1302,7 +1302,7 @@ button {
   background: color-mix(in srgb, var(--vibelink-terminal-fg) 34%, transparent);
   background-clip: content-box;
   border-radius: 999px;
-  padding: 2px 4px 2px 6px;
+  padding: 2px 3px 2px 7px;
   transition: background-color 120ms linear;
 }
 
@@ -3058,7 +3058,7 @@ button {
 
 .setup-agent-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 12px;
   align-items: center;
   padding: 12px;
@@ -3069,6 +3069,11 @@ button {
 .setup-agent-row > div {
   display: grid;
   gap: 3px;
+}
+
+.setup-agent-icon {
+  color: var(--vibelink-text);
+  flex: none;
 }
 
 .setup-agent-row span,

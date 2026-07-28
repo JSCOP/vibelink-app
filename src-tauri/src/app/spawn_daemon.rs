@@ -1,12 +1,18 @@
 use crate::{
     daemon::paths,
-    protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, Req},
+    protocol::{
+        daemon_auth_proof, read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient,
+        Req, DAEMON_AUTH_REQUIRED, DAEMON_PROTOCOL_MISMATCH, DAEMON_PROTOCOL_VERSION,
+    },
 };
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use interprocess::{
     local_socket::{prelude::*, GenericNamespaced, Name},
     ConnectWaitMode,
 };
+use keyring::Entry;
+use rand::{rngs::OsRng, RngCore};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -14,10 +20,131 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 pub type DaemonStream = LocalSocketStream;
+const IPC_SECRET_LEN: usize = 32;
+const IPC_SECRET_ACCOUNT: &str = "daemon-ipc-secret-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthenticatedDaemon {
+    pub policy_epoch: u64,
+    pub lease_until_unix_ms: i64,
+}
+
+fn ipc_secret_service() -> &'static str {
+    if paths::app_flavor() == "dev" {
+        "com.vibelink.desktop.dev.daemon-ipc"
+    } else {
+        "com.vibelink.desktop.daemon-ipc"
+    }
+}
+
+fn ipc_secret_entry() -> Result<Entry> {
+    Entry::new(ipc_secret_service(), IPC_SECRET_ACCOUNT)
+        .context("open daemon IPC secret in Windows Credential Manager")
+}
+
+pub(crate) fn load_or_create_ipc_secret() -> Result<[u8; IPC_SECRET_LEN]> {
+    let entry = ipc_secret_entry()?;
+    match entry.get_password() {
+        Ok(encoded) => decode_ipc_secret(&encoded),
+        Err(keyring::Error::NoEntry) => {
+            let mut secret = [0_u8; IPC_SECRET_LEN];
+            OsRng.fill_bytes(&mut secret);
+            entry
+                .set_password(&URL_SAFE_NO_PAD.encode(secret))
+                .context("store daemon IPC secret in Windows Credential Manager")?;
+            Ok(secret)
+        }
+        Err(error) => {
+            Err(anyhow!(error).context("load daemon IPC secret from Windows Credential Manager"))
+        }
+    }
+}
+
+pub(crate) fn load_ipc_secret() -> Result<[u8; IPC_SECRET_LEN]> {
+    let encoded = ipc_secret_entry()?
+        .get_password()
+        .context("load daemon IPC secret from Windows Credential Manager")?;
+    decode_ipc_secret(&encoded)
+}
+
+fn decode_ipc_secret(encoded: &str) -> Result<[u8; IPC_SECRET_LEN]> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("decode daemon IPC secret")?;
+    decoded
+        .try_into()
+        .map_err(|value: Vec<u8>| anyhow!("invalid daemon IPC secret length {}", value.len()))
+}
+pub fn authenticate_daemon_stream<S: Read + Write>(
+    stream: &mut S,
+    client_kind: ClientKind,
+    secret: &[u8; IPC_SECRET_LEN],
+) -> Result<AuthenticatedDaemon> {
+    authenticate_daemon_stream_with_client_id(stream, client_kind, secret, Uuid::new_v4())
+}
+
+fn authenticate_daemon_stream_with_client_id<S: Read + Write>(
+    stream: &mut S,
+    client_kind: ClientKind,
+    secret: &[u8; IPC_SECRET_LEN],
+    client_id: Uuid,
+) -> Result<AuthenticatedDaemon> {
+    write_frame(
+        stream,
+        &ClientToDaemon::Hello {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            client_id,
+            client_kind,
+        },
+    )
+    .context("write daemon hello")?;
+    let (boot_id, nonce, expires_at_unix_ms) = match read_frame::<_, DaemonToClient>(stream)
+        .context("read daemon challenge")?
+    {
+        DaemonToClient::Challenge {
+            protocol_version,
+            boot_id,
+            nonce,
+            expires_at_unix_ms,
+        } if protocol_version == DAEMON_PROTOCOL_VERSION => (boot_id, nonce, expires_at_unix_ms),
+        DaemonToClient::Challenge { .. } => bail!(DAEMON_PROTOCOL_MISMATCH),
+        DaemonToClient::Error { message, .. } => bail!(message),
+        other => bail!("unexpected daemon challenge response: {other:?}"),
+    };
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    if now_unix_ms > expires_at_unix_ms {
+        bail!(DAEMON_AUTH_REQUIRED);
+    }
+    let proof = daemon_auth_proof(
+        secret,
+        DAEMON_PROTOCOL_VERSION,
+        boot_id,
+        &nonce,
+        client_id,
+        client_kind,
+    );
+    write_frame(stream, &ClientToDaemon::Authenticate { client_id, proof })
+        .context("write daemon authentication")?;
+    match read_frame::<_, DaemonToClient>(stream).context("read daemon authentication result")? {
+        DaemonToClient::Authenticated {
+            policy_epoch,
+            lease_until_unix_ms,
+        } => Ok(AuthenticatedDaemon {
+            policy_epoch,
+            lease_until_unix_ms,
+        }),
+        DaemonToClient::Error { message, .. } => bail!(message),
+        other => bail!("unexpected daemon authentication response: {other:?}"),
+    }
+}
 
 const STARTUP_PING_REQ: Req = 0;
 const AUTHENTICATE_REQ: Req = u64::MAX;
@@ -185,20 +312,25 @@ impl std::fmt::Display for StartupAttemptError {
 }
 
 pub fn ensure_daemon() -> Result<DaemonStream> {
-    let mut recovery = StartupRecoveryBudget::default();
-    ensure_daemon_with_recovery(&mut recovery)
+    ensure_daemon_for(ClientKind::App)
 }
 
-pub(super) fn ensure_daemon_with_recovery(
+pub fn ensure_daemon_for(client_kind: ClientKind) -> Result<DaemonStream> {
+    let mut recovery = StartupRecoveryBudget::default();
+    ensure_daemon_with_recovery_for(&mut recovery, client_kind)
+}
+
+pub(super) fn ensure_daemon_with_recovery_for(
     recovery: &mut StartupRecoveryBudget,
+    client_kind: ClientKind,
 ) -> Result<DaemonStream> {
     let mut unhealthy_since = None;
-    let mut last_error = match connect_ready_daemon() {
+    let mut last_error = match connect_ready_daemon(client_kind) {
         Ok(stream) => return Ok(stream),
         Err(mut err) => {
             if err.kind == StartupAttemptErrorKind::Connect {
                 thread::sleep(DAEMON_READY_DELAY);
-                match connect_ready_daemon() {
+                match connect_ready_daemon(client_kind) {
                     Ok(stream) => return Ok(stream),
                     Err(retry_err) => err = retry_err,
                 }
@@ -229,7 +361,7 @@ pub(super) fn ensure_daemon_with_recovery(
             }
         }
 
-        match connect_ready_daemon() {
+        match connect_ready_daemon(client_kind) {
             Ok(stream) => return Ok(stream),
             Err(err) => {
                 track_unhealthy_error(&err, &mut unhealthy_since);
@@ -264,18 +396,25 @@ pub(super) fn ensure_daemon_with_recovery(
 }
 
 pub fn connect_daemon() -> io::Result<DaemonStream> {
-    let stream = connect_daemon_with_timeout(socket_name()?, STARTUP_CONNECT_TIMEOUT)?;
-    authenticate_daemon(stream).map_err(|error| {
+    connect_authenticated_daemon(ClientKind::App).map_err(|error| {
         let message = error.to_string();
         let kind = if message.contains("timed out") {
             io::ErrorKind::TimedOut
-        } else if message.contains("authentication failed") {
+        } else if message.contains(DAEMON_AUTH_REQUIRED) {
             io::ErrorKind::PermissionDenied
         } else {
             io::ErrorKind::ConnectionAborted
         };
         io::Error::new(kind, message)
     })
+}
+
+pub fn connect_authenticated_daemon(client_kind: ClientKind) -> Result<DaemonStream> {
+    let mut stream = connect_daemon_with_timeout(socket_name()?, STARTUP_CONNECT_TIMEOUT)
+        .context("connect daemon")?;
+    let secret = load_ipc_secret()?;
+    authenticate_daemon_stream(&mut stream, client_kind, &secret)?;
+    Ok(stream)
 }
 
 fn connect_daemon_with_timeout(name: Name<'static>, timeout: Duration) -> io::Result<DaemonStream> {
@@ -304,14 +443,16 @@ fn connect_daemon_with_timeout(name: Name<'static>, timeout: Duration) -> io::Re
     }
 }
 
-fn connect_ready_daemon() -> std::result::Result<DaemonStream, StartupAttemptError> {
+fn connect_ready_daemon(
+    client_kind: ClientKind,
+) -> std::result::Result<DaemonStream, StartupAttemptError> {
     let stream = connect_daemon_with_timeout(
         socket_name().map_err(|error| StartupAttemptError::connect(error.into()))?,
         STARTUP_CONNECT_TIMEOUT,
     )
     .context("connect daemon")
     .map_err(StartupAttemptError::connect)?;
-    let stream = authenticate_daemon(stream)
+    let stream = authenticate_daemon(stream, client_kind)
         .context("authenticate daemon")
         .map_err(StartupAttemptError::unhealthy)?;
     probe_daemon(stream)
@@ -319,13 +460,16 @@ fn connect_ready_daemon() -> std::result::Result<DaemonStream, StartupAttemptErr
         .map_err(StartupAttemptError::unhealthy)
 }
 
-fn authenticate_daemon(stream: DaemonStream) -> Result<DaemonStream> {
+fn authenticate_daemon(stream: DaemonStream, client_kind: ClientKind) -> Result<DaemonStream> {
     run_daemon_step_with_timeout(
         stream,
         STARTUP_AUTH_TIMEOUT,
         "vibelink-daemon-authenticate",
         "daemon authentication",
-        authenticate_daemon_io,
+        move |stream| {
+            let secret = load_ipc_secret()?;
+            authenticate_daemon_stream(stream, client_kind, &secret).map(|_| ())
+        },
     )
 }
 
@@ -367,32 +511,6 @@ where
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             bail!("{operation} stopped before returning a stream")
         }
-    }
-}
-
-pub fn authenticate_daemon_io<S>(stream: &mut S) -> Result<()>
-where
-    S: Read + Write,
-{
-    let (boot_token, user_sid) = paths::daemon_auth_material()?;
-    write_frame(
-        stream,
-        &ClientToDaemon::Authenticate {
-            req: AUTHENTICATE_REQ,
-            client_id: uuid::Uuid::new_v4(),
-            boot_token,
-            process_id: std::process::id(),
-            user_sid,
-        },
-    )
-    .context("write daemon authentication")?;
-    match read_frame::<_, DaemonToClient>(stream).context("read daemon authentication")? {
-        DaemonToClient::Reply {
-            req: AUTHENTICATE_REQ,
-            result: crate::protocol::ReplyResult::Ok,
-        } => Ok(()),
-        DaemonToClient::Error { message, .. } => bail!("daemon authentication rejected: {message}"),
-        other => bail!("unexpected daemon authentication response: {other:?}"),
     }
 }
 
@@ -1195,7 +1313,7 @@ pub(crate) const fn windows_creation_flags(include_breakaway: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{read_frame, write_frame};
+    use crate::protocol::{constant_time_eq, read_frame, write_frame};
     use std::io::{Cursor, Read, Result as IoResult, Write};
 
     struct ScriptedStream {
@@ -1211,6 +1329,26 @@ mod tests {
                 read: Cursor::new(read_bytes),
                 written: Vec::new(),
             }
+        }
+
+        fn with_responses(responses: &[DaemonToClient]) -> Self {
+            let mut read_bytes = Vec::new();
+            for response in responses {
+                write_frame(&mut read_bytes, response).expect("encode scripted response");
+            }
+            Self {
+                read: Cursor::new(read_bytes),
+                written: Vec::new(),
+            }
+        }
+
+        fn written_messages(&self) -> Vec<ClientToDaemon> {
+            let mut cursor = Cursor::new(self.written.clone());
+            let mut messages = Vec::new();
+            while cursor.position() < cursor.get_ref().len() as u64 {
+                messages.push(read_frame(&mut cursor).expect("decode written request"));
+            }
+            messages
         }
 
         fn written_message(&self) -> ClientToDaemon {
@@ -1233,6 +1371,91 @@ mod tests {
         fn flush(&mut self) -> IoResult<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn authenticated_client_sends_valid_current_proof() {
+        let secret = [0x44_u8; 32];
+        let client_id = Uuid::new_v4();
+        let boot_id = Uuid::new_v4();
+        let nonce = [0x33_u8; 32];
+        let challenge = DaemonToClient::Challenge {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            boot_id,
+            nonce,
+            expires_at_unix_ms: unix_time_millis_for_test() + 3_000,
+        };
+        let authenticated = DaemonToClient::Authenticated {
+            policy_epoch: 8,
+            lease_until_unix_ms: unix_time_millis_for_test() + 90_000,
+        };
+        let mut stream = ScriptedStream::with_responses(&[challenge, authenticated]);
+
+        let result = authenticate_daemon_stream_with_client_id(
+            &mut stream,
+            ClientKind::Cli,
+            &secret,
+            client_id,
+        )
+        .expect("valid proof accepted");
+        let messages = stream.written_messages();
+
+        assert_eq!(result.policy_epoch, 8);
+        assert_eq!(
+            messages[0],
+            ClientToDaemon::Hello {
+                protocol_version: DAEMON_PROTOCOL_VERSION,
+                client_id,
+                client_kind: ClientKind::Cli,
+            }
+        );
+        let ClientToDaemon::Authenticate {
+            client_id: proof_client_id,
+            proof,
+        } = messages[1]
+        else {
+            panic!("second frame must authenticate");
+        };
+        assert_eq!(proof_client_id, client_id);
+        assert!(constant_time_eq(
+            &proof,
+            &daemon_auth_proof(
+                &secret,
+                DAEMON_PROTOCOL_VERSION,
+                boot_id,
+                &nonce,
+                client_id,
+                ClientKind::Cli,
+            )
+        ));
+    }
+
+    #[test]
+    fn authenticated_client_rejects_expired_challenge_without_sending_proof() {
+        let challenge = DaemonToClient::Challenge {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            boot_id: Uuid::new_v4(),
+            nonce: [5_u8; 32],
+            expires_at_unix_ms: unix_time_millis_for_test() - 1,
+        };
+        let mut stream = ScriptedStream::with_responses(&[challenge]);
+        let error = authenticate_daemon_stream_with_client_id(
+            &mut stream,
+            ClientKind::App,
+            &[6_u8; 32],
+            Uuid::new_v4(),
+        )
+        .expect_err("expired challenge must fail");
+
+        assert_eq!(error.to_string(), DAEMON_AUTH_REQUIRED);
+        assert_eq!(stream.written_messages().len(), 1);
+    }
+
+    fn unix_time_millis_for_test() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
     }
 
     #[test]

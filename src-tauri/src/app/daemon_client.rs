@@ -1,12 +1,16 @@
+use crate::app::authorization::AuthorizationSnapshot;
 use crate::protocol::{
-    read_frame, write_frame, ClientToDaemon, DaemonToClient, RemoteBrowserHostRequest,
-    RemoteBrowserHostResponse, ReplyResult, Req, TaskSignal,
+    constant_time_eq, read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient,
+    RemoteBrowserHostRequest, RemoteBrowserHostResponse, ReplyResult, Req, TaskSignal,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{Duration as ChronoDuration, Utc};
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use interprocess::local_socket::{
     prelude::*, RecvHalf as LocalSocketRecvHalf, SendHalf as LocalSocketSendHalf,
 };
+use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -22,7 +26,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::spawn_daemon::{
-    ensure_daemon, ensure_daemon_with_recovery, DaemonStream, StartupRecoveryBudget,
+    ensure_daemon_for, ensure_daemon_with_recovery_for, DaemonStream, StartupRecoveryBudget,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -64,6 +68,11 @@ pub enum TerminalEvent {
     ConnectionLost {
         message: String,
     },
+    AuthorizationChanged {
+        code: String,
+        #[serde(rename = "policyEpoch")]
+        policy_epoch: u64,
+    },
     ConnectionRestored,
 }
 
@@ -90,12 +99,14 @@ struct ClientShared {
     pending: Mutex<HashMap<Req, Sender<DaemonToClient>>>,
     output_channel: Mutex<Option<Channel<TerminalEvent>>>,
     app_handle: Option<AppHandle>,
+    ws_token: [u8; 32],
     ws_port: u16,
     ws_clients: Mutex<Vec<TerminalWsClient>>,
     next_req: AtomicU64,
     reconnecting: AtomicBool,
     shutting_down: AtomicBool,
     connection_generation: AtomicU64,
+    client_kind: ClientKind,
 }
 
 struct TerminalWsClient {
@@ -200,30 +211,42 @@ impl TerminalWsClient {
 
 impl DaemonClient {
     pub fn new(stream: DaemonStream) -> Self {
-        Self::new_inner(stream, None)
+        Self::new_with_kind(stream, ClientKind::App)
+    }
+
+    pub fn new_with_kind(stream: DaemonStream, client_kind: ClientKind) -> Self {
+        Self::new_inner(stream, None, client_kind)
     }
 
     pub fn new_with_app(stream: DaemonStream, app_handle: AppHandle) -> Self {
-        Self::new_inner(stream, Some(app_handle))
+        Self::new_inner(stream, Some(app_handle), ClientKind::App)
     }
 
-    fn new_inner(stream: DaemonStream, app_handle: Option<AppHandle>) -> Self {
+    fn new_inner(
+        stream: DaemonStream,
+        app_handle: Option<AppHandle>,
+        client_kind: ClientKind,
+    ) -> Self {
         let register_browser_host = app_handle.is_some();
         let (reader, writer) = split_daemon_stream(stream);
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind terminal ws listener");
         let ws_port = listener.local_addr().expect("ws local addr").port();
+        let mut ws_token = [0_u8; 32];
+        OsRng.fill_bytes(&mut ws_token);
         let shared = Arc::new(ClientShared {
             writer: Mutex::new(writer),
             pending: Mutex::new(HashMap::new()),
             output_channel: Mutex::new(None),
             app_handle,
+            ws_token,
             ws_port,
             ws_clients: Mutex::new(Vec::new()),
             next_req: AtomicU64::new(1),
             reconnecting: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             connection_generation: AtomicU64::new(0),
+            client_kind,
         });
 
         spawn_ws_accept_loop(listener, Arc::clone(&shared));
@@ -242,6 +265,10 @@ impl DaemonClient {
             .output_channel
             .lock()
             .expect("output channel mutex poisoned") = Some(channel);
+    }
+
+    pub fn ws_token(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.shared.ws_token)
     }
 
     pub fn ws_port(&self) -> u16 {
@@ -292,6 +319,16 @@ impl DaemonClient {
             DaemonToClient::Error { message, .. } => bail!(message),
             other => bail!("unexpected worktree response: {other:?}"),
         }
+    }
+
+    pub fn send_authorization_heartbeat(&self, mut snapshot: AuthorizationSnapshot) -> Result<()> {
+        let heartbeat_cap = Utc::now() + ChronoDuration::seconds(90);
+        if snapshot.lease_until > heartbeat_cap {
+            snapshot.lease_until = heartbeat_cap;
+        }
+        self.send(ClientToDaemon::AuthorizationHeartbeat {
+            snapshot: snapshot.into(),
+        })
     }
 
     pub fn request_reply<F>(&self, make_msg: F) -> Result<ReplyResult>
@@ -345,7 +382,8 @@ impl DaemonClient {
 
         let result = (|| -> Result<()> {
             super::spawn_daemon::shutdown_daemon().context("shutdown current daemon")?;
-            let stream = ensure_daemon().context("spawn fresh daemon")?;
+            let stream =
+                ensure_daemon_for(self.shared.client_kind).context("spawn fresh daemon")?;
             let (reader, writer) = split_daemon_stream(stream);
             *self
                 .shared
@@ -424,7 +462,15 @@ fn spawn_reader_loop(reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, gen
 fn reader_loop(mut reader: LocalSocketRecvHalf, shared: Arc<ClientShared>, mut generation: u64) {
     loop {
         match read_frame::<_, DaemonToClient>(&mut reader) {
-            Ok(msg) => route_daemon_message(&shared, msg),
+            Ok(msg) => {
+                if !reader_generation_is_current(
+                    shared.connection_generation.load(Ordering::Acquire),
+                    generation,
+                ) {
+                    break;
+                }
+                route_daemon_message(&shared, msg)
+            }
             Err(err) => {
                 if !reader_generation_is_current(
                     shared.connection_generation.load(Ordering::Acquire),
@@ -467,7 +513,7 @@ fn reconnect(shared: &Arc<ClientShared>) -> Option<(LocalSocketRecvHalf, u64)> {
             return None;
         }
 
-        match ensure_daemon_with_recovery(&mut startup_recovery) {
+        match ensure_daemon_with_recovery_for(&mut startup_recovery, shared.client_kind) {
             Ok(stream) => {
                 let (reader, writer) = split_daemon_stream(stream);
                 *shared.writer.lock().expect("daemon writer mutex poisoned") = writer;
@@ -640,6 +686,7 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
                 let Ok(stream) = stream else {
                     continue;
                 };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                 let shared = Arc::clone(&shared);
                 let _ = thread::Builder::new()
                     .name("vibelink-term-ws-conn".to_string())
@@ -648,6 +695,17 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
                             Ok(ws) => ws,
                             Err(_) => return,
                         };
+                        let authenticated = match ws.read() {
+                            Ok(tungstenite::Message::Text(token)) => {
+                                websocket_token_matches(&shared.ws_token, token.as_ref())
+                            }
+                            _ => false,
+                        };
+                        if !authenticated {
+                            let _ = ws.close(None);
+                            return;
+                        }
+
                         let (tx, rx) = bounded::<Arc<[u8]>>(TERMINAL_WS_QUEUE_FRAMES);
                         let queued_bytes = Arc::new(AtomicUsize::new(0));
                         shared
@@ -672,6 +730,13 @@ fn spawn_ws_accept_loop(listener: std::net::TcpListener, shared: Arc<ClientShare
             }
         })
         .ok();
+}
+
+fn websocket_token_matches(expected: &[u8; 32], encoded: &str) -> bool {
+    let Ok(provided) = URL_SAFE_NO_PAD.decode(encoded) else {
+        return false;
+    };
+    constant_time_eq(expected, &provided)
 }
 
 fn frame_output(pane_id: &str, data: &[u8]) -> Vec<u8> {
@@ -746,6 +811,9 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
     }
 
     let event = match msg {
+        DaemonToClient::AuthorizationChanged { code, policy_epoch } => {
+            TerminalEvent::AuthorizationChanged { code, policy_epoch }
+        }
         DaemonToClient::PaneExited { pane_id, exit_code } => TerminalEvent::Exited {
             pane_id: pane_id.to_string(),
             exit_code,
@@ -786,7 +854,10 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
     match msg {
         DaemonToClient::Pong { req } | DaemonToClient::Reply { req, .. } => Some(*req),
         DaemonToClient::Error { req, .. } => *req,
-        DaemonToClient::Output { .. }
+        DaemonToClient::Challenge { .. }
+        | DaemonToClient::Authenticated { .. }
+        | DaemonToClient::AuthorizationChanged { .. }
+        | DaemonToClient::Output { .. }
         | DaemonToClient::PaneExited { .. }
         | DaemonToClient::PaneResized { .. }
         | DaemonToClient::SessionChanged { .. }
@@ -813,6 +884,23 @@ fn reader_generation_is_current(current_generation: u64, reader_generation: u64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn terminal_websocket_requires_exact_process_token() {
+        let token = [0x6a_u8; 32];
+        let encoded = URL_SAFE_NO_PAD.encode(token);
+
+        assert!(websocket_token_matches(&token, &encoded));
+        assert!(!websocket_token_matches(
+            &token,
+            &URL_SAFE_NO_PAD.encode([0x6b_u8; 32])
+        ));
+        assert!(!websocket_token_matches(&token, "not-base64!"));
+        assert!(!websocket_token_matches(
+            &token,
+            &URL_SAFE_NO_PAD.encode([0x6a_u8; 31])
+        ));
+    }
+
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 
     fn test_client() -> (DaemonClient, DaemonStream) {

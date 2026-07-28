@@ -24,7 +24,7 @@ describe('Agent session model', () => {
   })
 
   test('permission waiting state takes precedence over busy work', () => {
-    expect(agentSessionLiveState('busy', [{ requestId: 1, title: 'Write file', toolKind: 'edit', options: [] }])).toEqual({
+    expect(agentSessionLiveState('busy', [{ requestId: 1, generation: 1, title: 'Write file', toolKind: 'edit', options: [] }])).toEqual({
       label: 'Waiting for input',
       tone: 'waiting',
       pulse: false,

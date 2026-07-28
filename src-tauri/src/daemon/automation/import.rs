@@ -231,7 +231,7 @@ fn convert_job(
         "prompt": prompt,
         "provider": provider,
         "model": model,
-        "useCurrentHermesDefault": model.is_none(),
+        "useAgentDefaultModel": model.is_none(),
         "toolsets": toolsets,
         "skills": skills,
         "maxTurns": 50,

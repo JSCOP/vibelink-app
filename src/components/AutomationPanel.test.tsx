@@ -18,7 +18,7 @@ const automation: AutomationRecord = {
   agent: 'hermes',
   provider: null,
   model: null,
-  useCurrentHermesDefault: true,
+  useAgentDefaultModel: true,
   toolsets: ['hermes-acp'],
   skills: [],
   maxTurns: 50,
@@ -61,7 +61,14 @@ const completedRun: AutomationRunRecord = {
 }
 
 beforeEach(() => {
-  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Workspace', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }] })
+  useWorkspaceStore.setState({
+    activeSessionId: 'session-1',
+    sessions: [{ id: 'session-1', name: 'Workspace', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
+    agentClis: [
+      { id: 'hermes', displayName: 'Hermes', installed: true, auth: 'unknown', loginHint: 'hermes' },
+      { id: 'codex', displayName: 'Codex', installed: false, auth: 'unknown', loginHint: 'codex login' },
+    ],
+  })
   invoke.mockReset()
   invoke.mockImplementation(async (_command: string, payload?: { args?: string[] }) => {
     const args = payload?.args ?? []
@@ -81,7 +88,7 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe('AutomationPanel', () => {
-  it('shows Hermes prompt and retained run output in list/detail navigation', async () => {
+  it('shows the prompt and retained run output in list/detail navigation', async () => {
     render(<AutomationPanel />)
     fireEvent.click(await screen.findByRole('button', { name: /Daily mission/ }))
     expect(await screen.findByText('Review workspace')).toBeInTheDocument()
@@ -90,11 +97,11 @@ describe('AutomationPanel', () => {
     expect(screen.getByRole('button', { name: 'Open retained worktree' })).toHaveAttribute('title', 'C:/worktrees/run-1')
   })
 
-  it('creates a reviewed Hermes automation with isolated worktree defaults', async () => {
+  it('creates an automation on the default agent with isolated worktree defaults', async () => {
     render(<AutomationPanel />)
     fireEvent.click(await screen.findByRole('button', { name: 'New' }))
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'Weekly review' } })
-    fireEvent.change(screen.getByLabelText('Hermes prompt'), { target: { value: 'Review dependencies' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Review dependencies' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create automation' }))
 
     await waitFor(() => {
@@ -106,9 +113,56 @@ describe('AutomationPanel', () => {
       expect(input).toMatchObject({
         name: 'Weekly review',
         prompt: 'Review dependencies',
+        agent: 'hermes',
+        scheduleKind: 'daily',
+        scheduleValue: '09:00',
         workspaceMode: 'new_per_run',
-        useCurrentHermesDefault: true,
+        useAgentDefaultModel: true,
         requiresReview: false,
+      })
+    })
+  })
+
+  it('creates the automation on the agent chosen from the icon dropdown', async () => {
+    render(<AutomationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New' }))
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'Codex audit' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Audit the repo' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Hermes/ }))
+    // An uninstalled CLI is still selectable; the option explains why.
+    fireEvent.click(await screen.findByRole('option', { name: /codex not found on PATH/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create automation' }))
+
+    await waitFor(() => {
+      const createCall = invoke.mock.calls.find(([, payload]) => payload?.args?.[1] === 'create')
+      expect(createCall).toBeDefined()
+      const args = createCall?.[1]?.args
+      if (!args) throw new Error('missing automation create argv')
+      expect(JSON.parse(args[args.indexOf('--json') + 1])).toMatchObject({ agent: 'codex' })
+    })
+  })
+
+  it('rewrites the schedule value when the cadence changes', async () => {
+    render(<AutomationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New' }))
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'Weekly audit' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Audit weekly' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Every day at 09:00/ }))
+    fireEvent.change(screen.getByLabelText('Repeat'), { target: { value: 'weekly' } })
+    fireEvent.change(screen.getByLabelText('Day'), { target: { value: 'WED' } })
+    fireEvent.change(screen.getByLabelText('Hour'), { target: { value: '18' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create automation' }))
+
+    await waitFor(() => {
+      const createCall = invoke.mock.calls.find(([, payload]) => payload?.args?.[1] === 'create')
+      expect(createCall).toBeDefined()
+      const args = createCall?.[1]?.args
+      if (!args) throw new Error('missing automation create argv')
+      expect(JSON.parse(args[args.indexOf('--json') + 1])).toMatchObject({
+        scheduleKind: 'weekly',
+        scheduleValue: 'WED@18:00',
       })
     })
   })

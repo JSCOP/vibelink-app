@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeft,
-  Bot,
   CalendarClock,
   CirclePause,
   CirclePlay,
@@ -36,6 +35,8 @@ import {
 } from '../ipc/automations'
 import { AutomationEditorDialog, type AutomationEditorSaveInput } from './automations/AutomationEditorDialog'
 import { AutomationImportDialog } from './automations/AutomationImportDialog'
+import { automationAgentEntry } from './automations/agentCatalog'
+import { ProfileIcon } from './ProfileIcon'
 import {
   clearAutomationNavigation,
   getAutomationNavigationRequest,
@@ -235,8 +236,9 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
             ) : filteredRecords.map((record) => (
               <button key={record.id} type="button" className="automation-list-card" onClick={() => { setSelectedId(record.id); setDetailTab('overview') }}>
                 <span className={`automation-state-dot ${record.enabled ? 'enabled' : 'paused'}`} />
+                <ProfileIcon name={automationAgentEntry(record.agent).icon} size={15} className="automation-agent-icon" />
                 <span className="automation-list-card-body"><strong>{record.name}</strong><span>{formatSchedule(record)}</span><small>{record.nextRunAt ? `Next ${formatDate(record.nextRunAt)}` : record.requiresReview ? 'Review required' : 'Paused'}</small></span>
-                {record.source ? <Bot size={13} aria-label="Imported from Hermes" /> : null}
+                {record.source ? <span className="automation-source-mark" role="img" aria-label="Imported from Hermes" title="Imported from Hermes"><ProfileIcon name="hermes" size={13} /></span> : null}
               </button>
             ))}
           </div>
@@ -245,7 +247,7 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
         <div className="automation-detail">
           <header className="automation-detail-header">
             <button type="button" className="icon" aria-label="Back to automations" onClick={() => setSelectedId(null)}><ArrowLeft size={15} /></button>
-            <div><strong>{selected.name}</strong><span>{workspaceName}</span></div>
+            <div><strong>{selected.name}</strong><span>{automationAgentEntry(selected.agent).label} · {workspaceName}</span></div>
             <span className={`automation-status-pill ${selected.enabled ? 'enabled' : 'paused'}`}>{selected.enabled ? 'Enabled' : selected.requiresReview ? 'Review' : 'Paused'}</span>
           </header>
           <div className="automation-detail-actions">
@@ -273,12 +275,12 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
                 <div><dt>Next run</dt><dd>{selected.enabled ? formatDate(selected.nextRunAt) : 'Paused'}</dd></div>
                 <div><dt>Workspace</dt><dd>{selected.workspaceMode === 'new_per_run' ? 'New worktree per run' : 'Existing workspace'}</dd></div>
                 <div><dt>Grace</dt><dd>{selected.missedRunGraceMinutes} min</dd></div>
-                <div><dt>Model</dt><dd>{selected.useCurrentHermesDefault ? 'Current Hermes default' : `${selected.provider ?? ''} ${selected.model ?? ''}`.trim()}</dd></div>
+                <div><dt>Model</dt><dd>{selected.useAgentDefaultModel ? `${automationAgentEntry(selected.agent).label} default` : `${selected.provider ?? ''} ${selected.model ?? ''}`.trim()}</dd></div>
                 <div><dt>Timeout</dt><dd>{selected.timeoutSeconds}s · {selected.maxTurns} turns</dd></div>
               </dl>
               <section className="automation-detail-section"><header><strong>Prompt</strong></header><p>{selected.prompt}</p></section>
               <section className="automation-detail-section"><header><strong>Precheck</strong><button type="button" disabled={busy} onClick={() => void perform(`precheck:${selected.id}`, async () => setPrecheckResult(await precheckAutomation(selected.id)))}><FileCheck2 size={13} /> Test</button></header><p>{selected.precheck.command || 'No command configured.'}</p>{precheckResult ? <pre className={precheckResult.ok ? 'ok' : 'failed'}>{precheckResult.ok ? precheckResult.stdout || 'Passed' : precheckResult.error || precheckResult.stderr || 'Failed'}</pre> : null}</section>
-              <section className="automation-detail-section"><header><strong>Hermes access</strong></header><p>Toolsets: {selected.toolsets.join(', ') || 'default'}</p><p>Skills: {selected.skills.join(', ') || 'none'}</p></section>
+              {automationAgentEntry(selected.agent).supportsToolsets ? <section className="automation-detail-section"><header><strong>Agent access</strong></header><p>Toolsets: {selected.toolsets.join(', ') || 'default'}</p><p>Skills: {selected.skills.join(', ') || 'none'}</p></section> : null}
               {selected.source ? <section className="automation-detail-section"><header><strong>Imported source</strong></header><p>Hermes Cron · {selected.source.sourceId}</p><small>Read-only snapshot retained for review and duplicate detection.</small></section> : null}
             </div>
           ) : (

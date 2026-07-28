@@ -11,7 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const CONTROL_SCHEMA_VERSION: i64 = 7;
+const CONTROL_SCHEMA_VERSION: i64 = 8;
 const MAX_BACKUPS: usize = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -548,10 +548,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
               session_id TEXT NOT NULL,
               name TEXT NOT NULL,
               prompt TEXT NOT NULL,
-              agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent = 'hermes'),
+              agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent IN ('hermes','omp','claude','codex','opencode')),
               provider TEXT,
               model TEXT,
-              use_current_hermes_default INTEGER NOT NULL DEFAULT 1 CHECK(use_current_hermes_default IN (0,1)),
+              use_agent_default_model INTEGER NOT NULL DEFAULT 1 CHECK(use_agent_default_model IN (0,1)),
               toolsets_json TEXT NOT NULL DEFAULT '[\"hermes-acp\"]',
               skills_json TEXT NOT NULL DEFAULT '[]',
               max_turns INTEGER NOT NULL DEFAULT 50,
@@ -683,10 +683,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
               session_id TEXT NOT NULL,
               name TEXT NOT NULL,
               prompt TEXT NOT NULL,
-              agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent = 'hermes'),
+              agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent IN ('hermes','omp','claude','codex','opencode')),
               provider TEXT,
               model TEXT,
-              use_current_hermes_default INTEGER NOT NULL DEFAULT 1 CHECK(use_current_hermes_default IN (0,1)),
+              use_agent_default_model INTEGER NOT NULL DEFAULT 1 CHECK(use_agent_default_model IN (0,1)),
               toolsets_json TEXT NOT NULL DEFAULT '[\"hermes-acp\"]',
               skills_json TEXT NOT NULL DEFAULT '[]',
               max_turns INTEGER NOT NULL DEFAULT 50,
@@ -737,7 +737,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
               UNIQUE(automation_id, run_number)
             );
             INSERT INTO automations_v6(
-              id,session_id,name,prompt,agent,provider,model,use_current_hermes_default,
+              id,session_id,name,prompt,agent,provider,model,use_agent_default_model,
               toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,
               timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,
               missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,
@@ -879,7 +879,89 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     }
     migrate_worktree_schema_v4(connection)?;
     migrate_worktree_identity_v5(connection)?;
+    migrate_automation_agents_v8(connection)?;
     connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Widen automations from Hermes-only to the supported headless agent catalog.
+///
+/// Databases created before v8 carry `use_current_hermes_default` and a
+/// `CHECK(agent = 'hermes')` constraint. SQLite cannot relax a table CHECK in
+/// place, so the table is rebuilt once; the guard keeps the rebuild idempotent
+/// and skips it entirely on already-migrated databases.
+fn migrate_automation_agents_v8(connection: &Connection) -> Result<()> {
+    if !table_has_column(connection, "automations", "use_current_hermes_default")? {
+        return Ok(());
+    }
+    // Why: `automation_runs` cascades on `automations(id)`, so the rebuild must
+    // run with foreign keys disabled or dropping the old table would delete
+    // every retained run. This is SQLite's documented table-rebuild procedure.
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let rebuild = connection.execute_batch(
+        "BEGIN IMMEDIATE;
+        CREATE TABLE automations_v8 (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent IN ('hermes','omp','claude','codex','opencode')),
+          provider TEXT,
+          model TEXT,
+          use_agent_default_model INTEGER NOT NULL DEFAULT 1 CHECK(use_agent_default_model IN (0,1)),
+          toolsets_json TEXT NOT NULL DEFAULT '[\"hermes-acp\"]',
+          skills_json TEXT NOT NULL DEFAULT '[]',
+          max_turns INTEGER NOT NULL DEFAULT 50,
+          timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+          schedule_kind TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          timezone TEXT NOT NULL,
+          dtstart INTEGER,
+          next_run_at INTEGER,
+          last_run_at INTEGER,
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+          requires_review INTEGER NOT NULL DEFAULT 0 CHECK(requires_review IN (0,1)),
+          missed_run_grace_minutes INTEGER NOT NULL DEFAULT 720,
+          missed_run_policy TEXT NOT NULL DEFAULT 'run_once_within_grace' CHECK(missed_run_policy = 'run_once_within_grace'),
+          workspace_mode TEXT NOT NULL CHECK(workspace_mode IN ('new_per_run','existing')),
+          worktree_storage_json TEXT NOT NULL DEFAULT '{}',
+          base_ref TEXT,
+          precheck_json TEXT NOT NULL DEFAULT '{\"command\":null,\"timeoutSeconds\":60,\"requireWorkspace\":true,\"requireGit\":false}',
+          source_provider TEXT CHECK(source_provider IS NULL OR source_provider = 'hermes'),
+          source_id TEXT,
+          source_hash TEXT,
+          source_snapshot_json TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(source_provider, source_id),
+          CHECK(
+            (source_provider IS NULL AND source_id IS NULL AND source_hash IS NULL AND source_snapshot_json IS NULL)
+            OR
+            (source_provider IS NOT NULL AND source_id IS NOT NULL AND source_hash IS NOT NULL AND source_snapshot_json IS NOT NULL)
+          )
+        );
+        INSERT INTO automations_v8
+        SELECT id,session_id,name,prompt,agent,provider,model,use_current_hermes_default,
+               toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,
+               timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,
+               missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,
+               base_ref,precheck_json,source_provider,source_id,source_hash,source_snapshot_json,
+               created_at,updated_at
+        FROM automations;
+        DROP TABLE automations;
+        ALTER TABLE automations_v8 RENAME TO automations;
+        COMMIT;",
+    );
+    let restored = connection.pragma_update(None, "foreign_keys", "ON");
+    rebuild?;
+    restored?;
+    let violations: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if violations != 0 {
+        bail!("automation agent migration left {violations} foreign key violations");
+    }
     Ok(())
 }
 
@@ -1648,7 +1730,7 @@ mod tests {
             "agent",
             "provider",
             "model",
-            "use_current_hermes_default",
+            "use_agent_default_model",
             "toolsets_json",
             "skills_json",
             "max_turns",
@@ -1748,7 +1830,7 @@ mod tests {
 
         let row = connection
             .query_row(
-                "SELECT agent, use_current_hermes_default, toolsets_json, skills_json, max_turns,
+                "SELECT agent, use_agent_default_model, toolsets_json, skills_json, max_turns,
                         timeout_seconds, enabled, requires_review, missed_run_grace_minutes,
                         missed_run_policy, worktree_storage_json, precheck_json
                  FROM automations WHERE id = 'auto-1'",

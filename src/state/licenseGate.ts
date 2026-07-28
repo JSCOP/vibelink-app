@@ -20,3 +20,12 @@ export function isAppLocked(status: LicenseStatus | null | undefined): boolean {
 export function requiresProContent(kind: WorkspaceContentKind): boolean {
   return PRO_CONTENT_KINDS.includes(kind)
 }
+
+export function authorizationErrorMessage(error: unknown): string {
+  const text = String(error)
+  if (text.includes('ENTITLEMENT_REQUIRED')) return 'Sign in to an entitled Moobang account to continue.'
+  if (text.includes('AUTHORIZATION_STALE')) return 'VibeLink authorization expired. Reconnect to validate your account.'
+  if (text.includes('AUTH_REQUIRED')) return 'VibeLink could not authenticate the local background service.'
+  if (text.includes('DAEMON_PROTOCOL_MISMATCH')) return 'VibeLink and its background service are different versions. Restart VibeLink.'
+  return text
+}

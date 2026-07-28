@@ -1,4 +1,4 @@
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use crate::dedicated_cli::{
     parse_args, CliError, ControlExecutor, Flavor, Invocation, SocketExecutor,
 };
@@ -8,10 +8,12 @@ use tauri::State;
 
 #[tauri::command]
 pub async fn cli_request(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     args: Vec<String>,
 ) -> Result<Value, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::CliControl)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let invocation = parse_app_invocation(args).map_err(to_string)?;
         let mut executor = SocketExecutor;

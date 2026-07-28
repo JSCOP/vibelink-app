@@ -184,4 +184,20 @@ describe('SettingsDialog preferences', () => {
       },
     }))
   })
+
+  test('renders each AI agent row with its vendor brand mark, not a generic glyph', async () => {
+    render(
+      <SettingsDialog
+        settings={normalizeSettings(defaultSettings)}
+        onChange={vi.fn()}
+        onClose={vi.fn()}
+        onRunSetupWizard={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
+    const row = await screen.findByText('Oh My Pi')
+    const icon = row.closest('.vl-set-agent')?.querySelector('img')
+    expect(icon).toHaveAttribute('src', '/agent-icons/oh-my-pi.svg')
+  })
 })

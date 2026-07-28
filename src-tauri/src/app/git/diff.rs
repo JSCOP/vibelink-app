@@ -1,7 +1,7 @@
 use super::exec::{git_read, git_read_allow_fail};
 use super::paths::{resolve_repo_file_path, validate_base_ref, validate_repo_relative_path};
 use super::{merge_numstat, parse_name_status, to_string, ChangedFile, FileContents};
-use crate::app::license::LicenseService;
+use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 use tauri::State;
@@ -10,12 +10,14 @@ const MAX_DIFF_BYTES: usize = 1024 * 1024;
 
 #[tauri::command]
 pub async fn git_commit_file_contents(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     sha: String,
     path: String,
 ) -> Result<FileContents, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         commit_file_contents_native(&workspace_folder, &sha, &path)
     })
@@ -26,12 +28,14 @@ pub async fn git_commit_file_contents(
 
 #[tauri::command]
 pub async fn git_diff_refs(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
     head_ref: String,
 ) -> Result<Vec<ChangedFile>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         diff_refs_native(&workspace_folder, &base_ref, &head_ref)
     })
@@ -42,13 +46,15 @@ pub async fn git_diff_refs(
 
 #[tauri::command]
 pub async fn git_diff_refs_file(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
     head_ref: String,
     path: String,
 ) -> Result<FileContents, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         diff_refs_file_native(&workspace_folder, &base_ref, &head_ref, &path)
     })
@@ -59,12 +65,14 @@ pub async fn git_diff_refs_file(
 
 #[tauri::command]
 pub async fn git_compare_refs(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
     head_ref: String,
 ) -> Result<Vec<ChangedFile>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         compare_refs_native(&workspace_folder, &base_ref, &head_ref)
     })
@@ -75,13 +83,15 @@ pub async fn git_compare_refs(
 
 #[tauri::command]
 pub async fn git_compare_refs_file(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
     head_ref: String,
     path: String,
 ) -> Result<FileContents, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         compare_refs_file_native(&workspace_folder, &base_ref, &head_ref, &path)
     })
@@ -92,12 +102,14 @@ pub async fn git_compare_refs_file(
 
 #[tauri::command]
 pub async fn git_working_file_contents(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     path: String,
     area: String,
 ) -> Result<FileContents, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         working_file_contents_native(&workspace_folder, &path, &area)
     })
@@ -197,7 +209,6 @@ pub(crate) fn compare_refs_file_native(
         git_read_allow_fail(repo, ["show", &format!("{head_ref}:{path}")])?.unwrap_or_default();
     file_contents_from_bytes(old, new)
 }
-
 pub(crate) fn working_file_contents_native(
     repo: &str,
     path: &str,

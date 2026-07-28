@@ -1,9 +1,11 @@
 import { useCallback, useMemo, useState } from 'react'
-import { Bot, MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react'
+import { MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { useWorkspaceStore } from '../../state/store'
 import type { AgentConversationInfo } from '../../ipc/agentHistory'
+import { ProfileIcon } from '../ProfileIcon'
+import { agentIconName } from '../settings/agentBrand'
 import {
   agentConversationLabel,
   agentResumeLaunch,
@@ -243,7 +245,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
                 onClick={(event) => { void resumeConversation(conversation, event.ctrlKey || event.metaKey) }}
               >
                 <span className="agent-session-row-title">
-                  <Bot size={12} aria-hidden="true" />
+                  <ProfileIcon name={agentIconName(conversation.agent)} size={13} className="agent-conversation-brand" />
                   <strong>{conversation.title}</strong>
                 </span>
                 <span className="agent-session-row-meta">

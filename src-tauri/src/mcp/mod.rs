@@ -1,4 +1,5 @@
 use crate::app::agents::agent_cli_status_native;
+use crate::app::authorization::Capability;
 use crate::app::board::{
     board_brief_get_native, board_brief_set_native, board_doc_native, board_read_native,
     board_task_create_native, board_task_done_native, board_task_note_native,
@@ -14,7 +15,7 @@ use crate::dedicated_cli::{
     ValueKind,
 };
 use crate::protocol::{
-    ClientToDaemon, PaneCommandOrigin, PaneConfig, PaneMeta, ReplyResult, TaskSignal,
+    ClientKind, ClientToDaemon, PaneCommandOrigin, PaneConfig, PaneMeta, ReplyResult, TaskSignal,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -41,11 +42,10 @@ fn serve() -> Result<()> {
     let session_id =
         std::env::var("VIBELINK_SESSION_ID").context("VIBELINK_SESSION_ID is required")?;
     let session_id = parse_uuid(&session_id)?;
-    let stream = crate::app::spawn_daemon::connect_daemon()
-        .context("connect to the running VibeLink control plane")?;
-    let client = DaemonClient::new(stream);
-    let license = HeadlessLicenseCache::load()?;
-    license.require_entitled()?;
+    require_mcp_call()?;
+    let stream = crate::app::spawn_daemon::ensure_daemon_for(ClientKind::Mcp)
+        .context("connect to daemon")?;
+    let client = DaemonClient::new_with_kind(stream, ClientKind::Mcp);
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
@@ -53,7 +53,8 @@ fn serve() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line_with_license(&client, session_id, &line, Some(&license))
+        if let Some(response) =
+            handle_line_with_authorizer(&client, session_id, &line, Some(&require_mcp_call))
         {
             serde_json::to_writer(&mut stdout, &response)?;
             stdout.write_all(b"\n")?;
@@ -64,11 +65,11 @@ fn serve() -> Result<()> {
 }
 
 /// Returns Some(response_value) to write to stdout, or None when no reply is due.
-fn handle_line_with_license(
+fn handle_line_with_authorizer(
     client: &DaemonClient,
     session_id: Uuid,
     line: &str,
-    license: Option<&HeadlessLicenseCache>,
+    authorize: Option<&dyn Fn() -> Result<()>>,
 ) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -85,25 +86,27 @@ fn handle_line_with_license(
         return None;
     }
     Some(
-        handle_message_with_license(client, session_id, &request, license).unwrap_or_else(|err| {
-            error_response(
-                request.get("id").cloned().unwrap_or(Value::Null),
-                -32000,
-                err.to_string(),
-            )
-        }),
+        handle_message_with_authorizer(client, session_id, &request, authorize).unwrap_or_else(
+            |err| {
+                error_response(
+                    request.get("id").cloned().unwrap_or(Value::Null),
+                    -32000,
+                    err.to_string(),
+                )
+            },
+        ),
     )
 }
 
 fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
-    handle_line_with_license(client, session_id, line, None)
+    handle_line_with_authorizer(client, session_id, line, None)
 }
 
-fn handle_message_with_license(
+fn handle_message_with_authorizer(
     client: &DaemonClient,
     session_id: Uuid,
     request: &Value,
-    license: Option<&HeadlessLicenseCache>,
+    authorize: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     match request.get("method").and_then(Value::as_str) {
@@ -126,8 +129,8 @@ fn handle_message_with_license(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            if let Some(license) = license {
-                license.require_entitled()?;
+            if let Some(authorize) = authorize {
+                authorize()?;
             }
             match call_tool(client, session_id, name, &args) {
                 Ok(text) => Ok(json!({
@@ -159,7 +162,11 @@ fn handle_message_with_license(
 }
 
 fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
-    handle_message_with_license(client, session_id, request, None)
+    handle_message_with_authorizer(client, session_id, request, None)
+}
+
+fn require_mcp_call() -> Result<()> {
+    HeadlessLicenseCache::load()?.require_capability(Capability::McpCall)
 }
 
 fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) -> Result<String> {
@@ -231,12 +238,7 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 if index > 0 {
                     std::thread::sleep(Duration::from_millis(120));
                 }
-                client.send(ClientToDaemon::WritePane {
-                    session_id,
-                    pane_id,
-                    data: payload,
-                    origin: PaneCommandOrigin::Desktop,
-                })?;
+                write_pane(client, session_id, pane_id, payload)?;
             }
             Ok(json!({ "ok": true }).to_string())
         }
@@ -354,19 +356,9 @@ fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) 
                 board.brief.as_ref().map(|brief| brief.purpose.as_str()),
             );
             let payloads = task_assign_payloads(&prompt);
-            client.send(ClientToDaemon::WritePane {
-                session_id,
-                pane_id,
-                data: payloads[0].clone(),
-                origin: PaneCommandOrigin::Desktop,
-            })?;
+            write_pane(client, session_id, pane_id, payloads[0].clone())?;
             std::thread::sleep(Duration::from_millis(120));
-            client.send(ClientToDaemon::WritePane {
-                session_id,
-                pane_id,
-                data: payloads[1].clone(),
-                origin: PaneCommandOrigin::Desktop,
-            })?;
+            write_pane(client, session_id, pane_id, payloads[1].clone())?;
             let updated = board_task_update_native(
                 &session_id.to_string(),
                 task_id,
@@ -1035,12 +1027,7 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
             if !write_to_existing && !created_id_set.contains(&pane.id) {
                 continue;
             }
-            client.send(ClientToDaemon::WritePane {
-                session_id,
-                pane_id: pane.id,
-                data: payload.clone(),
-                origin: PaneCommandOrigin::Desktop,
-            })?;
+            write_pane(client, session_id, pane.id, payload.clone())?;
             command_pane_ids.push(pane.id.to_string());
         }
     }
@@ -1063,6 +1050,19 @@ fn launch_terminal_grid(client: &DaemonClient, session_id: Uuid, args: &Value) -
 fn attached_panes(client: &DaemonClient, session_id: Uuid) -> Result<Vec<PaneMeta>> {
     match client.request_reply(|req| ClientToDaemon::AttachSession { req, session_id })? {
         ReplyResult::Attached { panes, .. } => Ok(panes),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}
+
+fn write_pane(client: &DaemonClient, session_id: Uuid, pane_id: Uuid, data: Vec<u8>) -> Result<()> {
+    match client.request_reply(|req| ClientToDaemon::WritePane {
+        req,
+        session_id,
+        pane_id,
+        data,
+        origin: PaneCommandOrigin::Desktop,
+    })? {
+        ReplyResult::Ok => Ok(()),
         other => bail!("unexpected daemon response: {other:?}"),
     }
 }
@@ -1589,6 +1589,7 @@ fn error_response(id: Value, code: i64, message: impl Into<String>) -> Value {
 mod tests {
     use super::*;
     use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+    use std::cell::Cell;
 
     #[test]
     fn tools_list_contains_pane_task_and_skill_tools() {
@@ -1827,6 +1828,38 @@ mod tests {
 
         assert_eq!(response["id"], 7);
         assert_eq!(response["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn mcp_reloads_authorization_for_each_tool_call() {
+        let calls = Cell::new(0_u32);
+        let authorize = || {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call == 0 {
+                Ok(())
+            } else {
+                bail!("ENTITLEMENT_REQUIRED")
+            }
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "unknown_tool", "arguments": {} }
+        });
+        let client = placeholder_client();
+
+        let first =
+            handle_message_with_authorizer(&client, Uuid::nil(), &request, Some(&authorize))
+                .expect_err("first call reaches tool dispatch");
+        let second =
+            handle_message_with_authorizer(&client, Uuid::nil(), &request, Some(&authorize))
+                .expect_err("revoked second call fails closed");
+
+        assert!(first.to_string().contains("unknown tool"));
+        assert_eq!(second.to_string(), "ENTITLEMENT_REQUIRED");
+        assert_eq!(calls.get(), 2);
     }
 
     fn placeholder_client() -> DaemonClient {

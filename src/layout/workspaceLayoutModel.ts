@@ -36,7 +36,7 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   gitBranches: { kind: 'gitBranches', component: 'gitBranches', title: 'Branches', icon: 'git-branch' },
   automation: { kind: 'automation', component: 'automation', title: 'Automations', icon: 'timer' },
   workbench: { kind: 'workbench', component: 'workbench', title: 'Workbench', icon: 'git-branch' },
-  agent: { kind: 'agent', component: 'agent', title: 'VibeLink Agent', icon: 'bot' },
+  agent: { kind: 'agent', component: 'agent', title: 'VibeLink Agent', icon: 'hermes' },
   orchestration: { kind: 'orchestration', component: 'orchestration', title: 'Orchestration', icon: 'monitor-cog' },
   kanban: { kind: 'kanban', component: 'kanban', title: 'Kanban', icon: 'layout-grid' },
   todo: { kind: 'todo', component: 'todo', title: 'Todo List', icon: 'list-todo' },

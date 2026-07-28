@@ -10,3 +10,13 @@ export async function withSuppressedPanelRemoval<T>(ref: BooleanRef, work: () =>
     ref.current = false
   }
 }
+
+export async function withAllowedPanelRemoval<T>(ref: BooleanRef, work: () => Promise<T>): Promise<T> {
+  const previous = ref.current
+  ref.current = false
+  try {
+    return await work()
+  } finally {
+    ref.current = previous
+  }
+}

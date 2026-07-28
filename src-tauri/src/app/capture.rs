@@ -1,12 +1,16 @@
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use std::{
     borrow::Cow,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Condvar, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+    },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -26,7 +30,8 @@ const FFMPEG_ZIP_NAME: &str = "ffmpeg.zip";
 
 #[derive(Default)]
 pub struct CaptureState {
-    pub recording: Mutex<Option<Recording>>,
+    pub recording: Arc<Mutex<Option<Recording>>>,
+    next_recording_generation: AtomicU64,
     ffmpeg_provisioning: Mutex<FfmpegProvisioning>,
     ffmpeg_provisioning_changed: Condvar,
 }
@@ -38,10 +43,12 @@ struct FfmpegProvisioning {
     completed: Option<(u64, Result<String, String>)>,
 }
 
+#[derive(Clone)]
 pub struct Recording {
-    pub child: std::process::Child,
-    pub path: PathBuf,
-    pub started_at_ms: u64,
+    generation: u64,
+    child: Arc<Mutex<std::process::Child>>,
+    path: PathBuf,
+    started_at_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -118,6 +125,84 @@ fn virtual_bounds(monitors: &[CaptureMonitorRect]) -> Option<CaptureMonitorRect>
     })
 }
 
+fn recording_generation_is_current(current_generation: u64, monitor_generation: u64) -> bool {
+    current_generation == monitor_generation
+}
+
+fn take_recording_if_generation(
+    recording: &Mutex<Option<Recording>>,
+    generation: u64,
+) -> Option<Recording> {
+    let mut slot = recording.lock().ok()?;
+    if !slot
+        .as_ref()
+        .is_some_and(|current| recording_generation_is_current(current.generation, generation))
+    {
+        return None;
+    }
+    slot.take()
+}
+
+fn spawn_recording_monitor(
+    recording_slot: Arc<Mutex<Option<Recording>>>,
+    app: tauri::AppHandle,
+    recording: Recording,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name(format!("vibelink-capture-monitor-{}", recording.generation))
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            let finished = match recording.child.lock() {
+                Ok(mut child) => child
+                    .try_wait()
+                    .map(|status| status.is_some())
+                    .map_err(to_string),
+                Err(_) => Err("recording child unavailable".to_string()),
+            };
+            match finished {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(_) if stop_recording_child(&recording.child).is_ok() => {}
+                Err(_) => break,
+            }
+            if let Some(retired) =
+                take_recording_if_generation(&recording_slot, recording.generation)
+            {
+                let _ = app.emit(
+                    "capture://recording-stopped",
+                    CaptureRecordingEvent {
+                        started_at_ms: retired.started_at_ms,
+                        path: retired.path.to_string_lossy().into_owned(),
+                    },
+                );
+            }
+            break;
+        })
+        .map(|_| ())
+        .map_err(to_string)
+}
+
+fn stop_recording_child(child: &Mutex<std::process::Child>) -> Result<(), String> {
+    let mut child = child
+        .lock()
+        .map_err(|_| "recording child unavailable".to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"q");
+        let _ = stdin.flush();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait().map_err(to_string)? {
+            Some(_) => return Ok(()),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            None => {
+                child.kill().map_err(to_string)?;
+                child.wait().map_err(to_string)?;
+                return Ok(());
+            }
+        }
+    }
+}
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -429,22 +514,42 @@ fn resolve_capture_image_file(dir: &str, path: &str) -> Result<PathBuf, String> 
     Ok(canonical)
 }
 
+fn read_capture_file_native(dir: &str, path: &str) -> Result<Vec<u8>, String> {
+    let path = resolve_capture_image_file(dir, path)?;
+    std::fs::read(path).map_err(to_string)
+}
+
 #[tauri::command]
-pub async fn default_capture_dir() -> Result<String, String> {
+pub async fn default_capture_dir(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     Ok(default_capture_root().to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub async fn check_ffmpeg(ffmpeg_path: String) -> Result<(), String> {
+pub async fn check_ffmpeg(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    ffmpeg_path: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     resolve_ffmpeg(&ffmpeg_path).map(|_| ())
 }
 
 #[tauri::command]
 pub async fn ensure_ffmpeg(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
     ffmpeg_path: String,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     if let Ok(program) = resolve_ffmpeg(&ffmpeg_path) {
         return Ok(program);
     }
@@ -465,7 +570,13 @@ pub async fn ensure_ffmpeg(
 }
 
 #[tauri::command]
-pub async fn open_path(path: String) -> Result<(), String> {
+pub async fn open_path(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    path: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let target = normalize_open_target(&path)?;
 
     // Windows: call ShellExecuteW directly from this process instead of
@@ -518,7 +629,13 @@ pub async fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn reveal_path(path: String) -> Result<(), String> {
+pub async fn reveal_path(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    path: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let target = normalize_local_target(&path)?;
 
     #[cfg(windows)]
@@ -634,13 +751,16 @@ pub fn is_capture_overlay_label(label: &str) -> bool {
 
 #[tauri::command]
 pub async fn open_capture_overlay(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     mode: String,
     dir: String,
     ffmpeg_path: String,
 ) -> Result<(), String> {
-    // Close any live overlay first. A previous overlay whose label leaked is
-    // unreachable here, which is exactly why the new window gets a fresh label.
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    // Close every live or leaked overlay from the generated label family.
     for (label, window) in app.webview_windows() {
         if is_capture_overlay_label(&label) {
             let _ = window.destroy();
@@ -739,6 +859,7 @@ fn monitor_crop(region: CaptureMonitorRect, monitor: CaptureMonitorRect) -> Opti
 
 #[tauri::command]
 pub async fn capture_region_image(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     dir: String,
     file_name: String,
     x: i32,
@@ -746,6 +867,9 @@ pub async fn capture_region_image(
     w: u32,
     h: u32,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     if w == 0 || h == 0 {
         return Err("empty region".to_string());
     }
@@ -797,30 +921,45 @@ pub async fn capture_region_image(
 }
 
 #[tauri::command]
-pub async fn clipboard_write_image(png_bytes: Vec<u8>) -> Result<(), String> {
+pub async fn clipboard_write_image(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    png_bytes: Vec<u8>,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     copy_png_to_clipboard(&png_bytes)
 }
 
 #[tauri::command]
-pub async fn clipboard_write_text(text: String) -> Result<(), String> {
-    // The in-app browser hands the OS keyboard focus to a native child
-    // WebView2, and `navigator.clipboard.writeText` refuses to run from a
-    // document that does not hold focus ("Document is not focused"). Copying
-    // through the OS clipboard directly is focus-independent, so browser
-    // annotations can be copied while the page itself is focused.
+pub async fn clipboard_write_text(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    text: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    // Native clipboard access remains focus-independent for embedded WebView2 pages.
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
         .map_err(to_string)
 }
 
 #[tauri::command]
-pub fn read_capture_file(dir: String, path: String) -> Result<Vec<u8>, String> {
-    let path = resolve_capture_image_file(&dir, &path)?;
-    std::fs::read(path).map_err(to_string)
+pub fn read_capture_file(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+    dir: String,
+    path: String,
+) -> Result<Vec<u8>, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
+    read_capture_file_native(&dir, &path)
 }
 
 #[tauri::command]
 pub async fn start_video_capture(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
     dir: String,
@@ -831,6 +970,9 @@ pub async fn start_video_capture(
     w: u32,
     h: u32,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let w = w & !1;
     let h = h & !1;
     if w < 16 || h < 16 {
@@ -888,6 +1030,10 @@ pub async fn start_video_capture(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
+    let generation = state
+        .next_recording_generation
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
     let mut child = hide_console(&mut command).spawn().map_err(to_string)?;
     thread::sleep(Duration::from_millis(400));
     match child.try_wait() {
@@ -895,6 +1041,7 @@ pub async fn start_video_capture(
         Ok(None) => {}
         Err(error) => {
             let _ = child.kill();
+            let _ = child.wait();
             return Err(error.to_string());
         }
     }
@@ -910,11 +1057,21 @@ pub async fn start_video_capture(
         let _ = child.wait();
         return Err("already recording".to_string());
     }
-    *slot = Some(Recording {
-        child,
+    let recording = Recording {
+        generation,
+        child: Arc::new(Mutex::new(child)),
         path: output,
         started_at_ms,
-    });
+    };
+    *slot = Some(recording.clone());
+    drop(slot);
+    if let Err(error) =
+        spawn_recording_monitor(Arc::clone(&state.recording), app.clone(), recording.clone())
+    {
+        take_recording_if_generation(&state.recording, generation);
+        let _ = stop_recording_child(&recording.child);
+        return Err(error);
+    }
     let _ = app.emit(
         "capture://recording-started",
         CaptureRecordingEvent {
@@ -927,19 +1084,29 @@ pub async fn start_video_capture(
 
 #[tauri::command]
 pub fn capture_recording_state(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<Option<CaptureRecordingState>, String> {
-    let mut slot = state
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
+    let recording = state
         .recording
         .lock()
-        .map_err(|_| "recording state unavailable".to_string())?;
-    let Some(recording) = slot.as_mut() else {
+        .map_err(|_| "recording state unavailable".to_string())?
+        .clone();
+    let Some(recording) = recording else {
         return Ok(None);
     };
 
-    match recording.child.try_wait() {
+    let status = recording
+        .child
+        .lock()
+        .map_err(|_| "recording child unavailable".to_string())?
+        .try_wait();
+    match status {
         Ok(Some(_)) => {
-            *slot = None;
+            take_recording_if_generation(&state.recording, recording.generation);
             Ok(None)
         }
         Ok(None) => Ok(Some(CaptureRecordingState {
@@ -951,10 +1118,14 @@ pub fn capture_recording_state(
 
 #[tauri::command]
 pub async fn stop_video_capture(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<String, String> {
-    let mut recording = {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    let recording = {
         let mut slot = state
             .recording
             .lock()
@@ -962,11 +1133,7 @@ pub async fn stop_video_capture(
         slot.take().ok_or_else(|| "not recording".to_string())?
     };
 
-    if let Some(mut stdin) = recording.child.stdin.take() {
-        let _ = stdin.write_all(b"q");
-        let _ = stdin.flush();
-    }
-    let _ = recording.child.wait();
+    stop_recording_child(&recording.child)?;
 
     let path = recording.path.to_string_lossy().to_string();
     copy_path_to_clipboard(&path);
@@ -1028,17 +1195,16 @@ mod tests {
         std::fs::write(&outside, b"outside").expect("write outside file");
 
         let dir = root.to_string_lossy().into_owned();
-        let bytes = read_capture_file(dir.clone(), inside.to_string_lossy().into_owned())
+        let bytes = read_capture_file_native(&dir, &inside.to_string_lossy())
             .expect("inside image can be read");
         assert_eq!(bytes, b"inside");
 
-        let absolute_escape =
-            read_capture_file(dir.clone(), outside.to_string_lossy().into_owned())
-                .expect_err("absolute path outside Images is rejected");
+        let absolute_escape = read_capture_file_native(&dir, &outside.to_string_lossy())
+            .expect_err("absolute path outside Images is rejected");
         assert!(absolute_escape.contains("escapes image directory"));
 
         let traversal = format!("..{}outside.png", std::path::MAIN_SEPARATOR);
-        let traversal_escape = read_capture_file(dir, traversal)
+        let traversal_escape = read_capture_file_native(&dir, &traversal)
             .expect_err("relative traversal outside Images is rejected");
         assert!(traversal_escape.contains("escapes image directory"));
 
@@ -1191,5 +1357,43 @@ mod tests {
                 height: 100
             }
         );
+    }
+
+    #[test]
+    fn stale_recording_monitor_cannot_retire_new_generation() {
+        fn recording(generation: u64) -> Recording {
+            let child =
+                Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()))
+                    .args(["/D", "/Q", "/C", "more"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn recording child");
+            assert!(child.stdin.is_some());
+            Recording {
+                generation,
+                child: Arc::new(Mutex::new(child)),
+                path: PathBuf::from(format!("capture-{generation}.mp4")),
+                started_at_ms: generation,
+            }
+        }
+
+        let stale = recording(1);
+        let current = recording(2);
+        let slot = Mutex::new(Some(current.clone()));
+
+        assert!(take_recording_if_generation(&slot, stale.generation).is_none());
+        assert_eq!(
+            slot.lock()
+                .expect("recording slot")
+                .as_ref()
+                .map(|recording| recording.generation),
+            Some(2)
+        );
+
+        stop_recording_child(&stale.child).expect("stop stale child");
+        let current = take_recording_if_generation(&slot, 2).expect("take current child");
+        stop_recording_child(&current.child).expect("stop current child");
     }
 }

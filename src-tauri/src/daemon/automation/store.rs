@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use uuid::Uuid;
 
-const AUTOMATION_COLUMNS: &str = "id,session_id,name,prompt,agent,provider,model,use_current_hermes_default,toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,base_ref,precheck_json,source_provider,source_id,source_hash,source_snapshot_json,created_at,updated_at";
+const AUTOMATION_COLUMNS: &str = "id,session_id,name,prompt,agent,provider,model,use_agent_default_model,toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,base_ref,precheck_json,source_provider,source_id,source_hash,source_snapshot_json,created_at,updated_at";
 const RUN_COLUMNS: &str = "id,automation_id,run_number,trigger,scheduled_for,status,runtime_identity_json,worktree_json,precheck_result_json,output_snapshot_json,usage_json,error,started_at,finished_at,created_at";
 const FINAL_RUN_STATUSES: [&str; 7] = [
     "completed",
@@ -91,7 +91,7 @@ impl AutomationStore {
 
         transaction
             .execute(
-                "INSERT INTO automations(id,session_id,name,prompt,agent,provider,model,use_current_hermes_default,toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,base_ref,precheck_json,source_provider,source_id,source_hash,source_snapshot_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)",
+                "INSERT INTO automations(id,session_id,name,prompt,agent,provider,model,use_agent_default_model,toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,base_ref,precheck_json,source_provider,source_id,source_hash,source_snapshot_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)",
                 params![
                     record.id,
                     record.session_id,
@@ -100,7 +100,7 @@ impl AutomationStore {
                     record.agent,
                     record.provider,
                     record.model,
-                    bool_sql(record.use_current_hermes_default),
+                    bool_sql(record.use_agent_default_model),
                     toolsets,
                     skills,
                     i64::from(record.max_turns),
@@ -147,7 +147,7 @@ impl AutomationStore {
 
         let changed = transaction
             .execute(
-                "UPDATE automations SET session_id=?2,name=?3,prompt=?4,agent=?5,provider=?6,model=?7,use_current_hermes_default=?8,toolsets_json=?9,skills_json=?10,max_turns=?11,timeout_seconds=?12,schedule_kind=?13,schedule_value=?14,timezone=?15,dtstart=?16,next_run_at=?17,last_run_at=?18,enabled=?19,requires_review=?20,missed_run_grace_minutes=?21,missed_run_policy=?22,workspace_mode=?23,worktree_storage_json=?24,base_ref=?25,precheck_json=?26,source_provider=?27,source_id=?28,source_hash=?29,source_snapshot_json=?30,updated_at=?31 WHERE id=?1",
+                "UPDATE automations SET session_id=?2,name=?3,prompt=?4,agent=?5,provider=?6,model=?7,use_agent_default_model=?8,toolsets_json=?9,skills_json=?10,max_turns=?11,timeout_seconds=?12,schedule_kind=?13,schedule_value=?14,timezone=?15,dtstart=?16,next_run_at=?17,last_run_at=?18,enabled=?19,requires_review=?20,missed_run_grace_minutes=?21,missed_run_policy=?22,workspace_mode=?23,worktree_storage_json=?24,base_ref=?25,precheck_json=?26,source_provider=?27,source_id=?28,source_hash=?29,source_snapshot_json=?30,updated_at=?31 WHERE id=?1",
                 params![
                     record.id,
                     record.session_id,
@@ -156,7 +156,7 @@ impl AutomationStore {
                     record.agent,
                     record.provider,
                     record.model,
-                    bool_sql(record.use_current_hermes_default),
+                    bool_sql(record.use_agent_default_model),
                     toolsets,
                     skills,
                     i64::from(record.max_turns),
@@ -644,7 +644,7 @@ mod tests {
                    agent TEXT NOT NULL,
                    provider TEXT,
                    model TEXT,
-                   use_current_hermes_default INTEGER NOT NULL,
+                   use_agent_default_model INTEGER NOT NULL,
                    toolsets_json TEXT NOT NULL,
                    skills_json TEXT NOT NULL,
                    max_turns INTEGER NOT NULL,
@@ -703,7 +703,7 @@ mod tests {
             agent: "hermes".into(),
             provider: None,
             model: None,
-            use_current_hermes_default: true,
+            use_agent_default_model: true,
             toolsets: vec!["hermes-acp".into()],
             skills: Vec::new(),
             max_turns: 50,

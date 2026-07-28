@@ -1,4 +1,4 @@
-import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, Plus, Search, Timer, Workflow, type LucideIcon } from 'lucide-react'
+import { Plus, Search } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { AgentCliStatus } from '../ipc/agents'
@@ -13,8 +13,8 @@ type WorkspaceWindowKind = 'browser' | 'agent' | 'orchestration' | 'workbench' |
 type WorkspaceStructuralPanelKind = 'automation'
 type WorkspaceAddMenuItem =
   | { id: string; section: 'Terminals'; label: string; profile: Profile; disabled: boolean; hint?: string }
-  | { id: string; section: 'Windows'; label: string; icon: LucideIcon; kind: WorkspaceWindowKind | 'editor'; disabled: false }
-  | { id: string; section: 'Panels'; label: string; icon: LucideIcon; kind: WorkspaceStructuralPanelKind; disabled: false }
+  | { id: string; section: 'Windows'; label: string; icon: string; kind: WorkspaceWindowKind | 'editor'; disabled: false }
+  | { id: string; section: 'Panels'; label: string; icon: string; kind: WorkspaceStructuralPanelKind; disabled: false }
 
 type WorkspaceAddMenuProps = {
   actions: WorkspaceContentActions | null
@@ -25,19 +25,21 @@ type WorkspaceAddMenuProps = {
   setWorkspaceOverlayOpen?: (overlayId: string, open: boolean) => void
 }
 
-const windowItems: Array<{ kind: WorkspaceWindowKind | 'editor'; label: string; icon: LucideIcon }> = [
-  { kind: 'browser', label: 'Browser', icon: Globe },
-  { kind: 'editor', label: 'Editor', icon: FileCode2 },
-  { kind: 'agent', label: 'VibeLink Agent', icon: Bot },
-  { kind: 'orchestration', label: 'Orchestration', icon: Workflow },
-  { kind: 'workbench', label: 'Workbench', icon: GitBranch },
-  { kind: 'kanban', label: 'Kanban', icon: LayoutGrid },
-  { kind: 'todo', label: 'Todo List', icon: ListTodo },
-  { kind: 'diff', label: 'Task Diff', icon: GitCompare },
+/** Icon names resolve through the shared profile/brand icon registry, so an
+ *  agent-backed window shows its real vendor mark instead of a generic glyph. */
+const windowItems: Array<{ kind: WorkspaceWindowKind | 'editor'; label: string; icon: string }> = [
+  { kind: 'browser', label: 'Browser', icon: 'globe' },
+  { kind: 'editor', label: 'Editor', icon: 'file-code' },
+  { kind: 'agent', label: 'VibeLink Agent', icon: 'hermes' },
+  { kind: 'orchestration', label: 'Orchestration', icon: 'monitor-cog' },
+  { kind: 'workbench', label: 'Workbench', icon: 'git-branch' },
+  { kind: 'kanban', label: 'Kanban', icon: 'layout-grid' },
+  { kind: 'todo', label: 'Todo List', icon: 'list-todo' },
+  { kind: 'diff', label: 'Task Diff', icon: 'git-compare' },
 ]
 
-const panelItems: Array<{ kind: WorkspaceStructuralPanelKind; label: string; icon: LucideIcon }> = [
-  { kind: 'automation', label: 'Automations', icon: Timer },
+const panelItems: Array<{ kind: WorkspaceStructuralPanelKind; label: string; icon: string }> = [
+  { kind: 'automation', label: 'Automations', icon: 'timer' },
 ]
 
 function profileInstallHint(profile: Profile, statusById: Record<string, AgentCliStatus>): string | undefined {
@@ -162,7 +164,6 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
 
   const renderItem = (item: WorkspaceAddMenuItem) => {
     const isActive = item.id === activeId
-    const Icon = item.section === 'Terminals' ? null : item.icon
     const hint = item.section === 'Terminals' ? item.hint : undefined
     return (
       <button
@@ -180,7 +181,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
         <span className="workspace-add-menu-icon" aria-hidden="true">
           {item.section === 'Terminals'
             ? <ProfileIcon name={item.profile.icon} color={item.profile.color} size={15} />
-            : Icon ? <Icon size={15} /> : null}
+            : <ProfileIcon name={item.icon} size={15} />}
         </span>
         <span className="workspace-add-menu-item-copy">
           <span>{item.label}</span>

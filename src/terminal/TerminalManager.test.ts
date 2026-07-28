@@ -110,6 +110,12 @@ function emitTerminalTitle(paneId: string, title: string): void {
   entry.term.titleHandler(title)
 }
 
+function paneWriteData(call: unknown[]): string | undefined {
+  const args = call[1]
+  if (!args || typeof args !== 'object' || !('data' in args) || typeof args.data !== 'string') return undefined
+  return args.data
+}
+
 function makeContainer(): HTMLElement {
   const el = document.createElement('div')
   document.body.appendChild(el)
@@ -151,7 +157,7 @@ beforeEach(() => {
 vi.stubGlobal('ResizeObserver', StubResizeObserver)
 
 describe('TerminalManager pre-session input buffering', () => {
-  it('holds emulator input while the pane has no session and flushes it on the session-bound attach', () => {
+  it('holds emulator input while the pane has no session and flushes it on the session-bound attach', async () => {
     const paneId = 'pane-presession-flush'
     const container = makeContainer()
 
@@ -165,6 +171,7 @@ describe('TerminalManager pre-session input buffering', () => {
 
     // spawn_pane resolved; the store update re-renders the panel with a session.
     TerminalManager.attach(paneId, container, { sessionId: 'session-1' })
+    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(2))
 
     const writes = invokeMock.mock.calls.filter(([command]) => command === 'write_pane')
     expect(writes).toEqual([
@@ -182,19 +189,20 @@ describe('TerminalManager pre-session input buffering', () => {
     TerminalManager.dispose(paneId)
   })
 
-  it('sends input immediately when the pane already has a session', () => {
+  it('sends input after the pane attach is acknowledged', async () => {
     const paneId = 'pane-live-input'
     const container = makeContainer()
 
     TerminalManager.attach(paneId, container, { sessionId: 'session-2' })
     emitTerminalData(paneId, 'ls\r')
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-2', paneId, data: 'ls\r' }))
 
     expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-2', paneId, data: 'ls\r' })
 
     TerminalManager.dispose(paneId)
   })
 
-  it('flushes held input when the daemon reattaches the pane', () => {
+  it('flushes held input when the daemon reattaches the pane', async () => {
     const paneId = 'pane-reattach-flush'
     const container = makeContainer()
 
@@ -203,10 +211,94 @@ describe('TerminalManager pre-session input buffering', () => {
     expect(invokeMock).not.toHaveBeenCalledWith('write_pane', expect.anything())
 
     TerminalManager.reattachToDaemon('session-3', [paneId])
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-3', paneId, data: '\x1b[1;1R' }))
 
     expect(invokeMock).toHaveBeenCalledWith('attach_pane', { sessionId: 'session-3', paneId })
     expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-3', paneId, data: '\x1b[1;1R' })
 
+    TerminalManager.dispose(paneId)
+  })
+
+  it('keeps queued input after attach failure and flushes it once after retry', async () => {
+    const paneId = 'pane-attach-retry'
+    const container = makeContainer()
+    let attachAttempts = 0
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'attach_pane' && attachAttempts++ === 0) throw new Error('attach failed')
+      return undefined
+    })
+
+    TerminalManager.attach(paneId, container, {})
+    emitTerminalData(paneId, 'queued')
+    TerminalManager.attach(paneId, container, { sessionId: 'session-retry' })
+    await vi.waitFor(() => expect(attachAttempts).toBe(1))
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(0)
+
+    TerminalManager.reattachToDaemon('session-retry', [paneId])
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-retry', paneId, data: 'queued' }))
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(1)
+    TerminalManager.dispose(paneId)
+  })
+
+  it('retains a failed write chunk and preserves order across reattach', async () => {
+    const paneId = 'pane-write-retry'
+    const container = makeContainer()
+    let writeAttempts = 0
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'write_pane' && writeAttempts++ === 0) throw new Error('write failed')
+      return undefined
+    })
+
+    TerminalManager.attach(paneId, container, {})
+    emitTerminalData(paneId, 'first')
+    emitTerminalData(paneId, 'second')
+    TerminalManager.attach(paneId, container, { sessionId: 'session-write-retry' })
+    await vi.waitFor(() => expect(writeAttempts).toBe(1))
+
+    TerminalManager.reattachToDaemon('session-write-retry', [paneId])
+    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(3))
+    const payloads = invokeMock.mock.calls
+      .filter(([command]) => command === 'write_pane')
+      .map(paneWriteData)
+    expect(payloads).toEqual(['first', 'first', 'second'])
+    TerminalManager.dispose(paneId)
+  })
+
+  it('ignores stale attach completion and flushes only through the current generation', async () => {
+    const paneId = 'pane-stale-attach'
+    const container = makeContainer()
+    const resolvers: Array<() => void> = []
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== 'attach_pane') return Promise.resolve(undefined)
+      return new Promise<void>((resolve) => resolvers.push(resolve))
+    })
+
+    TerminalManager.attach(paneId, container, {})
+    emitTerminalData(paneId, 'retained')
+    TerminalManager.attach(paneId, container, { sessionId: 'session-old' })
+    TerminalManager.reattachToDaemon('session-new', [paneId])
+    expect(resolvers).toHaveLength(2)
+
+    resolvers[0]()
+    await Promise.resolve()
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(0)
+    resolvers[1]()
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-new', paneId, data: 'retained' }))
+    TerminalManager.dispose(paneId)
+  })
+
+  it('bounds pre-session input by chunks and writes one merged overflow notice', () => {
+    const paneId = 'pane-input-bound'
+    const container = makeContainer()
+    TerminalManager.attach(paneId, container, {})
+    for (let index = 0; index < 300; index += 1) emitTerminalData(paneId, 'x')
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { pendingInput?: unknown[]; pendingInputBytes?: number; inputTrimNoticeWritten?: boolean }>
+    }
+    const entry = manager.entries.get(paneId)
+    expect(entry?.pendingInput).toHaveLength(256)
+    expect(entry?.pendingInputBytes).toBe(256)
+    expect(entry?.inputTrimNoticeWritten).toBe(true)
     TerminalManager.dispose(paneId)
   })
 })

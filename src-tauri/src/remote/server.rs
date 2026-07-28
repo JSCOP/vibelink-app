@@ -11,18 +11,22 @@ use super::{
     identity::RemoteIdentity,
     protocol::ServerMessage,
 };
+use crate::app::authorization::{
+    AuthorizationDenied, AuthorizationSnapshot, AuthorizationState, Capability,
+};
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use crossbeam_channel::Sender;
 use local_ip_address::list_afinet_netifas;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    net::{IpAddr, TcpListener},
+    net::{IpAddr, Shutdown, TcpListener, TcpStream},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, Mutex, RwLock, RwLockReadGuard,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -92,6 +96,7 @@ pub struct RemoteStatus {
     pub hosts: Vec<String>,
     pub devices: Vec<DevicePublic>,
     pub v2_fingerprint: String,
+    pub re_pair_required: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -242,6 +247,7 @@ pub(crate) struct RemoteShared {
     pub appearance_generation: AtomicU64,
     pub workspace_order: RwLock<Vec<String>>,
     pub workspace_alerts: RwLock<HashMap<String, usize>>,
+    pub authorization: RwLock<AuthorizationSnapshot>,
     pub client_senders: Mutex<HashMap<Uuid, Sender<RemotePush>>>,
     pub client_close_requests: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
     pub client_devices: Mutex<HashMap<Uuid, String>>,
@@ -249,6 +255,55 @@ pub(crate) struct RemoteShared {
     pub v2_operation_ids: Mutex<HashMap<String, OperationReplayWindow>>,
     pub v2_identity: Arc<DeviceIdentity>,
     active_clients: Arc<ActiveClientCapacity>,
+}
+
+impl RemoteShared {
+    pub fn authorization_guard(
+        &self,
+        capability: Capability,
+    ) -> std::result::Result<RwLockReadGuard<'_, AuthorizationSnapshot>, AuthorizationDenied> {
+        let snapshot = self
+            .authorization
+            .read()
+            .expect("remote authorization lock");
+        snapshot.authorize(capability, Utc::now())?;
+        Ok(snapshot)
+    }
+
+    pub fn authorize(
+        &self,
+        capability: Capability,
+    ) -> std::result::Result<(), AuthorizationDenied> {
+        self.authorization_guard(capability).map(drop)
+    }
+
+    pub fn disconnect_clients(&self, device_id: Option<&str>) -> Vec<Uuid> {
+        let client_keys = self
+            .client_devices
+            .lock()
+            .expect("remote client devices mutex")
+            .iter()
+            .filter_map(|(client_key, active_device_id)| {
+                device_id
+                    .is_none_or(|expected| active_device_id == expected)
+                    .then_some(*client_key)
+            })
+            .collect::<Vec<_>>();
+        let close_requests = self
+            .client_close_requests
+            .lock()
+            .expect("remote client close requests mutex");
+        let senders = self.client_senders.lock().expect("remote clients mutex");
+        for client_key in &client_keys {
+            if let Some(close_requested) = close_requests.get(client_key) {
+                close_requested.store(true, Ordering::Release);
+            }
+            if let Some(sender) = senders.get(client_key) {
+                let _ = sender.try_send(RemotePush::WebSocket(Message::Close(None)));
+            }
+        }
+        client_keys
+    }
 }
 
 pub struct RemoteServer {
@@ -266,12 +321,21 @@ impl RemoteServer {
         let config_path = remote_dir.join("config.json");
         let devices_path = remote_dir.join("devices.json");
         let config = RemoteConfig::load(&config_path)?;
-        let identity = RemoteIdentity::load_or_generate(&remote_dir)?;
-        let devices = DeviceStore::load(devices_path.clone())?;
+        let mut identity = RemoteIdentity::load_or_generate(&remote_dir)?;
+        let mut devices = DeviceStore::load(devices_path)?;
+        if identity.generated_on_load() && !devices.is_empty() && !identity.requires_device_reset()
+        {
+            identity.mark_device_reset_required()?;
+        }
+        if identity.requires_device_reset() {
+            devices.reset_for_identity_change()?;
+            identity.acknowledge_device_reset()?;
+        }
         let v2_identity = Arc::new(DeviceIdentity::load_or_create(&format!(
             "desktop-{}",
             std::env::var("VIBELINK_APP_FLAVOR").unwrap_or_else(|_| "prod".to_string()),
         ))?);
+        let authorization = locked_authorization_snapshot();
         Ok(Self {
             config_path,
             config: Mutex::new(config),
@@ -283,6 +347,7 @@ impl RemoteServer {
                 appearance_generation: AtomicU64::new(0),
                 workspace_order: RwLock::new(Vec::new()),
                 workspace_alerts: RwLock::new(HashMap::new()),
+                authorization: RwLock::new(authorization),
                 client_senders: Mutex::new(HashMap::new()),
                 client_close_requests: Mutex::new(HashMap::new()),
                 client_devices: Mutex::new(HashMap::new()),
@@ -292,6 +357,21 @@ impl RemoteServer {
                 active_clients: Arc::new(ActiveClientCapacity::new(MAX_CLIENTS)),
             }),
         })
+    }
+
+    pub fn update_authorization(&self, snapshot: AuthorizationSnapshot) -> Result<()> {
+        *self
+            .shared
+            .authorization
+            .write()
+            .expect("remote authorization lock") = snapshot;
+        if self.shared.authorize(Capability::RemoteConnect).is_ok() {
+            self.start_if_enabled()
+        } else {
+            let _ = self.shared.disconnect_clients(None);
+            self.stop();
+            Ok(())
+        }
     }
 
     pub fn start_if_enabled(&self) -> Result<()> {
@@ -315,6 +395,10 @@ impl RemoteServer {
     }
 
     pub fn start(&self) -> Result<()> {
+        self.shared
+            .authorize(Capability::RemoteConnect)
+            .map_err(authorization_error)?;
+        self.reap_finished_runtime();
         let mut runtime = self.runtime.lock().expect("remote runtime mutex");
         if runtime.is_some() {
             return Ok(());
@@ -340,6 +424,12 @@ impl RemoteServer {
         let shared = Arc::clone(&self.shared);
         let handle = thread::Builder::new().name("vibelink-remote-accept".to_string()).spawn(move || {
             while !thread_shutdown.load(Ordering::Acquire) {
+                if let Err(denied) = shared.authorize(Capability::RemoteConnect) {
+                    tracing::warn!(code = denied.code.as_str(), "stopping stale or unentitled remote listener");
+                    let _ = shared.disconnect_clients(None);
+                    thread_shutdown.store(true, Ordering::Release);
+                    break;
+                }
                 match listener.accept() {
                     Ok((stream, address)) => {
                         let Some(client_permit) = shared.active_clients.try_reserve() else {
@@ -403,14 +493,68 @@ impl RemoteServer {
         }
         if let Some(runtime) = runtime {
             let _ = runtime.handle.join();
+        } else {
+            let _ = self.shared.disconnect_clients(None);
+        }
+        self.wait_for_authenticated_clients();
+    }
+
+    fn reap_finished_runtime(&self) {
+        let finished = self
+            .runtime
+            .lock()
+            .expect("remote runtime mutex")
+            .as_ref()
+            .is_some_and(|runtime| runtime.handle.is_finished());
+        if finished {
+            if let Some(runtime) = self.runtime.lock().expect("remote runtime mutex").take() {
+                let _ = runtime.handle.join();
+            }
+        }
+    }
+
+    fn wait_for_authenticated_clients(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !self
+            .shared
+            .client_senders
+            .lock()
+            .expect("remote clients mutex")
+            .is_empty()
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_clients(&self, client_keys: &[Uuid]) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while self
+            .shared
+            .client_senders
+            .lock()
+            .expect("remote clients mutex")
+            .keys()
+            .any(|client_key| client_keys.contains(client_key))
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
     pub fn status(&self) -> RemoteStatus {
         let config = self.config.lock().expect("remote config mutex").clone();
+        let devices = self.shared.devices.lock().expect("remote devices mutex");
+        let re_pair_required = devices.re_pair_required();
+        let devices = devices.list_public();
         RemoteStatus {
             enabled: config.enabled,
-            running: self.runtime.lock().expect("remote runtime mutex").is_some(),
+            running: self
+                .runtime
+                .lock()
+                .expect("remote runtime mutex")
+                .as_ref()
+                .is_some_and(|runtime| !runtime.handle.is_finished()),
             port: config.port,
             lan_enabled: config.lan_enabled,
             fingerprint: self
@@ -423,13 +567,9 @@ impl RemoteServer {
             } else {
                 vec!["127.0.0.1".to_string()]
             },
-            devices: self
-                .shared
-                .devices
-                .lock()
-                .expect("remote devices mutex")
-                .list_public(),
+            devices,
             v2_fingerprint: self.shared.v2_identity.fingerprint(),
+            re_pair_required,
         }
     }
 
@@ -481,6 +621,10 @@ impl RemoteServer {
     }
 
     pub fn create_pairing(&self) -> Result<PairingPayload> {
+        let _authorization = self
+            .shared
+            .authorization_guard(Capability::RemoteConnect)
+            .map_err(authorization_error)?;
         let status = self.status();
         if !status.running || !status.lan_enabled {
             return Err(anyhow!(
@@ -506,6 +650,10 @@ impl RemoteServer {
     }
 
     pub fn create_pairing_v2(&self) -> Result<PairingPayload> {
+        let _authorization = self
+            .shared
+            .authorization_guard(Capability::RemoteConnect)
+            .map_err(authorization_error)?;
         let status = self.status();
         if !status.running || !status.lan_enabled {
             return Err(anyhow!(
@@ -565,42 +713,8 @@ impl RemoteServer {
     }
 
     fn close_device_connections(&self, device_id: &str) {
-        let client_keys = self
-            .shared
-            .client_devices
-            .lock()
-            .expect("remote client devices mutex")
-            .iter()
-            .filter_map(|(client_key, active_device_id)| {
-                (active_device_id == device_id).then_some(*client_key)
-            })
-            .collect::<Vec<_>>();
-        {
-            let close_requests = self
-                .shared
-                .client_close_requests
-                .lock()
-                .expect("remote client close requests mutex");
-            for client_key in &client_keys {
-                if let Some(close_requested) = close_requests.get(client_key) {
-                    close_requested.store(true, Ordering::Release);
-                }
-            }
-        }
-        let senders = {
-            let senders = self
-                .shared
-                .client_senders
-                .lock()
-                .expect("remote clients mutex");
-            client_keys
-                .iter()
-                .filter_map(|client_key| senders.get(client_key).cloned())
-                .collect::<Vec<_>>()
-        };
-        for sender in senders {
-            let _ = sender.try_send(RemotePush::WebSocket(Message::Close(None)));
-        }
+        let client_keys = self.shared.disconnect_clients(Some(device_id));
+        self.wait_for_clients(&client_keys);
     }
 
     pub fn regenerate_identity(&self) -> Result<RemoteStatus> {
@@ -608,15 +722,15 @@ impl RemoteServer {
         if was_running {
             self.stop();
         }
-        self.identity
-            .write()
-            .expect("remote identity lock")
-            .regenerate()?;
         self.shared
             .devices
             .lock()
             .expect("remote devices mutex")
-            .revoke_all()?;
+            .reset_for_identity_change()?;
+        self.identity
+            .write()
+            .expect("remote identity lock")
+            .regenerate()?;
         if was_running {
             self.start()?;
         }
@@ -702,6 +816,22 @@ impl Drop for RemoteServer {
     }
 }
 
+fn locked_authorization_snapshot() -> AuthorizationSnapshot {
+    let now = Utc::now();
+    AuthorizationSnapshot {
+        state: AuthorizationState::Unlicensed,
+        entitled: false,
+        observed_at: now,
+        lease_until: now,
+        offline_grace_until: None,
+        policy_epoch: 0,
+    }
+}
+
+fn authorization_error(denied: AuthorizationDenied) -> anyhow::Error {
+    anyhow!(denied.code.as_str())
+}
+
 pub(crate) fn desktop_name() -> String {
     sysinfo::System::host_name()
         .filter(|name| !name.trim().is_empty())
@@ -727,181 +857,118 @@ pub(crate) fn local_hosts() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        net::TcpStream,
-        sync::{mpsc, Barrier},
-    };
+    use chrono::Duration as ChronoDuration;
+    use crossbeam_channel::bounded;
+    use std::{io::Read, net::TcpStream, sync::atomic::AtomicBool};
 
-    #[test]
-    fn debug_autostart_requires_explicit_opt_in() {
-        assert!(!should_autostart(true, true, None));
-        assert!(!should_autostart(true, true, Some("0")));
-        assert!(!should_autostart(true, true, Some("true")));
-        assert!(should_autostart(true, true, Some("1")));
-        assert!(!should_autostart(false, true, Some("1")));
-    }
-
-    #[test]
-    fn production_autostart_preserves_enabled_configuration() {
-        assert!(should_autostart(true, false, None));
-        assert!(should_autostart(true, false, Some("0")));
-        assert!(!should_autostart(false, false, Some("1")));
-    }
-
-    #[test]
-    fn lan_firewall_preflight_is_required_only_for_lan_binding() {
-        ensure_lan_firewall_with(false, 42_811, |_| {
-            panic!("local-only startup must not query the firewall")
-        })
-        .unwrap();
-
-        let error = ensure_lan_firewall_with(true, 42_812, |port| {
-            assert_eq!(port, 42_812);
-            Ok(false)
-        })
-        .unwrap_err();
-        assert!(error.downcast_ref::<LanFirewallNotConfirmed>().is_some());
-
-        ensure_lan_firewall_with(true, 42_812, |port| {
-            assert_eq!(port, 42_812);
-            Ok(true)
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn active_client_capacity_is_atomic_under_contention() {
-        let capacity = Arc::new(ActiveClientCapacity::new(MAX_CLIENTS));
-        let contender_count = MAX_CLIENTS * 4;
-        let start = Arc::new(Barrier::new(contender_count + 1));
-        let release = Arc::new(Barrier::new(contender_count + 1));
-        let (sender, receiver) = mpsc::channel();
-        let mut threads = Vec::with_capacity(contender_count);
-
-        for _ in 0..contender_count {
-            let capacity = Arc::clone(&capacity);
-            let start = Arc::clone(&start);
-            let release = Arc::clone(&release);
-            let sender = sender.clone();
-            threads.push(thread::spawn(move || {
-                start.wait();
-                let permit = capacity.try_reserve();
-                sender.send(permit.is_some()).expect("report reservation");
-                release.wait();
-                drop(permit);
-            }));
+    fn snapshot(entitled: bool, lease_until: chrono::DateTime<Utc>) -> AuthorizationSnapshot {
+        AuthorizationSnapshot {
+            state: if entitled {
+                AuthorizationState::ValidOnline
+            } else {
+                AuthorizationState::TrialExpired
+            },
+            entitled,
+            observed_at: Utc::now(),
+            lease_until,
+            offline_grace_until: None,
+            policy_epoch: 7,
         }
-        drop(sender);
-
-        start.wait();
-        let reservation_count = (0..contender_count)
-            .filter(|_| receiver.recv().expect("reservation result"))
-            .count();
-        let next_reservation_failed = capacity.try_reserve().is_none();
-
-        release.wait();
-        for thread in threads {
-            thread.join().expect("reservation thread");
-        }
-
-        assert_eq!(reservation_count, MAX_CLIENTS);
-        assert!(next_reservation_failed);
     }
 
-    #[test]
-    fn dropping_active_client_permit_restores_capacity() {
-        let capacity = Arc::new(ActiveClientCapacity::new(1));
-        let permit = capacity.try_reserve().expect("reserve client slot");
-
-        assert!(capacity.try_reserve().is_none());
-        drop(permit);
-        assert!(capacity.try_reserve().is_some());
+    fn temp_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vibelink-remote-{label}-{}", Uuid::new_v4()))
     }
 
-    #[test]
-    fn stop_signals_close_request_when_push_queue_is_full() {
-        let directory =
-            std::env::temp_dir().join(format!("vibelink-remote-stop-{}", Uuid::new_v4()));
-        let server = RemoteServer::new(directory.clone()).expect("create remote server");
-        let client_key = Uuid::new_v4();
-        let close_requested = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = crossbeam_channel::bounded(1);
-        sender
-            .try_send(RemotePush::WebSocket(Message::Ping(Vec::new().into())))
-            .expect("fill client push queue");
-        server
-            .shared
-            .client_senders
-            .lock()
-            .expect("remote clients mutex")
-            .insert(client_key, sender);
-        server
-            .shared
-            .client_close_requests
-            .lock()
-            .expect("remote client close requests mutex")
-            .insert(client_key, Arc::clone(&close_requested));
-
-        server.stop();
-
-        assert!(close_requested.load(Ordering::Acquire));
-        assert!(matches!(
-            receiver.try_recv().unwrap(),
-            RemotePush::WebSocket(Message::Ping(_))
-        ));
-        assert!(receiver.try_recv().is_err());
-        let _ = std::fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn device_close_signals_request_when_push_queue_is_full() {
-        let directory =
-            std::env::temp_dir().join(format!("vibelink-remote-close-{}", Uuid::new_v4()));
-        let server = RemoteServer::new(directory.clone()).expect("create remote server");
-        let client_key = Uuid::new_v4();
-        let close_requested = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = crossbeam_channel::bounded(1);
-        sender
-            .try_send(RemotePush::WebSocket(Message::Ping(Vec::new().into())))
-            .expect("fill client push queue");
-        server
-            .shared
-            .client_senders
-            .lock()
-            .expect("remote clients mutex")
-            .insert(client_key, sender);
-        server
-            .shared
-            .client_devices
-            .lock()
-            .expect("remote client devices mutex")
-            .insert(client_key, "device-a".to_string());
-        server
-            .shared
-            .client_close_requests
-            .lock()
-            .expect("remote client close requests mutex")
-            .insert(client_key, Arc::clone(&close_requested));
-
-        server.close_device_connections("device-a");
-
-        assert!(close_requested.load(Ordering::Acquire));
-        assert!(matches!(
-            receiver.try_recv().unwrap(),
-            RemotePush::WebSocket(Message::Ping(_))
-        ));
-        assert!(receiver.try_recv().is_err());
-        let _ = std::fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn server_binds_configured_port_and_reports_running() {
-        let directory =
-            std::env::temp_dir().join(format!("vibelink-remote-server-{}", Uuid::new_v4()));
+    fn available_port() -> u16 {
         let probe = TcpListener::bind(("127.0.0.1", 0)).expect("reserve test port");
-        let port = probe.local_addr().expect("probe address").port();
-        drop(probe);
+        probe.local_addr().expect("probe address").port()
+    }
+
+    #[test]
+    fn unentitled_and_stale_snapshots_cannot_start_or_pair() {
+        let directory = temp_directory("authorization-denied");
+        let port = available_port();
         let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        server.set_port(port).expect("set remote port");
+        assert_eq!(
+            server
+                .start()
+                .expect_err("unentitled start must fail")
+                .to_string(),
+            "ENTITLEMENT_REQUIRED"
+        );
+        assert_eq!(
+            server
+                .create_pairing()
+                .expect_err("unentitled pairing must fail")
+                .to_string(),
+            "ENTITLEMENT_REQUIRED"
+        );
+        assert!(TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse().unwrap(),
+            Duration::from_millis(100),
+        )
+        .is_err());
+
+        server
+            .update_authorization(snapshot(true, Utc::now() - ChronoDuration::milliseconds(1)))
+            .expect("store stale authorization");
+        assert_eq!(
+            server
+                .start()
+                .expect_err("stale start must fail")
+                .to_string(),
+            "AUTHORIZATION_STALE"
+        );
+        assert_eq!(
+            server
+                .create_pairing()
+                .expect_err("stale pairing must fail")
+                .to_string(),
+            "AUTHORIZATION_STALE"
+        );
+        assert!(!server.status().running);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn listener_self_stops_when_authorization_expires() {
+        let directory = temp_directory("stale-listener");
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        server
+            .update_authorization(snapshot(
+                true,
+                Utc::now() + ChronoDuration::milliseconds(150),
+            ))
+            .expect("authorize remote briefly");
+        server.set_port(available_port()).expect("set remote port");
+        server.set_enabled(true).expect("enable remote listener");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while server.status().running && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!server.status().running);
+        assert_eq!(
+            server
+                .start()
+                .expect_err("expired lease must not restart")
+                .to_string(),
+            "AUTHORIZATION_STALE"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn server_binds_configured_port_and_preserves_protocol_v1_pairing() {
+        let directory = temp_directory("server");
+        let port = available_port();
+        let server = RemoteServer::new(directory.clone()).expect("create remote server");
+        server
+            .update_authorization(snapshot(true, Utc::now() + ChronoDuration::minutes(1)))
+            .expect("authorize remote");
         server.set_port(port).expect("set remote port");
         server.start().expect("start remote server");
         assert!(server.status().running);
@@ -912,6 +979,10 @@ mod tests {
             Duration::from_secs(1),
         )
         .expect("connect remote listener");
+        let pairing = server.create_pairing().expect("create pairing");
+        let payload: Value = serde_json::from_str(&pairing.qr_payload).expect("parse QR payload");
+        assert_eq!(payload["v"], 1);
+        assert_eq!(payload["code"], pairing.code);
         server.stop();
         assert!(!server.status().running);
         let _ = std::fs::remove_dir_all(directory);

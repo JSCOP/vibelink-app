@@ -18,6 +18,7 @@ type TerminalEvent =
   | { kind: 'task'; sessionId: string; signal: TaskSignal }
   | { kind: 'connectionLost'; message: string }
   | { kind: 'connectionRestored' }
+  | { kind: 'authorizationChanged'; code: string; policyEpoch: number }
 
 let registration: Promise<void> | undefined
 const sessionReloadTimers = new Map<string, number>()
@@ -56,6 +57,10 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
       } else {
         void reloadBoard(event.sessionId)
       }
+    } else if (event.kind === 'authorizationChanged') {
+      const store = useWorkspaceStore.getState()
+      store.setError(event.code)
+      void store.refreshLicense()
     } else if (event.kind === 'connectionLost') {
       useWorkspaceStore.getState().setError(`Daemon connection lost: ${event.message}`)
     } else {
@@ -66,8 +71,12 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
   let nextRegistration: Promise<void> = Promise.resolve()
   nextRegistration = (async () => {
     await invoke<void>('init_terminal_output', { channel })
-    const port = await invoke<number>('terminal_ws_port')
+    const [port, token] = await Promise.all([
+      invoke<number>('terminal_ws_port'),
+      invoke<string>('terminal_ws_token'),
+    ])
     const socket = new WebSocket(`ws://127.0.0.1:${port}`)
+    socket.onopen = () => socket.send(token)
     if (registration !== nextRegistration) {
       socket.close()
       return

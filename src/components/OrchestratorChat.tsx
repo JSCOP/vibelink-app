@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { type ButtonHTMLAttributes, type ComponentType, useEffect, useMemo, useState } from 'react'
-import { Archive, Bot, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Square, Wrench, type LucideProps } from 'lucide-react'
-import { getHermesRuntimeStatus, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
+import { Archive, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Square, Wrench, type LucideProps } from 'lucide-react'
+import { dispatchHermesPrompt, getHermesRuntimeStatus, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
 import type { HermesRuntimeStatus, HermesWorkspaceState, SkillApplyInput, SkillEntry } from '../ipc/types'
 import type { HermesTurn } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
@@ -9,6 +9,7 @@ import { composeWorkspaceDigestPrompt, tasksForSession } from '../state/kanban'
 import { HermesMessage } from './HermesMessage'
 import { HermesPermissionPrompt } from './HermesPermissionPrompt'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
+import { ProfileIcon } from './ProfileIcon'
 import { useHermesSessionController } from './agent/useHermesSessionController'
 
 type AgentSection = 'chat' | 'skills' | 'messaging' | 'artifacts'
@@ -24,14 +25,14 @@ export function OrchestratorChat() {
   const permissions = controller.permissions
   const usage = useWorkspaceStore((state) => sessionId ? state.hermesUsage[sessionId] : undefined)
   const models = useWorkspaceStore((state) => sessionId ? state.hermesModels[sessionId] : undefined)
-  const pendingCount = useWorkspaceStore((state) => sessionId ? state.hermesPendingPrompts[sessionId]?.length ?? 0 : 0)
+  const pendingCount = useWorkspaceStore((state) => sessionId ? state.hermesPendingPrompts[sessionId]?.filter((prompt) => prompt.status === 'queued').length ?? 0 : 0)
   const panes = useWorkspaceStore((state) => state.panes)
   const kanban = useWorkspaceStore((state) => state.kanban)
   const workspaceBrief = useWorkspaceStore((state) => sessionId ? state.workspaceBriefs[sessionId] : null)
   const error = controller.error
   const setHermesStatus = useWorkspaceStore((state) => state.setHermesStatus)
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
-  const takeHermesPrompt = useWorkspaceStore((state) => state.takeHermesPrompt)
+  const claimHermesPrompt = useWorkspaceStore((state) => state.claimHermesPrompt)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
   const [message, setMessage] = useState('')
   const [runtime, setRuntime] = useState<HermesRuntimeStatus | null>(null)
@@ -95,13 +96,13 @@ export function OrchestratorChat() {
 
   useEffect(() => {
     if (!sessionId || status !== 'running' || pendingCount === 0) return
-    const next = takeHermesPrompt(sessionId)
+    const next = claimHermesPrompt(sessionId)
     if (next === undefined) return
     setHermesStatus(sessionId, 'busy')
     void (async () => {
       try {
         await startHermesOutputStream({ force: true })
-        await invoke('hermes_send', { sessionId, text: next })
+        await dispatchHermesPrompt(sessionId, next)
       } catch (sendError) {
         const failure = `VibeLink Agent error: ${String(sendError)}`
         setHermesStatus(sessionId, 'error')
@@ -109,7 +110,7 @@ export function OrchestratorChat() {
         useWorkspaceStore.getState().setError(failure)
       }
     })()
-  }, [sessionId, status, pendingCount, takeHermesPrompt, setHermesStatus])
+  }, [sessionId, status, pendingCount, claimHermesPrompt, setHermesStatus])
 
 
   if (!sessionId) return <div className="orchestrator-chat hermes-chat">Open a workspace.</div>
@@ -157,7 +158,7 @@ export function OrchestratorChat() {
         args: ['-NoLogo', '-NoExit', '-Command', action],
         cwd: controller.workspaceFolder,
         title: verb === 'model' ? 'Hermes model setup' : verb === 'auth' ? 'Hermes auth CLI' : 'Hermes CLI',
-        icon: 'sparkles',
+        icon: 'hermes',
       })
     } catch (terminalError) {
       useWorkspaceStore.getState().setError(String(terminalError))
@@ -192,7 +193,9 @@ export function OrchestratorChat() {
   const cancel = async () => {
     if (status !== 'busy') return
     await startHermesOutputStream({ force: true })
-    await invoke('hermes_cancel', { sessionId })
+    const generation = useWorkspaceStore.getState().hermesGenerations[sessionId]
+    if (generation === undefined) return
+    await invoke('hermes_cancel', { sessionId, generation })
   }
 
   const restart = async () => {
@@ -265,7 +268,7 @@ export function OrchestratorChat() {
           </div>
         </header>
         <nav className="vibelink-agent-nav vibelink-agent-section-nav" aria-label="VibeLink Agent sections">
-          <button type="button" className={agentSection === 'chat' ? 'active' : undefined} onClick={() => setAgentSection('chat')}><Bot size={14} /> Conversation</button>
+          <button type="button" className={agentSection === 'chat' ? 'active' : undefined} onClick={() => setAgentSection('chat')}><ProfileIcon name="hermes" size={14} /> Conversation</button>
           <button type="button" className={agentSection === 'skills' ? 'active' : undefined} onClick={() => setAgentSection('skills')}><Wrench size={14} /> Skills & Tools</button>
           <button type="button" className={agentSection === 'messaging' ? 'active' : undefined} onClick={() => setAgentSection('messaging')}><MessageSquare size={14} /> Messaging</button>
           <button type="button" className={agentSection === 'artifacts' ? 'active' : undefined} onClick={() => setAgentSection('artifacts')}><FileText size={14} /> Artifacts</button>
@@ -451,7 +454,7 @@ function AgentMessagingPanel({ sessionId, cliCommand, detected }: { sessionId: s
       shell: 'pwsh.exe',
       args: ['-NoLogo', '-NoExit', '-Command', `& ${quotePowerShellString(cliCommand)} gateway ${action}`],
       title: `Hermes gateway ${action}`,
-      icon: 'message-square',
+      icon: 'hermes',
     })
   }
   return (

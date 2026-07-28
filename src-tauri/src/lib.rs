@@ -11,6 +11,7 @@ pub mod orchestration;
 pub mod persistence;
 pub mod protocol;
 pub mod remote;
+pub mod storage;
 pub mod worktree_storage;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -1,4 +1,4 @@
-name: Microsoft Store package
+name: Microsoft Store and direct Windows release
 
 on:
   push:
@@ -8,7 +8,59 @@ permissions:
   contents: read
 
 jobs:
-  package:
+  release-contract:
+    runs-on: windows-latest
+    environment: release
+    outputs:
+      version: ${{ steps.contract.outputs.version }}
+      repository: ${{ steps.contract.outputs.repository }}
+      exe_name: ${{ steps.contract.outputs.exe_name }}
+      msi_name: ${{ steps.contract.outputs.msi_name }}
+      checksum_name: ${{ steps.contract.outputs.checksum_name }}
+    steps:
+      - name: Check out Desktop tag
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read pinned Web lock
+        id: lock
+        shell: powershell
+        run: node scripts/release-contract.mjs lock-info --github-output $env:GITHUB_OUTPUT
+      - name: Check out exact canonical Web commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.lock.outputs.repository }}
+          ref: ${{ steps.lock.outputs.web_commit }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          path: _canonical-web
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate candidate, versions, manifest hash, and source registries
+        id: contract
+        shell: powershell
+        run: >-
+          node scripts/release-contract.mjs validate-candidate
+          --web-root _canonical-web
+          --tag "${{ github.ref_name }}"
+          --github-output $env:GITHUB_OUTPUT
+      - name: Stage exact pinned Web metadata
+        shell: powershell
+        run: >-
+          node scripts/release-contract.mjs stage-metadata
+          --web-root _canonical-web
+          --version "${{ steps.contract.outputs.version }}"
+          --output release-metadata
+      - name: Upload pinned release contract
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibelink-release-contract-${{ github.run_id }}
+          path: release-metadata
+          if-no-files-found: error
+          retention-days: 30
+
+  package-store:
+    needs: release-contract
     runs-on: windows-latest
     environment: release
     env:
@@ -17,7 +69,8 @@ jobs:
       STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER }}
       STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.STORE_PUBLISHER_DISPLAY_NAME }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out Desktop tag
+        uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
           version: 10.13.1
@@ -26,26 +79,16 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - name: Download pinned Web metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: vibelink-release-contract-${{ github.run_id }}
+          path: release-metadata
+      - name: Validate Store identity and distinct signing labels
+        run: node scripts/release-contract.mjs validate-store-settings --metadata-root release-metadata
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Validate Store release contract
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not $env:STORE_IDENTITY_NAME) { throw 'Release variable STORE_IDENTITY_NAME is required.' }
-          if (-not $env:STORE_PUBLISHER) { throw 'Release variable STORE_PUBLISHER is required.' }
-          $tag = '${{ github.ref_name }}'
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Release tag must be vX.Y.Z: $tag" }
-          $version = $Matches[1]
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $cargoText = Get-Content src-tauri/Cargo.toml -Raw
-          $cargoPackage = [regex]::Match($cargoText, '(?ms)^\[package\]\s*(.*?)(?=^\[|\z)')
-          $cargoVersion = [regex]::Match($cargoPackage.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          if ($packageVersion -ne $version -or $tauriVersion -ne $version -or $cargoVersion -ne $version) {
-            throw "Tag/package version mismatch: tag=$version package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
-          }
-      - name: Build signed MSIX for Store submission
+      - name: Build Store submission MSIX
         shell: powershell
         run: |
           .\scripts\build-store-msix.ps1 `
@@ -53,31 +96,43 @@ jobs:
             -Publisher $env:STORE_PUBLISHER `
             -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME
       - name: Verify exact Store package
+        env:
+          RELEASE_VERSION: ${{ needs.release-contract.outputs.version }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $tagVersion = '${{ github.ref_name }}'.Substring(1)
-          $parts = $tagVersion.Split('.')
+          $parts = $env:RELEASE_VERSION.Split('.')
           $storeVersion = "$(1 + [int]$parts[0]).$($parts[1]).$($parts[2]).0"
           $expected = "VibeLink_$($storeVersion)_x64.msix"
           $packages = @(Get-ChildItem src-tauri/target/store -Filter '*.msix' -File)
           if ($packages.Count -ne 1 -or $packages[0].Name -ne $expected) {
             throw "Expected exactly $expected; found: $($packages.Name -join ', ')"
           }
-      - name: Upload Partner Center package
+      - name: Upload Store package with pinned listing metadata
         uses: actions/upload-artifact@v4
         with:
           name: vibelink-microsoft-store-${{ github.ref_name }}
-          path: src-tauri/target/store/*.msix
+          path: |
+            src-tauri/target/store/*.msix
+            release-metadata/store-listing.json
+            release-metadata/release-notes.md
           if-no-files-found: error
           retention-days: 30
+
   publish-installers:
+    needs: release-contract
     runs-on: windows-latest
     environment: release
     env:
       VIBELINK_LICENSE_API_URL: https://vibelink.moobang.net
+      RELEASE_VERSION: ${{ needs.release-contract.outputs.version }}
+      RELEASE_REPOSITORY: ${{ needs.release-contract.outputs.repository }}
+      EXE_NAME: ${{ needs.release-contract.outputs.exe_name }}
+      MSI_NAME: ${{ needs.release-contract.outputs.msi_name }}
+      CHECKSUM_NAME: ${{ needs.release-contract.outputs.checksum_name }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out Desktop tag
+        uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
           version: 10.13.1
@@ -86,52 +141,52 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
-      - name: Validate installer release contract
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $tag = '${{ github.ref_name }}'
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Release tag must be vX.Y.Z: $tag" }
-          $version = $Matches[1]
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $cargoText = Get-Content src-tauri/Cargo.toml -Raw
-          $cargoPackage = [regex]::Match($cargoText, '(?ms)^\[package\]\s*(.*?)(?=^\[|\z)')
-          $cargoVersion = [regex]::Match($cargoPackage.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          if ($packageVersion -ne $version -or $tauriVersion -ne $version -or $cargoVersion -ne $version) {
-            throw "Tag/package version mismatch: tag=$version package=$packageVersion tauri=$tauriVersion cargo=$cargoVersion"
-          }
+      - name: Download pinned Web metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: vibelink-release-contract-${{ github.run_id }}
+          path: release-metadata
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build Windows installers
+      - name: Build direct Windows installers
         run: pnpm tauri:build:ci
-      - name: Verify installers and write checksums
+      - name: Verify exact installers and write checksum asset
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '${{ github.ref_name }}'.Substring(1)
-          $msi = "src-tauri/target/release/bundle/msi/VibeLink_${version}_x64_en-US.msi"
-          $exe = "src-tauri/target/release/bundle/nsis/VibeLink_${version}_x64-setup.exe"
-          if (-not (Test-Path $msi) -or -not (Test-Path $exe)) {
+          $msi = Join-Path 'src-tauri/target/release/bundle/msi' $env:MSI_NAME
+          $exe = Join-Path 'src-tauri/target/release/bundle/nsis' $env:EXE_NAME
+          if (-not (Test-Path -LiteralPath $msi) -or -not (Test-Path -LiteralPath $exe)) {
             $found = Get-ChildItem src-tauri/target/release/bundle -Recurse -File | Select-Object -ExpandProperty FullName
-            throw "Expected installer files were not found. Found:`n$($found -join "`n")"
+            throw "Expected manifest-derived installer files were not found. Found:`n$($found -join "`n")"
           }
           $lines = @(
-            "$((Get-FileHash $exe -Algorithm SHA256).Hash.ToLower())  $(Split-Path $exe -Leaf)"
-            "$((Get-FileHash $msi -Algorithm SHA256).Hash.ToLower())  $(Split-Path $msi -Leaf)"
+            "$((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLower())  $env:EXE_NAME"
+            "$((Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLower())  $env:MSI_NAME"
           )
-          [System.IO.File]::WriteAllLines('SHA256SUMS.txt', $lines, [System.Text.Encoding]::ASCII)
-      - name: Publish GitHub release
+          [System.IO.File]::WriteAllLines($env:CHECKSUM_NAME, $lines, [System.Text.Encoding]::ASCII)
+      - name: Publish manifest-derived direct release
         env:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '${{ github.ref_name }}'.Substring(1)
-          gh release create "v$version" `
-            "src-tauri/target/release/bundle/nsis/VibeLink_${version}_x64-setup.exe" `
-            "src-tauri/target/release/bundle/msi/VibeLink_${version}_x64_en-US.msi" `
-            SHA256SUMS.txt `
-            --repo JSCOP/vibelink-releases `
-            --title "VibeLink $version" `
-            --notes "VibeLink $version Windows installers. Unsigned; verify hashes against SHA256SUMS.txt."
+          $exe = Join-Path 'src-tauri/target/release/bundle/nsis' $env:EXE_NAME
+          $msi = Join-Path 'src-tauri/target/release/bundle/msi' $env:MSI_NAME
+          gh release create "v$env:RELEASE_VERSION" `
+            $exe `
+            $msi `
+            $env:CHECKSUM_NAME `
+            --repo $env:RELEASE_REPOSITORY `
+            --title "VibeLink $env:RELEASE_VERSION" `
+            --notes-file release-metadata/direct-release-notes.md
+      - name: Verify public release assets and checksum manifest
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: >-
+          node scripts/release-contract.mjs validate-public-release
+          --manifest release-metadata/vibelink-product.v1.json
+          --version "${{ needs.release-contract.outputs.version }}"
+          --token-env RELEASES_TOKEN
+          --retries 12
+          --delay-ms 5000

@@ -1,4 +1,7 @@
-use super::{daemon_client::DaemonClient, license::LicenseService, spawn_daemon};
+use super::{
+    authorization::Capability, daemon_client::DaemonClient, entitlement::EntitlementSupervisor,
+    spawn_daemon,
+};
 use crate::{
     control_plane::{ControlCommand, ControlResponse},
     protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult, TaskSignal},
@@ -13,10 +16,12 @@ pub use crate::control_plane::{BoardDoc, Brief, Task, TaskPatch, TaskStatus};
 
 #[tauri::command]
 pub async fn board_read(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<String, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || board_read_native(&session_id))
         .await
         .map_err(to_string)?
@@ -25,12 +30,14 @@ pub async fn board_read(
 
 #[tauri::command]
 pub async fn board_write(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     json: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     tauri::async_runtime::spawn_blocking(move || board_write_native(&session_for_write, &json))
         .await
@@ -41,13 +48,15 @@ pub async fn board_write(
 
 #[tauri::command]
 pub async fn board_task_create(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     title: String,
     description: Option<String>,
 ) -> Result<Task, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_create_native(&session_for_write, &title, description.as_deref())
@@ -61,13 +70,15 @@ pub async fn board_task_create(
 
 #[tauri::command]
 pub async fn board_task_update(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     task_id: String,
     patch: TaskPatch,
 ) -> Result<Task, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_update_native(&session_for_write, &task_id, patch)
@@ -81,12 +92,14 @@ pub async fn board_task_update(
 
 #[tauri::command]
 pub async fn board_task_delete(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     task_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         board_task_delete_native(&session_for_write, &task_id)
@@ -99,14 +112,16 @@ pub async fn board_task_delete(
 
 #[tauri::command]
 pub async fn board_task_done(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     task_id: String,
     commit_msg: Option<String>,
     result_summary: Option<String>,
 ) -> Result<Task, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_done_native(&session_for_write, &task_id, commit_msg, result_summary)
@@ -120,13 +135,15 @@ pub async fn board_task_done(
 
 #[tauri::command]
 pub async fn board_task_note(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     task_id: String,
     message: String,
 ) -> Result<Task, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
         board_task_note_native(&session_for_write, &task_id, &message)
@@ -140,10 +157,12 @@ pub async fn board_task_note(
 
 #[tauri::command]
 pub async fn board_brief_get(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<Option<Brief>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || board_brief_get_native(&session_id))
         .await
         .map_err(to_string)?
@@ -152,13 +171,15 @@ pub async fn board_brief_get(
 
 #[tauri::command]
 pub async fn board_brief_set(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     session_id: String,
     purpose: String,
     notes: String,
 ) -> Result<Brief, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let session_for_write = session_id.clone();
     let brief = tauri::async_runtime::spawn_blocking(move || {
         board_brief_set_native(&session_for_write, purpose, notes)
@@ -278,12 +299,6 @@ fn task_response(response: ControlResponse) -> Result<Task> {
 fn request_control(command: ControlCommand) -> Result<ControlResponse> {
     let stream = spawn_daemon::connect_daemon().or_else(|_| spawn_daemon::ensure_daemon())?;
     let (mut reader, mut writer) = stream.split();
-    write_frame(
-        &mut writer,
-        &ClientToDaemon::Hello {
-            client_id: Uuid::new_v4(),
-        },
-    )?;
     let req = 1;
     write_frame(
         &mut writer,

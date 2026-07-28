@@ -6,6 +6,7 @@ import { create } from 'zustand'
 import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief } from '../ipc/types'
 import { defaultSettings, isAgentPane, normalizeLegacyWorkspaceWorktrees, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
 import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
+import { authorizationErrorMessage } from './licenseGate'
 import type { Settings } from './profiles'
 import type { AttentionSnapshot } from './worktreeAttention'
 import type { WorktreeBlockerKind, WorktreeCheckpoint, WorktreeCheckpointKind, WorktreeCreateRequest, WorktreeCreateResult, WorktreeProjection, WorktreeRecord, WorktreeRemovalPreflight, WorktreeRemovalResult, WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetupPolicy } from '../ipc/worktrees'
@@ -19,7 +20,7 @@ import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
 import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from './workspaceTodos'
 import { disposeEditorDocumentStore } from '../editor/documentStore'
-import type { HermesModelsState, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn, PendingPermission } from './hermes'
+import type { HermesModelsState, HermesPendingPrompt, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn, PendingPermission } from './hermes'
 import {
   normalizeWorkspaceLayoutState,
   serializeWorkspaceLayoutState,
@@ -78,6 +79,7 @@ export type CreateWorkspaceWorktreeInput = {
   initialAgent?: string | null
   initialPrompt?: string | null
 }
+export type PaneLifecycleState = 'spawning' | 'live' | 'closing' | 'closed'
 
 
 type WorkspaceState = {
@@ -91,6 +93,7 @@ type WorkspaceState = {
   workspaceReadyEpoch: number
   activeSessionId?: string
   panes: Record<string, PaneMeta>
+  paneLifecycle: Record<string, PaneLifecycleState>
   layoutJson?: string | null
   manualPaneTitles: ManualPaneTitleMap
   status: Status
@@ -110,7 +113,8 @@ type WorkspaceState = {
   hermesPermissions: Record<string, PendingPermission[]>
   hermesUsage: Record<string, { size: number; used: number }>
   hermesModels: Record<string, HermesModelsState>
-  hermesPendingPrompts: Record<string, string[]>
+  hermesPendingPrompts: Record<string, HermesPendingPrompt[]>
+  hermesGenerations: Record<string, number>
   hermesCurrentSession: Record<string, string>
   hermesSessions: Record<string, HermesSessionInfo[]>
   selectedTaskId: Record<string, string | null>
@@ -204,8 +208,11 @@ type WorkspaceState = {
   endHermesTurn: (sessionId: string) => void
   setHermesModels: (sessionId: string, models: { available: HermesModelInfo[]; current: string }) => void
   setHermesStatus: (sessionId: string, status: HermesStatus) => void
+  setHermesGeneration: (sessionId: string, generation: number) => void
   enqueueHermesPrompt: (sessionId: string, text: string) => void
-  takeHermesPrompt: (sessionId: string) => string | undefined
+  claimHermesPrompt: (sessionId: string) => HermesPendingPrompt | undefined
+  ackHermesPrompt: (sessionId: string, promptId: string) => void
+  releaseHermesPrompt: (sessionId: string, promptId: string) => void
   resetHermesTranscript: (sessionId: string) => void
   setHermesCurrentSession: (sessionId: string, acpSessionId: string) => void
   setHermesSessions: (sessionId: string, sessions: HermesSessionInfo[]) => void
@@ -223,6 +230,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaceEpoch: 0,
   workspaceReadyEpoch: 0,
   panes: {},
+  paneLifecycle: {},
   manualPaneTitles: {},
   status: 'booting',
   settings: loadSettings(),
@@ -239,6 +247,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   hermesTranscript: {},
   hermesPermissions: {},
   hermesUsage: {},
+  hermesGenerations: {},
   hermesModels: {},
   hermesPendingPrompts: {},
   hermesCurrentSession: {},
@@ -285,6 +294,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         settings,
         activeSessionId: undefined,
         panes: {},
+        paneLifecycle: {},
         layoutJson: null,
         status: 'ready',
       })
@@ -472,6 +482,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       workspaceReadyEpoch: epoch,
       activePaneId: undefined,
       panes,
+      paneLifecycle: Object.fromEntries(attached.panes.map((pane) => [pane.id, 'live' as const])),
       paneCompletionHighlights: reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
       paneReviewMarkers: reconcilePaneReviewMarkers(state.paneReviewMarkers, sessionId, panes),
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
@@ -684,6 +695,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       throw new Error('Workspace changed while the terminal was opening.')
     }
     const paneId = overrides?.paneId ?? crypto.randomUUID()
+    set((state) => ({ paneLifecycle: { ...state.paneLifecycle, [paneId]: 'spawning' } }))
     const profile = overrides && 'profileId' in overrides
       ? profileById(get().settings, overrides.profileId)
       : selectedProfileForWorkspace(get().settings, sessionId)
@@ -706,39 +718,62 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       cols: overrides?.cols ?? 120,
       rows: overrides?.rows ?? 32,
     }
-    const pane = await invoke<PaneMeta>('spawn_pane', { sessionId, cfg })
-    if (workspaceSessionEpoch !== sessionEpoch || workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
-      await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
-      throw new Error('Workspace changed while the terminal was opening.')
-    }
-    if (isWorkspaceInitialPanePending(sessionId, sessionEpoch)) workspaceInitialPanePending = null
-    set((state) => state.activeSessionId === sessionId
-      ? { panes: { ...state.panes, [pane.id]: pane } }
-      : {})
-    await get().refreshSessions()
-    if (workspaceSessionEpoch !== sessionEpoch || workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
-      await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
+    try {
+      const pane = await invoke<PaneMeta>('spawn_pane', { sessionId, cfg })
+      if (get().paneLifecycle[paneId] !== 'spawning') {
+        await invoke('cancel_pane_spawn', { sessionId, paneId }).catch(() => {})
+        throw new Error('PANE_SPAWN_CANCELLED')
+      }
+      if (workspaceSessionEpoch !== sessionEpoch || workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
+        await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
+        throw new Error('Workspace changed while the terminal was opening.')
+      }
+      if (isWorkspaceInitialPanePending(sessionId, sessionEpoch)) workspaceInitialPanePending = null
+      set((state) => state.activeSessionId === sessionId
+        ? {
+            panes: { ...state.panes, [pane.id]: pane },
+            paneLifecycle: { ...state.paneLifecycle, [paneId]: 'live' },
+          }
+        : {})
+      await get().refreshSessions()
+      if (workspaceSessionEpoch !== sessionEpoch || workspaceSessionReadyEpoch !== sessionEpoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) {
+        await invoke('close_pane', { sessionId, paneId: pane.id }).catch(() => {})
+        throw new Error('Workspace changed while the terminal was opening.')
+      }
+      return pane
+    } catch (error) {
       set((state) => {
-        if (state.activeSessionId !== sessionId || !state.panes[pane.id]) return {}
         const panes = { ...state.panes }
-        delete panes[pane.id]
-        return { panes, activePaneId: state.activePaneId === pane.id ? undefined : state.activePaneId }
+        delete panes[paneId]
+        return {
+          panes,
+          paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closed' },
+          activePaneId: state.activePaneId === paneId ? undefined : state.activePaneId,
+        }
       })
-      throw new Error('Workspace changed while the terminal was opening.')
+      throw error
     }
-    return pane
   },
 
   closePane: async (paneId: string, requestedSessionId?: string) => {
     const sessionId = requestedSessionId ?? get().activeSessionId
     if (!sessionId) return
-    await invoke('close_pane', { sessionId, paneId })
+    const previous = get().paneLifecycle[paneId] ?? (get().panes[paneId] ? 'live' : 'closed')
+    if (previous === 'closing' || previous === 'closed') return
+    set((state) => ({ paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closing' } }))
+    try {
+      await invoke(previous === 'spawning' ? 'cancel_pane_spawn' : 'close_pane', { sessionId, paneId })
+    } catch (error) {
+      set((state) => ({ paneLifecycle: { ...state.paneLifecycle, [paneId]: previous } }))
+      throw error
+    }
     set((state) => {
       if (state.activeSessionId !== sessionId) return {}
       const panes = { ...state.panes }
       delete panes[paneId]
       return {
         panes,
+        paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closed' },
         activePaneId: state.activePaneId === paneId ? undefined : state.activePaneId,
         paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
         paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
@@ -747,6 +782,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     await get().refreshSessions()
   },
 
+  clearSession: async (sessionId: string) => {
+    await invoke('clear_session', { sessionId })
+    set((state) => ({
+      panes: state.activeSessionId === sessionId ? {} : state.panes,
+      paneLifecycle: state.activeSessionId === sessionId ? {} : state.paneLifecycle,
+      activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
+      paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
+      paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
+    }))
+  },
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
     const normalized = normalizePaneTitle(title)
     if (!normalized) return
@@ -787,7 +832,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  setError: (error: string) => set({ error, status: 'error' }),
+  setError: (error: string) => set({ error: authorizationErrorMessage(error), status: 'error' }),
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
   setActivePaneId: (paneId) => set({ activePaneId: paneId }),
@@ -1168,11 +1213,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const session = get().sessions.find((item) => item.id === sessionId)
       get().setHermesStatus(sessionId, 'starting')
       try {
-        await invoke('hermes_start', {
+        const started = await invoke<{ generation: number }>('hermes_start', {
           sessionId,
           commandOverride: get().settings.hermesCommand || null,
           workspaceFolder: session?.workspaceFolder ?? null,
         })
+        get().setHermesGeneration(sessionId, started.generation)
       } catch (startError) {
         get().setHermesStatus(sessionId, 'error')
         set({ error: String(startError) })
@@ -1250,6 +1296,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setHermesStatus: (sessionId: string, status: HermesStatus) => {
     set((state) => ({ hermesStatus: { ...state.hermesStatus, [sessionId]: status } }))
   },
+  setHermesGeneration: (sessionId: string, generation: number) => {
+    set((state) => ({
+      hermesGenerations: { ...state.hermesGenerations, [sessionId]: generation },
+      hermesPermissions: {
+        ...state.hermesPermissions,
+        [sessionId]: (state.hermesPermissions[sessionId] ?? []).filter((permission) => permission.generation === generation),
+      },
+    }))
+  },
   setHermesCurrentSession: (sessionId: string, acpSessionId: string) => {
     set((state) => ({ hermesCurrentSession: { ...state.hermesCurrentSession, [sessionId]: acpSessionId } }))
   },
@@ -1260,19 +1315,42 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({ hermesTranscript: { ...state.hermesTranscript, [sessionId]: turns } }))
   },
   enqueueHermesPrompt: (sessionId, text) => {
+    const prompt: HermesPendingPrompt = { id: crypto.randomUUID(), text, status: 'queued' }
     set((state) => ({
       hermesPendingPrompts: {
         ...state.hermesPendingPrompts,
-        [sessionId]: [...(state.hermesPendingPrompts[sessionId] ?? []), text],
+        [sessionId]: [...(state.hermesPendingPrompts[sessionId] ?? []), prompt],
       },
     }))
   },
-  takeHermesPrompt: (sessionId) => {
+  claimHermesPrompt: (sessionId) => {
     const queue = get().hermesPendingPrompts[sessionId] ?? []
-    if (queue.length === 0) return undefined
-    const [next, ...rest] = queue
-    set((state) => ({ hermesPendingPrompts: { ...state.hermesPendingPrompts, [sessionId]: rest } }))
-    return next
+    if (queue.some((prompt) => prompt.status === 'sending')) return undefined
+    const index = queue.findIndex((prompt) => prompt.status === 'queued')
+    if (index < 0) return undefined
+    const claimed = { ...queue[index], status: 'sending' as const }
+    const next = [...queue]
+    next[index] = claimed
+    set((state) => ({ hermesPendingPrompts: { ...state.hermesPendingPrompts, [sessionId]: next } }))
+    return claimed
+  },
+  ackHermesPrompt: (sessionId, promptId) => {
+    set((state) => ({
+      hermesPendingPrompts: {
+        ...state.hermesPendingPrompts,
+        [sessionId]: (state.hermesPendingPrompts[sessionId] ?? []).filter((prompt) => prompt.id !== promptId),
+      },
+    }))
+  },
+  releaseHermesPrompt: (sessionId, promptId) => {
+    set((state) => ({
+      hermesPendingPrompts: {
+        ...state.hermesPendingPrompts,
+        [sessionId]: (state.hermesPendingPrompts[sessionId] ?? []).map((prompt) => (
+          prompt.id === promptId && prompt.status === 'sending' ? { ...prompt, status: 'queued' as const } : prompt
+        )),
+      },
+    }))
   },
   resetHermesTranscript: (sessionId: string) => {
     set((state) => {
@@ -1457,6 +1535,7 @@ function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions:
   const hermesUsage = { ...state.hermesUsage }
   const hermesModels = { ...state.hermesModels }
   const hermesPendingPrompts = { ...state.hermesPendingPrompts }
+  const hermesGenerations = { ...state.hermesGenerations }
   const hermesCurrentSession = { ...state.hermesCurrentSession }
   const hermesSessions = { ...state.hermesSessions }
   const workspaceProfileIds = { ...state.settings.workspaceProfileIds }
@@ -1465,13 +1544,14 @@ function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions:
   delete workspaceProfileIds[sessionId]
   delete workspaceDetails[sessionId]
   delete workspaceGroupIds[sessionId]
-  for (const collection of [viewModes, kanbanLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesCurrentSession, hermesSessions]) {
+  for (const collection of [viewModes, kanbanLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesGenerations, hermesCurrentSession, hermesSessions]) {
     delete collection[sessionId]
   }
   return {
     sessions,
     activeSessionId: state.activeSessionId === sessionId ? undefined : state.activeSessionId,
     panes: state.activeSessionId === sessionId ? {} : state.panes,
+    paneLifecycle: state.activeSessionId === sessionId ? {} : state.paneLifecycle,
     activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
     kanban: { tasks, taskOrder },
     viewModes,
@@ -1487,6 +1567,7 @@ function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions:
     hermesUsage,
     hermesModels,
     hermesPendingPrompts,
+    hermesGenerations,
     hermesCurrentSession,
     hermesSessions,
     manualPaneTitles: withoutPaneKeys(state.manualPaneTitles, deletedPaneIds),

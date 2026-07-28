@@ -1990,7 +1990,14 @@ mod tests {
             .file_name()
             .and_then(|name| name.to_str())
             .expect("cli file name");
-        assert_eq!(name, if cfg!(windows) { "vibelink.exe" } else { "vibelink" });
+        assert_eq!(
+            name,
+            if cfg!(windows) {
+                "vibelink.exe"
+            } else {
+                "vibelink"
+            }
+        );
 
         let script = render_batch_script(spec("codex")).expect("batch script");
         assert!(script.contains(&cli.display().to_string()));

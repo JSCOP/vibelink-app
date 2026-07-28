@@ -1,7 +1,7 @@
 use super::exec::{ensure_success, git_command, git_write_output};
 use super::paths::validate_base_ref;
 use super::to_string;
-use crate::app::license::LicenseService;
+use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
@@ -19,13 +19,15 @@ pub struct CloneProgress {
 
 #[tauri::command]
 pub async fn git_fetch(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     remote: Option<String>,
     prune: bool,
     refspec: Option<String>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         fetch_native(&workspace_folder, remote, prune, refspec)
     })
@@ -36,11 +38,13 @@ pub async fn git_fetch(
 
 #[tauri::command]
 pub async fn git_pull(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rebase: bool,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         run_sync(
             &workspace_folder,
@@ -54,14 +58,16 @@ pub async fn git_pull(
 
 #[tauri::command]
 pub async fn git_push(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     remote: Option<String>,
     branch: Option<String>,
     set_upstream: bool,
     force_with_lease: bool,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         push_native(
             &workspace_folder,
@@ -79,12 +85,14 @@ pub async fn git_push(
 #[tauri::command]
 pub async fn git_clone(
     _app: AppHandle,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     url: String,
     target_dir: String,
     channel: Channel<CloneProgress>,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || clone_native(&url, &target_dir, channel))
         .await
         .map_err(to_string)?

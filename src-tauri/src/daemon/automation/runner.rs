@@ -1,4 +1,5 @@
 use super::{
+    agents::{self, AgentSpec, PromptDelivery},
     model::{AutomationOutputSnapshot, AutomationRecord, AutomationRuntimeIdentity},
     process_registry::AutomationProcessRegistry,
 };
@@ -7,7 +8,7 @@ use serde_json::Value;
 use std::ffi::OsString;
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
@@ -111,19 +112,33 @@ impl AutomationRunner {
         &self,
         executable: &Path,
         automation: &AutomationRecord,
+        spec: &AgentSpec,
         cwd: &Path,
         usage_path: &Path,
-    ) -> Command {
+    ) -> (Command, Option<String>) {
         let mut command = Command::new(executable);
         #[cfg(test)]
         command.args(&self.prefix_args);
-        configure_command(&mut command, automation, cwd, usage_path);
-        command
+        let stdin_prompt = configure_command(&mut command, automation, spec, cwd, usage_path);
+        (command, stdin_prompt)
     }
 
     pub fn run(&self, run_id: &str, automation: &AutomationRecord, cwd: &Path) -> RunnerOutcome {
         let started_at = now_millis();
-        let executable = match self.resolve_executable() {
+        let Some(spec) = agents::spec(&automation.agent) else {
+            return RunnerOutcome::new(
+                "skipped_unavailable",
+                None,
+                None,
+                None,
+                Some(format!(
+                    "automation agent '{}' is not supported by this VibeLink build",
+                    automation.agent
+                )),
+                started_at,
+            );
+        };
+        let executable = match self.resolve_executable(spec) {
             Ok(value) => value,
             Err(error) => {
                 return RunnerOutcome::new(
@@ -139,7 +154,7 @@ impl AutomationRunner {
         if !cwd.is_dir() {
             return unavailable_cwd(cwd, started_at);
         }
-        if !automation.use_current_hermes_default
+        if !automation.use_agent_default_model
             && automation
                 .model
                 .as_deref()
@@ -152,26 +167,31 @@ impl AutomationRunner {
                 None,
                 None,
                 None,
-                Some("automation has no pinned Hermes model; select a model or use the current Hermes default".into()),
+                Some(format!(
+                    "automation has no pinned {} model; select a model or use the agent default",
+                    spec.display_name
+                )),
                 started_at,
             );
         }
 
         let usage_path = usage_file_path(run_id);
-        let command = self.build_command(&executable, automation, cwd, &usage_path);
+        let (command, stdin_prompt) =
+            self.build_command(&executable, automation, spec, cwd, &usage_path);
         self.execute_command(
             run_id,
             "automation",
             Duration::from_secs(u64::from(automation.timeout_seconds)),
             usage_path,
             command,
+            stdin_prompt,
             started_at,
         )
     }
 
     pub fn run_draft(&self, request_id: &str, prompt: &str, cwd: &Path) -> RunnerOutcome {
         let started_at = now_millis();
-        let executable = match self.resolve_executable() {
+        let executable = match self.resolve_executable(hermes_spec()) {
             Ok(value) => value,
             Err(error) => {
                 return RunnerOutcome::new(
@@ -222,6 +242,7 @@ impl AutomationRunner {
             Duration::from_secs(120),
             usage_path,
             command,
+            None,
             started_at,
         )
     }
@@ -233,6 +254,7 @@ impl AutomationRunner {
         timeout: Duration,
         usage_path: PathBuf,
         mut command: Command,
+        stdin_prompt: Option<String>,
         started_at: u64,
     ) -> RunnerOutcome {
         let executable = command.get_program().to_owned();
@@ -244,6 +266,31 @@ impl AutomationRunner {
                 return RunnerOutcome::new(status, None, None, None, Some(message), started_at);
             }
         };
+
+        // Why: prompts delivered over stdin must be written and the pipe closed
+        // before the child is handed to the registry, otherwise the agent waits
+        // on stdin forever and only ends at the hard timeout.
+        if let Some(prompt) = stdin_prompt {
+            if let Some(mut stdin) = child.stdin.take() {
+                let write_result = stdin
+                    .write_all(prompt.as_bytes())
+                    .and_then(|()| stdin.flush());
+                drop(stdin);
+                if let Err(error) = write_result {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(&usage_path);
+                    return RunnerOutcome::new(
+                        "dispatch_failed",
+                        None,
+                        None,
+                        None,
+                        Some(format!("write {label} prompt to agent stdin: {error}")),
+                        started_at,
+                    );
+                }
+            }
+        }
 
         let stdout_capture = Arc::new(Mutex::new(BoundedCapture::default()));
         let stderr_capture = Arc::new(Mutex::new(BoundedCapture::default()));
@@ -267,9 +314,7 @@ impl AutomationRunner {
                     None,
                     snapshot,
                     None,
-                    Some(format!(
-                        "register Hermes {label} process ownership: {error}"
-                    )),
+                    Some(format!("register {label} process ownership: {error}")),
                     started_at,
                 );
             }
@@ -306,7 +351,7 @@ impl AutomationRunner {
             ),
             WaitResult::TimedOut(termination_error) => {
                 let mut error = format!(
-                    "Hermes {label} exceeded its hard timeout of {} seconds",
+                    "{label} exceeded its hard timeout of {} seconds",
                     timeout.as_secs()
                 );
                 if let Some(termination_error) = termination_error {
@@ -324,7 +369,7 @@ impl AutomationRunner {
                 )
             }
             WaitResult::Failed(wait_error, termination_error) => {
-                let mut error = format!("wait for Hermes {label}: {wait_error}");
+                let mut error = format!("wait for {label}: {wait_error}");
                 if let Some(termination_error) = termination_error {
                     error.push_str(&format!(
                         "; process termination failed: {termination_error}"
@@ -345,43 +390,66 @@ impl AutomationRunner {
         }
     }
 
-    fn resolve_executable(&self) -> Result<PathBuf, String> {
+    fn resolve_executable(&self, spec: &AgentSpec) -> Result<PathBuf, String> {
         if let Some(executable) = self.executable.as_ref() {
             return resolve_program_local(executable).ok_or_else(|| {
-                format!("Hermes executable is unavailable: {}", executable.display())
+                format!(
+                    "{} executable is unavailable: {}",
+                    spec.display_name,
+                    executable.display()
+                )
             });
         }
-        if let Some(acp) = resolve_program_local(Path::new("hermes-acp")) {
-            let companion = acp.with_file_name(HERMES_BIN);
-            if companion.is_file() {
-                return Ok(companion);
+        if spec.id == "hermes" {
+            if let Some(hermes) = resolve_hermes_install() {
+                return Ok(hermes);
             }
         }
-        #[cfg(windows)]
-        {
-            let local_app_data = std::env::var("LOCALAPPDATA").ok();
-            let user_profile = std::env::var("USERPROFILE").ok();
-            let candidates = [
-                local_app_data.map(|p| {
-                    PathBuf::from(p)
-                        .join("hermes/hermes-agent/venv/Scripts")
-                        .join(HERMES_BIN)
-                }),
-                user_profile.map(|p| {
-                    PathBuf::from(p)
-                        .join(".hermes/hermes-agent/venv/Scripts")
-                        .join(HERMES_BIN)
-                }),
-            ];
-            for candidate in candidates.into_iter().flatten() {
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        resolve_program_local(Path::new(HERMES_BIN))
-            .ok_or_else(|| "Hermes CLI is unavailable; install or update Hermes Agent".to_string())
+        spec.resolve(resolve_program_local).ok_or_else(|| {
+            format!(
+                "{} CLI is unavailable on PATH; install it or pick another agent",
+                spec.display_name
+            )
+        })
     }
+}
+
+fn hermes_spec() -> &'static AgentSpec {
+    agents::spec("hermes").expect("hermes agent spec is always present")
+}
+
+/// Hermes ships inside a managed virtualenv that is often not on PATH, so its
+/// sibling `hermes-acp` shim and the two known install roots are checked first.
+fn resolve_hermes_install() -> Option<PathBuf> {
+    if let Some(acp) = resolve_program_local(Path::new("hermes-acp")) {
+        let companion = acp.with_file_name(HERMES_BIN);
+        if companion.is_file() {
+            return Some(companion);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let local_app_data = std::env::var("LOCALAPPDATA").ok();
+        let user_profile = std::env::var("USERPROFILE").ok();
+        let candidates = [
+            local_app_data.map(|p| {
+                PathBuf::from(p)
+                    .join("hermes/hermes-agent/venv/Scripts")
+                    .join(HERMES_BIN)
+            }),
+            user_profile.map(|p| {
+                PathBuf::from(p)
+                    .join(".hermes/hermes-agent/venv/Scripts")
+                    .join(HERMES_BIN)
+            }),
+        ];
+        for candidate in candidates.into_iter().flatten() {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 fn resolve_program_local(program: &Path) -> Option<PathBuf> {
     if program.components().count() > 1 {
@@ -469,63 +537,87 @@ enum WaitResult {
     Failed(io::Error, Option<io::Error>),
 }
 
+/// Build the unattended argv/env for one agent run. Returns the prompt when the
+/// selected agent takes it over stdin instead of argv.
 fn configure_command(
     command: &mut Command,
     automation: &AutomationRecord,
+    spec: &AgentSpec,
     cwd: &Path,
     usage_path: &Path,
-) {
+) -> Option<String> {
+    let prompt = unattended_prompt(&automation.prompt);
+    let stdin_prompt = matches!(spec.prompt_delivery, PromptDelivery::Stdin);
     command
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(if stdin_prompt {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .arg("--oneshot")
-        .arg(unattended_prompt(&automation.prompt))
-        .arg("--usage-file")
-        .arg(usage_path)
-        .arg("--toolsets")
-        .arg(unattended_toolsets(&automation.toolsets).join(","))
-        .arg("--accept-hooks")
-        .arg("--yolo")
-        .env("HERMES_MAX_ITERATIONS", automation.max_turns.to_string())
-        .env("HERMES_ACCEPT_HOOKS", "1")
-        .env("HERMES_YOLO_MODE", "1")
-        .env("HERMES_SESSION_SOURCE", "vibelink-automation")
-        .env_remove("HERMES_INTERACTIVE")
-        .env_remove("HERMES_DESKTOP")
-        .env_remove("HERMES_KANBAN_TASK")
-        .env_remove("HERMES_KANBAN_ROLE")
+        .args(spec.headless_args)
+        // Why: every supported CLI treats a TTY-less run differently; forcing
+        // plain output keeps the captured snapshot free of ANSI control bytes.
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("CI", "1")
+        .env("VIBELINK_AUTOMATION", "1")
+        .env_remove("FORCE_COLOR")
         .env_remove("VIBELINK_SESSION_ID")
         .env_remove("VIBELINK_PANE_ID");
-    for skill in automation
-        .skills
-        .iter()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty() && !v.starts_with('-'))
-    {
-        command.arg("--skills").arg(skill);
+    if !stdin_prompt {
+        command.arg(&prompt);
     }
-    if !automation.use_current_hermes_default {
-        if let Some(model) = automation
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+    if let Some(variable) = spec.max_turns_env {
+        command.env(variable, automation.max_turns.to_string());
+    }
+    if spec.supports_hermes_extensions {
+        command
+            .arg("--usage-file")
+            .arg(usage_path)
+            .arg("--toolsets")
+            .arg(unattended_toolsets(&automation.toolsets).join(","))
+            .env("HERMES_ACCEPT_HOOKS", "1")
+            .env("HERMES_YOLO_MODE", "1")
+            .env("HERMES_SESSION_SOURCE", "vibelink-automation")
+            .env_remove("HERMES_INTERACTIVE")
+            .env_remove("HERMES_DESKTOP")
+            .env_remove("HERMES_KANBAN_TASK")
+            .env_remove("HERMES_KANBAN_ROLE");
+        for skill in automation
+            .skills
+            .iter()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty() && !v.starts_with('-'))
+        {
+            command.arg("--skills").arg(skill);
+        }
+    }
+    command.args(spec.unattended_args);
+    if !automation.use_agent_default_model {
+        if let Some(model) =
+            spec.model_argument(automation.provider.as_deref(), automation.model.as_deref())
         {
             command.arg("--model").arg(model);
         }
-        if let Some(provider) = automation
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            command.arg("--provider").arg(provider);
+        // Why: only Hermes accepts a separate provider flag; opencode folds the
+        // provider into the model value and the rest resolve it from config.
+        if spec.supports_hermes_extensions {
+            if let Some(provider) = automation
+                .provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                command.arg("--provider").arg(provider);
+            }
         }
     }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    stdin_prompt.then_some(prompt)
 }
 
 fn configure_draft_command(
@@ -653,7 +745,7 @@ fn hermes_home() -> PathBuf {
 
 fn unattended_prompt(prompt: &str) -> String {
     format!(
-        "You are running as a VibeLink unattended automation. Work only inside the current run workspace. Do not create, edit, pause, resume, or trigger schedules or cron jobs. Do not use messaging platforms, project/workspace switching, browser automation, interactive login, CAPTCHA, device-code authentication, or secret prompts. Do not request clarification; make a safe reasonable assumption when possible and report any blocker in the final response. Do not modify Hermes configuration, credentials, plugins, hooks, or installed skills. Never merge into, delete, or otherwise mutate the base worktree automatically.\n\nUser automation prompt:\n{}",
+        "You are running as a VibeLink unattended automation. Work only inside the current run workspace. Do not create, edit, pause, resume, or trigger schedules or cron jobs. Do not use messaging platforms, project/workspace switching, browser automation, interactive login, CAPTCHA, device-code authentication, or secret prompts. Do not request clarification; make a safe reasonable assumption when possible and report any blocker in the final response. Do not modify your own agent configuration, credentials, plugins, hooks, or installed skills. Never merge into, delete, or otherwise mutate the base worktree automatically.\n\nUser automation prompt:\n{}",
         prompt.trim()
     )
 }
@@ -933,7 +1025,7 @@ mod tests {
             agent: "hermes".into(),
             provider: Some("provider".into()),
             model: Some("model".into()),
-            use_current_hermes_default: false,
+            use_agent_default_model: false,
             toolsets: vec!["hermes-acp".into()],
             skills: vec!["review".into()],
             max_turns: 7,
@@ -981,13 +1073,28 @@ mod tests {
         let production = AutomationRunner::new(Arc::clone(&registry), Some(executable.clone()));
         let prefixed = AutomationRunner::new_with_prefix(registry, executable, prefix_args.clone());
 
+        let spec = hermes_spec();
         let production_args = production
-            .build_command(Path::new("powershell.exe"), &automation, cwd, usage_path)
+            .build_command(
+                Path::new("powershell.exe"),
+                &automation,
+                spec,
+                cwd,
+                usage_path,
+            )
+            .0
             .get_args()
             .map(OsString::from)
             .collect::<Vec<_>>();
         let prefixed_args = prefixed
-            .build_command(Path::new("powershell.exe"), &automation, cwd, usage_path)
+            .build_command(
+                Path::new("powershell.exe"),
+                &automation,
+                spec,
+                cwd,
+                usage_path,
+            )
+            .0
             .get_args()
             .map(OsString::from)
             .collect::<Vec<_>>();

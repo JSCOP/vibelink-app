@@ -31,7 +31,7 @@ export function HermesInstallGuidance({ runtime, commandOverride = null, session
         args: ['-NoLogo', '-NoExit', '-Command', script],
         cwd: workspaceFolder ?? null,
         title,
-        icon: 'sparkles',
+        icon: 'hermes',
       })
     } catch (error) {
       setMessage(String(error))

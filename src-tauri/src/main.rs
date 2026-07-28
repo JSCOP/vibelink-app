@@ -12,6 +12,7 @@ mod orchestration;
 mod persistence;
 mod protocol;
 mod remote;
+mod storage;
 mod worktree_storage;
 
 fn main() {

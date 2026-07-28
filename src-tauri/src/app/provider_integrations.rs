@@ -7,7 +7,7 @@ use url::form_urlencoded;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use crate::app::license::LicenseService;
+use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use std::sync::Arc;
 #[cfg(windows)]
 use tauri::Manager;
@@ -1857,26 +1857,31 @@ fn repository_name_from_clone_url(url: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+fn authorize_provider(
+    supervisor: &State<'_, Arc<EntitlementSupervisor>>,
+    capability: Capability,
+) -> std::result::Result<(), ProviderFailure> {
+    supervisor
+        .authorize(capability)
+        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))
+}
+
 #[tauri::command]
 pub async fn provider_scopes_list(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     provider: ProviderKind,
 ) -> std::result::Result<Vec<String>, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceRead)?;
     Ok(provider_scopes(provider))
 }
 
 #[tauri::command]
 pub async fn provider_credential_capture(
     app: AppHandle,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: CredentialReference,
 ) -> std::result::Result<CredentialReference, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceMutate)?;
     let parent_hwnd = provider_prompt_parent(&app);
     tauri::async_runtime::spawn_blocking(move || capture_credential(request, parent_hwnd))
         .await
@@ -1885,13 +1890,11 @@ pub async fn provider_credential_capture(
 
 #[tauri::command]
 pub async fn provider_credential_status(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     provider: ProviderKind,
     account: String,
 ) -> std::result::Result<Option<CredentialReference>, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceRead)?;
     tauri::async_runtime::spawn_blocking(move || credential_status(provider, &account))
         .await
         .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?
@@ -1899,12 +1902,10 @@ pub async fn provider_credential_status(
 
 #[tauri::command]
 pub async fn provider_credential_delete(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     reference: CredentialReference,
 ) -> std::result::Result<(), ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceMutate)?;
     tauri::async_runtime::spawn_blocking(move || delete_credential(&reference))
         .await
         .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?
@@ -1912,12 +1913,10 @@ pub async fn provider_credential_delete(
 
 #[tauri::command]
 pub async fn provider_discover(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: DiscoveryRequest,
 ) -> std::result::Result<Vec<ProviderItem>, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceRead)?;
     tauri::async_runtime::spawn_blocking(move || discover(request))
         .await
         .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?
@@ -1925,12 +1924,10 @@ pub async fn provider_discover(
 
 #[tauri::command]
 pub async fn provider_assigned_items(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: AssignedProviderRequest,
 ) -> std::result::Result<AssignedProviderResult, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceRead)?;
     tauri::async_runtime::spawn_blocking(move || assigned_items(request))
         .await
         .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?
@@ -1938,24 +1935,20 @@ pub async fn provider_assigned_items(
 
 #[tauri::command]
 pub async fn provider_workspace_input(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     provider: ProviderKind,
     item: ProviderItem,
 ) -> std::result::Result<WorkspaceCreationInput, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceRead)?;
     Ok(workspace_creation_input(item, provider))
 }
 
 #[tauri::command]
 pub async fn provider_review_comment(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: ReviewCommentRequest,
 ) -> std::result::Result<ReviewCommentResult, ProviderFailure> {
-    license
-        .require_entitled_cached()
-        .map_err(|error| ProviderFailure::new("denied_capability", error.to_string(), false))?;
+    authorize_provider(&supervisor, Capability::WorkspaceMutate)?;
     tauri::async_runtime::spawn_blocking(move || create_review_comment(request))
         .await
         .map_err(|error| ProviderFailure::new("internal", error.to_string(), false))?

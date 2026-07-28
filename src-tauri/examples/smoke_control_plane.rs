@@ -1,28 +1,15 @@
 #![allow(dead_code)]
 
-#[path = "../src/control_plane.rs"]
-mod control_plane;
-#[path = "../src/daemon/paths.rs"]
-mod paths;
-#[path = "../src/protocol.rs"]
-mod protocol;
-
 use anyhow::{bail, Result};
-use control_plane::{ControlCommand, ControlResponse};
-use interprocess::local_socket::{prelude::*, ConnectOptions, GenericNamespaced};
-use protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult};
+use app_lib::{
+    app::spawn_daemon,
+    control_plane::{ControlCommand, ControlResponse},
+    protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult},
+};
 use uuid::Uuid;
 
 fn main() -> Result<()> {
-    let name = paths::socket_name_string().to_ns_name::<GenericNamespaced>()?;
-    let mut stream = ConnectOptions::new().name(name).connect_sync()?;
-    write_frame(
-        &mut stream,
-        &ClientToDaemon::Hello {
-            client_id: Uuid::new_v4(),
-        },
-    )?;
-
+    let mut stream = spawn_daemon::connect_daemon().or_else(|_| spawn_daemon::ensure_daemon())?;
     let session_id = Uuid::new_v4().to_string();
     let operation_id = Uuid::new_v4();
     let create = ControlCommand::TaskCreate {

@@ -1,12 +1,15 @@
 use super::error::{CliError, ErrorCode};
-use crate::protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult};
+use crate::{
+    app::spawn_daemon::{authenticate_daemon_stream, load_ipc_secret},
+    protocol::{read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient, ReplyResult},
+};
 use interprocess::{
     local_socket::{prelude::*, GenericNamespaced},
     ConnectWaitMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{env, fs, process::Command as ProcessCommand, sync::mpsc, thread, time::Duration};
+use std::{env, process::Command as ProcessCommand, sync::mpsc, thread, time::Duration};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,19 +56,14 @@ impl Flavor {
 pub struct ControlSocketConfig {
     pub flavor: Flavor,
     pub user_sid: String,
-    boot_token: Option<String>,
     pub timeout: Duration,
 }
 
 impl ControlSocketConfig {
     pub fn detect(flavor: Option<Flavor>, timeout: Duration) -> Result<Self, CliError> {
-        let flavor = flavor.unwrap_or(Flavor::detect()?);
-        let user_sid = current_user_sid();
-        let boot_token = read_boot_token(flavor)?;
         Ok(Self {
-            flavor,
-            user_sid,
-            boot_token,
+            flavor: flavor.unwrap_or(Flavor::detect()?),
+            user_sid: current_user_sid(),
             timeout,
         })
     }
@@ -92,31 +90,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(PRIME);
     }
     hash
-}
-
-fn read_boot_token(flavor: Flavor) -> Result<Option<String>, CliError> {
-    let product = match flavor {
-        Flavor::Dev => "VibeLink Dev",
-        Flavor::Prod => "VibeLink",
-    };
-    let dirs = directories::ProjectDirs::from("com", "vibelink", product)
-        .ok_or_else(|| CliError::unavailable("could not resolve VibeLink data directory"))?;
-    let path = dirs.data_dir().join("daemon-auth.token");
-    let token = match fs::read_to_string(&path) {
-        Ok(token) => token.trim().to_string(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(CliError::unavailable(format!(
-                "read daemon authentication material: {error}"
-            )))
-        }
-    };
-    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CliError::unavailable(
-            "daemon authentication material is invalid",
-        ));
-    }
-    Ok(Some(token))
 }
 
 fn current_user_sid() -> String {
@@ -201,34 +174,10 @@ impl ControlSocketClient {
     }
 
     pub(crate) fn authenticate(&mut self) -> Result<(), CliError> {
-        let client_id = Uuid::new_v4();
-        let boot_token = self.config.boot_token.take().ok_or_else(|| {
-            CliError::unavailable(
-                "the selected VibeLink daemon authentication token is unavailable",
-            )
-        })?;
-        let user_sid = std::mem::take(&mut self.config.user_sid);
-        self.write(&ClientToDaemon::Hello { client_id })?;
-        self.write(&ClientToDaemon::Authenticate {
-            req: 0,
-            client_id,
-            boot_token,
-            process_id: std::process::id(),
-            user_sid,
-        })?;
-        loop {
-            match self.read()? {
-                DaemonToClient::Reply {
-                    req: 0,
-                    result: ReplyResult::Ok,
-                } => return Ok(()),
-                DaemonToClient::Error {
-                    req: Some(0),
-                    message,
-                } => return Err(map_daemon_error(message)),
-                _ => {}
-            }
-        }
+        let secret = load_ipc_secret().map_err(|error| CliError::unavailable(error.to_string()))?;
+        authenticate_daemon_stream(&mut self.stream, ClientKind::Cli, &secret)
+            .map(|_| ())
+            .map_err(|error| map_daemon_error(error.to_string()))
     }
 
     pub(crate) fn execute_json_in_place(
@@ -263,9 +212,7 @@ impl ControlSocketClient {
 
     fn ping_blocking(mut self) -> Result<(), CliError> {
         let req = 1;
-        self.write(&ClientToDaemon::Hello {
-            client_id: Uuid::new_v4(),
-        })?;
+        self.authenticate()?;
         self.write(&ClientToDaemon::Ping { req })?;
         loop {
             match self.read()? {

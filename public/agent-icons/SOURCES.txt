@@ -1,5 +1,23 @@
-codex.svg — https://developers.openai.com/favicon.svg (OpenAI)
+Brand marks for the AI coding agents VibeLink integrates with. Ids match
+`src-tauri/src/app/agent_hooks.rs` (completion hooks) and
+`src-tauri/src/app/agents.rs` (CLI probes); the UI resolves them through
+`src/state/profileIcons.ts` and `src/components/settings/agentBrand.ts`.
+
+amp.svg — https://ampcode.com/amp-mark-color.svg (Sourcegraph Amp)
+antigravity.png — https://antigravity.google/favicon.ico (Google Antigravity), 48px ICO frame rescaled to 128px PNG
 claude-code.svg — https://claude.ai/favicon.svg (Anthropic)
+codex.svg — https://developers.openai.com/favicon.svg (OpenAI)
+command-code.png — https://www.commandcode.ai/favicon.ico (Command Code), 48px ICO frame rescaled to 128px PNG
+copilot.svg — https://api.iconify.design/simple-icons/githubcopilot.svg (GitHub Copilot, simple-icons), recolored to #ffffff
+cursor.svg — https://cursor.com/favicon.svg (Cursor)
+devin.svg — https://devin.ai/favicon.svg (Cognition Devin), root fill set to #FFFFFF for VibeLink's dark chrome
+droid.svg — https://factory.ai/favicon.svg (Factory Droid)
+gemini.svg — https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg (Google Gemini)
+grok.svg — https://api.iconify.design/logos/grok-icon.svg (xAI Grok), root fill set to #FFFFFF
+hermes.svg — Hermes Agent ACP registry icon (hermes-agent/acp_registry/icon.svg), recolored from currentColor to a fixed light stroke.
+kimi.svg — https://api.iconify.design/simple-icons/kimi.svg (Moonshot Kimi, simple-icons), recolored to #ffffff
+mimo-code.svg — https://api.iconify.design/simple-icons/xiaomi.svg (Xiaomi, simple-icons), recolored to MiMo orange #ff6900; Xiaomi ships no standalone MiMo Code mark
 oh-my-pi.svg — https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/icon.svg (Oh My Pi)
 opencode.svg — https://opencode.ai/favicon.svg (OpenCode)
+pi.svg — https://pi.dev/favicon.svg (Pi)
 powershell.svg — https://raw.githubusercontent.com/PowerShell/PowerShell/master/assets/ps_black_64.svg (Microsoft PowerShell)

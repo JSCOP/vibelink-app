@@ -8,6 +8,8 @@ import type { HermesRuntimeStatus } from '../ipc/types'
 import { useWorkspaceStore } from '../state/store'
 import { AccountSignIn } from './AccountSignIn'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
+import { ProfileIcon } from './ProfileIcon'
+import { agentIconName } from './settings/agentBrand'
 import { setupStepAutoPass, setupStepIds, setupStepTitle } from './setupWizardSteps'
 
 type SetupWizardProps = {
@@ -111,7 +113,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
         args: ['-NoLogo', '-NoExit', '-Command', script],
         cwd: session?.workspaceFolder ?? null,
         title: `${status.displayName} login`,
-        icon: 'bot',
+        icon: agentIconName(status.id),
       })
     } finally {
       setAgentBusy(false)
@@ -150,7 +152,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
       args: ['-NoLogo', '-NoExit', '-Command', script],
       cwd: session?.workspaceFolder ?? null,
       title: verb === 'auth' ? 'Hermes auth CLI' : 'Hermes model setup',
-      icon: 'sparkles',
+      icon: 'hermes',
     })
   }
 
@@ -228,6 +230,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
               <div className="setup-agent-list">
                 {agentClis.map((status) => (
                   <div key={status.id} className="setup-agent-row">
+                    <ProfileIcon name={agentIconName(status.id)} size={20} className="setup-agent-icon" />
                     <div>
                       <strong>{status.displayName}</strong>
                       <span>{status.version ?? agentStatusLabel(status)}</span>

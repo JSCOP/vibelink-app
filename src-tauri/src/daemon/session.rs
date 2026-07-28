@@ -1,3 +1,4 @@
+use super::scrollback::ScrollbackRing;
 use crate::daemon::persistence::PersistedSession;
 use crate::daemon::pty::Pane;
 use crate::orchestration::PaneProjectionState;
@@ -17,10 +18,13 @@ use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+
+const SPAWN_CANCELLATION_TTL: Duration = Duration::from_secs(60);
+const MAX_SPAWN_CANCELLATIONS: usize = 4096;
 
 pub struct Session {
     pub meta: SessionMeta,
@@ -69,6 +73,13 @@ pub struct DaemonState {
     next_pane_generation: u64,
     next_pane_lease_revision: u64,
     desktop_selection: DesktopSelection,
+    spawn_cancellations: HashMap<(Uuid, Uuid), Instant>,
+}
+
+fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, ScrollbackRing> {
+    scrollback
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl DaemonState {
@@ -85,6 +96,7 @@ impl DaemonState {
                 workspace_id: None,
                 pane_id: None,
             },
+            spawn_cancellations: HashMap::new(),
         }
     }
 
@@ -465,6 +477,42 @@ impl DaemonState {
         session.panes.insert(meta.id, pane);
         session.meta.pane_count = session.panes.len();
         Ok(meta)
+    }
+
+    pub fn cancel_pane_spawn(
+        &mut self,
+        session_id: Uuid,
+        pane_id: Uuid,
+    ) -> anyhow::Result<Option<Pane>> {
+        self.session(session_id)?;
+        self.prune_spawn_cancellations();
+        if self.spawn_cancellations.len() >= MAX_SPAWN_CANCELLATIONS {
+            if let Some(oldest) = self
+                .spawn_cancellations
+                .iter()
+                .min_by_key(|(_, expires_at)| *expires_at)
+                .map(|(key, _)| *key)
+            {
+                self.spawn_cancellations.remove(&oldest);
+            }
+        }
+        self.spawn_cancellations.insert(
+            (session_id, pane_id),
+            Instant::now() + SPAWN_CANCELLATION_TTL,
+        );
+        self.close_pane(session_id, pane_id)
+    }
+
+    pub fn pane_spawn_cancelled(&mut self, session_id: Uuid, pane_id: Uuid) -> bool {
+        self.prune_spawn_cancellations();
+        self.spawn_cancellations
+            .contains_key(&(session_id, pane_id))
+    }
+
+    fn prune_spawn_cancellations(&mut self) {
+        let now = Instant::now();
+        self.spawn_cancellations
+            .retain(|_, expires_at| *expires_at > now);
     }
 
     pub fn close_pane(&mut self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
@@ -1631,6 +1679,61 @@ mod tests {
 
         assert_eq!(closed.expect("closed pane").meta().config, config);
         assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
+        assert!(state.persisted_sessions()[0].panes.is_empty());
+    }
+
+    #[test]
+    fn cancel_pane_spawn_records_tombstone_and_removes_live_pane() {
+        let mut state = DaemonState::new();
+        let meta = state.create_session("Workspace".to_string(), None);
+        let pending_id = Uuid::new_v4();
+
+        assert!(state
+            .cancel_pane_spawn(meta.id, pending_id)
+            .expect("cancel pending pane")
+            .is_none());
+        assert!(state.pane_spawn_cancelled(meta.id, pending_id));
+
+        let live_id = Uuid::new_v4();
+        state
+            .insert_pane(meta.id, Pane::for_test(test_config(live_id), true))
+            .expect("insert live pane");
+        assert!(state
+            .cancel_pane_spawn(meta.id, live_id)
+            .expect("cancel live pane")
+            .is_some());
+        assert!(state.pane_spawn_cancelled(meta.id, live_id));
+        assert!(state.pane_metas(meta.id).expect("pane metas").is_empty());
+    }
+
+    #[test]
+    fn immediate_spawn_close_stress_leaves_no_pane_records() {
+        let mut state = DaemonState::new();
+        let session = state.create_session("Workspace".to_string(), None);
+
+        for iteration in 0..1_000 {
+            let pane_id = Uuid::new_v4();
+            if iteration % 2 == 0 {
+                assert!(state
+                    .cancel_pane_spawn(session.id, pane_id)
+                    .expect("cancel pre-insert pane")
+                    .is_none());
+                assert!(state.pane_spawn_cancelled(session.id, pane_id));
+            } else {
+                state
+                    .insert_pane(session.id, Pane::for_test(test_config(pane_id), true))
+                    .expect("insert racing pane");
+                assert!(state
+                    .cancel_pane_spawn(session.id, pane_id)
+                    .expect("cancel inserted pane")
+                    .is_some());
+            }
+        }
+
+        assert!(state
+            .pane_metas(session.id)
+            .expect("pane metas after stress")
+            .is_empty());
         assert!(state.persisted_sessions()[0].panes.is_empty());
     }
 

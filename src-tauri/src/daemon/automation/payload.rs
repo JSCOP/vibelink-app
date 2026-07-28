@@ -1,3 +1,4 @@
+use super::agents;
 use super::types::*;
 use crate::worktree_storage::{WorktreeStorage, WorktreeStorageMode, DEFAULT_WORKTREE_FOLDER};
 use anyhow::{bail, Result};
@@ -19,7 +20,8 @@ pub fn parse_create(
     let object = payload_object(payload)?;
     reject_legacy(object)?;
 
-    let agent = optional_string(object, "agent")?.unwrap_or_else(|| "hermes".to_string());
+    let agent =
+        optional_string(object, "agent")?.unwrap_or_else(|| agents::DEFAULT_AGENT_ID.to_string());
     validate_agent(&agent)?;
     let schedule_kind = required_string(object, "scheduleKind")?;
     validate_schedule_kind(&schedule_kind)?;
@@ -38,8 +40,7 @@ pub fn parse_create(
         agent,
         provider: nullable_string(object, "provider")?.unwrap_or(None),
         model: nullable_string(object, "model")?.unwrap_or(None),
-        use_current_hermes_default: optional_bool(object, "useCurrentHermesDefault")?
-            .unwrap_or(true),
+        use_agent_default_model: optional_bool(object, "useAgentDefaultModel")?.unwrap_or(true),
         toolsets: optional_string_array(object, "toolsets")?
             .unwrap_or_else(|| vec!["hermes-acp".to_string()]),
         skills: optional_string_array(object, "skills")?.unwrap_or_default(),
@@ -93,8 +94,8 @@ pub fn apply_patch(
     if let Some(model) = nullable_string(object, "model")? {
         record.model = model;
     }
-    if let Some(value) = optional_bool(object, "useCurrentHermesDefault")? {
-        record.use_current_hermes_default = value;
+    if let Some(value) = optional_bool(object, "useAgentDefaultModel")? {
+        record.use_agent_default_model = value;
     }
     if let Some(value) = optional_string_array(object, "toolsets")? {
         record.toolsets = value;
@@ -167,6 +168,9 @@ fn reject_legacy(object: &Map<String, Value>) -> Result<()> {
     }
     if object.contains_key("policy") {
         bail!("legacy automation field 'policy' is not supported");
+    }
+    if object.contains_key("useCurrentHermesDefault") {
+        bail!("legacy automation field 'useCurrentHermesDefault' is not supported; use 'useAgentDefaultModel'");
     }
     Ok(())
 }
@@ -429,12 +433,14 @@ fn parse_source(value: Option<&Value>) -> Result<Option<Option<AutomationSource>
 }
 
 fn validate_agent(agent: &str) -> Result<()> {
-    if agent != "hermes" {
-        bail!("automation agent must be 'hermes'");
+    if !agents::is_supported(agent) {
+        bail!(
+            "unsupported automation agent '{agent}'; expected one of {}",
+            agents::supported_ids().join(", ")
+        );
     }
     Ok(())
 }
-
 fn validate_schedule_kind(kind: &str) -> Result<()> {
     if !matches!(
         kind,
@@ -485,7 +491,7 @@ mod tests {
         assert!(record.skills.is_empty());
         assert_eq!(record.max_turns, 50);
         assert_eq!(record.timeout_seconds, 1_800);
-        assert!(record.use_current_hermes_default);
+        assert!(record.use_agent_default_model);
         assert!(record.enabled);
         assert!(!record.requires_review);
         assert_eq!(record.missed_run_grace_minutes, 720);
@@ -643,6 +649,40 @@ mod tests {
             "snapshot":{}
         });
         assert!(parse_create("session-a", &invalid_source_provider, 100, "automation-a").is_err());
+    }
+
+    #[test]
+    fn accepts_every_catalog_agent_and_defaults_to_hermes() {
+        let record = parse_create("session-a", &minimal_payload(), 100, "automation-a")
+            .expect("parse create");
+        assert_eq!(record.agent, agents::DEFAULT_AGENT_ID);
+
+        for agent in agents::supported_ids() {
+            let mut payload = minimal_payload();
+            payload["agent"] = json!(agent);
+            let parsed = parse_create("session-a", &payload, 100, "automation-a")
+                .unwrap_or_else(|error| panic!("parse create for {agent}: {error}"));
+            assert_eq!(parsed.agent, agent);
+
+            let patched = apply_patch(&record, &json!({ "agent": agent }), 200)
+                .unwrap_or_else(|error| panic!("apply patch for {agent}: {error}"));
+            assert_eq!(patched.agent, agent);
+        }
+    }
+
+    #[test]
+    fn rejects_the_superseded_hermes_model_default_field() {
+        let mut payload = minimal_payload();
+        payload["useCurrentHermesDefault"] = json!(false);
+        assert!(parse_create("session-a", &payload, 100, "automation-a").is_err());
+
+        let existing = parse_create("session-a", &minimal_payload(), 100, "automation-a")
+            .expect("parse create");
+        assert!(apply_patch(&existing, &json!({"useCurrentHermesDefault": false}), 200).is_err());
+
+        let patched = apply_patch(&existing, &json!({"useAgentDefaultModel": false}), 200)
+            .expect("apply agent default patch");
+        assert!(!patched.use_agent_default_model);
     }
 
     #[test]

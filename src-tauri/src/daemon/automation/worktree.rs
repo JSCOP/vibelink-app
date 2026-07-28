@@ -122,36 +122,30 @@ impl AutomationWorktreeController {
         automation: &AutomationRecord,
         base_workspace: &Path,
     ) -> Result<PreparedWorkspace> {
-        self.prepare_with_worktree(
-            run_id,
-            run_number,
-            automation,
-            base_workspace,
-            |planned| {
-                let output = Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        "-b",
-                        &planned.branch,
-                        &planned.worktree_path,
-                        &planned.base_revision,
-                    ])
-                    .current_dir(base_workspace)
-                    .output()
-                    .context("create test automation worktree")?;
-                if !output.status.success() {
-                    bail!(
-                        "create test automation worktree failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    );
-                }
-                Ok(AutomationWorktreeProvision {
-                    session_id: "test-session".into(),
-                    assignment: planned.clone(),
-                })
-            },
-        )
+        self.prepare_with_worktree(run_id, run_number, automation, base_workspace, |planned| {
+            let output = Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    &planned.branch,
+                    &planned.worktree_path,
+                    &planned.base_revision,
+                ])
+                .current_dir(base_workspace)
+                .output()
+                .context("create test automation worktree")?;
+            if !output.status.success() {
+                bail!(
+                    "create test automation worktree failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Ok(AutomationWorktreeProvision {
+                session_id: "test-session".into(),
+                assignment: planned.clone(),
+            })
+        })
     }
     pub fn cleanup_if_safe(
         &self,
@@ -540,11 +534,8 @@ mod tests {
             );
             let registry = Arc::new(WorktreeRegistry::new(control));
             let controller = AutomationWorktreeController::new(
-                WorktreeManager::new(
-                    root.join("default-managed"),
-                    Arc::clone(&registry),
-                )
-                .expect("manager"),
+                WorktreeManager::new(root.join("default-managed"), Arc::clone(&registry))
+                    .expect("manager"),
                 registry,
             );
             Self {
@@ -564,7 +555,7 @@ mod tests {
                 agent: "hermes".into(),
                 provider: None,
                 model: None,
-                use_current_hermes_default: true,
+                use_agent_default_model: true,
                 toolsets: vec!["hermes-acp".into()],
                 skills: vec![],
                 max_turns: 50,

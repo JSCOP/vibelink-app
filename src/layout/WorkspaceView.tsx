@@ -1510,6 +1510,7 @@ export function WorkspaceView({
     publishOpenContentFromDockview(api)
   }, [])
 
+
   const syncChromeState = useCallback(() => {
     const api = apiRef.current
     syncOpenContentRegistry()

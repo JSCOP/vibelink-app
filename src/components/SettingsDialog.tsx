@@ -77,7 +77,7 @@ import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
 import { normalizeFontChoices, terminalFontStack } from '../state/fonts'
 import { canDeleteProfile, createProfile, joinCommandLine, splitCommandLine, type ChatImageAttachmentMode, type ChatPersonality, type GitStatusPresentation, type Profile, type ProfileKind, type Settings } from '../state/profiles'
-import { profileIconNames } from '../state/profileIcons'
+import { profileIconNames, profileIcons } from '../state/profileIcons'
 import { terminalThemeDefinitionById, terminalThemeGroups, type TerminalThemeId } from '../state/terminalThemes'
 import { applyThemeToDocument } from '../state/themePreview'
 import { TerminalManager } from '../terminal/TerminalManager'
@@ -106,6 +106,7 @@ import {
   SettingsSwitch,
   SettingsText,
   SettingsValue,
+  type SettingsIcon,
 } from './settings/controls'
 import { agentIconName } from './settings/agentBrand'
 import { filterSettingsSections, settingsSectionById, type SettingsSectionId } from './settings/sections'
@@ -120,6 +121,9 @@ type SettingsDialogProps = {
 type WorktreeStorageChoice = 'sameDrive' | 'specificDrive' | 'appData' | 'custom'
 
 const fontWeightOptions = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+/** Hermes owns this section, so its card wears the real Hermes mark. */
+const hermesBrandIcon = profileIcons.hermes as SettingsIcon
+
 
 const profileKindLabels: Record<ProfileKind, string> = {
   local: 'Local',
@@ -386,7 +390,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
         args: ['-NoLogo', '-NoExit', '-Command', script],
         cwd: activeSession?.workspaceFolder ?? null,
         title: mode === 'auth' ? 'Hermes auth CLI' : mode === 'status' ? 'Hermes status CLI' : 'Hermes model setup',
-        icon: 'sparkles',
+        icon: 'hermes',
       })
       setTerminalMessage('Hermes CLI terminal opened.')
     } catch (error) {
@@ -403,7 +407,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
         args: ['-NoLogo', '-NoExit', '-Command', `& ${quotePowerShellString(hermesCommand)} gateway ${action}`],
         cwd: activeSession?.workspaceFolder ?? null,
         title: `Hermes gateway ${action}`,
-        icon: 'message-square',
+        icon: 'hermes',
       })
       setTerminalMessage('Hermes gateway terminal opened.')
     } catch (error) {
@@ -595,7 +599,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
                         <SettingsPill icon={Sparkles}>Hook available</SettingsPill>
                       ) : !agent.cli.installed ? (
                         <SettingsPill icon={CircleX}>Not found</SettingsPill>
-                      ) : agent.cli.auth === 'loggedOut' ? (
+                      ) : agent.cli.auth !== 'loggedIn' ? (
                         <SettingsButton icon={LogIn} label="Log in" title={`Run ${agent.cli.loginHint} in a terminal`} disabled={agentBusy || !activeSessionId} onClick={() => void openAgentLogin(agent.id, agent.displayName, agent.cli?.loginHint ?? agent.id)} />
                       ) : (
                         <SettingsPill tone="ok" icon={CircleCheck}>Ready</SettingsPill>
@@ -622,7 +626,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             {activeSection === 'model' ? (
               <>
                 <SettingsCard
-                  icon={Bot}
+                  icon={hermesBrandIcon}
                   title="Hermes runtime"
                   hint="Hermes owns provider, login, and model configuration. VibeLink reads the global installation without modifying it."
                   status={runtime?.detected ? <SettingsPill tone="ok" icon={CircleCheck}>Detected</SettingsPill> : <SettingsPill tone="warn" icon={TriangleAlert}>Missing</SettingsPill>}

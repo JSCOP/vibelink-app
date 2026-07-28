@@ -2,7 +2,6 @@ import {
   Archive,
   Bell,
   Blocks,
-  Bot,
   Box,
   CircleUser,
   GitBranch,
@@ -19,6 +18,7 @@ import {
   Smartphone,
   Sparkles,
 } from 'lucide-react'
+import { profileIcons } from '../../state/profileIcons'
 import type { SettingsIcon } from './controls'
 
 export type SettingsSectionId =
@@ -79,7 +79,7 @@ export const settingsSectionGroups: SettingsSectionGroup[] = [
     label: 'AI',
     sections: [
       { id: 'agents', label: 'Agents', icon: Sparkles, keywords: 'claude codex omp oh my pi opencode cli hook install login' },
-      { id: 'model', label: 'Model', icon: Bot, keywords: 'hermes provider acp runtime version' },
+      { id: 'model', label: 'Model', icon: profileIcons.hermes as SettingsIcon, keywords: 'hermes provider acp runtime version' },
       { id: 'chat', label: 'Chat', icon: MessageSquare, keywords: 'personality reasoning tool calls images' },
       { id: 'mcp', label: 'MCP', icon: Box, keywords: 'server bridge tools self check' },
       { id: 'memory', label: 'Memory', icon: Blocks, keywords: 'context compression persistent' },

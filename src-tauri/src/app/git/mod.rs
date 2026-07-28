@@ -36,7 +36,7 @@ use self::worktree_registry::{
     WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
 };
 use super::daemon_client::DaemonClient;
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{anyhow, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -140,41 +140,49 @@ fn daemon_worktree_request<T: Serialize, R: DeserializeOwned>(
 
 #[tauri::command]
 pub fn worktree_registry_list(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeListRequest,
 ) -> Result<Vec<WorktreeProjection>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_LIST, &request)
 }
 
 #[tauri::command]
 pub fn worktree_registry_reconcile(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeReconcileRequest,
 ) -> Result<Vec<WorktreeProjection>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_RECONCILE, &request)
 }
 
 #[tauri::command]
 pub fn worktree_registry_import(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeImportRequest,
 ) -> Result<WorktreeProjection, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_IMPORT, &request)
 }
 
 #[tauri::command]
 pub fn worktree_lifecycle_create(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeCreateRequest,
 ) -> Result<WorktreeCreateResult, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         request.operation_id,
@@ -188,11 +196,13 @@ pub fn worktree_lifecycle_create(
 /// originating request's own result rather than assuming a rollback happened.
 #[tauri::command]
 pub fn worktree_lifecycle_cancel(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeOperationIdRequest,
 ) -> Result<bool, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         request.operation_id,
@@ -203,11 +213,13 @@ pub fn worktree_lifecycle_cancel(
 
 #[tauri::command]
 pub fn worktree_lifecycle_move(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeMoveRequest,
 ) -> Result<WorktreeMoveResult, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         request.operation_id,
@@ -218,11 +230,13 @@ pub fn worktree_lifecycle_move(
 
 #[tauri::command]
 pub fn worktree_removal_preflight(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeRemovalPreflightRequest,
 ) -> Result<WorktreeRemovalPreflight, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         Uuid::new_v4(),
@@ -233,11 +247,13 @@ pub fn worktree_removal_preflight(
 
 #[tauri::command]
 pub fn worktree_lifecycle_remove(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeRemoveRequest,
 ) -> Result<WorktreeRemovalResult, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         request.operation_id,
@@ -248,21 +264,25 @@ pub fn worktree_lifecycle_remove(
 
 #[tauri::command]
 pub fn worktree_registry_set(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeSetRequest,
 ) -> Result<worktree_registry::WorktreeRecord, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(&client, Uuid::new_v4(), WORKTREE_METHOD_SET, &request)
 }
 
 #[tauri::command]
 pub fn worktree_checkpoint_create(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeCheckpointRequest,
 ) -> Result<WorktreeCheckpoint, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         Uuid::new_v4(),
@@ -273,11 +293,13 @@ pub fn worktree_checkpoint_create(
 
 #[tauri::command]
 pub fn worktree_checkpoints_list(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     worktree_id: String,
 ) -> Result<Vec<WorktreeCheckpoint>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         Uuid::new_v4(),
@@ -288,11 +310,13 @@ pub fn worktree_checkpoints_list(
 
 #[tauri::command]
 pub fn worktree_review_comment_create(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     request: WorktreeReviewCommentRequest,
 ) -> Result<WorktreeReviewComment, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         Uuid::new_v4(),
@@ -303,11 +327,13 @@ pub fn worktree_review_comment_create(
 
 #[tauri::command]
 pub fn worktree_review_comments_list(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
     worktree_id: String,
 ) -> Result<Vec<WorktreeReviewComment>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     daemon_worktree_request(
         &client,
         Uuid::new_v4(),
@@ -318,10 +344,12 @@ pub fn worktree_review_comments_list(
 
 #[tauri::command]
 pub async fn git_is_available(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<bool, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         git_exit_status(&workspace_folder, ["rev-parse", "--is-inside-work-tree"])
             .map(|status| status.success())
@@ -333,10 +361,12 @@ pub async fn git_is_available(
 
 #[tauri::command]
 pub async fn git_snapshot_baseline(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<String, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || snapshot_baseline_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -345,11 +375,13 @@ pub async fn git_snapshot_baseline(
 
 #[tauri::command]
 pub async fn git_changed_files(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
 ) -> Result<Vec<ChangedFile>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || changed_files_native(&workspace_folder, &base_ref))
         .await
         .map_err(to_string)?
@@ -358,12 +390,14 @@ pub async fn git_changed_files(
 
 #[tauri::command]
 pub async fn git_file_contents(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     base_ref: String,
     path: String,
 ) -> Result<FileContents, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         file_contents_native(&workspace_folder, &base_ref, &path)
     })

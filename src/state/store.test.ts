@@ -140,11 +140,13 @@ describe('workspace store profiles', () => {
       activeSessionId: undefined,
       activePaneId: undefined,
       panes: {},
+      paneLifecycle: {},
       manualPaneTitles: {},
       layoutJson: null,
       status: 'ready',
       error: undefined,
       hermesPendingPrompts: {},
+      hermesGenerations: {},
       hermesTranscript: {},
       hermesCurrentSession: {},
       paneCompletionHighlights: {},
@@ -1135,18 +1137,79 @@ describe('workspace store profiles', () => {
     await useWorkspaceStore.getState().deleteSession(createdSession.id)
 
     expect(useWorkspaceStore.getState().manualPaneTitles).toEqual({ [survivorPane.id]: true })
+    const cleanupCall = vi.mocked(invoke).mock.calls.findIndex(([command]) => command === 'agent_workspace_cleanup')
+    const deleteCall = vi.mocked(invoke).mock.calls.findIndex(([command]) => command === 'delete_session')
+    expect(cleanupCall).toBeGreaterThanOrEqual(0)
+    expect(deleteCall).toBeGreaterThan(cleanupCall)
     expect(useWorkspaceStore.getState().capturesByPane).toEqual({ [survivorPane.id]: ['keep.png'] })
     expect(useWorkspaceStore.getState().settings.paneRoles).toEqual({ [survivorPane.id]: 'Keep' })
   })
 
-  test('queues Hermes prompts FIFO and drains once', () => {
+  test('cancels a pane closed before its spawn reply arrives', async () => {
+    let resolveSpawn: ((pane: PaneMeta) => void) | undefined
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'spawn_pane') {
+        return await new Promise<PaneMeta>((resolve) => { resolveSpawn = resolve })
+      }
+      if (command === 'cancel_pane_spawn') return null
+      if (command === 'list_sessions') return []
+      return null
+    })
+    useWorkspaceStore.setState({ activeSessionId: 'session-1' })
+
+    const spawning = useWorkspaceStore.getState().spawnPane('session-1', { paneId: 'pane-test' })
+    expect(useWorkspaceStore.getState().paneLifecycle['pane-test']).toBe('spawning')
+
+    await useWorkspaceStore.getState().closePane('pane-test')
+    resolveSpawn?.(spawnedPane)
+
+    await expect(spawning).rejects.toThrow('PANE_SPAWN_CANCELLED')
+    expect(useWorkspaceStore.getState().paneLifecycle['pane-test']).toBe('closed')
+    expect(useWorkspaceStore.getState().panes['pane-test']).toBeUndefined()
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'cancel_pane_spawn')).toHaveLength(2)
+    expect(invoke).not.toHaveBeenCalledWith('close_pane', expect.anything())
+  })
+
+  test('deduplicates concurrent closes for a live pane', async () => {
+    let releaseClose: (() => void) | undefined
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'close_pane') await new Promise<void>((resolve) => { releaseClose = resolve })
+      if (command === 'list_sessions') return []
+      return null
+    })
+    useWorkspaceStore.setState({
+      activeSessionId: 'session-1',
+      panes: { [spawnedPane.id]: spawnedPane },
+      paneLifecycle: { [spawnedPane.id]: 'live' },
+    })
+
+    const first = useWorkspaceStore.getState().closePane(spawnedPane.id)
+    const duplicate = useWorkspaceStore.getState().closePane(spawnedPane.id)
+    await duplicate
+    releaseClose?.()
+    await first
+
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'close_pane')).toHaveLength(1)
+    expect(useWorkspaceStore.getState().paneLifecycle[spawnedPane.id]).toBe('closed')
+  })
+
+  test('claims, releases, and acknowledges Hermes prompts without duplication', () => {
     const store = useWorkspaceStore.getState()
 
     store.enqueueHermesPrompt('session-1', 'first')
     store.enqueueHermesPrompt('session-1', 'second')
 
-    expect(useWorkspaceStore.getState().takeHermesPrompt('session-1')).toBe('first')
-    expect(useWorkspaceStore.getState().takeHermesPrompt('session-1')).toBe('second')
-    expect(useWorkspaceStore.getState().takeHermesPrompt('session-1')).toBeUndefined()
+    const first = useWorkspaceStore.getState().claimHermesPrompt('session-1')
+    expect(first?.text).toBe('first')
+    expect(useWorkspaceStore.getState().claimHermesPrompt('session-1')).toBeUndefined()
+
+    useWorkspaceStore.getState().releaseHermesPrompt('session-1', first!.id)
+    expect(useWorkspaceStore.getState().claimHermesPrompt('session-1')).toEqual(first)
+    useWorkspaceStore.getState().ackHermesPrompt('session-1', first!.id)
+
+    const second = useWorkspaceStore.getState().claimHermesPrompt('session-1')
+    expect(second?.text).toBe('second')
+    useWorkspaceStore.getState().ackHermesPrompt('session-1', second!.id)
+    expect(useWorkspaceStore.getState().hermesPendingPrompts['session-1']).toEqual([])
   })
 })

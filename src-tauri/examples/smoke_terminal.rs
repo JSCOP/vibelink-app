@@ -1,20 +1,14 @@
 #![allow(dead_code)]
 
-#[path = "../src/control_plane.rs"]
-mod control_plane;
-#[path = "../src/daemon/paths.rs"]
-mod paths;
-#[path = "../src/protocol.rs"]
-mod protocol;
-
 use anyhow::{bail, Context, Result};
-use interprocess::local_socket::{
-    prelude::*, ConnectOptions, GenericNamespaced, SendHalf as LocalSocketSendHalf,
+use app_lib::{
+    app::spawn_daemon,
+    protocol::{
+        read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneConfig,
+        ReplyResult,
+    },
 };
-use protocol::{
-    read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneConfig,
-    ReplyResult,
-};
+use interprocess::local_socket::{prelude::*, SendHalf as LocalSocketSendHalf};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -52,8 +46,7 @@ struct DaemonConnection {
 
 impl DaemonConnection {
     fn connect() -> Result<Self> {
-        let name = paths::socket_name_string().to_ns_name::<GenericNamespaced>()?;
-        let stream = ConnectOptions::new().name(name).connect_sync()?;
+        let stream = spawn_daemon::connect_daemon().or_else(|_| spawn_daemon::ensure_daemon())?;
         let (mut reader, writer) = stream.split();
         let (tx, frames) = mpsc::channel();
 
@@ -288,6 +281,7 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         role: None,
         cols: 80,
         rows: 24,
+        restore_on_start: false,
     };
 
     match request_reply(
@@ -314,10 +308,18 @@ fn run_case(daemon: &mut DaemonConnection, session_id: Uuid, case: &SmokeCase) -
         other => bail!("unexpected spawn response: {other:?}"),
     }
 
-    daemon.send(&ClientToDaemon::AttachPane {
-        session_id,
-        pane_id,
-    })?;
+    match request_reply(
+        daemon,
+        3,
+        ClientToDaemon::AttachPane {
+            req: 3,
+            session_id,
+            pane_id,
+        },
+    )? {
+        ReplyResult::Ok => {}
+        other => bail!("unexpected attach response: {other:?}"),
+    }
     let output = collect_output(daemon, session_id, pane_id, &case.expected)
         .with_context(|| format!("capture output for {}", case.name))?;
     Ok(sample_output(&output))
@@ -365,6 +367,7 @@ fn collect_output(
                     .any(|window| window == b"\x1b[6n")
                 {
                     daemon.send(&ClientToDaemon::WritePane {
+                        req: 4,
                         session_id,
                         pane_id,
                         data: b"\x1b[1;1R".to_vec(),
@@ -383,6 +386,10 @@ fn collect_output(
                 }
                 break;
             }
+            Some(DaemonToClient::Reply {
+                req: 4,
+                result: ReplyResult::Ok,
+            }) => {}
             Some(DaemonToClient::Error { message, .. }) => bail!(message),
             Some(DaemonToClient::Output { .. } | DaemonToClient::PaneExited { .. }) => {}
             Some(other) => bail!("unexpected terminal frame: {other:?}"),

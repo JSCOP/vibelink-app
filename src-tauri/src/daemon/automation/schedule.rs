@@ -369,7 +369,7 @@ mod tests {
             agent: "hermes".into(),
             provider: None,
             model: None,
-            use_current_hermes_default: true,
+            use_agent_default_model: true,
             toolsets: vec![],
             skills: vec![],
             max_turns: 10,

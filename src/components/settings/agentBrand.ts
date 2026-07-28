@@ -1,24 +1,30 @@
-/** Maps hook ids onto an available brand or semantic profile icon. */
+/** Maps agent ids onto their brand icon in `public/agent-icons`.
+ *
+ *  Every AI coding agent VibeLink integrates with owns a real vendor mark; a
+ *  generic glyph is only used for an agent id we do not ship an icon for. Keep
+ *  the ids in sync with `src-tauri/src/app/agent_hooks.rs` (hook specs) and
+ *  `src-tauri/src/app/agents.rs` (CLI probes). */
 const agentIconNames: Record<string, string> = {
+  amp: 'amp',
+  antigravity: 'antigravity',
   claude: 'claude-code',
   'claude-code': 'claude-code',
   codex: 'codex',
-  gemini: 'sparkles',
-  antigravity: 'rocket',
-  amp: 'zap',
-  opencode: 'opencode',
-  'mimo-code': 'file-code',
-  cursor: 'code',
-  pi: 'terminal-square',
-  omp: 'oh-my-pi',
+  'command-code': 'command-code',
+  copilot: 'copilot',
+  cursor: 'cursor',
+  devin: 'devin',
+  droid: 'droid',
+  gemini: 'gemini',
+  grok: 'grok',
+  hermes: 'hermes',
+  kimi: 'kimi',
+  'mimo-code': 'mimo-code',
   'oh-my-pi': 'oh-my-pi',
-  droid: 'bot',
-  'command-code': 'command',
-  grok: 'flame',
-  copilot: 'git-branch',
-  hermes: 'messages-square',
-  devin: 'bot',
-  kimi: 'sparkles',
+  omp: 'oh-my-pi',
+  opencode: 'opencode',
+  openai: 'codex',
+  pi: 'pi',
   powershell: 'powershell',
 }
 

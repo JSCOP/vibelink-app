@@ -1,5 +1,5 @@
 use super::git::paths::contain_path;
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -90,11 +90,11 @@ enum ConditionalWriteOutcome {
 
 #[tauri::command]
 pub async fn fs_list_dir(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<Vec<DirEntryInfo>, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         list_dir_native(&workspace_folder, &rel_path)
     })
     .await
@@ -102,11 +102,11 @@ pub async fn fs_list_dir(
 
 #[tauri::command]
 pub async fn fs_read_text(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextFile, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         read_text_native(&workspace_folder, &rel_path)
     })
     .await
@@ -114,11 +114,11 @@ pub async fn fs_read_text(
 
 #[tauri::command]
 pub async fn fs_read_image(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<String, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         read_base64_native(&workspace_folder, &rel_path)
     })
     .await
@@ -126,11 +126,11 @@ pub async fn fs_read_image(
 
 #[tauri::command]
 pub async fn fs_open_text_document(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextDocument, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         open_text_document_native(&workspace_folder, &rel_path)
     })
     .await
@@ -138,11 +138,11 @@ pub async fn fs_open_text_document(
 
 #[tauri::command]
 pub async fn fs_text_document_revision(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextDocumentRevision, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         text_document_revision_native(&workspace_folder, &rel_path)
     })
     .await
@@ -150,7 +150,7 @@ pub async fn fs_text_document_revision(
 
 #[tauri::command]
 pub async fn fs_save_text_document(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
     content: String,
@@ -158,7 +158,7 @@ pub async fn fs_save_text_document(
     encoding: TextDocumentEncoding,
     line_ending: TextDocumentLineEnding,
 ) -> Result<SaveTextDocumentResult, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         save_text_document_native(
             &workspace_folder,
             &rel_path,
@@ -174,7 +174,7 @@ pub async fn fs_save_text_document(
 
 #[tauri::command]
 pub async fn fs_save_text_document_as(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
     content: String,
@@ -182,7 +182,7 @@ pub async fn fs_save_text_document_as(
     encoding: TextDocumentEncoding,
     line_ending: TextDocumentLineEnding,
 ) -> Result<SaveTextDocumentResult, String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         save_text_document_native(
             &workspace_folder,
             &rel_path,
@@ -198,11 +198,11 @@ pub async fn fs_save_text_document_as(
 
 #[tauri::command]
 pub async fn fs_create_file(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         create_file_native(&workspace_folder, &rel_path)
     })
     .await
@@ -210,11 +210,11 @@ pub async fn fs_create_file(
 
 #[tauri::command]
 pub async fn fs_create_dir(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         create_dir_native(&workspace_folder, &rel_path)
     })
     .await
@@ -222,12 +222,12 @@ pub async fn fs_create_dir(
 
 #[tauri::command]
 pub async fn fs_rename(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     from_rel: String,
     to_rel: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         rename_native(&workspace_folder, &from_rel, &to_rel)
     })
     .await
@@ -235,11 +235,11 @@ pub async fn fs_rename(
 
 #[tauri::command]
 pub async fn fs_delete(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_paths: Vec<String>,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         delete_native(&workspace_folder, &rel_paths)
     })
     .await
@@ -247,12 +247,12 @@ pub async fn fs_delete(
 
 #[tauri::command]
 pub async fn open_in_editor(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
     editor_command: String,
 ) -> Result<(), String> {
-    entitled_spawn(license, move || {
+    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
         open_in_editor_native(&workspace_folder, &rel_path, &editor_command)
     })
     .await
@@ -1344,15 +1344,16 @@ fn open_in_editor_native(root: &str, rel_path: &str, editor_command: &str) -> Re
     Ok(())
 }
 
-async fn entitled_spawn<T, F>(
-    license: State<'_, Arc<LicenseService>>,
+async fn authorized_spawn<T, F>(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    capability: Capability,
     operation: F,
 ) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor.authorize(capability).map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(to_string)?

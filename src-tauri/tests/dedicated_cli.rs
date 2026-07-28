@@ -5,11 +5,20 @@ mod browser;
 #[path = "../src/control_plane.rs"]
 mod control_plane;
 #[path = "../src/daemon/paths.rs"]
-mod daemon_paths;
+pub mod daemon_paths;
 #[path = "../src/dedicated_cli/mod.rs"]
 pub mod dedicated_cli;
 #[path = "../src/protocol.rs"]
 mod protocol;
+#[path = "../src/app/spawn_daemon.rs"]
+pub mod spawn_daemon;
+pub mod daemon {
+    pub use crate::daemon_paths as paths;
+}
+
+pub mod app {
+    pub use crate::spawn_daemon;
+}
 
 pub mod mcp {
     pub fn run(_args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {

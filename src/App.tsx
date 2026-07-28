@@ -116,6 +116,7 @@ function App() {
   const bootstrap = useWorkspaceStore((state) => state.bootstrap)
   const license = useWorkspaceStore((state) => state.license)
   const revalidateLicense = useWorkspaceStore((state) => state.revalidateLicense)
+  const refreshLicense = useWorkspaceStore((state) => state.refreshLicense)
   const createSession = useWorkspaceStore((state) => state.createSession)
   const renameSession = useWorkspaceStore((state) => state.renameSession)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
@@ -234,10 +235,20 @@ function App() {
   }, [bootstrap])
 
   useEffect(() => {
-    if (!license.ready || !license.status?.email) return
-    const timer = window.setInterval(() => { void revalidateLicense() }, 12 * 60 * 60 * 1000)
-    return () => window.clearInterval(timer)
-  }, [license.ready, license.status?.email, revalidateLicense])
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen('authorization://changed', () => {
+      if (!disposed) void refreshLicense()
+    }).then((dispose) => {
+      if (disposed) dispose()
+      else unlisten = dispose
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [refreshLicense])
+
 
   useEffect(() => {
     if (!appLocked) return

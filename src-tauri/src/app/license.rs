@@ -1,9 +1,14 @@
-use crate::persistence::{load_json_or_default, quarantine_file, write_json_atomic};
+use super::authorization::{AuthorizationSnapshot, AuthorizationState, Capability};
+use super::entitlement::EntitlementSupervisor;
+use crate::storage::{
+    load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError, LoadSource,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use keyring::Entry;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
+    path::Path,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -18,6 +23,7 @@ const ACCOUNT_PROVIDER: &str = "moobang";
 const PRO_REQUIRED_ERROR: &str = "VibeLink Pro license required.";
 const TRIAL_LOCK_ERROR: &str =
     "VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.";
+const DEVICE_IDENTITY_SCHEMA_VERSION: u64 = 1;
 const ENFORCE_LICENSE_ENV: &str = "VIBELINK_ENFORCE_LICENSE";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -168,6 +174,19 @@ struct StoredAccount {
 struct DeviceIdentity {
     device_id: String,
     device_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceIdentityDocument {
+    schema_version: u64,
+    device_id: String,
+    device_name: String,
+}
+
+struct LoadedDeviceIdentity {
+    identity: DeviceIdentity,
+    legacy: bool,
 }
 
 pub struct LicenseService {
@@ -474,13 +493,57 @@ impl LicenseService {
         }
     }
 
-    pub fn require_entitled_cached(&self) -> Result<()> {
-        let status = self.status()?;
-        if status.entitled {
-            Ok(())
-        } else {
-            Err(anyhow!(PRO_REQUIRED_ERROR))
+    pub fn authorization_snapshot(&self, policy_epoch: u64) -> Result<AuthorizationSnapshot> {
+        let cache = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?;
+        Ok(authorization_snapshot_from_cache(
+            cache.as_ref(),
+            &self.device,
+            Utc::now(),
+            policy_epoch,
+        ))
+    }
+
+    pub fn authorization_snapshot_for_status(
+        &self,
+        status: LicenseStatusDto,
+        policy_epoch: u64,
+    ) -> Result<AuthorizationSnapshot> {
+        let observed_at = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .as_ref()
+            .and_then(|stored| parse_optional_time(stored.last_observed_at.as_deref()))
+            .or_else(|| parse_optional_time(status.validated_at.as_deref()))
+            .unwrap_or_else(Utc::now);
+        Ok(authorization_snapshot_from_status(
+            status,
+            observed_at,
+            Utc::now(),
+            policy_epoch,
+        ))
+    }
+
+    pub fn persist_observed_now(&self) -> Result<()> {
+        let stored = self
+            .cache
+            .read()
+            .map_err(|_| anyhow!("license cache poisoned"))?
+            .clone();
+        let Some(mut stored) = stored else {
+            return Ok(());
+        };
+        let now = Utc::now();
+        if parse_optional_time(stored.last_observed_at.as_deref())
+            .is_some_and(|previous| now <= previous)
+        {
+            return Ok(());
         }
+        stored.last_observed_at = Some(now.to_rfc3339());
+        self.store_credential(stored)
     }
 
     fn resolve_entitlement(&self, session_token: &str, register: bool) -> Result<LicenseStatusDto> {
@@ -636,15 +699,18 @@ impl LicenseService {
 
 pub struct HeadlessLicenseCache {
     stored: Option<StoredAccount>,
+    device: DeviceIdentity,
     development_entitlement: bool,
 }
 
 impl HeadlessLicenseCache {
     pub fn load() -> Result<Self> {
         let development_entitlement = development_entitlement_enabled();
+        let device = load_or_create_device_identity()?;
         if development_entitlement {
             return Ok(Self {
                 stored: None,
+                device,
                 development_entitlement,
             });
         }
@@ -654,35 +720,40 @@ impl HeadlessLicenseCache {
             .context("open Windows Credential Manager account entry")?;
         Ok(Self {
             stored: read_credential(&entry)?,
+            device,
             development_entitlement,
         })
     }
 
-    pub fn require_entitled(&self) -> Result<()> {
+    pub fn authorization_snapshot(&self, policy_epoch: u64) -> AuthorizationSnapshot {
         if self.development_entitlement {
-            return Ok(());
+            let now = Utc::now();
+            return AuthorizationSnapshot {
+                state: AuthorizationState::ValidOnline,
+                entitled: true,
+                observed_at: now,
+                lease_until: now + ChronoDuration::days(3650),
+                offline_grace_until: None,
+                policy_epoch,
+            };
         }
-        let Some(stored) = self
-            .stored
-            .as_ref()
-            .filter(|stored| matches!(stored.plan.as_deref(), Some("pro") | Some("trial")))
-        else {
-            return Err(anyhow!(TRIAL_LOCK_ERROR));
-        };
-        let now = Utc::now();
-        let validated_at = parse_optional_time(stored.validated_at.as_deref())
-            .ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
-        let grace_until = parse_optional_time(stored.offline_grace_until.as_deref())
-            .ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
-        let last_observed = parse_optional_time(stored.last_observed_at.as_deref())
-            .ok_or_else(|| anyhow!(TRIAL_LOCK_ERROR))?;
-        if now > grace_until
-            || now < validated_at - ChronoDuration::minutes(5)
-            || now < last_observed - ChronoDuration::minutes(5)
-        {
-            return Err(anyhow!(TRIAL_LOCK_ERROR));
-        }
-        Ok(())
+        authorization_snapshot_from_cache(
+            self.stored.as_ref(),
+            &self.device,
+            Utc::now(),
+            policy_epoch,
+        )
+    }
+
+    pub fn require_capability(&self, capability: super::authorization::Capability) -> Result<()> {
+        self.authorization_snapshot(0)
+            .authorize(capability, Utc::now())
+            .map_err(|denied| anyhow!(denied.code.as_str()))
+    }
+
+    pub fn require_entitled(&self) -> Result<()> {
+        self.require_capability(super::authorization::Capability::CliControl)
+            .map_err(|_| anyhow!(TRIAL_LOCK_ERROR))
     }
 
     pub fn is_entitled(&self) -> bool {
@@ -800,6 +871,46 @@ fn stored_from_api(
         pending_session_token: None,
         pending_device_code: None,
     })
+}
+fn authorization_snapshot_from_cache(
+    stored: Option<&StoredAccount>,
+    device: &DeviceIdentity,
+    now: DateTime<Utc>,
+    policy_epoch: u64,
+) -> AuthorizationSnapshot {
+    let status = status_from_cache(stored, device, now);
+    let observed_at = stored
+        .and_then(|account| parse_optional_time(account.last_observed_at.as_deref()))
+        .or_else(|| parse_optional_time(status.validated_at.as_deref()))
+        .unwrap_or(now);
+    authorization_snapshot_from_status(status, observed_at, now, policy_epoch)
+}
+
+fn authorization_snapshot_from_status(
+    status: LicenseStatusDto,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    policy_epoch: u64,
+) -> AuthorizationSnapshot {
+    let offline_grace_until = parse_optional_time(status.offline_grace_until.as_deref());
+    let lease_until = offline_grace_until
+        .or_else(|| parse_optional_time(status.trial_ends_at.as_deref()))
+        .unwrap_or(observed_at.min(now));
+    let state = match status.state.as_str() {
+        "trial" => AuthorizationState::Trial,
+        "trialExpired" => AuthorizationState::TrialExpired,
+        "validOnline" | "validOffline" => AuthorizationState::ValidOnline,
+        "unlicensed" | "revoked" => AuthorizationState::Unlicensed,
+        _ => AuthorizationState::ConfigurationError,
+    };
+    AuthorizationSnapshot {
+        state,
+        entitled: status.entitled,
+        observed_at,
+        offline_grace_until,
+        lease_until,
+        policy_epoch,
+    }
 }
 
 fn status_from_cache(
@@ -1074,37 +1185,92 @@ fn load_or_create_device_identity() -> Result<DeviceIdentity> {
     let path = crate::daemon::paths::daemon_paths()?
         .data_dir
         .join("license-device.json");
-    let identity: DeviceIdentity = load_json_or_default(&path, "license device identity")?;
-    if Uuid::parse_str(&identity.device_id).is_ok() && !identity.device_name.trim().is_empty() {
-        return Ok(identity);
+    load_or_create_device_identity_at(&path)
+}
+
+fn load_or_create_device_identity_at(path: &Path) -> Result<DeviceIdentity> {
+    let report = load_with_recovery(
+        path,
+        LoadedDeviceIdentity {
+            identity: DeviceIdentity {
+                device_id: String::new(),
+                device_name: String::new(),
+            },
+            legacy: false,
+        },
+        parse_device_identity,
+    )?;
+    let mut loaded = report.value;
+    if report.source == LoadSource::Default {
+        loaded.identity = new_device_identity();
+        write_device_identity(path, &loaded.identity)?;
+    } else if loaded.legacy {
+        write_device_identity(path, &loaded.identity)?;
     }
-    if path.exists() {
-        let quarantine = quarantine_file(&path, "invalid")?;
-        tracing::warn!(path = %quarantine.display(), "quarantined invalid license device identity");
+    Ok(loaded.identity)
+}
+
+fn parse_device_identity(bytes: &[u8]) -> std::result::Result<LoadedDeviceIdentity, DocumentError> {
+    let value: serde_json::Value = parse_json(bytes)?;
+    let (identity, legacy) = if value.get("schemaVersion").is_some() {
+        let document: DeviceIdentityDocument = serde_json::from_value(value)?;
+        require_supported_schema(document.schema_version, DEVICE_IDENTITY_SCHEMA_VERSION)?;
+        (
+            DeviceIdentity {
+                device_id: document.device_id,
+                device_name: document.device_name,
+            },
+            false,
+        )
+    } else {
+        (serde_json::from_value(value)?, true)
+    };
+    Uuid::parse_str(&identity.device_id).map_err(|_| {
+        DocumentError::Invalid(anyhow!(
+            "license device identity contains an invalid device id"
+        ))
+    })?;
+    if identity.device_name.trim().is_empty() {
+        return Err(DocumentError::Invalid(anyhow!(
+            "license device identity contains an empty device name"
+        )));
     }
+    Ok(LoadedDeviceIdentity { identity, legacy })
+}
+
+fn write_device_identity(path: &Path, identity: &DeviceIdentity) -> Result<()> {
+    write_json(
+        path,
+        &DeviceIdentityDocument {
+            schema_version: DEVICE_IDENTITY_SCHEMA_VERSION,
+            device_id: identity.device_id.clone(),
+            device_name: identity.device_name.clone(),
+        },
+    )
+}
+
+fn new_device_identity() -> DeviceIdentity {
     let device_name = std::env::var("COMPUTERNAME")
         .unwrap_or_else(|_| "Windows device".to_string())
         .chars()
         .filter(|character| !character.is_control())
         .take(64)
         .collect::<String>();
-    let identity = DeviceIdentity {
+    DeviceIdentity {
         device_id: Uuid::new_v4().to_string(),
         device_name: if device_name.is_empty() {
             "Windows device".to_string()
         } else {
             device_name
         },
-    };
-    write_json_atomic(&path, &identity)?;
-    Ok(identity)
+    }
 }
 
 #[tauri::command]
 pub async fn license_status(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
+    let service = supervisor.service();
     tauri::async_runtime::spawn_blocking(move || {
         service.status().map_err(|error| error.to_string())
     })
@@ -1114,9 +1280,9 @@ pub async fn license_status(
 
 #[tauri::command]
 pub async fn account_sign_in_start(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<AccountSignInStartDto, String> {
-    let service = Arc::clone(service.inner());
+    let service = supervisor.service();
     tauri::async_runtime::spawn_blocking(move || {
         service.start_sign_in().map_err(|error| error.to_string())
     })
@@ -1126,14 +1292,21 @@ pub async fn account_sign_in_start(
 
 #[tauri::command]
 pub async fn account_sign_in_poll(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     device_code: String,
 ) -> std::result::Result<AccountSignInPollResult, String> {
-    let service = Arc::clone(service.inner());
+    let supervisor = Arc::clone(supervisor.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        service
+        let result = supervisor
+            .service()
             .poll_sign_in(device_code)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if let AccountSignInPollResult::Status(status) = &result {
+            supervisor
+                .publish_status(status.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(result)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1141,11 +1314,11 @@ pub async fn account_sign_in_poll(
 
 #[tauri::command]
 pub async fn license_revalidate(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
+    let supervisor = Arc::clone(supervisor.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        service.revalidate().map_err(|error| error.to_string())
+        supervisor.refresh_now().map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1153,14 +1326,19 @@ pub async fn license_revalidate(
 
 #[tauri::command]
 pub async fn license_deactivate_device(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     activation_id: String,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
+    let supervisor = Arc::clone(supervisor.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        service
+        let status = supervisor
+            .service()
             .deactivate_device(activation_id)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        supervisor
+            .publish_status(status.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(status)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1168,11 +1346,18 @@ pub async fn license_deactivate_device(
 
 #[tauri::command]
 pub async fn account_sign_out(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    let service = Arc::clone(service.inner());
+    let supervisor = Arc::clone(supervisor.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        service.sign_out().map_err(|error| error.to_string())
+        let status = supervisor
+            .service()
+            .sign_out()
+            .map_err(|error| error.to_string())?;
+        supervisor
+            .publish_status(status.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(status)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1180,9 +1365,9 @@ pub async fn account_sign_out(
 
 #[tauri::command]
 pub async fn license_forget_local(
-    service: tauri::State<'_, Arc<LicenseService>>,
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
 ) -> std::result::Result<LicenseStatusDto, String> {
-    account_sign_out(service).await
+    account_sign_out(supervisor).await
 }
 
 #[tauri::command]
@@ -1209,6 +1394,102 @@ mod tests {
             device_id: Uuid::new_v4().to_string(),
             device_name: "Test device".to_string(),
         }
+    }
+
+    fn temp_storage_path(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-license-storage-{label}-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create license test directory");
+        root.join("license-device.json")
+    }
+
+    fn cleanup_storage_path(path: &Path) {
+        if let Some(root) = path.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn malformed_account_credential_is_deleted_and_loads_locked() {
+        let entry = Entry::new_with_credential(Box::new(keyring::mock::MockCredential::default()));
+        entry
+            .set_password(r#"{"sessionToken":"secret""#)
+            .expect("store malformed credential");
+
+        assert!(read_credential(&entry)
+            .expect("clear malformed credential")
+            .is_none());
+        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
+        assert!(!status_from_cache(None, &device(), Utc::now()).entitled);
+    }
+
+    #[test]
+    fn credential_store_read_failures_are_preserved() {
+        let credential = keyring::mock::MockCredential::default();
+        credential.set_error(keyring::Error::NoStorageAccess(Box::new(
+            std::io::Error::other("credential store locked"),
+        )));
+        let entry = Entry::new_with_credential(Box::new(credential));
+
+        let error = read_credential(&entry).expect_err("storage failure should propagate");
+        assert!(error
+            .to_string()
+            .contains("read Windows Credential Manager account entry"));
+    }
+
+    #[test]
+    fn device_identity_migrates_legacy_shape_to_schema_v1() {
+        let path = temp_storage_path("legacy");
+        let legacy = device();
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let loaded = load_or_create_device_identity_at(&path).expect("load legacy identity");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.device_id, legacy.device_id);
+        assert_eq!(document["schemaVersion"], DEVICE_IDENTITY_SCHEMA_VERSION);
+        assert_eq!(document["deviceId"], legacy.device_id);
+        cleanup_storage_path(&path);
+    }
+
+    #[test]
+    fn device_identity_recovers_valid_backup() {
+        let path = temp_storage_path("backup");
+        let first = device();
+        let second = device();
+        write_device_identity(&path, &first).unwrap();
+        write_device_identity(&path, &second).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+
+        let loaded = load_or_create_device_identity_at(&path).expect("recover identity backup");
+        let primary = parse_device_identity(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.device_id, first.device_id);
+        assert_eq!(primary.identity.device_id, first.device_id);
+        cleanup_storage_path(&path);
+    }
+
+    #[test]
+    fn device_identity_newer_schema_errors_without_overwrite() {
+        let path = temp_storage_path("newer");
+        let future = br#"{"schemaVersion":2,"deviceId":"00000000-0000-0000-0000-000000000001","deviceName":"Future"}"#;
+        std::fs::write(&path, future).unwrap();
+
+        let error = load_or_create_device_identity_at(&path)
+            .expect_err("future identity schema should fail");
+
+        assert!(error.to_string().contains("unsupported storage schema 2"));
+        assert!(!path.exists());
+        let quarantined = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .expect("future identity quarantine");
+        assert_eq!(std::fs::read(quarantined.path()).unwrap(), future);
+        cleanup_storage_path(&path);
     }
 
     fn stored_pro(
@@ -1457,6 +1738,7 @@ mod tests {
 
         let headless = HeadlessLicenseCache {
             stored: None,
+            device: device(),
             development_entitlement: true,
         };
         assert!(headless.require_entitled().is_ok());
@@ -1472,10 +1754,10 @@ mod tests {
                 now - ChronoDuration::minutes(1),
                 now + ChronoDuration::days(6),
             )),
+            device: device(),
             development_entitlement: false,
         };
-        assert!(active.require_entitled().is_ok());
-        assert!(active.is_entitled());
+        assert!(active.require_capability(Capability::CliControl).is_ok());
 
         let expired = HeadlessLicenseCache {
             stored: Some(stored_trial(
@@ -1484,10 +1766,59 @@ mod tests {
                 now - ChronoDuration::days(1),
                 now - ChronoDuration::days(1),
             )),
+            device: device(),
             development_entitlement: false,
         };
-        assert!(expired.require_entitled().is_err());
-        assert!(!expired.is_entitled());
+        assert!(expired.require_capability(Capability::CliControl).is_err());
+    }
+
+    #[test]
+    fn headless_policy_returns_stable_entitlement_error() {
+        let now = Utc::now();
+        let expired = HeadlessLicenseCache {
+            stored: Some(stored_trial(
+                now - ChronoDuration::days(8),
+                now - ChronoDuration::days(1),
+                now - ChronoDuration::days(1),
+                now - ChronoDuration::days(1),
+            )),
+            device: device(),
+            development_entitlement: false,
+        };
+        assert_eq!(
+            expired
+                .require_capability(Capability::TerminalWrite)
+                .unwrap_err()
+                .to_string(),
+            "ENTITLEMENT_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn business_revocation_status_overrides_an_entitled_cache_snapshot() {
+        let now = Utc::now();
+        let mut status = status_from_cache(
+            Some(&stored_pro(
+                now - ChronoDuration::hours(1),
+                now + ChronoDuration::days(1),
+                now,
+            )),
+            &device(),
+            now,
+        );
+        status.state = "revoked".to_string();
+        status.entitled = false;
+        let snapshot = authorization_snapshot_from_status(status, now, now, 7);
+        assert_eq!(snapshot.state, AuthorizationState::Unlicensed);
+        assert_eq!(snapshot.policy_epoch, 7);
+        assert_eq!(
+            snapshot
+                .authorize(Capability::WorkspaceMutate, now)
+                .unwrap_err()
+                .code
+                .as_str(),
+            "ENTITLEMENT_REQUIRED"
+        );
     }
 
     #[test]

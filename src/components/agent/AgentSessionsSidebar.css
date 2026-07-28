@@ -136,7 +136,8 @@
   width: 100%;
 }
 
-.agent-conversation-row .agent-session-row-title svg {
+.agent-conversation-row .agent-session-row-title svg,
+.agent-conversation-row .agent-conversation-brand {
   color: var(--vibelink-muted);
   flex: 0 0 auto;
 }

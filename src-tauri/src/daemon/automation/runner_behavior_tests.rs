@@ -107,7 +107,7 @@ fn success_captures_response_usage_stderr_and_exact_pinned_invocation() {
         "prompt": prompt,
         "provider": "openai-codex",
         "model": "gpt-5.6",
-        "useCurrentHermesDefault": false,
+        "useAgentDefaultModel": false,
         "toolsets": [
             "hermes-acp",
             "cronjob",
@@ -154,12 +154,12 @@ fn success_captures_response_usage_stderr_and_exact_pinned_invocation() {
             usage_path,
             "--toolsets".to_string(),
             "web,terminal,file,vision,todo,memory,session_search,code_execution,delegation,search,debugging".to_string(),
-            "--accept-hooks".to_string(),
-            "--yolo".to_string(),
             "--skills".to_string(),
             "review".to_string(),
             "--skills".to_string(),
             "qa".to_string(),
+            "--accept-hooks".to_string(),
+            "--yolo".to_string(),
             "--model".to_string(),
             "gpt-5.6".to_string(),
             "--provider".to_string(),
@@ -179,7 +179,7 @@ fn current_default_omits_model_and_provider_from_real_child_argv() {
         "prompt": "Use the configured Hermes default",
         "provider": "must-not-be-forwarded",
         "model": "must-not-be-forwarded",
-        "useCurrentHermesDefault": true,
+        "useAgentDefaultModel": true,
         "toolsets": ["search", "cronjob"],
         "skills": [],
         "maxTurns": 9
@@ -306,6 +306,123 @@ fn oversized_child_output_sets_truncation_flag_and_preserves_final_tail() {
         .is_some_and(|response| response.ends_with("TRUNCATED_FINAL_RESPONSE")));
 }
 
+/// Each non-Hermes agent must be launched in its own documented headless mode
+/// with no Hermes-only flags leaking in, and the prompt must reach it exactly
+/// once — as argv for the argv agents, over stdin for opencode.
+#[test]
+fn every_agent_runs_headless_with_only_its_own_flags() {
+    let prompt = "Audit the workspace";
+    let guarded = unattended_prompt(prompt);
+    let expected_argv: [(&str, Vec<String>); 4] = [
+        (
+            "omp",
+            vec![
+                "--print".into(),
+                guarded.clone(),
+                "--auto-approve".into(),
+                "--no-session".into(),
+            ],
+        ),
+        (
+            "claude",
+            vec![
+                "--print".into(),
+                guarded.clone(),
+                "--permission-mode".into(),
+                "bypassPermissions".into(),
+            ],
+        ),
+        (
+            "codex",
+            vec![
+                "exec".into(),
+                "--skip-git-repo-check".into(),
+                "--color".into(),
+                "never".into(),
+                guarded.clone(),
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+            ],
+        ),
+        // opencode receives the prompt on stdin, so it never appears in argv.
+        ("opencode", vec!["run".into(), "--auto".into()]),
+    ];
+
+    for (agent, expected) in expected_argv {
+        let fake = FakeHermes::new(&format!("agent-{agent}"), "success");
+        let record = canonical_record(json!({ "agent": agent, "prompt": prompt }));
+
+        let outcome = fake.run(&format!("agent-{agent}"), &record);
+        assert_eq!(outcome.status, "completed", "{agent} did not complete");
+
+        let capture = fake.capture();
+        assert_eq!(captured_args(&capture), expected, "unexpected {agent} argv");
+
+        let stdin = capture["stdin"].as_str().unwrap_or("");
+        if agent == "opencode" {
+            assert_eq!(
+                stdin.trim_end(),
+                guarded,
+                "opencode prompt did not arrive on stdin"
+            );
+        } else {
+            assert!(
+                stdin.is_empty(),
+                "{agent} unexpectedly received stdin: {stdin:?}"
+            );
+        }
+
+        for hermes_only in [
+            "--usage-file",
+            "--toolsets",
+            "--accept-hooks",
+            "--yolo",
+            "--skills",
+        ] {
+            assert!(
+                !expected.iter().any(|value| value == hermes_only),
+                "{agent} received Hermes-only flag {hermes_only}"
+            );
+        }
+    }
+}
+
+#[test]
+fn opencode_qualifies_a_pinned_model_and_omits_the_provider_flag() {
+    let fake = FakeHermes::new("opencode-model", "success");
+    let record = canonical_record(json!({
+        "agent": "opencode",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4",
+        "useAgentDefaultModel": false
+    }));
+
+    let outcome = fake.run("opencode-model", &record);
+
+    assert_eq!(outcome.status, "completed");
+    let args = captured_args(&fake.capture());
+    assert_eq!(
+        args,
+        vec!["run", "--auto", "--model", "anthropic/claude-sonnet-4"]
+    );
+    assert!(!args.iter().any(|value| value == "--provider"));
+}
+
+#[test]
+fn an_unsupported_agent_is_skipped_without_spawning() {
+    let fake = FakeHermes::new("unsupported", "success");
+    let mut record = canonical_record(json!({}));
+    record.agent = "openclaw".to_string();
+
+    let outcome = fake.run("unsupported", &record);
+
+    assert_eq!(outcome.status, "skipped_unavailable");
+    assert_eq!(outcome.runtime_identity, None);
+    assert!(outcome
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("openclaw")));
+}
+
 fn canonical_record(overrides: Value) -> super::AutomationRecord {
     let mut payload = json!({
         "name": "Runner behavior test",
@@ -341,7 +458,7 @@ fn captured_args(capture: &Value) -> Vec<String> {
 
 fn unattended_prompt(prompt: &str) -> String {
     format!(
-        "You are running as a VibeLink unattended automation. Work only inside the current run workspace. Do not create, edit, pause, resume, or trigger schedules or cron jobs. Do not use messaging platforms, project/workspace switching, browser automation, interactive login, CAPTCHA, device-code authentication, or secret prompts. Do not request clarification; make a safe reasonable assumption when possible and report any blocker in the final response. Do not modify Hermes configuration, credentials, plugins, hooks, or installed skills. Never merge into, delete, or otherwise mutate the base worktree automatically.\n\nUser automation prompt:\n{}",
+        "You are running as a VibeLink unattended automation. Work only inside the current run workspace. Do not create, edit, pause, resume, or trigger schedules or cron jobs. Do not use messaging platforms, project/workspace switching, browser automation, interactive login, CAPTCHA, device-code authentication, or secret prompts. Do not request clarification; make a safe reasonable assumption when possible and report any blocker in the final response. Do not modify your own agent configuration, credentials, plugins, hooks, or installed skills. Never merge into, delete, or otherwise mutate the base worktree automatically.\n\nUser automation prompt:\n{}",
         prompt.trim()
     )
 }
@@ -389,9 +506,16 @@ if ($remaining.Count -gt 0 -and $remaining[0] -eq '--') {
 }
 $root = (Get-Location).Path
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+$stdin = ''
+if (-not [Console]::IsInputRedirected) {
+    $stdin = ''
+} else {
+    $stdin = [Console]::In.ReadToEnd()
+}
 $capture = [ordered]@{
     args = @($remaining)
     maxTurns = $env:HERMES_MAX_ITERATIONS
+    stdin = $stdin
 }
 [IO.File]::WriteAllText(
     (Join-Path $root 'capture.json'),
@@ -407,9 +531,10 @@ for ($index = 0; $index -lt $remaining.Count - 1; $index++) {
         break
     }
 }
+# Only Hermes passes --usage-file; other agents legitimately have none.
 function Write-Usage {
     if ($null -eq $usagePath) {
-        throw 'fake Hermes did not receive --usage-file'
+        return
     }
     $usage = [ordered]@{
         inputTokens = 12

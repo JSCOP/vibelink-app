@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, Sparkles } from 'lucide-react'
+import { Check } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { isAgentPane } from '../state/profiles'
@@ -65,7 +65,7 @@ export function TaskAssignDialog({ taskId, onClose }: TaskAssignDialogProps) {
               title={hermesDetected ? 'Assign to VibeLink Agent' : 'Install Hermes Agent to use this'}
               onClick={() => setSelectedPaneId('vibelink-agent')}
             >
-              <Sparkles size={16} className="task-pane-card-icon" />
+              <ProfileIcon name="hermes" size={16} className="task-pane-card-icon" />
               <span className="task-pane-card-title">VibeLink Agent</span>
               {effectiveSelectedPaneId === 'vibelink-agent' ? <Check size={14} /> : null}
             </button>

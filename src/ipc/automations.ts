@@ -5,7 +5,7 @@ export type AutomationJsonPrimitive = string | number | boolean | null
 export type AutomationJsonValue = AutomationJsonPrimitive | AutomationJsonObject | AutomationJsonValue[]
 export type AutomationJsonObject = { [key: string]: AutomationJsonValue }
 
-export type AutomationAgent = 'hermes'
+export type AutomationAgent = 'hermes' | 'omp' | 'claude' | 'codex' | 'opencode'
 export type AutomationScheduleKind = 'once' | 'interval' | 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'cron'
 export type AutomationMissedRunPolicy = 'run_once_within_grace'
 export type AutomationWorkspaceMode = 'new_per_run' | 'existing'
@@ -79,7 +79,7 @@ export type AutomationRecord = {
   agent: AutomationAgent
   provider: string | null
   model: string | null
-  useCurrentHermesDefault: boolean
+  useAgentDefaultModel: boolean
   toolsets: string[]
   skills: string[]
   maxTurns: number
@@ -124,12 +124,13 @@ export type AutomationRunRecord = {
 export type CreateAutomationInput = {
   name: string
   prompt: string
+  agent?: AutomationAgent
   scheduleKind: AutomationScheduleKind
   scheduleValue: string
   timezone: string
   provider?: string | null
   model?: string | null
-  useCurrentHermesDefault?: boolean
+  useAgentDefaultModel?: boolean
   toolsets?: string[]
   skills?: string[]
   maxTurns?: number

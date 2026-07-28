@@ -358,7 +358,112 @@
   background: var(--vibelink-panel-2);
 }
 
-.automation-ai-draft { border-color: var(--vibelink-accent-border); background: var(--vibelink-accent-muted); }
+.automation-name-field input { font-size: 13px; }
+.automation-prompt-field textarea { min-height: 120px; }
+
+/* Three equal columns keep Agent, Schedule, and Run-in on one scannable row. */
+.automation-primary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+
+/* Pickers are buttons, so their caption is a sibling span, not a wrapping label. */
+.automation-labeled-control { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.automation-labeled-control > span:first-child { color: var(--vibelink-muted); font-size: 10px; }
+.automation-next-runs { margin: -2px 0 0; color: var(--vibelink-muted); font-size: 10px; }
+
+.automation-picker { position: relative; }
+.automation-picker-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+  padding: 7px 8px !important;
+  text-align: left;
+}
+
+/* Rendered into document.body and pinned to its trigger, so the automation
+ * form's scroll container cannot clip it. Coordinates come from the component.
+ * It must stack above `.automation-dialog-backdrop`, which is also portalled. */
+.automation-picker-menu {
+  position: fixed;
+  z-index: 260;
+  display: flex;
+  max-height: min(340px, 70vh);
+  max-width: calc(100vw - 16px);
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 8px;
+  padding: 5px;
+  background: var(--vibelink-panel);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .45);
+}
+
+.automation-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px !important;
+  text-align: left;
+}
+
+.automation-picker-option-body { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.automation-picker-option-body strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.automation-picker-option-body small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vibelink-muted); font-size: 10px; }
+.automation-picker-option[aria-selected='true'] { background: var(--vibelink-accent-soft); }
+
+/* The schedule popover is a form, not a list, so it needs its own padding. */
+.automation-schedule-menu { min-width: 260px; gap: 8px; padding: 10px; }
+
+/* The popover is portalled out of `.automation-editor-form`, so it cannot
+ * inherit that form's control styling and restates it here. */
+.automation-picker-menu label { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: var(--vibelink-muted); font-size: 10px; }
+
+.automation-picker-menu input,
+.automation-picker-menu select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 6px;
+  outline: 0;
+  padding: 7px 8px;
+  color: var(--vibelink-text);
+  background: var(--vibelink-input);
+  font: 12px var(--vibelink-sans);
+}
+
+.automation-picker-menu input:focus,
+.automation-picker-menu select:focus { border-color: var(--vibelink-focus); }
+
+.automation-picker-menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 7px 8px;
+  color: var(--vibelink-text);
+  background: transparent;
+  font: 12px var(--vibelink-sans);
+  cursor: pointer;
+}
+
+.automation-picker-menu button:hover { background: var(--vibelink-panel-2); }
+.automation-clock { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 5px; }
+.automation-clock > span { color: var(--vibelink-muted); }
+
+.automation-advanced-toggle {
+  align-self: flex-start;
+  gap: 5px;
+  border-color: transparent !important;
+  background: transparent !important;
+  color: var(--vibelink-muted) !important;
+}
+
+.automation-advanced-toggle svg { transition: transform .15s ease; }
+.automation-advanced-toggle svg.is-open { transform: rotate(180deg); }
+.automation-advanced { display: flex; flex-direction: column; gap: 8px; }
 .automation-section-heading { display: flex; align-items: center; gap: 7px; }
 .automation-section-heading > div { display: flex; flex-direction: column; }
 .automation-section-heading span,
@@ -427,10 +532,14 @@
 
 .automation-dialog-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 7px;
   padding-top: 3px;
 }
+
+/* The enable toggle sits with the actions, so it takes the leading space. */
+.automation-dialog-actions .automation-enabled-check { margin-right: auto; }
 
 .automation-import-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 14px 8px; }
 .automation-import-toolbar p { margin: 0; color: var(--vibelink-muted); font-size: 11px; line-height: 1.45; }
@@ -455,5 +564,6 @@
   .automation-import-dialog { width: calc(100vw - 24px); max-height: calc(100vh - 24px); }
   .automation-field-grid,
   .automation-field-grid.three,
+  .automation-primary-grid,
   .automation-occurrences { grid-template-columns: 1fr; }
 }

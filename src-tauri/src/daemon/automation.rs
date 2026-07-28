@@ -1,3 +1,5 @@
+#[path = "automation/agents.rs"]
+pub mod agents;
 #[path = "automation/draft.rs"]
 mod draft;
 #[path = "automation/import.rs"]
@@ -49,7 +51,6 @@ use std::{
 use store::AutomationStore;
 use uuid::Uuid;
 
-
 #[derive(Clone, Debug)]
 pub struct AutomationWorktreeProvision {
     pub session_id: String,
@@ -100,10 +101,10 @@ impl AutomationService {
         let service = Self {
             connection: Mutex::new(connection),
             coordinator,
-            worktrees: AutomationWorktreeController::new(WorktreeManager::new(
-                artifact_root.join("worktrees"),
-                Arc::clone(&registry),
-            )?, registry),
+            worktrees: AutomationWorktreeController::new(
+                WorktreeManager::new(artifact_root.join("worktrees"), Arc::clone(&registry))?,
+                registry,
+            ),
             process_registry,
             runner,
             draft_root,
@@ -397,14 +398,14 @@ impl AutomationService {
             workspace,
             |planned| create_worktree(&automation, claim, workspace, planned),
         ) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    return self.finish_prepare_failure(
-                        &claim.id,
-                        format!("prepare automation workspace: {error:#}"),
-                    )
-                }
-            };
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self.finish_prepare_failure(
+                    &claim.id,
+                    format!("prepare automation workspace: {error:#}"),
+                )
+            }
+        };
 
         let saved = self.persist_prepared_worktree(&claim.id, &prepared)?;
         if saved.status == "cancelled" {

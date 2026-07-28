@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "canonicalWeb": {
+    "repository": "JSCOP/vibelink-web",
+    "commit": "d8a066f68e380459cffc37321574cc485cfbd390",
+    "manifest": {
+      "path": "product/vibelink-product.v1.json",
+      "sha256": "7aa019fcf674a9e68693bfeece834c2db3df5f8100339d2e8d7c1392dd19dd1b"
+    },
+    "generated": {
+      "storeListingPath": "product/generated/store-listing.json",
+      "releaseNotesPath": "product/generated/release-notes.md"
+    }
+  }
+}

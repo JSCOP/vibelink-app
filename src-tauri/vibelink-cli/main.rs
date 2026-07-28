@@ -24,6 +24,8 @@ mod persistence;
 mod protocol;
 #[path = "../src/remote/mod.rs"]
 mod remote;
+#[path = "../src/storage.rs"]
+mod storage;
 #[path = "../src/worktree_storage.rs"]
 mod worktree_storage;
 

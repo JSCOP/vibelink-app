@@ -1,20 +1,20 @@
 #![allow(dead_code)]
 
-#[path = "../src/control_plane.rs"]
-mod control_plane;
-#[path = "../src/daemon/paths.rs"]
-mod paths;
-#[path = "../src/protocol.rs"]
-mod protocol;
-
 use anyhow::{bail, Result};
-use interprocess::local_socket::{prelude::*, ConnectOptions, GenericNamespaced};
-use protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult};
+use app_lib::{
+    app::spawn_daemon,
+    protocol::{read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient, ReplyResult},
+};
 
 fn main() -> Result<()> {
-    let name = paths::socket_name_string().to_ns_name::<GenericNamespaced>()?;
-    let mut stream = ConnectOptions::new().name(name).connect_sync()?;
-    write_frame(&mut stream, &ClientToDaemon::Shutdown { req: 1 })?;
+    let mut stream = spawn_daemon::ensure_daemon_for(ClientKind::Shutdown)?;
+    write_frame(
+        &mut stream,
+        &ClientToDaemon::Shutdown {
+            req: 1,
+            clean_exit: false,
+        },
+    )?;
     match read_frame::<_, DaemonToClient>(&mut stream)? {
         DaemonToClient::Reply {
             req: 1,

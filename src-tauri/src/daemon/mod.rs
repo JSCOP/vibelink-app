@@ -10,18 +10,24 @@ pub mod session;
 mod terminal_history;
 
 use crate::agent_runtime::WorktreeManager;
-use crate::app::git::worktree::{WorktreeStorage, WorktreeStorageMode};
-use crate::app::git::worktree_lifecycle::{WorktreeCreateResult, WorktreeLifecycleService};
-use crate::app::git::worktree_registry::{
-    WorktreeBlockerKind, WorktreeCheckpointRequest, WorktreeCreateRequest, WorktreeIdRequest,
-    WorktreeImportRequest, WorktreeListRequest, WorktreeMoveRequest, WorktreeOperationIdRequest,
-    WorktreeOrigin, WorktreeProjection, WorktreeReconcileRequest, WorktreeRegistry,
-    WorktreeRemovalPreflightRequest, WorktreeRemovalResult, WorktreeRemoveRequest,
-    WorktreeReviewCommentRequest, WorktreeRuntimeBlockers, WorktreeSetRequest,
-    WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT, WORKTREE_METHOD_CHECKPOINTS,
-    WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT, WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE,
-    WORKTREE_METHOD_PREFLIGHT_REMOVE, WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE,
-    WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
+use crate::app::{
+    authorization::{AuthorizationErrorCode, AuthorizationSnapshot, Capability},
+    git::worktree::{WorktreeStorage, WorktreeStorageMode},
+    git::worktree_lifecycle::{WorktreeCreateResult, WorktreeLifecycleService},
+    git::worktree_registry::{
+        WorktreeBlockerKind, WorktreeCheckpointRequest, WorktreeCreateRequest, WorktreeIdRequest,
+        WorktreeImportRequest, WorktreeListRequest, WorktreeMoveRequest,
+        WorktreeOperationIdRequest, WorktreeOrigin, WorktreeProjection, WorktreeReconcileRequest,
+        WorktreeRegistry, WorktreeRemovalPreflightRequest, WorktreeRemovalResult,
+        WorktreeRemoveRequest, WorktreeReviewCommentRequest, WorktreeRuntimeBlockers,
+        WorktreeSetRequest, WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT,
+        WORKTREE_METHOD_CHECKPOINTS, WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT,
+        WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE, WORKTREE_METHOD_PREFLIGHT_REMOVE,
+        WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE, WORKTREE_METHOD_REVIEW_COMMENTS,
+        WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
+    },
+    license::HeadlessLicenseCache,
+    spawn_daemon::load_or_create_ipc_secret,
 };
 use crate::computer_use::{
     ActionRequest, ActionTarget, ApprovalRequest, ComputerAction as ProviderComputerAction,
@@ -56,14 +62,17 @@ use crate::orchestration::{
     RunRevisionRequest, UpdateTaskRequest, WorkerDoneRequest, WorktreeAssignment, WorktreeMode,
 };
 use crate::protocol::{
-    read_frame, write_frame, ClientToDaemon, DaemonToClient, PaneCommandOrigin, PaneConfig,
-    RemoteBrowserHostRequest, RemoteBrowserHostResponse, RemoteConnectionCleanupRequest,
-    RemotePaneLeaseResult, RemotePaneLeaseStatusRequest, ReplyResult, Req,
+    constant_time_eq, daemon_auth_proof, read_frame, write_frame, ClientKind, ClientToDaemon,
+    DaemonToClient, PaneCommandOrigin, PaneConfig, RemoteBrowserHostRequest,
+    RemoteBrowserHostResponse, RemoteConnectionCleanupRequest, RemotePaneLeaseResult,
+    RemotePaneLeaseStatusRequest, ReplyResult, Req, DAEMON_AUTH_REQUIRED, DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::{RemotePaneLeaseStatus, RemoteServer};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -77,7 +86,7 @@ use std::{
         Arc, LazyLock, Mutex, MutexGuard,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -91,11 +100,14 @@ struct ComputerHostCall {
     reply: Sender<std::result::Result<HostResponseBody, ProviderError>>,
 }
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+type SharedConnections = Arc<Mutex<std::collections::HashMap<Uuid, ConnectionControl>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 256;
 const PERSIST_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 const REMOTE_PANE_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const AUTOMATION_SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 const AUTOMATION_SCHEDULER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const AUTH_CHALLENGE_TTL: Duration = Duration::from_secs(3);
+const POLICY_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 static PERSISTENCE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static DEBOUNCED_PERSISTER: LazyLock<Mutex<Option<DebouncedPersister>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -204,6 +216,90 @@ struct DebouncedPersister {
     handle: thread::JoinHandle<()>,
 }
 
+#[derive(Clone)]
+struct ConnectionControl {
+    sender: Sender<DaemonToClient>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AuthenticatedClient {
+    client_id: Uuid,
+    client_kind: ClientKind,
+}
+
+struct PendingChallenge {
+    boot_id: Uuid,
+    nonce: [u8; 32],
+    client_id: Uuid,
+    client_kind: ClientKind,
+    expires_at: Instant,
+    consumed: bool,
+}
+
+impl PendingChallenge {
+    fn verify(
+        &mut self,
+        secret: &[u8; 32],
+        client_id: Uuid,
+        proof: &[u8; 32],
+        now: Instant,
+    ) -> std::result::Result<(), AuthorizationErrorCode> {
+        if self.consumed {
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+        self.consumed = true;
+        if now > self.expires_at || client_id != self.client_id {
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+        let expected = daemon_auth_proof(
+            secret,
+            DAEMON_PROTOCOL_VERSION,
+            self.boot_id,
+            &self.nonce,
+            self.client_id,
+            self.client_kind,
+        );
+        if !constant_time_eq(&expected, proof) {
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct PolicyHeartbeat {
+    deadline: Option<Instant>,
+    policy_epoch: u64,
+    revoked: bool,
+}
+
+impl PolicyHeartbeat {
+    fn note_app_connection(&mut self) {
+        self.deadline = Some(Instant::now() + POLICY_HEARTBEAT_TTL);
+        self.revoked = false;
+    }
+
+    fn update(&mut self, snapshot: AuthorizationSnapshot) {
+        let now_wall = Utc::now();
+        let remaining = snapshot
+            .lease_until
+            .signed_duration_since(now_wall)
+            .to_std()
+            .unwrap_or_default()
+            .min(POLICY_HEARTBEAT_TTL);
+        self.deadline = Some(Instant::now() + remaining);
+        self.policy_epoch = snapshot.policy_epoch;
+        self.revoked = snapshot
+            .authorize(Capability::WorkspaceRead, now_wall)
+            .is_err();
+    }
+
+    fn stale(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now > deadline)
+    }
+}
+
 fn lock_state(state: &SharedState) -> MutexGuard<'_, DaemonState> {
     state
         .lock()
@@ -240,8 +336,6 @@ fn run_inner() -> Result<()> {
     }
 
     let _pid_file = PidFileGuard::create(paths.pid.clone())?;
-    let boot_token = Arc::new(paths::load_or_create_boot_token(&paths.auth_token)?);
-    let user_sid = Arc::new(paths::current_user_sid());
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
@@ -284,6 +378,10 @@ fn run_inner() -> Result<()> {
     let remote = Arc::new(RemoteServer::new(paths.data_dir.clone())?);
     remote.start_if_enabled()?;
 
+    let ipc_secret = Arc::new(load_or_create_ipc_secret()?);
+    let boot_id = Uuid::new_v4();
+    let policy_heartbeat = Arc::new(Mutex::new(PolicyHeartbeat::default()));
+    let connections = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let sessions_path = Arc::new(paths.sessions.clone());
     let shutdown = Arc::new(AtomicBool::new(false));
     start_automation_scheduler(
@@ -295,6 +393,13 @@ fn run_inner() -> Result<()> {
         Arc::clone(&worktrees),
     )?;
     start_remote_pane_lease_expiry_sweep(Arc::clone(&state), Arc::clone(&shutdown))?;
+    spawn_policy_monitor(
+        Arc::clone(&state),
+        Arc::clone(&sessions_path),
+        Arc::clone(&connections),
+        Arc::clone(&policy_heartbeat),
+        Arc::clone(&shutdown),
+    )?;
     let socket_name = paths::socket_name_string();
     let name = socket_name.as_str().to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
@@ -317,8 +422,9 @@ fn run_inner() -> Result<()> {
                 let automation = Arc::clone(&automation);
                 let worktrees = Arc::clone(&worktrees);
                 let remote = Arc::clone(&remote);
-                let boot_token = Arc::clone(&boot_token);
-                let user_sid = Arc::clone(&user_sid);
+                let ipc_secret = Arc::clone(&ipc_secret);
+                let policy_heartbeat = Arc::clone(&policy_heartbeat);
+                let connections = Arc::clone(&connections);
                 thread::Builder::new()
                     .name("vibelink-daemon-client".to_string())
                     .spawn(move || {
@@ -335,8 +441,10 @@ fn run_inner() -> Result<()> {
                             remote,
                             shutdown,
                             computer,
-                            boot_token,
-                            user_sid,
+                            boot_id,
+                            ipc_secret,
+                            policy_heartbeat,
+                            connections,
                         )
                     })?;
             }
@@ -349,7 +457,6 @@ fn run_inner() -> Result<()> {
         warn!(?err, "failed to persist state during shutdown");
     }
     drop(lock_file);
-
 
     Ok(())
 }
@@ -952,8 +1059,300 @@ fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> 
     persist_state(&state, sessions_path)
 }
 
+fn unix_time_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn send_admission_error<S: Write>(stream: &mut S, code: AuthorizationErrorCode) {
+    let _ = write_frame(
+        stream,
+        &DaemonToClient::Error {
+            req: None,
+            message: code.as_str().to_string(),
+        },
+    );
+}
+
+fn authenticate_connection<S: Read + Write>(
+    stream: &mut S,
+    boot_id: Uuid,
+    secret: &[u8; 32],
+) -> std::result::Result<AuthenticatedClient, AuthorizationErrorCode> {
+    let (client_id, client_kind) = match read_frame::<_, ClientToDaemon>(stream) {
+        Ok(ClientToDaemon::Hello {
+            protocol_version,
+            client_id,
+            client_kind,
+        }) if protocol_version == DAEMON_PROTOCOL_VERSION => (client_id, client_kind),
+        Ok(ClientToDaemon::Hello { .. }) => {
+            send_admission_error(stream, AuthorizationErrorCode::DaemonProtocolMismatch);
+            return Err(AuthorizationErrorCode::DaemonProtocolMismatch);
+        }
+        Ok(_) | Err(_) => {
+            send_admission_error(stream, AuthorizationErrorCode::AuthRequired);
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+    };
+
+    let mut nonce = [0_u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+    let mut pending = PendingChallenge {
+        boot_id,
+        nonce,
+        client_id,
+        client_kind,
+        expires_at: Instant::now() + AUTH_CHALLENGE_TTL,
+        consumed: false,
+    };
+    write_frame(
+        stream,
+        &DaemonToClient::Challenge {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            boot_id,
+            nonce,
+            expires_at_unix_ms: unix_time_millis() + AUTH_CHALLENGE_TTL.as_millis() as i64,
+        },
+    )
+    .map_err(|_| AuthorizationErrorCode::AuthRequired)?;
+
+    let (authenticate_client_id, proof) = match read_frame::<_, ClientToDaemon>(stream) {
+        Ok(ClientToDaemon::Authenticate { client_id, proof }) => (client_id, proof),
+        Ok(_) | Err(_) => {
+            send_admission_error(stream, AuthorizationErrorCode::AuthRequired);
+            return Err(AuthorizationErrorCode::AuthRequired);
+        }
+    };
+    if let Err(code) = pending.verify(secret, authenticate_client_id, &proof, Instant::now()) {
+        send_admission_error(stream, code);
+        return Err(code);
+    }
+
+    let (policy_epoch, lease_until_unix_ms) = HeadlessLicenseCache::load()
+        .map(|cache| {
+            let snapshot = cache.authorization_snapshot(0);
+            (
+                snapshot.policy_epoch,
+                snapshot.lease_until.timestamp_millis(),
+            )
+        })
+        .unwrap_or_else(|_| (0, unix_time_millis()));
+    write_frame(
+        stream,
+        &DaemonToClient::Authenticated {
+            policy_epoch,
+            lease_until_unix_ms,
+        },
+    )
+    .map_err(|_| AuthorizationErrorCode::AuthRequired)?;
+    Ok(AuthenticatedClient {
+        client_id,
+        client_kind,
+    })
+}
+
+fn request_capability(
+    msg: &ClientToDaemon,
+) -> std::result::Result<Capability, AuthorizationErrorCode> {
+    match msg {
+        ClientToDaemon::Hello { .. } | ClientToDaemon::Authenticate { .. } => {
+            Err(AuthorizationErrorCode::AuthRequired)
+        }
+        ClientToDaemon::Ping { .. }
+        | ClientToDaemon::AuthorizationHeartbeat { .. }
+        | ClientToDaemon::RegisterBrowserHost => Ok(Capability::AccountStatus),
+        ClientToDaemon::Shutdown { .. } => Ok(Capability::DaemonShutdown),
+        ClientToDaemon::ListSessions { .. }
+        | ClientToDaemon::RemoteWorkspaceProjection { .. }
+        | ClientToDaemon::AttachSession { .. }
+        | ClientToDaemon::DetachSession { .. }
+        | ClientToDaemon::SubscribePane { .. }
+        | ClientToDaemon::DetachPane { .. }
+        | ClientToDaemon::GetScrollback { .. }
+        | ClientToDaemon::ResourceSnapshot { .. }
+        | ClientToDaemon::AttentionSnapshot { .. }
+        | ClientToDaemon::RemotePaneLeaseStatus { .. } => Ok(Capability::WorkspaceRead),
+        ClientToDaemon::AttachPane { .. } => Ok(Capability::TerminalRead),
+        ClientToDaemon::WritePane { .. } => Ok(Capability::TerminalWrite),
+        ClientToDaemon::Cli { .. } => Ok(Capability::CliControl),
+        ClientToDaemon::Remote { .. } => Ok(Capability::RemoteConnect),
+        ClientToDaemon::SetDesktopSelection { .. }
+        | ClientToDaemon::CreateSession { .. }
+        | ClientToDaemon::RenameSession { .. }
+        | ClientToDaemon::SetSessionWorkspaceFolder { .. }
+        | ClientToDaemon::DeleteSession { .. }
+        | ClientToDaemon::SaveLayout { .. }
+        | ClientToDaemon::SpawnPane { .. }
+        | ClientToDaemon::CancelPaneSpawn { .. }
+        | ClientToDaemon::ResizePane { .. }
+        | ClientToDaemon::NotifySessionChanged { .. }
+        | ClientToDaemon::SetPaneTitle { .. }
+        | ClientToDaemon::SetPaneRole { .. }
+        | ClientToDaemon::ClosePane { .. }
+        | ClientToDaemon::ClearSession { .. }
+        | ClientToDaemon::TaskEvent { .. }
+        | ClientToDaemon::Control { .. }
+        | ClientToDaemon::Worktree { .. }
+        | ClientToDaemon::Orchestration { .. }
+        | ClientToDaemon::Computer { .. }
+        | ClientToDaemon::RemoteBrowser { .. }
+        | ClientToDaemon::RemoteBrowserResponse { .. }
+        | ClientToDaemon::RemotePaneLeaseClaim { .. }
+        | ClientToDaemon::RemotePaneLeaseRenew { .. }
+        | ClientToDaemon::RemotePaneLeaseRelease { .. }
+        | ClientToDaemon::RemotePaneLeaseAdminReclaim { .. }
+        | ClientToDaemon::RemoteConnectionCleanup { .. } => Ok(Capability::WorkspaceMutate),
+    }
+}
+
+fn client_capability(
+    client_kind: ClientKind,
+    msg: &ClientToDaemon,
+) -> std::result::Result<Option<Capability>, AuthorizationErrorCode> {
+    match client_kind {
+        ClientKind::App => Ok(None),
+        ClientKind::Cli => Ok(Some(Capability::CliControl)),
+        ClientKind::Mcp => Ok(Some(Capability::McpCall)),
+        ClientKind::Remote => Ok(Some(Capability::RemoteConnect)),
+        ClientKind::StartupProbe if matches!(msg, ClientToDaemon::Ping { .. }) => Ok(None),
+        ClientKind::Shutdown
+            if matches!(
+                msg,
+                ClientToDaemon::Ping { .. } | ClientToDaemon::Shutdown { .. }
+            ) =>
+        {
+            Ok(None)
+        }
+        ClientKind::StartupProbe | ClientKind::Shutdown => {
+            Err(AuthorizationErrorCode::AuthRequired)
+        }
+    }
+}
+
+fn authorize_daemon_message(
+    msg: &ClientToDaemon,
+    client_kind: ClientKind,
+) -> std::result::Result<(), AuthorizationErrorCode> {
+    authorize_daemon_message_with(msg, client_kind, || {
+        HeadlessLicenseCache::load().map(|cache| cache.authorization_snapshot(0))
+    })
+}
+
+fn authorize_daemon_message_with<F>(
+    msg: &ClientToDaemon,
+    client_kind: ClientKind,
+    load_snapshot: F,
+) -> std::result::Result<(), AuthorizationErrorCode>
+where
+    F: FnOnce() -> Result<AuthorizationSnapshot>,
+{
+    let operation = request_capability(msg)?;
+    let ingress = client_capability(client_kind, msg)?;
+    let snapshot = load_snapshot().map_err(|_| AuthorizationErrorCode::AuthorizationStale)?;
+    let now = Utc::now();
+    if let Some(ingress) = ingress {
+        snapshot
+            .authorize(ingress, now)
+            .map_err(|denied| denied.code)?;
+    }
+    snapshot
+        .authorize(operation, now)
+        .map_err(|denied| denied.code)
+}
+
+fn revoke_daemon_authorization(
+    state: &SharedState,
+    sessions_path: &Path,
+    connections: &SharedConnections,
+    shutdown: &Arc<AtomicBool>,
+    code: AuthorizationErrorCode,
+    policy_epoch: u64,
+    terminate_daemon: bool,
+) {
+    let controls = lock_mutex(connections)
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for control in controls {
+        let _ = control.sender.send_timeout(
+            DaemonToClient::AuthorizationChanged {
+                code: code.as_str().to_string(),
+                policy_epoch,
+            },
+            Duration::from_millis(250),
+        );
+        control.cancelled.store(true, Ordering::Release);
+    }
+    kill_all_panes(state);
+    if let Err(error) = persist_state(state, sessions_path) {
+        warn!(?error, "failed to persist authorization revocation cleanup");
+    }
+    if terminate_daemon {
+        shutdown.store(true, Ordering::Release);
+        let _ = crate::app::spawn_daemon::connect_daemon();
+    }
+}
+
+fn heartbeat_revocation(
+    heartbeat: &Mutex<PolicyHeartbeat>,
+    now: Instant,
+) -> Option<(AuthorizationErrorCode, u64, bool)> {
+    let mut heartbeat = lock_mutex(heartbeat);
+    if heartbeat.revoked {
+        return Some((
+            AuthorizationErrorCode::EntitlementRequired,
+            heartbeat.policy_epoch,
+            false,
+        ));
+    }
+    if heartbeat.stale(now) {
+        heartbeat.revoked = true;
+        return Some((
+            AuthorizationErrorCode::AuthorizationStale,
+            heartbeat.policy_epoch,
+            true,
+        ));
+    }
+    None
+}
+
+fn spawn_policy_monitor(
+    state: SharedState,
+    sessions_path: Arc<PathBuf>,
+    connections: SharedConnections,
+    heartbeat: Arc<Mutex<PolicyHeartbeat>>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("vibelink-daemon-policy".to_string())
+        .spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_secs(1));
+                if let Some((code, epoch, terminate_daemon)) =
+                    heartbeat_revocation(&heartbeat, Instant::now())
+                {
+                    revoke_daemon_authorization(
+                        &state,
+                        &sessions_path,
+                        &connections,
+                        &shutdown,
+                        code,
+                        epoch,
+                        terminate_daemon,
+                    );
+                    if terminate_daemon {
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(())
+}
+
 fn handle_connection(
-    stream: LocalSocketStream,
+    mut stream: LocalSocketStream,
     state: SharedState,
     sessions_path: Arc<PathBuf>,
     control: Arc<ControlPlane>,
@@ -965,17 +1364,45 @@ fn handle_connection(
     remote: Arc<RemoteServer>,
     shutdown: Arc<AtomicBool>,
     computer: SharedComputerHost,
-    boot_token: Arc<String>,
-    user_sid: Arc<String>,
+    boot_id: Uuid,
+    ipc_secret: Arc<[u8; 32]>,
+    policy_heartbeat: Arc<Mutex<PolicyHeartbeat>>,
+    connections: SharedConnections,
 ) {
     if let Err(err) = stream.set_send_timeout(Some(CLIENT_WRITE_TIMEOUT)) {
         warn!(?err, "failed to set daemon client write timeout");
     }
-    let mut client_id = Uuid::new_v4();
-    let mut authenticated = false;
+    if let Err(err) = stream.set_recv_timeout(Some(AUTH_CHALLENGE_TTL)) {
+        warn!(?err, "failed to set daemon admission timeout");
+    }
+    let authenticated = match authenticate_connection(&mut stream, boot_id, &ipc_secret) {
+        Ok(authenticated) => authenticated,
+        Err(error) => {
+            warn!(code = error.as_str(), "daemon client admission rejected");
+            return;
+        }
+    };
+    if let Err(err) = stream.set_recv_timeout(Some(Duration::from_secs(1))) {
+        warn!(?err, "failed to set daemon client read timeout");
+    }
+    if authenticated.client_kind == ClientKind::App {
+        lock_mutex(&policy_heartbeat).note_app_connection();
+    }
+
+    let client_id = authenticated.client_id;
+    let client_kind = authenticated.client_kind;
     let (mut reader, mut writer) = stream.split();
     let (tx, rx) = bounded::<DaemonToClient>(CLIENT_QUEUE_CAPACITY);
+    let cancelled = Arc::new(AtomicBool::new(false));
 
+    lock_state(&state).add_client(client_id, tx.clone());
+    lock_mutex(&connections).insert(
+        client_id,
+        ConnectionControl {
+            sender: tx.clone(),
+            cancelled: Arc::clone(&cancelled),
+        },
+    );
     let writer_thread = thread::Builder::new()
         .name("vibelink-daemon-client-writer".to_string())
         .spawn(move || {
@@ -988,6 +1415,24 @@ fn handle_connection(
         });
 
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        if let Some((code, epoch, terminate_daemon)) =
+            heartbeat_revocation(&policy_heartbeat, Instant::now())
+        {
+            revoke_daemon_authorization(
+                &state,
+                &sessions_path,
+                &connections,
+                &shutdown,
+                code,
+                epoch,
+                terminate_daemon,
+            );
+            break;
+        }
+
         let msg = match read_frame::<_, ClientToDaemon>(&mut reader) {
             Ok(msg) => msg,
             Err(crate::protocol::FrameError::Io(err))
@@ -995,54 +1440,78 @@ fn handle_connection(
             {
                 break
             }
+            Err(crate::protocol::FrameError::Io(err))
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
             Err(err) => {
                 error!(?err, "failed to read daemon frame");
                 break;
             }
         };
 
-        match &msg {
-            ClientToDaemon::Hello { .. } | ClientToDaemon::Ping { .. } => {}
-            ClientToDaemon::Authenticate {
-                req,
-                client_id: authenticated_client_id,
-                boot_token: supplied_token,
-                process_id,
-                user_sid: supplied_sid,
-            } => {
-                if *process_id == 0
-                    || supplied_sid != user_sid.as_str()
-                    || !constant_time_equal(supplied_token.as_bytes(), boot_token.as_bytes())
-                {
-                    let _ = tx.send(DaemonToClient::Error {
-                        req: Some(*req),
-                        message: "authentication_denied: invalid daemon client identity"
-                            .to_string(),
-                    });
-                    continue;
-                }
-                client_id = *authenticated_client_id;
-                lock_state(&state).add_client(client_id, tx.clone());
-                let _ = tx.send(DaemonToClient::Reply {
-                    req: *req,
-                    result: ReplyResult::Ok,
-                });
-                authenticated = true;
-                continue;
+        let request_id = request_id(&msg);
+        if let Err(code) = authorize_daemon_message(&msg, client_kind) {
+            let _ = tx.send(DaemonToClient::Error {
+                req: request_id,
+                message: code.as_str().to_string(),
+            });
+            if matches!(
+                code,
+                AuthorizationErrorCode::EntitlementRequired
+                    | AuthorizationErrorCode::AuthorizationStale
+            ) {
+                let epoch = lock_mutex(&policy_heartbeat).policy_epoch;
+                revoke_daemon_authorization(
+                    &state,
+                    &sessions_path,
+                    &connections,
+                    &shutdown,
+                    code,
+                    epoch,
+                    false,
+                );
+            } else {
+                cancelled.store(true, Ordering::Release);
             }
-            _ if !authenticated => {
-                let _ = tx.send(DaemonToClient::Error {
-                    req: request_id(&msg),
-                    message:
-                        "authentication_required: authenticate before privileged daemon requests"
-                            .to_string(),
-                });
-                continue;
-            }
-            _ => {}
+            break;
         }
 
-        let request_id = request_id(&msg);
+        if let ClientToDaemon::AuthorizationHeartbeat { snapshot } = &msg {
+            if client_kind != ClientKind::App {
+                let _ = tx.send(DaemonToClient::Error {
+                    req: request_id,
+                    message: DAEMON_AUTH_REQUIRED.to_string(),
+                });
+                break;
+            }
+            let authorization_snapshot: AuthorizationSnapshot = snapshot.clone().into();
+            if let Err(error) = remote.update_authorization(authorization_snapshot.clone()) {
+                warn!(?error, "remote authorization update failed");
+            }
+            let mut heartbeat = lock_mutex(&policy_heartbeat);
+            heartbeat.update(authorization_snapshot);
+            let revoked = heartbeat.revoked;
+            let epoch = heartbeat.policy_epoch;
+            drop(heartbeat);
+            if revoked {
+                revoke_daemon_authorization(
+                    &state,
+                    &sessions_path,
+                    &connections,
+                    &shutdown,
+                    AuthorizationErrorCode::EntitlementRequired,
+                    epoch,
+                    false,
+                );
+                break;
+            }
+        }
+
         if let Err(err) = dispatch_message(
             Arc::clone(&state),
             &sessions_path,
@@ -1079,6 +1548,7 @@ fn handle_connection(
     };
     process_pane_lease_transitions(&state, lease_transitions);
     unregister_browser_host(client_id);
+    lock_mutex(&connections).remove(&client_id);
     drop(tx);
     if let Ok(writer_thread) = writer_thread {
         let _ = writer_thread.join();
@@ -3501,22 +3971,24 @@ fn dispatch_automation_cli(
             let record = automation.get(id)?;
             let workspace = automation_workspace(state, &record.session_id)?;
             let claim = automation.trigger(id)?;
-            Ok(serde_json::to_value(automation.execute_and_notify_with_worktree(
-                &claim,
-                &workspace,
-                |record, claim, workspace, planned| {
-                    provision_automation_worktree(
-                        state,
-                        sessions_path,
-                        worktree_lifecycle,
-                        worktrees,
-                        record,
-                        claim,
-                        workspace,
-                        planned,
-                    )
-                },
-            )?)?)
+            Ok(serde_json::to_value(
+                automation.execute_and_notify_with_worktree(
+                    &claim,
+                    &workspace,
+                    |record, claim, workspace, planned| {
+                        provision_automation_worktree(
+                            state,
+                            sessions_path,
+                            worktree_lifecycle,
+                            worktrees,
+                            record,
+                            claim,
+                            workspace,
+                            planned,
+                        )
+                    },
+                )?,
+            )?)
         }
         AutomationAction::Runs => {
             let id = automation_cli_id(&command.arguments, "automation id")?;
@@ -4320,14 +4792,10 @@ fn dispatch_message(
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
     match msg {
-        ClientToDaemon::Hello { .. } => Ok(()),
-        ClientToDaemon::Authenticate { req, .. } => send(
-            tx,
-            DaemonToClient::Reply {
-                req,
-                result: ReplyResult::Ok,
-            },
-        ),
+        ClientToDaemon::Hello { .. } | ClientToDaemon::Authenticate { .. } => {
+            bail!(DAEMON_AUTH_REQUIRED)
+        }
+        ClientToDaemon::AuthorizationHeartbeat { .. } => Ok(()),
         ClientToDaemon::RegisterBrowserHost => {
             register_browser_host(client_id, tx.clone());
             Ok(())
@@ -4429,23 +4897,15 @@ fn dispatch_message(
             persist_state(&state, sessions_path)?;
             send_ok(tx, req)?;
             notify_session_changed(&state, session_id)?;
+            let pane_ids = panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+            kill_owned_panes(panes, "deleted session")?;
             if let Err(error) = remove_session_history(sessions_path, session_id) {
                 warn!(?error, %session_id, "failed to remove deleted workspace history");
             }
-            for mut pane in panes {
-                let pane_id = pane.id;
-                let sessions_path = sessions_path.to_path_buf();
-                thread::Builder::new()
-                    .name(format!("vibelink-close-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(err) = pane.kill() {
-                            warn!(?err, %pane_id, "failed to kill deleted pane");
-                        }
-                        if let Err(error) = remove_pane_history(&sessions_path, session_id, pane_id)
-                        {
-                            warn!(?error, %pane_id, "failed to remove deleted pane history");
-                        }
-                    })?;
+            for pane_id in pane_ids {
+                if let Err(error) = remove_pane_history(sessions_path, session_id, pane_id) {
+                    warn!(?error, %pane_id, "failed to remove deleted pane history");
+                }
             }
             Ok(())
         }
@@ -4503,13 +4963,26 @@ fn dispatch_message(
             )?;
             notify_session_changed(&state, session_id)
         }
+        ClientToDaemon::CancelPaneSpawn {
+            req,
+            session_id,
+            pane_id,
+        } => {
+            let pane = lock_state(&state).cancel_pane_spawn(session_id, pane_id)?;
+            persist_state(&state, sessions_path)?;
+            if let Some(pane) = pane {
+                kill_owned_panes(vec![pane], "cancelled spawn")?;
+            }
+            send_ok(tx, req)
+        }
         ClientToDaemon::AttachPane {
+            req,
             session_id,
             pane_id,
         } => {
             info!(%client_id, %session_id, %pane_id, "attaching pane");
             lock_state(&state).attach_pane(client_id, session_id, pane_id)?;
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::SubscribePane {
             req,
@@ -4534,13 +5007,14 @@ fn dispatch_message(
             Ok(())
         }
         ClientToDaemon::WritePane {
+            req,
             session_id,
             pane_id,
             data,
             origin,
         } => {
             write_pane_authorized(&state, session_id, pane_id, &data, &origin)?;
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::ResizePane {
             session_id,
@@ -4593,22 +5067,13 @@ fn dispatch_message(
             }
             persist_state(&state, sessions_path)?;
             notify_session_changed(&state, session_id)?;
-            send_ok(tx, req)?;
-            if let Some(mut pane) = pane {
-                let sessions_path = sessions_path.to_path_buf();
-                thread::Builder::new()
-                    .name(format!("vibelink-close-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(err) = pane.kill() {
-                            warn!(?err, pane_id = %pane_id, "failed to kill closed pane");
-                        }
-                        if let Err(error) = remove_pane_history(&sessions_path, session_id, pane_id)
-                        {
-                            warn!(?error, %pane_id, "failed to remove closed pane history");
-                        }
-                    })?;
+            if let Some(pane) = pane {
+                kill_owned_panes(vec![pane], "closed pane")?;
+                if let Err(error) = remove_pane_history(sessions_path, session_id, pane_id) {
+                    warn!(?error, %pane_id, "failed to remove closed pane history");
+                }
             }
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::ClearSession { req, session_id } => {
             let (panes, lease_transitions) = {
@@ -4621,26 +5086,17 @@ fn dispatch_message(
             process_pane_lease_transitions(&state, lease_transitions);
             persist_state(&state, sessions_path)?;
             notify_session_changed(&state, session_id)?;
-            send_ok(tx, req)?;
-            for mut pane in panes {
-                let pane_id = pane.id;
-                let sessions_path = sessions_path.to_path_buf();
-                thread::Builder::new()
-                    .name(format!("vibelink-close-pty-{pane_id}"))
-                    .spawn(move || {
-                        if let Err(err) = pane.kill() {
-                            warn!(?err, pane_id = %pane_id, "failed to kill cleared pane");
-                        }
-                        if let Err(error) = remove_pane_history(&sessions_path, session_id, pane_id)
-                        {
-                            warn!(?error, %pane_id, "failed to remove cleared pane history");
-                        }
-                    })?;
+            let pane_ids = panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+            kill_owned_panes(panes, "cleared session")?;
+            for pane_id in pane_ids {
+                if let Err(error) = remove_pane_history(sessions_path, session_id, pane_id) {
+                    warn!(?error, %pane_id, "failed to remove cleared pane history");
+                }
             }
             if let Err(error) = remove_session_history(sessions_path, session_id) {
                 warn!(?error, %session_id, "failed to remove cleared workspace history");
             }
-            Ok(())
+            send_ok(tx, req)
         }
         ClientToDaemon::GetScrollback {
             req,
@@ -5489,8 +5945,7 @@ fn remote_pane_lease_status_response(
 
 fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
     match msg {
-        ClientToDaemon::Authenticate { req, .. }
-        | ClientToDaemon::Ping { req }
+        ClientToDaemon::Ping { req }
         | ClientToDaemon::ListSessions { req }
         | ClientToDaemon::RemoteWorkspaceProjection { req, .. }
         | ClientToDaemon::SetDesktopSelection { req, .. }
@@ -5501,6 +5956,9 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::AttachSession { req, .. }
         | ClientToDaemon::SpawnPane { req, .. }
         | ClientToDaemon::SubscribePane { req, .. }
+        | ClientToDaemon::CancelPaneSpawn { req, .. }
+        | ClientToDaemon::AttachPane { req, .. }
+        | ClientToDaemon::WritePane { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
         | ClientToDaemon::SetPaneRole { req, .. }
         | ClientToDaemon::ClosePane { req, .. }
@@ -5524,13 +5982,13 @@ fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::AttentionSnapshot { req }
         | ClientToDaemon::Shutdown { req, .. } => Some(*req),
         ClientToDaemon::Hello { .. }
+        | ClientToDaemon::Authenticate { .. }
+        | ClientToDaemon::AuthorizationHeartbeat { .. }
         | ClientToDaemon::RegisterBrowserHost
         | ClientToDaemon::RemoteBrowserResponse { .. }
         | ClientToDaemon::DetachSession { .. }
         | ClientToDaemon::SaveLayout { .. }
-        | ClientToDaemon::AttachPane { .. }
         | ClientToDaemon::DetachPane { .. }
-        | ClientToDaemon::WritePane { .. }
         | ClientToDaemon::ResizePane { .. }
         | ClientToDaemon::NotifySessionChanged { .. } => None,
     }
@@ -5649,6 +6107,9 @@ fn spawn_pane_for_session_internal(
     coordinator: Option<Arc<CoordinatorService>>,
     restored_scrollback: Option<Vec<u8>>,
 ) -> Result<crate::protocol::PaneMeta> {
+    if lock_state(&state).pane_spawn_cancelled(session_id, cfg.pane_id) {
+        bail!("PANE_SPAWN_CANCELLED");
+    }
     lock_state(&state).pane_metas(session_id)?;
 
     let pane_id = cfg.pane_id;
@@ -5666,6 +6127,14 @@ fn spawn_pane_for_session_internal(
         .then(|| spawned.pane.scrollback_snapshot());
     let (meta, generation) = {
         let mut guard = lock_state(&state);
+        if guard.pane_spawn_cancelled(session_id, pane_id) {
+            drop(guard);
+            let mut pane = spawned.pane;
+            if let Err(error) = pane.kill() {
+                warn!(?error, %pane_id, "failed to kill pane cancelled during spawn");
+            }
+            bail!("PANE_SPAWN_CANCELLED");
+        }
         let meta = match guard.insert_pane_or_recover(session_id, spawned.pane) {
             Ok(meta) => meta,
             Err((err, mut pane)) => {
@@ -5993,6 +6462,24 @@ fn persist_restorable_panes_and_kill_all(state: &SharedState, sessions_path: &Pa
     persist_result
 }
 
+fn kill_owned_panes(panes: Vec<Pane>, operation: &str) -> Result<()> {
+    let mut first_error = None;
+    for mut pane in panes {
+        let pane_id = pane.id;
+        if let Err(error) = pane.kill_and_wait(Duration::from_secs(5)) {
+            warn!(?error, %pane_id, operation, "failed to terminate owned pane");
+            if first_error.is_none() {
+                first_error =
+                    Some(error.context(format!("terminate pane {pane_id} for {operation}")));
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn kill_all_panes(state: &SharedState) {
     let pane_ids: Vec<Uuid> = {
         let guard = lock_state(state);
@@ -6032,6 +6519,233 @@ fn kill_all_panes(state: &SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::authorization::AuthorizationState;
+    use std::io::Cursor;
+
+    struct AdmissionScript {
+        read: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl AdmissionScript {
+        fn from_client_message(message: &ClientToDaemon) -> Self {
+            let mut read = Vec::new();
+            write_frame(&mut read, message).expect("encode client frame");
+            Self {
+                read: Cursor::new(read),
+                written: Vec::new(),
+            }
+        }
+
+        fn response(&self) -> DaemonToClient {
+            read_frame(&mut Cursor::new(self.written.clone())).expect("decode daemon response")
+        }
+    }
+
+    impl Read for AdmissionScript {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.read.read(buffer)
+        }
+    }
+
+    impl Write for AdmissionScript {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.written.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn authorization_snapshot(
+        entitled: bool,
+        lease_until: chrono::DateTime<Utc>,
+    ) -> AuthorizationSnapshot {
+        AuthorizationSnapshot {
+            state: if entitled {
+                AuthorizationState::ValidOnline
+            } else {
+                AuthorizationState::TrialExpired
+            },
+            entitled,
+            observed_at: Utc::now(),
+            lease_until,
+            offline_grace_until: None,
+            policy_epoch: 9,
+        }
+    }
+
+    fn pending_challenge() -> (PendingChallenge, [u8; 32]) {
+        let secret = [0x51_u8; 32];
+        (
+            PendingChallenge {
+                boot_id: Uuid::new_v4(),
+                nonce: [0x31_u8; 32],
+                client_id: Uuid::new_v4(),
+                client_kind: ClientKind::Cli,
+                expires_at: Instant::now() + AUTH_CHALLENGE_TTL,
+                consumed: false,
+            },
+            secret,
+        )
+    }
+
+    #[test]
+    fn valid_current_admission_proof_succeeds() {
+        let (mut challenge, secret) = pending_challenge();
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            challenge.boot_id,
+            &challenge.nonce,
+            challenge.client_id,
+            challenge.client_kind,
+        );
+
+        assert_eq!(
+            challenge.verify(&secret, challenge.client_id, &proof, Instant::now()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn wrong_secret_expired_nonce_and_replay_fail_closed() {
+        let (mut wrong_secret, secret) = pending_challenge();
+        let wrong_proof = daemon_auth_proof(
+            &[0x52_u8; 32],
+            DAEMON_PROTOCOL_VERSION,
+            wrong_secret.boot_id,
+            &wrong_secret.nonce,
+            wrong_secret.client_id,
+            wrong_secret.client_kind,
+        );
+        assert_eq!(
+            wrong_secret.verify(
+                &secret,
+                wrong_secret.client_id,
+                &wrong_proof,
+                Instant::now()
+            ),
+            Err(AuthorizationErrorCode::AuthRequired)
+        );
+
+        let (mut expired, secret) = pending_challenge();
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            expired.boot_id,
+            &expired.nonce,
+            expired.client_id,
+            expired.client_kind,
+        );
+        assert_eq!(
+            expired.verify(
+                &secret,
+                expired.client_id,
+                &proof,
+                expired.expires_at + Duration::from_millis(1),
+            ),
+            Err(AuthorizationErrorCode::AuthRequired)
+        );
+
+        let (mut replayed, secret) = pending_challenge();
+        let proof = daemon_auth_proof(
+            &secret,
+            DAEMON_PROTOCOL_VERSION,
+            replayed.boot_id,
+            &replayed.nonce,
+            replayed.client_id,
+            replayed.client_kind,
+        );
+        assert!(replayed
+            .verify(&secret, replayed.client_id, &proof, Instant::now())
+            .is_ok());
+        assert_eq!(
+            replayed.verify(&secret, replayed.client_id, &proof, Instant::now()),
+            Err(AuthorizationErrorCode::AuthRequired)
+        );
+    }
+
+    #[test]
+    fn unauthenticated_command_and_shutdown_are_rejected_as_first_frame() {
+        for message in [
+            ClientToDaemon::Ping { req: 1 },
+            ClientToDaemon::Shutdown {
+                req: 2,
+                clean_exit: false,
+            },
+        ] {
+            let mut stream = AdmissionScript::from_client_message(&message);
+            assert_eq!(
+                authenticate_connection(&mut stream, Uuid::new_v4(), &[7_u8; 32]),
+                Err(AuthorizationErrorCode::AuthRequired)
+            );
+            assert_eq!(
+                stream.response(),
+                DaemonToClient::Error {
+                    req: None,
+                    message: "AUTH_REQUIRED".to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn expired_entitlement_and_logout_fail_next_request_with_stable_codes() {
+        let message = ClientToDaemon::WritePane {
+            req: 1,
+            session_id: Uuid::new_v4(),
+            pane_id: Uuid::new_v4(),
+            data: b"whoami\r".to_vec(),
+            origin: crate::protocol::PaneCommandOrigin::Desktop,
+        };
+        let active = authorization_snapshot(true, Utc::now() + chrono::Duration::minutes(1));
+        assert_eq!(
+            authorize_daemon_message_with(&message, ClientKind::Cli, || Ok(active)),
+            Ok(())
+        );
+
+        let logged_out = authorization_snapshot(false, Utc::now());
+        assert_eq!(
+            authorize_daemon_message_with(&message, ClientKind::Cli, || Ok(logged_out)),
+            Err(AuthorizationErrorCode::EntitlementRequired)
+        );
+
+        let expired = authorization_snapshot(true, Utc::now() - chrono::Duration::milliseconds(1));
+        assert_eq!(
+            authorize_daemon_message_with(&message, ClientKind::App, || Ok(expired)),
+            Err(AuthorizationErrorCode::AuthorizationStale)
+        );
+    }
+
+    #[test]
+    fn stale_policy_heartbeat_requires_daemon_shutdown() {
+        let heartbeat = Mutex::new(PolicyHeartbeat {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            policy_epoch: 12,
+            revoked: false,
+        });
+
+        assert_eq!(
+            heartbeat_revocation(&heartbeat, Instant::now()),
+            Some((AuthorizationErrorCode::AuthorizationStale, 12, true))
+        );
+    }
+
+    #[test]
+    fn heartbeat_lease_is_bounded_to_ninety_seconds() {
+        let mut heartbeat = PolicyHeartbeat::default();
+        heartbeat.update(authorization_snapshot(
+            true,
+            Utc::now() + chrono::Duration::hours(1),
+        ));
+        let deadline = heartbeat.deadline.expect("heartbeat deadline");
+
+        assert!(deadline <= Instant::now() + POLICY_HEARTBEAT_TTL);
+        assert!(!heartbeat.revoked);
+    }
 
     #[test]
     fn headless_worktree_prompt_defaults_to_omp_and_rejects_unknown_profiles() {
@@ -6651,6 +7365,38 @@ mod tests {
                 pane_id,
             }),
             None
+        );
+    }
+
+    #[test]
+    fn request_id_tracks_attach_write_and_cancel_acknowledgements() {
+        let session_id = Uuid::new_v4();
+        let pane_id = Uuid::new_v4();
+        assert_eq!(
+            request_id(&ClientToDaemon::AttachPane {
+                req: 7,
+                session_id,
+                pane_id,
+            }),
+            Some(7)
+        );
+        assert_eq!(
+            request_id(&ClientToDaemon::CancelPaneSpawn {
+                req: 9,
+                session_id,
+                pane_id,
+            }),
+            Some(9)
+        );
+        assert_eq!(
+            request_id(&ClientToDaemon::WritePane {
+                req: 8,
+                session_id,
+                pane_id,
+                data: b"input".to_vec(),
+                origin: PaneCommandOrigin::Desktop,
+            }),
+            Some(8)
         );
     }
 

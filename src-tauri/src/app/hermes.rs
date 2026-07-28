@@ -1,9 +1,12 @@
-use super::license::LicenseService;
+use super::{authorization::Capability, entitlement::EntitlementSupervisor};
+use crate::storage::{
+    load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError,
+};
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam_channel::{bounded, Sender};
-use serde::Serialize;
+use crossbeam_channel::{bounded, Receiver, Sender};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -31,6 +34,19 @@ const HERMES_BIN: &str = if cfg!(windows) {
     "hermes"
 };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const LAST_ACP_SESSION_SCHEMA_VERSION: u64 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LastAcpSessionDocument {
+    schema_version: u64,
+    acp_session_id: String,
+}
+
+struct LoadedLastAcpSession {
+    acp_session_id: Option<String>,
+    legacy: bool,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,12 +109,20 @@ pub struct HermesPlanEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesEvent {
+    generation: u64,
+    #[serde(flatten)]
+    payload: HermesEventPayload,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
     tag = "kind"
 )]
-pub enum HermesEvent {
+pub enum HermesEventPayload {
     Started {
         session_id: String,
         acp_session_id: String,
@@ -169,11 +193,23 @@ pub enum HermesEvent {
     },
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesStartResult {
+    generation: u64,
+}
+
+struct HermesInstanceEntry {
+    generation: u64,
+    instance: Arc<HermesInstance>,
+}
+
 pub struct HermesManager {
-    instances: Mutex<HashMap<String, Arc<HermesInstance>>>,
-    starting: Mutex<HashSet<String>>,
+    instances: Mutex<HashMap<String, HermesInstanceEntry>>,
+    starting: Mutex<HashMap<String, u64>>,
+    next_generation: AtomicU64,
     output_channel: Mutex<Option<Channel<HermesEvent>>>,
-    active_prompts: Mutex<HashSet<String>>,
+    active_prompts: Mutex<HashMap<String, u64>>,
 }
 
 struct HermesInstance {
@@ -190,9 +226,10 @@ impl HermesManager {
     pub fn new() -> Self {
         Self {
             instances: Mutex::new(HashMap::new()),
-            starting: Mutex::new(HashSet::new()),
+            starting: Mutex::new(HashMap::new()),
+            next_generation: AtomicU64::new(1),
             output_channel: Mutex::new(None),
-            active_prompts: Mutex::new(HashSet::new()),
+            active_prompts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -208,38 +245,49 @@ impl HermesManager {
         session_id: String,
         command_override: Option<String>,
         workspace_folder: Option<String>,
-    ) -> Result<()> {
-        {
-            let mut starting = self.starting.lock().expect("hermes starting poisoned");
-            let existing = self
-                .instances
+    ) -> Result<u64> {
+        let existing = self
+            .instances
+            .lock()
+            .expect("hermes instances poisoned")
+            .get(&session_id)
+            .map(|entry| (entry.generation, Arc::clone(&entry.instance)));
+        if let Some((generation, instance)) = &existing {
+            if let Some(acp_session_id) = instance
+                .acp_session_id
                 .lock()
-                .expect("hermes instances poisoned")
-                .get(&session_id)
-                .cloned();
-            if let Some(existing) = existing {
-                if let Some(acp) = existing
-                    .acp_session_id
-                    .lock()
-                    .expect("hermes acp session poisoned")
-                    .clone()
-                {
-                    let _ = self.send_event(HermesEvent::Started {
+                .expect("hermes acp session poisoned")
+                .clone()
+            {
+                self.send_current_event(
+                    &session_id,
+                    *generation,
+                    HermesEventPayload::Started {
                         session_id: session_id.clone(),
-                        acp_session_id: acp,
-                    });
-                    return Ok(());
-                }
-                if starting.contains(&session_id) {
-                    return Ok(());
-                }
-                drop(starting);
-                let _ = self.stop(&session_id);
-                starting = self.starting.lock().expect("hermes starting poisoned");
-            } else if starting.contains(&session_id) {
-                return Ok(());
+                        acp_session_id,
+                    },
+                )?;
+                return Ok(*generation);
             }
-            starting.insert(session_id.clone());
+        }
+
+        let generation = {
+            let mut starting = self.starting.lock().expect("hermes starting poisoned");
+            if let Some(generation) = starting.get(&session_id) {
+                return Ok(*generation);
+            }
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            starting.insert(session_id.clone(), generation);
+            generation
+        };
+
+        if let Some((existing_generation, _)) = existing {
+            if let Err(error) = self.stop_generation(&session_id, existing_generation, false) {
+                if self.current_generation(&session_id) == Some(existing_generation) {
+                    self.clear_starting(&session_id, generation);
+                    return Err(error);
+                }
+            }
         }
 
         let result = (|| -> Result<()> {
@@ -285,16 +333,23 @@ impl HermesManager {
             self.instances
                 .lock()
                 .expect("hermes instances poisoned")
-                .insert(session_id.clone(), Arc::clone(&instance));
+                .insert(
+                    session_id.clone(),
+                    HermesInstanceEntry {
+                        generation,
+                        instance: Arc::clone(&instance),
+                    },
+                );
 
             spawn_stdout_reader(
                 session_id.clone(),
+                generation,
                 stdout,
                 Arc::clone(&instance),
                 Arc::clone(self),
             );
             if let Some(stderr) = stderr {
-                spawn_stderr_drain(session_id.clone(), stderr);
+                spawn_stderr_drain(session_id.clone(), generation, stderr, Arc::clone(self));
             }
 
             let handshake_session_id = session_id.clone();
@@ -307,23 +362,28 @@ impl HermesManager {
                 .spawn(move || {
                     let result = handshake(
                         &handshake_session_id,
+                        generation,
                         &handshake_cwd,
                         &handshake_home,
                         configured_model.as_ref(),
                         &handshake_instance,
                         &handshake_manager,
                     );
-                    handshake_manager
-                        .starting
-                        .lock()
-                        .expect("hermes starting poisoned")
-                        .remove(&handshake_session_id);
+                    handshake_manager.clear_starting(&handshake_session_id, generation);
                     if let Err(err) = result {
-                        let _ = handshake_manager.send_event(HermesEvent::Error {
-                            session_id: handshake_session_id.clone(),
-                            message: err.to_string(),
-                        });
-                        let _ = handshake_manager.stop(&handshake_session_id);
+                        let _ = handshake_manager.send_current_event(
+                            &handshake_session_id,
+                            generation,
+                            HermesEventPayload::Error {
+                                session_id: handshake_session_id.clone(),
+                                message: err.to_string(),
+                            },
+                        );
+                        let _ = handshake_manager.stop_generation(
+                            &handshake_session_id,
+                            generation,
+                            true,
+                        );
                     }
                 })
                 .map_err(|err| anyhow!(err))?;
@@ -331,23 +391,21 @@ impl HermesManager {
         })();
 
         if result.is_err() {
-            self.starting
-                .lock()
-                .expect("hermes starting poisoned")
-                .remove(&session_id);
-            let _ = self.stop(&session_id);
+            self.clear_starting(&session_id, generation);
+            let _ = self.stop_generation(&session_id, generation, false);
         }
-        result
+        result.map(|()| generation)
     }
 
-    pub fn new_session(self: &Arc<Self>, session_id: &str) -> Result<String> {
-        let instance = self.instance(session_id)?;
+    pub fn new_session(self: &Arc<Self>, session_id: &str, generation: u64) -> Result<String> {
+        let instance = self.instance(session_id, generation)?;
         let home = agent_workspace_dir(session_id)?;
         let configured_model = read_global_configured_model().ok().flatten();
         let response = new_acp_session(session_id, &instance, &instance.cwd)?;
         let acp_id = acp_session_id_from_response(&response, None)?;
         finalize_acp_session(
             session_id,
+            generation,
             &home,
             configured_model.as_ref(),
             &instance,
@@ -361,15 +419,20 @@ impl HermesManager {
     pub fn resume_session(
         self: &Arc<Self>,
         session_id: &str,
+        generation: u64,
         acp_session_id: String,
     ) -> Result<()> {
-        let instance = self.instance(session_id)?;
+        let instance = self.instance(session_id, generation)?;
         let home = agent_workspace_dir(session_id)?;
         let configured_model = read_global_configured_model().ok().flatten();
-        self.send_event(HermesEvent::SessionReplay {
-            session_id: session_id.to_string(),
-            acp_session_id: acp_session_id.clone(),
-        })?;
+        self.send_current_event(
+            session_id,
+            generation,
+            HermesEventPayload::SessionReplay {
+                session_id: session_id.to_string(),
+                acp_session_id: acp_session_id.clone(),
+            },
+        )?;
         let response = instance.request(
             "session/resume",
             json!({
@@ -381,6 +444,7 @@ impl HermesManager {
         )?;
         finalize_acp_session(
             session_id,
+            generation,
             &home,
             configured_model.as_ref(),
             &instance,
@@ -390,8 +454,12 @@ impl HermesManager {
         )
     }
 
-    pub fn list_sessions(&self, session_id: &str) -> Result<Vec<HermesSessionInfo>> {
-        let instance = self.instance(session_id)?;
+    pub fn list_sessions(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<Vec<HermesSessionInfo>> {
+        let instance = self.instance(session_id, generation)?;
         if !instance.sessions_list_supported.load(Ordering::Relaxed) {
             bail!("session list requires a newer Hermes — run `hermes update`");
         }
@@ -440,29 +508,40 @@ impl HermesManager {
                 break;
             }
         }
+        if !self.is_current(session_id, generation) {
+            bail!("HERMES_SESSION_REPLACED");
+        }
         Ok(sessions)
     }
 
-    pub fn send_message(self: &Arc<Self>, session_id: String, text: String) -> Result<()> {
-        let instance = self.instance(&session_id)?;
+    pub fn send_message(
+        self: &Arc<Self>,
+        session_id: String,
+        generation: u64,
+        text: String,
+    ) -> Result<()> {
+        let instance = self.instance(&session_id, generation)?;
         let acp_session_id = instance.acp_session_id()?;
         let skill_prompt =
             crate::app::skills::augment_prompt_with_enabled_skills(&session_id, &text)?;
         let prompt_text = Self::augment_prompt_with_workspace_brief(&session_id, skill_prompt)?;
+        let pending = instance.begin_request(
+            "session/prompt",
+            json!({
+                "sessionId": acp_session_id,
+                "prompt": [{ "type": "text", "text": prompt_text }],
+            }),
+        )?;
+        let pending_id = pending.id;
+        self.set_prompt_active(&session_id, generation, true);
         let manager = Arc::clone(self);
-        manager.set_prompt_active(&session_id, true);
-        thread::Builder::new()
+        let response_instance = Arc::clone(&instance);
+        let response_session_id = session_id.clone();
+        let spawn = thread::Builder::new()
             .name(format!("vibelink-hermes-prompt-{session_id}"))
             .spawn(move || {
-                let result = instance.request(
-                    "session/prompt",
-                    json!({
-                        "sessionId": acp_session_id,
-                        "prompt": [{ "type": "text", "text": prompt_text }],
-                    }),
-                    None,
-                );
-                manager.set_prompt_active(&session_id, false);
+                let result = response_instance.finish_request(pending, None);
+                manager.set_prompt_active(&response_session_id, generation, false);
                 match result {
                     Ok(value) => {
                         let stop_reason = value
@@ -470,20 +549,32 @@ impl HermesManager {
                             .and_then(Value::as_str)
                             .unwrap_or("end_turn")
                             .to_string();
-                        let _ = manager.send_event(HermesEvent::TurnEnded {
-                            session_id,
-                            stop_reason,
-                        });
+                        let _ = manager.send_current_event(
+                            &response_session_id,
+                            generation,
+                            HermesEventPayload::TurnEnded {
+                                session_id: response_session_id.clone(),
+                                stop_reason,
+                            },
+                        );
                     }
                     Err(err) => {
-                        let _ = manager.send_event(HermesEvent::Error {
-                            session_id,
-                            message: err.to_string(),
-                        });
+                        let _ = manager.send_current_event(
+                            &response_session_id,
+                            generation,
+                            HermesEventPayload::Error {
+                                session_id: response_session_id.clone(),
+                                message: err.to_string(),
+                            },
+                        );
                     }
                 }
-            })
-            .map_err(|err| anyhow!(err))?;
+            });
+        if let Err(error) = spawn {
+            instance.cancel_pending(pending_id);
+            self.set_prompt_active(&session_id, generation, false);
+            return Err(anyhow!(error));
+        }
         Ok(())
     }
     fn augment_prompt_with_workspace_brief(session_id: &str, prompt: String) -> Result<String> {
@@ -514,12 +605,15 @@ impl HermesManager {
         prompt
     }
 
-    pub fn cancel(&self, session_id: &str) -> Result<()> {
-        if !self.is_prompt_active(session_id) {
-            debug!(session_id, "ignoring Hermes cancel without active prompt");
+    pub fn cancel(&self, session_id: &str, generation: u64) -> Result<()> {
+        if !self.is_prompt_active(session_id, generation) {
+            debug!(
+                session_id,
+                generation, "ignoring Hermes cancel without active prompt"
+            );
             return Ok(());
         }
-        let instance = self.instance(session_id)?;
+        let instance = self.instance(session_id, generation)?;
         let acp_session_id = instance.acp_session_id()?;
         instance.notification("session/cancel", json!({ "sessionId": acp_session_id }))
     }
@@ -527,10 +621,11 @@ impl HermesManager {
     pub fn respond_permission(
         &self,
         session_id: &str,
+        generation: u64,
         request_id: u64,
         option_id: String,
     ) -> Result<()> {
-        let instance = self.instance(session_id)?;
+        let instance = self.instance(session_id, generation)?;
         instance.write_line(&json!({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -538,44 +633,57 @@ impl HermesManager {
         }))
     }
 
-    pub fn set_model(&self, session_id: &str, model_id: String) -> Result<()> {
+    pub fn set_model(&self, session_id: &str, generation: u64, model_id: String) -> Result<()> {
         require_qualified_model(&model_id)?;
-        let instance = self.instance(session_id)?;
+        let instance = self.instance(session_id, generation)?;
         let acp_session_id = instance.acp_session_id()?;
         instance.request(
             "session/set_model",
             json!({ "sessionId": acp_session_id, "modelId": model_id }),
             Some(REQUEST_TIMEOUT),
         )?;
+        self.instance(session_id, generation)?;
         Ok(())
     }
 
-    pub fn set_mode(&self, session_id: &str, mode_id: String) -> Result<()> {
-        let instance = self.instance(session_id)?;
+    pub fn set_mode(&self, session_id: &str, generation: u64, mode_id: String) -> Result<()> {
+        let instance = self.instance(session_id, generation)?;
         let acp_session_id = instance.acp_session_id()?;
         instance.request(
             "session/set_mode",
             json!({ "sessionId": acp_session_id, "modeId": mode_id }),
             Some(REQUEST_TIMEOUT),
         )?;
+        self.instance(session_id, generation)?;
         Ok(())
     }
-
     pub fn stop(&self, session_id: &str) -> Result<()> {
-        let instance = self
-            .instances
-            .lock()
-            .expect("hermes instances poisoned")
-            .remove(session_id);
-        if let Some(instance) = instance {
-            instance.fail_pending("Hermes stopped");
-            self.set_prompt_active(session_id, false);
+        let Some(generation) = self.current_generation(session_id) else {
+            return Ok(());
+        };
+        self.stop_generation(session_id, generation, true)
+    }
+
+    fn stop_generation(&self, session_id: &str, generation: u64, emit_exit: bool) -> Result<()> {
+        let instance = self.instance(session_id, generation)?;
+        instance.fail_pending("HERMES_SESSION_REPLACED");
+        self.set_prompt_active(session_id, generation, false);
+        {
             let mut child = instance.child.lock().expect("hermes child poisoned");
-            let _ = child.kill();
-            let _ = child.wait();
-            self.send_event(HermesEvent::Exited {
-                session_id: session_id.to_string(),
-            })?;
+            if child.try_wait()?.is_none() {
+                if let Err(error) = child.kill() {
+                    if child.try_wait()?.is_none() {
+                        return Err(error).context("kill Hermes process");
+                    }
+                } else {
+                    child.wait().context("wait for Hermes process")?;
+                }
+            }
+        }
+        if emit_exit {
+            self.retire_instance_if_current(session_id, generation, true)?;
+        } else {
+            self.remove_instance_if_current(session_id, generation);
         }
         Ok(())
     }
@@ -593,35 +701,107 @@ impl HermesManager {
         }
     }
 
-    fn set_prompt_active(&self, session_id: &str, active: bool) {
+    fn clear_starting(&self, session_id: &str, generation: u64) {
+        let mut starting = self.starting.lock().expect("hermes starting poisoned");
+        if starting.get(session_id) == Some(&generation) {
+            starting.remove(session_id);
+        }
+    }
+
+    fn set_prompt_active(&self, session_id: &str, generation: u64, active: bool) {
         let mut active_prompts = self
             .active_prompts
             .lock()
             .expect("hermes active prompts poisoned");
         if active {
-            active_prompts.insert(session_id.to_string());
-        } else {
+            active_prompts.insert(session_id.to_string(), generation);
+        } else if active_prompts.get(session_id) == Some(&generation) {
             active_prompts.remove(session_id);
         }
     }
 
-    fn is_prompt_active(&self, session_id: &str) -> bool {
+    fn is_prompt_active(&self, session_id: &str, generation: u64) -> bool {
         self.active_prompts
             .lock()
             .expect("hermes active prompts poisoned")
-            .contains(session_id)
+            .get(session_id)
+            == Some(&generation)
     }
 
-    fn instance(&self, session_id: &str) -> Result<Arc<HermesInstance>> {
+    fn current_generation(&self, session_id: &str) -> Option<u64> {
         self.instances
             .lock()
             .expect("hermes instances poisoned")
             .get(session_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("Hermes is not running for session {session_id}"))
+            .map(|entry| entry.generation)
     }
 
-    fn send_event(&self, event: HermesEvent) -> Result<()> {
+    fn is_current(&self, session_id: &str, generation: u64) -> bool {
+        self.current_generation(session_id) == Some(generation)
+    }
+
+    fn instance(&self, session_id: &str, generation: u64) -> Result<Arc<HermesInstance>> {
+        self.instances
+            .lock()
+            .expect("hermes instances poisoned")
+            .get(session_id)
+            .filter(|entry| entry.generation == generation)
+            .map(|entry| Arc::clone(&entry.instance))
+            .ok_or_else(|| anyhow!("HERMES_SESSION_REPLACED"))
+    }
+
+    fn remove_instance_if_current(&self, session_id: &str, generation: u64) -> bool {
+        let mut instances = self.instances.lock().expect("hermes instances poisoned");
+        if instances.get(session_id).map(|entry| entry.generation) != Some(generation) {
+            return false;
+        }
+        instances.remove(session_id);
+        true
+    }
+
+    fn retire_instance_if_current(
+        &self,
+        session_id: &str,
+        generation: u64,
+        emit_exit: bool,
+    ) -> Result<bool> {
+        let mut instances = self.instances.lock().expect("hermes instances poisoned");
+        if instances.get(session_id).map(|entry| entry.generation) != Some(generation) {
+            return Ok(false);
+        }
+        let send_result = if emit_exit {
+            self.output_channel
+                .lock()
+                .expect("hermes output channel poisoned")
+                .as_ref()
+                .cloned()
+                .map(|channel| {
+                    channel.send(HermesEvent {
+                        generation,
+                        payload: HermesEventPayload::Exited {
+                            session_id: session_id.to_string(),
+                        },
+                    })
+                })
+                .transpose()
+        } else {
+            Ok(None)
+        };
+        instances.remove(session_id);
+        send_result?;
+        Ok(true)
+    }
+
+    fn send_current_event(
+        &self,
+        session_id: &str,
+        generation: u64,
+        payload: HermesEventPayload,
+    ) -> Result<()> {
+        let instances = self.instances.lock().expect("hermes instances poisoned");
+        if instances.get(session_id).map(|entry| entry.generation) != Some(generation) {
+            return Ok(());
+        }
         if let Some(channel) = self
             .output_channel
             .lock()
@@ -629,46 +809,91 @@ impl HermesManager {
             .as_ref()
             .cloned()
         {
-            channel.send(event)?;
+            channel.send(HermesEvent {
+                generation,
+                payload,
+            })?;
         }
         Ok(())
     }
 }
 
+struct PendingHermesRequest {
+    id: u64,
+    method: String,
+    receiver: Receiver<Value>,
+}
+
 impl HermesInstance {
     fn request(&self, method: &str, params: Value, timeout: Option<Duration>) -> Result<Value> {
+        let pending = self.begin_request(method, params)?;
+        self.finish_request(pending, timeout)
+    }
+
+    fn begin_request(&self, method: &str, params: Value) -> Result<PendingHermesRequest> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = bounded(1);
+        let (tx, receiver) = bounded(1);
         self.pending
             .lock()
             .expect("hermes pending poisoned")
             .insert(id, tx);
-        let write = self.write_line(&json!({
+        if let Err(error) = self.write_line(&json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
             "params": params,
-        }));
-        if let Err(err) = write {
+        })) {
             self.pending
                 .lock()
                 .expect("hermes pending poisoned")
                 .remove(&id);
-            return Err(err);
+            return Err(error);
         }
+        Ok(PendingHermesRequest {
+            id,
+            method: method.to_string(),
+            receiver,
+        })
+    }
 
+    fn finish_request(
+        &self,
+        pending: PendingHermesRequest,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let response = match timeout {
-            Some(timeout) => rx
-                .recv_timeout(timeout)
-                .map_err(|err| anyhow!("Hermes request {method} timed out or failed: {err}"))?,
-            None => rx
+            Some(timeout) => pending.receiver.recv_timeout(timeout).map_err(|error| {
+                anyhow!(
+                    "Hermes request {} timed out or failed: {error}",
+                    pending.method
+                )
+            }),
+            None => pending
+                .receiver
                 .recv()
-                .map_err(|err| anyhow!("Hermes request {method} failed: {err}"))?,
+                .map_err(|error| anyhow!("Hermes request {} failed: {error}", pending.method)),
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                self.pending
+                    .lock()
+                    .expect("hermes pending poisoned")
+                    .remove(&pending.id);
+                return Err(error);
+            }
         };
         if let Some(error) = response.get("error") {
-            bail!("Hermes request {method} failed: {error}");
+            bail!("Hermes request {} failed: {error}", pending.method);
         }
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    fn cancel_pending(&self, id: u64) {
+        self.pending
+            .lock()
+            .expect("hermes pending poisoned")
+            .remove(&id);
     }
 
     fn fail_pending(&self, message: &str) {
@@ -710,36 +935,46 @@ impl HermesInstance {
 
 #[tauri::command]
 pub async fn init_hermes_output(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     manager: State<'_, Arc<HermesManager>>,
     channel: Channel<HermesEvent>,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     manager.set_output_channel(channel);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn hermes_start(
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     manager: State<'_, Arc<HermesManager>>,
     session_id: String,
     command_override: Option<String>,
     workspace_folder: Option<String>,
-) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+) -> Result<HermesStartResult, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager
         .start(session_id, command_override, workspace_folder)
+        .map(|generation| HermesStartResult { generation })
         .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_new_session(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
 ) -> Result<String, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.new_session(&session_id))
+    tauri::async_runtime::spawn_blocking(move || manager.new_session(&session_id, generation))
         .await
         .map_err(to_string)?
         .map_err(to_string)
@@ -748,14 +983,17 @@ pub async fn hermes_new_session(
 #[tauri::command]
 pub async fn hermes_resume_session(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
     acp_session_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || {
-        manager.resume_session(&session_id, acp_session_id)
+        manager.resume_session(&session_id, generation, acp_session_id)
     })
     .await
     .map_err(to_string)?
@@ -765,12 +1003,15 @@ pub async fn hermes_resume_session(
 #[tauri::command]
 pub async fn hermes_list_sessions(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
 ) -> Result<Vec<HermesSessionInfo>, String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.list_sessions(&session_id))
+    tauri::async_runtime::spawn_blocking(move || manager.list_sessions(&session_id, generation))
         .await
         .map_err(to_string)?
         .map_err(to_string)
@@ -779,63 +1020,82 @@ pub async fn hermes_list_sessions(
 #[tauri::command]
 pub async fn hermes_send(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
     text: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    manager.send_message(session_id, text).map_err(to_string)
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    manager
+        .send_message(session_id, generation, text)
+        .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_cancel(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
-    manager.cancel(&session_id).map_err(to_string)
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    manager.cancel(&session_id, generation).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_respond_permission(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
     request_id: u64,
     option_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager
-        .respond_permission(&session_id, request_id, option_id)
+        .respond_permission(&session_id, generation, request_id, option_id)
         .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_set_model(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
     model_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.set_model(&session_id, model_id))
-        .await
-        .map_err(to_string)?
-        .map_err(to_string)
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.set_model(&session_id, generation, model_id)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn hermes_set_mode(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
+    generation: u64,
     mode_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.set_mode(&session_id, mode_id))
+    tauri::async_runtime::spawn_blocking(move || manager.set_mode(&session_id, generation, mode_id))
         .await
         .map_err(to_string)?
         .map_err(to_string)
@@ -844,15 +1104,23 @@ pub async fn hermes_set_mode(
 #[tauri::command]
 pub async fn hermes_stop(
     manager: State<'_, Arc<HermesManager>>,
-    license: State<'_, Arc<LicenseService>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<(), String> {
-    license.require_entitled_cached().map_err(to_string)?;
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     manager.stop(&session_id).map_err(to_string)
 }
 
 #[tauri::command]
-pub async fn hermes_cli_command(command_override: Option<String>) -> Result<String, String> {
+pub async fn hermes_cli_command(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    command_override: Option<String>,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || resolve_hermes_command(command_override))
         .await
         .map_err(to_string)?
@@ -861,9 +1129,13 @@ pub async fn hermes_cli_command(command_override: Option<String>) -> Result<Stri
 
 #[tauri::command]
 pub async fn hermes_auth_list(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     command_override: Option<String>,
 ) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         hermes_auth_list_native(&session_id, command_override)
     })
@@ -874,8 +1146,12 @@ pub async fn hermes_auth_list(
 
 #[tauri::command]
 pub async fn hermes_runtime_status(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     command_override: Option<String>,
 ) -> Result<HermesRuntimeStatus, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || hermes_runtime_status_native(command_override))
         .await
         .map_err(to_string)?
@@ -884,9 +1160,13 @@ pub async fn hermes_runtime_status(
 
 #[tauri::command]
 pub async fn hermes_workspace_state(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
     workspace_folder: Option<String>,
 ) -> Result<HermesWorkspaceState, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         read_workspace_state_native(&session_id, workspace_folder.as_deref())
     })
@@ -895,27 +1175,41 @@ pub async fn hermes_workspace_state(
     .map_err(to_string)
 }
 
+fn cleanup_agent_workspace_at(
+    manager: &HermesManager,
+    session_id: &str,
+    path: &Path,
+) -> Result<()> {
+    manager.stop(session_id)?;
+    if path.exists() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("delete VibeLink agent workspace {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn agent_workspace_cleanup(
     manager: State<'_, Arc<HermesManager>>,
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || -> Result<()> {
-        manager.stop(&session_id)?;
         let path = agent_workspace_dir(&session_id)?;
-        if path.exists() {
-            std::fs::remove_dir_all(&path)
-                .with_context(|| format!("delete VibeLink agent workspace {}", path.display()))?;
-        }
-        Ok(())
+        cleanup_agent_workspace_at(&manager, &session_id, &path)
     })
     .await
     .map_err(to_string)?
     .map_err(to_string)
 }
+
 fn spawn_stdout_reader(
     session_id: String,
+    generation: u64,
     stdout: impl std::io::Read + Send + 'static,
     instance: Arc<HermesInstance>,
     manager: Arc<HermesManager>,
@@ -927,36 +1221,48 @@ fn spawn_stdout_reader(
                 match line {
                     Ok(line) if line.trim().is_empty() => continue,
                     Ok(line) => match serde_json::from_str::<Value>(&line) {
-                        Ok(value) => route_acp_message(&session_id, &value, &instance, &manager),
+                        Ok(value) => {
+                            route_acp_message(&session_id, generation, &value, &instance, &manager)
+                        }
                         Err(err) => warn!(?err, line, "invalid Hermes ACP JSON"),
                     },
                     Err(err) => {
-                        let _ = manager.send_event(HermesEvent::Error {
-                            session_id: session_id.clone(),
-                            message: format!("Hermes stdout stopped: {err}"),
-                        });
+                        let _ = manager.send_current_event(
+                            &session_id,
+                            generation,
+                            HermesEventPayload::Error {
+                                session_id: session_id.clone(),
+                                message: format!("Hermes stdout stopped: {err}"),
+                            },
+                        );
                         break;
                     }
                 }
             }
             instance.fail_pending("Hermes process exited");
-            manager
-                .instances
-                .lock()
-                .expect("hermes instances poisoned")
-                .remove(&session_id);
-            manager.set_prompt_active(&session_id, false);
-            let _ = manager.send_event(HermesEvent::Exited { session_id });
+            if manager
+                .retire_instance_if_current(&session_id, generation, true)
+                .unwrap_or(false)
+            {
+                manager.set_prompt_active(&session_id, generation, false);
+            }
         })
         .expect("spawn hermes stdout reader");
 }
 
-fn spawn_stderr_drain(session_id: String, stderr: impl std::io::Read + Send + 'static) {
+fn spawn_stderr_drain(
+    session_id: String,
+    generation: u64,
+    stderr: impl std::io::Read + Send + 'static,
+    manager: Arc<HermesManager>,
+) {
     thread::Builder::new()
         .name(format!("vibelink-hermes-stderr-{session_id}"))
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                debug!(session_id, line, "Hermes stderr");
+                if manager.is_current(&session_id, generation) {
+                    debug!(session_id, generation, line, "Hermes stderr");
+                }
             }
         })
         .expect("spawn hermes stderr drain");
@@ -976,8 +1282,73 @@ fn vibelink_mcp_servers(session_id: &str, flavor: &str) -> Value {
     }])
 }
 
+fn load_last_acp_session(path: &Path) -> Result<Option<String>> {
+    let report = load_with_recovery(
+        path,
+        LoadedLastAcpSession {
+            acp_session_id: None,
+            legacy: false,
+        },
+        parse_last_acp_session,
+    )?;
+    let loaded = report.value;
+    if loaded.legacy {
+        save_last_acp_session(
+            path,
+            loaded
+                .acp_session_id
+                .as_deref()
+                .expect("legacy Hermes metadata always has a session id"),
+        )?;
+    }
+    Ok(loaded.acp_session_id)
+}
+
+fn parse_last_acp_session(
+    bytes: &[u8],
+) -> std::result::Result<LoadedLastAcpSession, DocumentError> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|error| DocumentError::Invalid(anyhow!(error)))?;
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"') {
+        let document: LastAcpSessionDocument = parse_json(bytes)?;
+        require_supported_schema(document.schema_version, LAST_ACP_SESSION_SCHEMA_VERSION)?;
+        return Ok(LoadedLastAcpSession {
+            acp_session_id: Some(require_acp_session_id(document.acp_session_id)?),
+            legacy: false,
+        });
+    }
+    Ok(LoadedLastAcpSession {
+        acp_session_id: Some(require_acp_session_id(trimmed.to_string())?),
+        legacy: true,
+    })
+}
+
+fn require_acp_session_id(value: String) -> std::result::Result<String, DocumentError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(DocumentError::Invalid(anyhow!(
+            "Hermes session metadata contains an empty session id"
+        )));
+    }
+    Ok(value)
+}
+
+fn save_last_acp_session(path: &Path, acp_session_id: &str) -> Result<()> {
+    let acp_session_id = require_acp_session_id(acp_session_id.to_string())
+        .map_err(|_| anyhow!("Hermes session id is empty"))?;
+    write_json(
+        path,
+        &LastAcpSessionDocument {
+            schema_version: LAST_ACP_SESSION_SCHEMA_VERSION,
+            acp_session_id,
+        },
+    )
+}
+
 fn handshake(
     vibelink_session_id: &str,
+    generation: u64,
     cwd: &str,
     home: &Path,
     configured_model: Option<&HermesConfiguredModel>,
@@ -993,6 +1364,7 @@ fn handshake(
         }),
         Some(REQUEST_TIMEOUT),
     )?;
+    manager.instance(vibelink_session_id, generation)?;
     instance.sessions_list_supported.store(
         initialize
             .pointer("/agentCapabilities/sessionCapabilities/list")
@@ -1001,16 +1373,17 @@ fn handshake(
     );
 
     let session_file = home.join("last-acp-session");
-    let saved_session = std::fs::read_to_string(&session_file)
-        .ok()
-        .and_then(non_empty)
-        .map(|value| value.trim().to_string());
+    let saved_session = load_last_acp_session(&session_file)?;
 
     let (response, resumed_session) = if let Some(session_id) = saved_session.as_deref() {
-        let _ = manager.send_event(HermesEvent::SessionReplay {
-            session_id: vibelink_session_id.to_string(),
-            acp_session_id: session_id.to_string(),
-        });
+        let _ = manager.send_current_event(
+            vibelink_session_id,
+            generation,
+            HermesEventPayload::SessionReplay {
+                session_id: vibelink_session_id.to_string(),
+                acp_session_id: session_id.to_string(),
+            },
+        );
         let resume_result = instance.request(
             "session/resume",
             json!({
@@ -1033,6 +1406,7 @@ fn handshake(
 
     finalize_acp_session(
         vibelink_session_id,
+        generation,
         home,
         configured_model,
         instance,
@@ -1044,6 +1418,7 @@ fn handshake(
 
 fn finalize_acp_session(
     vibelink_session_id: &str,
+    generation: u64,
     home: &Path,
     configured_model: Option<&HermesConfiguredModel>,
     instance: &HermesInstance,
@@ -1052,11 +1427,21 @@ fn finalize_acp_session(
     resumed_session: Option<&str>,
 ) -> Result<()> {
     let acp_session_id = acp_session_id_from_response(response, resumed_session)?;
-    std::fs::write(home.join("last-acp-session"), &acp_session_id)?;
-    *instance
-        .acp_session_id
-        .lock()
-        .expect("hermes acp session poisoned") = Some(acp_session_id.clone());
+    {
+        let instances = manager.instances.lock().expect("hermes instances poisoned");
+        if instances
+            .get(vibelink_session_id)
+            .map(|entry| entry.generation)
+            != Some(generation)
+        {
+            bail!("HERMES_SESSION_REPLACED");
+        }
+        save_last_acp_session(&home.join("last-acp-session"), &acp_session_id)?;
+        *instance
+            .acp_session_id
+            .lock()
+            .expect("hermes acp session poisoned") = Some(acp_session_id.clone());
+    }
 
     if let Some(model) = configured_model.filter(|model| !model.provider.trim().is_empty()) {
         let model_id = acp_model_id_from_configured_model(model);
@@ -1069,17 +1454,27 @@ fn finalize_acp_session(
         }
     }
 
-    manager.send_event(HermesEvent::Started {
-        session_id: vibelink_session_id.to_string(),
-        acp_session_id: acp_session_id.clone(),
-    })?;
+    manager.instance(vibelink_session_id, generation)?;
+
+    manager.send_current_event(
+        vibelink_session_id,
+        generation,
+        HermesEventPayload::Started {
+            session_id: vibelink_session_id.to_string(),
+            acp_session_id: acp_session_id.clone(),
+        },
+    )?;
     let models = models_from_response(response);
     if !models.0.is_empty() || !models.1.is_empty() {
-        manager.send_event(HermesEvent::Models {
-            session_id: vibelink_session_id.to_string(),
-            available: models.0,
-            current: models.1,
-        })?;
+        manager.send_current_event(
+            vibelink_session_id,
+            generation,
+            HermesEventPayload::Models {
+                session_id: vibelink_session_id.to_string(),
+                available: models.0,
+                current: models.1,
+            },
+        )?;
     }
     Ok(())
 }
@@ -1140,10 +1535,14 @@ fn require_qualified_model(model_id: &str) -> Result<()> {
 
 fn route_acp_message(
     vibelink_session_id: &str,
+    generation: u64,
     value: &Value,
     instance: &HermesInstance,
     manager: &HermesManager,
 ) {
+    if !manager.is_current(vibelink_session_id, generation) {
+        return;
+    }
     if value.get("id").is_some() && (value.get("result").is_some() || value.get("error").is_some())
     {
         if let Some(id) = value.get("id").and_then(Value::as_u64) {
@@ -1161,14 +1560,14 @@ fn route_acp_message(
 
     if value.get("method").and_then(Value::as_str) == Some("session/update") {
         if let Some(event) = translate_update(vibelink_session_id, value) {
-            let _ = manager.send_event(event);
+            let _ = manager.send_current_event(vibelink_session_id, generation, event);
         }
         return;
     }
 
     if value.get("method").and_then(Value::as_str) == Some("session/request_permission") {
         if let Some(event) = translate_permission(vibelink_session_id, value) {
-            let _ = manager.send_event(event);
+            let _ = manager.send_current_event(vibelink_session_id, generation, event);
         }
         return;
     }
@@ -1182,40 +1581,40 @@ fn route_acp_message(
     }
 }
 
-pub fn translate_update(vibelink_session_id: &str, value: &Value) -> Option<HermesEvent> {
+pub fn translate_update(vibelink_session_id: &str, value: &Value) -> Option<HermesEventPayload> {
     let update = value.get("params")?.get("update")?;
     let kind = update.get("sessionUpdate")?.as_str()?;
     match kind {
-        "user_message_chunk" => Some(HermesEvent::UserMessage {
+        "user_message_chunk" => Some(HermesEventPayload::UserMessage {
             session_id: vibelink_session_id.to_string(),
             text: update_text(update),
         }),
-        "agent_message_chunk" => Some(HermesEvent::Message {
+        "agent_message_chunk" => Some(HermesEventPayload::Message {
             session_id: vibelink_session_id.to_string(),
             text: update_text(update),
         }),
-        "agent_thought_chunk" => Some(HermesEvent::Thought {
+        "agent_thought_chunk" => Some(HermesEventPayload::Thought {
             session_id: vibelink_session_id.to_string(),
             text: update_text(update),
         }),
-        "tool_call" => Some(HermesEvent::ToolCall {
+        "tool_call" => Some(HermesEventPayload::ToolCall {
             session_id: vibelink_session_id.to_string(),
             tool_call_id: read_string(update, &["toolCallId", "id"]),
             title: read_string(update, &["title", "name"]),
             tool_kind: read_string(update, &["kind", "toolKind"]),
             status: read_string(update, &["status"]),
         }),
-        "tool_call_update" => Some(HermesEvent::ToolUpdate {
+        "tool_call_update" => Some(HermesEventPayload::ToolUpdate {
             session_id: vibelink_session_id.to_string(),
             tool_call_id: read_string(update, &["toolCallId", "id"]),
             status: read_string(update, &["status"]),
             content: update_text(update),
         }),
-        "plan" => Some(HermesEvent::Plan {
+        "plan" => Some(HermesEventPayload::Plan {
             session_id: vibelink_session_id.to_string(),
             entries: plan_entries(update),
         }),
-        "usage_update" => Some(HermesEvent::Usage {
+        "usage_update" => Some(HermesEventPayload::Usage {
             session_id: vibelink_session_id.to_string(),
             size: read_u64(update, &["size", "contextWindow"]),
             used: read_u64(update, &["used", "tokens"]),
@@ -1224,10 +1623,10 @@ pub fn translate_update(vibelink_session_id: &str, value: &Value) -> Option<Herm
     }
 }
 
-fn translate_permission(vibelink_session_id: &str, value: &Value) -> Option<HermesEvent> {
+fn translate_permission(vibelink_session_id: &str, value: &Value) -> Option<HermesEventPayload> {
     let params = value.get("params")?;
     let tool_call = params.get("toolCall")?;
-    Some(HermesEvent::Permission {
+    Some(HermesEventPayload::Permission {
         session_id: vibelink_session_id.to_string(),
         request_id: value.get("id")?.as_u64()?,
         title: read_string(tool_call, &["title", "name"]),
@@ -1720,7 +2119,7 @@ mod tests {
 
         let event = translate_update("vibelink-session", &value).expect("event");
         match event {
-            HermesEvent::Message { session_id, text } => {
+            HermesEventPayload::Message { session_id, text } => {
                 assert_eq!(session_id, "vibelink-session");
                 assert_eq!(text, "hello");
             }
@@ -1747,7 +2146,7 @@ mod tests {
 
         let event = translate_update("vibelink-session", &value).expect("event");
         match event {
-            HermesEvent::ToolCall {
+            HermesEventPayload::ToolCall {
                 session_id,
                 tool_call_id,
                 title,
@@ -1766,13 +2165,17 @@ mod tests {
 
     #[test]
     fn hermes_events_serialize_frontend_field_names() {
-        let value = serde_json::to_value(HermesEvent::Started {
-            session_id: "vibelink-session".to_string(),
-            acp_session_id: "acp-session".to_string(),
+        let value = serde_json::to_value(HermesEvent {
+            generation: 7,
+            payload: HermesEventPayload::Started {
+                session_id: "vibelink-session".to_string(),
+                acp_session_id: "acp-session".to_string(),
+            },
         })
         .expect("serialize event");
 
         assert_eq!(value["kind"], "started");
+        assert_eq!(value["generation"], 7);
         assert_eq!(value["sessionId"], "vibelink-session");
         assert_eq!(value["acpSessionId"], "acp-session");
         assert!(value.get("session_id").is_none());
@@ -1782,11 +2185,117 @@ mod tests {
     fn hermes_manager_tracks_active_prompts_for_cancel_guard() {
         let manager = HermesManager::new();
 
-        assert!(!manager.is_prompt_active("session-1"));
-        manager.set_prompt_active("session-1", true);
-        assert!(manager.is_prompt_active("session-1"));
-        manager.set_prompt_active("session-1", false);
-        assert!(!manager.is_prompt_active("session-1"));
+        assert!(!manager.is_prompt_active("session-1", 4));
+        manager.set_prompt_active("session-1", 4, true);
+        assert!(manager.is_prompt_active("session-1", 4));
+        assert!(!manager.is_prompt_active("session-1", 5));
+        manager.set_prompt_active("session-1", 5, false);
+        assert!(manager.is_prompt_active("session-1", 4));
+        manager.set_prompt_active("session-1", 4, false);
+        assert!(!manager.is_prompt_active("session-1", 4));
+    }
+
+    #[test]
+    fn stop_generation_waits_and_removes_exact_child() {
+        let manager = HermesManager::new();
+        let instance = Arc::new(test_instance());
+        manager.instances.lock().expect("instances mutex").insert(
+            "session-1".to_string(),
+            HermesInstanceEntry {
+                generation: 4,
+                instance: Arc::clone(&instance),
+            },
+        );
+
+        manager
+            .stop_generation("session-1", 4, false)
+            .expect("stop generation");
+
+        assert_eq!(manager.current_generation("session-1"), None);
+        assert!(instance
+            .child
+            .lock()
+            .expect("child mutex")
+            .try_wait()
+            .expect("child status")
+            .is_some());
+    }
+
+    #[test]
+    fn workspace_cleanup_stops_child_before_removing_owned_files() {
+        let manager = HermesManager::new();
+        let instance = Arc::new(test_instance());
+        manager.instances.lock().expect("instances mutex").insert(
+            "session-cleanup".to_string(),
+            HermesInstanceEntry {
+                generation: 8,
+                instance: Arc::clone(&instance),
+            },
+        );
+        let path =
+            std::env::temp_dir().join(format!("vibelink-hermes-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create Agent workspace");
+        std::fs::write(path.join("metadata.json"), b"owned").expect("write Agent metadata");
+
+        cleanup_agent_workspace_at(&manager, "session-cleanup", &path)
+            .expect("cleanup Agent workspace");
+
+        assert_eq!(manager.current_generation("session-cleanup"), None);
+        assert!(!path.exists());
+        assert!(instance
+            .child
+            .lock()
+            .expect("child mutex")
+            .try_wait()
+            .expect("child status")
+            .is_some());
+    }
+
+    #[test]
+    fn stale_generation_cannot_remove_or_complete_current_instance() {
+        let manager = HermesManager::new();
+        let stale = Arc::new(test_instance());
+        let current = Arc::new(test_instance());
+        manager.instances.lock().expect("instances mutex").insert(
+            "session-1".to_string(),
+            HermesInstanceEntry {
+                generation: 2,
+                instance: Arc::clone(&current),
+            },
+        );
+        let (sender, _receiver) = bounded(1);
+        stale
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .insert(9, sender);
+
+        route_acp_message(
+            "session-1",
+            1,
+            &json!({ "jsonrpc": "2.0", "id": 9, "result": {} }),
+            &stale,
+            &manager,
+        );
+
+        assert!(stale
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .contains_key(&9));
+        assert!(!manager.remove_instance_if_current("session-1", 1));
+        assert_eq!(manager.current_generation("session-1"), Some(2));
+        let error = manager
+            .instance("session-1", 1)
+            .err()
+            .expect("stale generation error");
+        assert_eq!(error.to_string(), "HERMES_SESSION_REPLACED");
+
+        for instance in [stale, current] {
+            let mut child = instance.child.lock().expect("child mutex");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     #[test]
@@ -1806,6 +2315,119 @@ mod tests {
         .expect("response id");
 
         assert_eq!(session_id, "new-session");
+    }
+
+    fn hermes_metadata_path(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-hermes-metadata-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create Hermes metadata test directory");
+        root.join("last-acp-session")
+    }
+
+    fn hermes_metadata_backup_path(path: &Path) -> PathBuf {
+        path.with_file_name(format!(
+            "{}.bak",
+            path.file_name().unwrap().to_string_lossy()
+        ))
+    }
+
+    fn cleanup_hermes_metadata(path: &Path) {
+        if let Some(root) = path.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn hermes_legacy_session_metadata_migrates_to_schema_v1() {
+        let path = hermes_metadata_path("legacy");
+        std::fs::write(&path, " legacy-session\n").unwrap();
+
+        let loaded = load_last_acp_session(&path).expect("load legacy Hermes metadata");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.as_deref(), Some("legacy-session"));
+        assert_eq!(document["schemaVersion"], LAST_ACP_SESSION_SCHEMA_VERSION);
+        assert_eq!(document["acpSessionId"], "legacy-session");
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_corrupt_primary_recovers_valid_backup() {
+        let path = hermes_metadata_path("backup");
+        save_last_acp_session(&path, "first-session").unwrap();
+        save_last_acp_session(&path, "second-session").unwrap();
+        std::fs::write(&path, b"{").unwrap();
+
+        let loaded = load_last_acp_session(&path).expect("recover Hermes metadata backup");
+
+        assert_eq!(loaded.as_deref(), Some("first-session"));
+        assert_eq!(
+            parse_last_acp_session(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .acp_session_id
+                .as_deref(),
+            Some("first-session")
+        );
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_corrupt_primary_and_backup_return_safe_default() {
+        let path = hermes_metadata_path("default");
+        std::fs::write(&path, b"{").unwrap();
+        std::fs::write(hermes_metadata_backup_path(&path), b"[").unwrap();
+
+        let loaded = load_last_acp_session(&path).expect("default corrupt Hermes metadata");
+
+        assert!(loaded.is_none());
+        assert!(!path.exists());
+        assert!(!hermes_metadata_backup_path(&path).exists());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count(),
+            2
+        );
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_newer_metadata_schema_errors_without_overwrite() {
+        let path = hermes_metadata_path("newer");
+        let future = br#"{"schemaVersion":2,"acpSessionId":"future-session"}"#;
+        std::fs::write(&path, future).unwrap();
+
+        let error = load_last_acp_session(&path).expect_err("future Hermes schema should fail");
+
+        assert!(error.to_string().contains("unsupported storage schema 2"));
+        assert!(!path.exists());
+        let quarantined = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .expect("future Hermes metadata quarantine");
+        assert_eq!(std::fs::read(quarantined.path()).unwrap(), future);
+        cleanup_hermes_metadata(&path);
+    }
+
+    #[test]
+    fn hermes_session_metadata_persists_normally() {
+        let path = hermes_metadata_path("roundtrip");
+
+        save_last_acp_session(&path, "current-session").expect("save Hermes metadata");
+        let loaded = load_last_acp_session(&path).expect("load Hermes metadata");
+
+        assert_eq!(loaded.as_deref(), Some("current-session"));
+        let document: LastAcpSessionDocument =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document.schema_version, LAST_ACP_SESSION_SCHEMA_VERSION);
+        assert_eq!(document.acp_session_id, "current-session");
+        cleanup_hermes_metadata(&path);
     }
 
     #[test]
