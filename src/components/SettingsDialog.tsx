@@ -109,7 +109,7 @@ import {
   type SettingsIcon,
 } from './settings/controls'
 import { agentIconName } from './settings/agentBrand'
-import { filterSettingsSections, settingsSectionById, type SettingsSectionId } from './settings/sections'
+import { filterSettingsSections, searchSettingsEntries, settingsSectionById, settingsSectionGroups, type SettingsSectionId } from './settings/sections'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -191,6 +191,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
   const fontChoices = useMemo(() => normalizeFontChoices(installedFonts, draft.fontFamily), [draft.fontFamily, installedFonts])
   const selectedTheme = terminalThemeDefinitionById(draft.terminalThemeId)
   const navGroups = useMemo(() => filterSettingsSections(search), [search])
+  const deepResults = useMemo(() => searchSettingsEntries(search), [search])
+  const deepSearchActive = search.trim().length > 0 && deepResults.length > 0
   const section = settingsSectionById(activeSection)
   const SectionIcon = section.icon
   /** Hook rows and CLI rows describe the same agents; merge them into one list. */
@@ -538,8 +540,34 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }
             <input aria-label="Search settings" value={search} placeholder="Search settings" onChange={(event) => setSearch(event.target.value)} />
           </div>
           <div className="vl-set-nav-scroll">
-            {navGroups.length === 0 ? <p className="vl-set-nav-empty">No matching settings.</p> : null}
-            {navGroups.map((group) => (
+            {deepSearchActive ? (
+              <nav className="vl-set-nav-group vl-set-search-results" aria-label="Search results">
+                {deepResults.map((result) => {
+                  const resultSection = settingsSectionById(result.section)
+                  const Icon = resultSection.icon
+                  const group = settingsSectionGroups.find((candidate) => candidate.sections.some((candidateSection) => candidateSection.id === result.section))
+                  return (
+                    <button
+                      key={`${result.section}:${result.label}`}
+                      type="button"
+                      className="vl-set-nav-item vl-set-search-result"
+                      onClick={() => {
+                        setActiveSection(result.section)
+                        setSearch('')
+                      }}
+                    >
+                      <Icon size={14} strokeWidth={1.9} aria-hidden="true" />
+                      <span className="vl-set-search-result-text">
+                        <span>{result.label}</span>
+                        <small>{group ? `${group.label} › ` : ''}{resultSection.label}</small>
+                      </span>
+                    </button>
+                  )
+                })}
+              </nav>
+            ) : null}
+            {!deepSearchActive && navGroups.length === 0 ? <p className="vl-set-nav-empty">No matching settings.</p> : null}
+            {deepSearchActive ? null : navGroups.map((group) => (
               <nav key={group.id} className="vl-set-nav-group" aria-label={group.label}>
                 <h3>{group.label}</h3>
                 {group.sections.map((entry) => {

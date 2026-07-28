@@ -41,6 +41,34 @@ fn cold_restore_scrollback(mut scrollback: Vec<u8>, rows: u16) -> Vec<u8> {
     scrollback
 }
 
+#[cfg(windows)]
+fn assign_process_job(
+    pane_id: Uuid,
+    root_pid: Option<u32>,
+) -> Option<crate::daemon::proc::PaneProcessJob> {
+    match root_pid {
+        Some(pid) => match crate::daemon::proc::PaneProcessJob::assign(pid) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    %pane_id,
+                    root_pid = pid,
+                    "failed to assign pane process to kill-on-close job; continuing without job ownership"
+                );
+                None
+            }
+        },
+        None => {
+            tracing::warn!(
+                %pane_id,
+                "PTY child did not expose a process id; continuing without job ownership"
+            );
+            None
+        }
+    }
+}
+
 pub struct SpawnedPane {
     pub pane: Pane,
     pub reader: Box<dyn Read + Send>,
@@ -59,6 +87,8 @@ pub struct Pane {
     child: SharedChild,
     killer: SharedKiller,
     root_pid: Option<u32>,
+    #[cfg(windows)]
+    _process_job: Option<crate::daemon::proc::PaneProcessJob>,
     pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     pub(crate) scrollback: Arc<Mutex<ScrollbackRing>>,
@@ -122,6 +152,8 @@ impl Pane {
             .spawn_command(command)
             .context("spawn pty command")?;
         let root_pid = child.process_id();
+        #[cfg(windows)]
+        let process_job = assign_process_job(config.pane_id, root_pid);
         let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().context("clone pty reader")?;
         let writer = pair.master.take_writer().context("take pty writer")?;
@@ -138,6 +170,8 @@ impl Pane {
                 child: Arc::new(Mutex::new(child)),
                 killer: Arc::new(Mutex::new(killer)),
                 root_pid,
+                #[cfg(windows)]
+                _process_job: process_job,
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
                 scrollback: Arc::new(Mutex::new(scrollback)),
@@ -256,6 +290,8 @@ impl Pane {
                 Box::new(FakeChild) as Box<dyn ChildKiller + Send + Sync>
             )),
             root_pid: None,
+            #[cfg(windows)]
+            _process_job: None,
             writer: Arc::new(Mutex::new(
                 Box::new(std::io::sink()) as Box<dyn Write + Send>
             )),
@@ -762,6 +798,13 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pane_job_assignment_failure_is_nonfatal() {
+        assert!(assign_process_job(Uuid::new_v4(), Some(u32::MAX)).is_none());
+        assert!(assign_process_job(Uuid::new_v4(), None).is_none());
     }
 
     #[test]

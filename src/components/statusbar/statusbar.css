@@ -1,0 +1,59 @@
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 24px;
+  padding: 0 10px;
+  flex: none;
+  background: var(--vibelink-sidebar);
+  border-top: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-muted);
+  font-size: 11px;
+  user-select: none;
+}
+
+.statusbar-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.statusbar-workspace {
+  max-width: 40%;
+}
+
+.statusbar-workspace-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.statusbar-branch {
+  color: var(--vibelink-blue);
+}
+
+.statusbar-sync {
+  color: var(--vibelink-muted);
+  font-size: 10px;
+}
+
+.statusbar-spacer {
+  flex: 1;
+}
+
+.statusbar-resources {
+  cursor: pointer;
+}
+
+.statusbar-resources:hover {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}

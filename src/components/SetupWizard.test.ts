@@ -1,33 +1,28 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
-import type { AgentCliStatus } from '../ipc/agents'
-import { setupStepAutoPass } from './setupWizardSteps'
+import { isSetupStepId, setupStepAutoPass, setupStepIds, setupStepTitle } from './setupWizardSteps'
 
-const detectedAgent: AgentCliStatus = {
-  id: 'codex',
-  displayName: 'Codex',
-  installed: true,
-  path: 'C:/tools/codex.exe',
-  version: 'codex 1.0',
-  auth: 'loggedIn',
-  loginHint: 'codex login',
-}
-
-describe('setup wizard auto-pass', () => {
-  test('pre-checks license and runtime when already satisfied', () => {
-    expect(setupStepAutoPass({
-      entitled: true,
-      runtimeDetected: true,
-      agentClis: [detectedAgent],
-      mcp: { spawnOk: true, initializeOk: true, toolCount: 16 },
-    })).toEqual({ license: true, agents: true, runtime: true, mcp: true })
+describe('setup wizard steps', () => {
+  test('uses the simplified first-run flow', () => {
+    expect(setupStepIds).toEqual(['welcome', 'account', 'appearance', 'finish'])
+    expect(setupStepIds.map(setupStepTitle)).toEqual(['Welcome', 'Account', 'Appearance', 'Finish'])
+    expect(setupStepIds.join(',')).not.toMatch(/agents|runtime|model|mcp/)
   })
 
-  test('leaves Pro setup steps incomplete when not entitled', () => {
-    expect(setupStepAutoPass({
-      entitled: false,
-      runtimeDetected: false,
-      agentClis: [],
-      mcp: null,
-    })).toEqual({ license: false, agents: false, runtime: false, mcp: false })
+  test('ignores persisted step ids from the retired flow', () => {
+    expect(['agents', 'appearance', 'mcp', 'finish'].filter(isSetupStepId)).toEqual(['appearance', 'finish'])
+  })
+
+  test('auto-passes only an already-entitled account step', () => {
+    expect(setupStepAutoPass({ entitled: true })).toEqual({ account: true })
+    expect(setupStepAutoPass({ entitled: false })).toEqual({ account: false })
+  })
+
+  test('keeps the setup backdrop below the draggable topbar', () => {
+    const css = readFileSync(new URL('../App.css', import.meta.url), 'utf8')
+
+    expect(css).toMatch(/\.main-surface\s*\{[^}]*--vibelink-topbar-height:\s*36px/s)
+    expect(css).toMatch(/\.topbar\s*\{[^}]*flex:\s*0 0 var\(--vibelink-topbar-height\)/s)
+    expect(css).toMatch(/\.setup-wizard-backdrop\s*\{[^}]*top:\s*var\(--vibelink-topbar-height\)/s)
   })
 })

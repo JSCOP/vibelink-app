@@ -340,3 +340,82 @@ fn emit_board_changed(client: &DaemonClient, session_id: &str) -> Result<()> {
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control_plane::ControlPlane;
+    use std::{
+        collections::HashSet,
+        fs,
+        path::PathBuf,
+        sync::Barrier,
+        thread,
+    };
+
+    fn test_data_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vibelink-board-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn concurrent_task_mutations_preserve_both_writes_without_legacy_temp_files() {
+        let directory = test_data_dir("concurrent-writes");
+        let plane = Arc::new(ControlPlane::open(&directory).expect("open control plane"));
+        let session_id = Uuid::new_v4().to_string();
+        let start = Arc::new(Barrier::new(3));
+
+        let writers = ["First task", "Second task"].map(|title| {
+            let plane = Arc::clone(&plane);
+            let session_id = session_id.clone();
+            let start = Arc::clone(&start);
+            thread::spawn(move || {
+                start.wait();
+                plane.execute(
+                    Uuid::new_v4(),
+                    ControlCommand::TaskCreate {
+                        session_id,
+                        title: title.to_string(),
+                        description: None,
+                    },
+                )
+            })
+        });
+
+        start.wait();
+        for writer in writers {
+            assert!(matches!(
+                writer.join().expect("join board writer"),
+                Ok(ControlResponse::Task(_))
+            ));
+        }
+
+        let ControlResponse::Board(board) = plane
+            .execute(
+                Uuid::new_v4(),
+                ControlCommand::BoardRead {
+                    session_id: session_id.clone(),
+                },
+            )
+            .expect("read concurrent board")
+        else {
+            panic!("board response");
+        };
+        let titles = board
+            .tasks
+            .values()
+            .map(|task| task.title.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(titles, HashSet::from(["First task", "Second task"]));
+        assert_eq!(board.task_order.len(), 2);
+        assert_eq!(board.revision, 2);
+
+        let legacy_path = directory
+            .join("kanban")
+            .join(format!("{session_id}.json"));
+        assert!(!legacy_path.exists());
+        assert!(!legacy_path.with_extension("json.tmp").exists());
+
+        drop(plane);
+        fs::remove_dir_all(directory).expect("cleanup control plane");
+    }
+}

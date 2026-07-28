@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Bug, X } from 'lucide-react'
 import { submitBugReport, type BugReportInput } from '../ipc/bugReports'
+import { toast } from './toast/toastStore'
 
 const categories: { value: BugReportInput['category']; label: string }[] = [
   { value: 'crash', label: 'Crash or freeze' },
@@ -19,13 +20,9 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
   const [stepsToReproduce, setStepsToReproduce] = useState('')
   const [contactAllowed, setContactAllowed] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
-  const [success, setSuccess] = useState(false)
 
   const submit = () => {
     setBusy(true)
-    setMessage('')
-    setSuccess(false)
     void submitBugReport({
       category,
       title: title.trim(),
@@ -36,11 +33,10 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
       setTitle('')
       setDescription('')
       setStepsToReproduce('')
-      setSuccess(true)
-      setMessage(`Bug report received · ${report.id}`)
+      toast.success(`Bug report received · ${report.id}`)
       setBusy(false)
     }, (error: unknown) => {
-      setMessage(String(error))
+      toast.error(String(error))
       setBusy(false)
     })
   }
@@ -80,7 +76,6 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
               <span>Allow support to reply to my Moobang account email.</span>
             </label>
             <p className="vibelink-settings-note">Limit: 20 reports per account per day. VibeLink attaches only its version and Windows platform. Logs, terminal output, workspace paths, and tokens are never attached automatically.</p>
-            <p role="status" aria-live="polite" className={success ? 'bug-report-success' : 'settings-error'}>{message}</p>
           </section>
           <footer className="settings-dialog-footer">
             <span>Do not include passwords, tokens, or private terminal output.</span>

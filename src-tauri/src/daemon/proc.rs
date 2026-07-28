@@ -66,6 +66,77 @@ pub fn process_exists(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
+pub struct PaneProcessJob {
+    _handle: OwnedHandle,
+}
+
+#[cfg(windows)]
+impl PaneProcessJob {
+    /// Create a kill-on-close job and assign the exact pane root process to it.
+    pub fn assign(pid: u32) -> std::io::Result<Self> {
+        use std::{ffi::c_void, mem::size_of};
+        use windows::{
+            core::PCWSTR,
+            Win32::System::{
+                JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW,
+                    JobObjectExtendedLimitInformation, SetInformationJobObject,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                },
+                Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+            },
+        };
+
+        let job = OwnedHandle(
+            unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(windows_error)?,
+        );
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .map_err(windows_error)?;
+
+        let process = OwnedHandle(
+            unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) }
+                .map_err(windows_error)?,
+        );
+        unsafe { AssignProcessToJobObject(job.0, process.0) }.map_err(windows_error)?;
+
+        Ok(Self { _handle: job })
+    }
+}
+
+#[cfg(windows)]
+struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+// SAFETY: Windows kernel handles are process-wide identifiers. This wrapper uniquely owns
+// the job handle, closes it on Drop, and is only moved with its owning Pane.
+unsafe impl Send for OwnedHandle {}
+
+#[cfg(windows)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+
+        if !self.0.is_invalid() {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_error(error: windows::core::Error) -> std::io::Error {
+    std::io::Error::other(error.to_string())
+}
+
+#[cfg(windows)]
 pub fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> std::io::Result<bool> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
@@ -179,6 +250,51 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pane_process_job_kills_assigned_process_tree_when_released() {
+        let mut root = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Seconds 1; $child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo -NoProfile -Command Start-Sleep -Seconds 60' -PassThru; Start-Sleep -Seconds 60",
+            ])
+            .spawn()
+            .expect("spawn pane job root powershell");
+        let root_pid = root.id();
+        let job = match super::PaneProcessJob::assign(root_pid) {
+            Ok(job) => job,
+            Err(error) => {
+                kill_process_tree(root_pid);
+                let _ = root.wait();
+                panic!("assign pane root to kill-on-close job: {error}");
+            }
+        };
+        let targets = wait_for_descendant(root_pid);
+
+        drop(job);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut sys = System::new();
+            sys.refresh_processes(ProcessesToUpdate::All, true);
+            if targets
+                .iter()
+                .all(|pid| sys.process(Pid::from_u32(*pid)).is_none())
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                kill_process_tree(root_pid);
+                let _ = root.wait();
+                panic!("pane job process tree still alive after job release: {targets:?}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let _ = root.wait();
     }
 
     #[cfg(windows)]

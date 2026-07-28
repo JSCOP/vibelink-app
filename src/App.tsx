@@ -6,7 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
-import { Activity, AlertTriangle, Bug, Camera, Eraser, Minus, Settings2, Square, Video, X } from 'lucide-react'
+import { Activity, AlertTriangle, Bug, Camera, Eraser, LayoutGrid, Minus, Settings2, Sparkles, Square, Video, X } from 'lucide-react'
 import { SettingsDialog } from './components/SettingsDialog'
 import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
 import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
@@ -18,6 +18,10 @@ import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
 import { AppDialogHost } from './components/AppDialog'
+import { ToastHost } from './components/toast/ToastHost'
+import { CommandPaletteHost } from './components/palette/CommandPalette'
+import type { PaletteItem } from './components/palette/paletteModel'
+import { StatusBar } from './components/statusbar/StatusBar'
 import { NotificationCenter } from './components/notifications/NotificationCenter'
 import { requestAutomationNavigation } from './components/automations/navigation'
 import type { AutomationNotificationPayload } from './ipc/notifications'
@@ -778,6 +782,23 @@ function App() {
     setIsSetupWizardOpen(true)
   }
 
+  const paletteCommands: PaletteItem[] = [
+    { id: 'cmd:settings', category: 'command', label: 'Open settings', detail: 'Configure VibeLink', icon: Settings2, run: () => setIsSettingsOpen(true) },
+    { id: 'cmd:monitor', category: 'command', label: 'Resource monitor', detail: 'Processes and memory', icon: Activity, run: () => setIsResourceMonitorOpen(true) },
+    { id: 'cmd:capture-image', category: 'command', label: 'Capture image', detail: 'Screenshot a region', icon: Camera, run: () => { openImageCapture() } },
+    { id: 'cmd:capture-video', category: 'command', label: 'Capture video', detail: 'Record a region', icon: Video, run: () => { void openVideoCapture() } },
+    { id: 'cmd:bug-report', category: 'command', label: 'Report a bug', detail: 'Account bug report', icon: Bug, run: () => setIsBugReportOpen(true) },
+    { id: 'cmd:run-setup', category: 'command', label: 'Run setup wizard', detail: 'Account, theme, and font', icon: Sparkles, run: () => { runSetupWizardAgain() } },
+    {
+      id: 'cmd:reset-layout', category: 'command', label: 'Reset workspace layout', detail: 'Panes keep running', icon: LayoutGrid,
+      run: () => {
+        void confirmDialog({ title: 'Reset the workspace layout?', message: 'Panes keep running; only the arrangement is rebuilt.', confirmLabel: 'Reset' })
+          .then((confirmed) => { if (confirmed) return contentActions?.resetLayout() })
+      },
+    },
+    { id: 'cmd:arrange-panes', category: 'command', label: 'Arrange panes', detail: 'Balance the active terminal grid', icon: LayoutGrid, run: () => { void contentActions?.arrangeTerminals() } },
+  ]
+
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
 
@@ -872,7 +893,7 @@ function App() {
             onCreate={() => setIsCreateOpen(true)}
           />
         ) : null}
-        {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} /> : null}
+        {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} /> : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
         {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
@@ -925,6 +946,7 @@ function App() {
             </section>
           </div>
         ) : null}
+        {status === 'ready' && !setupWizardVisible ? <StatusBar onOpenResourceMonitor={() => setIsResourceMonitorOpen(true)} /> : null}
       </section>
     </main>
     {dirtyEditorPrompt && typeof document !== 'undefined' ? createPortal(
@@ -952,6 +974,8 @@ function App() {
       document.body,
     ) : null}
     <AppDialogHost />
+    <ToastHost />
+    <CommandPaletteHost contentActions={contentActions} commands={paletteCommands} />
     </>
   )
 }

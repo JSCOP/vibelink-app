@@ -108,6 +108,30 @@
   justify-self: center;
 }
 
+.vl-set-search-result-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+}
+
+.vl-set-search-result-text > span {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vl-set-search-result-text > small {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--vibelink-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .vl-set-nav-item:hover {
   background: var(--vibelink-hover);
   color: var(--vibelink-text);

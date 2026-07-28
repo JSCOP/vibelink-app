@@ -4,12 +4,15 @@ import type { IDockviewPanelProps } from 'dockview-react'
 import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, TextSelect, X } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
+import { TerminalSearchBar } from '../components/TerminalSearchBar'
+import { terminalSearchForgetPane } from '../terminal/search'
 import { pathFromTerminalSelection } from '../terminal/selectionPath'
 import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
 import type { WorkspaceContentParams } from './workspaceContentModel'
 import { reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { findTerminalWindowForPane } from './terminalWindowRegistry'
+import { toast } from '../components/toast/toastStore'
 
 type TerminalPanelParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
 
@@ -36,7 +39,6 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const applyTerminalTitle = useWorkspaceStore((state) => state.applyTerminalTitle)
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
-  const setError = useWorkspaceStore((state) => state.setError)
   const hermesCommand = useWorkspaceStore((state) => state.settings?.hermesCommand ?? '')
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
   const paneTitle = useWorkspaceStore((state) => paneId ? state.panes[paneId]?.config.title : undefined)
@@ -104,7 +106,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     const path = contextMenu?.selectedPath
     closeContextMenu()
     if (!path) return
-    void invoke(command, { path }).catch((error) => setError(`${errorMessage}: ${String(error)}`))
+    void invoke(command, { path }).catch((error) => toast.error(`${errorMessage}: ${String(error)}`))
   }
 
   const askVibeLinkAgent = async () => {
@@ -165,6 +167,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [closeContextMenu, contextMenu])
 
+  useEffect(() => () => {
+    if (paneId) terminalSearchForgetPane(paneId)
+  }, [paneId])
+
   useEffect(() => {
     if (!paneId) return
     TerminalManager.setPaneVisible(paneId, panelApi.isVisible)
@@ -213,6 +219,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   return (
     <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onContextMenu={onContextMenu}>
       <div ref={hostRef} className="dock-terminal-host" />
+      <TerminalSearchBar paneId={paneId} />
       {remoteLease ? (
         <div
           className="remote-pane-lease-cover"

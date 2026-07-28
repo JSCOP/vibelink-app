@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceContentActions } from '../layout/contentActions'
 import { registerEditorNavigation } from '../editor/editorNavigation'
+const toastError = vi.hoisted(() => vi.fn())
+vi.mock('../components/toast/toastStore', () => ({ toast: { error: toastError } }))
 import {
   openTerminalLinkTarget,
   parseTerminalOpenTarget,
@@ -8,6 +10,8 @@ import {
 } from './fileLinkNavigation'
 
 describe('terminal file link navigation', () => {
+  beforeEach(() => toastError.mockReset())
+
   it('parses line/column links and OMP Read range selectors', () => {
     expect(parseTerminalOpenTarget('E:/repo/src/App.tsx:120:7')).toEqual({
       path: 'E:/repo/src/App.tsx',
@@ -79,5 +83,17 @@ describe('terminal file link navigation', () => {
 
     expect(openContent).not.toHaveBeenCalled()
     expect(openSystemPath).toHaveBeenCalledWith('D:/other/file.ts')
+  })
+
+  it('reports system-open failures through an error toast', async () => {
+    const openSystemPath = vi.fn(async () => { throw new Error('ShellExecute failed') })
+
+    await openTerminalLinkTarget(parseTerminalOpenTarget('D:/other/file.ts'), {
+      workspaceEpoch: 1,
+      contentActions: null,
+      openSystemPath,
+    })
+
+    expect(toastError).toHaveBeenCalledWith('Could not open terminal link: Error: ShellExecute failed')
   })
 })

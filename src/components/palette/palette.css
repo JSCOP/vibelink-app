@@ -1,0 +1,108 @@
+.command-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+}
+
+.command-palette {
+  position: absolute;
+  top: calc(var(--vibelink-topbar-height, 36px) + 24px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 48px));
+  background: var(--vibelink-panel);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.command-palette-input {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--vibelink-input);
+  border: none;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.command-palette-list {
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.command-palette-heading {
+  margin: 8px 8px 4px;
+  color: var(--vibelink-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.command-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--vibelink-text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-palette-item[data-selected] {
+  background: var(--vibelink-hover);
+}
+
+.command-palette-item-icon {
+  display: inline-flex;
+  width: 18px;
+  justify-content: center;
+  color: var(--vibelink-muted);
+  flex: none;
+}
+
+.command-palette-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette-item-detail {
+  margin-left: auto;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--vibelink-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: none;
+}
+
+.command-palette-empty {
+  padding: 18px 12px;
+  color: var(--vibelink-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.command-palette-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 7px 12px;
+  border-top: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-muted);
+  font-size: 10.5px;
+}

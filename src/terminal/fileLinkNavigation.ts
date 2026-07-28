@@ -1,6 +1,7 @@
 import type { WorkspaceContentActions } from '../layout/contentActions'
 import { normalizeWorkspaceRelativePath } from '../layout/workspaceContentModel'
 import { requestEditorNavigation, type EditorNavigationTarget } from '../editor/editorNavigation'
+import { toast } from '../components/toast/toastStore'
 
 export type TerminalOpenTarget = {
   path: string
@@ -77,7 +78,11 @@ export async function openTerminalLinkTarget(target: TerminalOpenTarget, options
     return
   }
 
-  await options.openSystemPath(target.path)
+  try {
+    await options.openSystemPath(target.path)
+  } catch (error) {
+    toast.error(`Could not open terminal link: ${String(error)}`)
+  }
 }
 
 

@@ -58,6 +58,8 @@ import {
 import type { DirEntryInfo, PaneMeta } from '../ipc/types'
 import type { WorkspaceCreationInput } from '../ipc/providerIntegrations'
 import { TerminalManager } from '../terminal/TerminalManager'
+import { openTerminalSearch } from '../terminal/search'
+import { isPaletteOpen, openPalette } from '../components/palette/paletteStore'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
 import { profileById, selectedProfileForWorkspace } from '../state/profiles'
 import {
@@ -1780,7 +1782,7 @@ export function WorkspaceView({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (effectiveWorkspaceInteractionSuspended || isAppDialogOpen()) return
+      if (effectiveWorkspaceInteractionSuspended || isAppDialogOpen() || isPaletteOpen()) return
       const api = apiRef.current
       const active = api?.activePanel
       if (!api || !active) return
@@ -2089,6 +2091,12 @@ async function runKeybindingAction(
       return
     case 'toggleLeftSidebar':
       toggleWorkspaceLeftSidebar(api)
+      return
+    case 'terminalSearch':
+      if (activePaneId) openTerminalSearch(activePaneId)
+      return
+    case 'openCommandPalette':
+      openPalette()
       return
     case 'closePane':
       await actions.requestCloseContent(activePaneId ? workspaceContentPanelId({ kind: 'terminal', instanceId: activePaneId }) : active.id)

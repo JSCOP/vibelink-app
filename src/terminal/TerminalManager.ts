@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
+import type { ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { terminalThemeById } from '../state/terminalThemes'
@@ -71,6 +72,25 @@ const MAX_DIVIDER_STABILITY_FRAMES = 8
 
 
 
+export type TerminalSearchOptions = {
+  caseSensitive?: boolean
+  wholeWord?: boolean
+  regex?: boolean
+  incremental?: boolean
+}
+
+const SEARCH_DECORATION_COLORS = {
+  matchBackground: '#39434f',
+  matchOverviewRuler: '#8b949e',
+  activeMatchBackground: '#ff9f1a',
+  activeMatchColorOverviewRuler: '#ff9f1a',
+}
+
+const withSearchDecorations = (options?: TerminalSearchOptions): ISearchOptions => ({
+  ...options,
+  decorations: SEARCH_DECORATION_COLORS,
+})
+
 type PendingInputChunk = { data: string; bytes: number }
 
 type SequencedOutputFrame = {
@@ -94,6 +114,7 @@ type Entry = {
   paneId: string
   term: Terminal
   fit: FitAddon
+  search: SearchAddon
   opened: boolean
   daemonAttached: boolean
   dataWired: boolean
@@ -364,8 +385,9 @@ class TerminalManagerImpl {
 
     const term = new Terminal(createTerminalOptions(this.settings))
     const fit = new FitAddon()
+    const search = new SearchAddon()
     term.loadAddon(fit)
-    term.loadAddon(new SearchAddon())
+    term.loadAddon(search)
     term.loadAddon(new Unicode11Addon())
     term.loadAddon(new ClipboardAddon())
     term.unicode.activeVersion = '11'
@@ -398,7 +420,7 @@ class TerminalManagerImpl {
       return true
     })
 
-    const entry: Entry = { paneId, term, fit, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false }
+    const entry: Entry = { paneId, term, fit, search, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false }
     this.entries.set(paneId, entry)
     entry.linkDisposables = [
       term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
@@ -955,6 +977,37 @@ class TerminalManagerImpl {
 
   hasSelection(paneId: string): boolean {
     return this.entries.get(paneId)?.term.hasSelection() ?? false
+  }
+
+  /** Find the next match in the pane buffer, highlighting every match with
+   *  decorations. Returns false when the pane or the term is missing. */
+  searchFindNext(paneId: string, query: string, options?: TerminalSearchOptions): boolean {
+    const entry = this.entries.get(paneId)
+    if (!entry || !query) return false
+    return entry.search.findNext(query, withSearchDecorations(options))
+  }
+
+  searchFindPrevious(paneId: string, query: string, options?: TerminalSearchOptions): boolean {
+    const entry = this.entries.get(paneId)
+    if (!entry || !query) return false
+    return entry.search.findPrevious(query, withSearchDecorations(options))
+  }
+
+  /** Remove every match decoration and the active-match selection. */
+  searchClear(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return
+    entry.search.clearDecorations()
+    entry.term.clearSelection()
+  }
+
+  /** Subscribe to match-count/index changes for a pane. Returns an
+   *  unsubscribe; when the pane is gone the subscription resolves to a no-op. */
+  onSearchResultsChanged(paneId: string, listener: (resultIndex: number, resultCount: number) => void): () => void {
+    const entry = this.entries.get(paneId)
+    if (!entry) return () => undefined
+    const disposable = entry.search.onDidChangeResults?.((event) => listener(event.resultIndex, event.resultCount))
+    return () => disposable?.dispose()
   }
 
   getSelection(paneId: string): string {
