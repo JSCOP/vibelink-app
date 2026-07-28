@@ -23,6 +23,7 @@ import {
   preventTerminalPaneStackDrop,
   unstackSerializedDockview,
 } from './innerPaneLayout'
+import { paneIdsInReadingOrder } from './paneSwap'
 import {
   parseWorkspaceContentParams,
   workspaceContentPanelId,
@@ -228,8 +229,13 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   const paneIds = useCallback((): string[] => {
     const api = innerApiRef.current
     if (!api) return paneIdsFromParams
-    return api.panels.flatMap((panel) => {
-      const content = parseWorkspaceContentParams(panel.params)
+    const panels = api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')
+    const panelById = new Map(panels.map((panel) => [panel.id, panel] as const))
+    return paneIdsInReadingOrder(panels.map((panel) => panel.id), (panelId) => {
+      const rect = panelById.get(panelId)?.group.element.getBoundingClientRect()
+      return rect ? { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height } : null
+    }).flatMap((panelId) => {
+      const content = parseWorkspaceContentParams(panelById.get(panelId)?.params)
       return content?.kind === 'terminal' ? [content.paneId] : []
     })
   }, [paneIdsFromParams])

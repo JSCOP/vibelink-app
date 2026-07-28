@@ -1,23 +1,19 @@
-import { useCallback, useMemo, useState } from 'react'
-import { MessagesSquare, Plus, RefreshCw, Search } from 'lucide-react'
+import { useCallback, useMemo, useState, useSyncExternalStore } from 'react'
+import { MessagesSquare, RefreshCw, Search } from 'lucide-react'
 import { WorkspaceSidebarPanelShell } from '../WorkspaceSidebarPanelShell'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
+import { getOpenContentSnapshot, subscribeOpenContent } from '../../layout/openContentRegistry'
+import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
 import { useWorkspaceStore } from '../../state/store'
 import type { AgentConversationInfo } from '../../ipc/agentHistory'
 import { ProfileIcon } from '../ProfileIcon'
 import { agentIconName } from '../settings/agentBrand'
 import {
   agentConversationLabel,
+  agentConversationPaneIds,
   agentResumeLaunch,
-  agentSessionIsUnread,
-  agentSessionLiveState,
-  agentSessionTitle,
-  compactAgentSessionCwd,
   formatAgentSessionUpdatedAt,
-  loadAgentSessionViews,
-  saveAgentSessionViews,
   visibleAgentConversations,
-  visibleAgentSessions,
 } from './agentSessionsModel'
 import { useHermesSessionController } from './useHermesSessionController'
 import './AgentSessionsSidebar.css'
@@ -26,68 +22,47 @@ export type AgentSessionsSidebarProps = {
   onCollapse?: () => void
 }
 
+const terminalPanelIdPrefix = workspaceContentPanelId({ kind: 'terminal', instanceId: '' })
+const paneRevealTimers = new WeakMap<HTMLElement, number>()
+
 export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) {
   const controller = useHermesSessionController()
   const contentActions = useWorkspaceContentActions()
   const setError = useWorkspaceStore((state) => state.setError)
   const activePaneId = useWorkspaceStore((state) => state.activePaneId)
+  const panes = useWorkspaceStore((state) => state.panes)
+  const openContent = useSyncExternalStore(subscribeOpenContent, getOpenContentSnapshot, getOpenContentSnapshot)
   const [search, setSearch] = useState('')
-  const [selection, setSelection] = useState(() => ({ workspaceId: controller.workspaceId, sessionId: controller.currentSessionId }))
   const [refreshing, setRefreshing] = useState(false)
-  const [views, setViews] = useState<Record<string, Record<string, number>>>(() => loadAgentSessionViews(typeof window === 'undefined' ? null : window.localStorage))
-  const shownSessions = useMemo(() => visibleAgentSessions(controller.sessions, search), [controller.sessions, search])
   const shownConversations = useMemo(() => visibleAgentConversations(controller.conversations, search), [controller.conversations, search])
-  const preferredSessionId = selection.workspaceId === controller.workspaceId ? selection.sessionId : null
-  const selectedSession = controller.sessions.find((session) => session.id === preferredSessionId)
-    ?? controller.sessions.find((session) => session.id === controller.currentSessionId)
-    ?? controller.sessions[0]
-    ?? null
-  const selectedSessionId = selectedSession?.id ?? null
-  const workspaceViews = controller.workspaceId ? views[controller.workspaceId] ?? {} : {}
-  const liveState = agentSessionLiveState(controller.status, controller.permissions)
-  const selectSession = useCallback((sessionId: string) => {
-    setSelection({ workspaceId: controller.workspaceId, sessionId })
-  }, [controller.workspaceId])
+  const paneNumberById = useMemo(() => new Map(openContent.flatMap((item) => {
+    if (item.kind !== 'terminal' || !item.panelId.startsWith(terminalPanelIdPrefix)) return []
+    const paneId = item.panelId.slice(terminalPanelIdPrefix.length)
+    return paneId ? [[paneId, 0] as const] : []
+  }).map(([paneId], index) => [paneId, index + 1] as const)), [openContent])
 
+  const conversationPaneIds = useCallback((conversation: AgentConversationInfo) => agentConversationPaneIds(conversation, Object.values(panes))
+    .sort((left, right) => (paneNumberById.get(left) ?? Number.MAX_SAFE_INTEGER) - (paneNumberById.get(right) ?? Number.MAX_SAFE_INTEGER)), [paneNumberById, panes])
 
-  const markViewed = useCallback((acpSessionId: string) => {
-    const workspaceId = controller.workspaceId
-    if (!workspaceId) return
-    setViews((current) => {
-      const next = {
-        ...current,
-        [workspaceId]: {
-          ...(current[workspaceId] ?? {}),
-          [acpSessionId]: Date.now(),
-        },
-      }
-      saveAgentSessionViews(typeof window === 'undefined' ? null : window.localStorage, next)
-      return next
-    })
-  }, [controller.workspaceId])
-
-  const activateAgent = useCallback(async (acpSessionId: string) => {
-    try {
-      const panelId = await contentActions.openContent({ kind: 'agent' })
-      if (panelId) contentActions.activateContent(panelId)
-      markViewed(acpSessionId)
-      return true
-    } catch (reason) {
-      setError(String(reason))
-      return false
-    }
-  }, [contentActions, markViewed, setError])
+  const revealPane = useCallback((paneId: string) => {
+    contentActions.activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+    flashAgentSessionPane(paneId)
+  }, [contentActions])
 
   const resumeConversation = useCallback(async (conversation: AgentConversationInfo, newWindow: boolean) => {
+    const openPaneIds = conversationPaneIds(conversation)
+    if (!newWindow && openPaneIds.length > 0) {
+      revealPane(activePaneId && openPaneIds.includes(activePaneId) ? activePaneId : openPaneIds[0])
+      return
+    }
     const launch = agentResumeLaunch(conversation)
     if (!launch) {
       setError(`Resuming ${agentConversationLabel(conversation.agent)} conversations is not supported.`)
       return
     }
     try {
-      // Plain click replaces the process in the highlighted terminal pane so
-      // the spatial grid stays unchanged. Ctrl/Cmd+click keeps the explicit
-      // escape hatch that opens the conversation in a fresh terminal window.
+      // Plain click replaces the highlighted terminal only when this conversation
+      // is not already open. Ctrl/Cmd+click explicitly creates another window.
       const panelId = await contentActions.openContent({
         kind: 'terminal',
         cwd: conversation.cwd,
@@ -97,32 +72,18 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
         newWindow,
         ...(!newWindow && activePaneId ? { replacePaneId: activePaneId } : {}),
       })
-      if (panelId) contentActions.activateContent(panelId)
+      if (!panelId) return
+      contentActions.activateContent(panelId)
+      if (panelId.startsWith(terminalPanelIdPrefix)) flashAgentSessionPane(panelId.slice(terminalPanelIdPrefix.length))
     } catch (reason) {
       setError(String(reason))
     }
-  }, [activePaneId, contentActions, setError])
-
-  const openSelected = async () => {
-    if (!selectedSession) return
-    if (selectedSession.id !== controller.currentSessionId) {
-      if (!await controller.resumeSession(selectedSession.id)) return
-    }
-    selectSession(selectedSession.id)
-    await activateAgent(selectedSession.id)
-  }
-
-  const createSession = async () => {
-    const acpSessionId = await controller.newSession()
-    if (!acpSessionId) return
-    selectSession(acpSessionId)
-    await activateAgent(acpSessionId)
-  }
+  }, [activePaneId, contentActions, conversationPaneIds, revealPane, setError])
 
   const refresh = async () => {
     setRefreshing(true)
     try {
-      await controller.refreshSessions()
+      await controller.refreshConversations()
     } finally {
       setRefreshing(false)
     }
@@ -135,7 +96,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
         type="search"
         aria-label="Search agent sessions"
         value={search}
-        placeholder="Search title, ID, or folder"
+        placeholder="Search title, agent, or folder"
         onChange={(event) => setSearch(event.target.value)}
       />
     </label>
@@ -143,40 +104,14 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
 
   const headerActions = (
     <>
-      <span className="agent-sessions-count" aria-label={`${shownSessions.length} shown of ${controller.sessions.length} recent sessions`}>
-        {shownSessions.length}/{controller.sessions.length}
+      <span className="agent-sessions-count" aria-label={`${shownConversations.length} shown of ${controller.conversations.length} conversations`}>
+        {shownConversations.length}/{controller.conversations.length}
       </span>
-      <button type="button" aria-label="Refresh agent sessions" title="Refresh agent sessions" disabled={refreshing || controller.status === 'starting'} onClick={() => void refresh()}>
+      <button type="button" aria-label="Refresh agent sessions" title="Refresh agent sessions" disabled={refreshing || controller.conversationsLoading} onClick={() => void refresh()}>
         <RefreshCw size={13} aria-hidden="true" />
-      </button>
-      <button type="button" aria-label="New agent session" title="New agent session" disabled={controller.actionsDisabled || !controller.workspaceId} onClick={() => void createSession()}>
-        <Plus size={13} aria-hidden="true" />
       </button>
     </>
   )
-
-  const footer = selectedSession ? (
-    <div className="agent-session-detail">
-      <div className="agent-session-detail-heading">
-        <strong>{agentSessionTitle(selectedSession)}</strong>
-        {selectedSession.id === controller.currentSessionId ? <span>Current</span> : null}
-      </div>
-      <dl>
-        <div><dt>Session</dt><dd><code>{selectedSession.id}</code></dd></div>
-        <div><dt>Folder</dt><dd title={selectedSession.cwd ?? undefined}>{selectedSession.cwd || 'Unavailable'}</dd></div>
-        <div><dt>Updated</dt><dd>{formatAgentSessionUpdatedAt(selectedSession.updatedAt)}</dd></div>
-        {selectedSession.id === controller.currentSessionId ? <div><dt>Status</dt><dd>{liveState.label}</dd></div> : null}
-      </dl>
-      <button
-        type="button"
-        className="agent-session-primary-action"
-        disabled={selectedSession.id !== controller.currentSessionId && controller.actionsDisabled}
-        onClick={() => void openSelected()}
-      >
-        {selectedSession.id === controller.currentSessionId ? 'Open' : 'Resume'}
-      </button>
-    </div>
-  ) : null
 
   return (
     <WorkspaceSidebarPanelShell
@@ -184,46 +119,47 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
       icon={<MessagesSquare size={14} aria-hidden="true" />}
       actions={headerActions}
       filter={filter}
-      footer={footer}
       onCollapse={onCollapse}
       collapsed={false}
       ariaLabel="Agent Sessions"
-      state={controller.workspaceId && controller.sessions.length === 0 && shownConversations.length === 0
-        ? { kind: refreshing || controller.conversationsLoading ? 'loading' : 'empty', message: refreshing || controller.conversationsLoading ? 'Loading agent sessions…' : 'No agent sessions yet' }
+      state={controller.workspaceId && controller.conversations.length === 0
+        ? { kind: refreshing || controller.conversationsLoading ? 'loading' : 'empty', message: refreshing || controller.conversationsLoading ? 'Loading agent sessions…' : 'No agent conversations yet' }
         : null}
       className="agent-sessions-sidebar"
     >
-      {shownSessions.length > 0 ? (
+      {shownConversations.length > 0 ? (
         <>
-          <div className="agent-session-group-label">Live sessions</div>
-          <div className="agent-session-list" role="listbox" aria-label="Live agent sessions">
-            {shownSessions.map((session) => {
-              const isCurrent = session.id === controller.currentSessionId
-              const isSelected = session.id === selectedSessionId
-              const unread = agentSessionIsUnread(session, workspaceViews[session.id])
+          <div className="agent-session-group-label">Recent conversations</div>
+          <div className="agent-session-list" role="list" aria-label="Recent agent conversations">
+            {shownConversations.map((conversation) => {
+              const openPaneIds = conversationPaneIds(conversation)
+              const active = Boolean(activePaneId && openPaneIds.includes(activePaneId))
+              const paneNumbers = openPaneIds.flatMap((paneId) => {
+                const paneNumber = paneNumberById.get(paneId)
+                return paneNumber ? [paneNumber] : []
+              })
+              const paneLabel = paneNumbers.length === 1 ? `Pane ${paneNumbers[0]}` : paneNumbers.length > 1 ? `Panes ${paneNumbers.join(', ')}` : null
+              const actionTitle = paneLabel
+                ? `${active ? 'Active in' : 'Open in'} terminal ${paneLabel.toLocaleLowerCase()}. Click to reveal · Ctrl+click for a new window · ${conversation.path}`
+                : `Resume in the highlighted terminal · Ctrl+click for a new window · ${conversation.path}`
               return (
                 <button
-                  key={session.id}
+                  key={`${conversation.agent}:${conversation.path}`}
                   type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  className={`agent-session-row${isSelected ? ' selected' : ''}${unread ? ' unread' : ''}`}
-                  onClick={() => selectSession(session.id)}
-                  onDoubleClick={() => { selectSession(session.id); void openSelectedSession(session.id, isCurrent) }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return
-                    event.preventDefault()
-                    void openSelectedSession(session.id, isCurrent)
-                  }}
+                  className={`agent-session-row agent-conversation-row${openPaneIds.length ? ' is-open' : ''}${active ? ' is-active' : ''}`}
+                  role="listitem"
+                  aria-current={active ? 'true' : undefined}
+                  title={actionTitle}
+                  onClick={(event) => { void resumeConversation(conversation, event.ctrlKey || event.metaKey) }}
                 >
                   <span className="agent-session-row-title">
-                    {isCurrent ? <span role="status" className={`agent-session-status agent-session-status-${liveState.tone}${liveState.pulse ? ' pulsing' : ''}`} aria-label={liveState.label} title={liveState.label} /> : null}
-                    <strong>{agentSessionTitle(session)}</strong>
-                    {isCurrent ? <small>Current</small> : null}
+                    <ProfileIcon name={agentIconName(conversation.agent)} size={13} className="agent-conversation-brand" />
+                    <strong>{conversation.title}</strong>
+                    {paneLabel ? <span className="agent-conversation-pane-badge">{paneLabel}</span> : null}
                   </span>
                   <span className="agent-session-row-meta">
-                    <span title={session.cwd ?? undefined}>{compactAgentSessionCwd(session.cwd, controller.workspaceFolder)}</span>
-                    <time dateTime={session.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(session.updatedAt)}</time>
+                    <span className="agent-conversation-agent">{agentConversationLabel(conversation.agent)}</span>
+                    <time dateTime={conversation.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(conversation.updatedAt)}</time>
                   </span>
                 </button>
               )
@@ -231,38 +167,28 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
           </div>
         </>
       ) : null}
-      {shownConversations.length > 0 ? (
-        <>
-          <div className="agent-session-group-label">Recent conversations</div>
-          <div className="agent-session-list" role="list" aria-label="Recent agent conversations">
-            {shownConversations.map((conversation) => (
-              <button
-                key={`${conversation.agent}:${conversation.path}`}
-                type="button"
-                className="agent-session-row agent-conversation-row"
-                role="listitem"
-                title={`Resume in the highlighted terminal · Ctrl+click for a new window · ${conversation.path}`}
-                onClick={(event) => { void resumeConversation(conversation, event.ctrlKey || event.metaKey) }}
-              >
-                <span className="agent-session-row-title">
-                  <ProfileIcon name={agentIconName(conversation.agent)} size={13} className="agent-conversation-brand" />
-                  <strong>{conversation.title}</strong>
-                </span>
-                <span className="agent-session-row-meta">
-                  <span className="agent-conversation-agent">{agentConversationLabel(conversation.agent)}</span>
-                  <time dateTime={conversation.updatedAt ?? undefined}>{formatAgentSessionUpdatedAt(conversation.updatedAt)}</time>
-                </span>
-              </button>
-            ))}
-          </div>
-        </>
-      ) : null}
+
     </WorkspaceSidebarPanelShell>
   )
-
-  async function openSelectedSession(acpSessionId: string, isCurrent: boolean): Promise<void> {
-    if (!isCurrent && !await controller.resumeSession(acpSessionId)) return
-    selectSession(acpSessionId)
-    await activateAgent(acpSessionId)
-  }
 }
+
+function flashAgentSessionPane(paneId: string): void {
+  if (typeof document === 'undefined') return
+  const reveal = () => {
+    const shell = [...document.querySelectorAll<HTMLElement>('.terminal-panel-shell[data-pane-id]')]
+      .find((candidate) => candidate.dataset.paneId === paneId)
+    if (!shell) return
+    const previous = paneRevealTimers.get(shell)
+    if (previous !== undefined) window.clearTimeout(previous)
+    shell.classList.remove('agent-session-pane-reveal')
+    void shell.offsetWidth
+    shell.classList.add('agent-session-pane-reveal')
+    paneRevealTimers.set(shell, window.setTimeout(() => {
+      shell.classList.remove('agent-session-pane-reveal')
+      paneRevealTimers.delete(shell)
+    }, 1000))
+  }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(reveal)
+  else reveal()
+}
+
