@@ -12,6 +12,7 @@ mod orchestration;
 mod persistence;
 mod protocol;
 mod remote;
+mod worktree_storage;
 
 fn main() {
     let first = std::env::args().nth(1);

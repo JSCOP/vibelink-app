@@ -24,6 +24,8 @@ mod persistence;
 mod protocol;
 #[path = "../src/remote/mod.rs"]
 mod remote;
+#[path = "../src/worktree_storage.rs"]
+mod worktree_storage;
 
 use dedicated_cli::{run_with_io, CliError, SocketExecutor};
 

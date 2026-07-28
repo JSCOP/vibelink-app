@@ -210,6 +210,33 @@ impl CoordinatorService {
         )
     }
 
+    pub fn create_notification(
+        &self,
+        kind: &str,
+        entity_id: &str,
+        payload: Value,
+    ) -> CoordinatorResult<NotificationRecord> {
+        let kind = required(kind, "notification kind")?;
+        let entity_id = required(entity_id, "notification entity id")?;
+        self.control.with_connection_mut(|connection| {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let existing = transaction
+                .query_row(
+                    "SELECT id,sequence,kind,entity_id,unread,acknowledged_at,payload_json,created_at FROM notifications WHERE kind=?1 AND entity_id=?2 ORDER BY sequence DESC LIMIT 1",
+                    params![kind, entity_id],
+                    read_notification,
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                transaction.commit()?;
+                return Ok(existing);
+            }
+            let inserted = insert_notification(&transaction, &kind, Some(&entity_id), payload)?;
+            transaction.commit()?;
+            Ok(inserted)
+        })
+    }
+
     pub fn notifications_after(
         &self,
         after_sequence: u64,

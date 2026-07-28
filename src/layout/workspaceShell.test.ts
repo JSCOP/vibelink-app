@@ -179,11 +179,35 @@ describe('WorkspaceView shell primitives', () => {
 
     const left = groups.find((group) => group.id === 'workspace-left-tools')!
     const right = groups.find((group) => group.id === 'workspace-right-tools')!
-    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer'])
+    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer', 'automation'])
     expect(right.panels.map((panel) => panel.params.kind)).toEqual(['workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'agentSessions'])
     expect(right.activePanel?.params.kind).toBe('workspaceFiles')
     expect(groups[0].panels).toEqual([])
   })
+  it('backfills missing automation panel at left index 2 without changing active panel', () => {
+    const { api, groups, makePanel } = fakeDock(['grid-main'])
+    registerWorkspaceEdgeGroups(api, 1600)
+    const left = groups.find((group) => group.id === 'workspace-left-tools')!
+    const active = makePanel(createSingletonContentParams('workspaces'), left)
+    makePanel(createSingletonContentParams('explorer'), left)
+    makePanel(createSingletonContentParams('sourceControl'), left)
+    makePanel(createSingletonContentParams('gitHistory'), left)
+    makePanel(createSingletonContentParams('gitBranches'), left)
+    left.activePanel = active
+
+    ensureWorkspaceEdgeShell(api)
+
+    expect(left.panels.map((panel) => panel.params.kind)).toEqual(['workspaces', 'explorer', 'automation'])
+    expect(left.panels[2].params).toEqual({
+      schema: 1,
+      kind: 'automation',
+      instanceId: 'automation',
+      title: 'Automations',
+      icon: 'timer',
+    })
+    expect(left.activePanel?.params.kind).toBe('workspaces')
+  })
+
   it('leaves every edge group with an active panel so the rail cannot render blank', () => {
     const { api, groups, makePanel } = fakeDock(['grid-main'])
     registerWorkspaceEdgeGroups(api, 1600)

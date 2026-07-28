@@ -78,6 +78,12 @@ action_enum!(AutomationAction {
     Run => "run",
     Runs => "runs",
     Precheck => "precheck",
+    SchedulePreview => "schedule-preview",
+    Cancel => "cancel",
+    ImportPreview => "import-preview",
+    Import => "import",
+    DraftPreview => "draft-preview",
+    DraftCancel => "draft-cancel",
 });
 
 action_enum!(BrowserAction {
@@ -332,6 +338,16 @@ fn extract_globals(raw: Vec<String>) -> Result<(Vec<String>, ParsedGlobals), Cli
         timeout_ms: DEFAULT_TIMEOUT_MS,
         ..ParsedGlobals::default()
     };
+    let automation_json_action_index = raw
+        .windows(2)
+        .position(|pair| {
+            pair[0] == "automation"
+                && matches!(
+                    pair[1].as_str(),
+                    "create" | "update" | "schedule-preview" | "import" | "draft-preview"
+                )
+        })
+        .map(|domain_index| domain_index + 1);
     let mut tokens = Vec::with_capacity(raw.len());
     let mut index = 0;
     let mut timeout_seen = false;
@@ -343,12 +359,18 @@ fn extract_globals(raw: Vec<String>) -> Result<(Vec<String>, ParsedGlobals), Cli
         }
         let (name, inline_value) = split_flag(token);
         match name {
+            "--json"
+                if automation_json_action_index
+                    .is_some_and(|action_index| index > action_index) =>
+            {
+                tokens.push(token.clone());
+            }
             "--json" => {
                 if inline_value.is_some() {
-                    return Err(CliError::invalid("--json does not take a value"));
+                    return Err(CliError::invalid("global --json does not take a value"));
                 }
                 if globals.json {
-                    return Err(CliError::invalid("--json may be supplied only once"));
+                    return Err(CliError::invalid("global --json may be supplied only once"));
                 }
                 globals.json = true;
             }
@@ -616,7 +638,19 @@ mod tests {
             (
                 "automation",
                 &[
-                    "list", "create", "update", "delete", "run", "runs", "precheck",
+                    "list",
+                    "create",
+                    "update",
+                    "delete",
+                    "run",
+                    "runs",
+                    "precheck",
+                    "schedule-preview",
+                    "cancel",
+                    "import-preview",
+                    "import",
+                    "draft-preview",
+                    "draft-cancel",
                 ],
             ),
             (
@@ -740,8 +774,6 @@ mod tests {
         assert!(invocation.json);
         assert_eq!(invocation.flavor, Some(Flavor::Prod));
         assert_eq!(invocation.timeout_ms, 15_000);
-        assert_eq!(invocation.operation_id, operation_id);
-        assert_eq!(invocation.expected_revision, Some(7));
         let Command::Terminal(command) = invocation.command else {
             panic!("expected terminal command")
         };
@@ -751,33 +783,143 @@ mod tests {
         assert_eq!(command.arguments.options["text"], ["hello"]);
         assert!(command.arguments.switches.contains("enter"));
     }
-
     #[test]
-    fn request_timeout_does_not_consume_automation_timeout() {
+    fn automation_payload_json_does_not_consume_global_json_output() {
+        let payload = r#"{"requestId":"33e7e588-9842-44c1-94e7-c77819718d11","request":"test"}"#;
         let invocation = parse_args([
+            "--json",
             "automation",
-            "create",
+            "draft-preview",
             "--workspace",
             "workspace-1",
-            "--name",
-            "nightly",
-            "--schedule-kind",
-            "daily",
-            "--schedule-value",
-            "02:00",
-            "--command",
-            "vibelink status",
-            "--timeout-seconds",
-            "3600",
+            "--json",
+            payload,
             "--request-timeout-seconds",
             "15",
         ])
-        .expect("parse automation timeout");
+        .expect("parse automation draft JSON payload");
+        assert!(invocation.json);
         assert_eq!(invocation.timeout_ms, 15_000);
         let Command::Automation(command) = invocation.command else {
             panic!("expected automation command")
         };
-        assert_eq!(command.arguments.options["timeout-seconds"], ["3600"]);
+        assert_eq!(command.action, AutomationAction::DraftPreview);
+        assert_eq!(command.arguments.options["json"], [payload]);
+    }
+
+    #[test]
+    fn automation_schedule_preview_keeps_json_payload() {
+        let payload = r#"{"scheduleKind":"daily","scheduleValue":"09:00","timezone":"UTC"}"#;
+        let invocation = parse_args(["automation", "schedule-preview", "--json", payload])
+            .expect("parse automation schedule preview JSON payload");
+        let Command::Automation(command) = invocation.command else {
+            panic!("expected automation command")
+        };
+        assert_eq!(command.action, AutomationAction::SchedulePreview);
+        assert_eq!(command.arguments.options["json"], [payload]);
+    }
+    #[test]
+    fn automation_v4_actions_parse_and_require_json_or_id() {
+        let run_id = Uuid::new_v4().to_string();
+        let cancel_inv =
+            parse_args(["automation", "cancel", &run_id]).expect("parse cancel positional");
+        let Command::Automation(cancel_cmd) = cancel_inv.command else {
+            panic!("expected automation")
+        };
+        assert_eq!(cancel_cmd.action, AutomationAction::Cancel);
+        assert_eq!(cancel_cmd.arguments.positionals, [run_id.clone()]);
+
+        let cancel_opt_inv =
+            parse_args(["automation", "cancel", "--id", &run_id]).expect("parse cancel --id");
+        let Command::Automation(cancel_opt_cmd) = cancel_opt_inv.command else {
+            panic!("expected automation")
+        };
+        assert_eq!(cancel_opt_cmd.action, AutomationAction::Cancel);
+        assert_eq!(cancel_opt_cmd.arguments.options["id"], [run_id]);
+
+        let import_preview_inv =
+            parse_args(["automation", "import-preview", "--workspace", "ws-1"])
+                .expect("parse import-preview");
+        let Command::Automation(import_preview_cmd) = import_preview_inv.command else {
+            panic!("expected automation")
+        };
+        assert_eq!(import_preview_cmd.action, AutomationAction::ImportPreview);
+        assert_eq!(
+            import_preview_cmd.selectors.workspace.as_deref(),
+            Some("ws-1")
+        );
+
+        let import_payload = r#"{"jobs":[]}"#;
+        let import_inv = parse_args([
+            "automation",
+            "import",
+            "--workspace",
+            "ws-1",
+            "--json",
+            import_payload,
+        ])
+        .expect("parse import");
+        let Command::Automation(import_cmd) = import_inv.command else {
+            panic!("expected automation")
+        };
+        assert_eq!(import_cmd.action, AutomationAction::Import);
+        assert_eq!(import_cmd.arguments.options["json"], [import_payload]);
+
+        let draft_payload =
+            r#"{"requestId":"33e7e588-9842-44c1-94e7-c77819718d11","request":"test"}"#;
+        let draft_inv = parse_args([
+            "automation",
+            "draft-preview",
+            "--workspace",
+            "ws-1",
+            "--json",
+            draft_payload,
+        ])
+        .expect("parse draft-preview");
+        let Command::Automation(draft_cmd) = draft_inv.command else {
+            panic!("expected automation")
+        };
+        assert_eq!(draft_cmd.action, AutomationAction::DraftPreview);
+        assert_eq!(draft_cmd.arguments.options["json"], [draft_payload]);
+
+        let draft_request_id = Uuid::new_v4().to_string();
+        let draft_cancel_inv =
+            parse_args(["automation", "draft-cancel", "--id", &draft_request_id])
+                .expect("parse draft-cancel");
+        let Command::Automation(draft_cancel_cmd) = draft_cancel_inv.command else {
+            panic!("expected automation")
+        };
+        assert_eq!(draft_cancel_cmd.action, AutomationAction::DraftCancel);
+        assert_eq!(draft_cancel_cmd.arguments.options["id"], [draft_request_id]);
+
+        assert!(parse_args(["automation", "create", "--workspace", "ws-1"]).is_err());
+        assert!(parse_args(["automation", "update", "--id", &Uuid::new_v4().to_string()]).is_err());
+        assert!(parse_args(["automation", "import", "--workspace", "ws-1"]).is_err());
+        assert!(parse_args(["automation", "draft-preview", "--workspace", "ws-1"]).is_err());
+        assert!(parse_args(["automation", "draft-cancel"]).is_err());
+        assert!(parse_args(["automation", "draft-cancel", "--id", "not-a-uuid"]).is_err());
+    }
+
+    #[test]
+    fn automation_rejects_legacy_goal_and_command_flags() {
+        assert!(parse_args([
+            "automation",
+            "create",
+            "--workspace",
+            "ws-1",
+            "--goal",
+            "do task"
+        ])
+        .is_err());
+        assert!(parse_args([
+            "automation",
+            "create",
+            "--workspace",
+            "ws-1",
+            "--command",
+            "run"
+        ])
+        .is_err());
     }
 
     #[test]

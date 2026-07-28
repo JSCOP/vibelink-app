@@ -18,6 +18,9 @@ import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
 import { AppDialogHost } from './components/AppDialog'
+import { NotificationCenter } from './components/notifications/NotificationCenter'
+import { requestAutomationNavigation } from './components/automations/navigation'
+import type { AutomationNotificationPayload } from './ipc/notifications'
 import { choiceDialog, confirmDialog, isAppDialogOpen } from './components/appDialogStore'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
@@ -550,6 +553,21 @@ function App() {
     void openSession(sessionId)
   }, [openSession])
 
+  const openAutomationNotification = useCallback(async (payload: AutomationNotificationPayload) => {
+    if (useWorkspaceStore.getState().activeSessionId !== payload.sessionId) {
+      await openSession(payload.sessionId)
+    }
+    if (useWorkspaceStore.getState().activeSessionId !== payload.sessionId) return
+    const actions = contentActionsRef.current
+    const panelId = await actions?.openContent({ kind: 'automation' })
+    if (panelId) actions?.activateContent(panelId)
+    requestAutomationNavigation({
+      sessionId: payload.sessionId,
+      automationId: payload.automationId,
+      runId: payload.automationRunId,
+    })
+  }, [openSession])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
@@ -743,6 +761,7 @@ function App() {
           <button type="button" className="topbar-icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setIsBugReportOpen(true)}>
             <Bug size={16} aria-hidden="true" />
           </button>
+          <NotificationCenter onOpenAutomation={openAutomationNotification} />
           <button type="button" className="topbar-icon-button" title="Open settings" aria-label="Open settings" onClick={() => setIsSettingsOpen(true)}>
             <Settings2 size={16} aria-hidden="true" />
           </button>

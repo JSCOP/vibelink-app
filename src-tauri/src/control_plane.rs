@@ -11,7 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const CONTROL_SCHEMA_VERSION: i64 = 3;
+const CONTROL_SCHEMA_VERSION: i64 = 6;
 const MAX_BACKUPS: usize = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -443,7 +443,7 @@ fn open_connection(path: &Path) -> Result<Connection> {
 }
 
 fn migrate_schema(connection: &Connection) -> Result<()> {
-    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version > CONTROL_SCHEMA_VERSION {
         bail!("control database schema {version} is newer than supported {CONTROL_SCHEMA_VERSION}");
     }
@@ -539,18 +539,62 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
             CREATE TABLE automations (
-              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
-              schedule_kind TEXT NOT NULL, schedule_value TEXT NOT NULL, timezone TEXT NOT NULL,
-              enabled INTEGER NOT NULL DEFAULT 1, workspace_mode TEXT NOT NULL,
-              precheck_json TEXT, policy_json TEXT NOT NULL DEFAULT '{}',
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent = 'hermes'),
+              provider TEXT,
+              model TEXT,
+              use_current_hermes_default INTEGER NOT NULL DEFAULT 1 CHECK(use_current_hermes_default IN (0,1)),
+              toolsets_json TEXT NOT NULL DEFAULT '[\"hermes-acp\"]',
+              skills_json TEXT NOT NULL DEFAULT '[]',
+              max_turns INTEGER NOT NULL DEFAULT 50,
+              timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+              schedule_kind TEXT NOT NULL,
+              schedule_value TEXT NOT NULL,
+              timezone TEXT NOT NULL,
+              dtstart INTEGER,
+              next_run_at INTEGER,
+              last_run_at INTEGER,
+              enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+              requires_review INTEGER NOT NULL DEFAULT 0 CHECK(requires_review IN (0,1)),
+              missed_run_grace_minutes INTEGER NOT NULL DEFAULT 720,
+              missed_run_policy TEXT NOT NULL DEFAULT 'run_once_within_grace' CHECK(missed_run_policy = 'run_once_within_grace'),
+              workspace_mode TEXT NOT NULL CHECK(workspace_mode IN ('new_per_run','existing')),
+              worktree_storage_json TEXT NOT NULL DEFAULT '{}',
+              base_ref TEXT,
+              precheck_json TEXT NOT NULL DEFAULT '{\"command\":null,\"timeoutSeconds\":60,\"requireWorkspace\":true,\"requireGit\":false}',
+              source_provider TEXT CHECK(source_provider IS NULL OR source_provider = 'hermes'),
+              source_id TEXT,
+              source_hash TEXT,
+              source_snapshot_json TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(source_provider, source_id),
+              CHECK(
+                (source_provider IS NULL AND source_id IS NULL AND source_hash IS NULL AND source_snapshot_json IS NULL)
+                OR
+                (source_provider IS NOT NULL AND source_id IS NOT NULL AND source_hash IS NOT NULL AND source_snapshot_json IS NOT NULL)
+              )
             );
             CREATE TABLE automation_runs (
-              id TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
-              orchestration_run_id TEXT, status TEXT NOT NULL, dispatch_token TEXT NOT NULL UNIQUE,
-              output_summary TEXT, output_truncated INTEGER NOT NULL DEFAULT 0,
-              precheck_json TEXT, worktree_path TEXT, branch TEXT,
-              started_at INTEGER, finished_at INTEGER, created_at INTEGER NOT NULL
+              id TEXT PRIMARY KEY,
+              automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+              run_number INTEGER NOT NULL,
+              trigger TEXT NOT NULL CHECK(trigger IN ('scheduled','manual')),
+              scheduled_for INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('pending','dispatching','dispatched','completed','skipped_precheck','skipped_missed','skipped_unavailable','skipped_needs_interactive_auth','dispatch_failed','cancelled')),
+              runtime_identity_json TEXT,
+              worktree_json TEXT,
+              precheck_result_json TEXT,
+              output_snapshot_json TEXT,
+              usage_json TEXT,
+              error TEXT,
+              started_at INTEGER,
+              finished_at INTEGER,
+              created_at INTEGER NOT NULL,
+              UNIQUE(automation_id, run_number)
             );
             CREATE TABLE notifications (
               id TEXT PRIMARY KEY, sequence INTEGER NOT NULL UNIQUE, host_id TEXT,
@@ -566,9 +610,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
               migration_version INTEGER NOT NULL, imported_at INTEGER NOT NULL,
               PRIMARY KEY(source_path, migration_version)
             );
-            PRAGMA user_version = 3;
+            PRAGMA user_version = 6;
             COMMIT;",
         )?;
+        version = CONTROL_SCHEMA_VERSION;
     }
     if version == 1 {
         connection.execute_batch(
@@ -601,6 +646,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             PRAGMA user_version = 3;
             COMMIT;",
         )?;
+        version = 3;
     }
     if version == 2 {
         connection.execute_batch(
@@ -622,6 +668,212 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             PRAGMA user_version = 3;
             COMMIT;",
         )?;
+        version = 3;
+    }
+    if version == 3 || version == 5 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+            CREATE TABLE automations_v6 (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              agent TEXT NOT NULL DEFAULT 'hermes' CHECK(agent = 'hermes'),
+              provider TEXT,
+              model TEXT,
+              use_current_hermes_default INTEGER NOT NULL DEFAULT 1 CHECK(use_current_hermes_default IN (0,1)),
+              toolsets_json TEXT NOT NULL DEFAULT '[\"hermes-acp\"]',
+              skills_json TEXT NOT NULL DEFAULT '[]',
+              max_turns INTEGER NOT NULL DEFAULT 50,
+              timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+              schedule_kind TEXT NOT NULL,
+              schedule_value TEXT NOT NULL,
+              timezone TEXT NOT NULL,
+              dtstart INTEGER,
+              next_run_at INTEGER,
+              last_run_at INTEGER,
+              enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+              requires_review INTEGER NOT NULL DEFAULT 0 CHECK(requires_review IN (0,1)),
+              missed_run_grace_minutes INTEGER NOT NULL DEFAULT 720,
+              missed_run_policy TEXT NOT NULL DEFAULT 'run_once_within_grace' CHECK(missed_run_policy = 'run_once_within_grace'),
+              workspace_mode TEXT NOT NULL CHECK(workspace_mode IN ('new_per_run','existing')),
+              worktree_storage_json TEXT NOT NULL DEFAULT '{}',
+              base_ref TEXT,
+              precheck_json TEXT NOT NULL DEFAULT '{\"command\":null,\"timeoutSeconds\":60,\"requireWorkspace\":true,\"requireGit\":false}',
+              source_provider TEXT CHECK(source_provider IS NULL OR source_provider = 'hermes'),
+              source_id TEXT,
+              source_hash TEXT,
+              source_snapshot_json TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(source_provider, source_id),
+              CHECK(
+                (source_provider IS NULL AND source_id IS NULL AND source_hash IS NULL AND source_snapshot_json IS NULL)
+                OR
+                (source_provider IS NOT NULL AND source_id IS NOT NULL AND source_hash IS NOT NULL AND source_snapshot_json IS NOT NULL)
+              )
+            );
+            CREATE TABLE automation_runs_v6 (
+              id TEXT PRIMARY KEY,
+              automation_id TEXT NOT NULL REFERENCES automations_v6(id) ON DELETE CASCADE,
+              run_number INTEGER NOT NULL,
+              trigger TEXT NOT NULL CHECK(trigger IN ('scheduled','manual')),
+              scheduled_for INTEGER NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('pending','dispatching','dispatched','completed','skipped_precheck','skipped_missed','skipped_unavailable','skipped_needs_interactive_auth','dispatch_failed','cancelled')),
+              runtime_identity_json TEXT,
+              worktree_json TEXT,
+              precheck_result_json TEXT,
+              output_snapshot_json TEXT,
+              usage_json TEXT,
+              error TEXT,
+              started_at INTEGER,
+              finished_at INTEGER,
+              created_at INTEGER NOT NULL,
+              UNIQUE(automation_id, run_number)
+            );
+            INSERT INTO automations_v6(
+              id,session_id,name,prompt,agent,provider,model,use_current_hermes_default,
+              toolsets_json,skills_json,max_turns,timeout_seconds,schedule_kind,schedule_value,
+              timezone,dtstart,next_run_at,last_run_at,enabled,requires_review,
+              missed_run_grace_minutes,missed_run_policy,workspace_mode,worktree_storage_json,
+              base_ref,precheck_json,source_provider,source_id,source_hash,source_snapshot_json,
+              created_at,updated_at
+            )
+            SELECT
+              id,
+              session_id,
+              name,
+              CASE
+                WHEN json_valid(policy_json) THEN COALESCE(CAST(json_extract(policy_json, '$.goal') AS TEXT), '')
+                ELSE ''
+              END,
+              'hermes',
+              NULL,
+              NULL,
+              1,
+              '[\"hermes-acp\"]',
+              '[]',
+              50,
+              1800,
+              schedule_kind,
+              schedule_value,
+              timezone,
+              NULL,
+              NULL,
+              (
+                SELECT MAX(legacy_run.created_at)
+                FROM automation_runs legacy_run
+                WHERE legacy_run.automation_id = automations.id
+                  AND legacy_run.dispatch_token NOT LIKE 'manual:%'
+              ),
+              enabled,
+              0,
+              720,
+              'run_once_within_grace',
+              CASE workspace_mode
+                WHEN 'reuse' THEN 'existing'
+                WHEN 'existing' THEN 'existing'
+                WHEN 'worktree' THEN 'new_per_run'
+                WHEN 'new_per_run' THEN 'new_per_run'
+                ELSE 'new_per_run'
+              END,
+              '{}',
+              NULL,
+              json_object(
+                'command', CASE
+                  WHEN json_valid(precheck_json) AND json_type(precheck_json, '$.command') = 'text'
+                    THEN json_extract(precheck_json, '$.command')
+                  ELSE NULL
+                END,
+                'timeoutSeconds', CASE
+                  WHEN json_valid(precheck_json)
+                    AND json_type(precheck_json, '$.timeoutSeconds') IN ('integer','real')
+                    AND json_extract(precheck_json, '$.timeoutSeconds') > 0
+                    THEN CAST(json_extract(precheck_json, '$.timeoutSeconds') AS INTEGER)
+                  ELSE 60
+                END,
+                'requireWorkspace', json(CASE
+                  WHEN json_valid(precheck_json) AND json_type(precheck_json, '$.requireWorkspace') IN ('true','false')
+                    THEN CASE json_extract(precheck_json, '$.requireWorkspace') WHEN 0 THEN 'false' ELSE 'true' END
+                  ELSE 'true'
+                END),
+                'requireGit', json(CASE
+                  WHEN json_valid(precheck_json) AND json_type(precheck_json, '$.requireGit') IN ('true','false')
+                    THEN CASE json_extract(precheck_json, '$.requireGit') WHEN 0 THEN 'false' ELSE 'true' END
+                  WHEN workspace_mode IN ('worktree','new_per_run') THEN 'true'
+                  ELSE 'false'
+                END)
+              ),
+              NULL,
+              NULL,
+              NULL,
+              NULL,
+              created_at,
+              updated_at
+            FROM automations;
+            INSERT INTO automation_runs_v6(
+              id,automation_id,run_number,trigger,scheduled_for,status,runtime_identity_json,
+              worktree_json,precheck_result_json,output_snapshot_json,usage_json,error,
+              started_at,finished_at,created_at
+            )
+            SELECT
+              id,
+              automation_id,
+              ROW_NUMBER() OVER (PARTITION BY automation_id ORDER BY created_at,id),
+              CASE WHEN dispatch_token LIKE 'manual:%' THEN 'manual' ELSE 'scheduled' END,
+              created_at,
+              CASE status
+                WHEN 'completed' THEN 'completed'
+                WHEN 'cancelled' THEN 'cancelled'
+                WHEN 'skipped' THEN 'skipped_precheck'
+                WHEN 'queued' THEN 'dispatch_failed'
+                WHEN 'running' THEN 'dispatch_failed'
+                WHEN 'failed' THEN 'dispatch_failed'
+                ELSE 'dispatch_failed'
+              END,
+              NULL,
+              CASE
+                WHEN worktree_path IS NULL AND branch IS NULL THEN NULL
+                ELSE json_object(
+                  'path', worktree_path,
+                  'branch', branch,
+                  'baseRevision', NULL,
+                  'disposition', 'retained'
+                )
+              END,
+              CASE WHEN precheck_json IS NOT NULL AND json_valid(precheck_json) THEN precheck_json ELSE NULL END,
+              CASE
+                WHEN output_summary IS NULL THEN NULL
+                ELSE json_object(
+                  'text', substr(output_summary, 1, 262144),
+                  'truncated', json(CASE
+                    WHEN output_truncated <> 0 OR length(CAST(output_summary AS BLOB)) > 262144 THEN 'true'
+                    ELSE 'false'
+                  END)
+                )
+              END,
+              NULL,
+              CASE
+                WHEN status IN ('queued','running') THEN 'Automation run interrupted by schema v6 migration'
+                WHEN status = 'failed' THEN output_summary
+                WHEN status NOT IN ('completed','cancelled','skipped','queued','running','failed')
+                  THEN 'Unsupported legacy automation run status: ' || status
+                ELSE NULL
+              END,
+              started_at,
+              CASE WHEN status IN ('queued','running') THEN COALESCE(finished_at,started_at,created_at) ELSE finished_at END,
+              created_at
+            FROM automation_runs;
+            DROP TABLE automation_runs;
+            DROP TABLE automations;
+            ALTER TABLE automations_v6 RENAME TO automations;
+            ALTER TABLE automation_runs_v6 RENAME TO automation_runs;
+            PRAGMA user_version = 6;
+            COMMIT;",
+        )?;
+    }
+    if version == 4 {
+        connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
     }
     Ok(())
 }
@@ -1070,6 +1322,51 @@ mod tests {
         (directory, plane)
     }
 
+    fn table_columns(connection: &Connection, table: &str) -> Vec<String> {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table info");
+        statement
+            .query_map([], |row| row.get(1))
+            .expect("query table info")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect table columns")
+    }
+
+    fn seed_version_three_automation_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                CREATE TABLE automations (
+                  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
+                  schedule_kind TEXT NOT NULL, schedule_value TEXT NOT NULL, timezone TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1, workspace_mode TEXT NOT NULL,
+                  precheck_json TEXT, policy_json TEXT NOT NULL DEFAULT '{}',
+                  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE automation_runs (
+                  id TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+                  orchestration_run_id TEXT, status TEXT NOT NULL, dispatch_token TEXT NOT NULL UNIQUE,
+                  output_summary TEXT, output_truncated INTEGER NOT NULL DEFAULT 0,
+                  precheck_json TEXT, worktree_path TEXT, branch TEXT,
+                  started_at INTEGER, finished_at INTEGER, created_at INTEGER NOT NULL
+                );
+                PRAGMA user_version = 3;",
+            )
+            .expect("seed version three automation schema");
+    }
+
+    fn seed_version_five_automation_schema(connection: &Connection) {
+        seed_version_three_automation_schema(connection);
+        connection
+            .execute_batch(
+                "ALTER TABLE automation_runs ADD COLUMN worktree_id TEXT;
+                 ALTER TABLE automation_runs ADD COLUMN worktree_instance_id TEXT;
+                 PRAGMA user_version = 5;",
+            )
+            .expect("seed version five automation schema");
+    }
+
     #[test]
     fn board_mutations_are_revisioned_and_idempotent() {
         let (directory, plane) = plane();
@@ -1165,6 +1462,490 @@ mod tests {
     }
 
     #[test]
+    fn v6_automation_tables_column_order_and_absence_of_legacy_columns() {
+        let (directory, plane) = plane();
+        let connection = plane.connection.lock().expect("control plane mutex");
+
+        let automations_cols = table_columns(&connection, "automations");
+        let expected_automations_cols = vec![
+            "id",
+            "session_id",
+            "name",
+            "prompt",
+            "agent",
+            "provider",
+            "model",
+            "use_current_hermes_default",
+            "toolsets_json",
+            "skills_json",
+            "max_turns",
+            "timeout_seconds",
+            "schedule_kind",
+            "schedule_value",
+            "timezone",
+            "dtstart",
+            "next_run_at",
+            "last_run_at",
+            "enabled",
+            "requires_review",
+            "missed_run_grace_minutes",
+            "missed_run_policy",
+            "workspace_mode",
+            "worktree_storage_json",
+            "base_ref",
+            "precheck_json",
+            "source_provider",
+            "source_id",
+            "source_hash",
+            "source_snapshot_json",
+            "created_at",
+            "updated_at",
+        ];
+        assert_eq!(
+            automations_cols, expected_automations_cols,
+            "automations table column order mismatch"
+        );
+
+        let automation_runs_cols = table_columns(&connection, "automation_runs");
+        let expected_runs_cols = vec![
+            "id",
+            "automation_id",
+            "run_number",
+            "trigger",
+            "scheduled_for",
+            "status",
+            "runtime_identity_json",
+            "worktree_json",
+            "precheck_result_json",
+            "output_snapshot_json",
+            "usage_json",
+            "error",
+            "started_at",
+            "finished_at",
+            "created_at",
+        ];
+        assert_eq!(
+            automation_runs_cols, expected_runs_cols,
+            "automation_runs table column order mismatch"
+        );
+
+        let v3_only_columns = [
+            "policy_json",
+            "orchestration_run_id",
+            "dispatch_token",
+            "output_summary",
+            "output_truncated",
+            "worktree_path",
+            "branch",
+        ];
+        for col in v3_only_columns {
+            assert!(
+                !automations_cols.iter().any(|c| c == col),
+                "v3 column {col} found in automations table"
+            );
+            assert!(
+                !automation_runs_cols.iter().any(|c| c == col),
+                "v3 column {col} found in automation_runs table"
+            );
+        }
+
+        drop(connection);
+        drop(plane);
+        fs::remove_dir_all(directory).expect("cleanup control plane");
+    }
+
+    #[test]
+    fn v6_automation_tables_check_constraints_and_defaults() {
+        let (directory, plane) = plane();
+        let connection = plane.connection.lock().expect("control plane mutex");
+
+        // Test insertion of minimal valid automation record to test defaults
+        connection
+            .execute(
+                "INSERT INTO automations (
+                    id, session_id, name, prompt, schedule_kind, schedule_value, timezone,
+                    workspace_mode, created_at, updated_at
+                ) VALUES (
+                    'auto-1', 'session-1', 'Test Auto', 'Test Prompt', 'cron', '0 9 * * *', 'UTC',
+                    'new_per_run', 100, 200
+                )",
+                [],
+            )
+            .expect("insert minimal automation with defaults");
+
+        let row = connection
+            .query_row(
+                "SELECT agent, use_current_hermes_default, toolsets_json, skills_json, max_turns,
+                        timeout_seconds, enabled, requires_review, missed_run_grace_minutes,
+                        missed_run_policy, worktree_storage_json, precheck_json
+                 FROM automations WHERE id = 'auto-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
+                        r.get::<_, i64>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, String>(10)?,
+                        r.get::<_, String>(11)?,
+                    ))
+                },
+            )
+            .expect("query defaults");
+
+        assert_eq!(row.0, "hermes");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, r#"["hermes-acp"]"#);
+        assert_eq!(row.3, "[]");
+        assert_eq!(row.4, 50);
+        assert_eq!(row.5, 1800);
+        assert_eq!(row.6, 1);
+        assert_eq!(row.7, 0);
+        assert_eq!(row.8, 720);
+        assert_eq!(row.9, "run_once_within_grace");
+        assert_eq!(row.10, "{}");
+        assert_eq!(
+            row.11,
+            r#"{"command":null,"timeoutSeconds":60,"requireWorkspace":true,"requireGit":false}"#
+        );
+
+        // CHECK constraint validations
+        assert!(connection
+            .execute(
+                "INSERT INTO automations (
+                    id, session_id, name, prompt, agent, schedule_kind, schedule_value, timezone,
+                    workspace_mode, created_at, updated_at
+                ) VALUES ('auto-bad-agent', 's', 'n', 'p', 'invalid_agent', 'cron', '0 9 * * *', 'UTC', 'new_per_run', 1, 1)",
+                [],
+            )
+            .is_err());
+
+        assert!(connection
+            .execute(
+                "INSERT INTO automations (
+                    id, session_id, name, prompt, schedule_kind, schedule_value, timezone,
+                    workspace_mode, enabled, created_at, updated_at
+                ) VALUES ('auto-bad-enabled', 's', 'n', 'p', 'cron', '0 9 * * *', 'UTC', 'new_per_run', 2, 1, 1)",
+                [],
+            )
+            .is_err());
+
+        assert!(connection
+            .execute(
+                "INSERT INTO automations (
+                    id, session_id, name, prompt, schedule_kind, schedule_value, timezone,
+                    workspace_mode, missed_run_policy, created_at, updated_at
+                ) VALUES ('auto-bad-policy', 's', 'n', 'p', 'cron', '0 9 * * *', 'UTC', 'new_per_run', 'invalid_policy', 1, 1)",
+                [],
+            )
+            .is_err());
+
+        assert!(connection
+            .execute(
+                "INSERT INTO automations (
+                    id, session_id, name, prompt, schedule_kind, schedule_value, timezone,
+                    workspace_mode, created_at, updated_at
+                ) VALUES ('auto-bad-ws', 's', 'n', 'p', 'cron', '0 9 * * *', 'UTC', 'invalid_mode', 1, 1)",
+                [],
+            )
+            .is_err());
+
+        // Partial source details check (must be all NULL or all NOT NULL)
+        assert!(connection
+            .execute(
+                "INSERT INTO automations (
+                    id, session_id, name, prompt, schedule_kind, schedule_value, timezone,
+                    workspace_mode, source_provider, source_id, created_at, updated_at
+                ) VALUES ('auto-partial-source', 's', 'n', 'p', 'cron', '0 9 * * *', 'UTC', 'new_per_run', 'hermes', 'src-1', 1, 1)",
+                [],
+            )
+            .is_err());
+
+        // automation_runs trigger and status check
+        connection
+            .execute(
+                "INSERT INTO automation_runs (
+                    id, automation_id, run_number, trigger, scheduled_for, status, created_at
+                ) VALUES ('run-1', 'auto-1', 1, 'scheduled', 100, 'pending', 100)",
+                [],
+            )
+            .expect("insert valid run");
+
+        assert!(connection
+            .execute(
+                "INSERT INTO automation_runs (
+                    id, automation_id, run_number, trigger, scheduled_for, status, created_at
+                ) VALUES ('run-bad-trigger', 'auto-1', 2, 'invalid_trigger', 100, 'pending', 100)",
+                [],
+            )
+            .is_err());
+
+        assert!(connection
+            .execute(
+                "INSERT INTO automation_runs (
+                    id, automation_id, run_number, trigger, scheduled_for, status, created_at
+                ) VALUES ('run-bad-status', 'auto-1', 3, 'manual', 100, 'invalid_status', 100)",
+                [],
+            )
+            .is_err());
+
+        drop(connection);
+        drop(plane);
+        fs::remove_dir_all(directory).expect("cleanup control plane");
+    }
+
+    #[test]
+    fn version_three_automations_are_replaced_with_canonical_v6_records() {
+        let connection = Connection::open_in_memory().expect("open version three database");
+        seed_version_three_automation_schema(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO automations(
+                   id,session_id,name,schedule_kind,schedule_value,timezone,enabled,workspace_mode,
+                   precheck_json,policy_json,created_at,updated_at
+                 ) VALUES
+                   ('automation-existing','session-a','Dependency audit','daily','09:00','Asia/Seoul',1,'reuse',
+                    '{\"command\":\"cargo check\",\"timeoutSeconds\":90,\"requireGit\":true}',
+                    '{\"goal\":\"Inspect dependencies without changing them\"}',100,200),
+                   ('automation-worktree','session-b','Workspace report','hourly','15','UTC',0,'worktree',
+                    NULL,'{\"goal\":\"Summarize workspace\"}',110,210),
+                   ('automation-nulls','session-c','Null prompt test','daily','10:00','UTC',1,'existing',
+                    NULL,'{}',120,220);
+                 INSERT INTO automation_runs(
+                   id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,
+                   output_truncated,precheck_json,worktree_path,branch,started_at,finished_at,created_at
+                 ) VALUES
+                   ('run-final','automation-existing','orchestration-1','completed','daily:2026-07-28',
+                    'Final legacy output',1,'{\"ok\":true}','E:/retained','legacy-branch',300,350,300),
+                   ('run-running','automation-existing','orchestration-2','running','manual:abc',
+                    'Partial legacy output',0,NULL,NULL,NULL,400,NULL,400),
+                   ('run-queued','automation-existing',NULL,'queued','daily:2026-07-29',
+                    NULL,0,NULL,NULL,NULL,NULL,NULL,500);",
+            )
+            .expect("seed version three automation records");
+
+        migrate_schema(&connection).expect("migrate version three database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read schema version");
+        assert_eq!(version, CONTROL_SCHEMA_VERSION);
+
+        let existing = connection
+            .query_row(
+                "SELECT name,prompt,workspace_mode,created_at,updated_at,precheck_json FROM automations WHERE id='automation-existing'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .expect("read migrated existing-workspace automation");
+        assert_eq!(existing.0, "Dependency audit");
+        assert_eq!(existing.1, "Inspect dependencies without changing them");
+        assert_eq!(existing.2, "existing");
+        assert_eq!((existing.3, existing.4), (100, 200));
+        let precheck: serde_json::Value =
+            serde_json::from_str(&existing.5).expect("parse canonical precheck");
+        assert_eq!(precheck["command"], "cargo check");
+        assert_eq!(precheck["timeoutSeconds"], 90);
+        assert_eq!(precheck["requireWorkspace"], true);
+        assert_eq!(precheck["requireGit"], true);
+
+        let worktree_mode: String = connection
+            .query_row(
+                "SELECT workspace_mode FROM automations WHERE id='automation-worktree'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated worktree automation");
+        assert_eq!(worktree_mode, "new_per_run");
+
+        let nulls_automation = connection
+            .query_row(
+                "SELECT prompt, source_provider, source_id, source_hash, source_snapshot_json FROM automations WHERE id='automation-nulls'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .expect("read migrated nulls automation");
+        assert_eq!(nulls_automation.0, "");
+        assert_eq!(nulls_automation.1, None);
+        assert_eq!(nulls_automation.2, None);
+        assert_eq!(nulls_automation.3, None);
+        assert_eq!(nulls_automation.4, None);
+
+        let final_run = connection
+            .query_row(
+                "SELECT run_number,trigger,scheduled_for,status,output_snapshot_json,error,started_at,finished_at,created_at FROM automation_runs WHERE id='run-final'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, i64>(8)?,
+                    ))
+                },
+            )
+            .expect("read migrated final run");
+        assert_eq!(final_run.0, 1);
+        assert_eq!(final_run.1, "scheduled");
+        assert_eq!(final_run.2, 300);
+        assert_eq!(final_run.3, "completed");
+        assert_eq!(final_run.5, None);
+        assert_eq!(
+            (final_run.6, final_run.7, final_run.8),
+            (Some(300), Some(350), 300)
+        );
+        let output: serde_json::Value =
+            serde_json::from_str(&final_run.4).expect("parse migrated output snapshot");
+        assert_eq!(output["text"], "Final legacy output");
+        assert_eq!(output["truncated"], true);
+
+        let running = connection
+            .query_row(
+                "SELECT run_number,trigger,status,error,started_at,finished_at,created_at FROM automation_runs WHERE id='run-running'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("read migrated running run");
+        assert_eq!(running.0, 2);
+        assert_eq!(running.1, "manual");
+        assert_eq!(running.2, "dispatch_failed");
+        assert_eq!(
+            running.3,
+            "Automation run interrupted by schema v6 migration"
+        );
+        assert_eq!(
+            (running.4, running.5, running.6),
+            (Some(400), Some(400), 400)
+        );
+
+        let queued = connection
+            .query_row(
+                "SELECT run_number,status,error,created_at FROM automation_runs WHERE id='run-queued'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("read migrated queued run");
+        assert_eq!(queued.0, 3);
+        assert_eq!(queued.1, "dispatch_failed");
+        assert_eq!(
+            queued.2,
+            "Automation run interrupted by schema v6 migration"
+        );
+        assert_eq!(queued.3, 500);
+
+        let fresh = Connection::open_in_memory().expect("open fresh database");
+        migrate_schema(&fresh).expect("create fresh current database");
+        assert_eq!(
+            table_columns(&connection, "automations"),
+            table_columns(&fresh, "automations")
+        );
+        assert_eq!(
+            table_columns(&connection, "automation_runs"),
+            table_columns(&fresh, "automation_runs")
+        );
+        assert!(!table_columns(&connection, "automation_runs")
+            .iter()
+            .any(|column| column == "orchestration_run_id"));
+    }
+
+    #[test]
+    fn version_five_development_automations_migrate_without_data_loss() {
+        let connection = Connection::open_in_memory().expect("open version five database");
+        seed_version_five_automation_schema(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO automations(
+                   id,session_id,name,schedule_kind,schedule_value,timezone,enabled,workspace_mode,
+                   precheck_json,policy_json,created_at,updated_at
+                 ) VALUES(
+                   'automation-v5','session-v5','Legacy development job','daily','09:00','UTC',1,'worktree',
+                   NULL,'{\"goal\":\"Preserve this prompt\"}',100,200
+                 );
+                 INSERT INTO automation_runs(
+                   id,automation_id,status,dispatch_token,output_summary,output_truncated,
+                   worktree_path,branch,worktree_id,worktree_instance_id,created_at
+                 ) VALUES(
+                   'run-v5','automation-v5','completed','manual:v5','Legacy output',0,
+                   'E:/legacy-worktree','legacy-v5','worktree-v5','instance-v5',300
+                 );",
+            )
+            .expect("seed version five records");
+
+        migrate_schema(&connection).expect("migrate version five database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read migrated version");
+        assert_eq!(version, CONTROL_SCHEMA_VERSION);
+        let prompt: String = connection
+            .query_row(
+                "SELECT prompt FROM automations WHERE id='automation-v5'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated automation");
+        assert_eq!(prompt, "Preserve this prompt");
+        let output: String = connection
+            .query_row(
+                "SELECT json_extract(output_snapshot_json, '$.text') FROM automation_runs WHERE id='run-v5'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated run output");
+        assert_eq!(output, "Legacy output");
+        let run_columns = table_columns(&connection, "automation_runs");
+        assert!(!run_columns.iter().any(|column| column == "dispatch_token"));
+        assert!(!run_columns
+            .iter()
+            .any(|column| column == "worktree_instance_id"));
+    }
+
+    #[test]
     fn message_schema_accepts_chat_messages() {
         let (directory, plane) = plane();
         let connection = plane.connection.lock().expect("control plane mutex");
@@ -1202,6 +1983,13 @@ mod tests {
                   message_type TEXT NOT NULL CHECK(message_type IN ('status','dispatch','worker_done','merge_ready','escalation','handoff','decision_gate','heartbeat')),
                   payload_json TEXT NOT NULL, unread INTEGER NOT NULL DEFAULT 1,
                   delivered_at INTEGER, created_at INTEGER NOT NULL
+                );
+                CREATE TABLE automations (
+                  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
+                  schedule_kind TEXT NOT NULL, schedule_value TEXT NOT NULL, timezone TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1, workspace_mode TEXT NOT NULL,
+                  precheck_json TEXT, policy_json TEXT NOT NULL DEFAULT '{}',
+                  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
                 );
                 CREATE TABLE automation_runs (
                   id TEXT PRIMARY KEY, automation_id TEXT NOT NULL,

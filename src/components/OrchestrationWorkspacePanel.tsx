@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Check, CirclePlay, ListPlus, MessageSquareText, RefreshCw, RotateCcw, Send, Square, Timer, Workflow, X } from 'lucide-react'
+import { Check, CirclePlay, ListPlus, MessageSquareText, RefreshCw, RotateCcw, Send, Square, Workflow, X } from 'lucide-react'
 import {
   launchReadyOrchestrationTasks,
   orchestrationRequest,
@@ -13,11 +13,10 @@ import {
   type OrchestrationTask,
 } from '../ipc/orchestration'
 import { useWorkspaceStore } from '../state/store'
-import { AutomationPanel } from './AutomationPanel'
 import { OrchestratorChat } from './OrchestratorChat'
 import '../styles/orchestration.css'
 
-type PanelTab = 'run' | 'agent' | 'automation'
+type PanelTab = 'run' | 'agent'
 type Dispatch = {
   id: string
   taskId: string
@@ -61,10 +60,9 @@ export function OrchestrationWorkspacePanel() {
       <div className="orchestration-tabs" role="tablist" aria-label="Orchestrator views">
         <button type="button" role="tab" aria-selected={tab === 'run'} onClick={() => setTab('run')}><Workflow size={14} /> Runs</button>
         <button type="button" role="tab" aria-selected={tab === 'agent'} onClick={() => setTab('agent')}><MessageSquareText size={14} /> Agent</button>
-        <button type="button" role="tab" aria-selected={tab === 'automation'} onClick={() => setTab('automation')}><Timer size={14} /> Automations</button>
       </div>
       <div className="orchestration-tab-content">
-        {tab === 'run' ? <OrchestrationRunPanel /> : tab === 'agent' ? <OrchestratorChat /> : <AutomationPanel />}
+        {tab === 'run' ? <OrchestrationRunPanel /> : <OrchestratorChat />}
       </div>
     </section>
   )

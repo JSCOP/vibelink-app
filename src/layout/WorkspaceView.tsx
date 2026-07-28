@@ -21,7 +21,7 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react'
 import { getGridLocation, type AddPanelOptions } from 'dockview-core'
-import { FileCode2 } from 'lucide-react'
+import { FileCode2, Timer } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
 import { WorkspaceAddMenu } from '../components/WorkspaceAddMenu'
 import { QuickPick } from '../components/QuickPick'
@@ -36,6 +36,8 @@ import { SourceControlSidebar } from '../components/git/SourceControlSidebar'
 import { WorkspacesSidebar } from '../components/workspaces/WorkspacesSidebar'
 import { GitHistorySidebar } from '../components/git/GitHistorySidebar'
 import { GitBranchesSidebar } from '../components/git/GitBranchesSidebar'
+import { AutomationPanel } from '../components/AutomationPanel'
+import { WorkspaceSidebarPanelShell } from '../components/WorkspaceSidebarPanelShell'
 import { GitWorkspaceProvider } from '../components/git/GitWorkspaceProvider'
 import { AgentSessionsSidebar } from '../components/agent/AgentSessionsSidebar'
 import { OrchestratorChat } from '../components/OrchestratorChat'
@@ -241,6 +243,30 @@ function GitBranchesContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-branches"><ProPanelBoundary feature="Git Branches"><ErrorBoundary label="Git Branches panel"><GitBranchesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
+/** Automations is a left-edge structural singleton. Unlike the Git sidebars,
+ * which own their shell internally, the automation body is shell-agnostic, so
+ * the narrow-sidebar chrome (header, collapse, state slots) is applied here. */
+function AutomationContentPanel(props: WorkspaceContentPanelProps) {
+  const state = useEdgePanelState(props.api)
+  return (
+    <WindowPanelShell panelId={props.api.id} className="workspace-window-automation">
+      <ProPanelBoundary feature="Automations">
+        <ErrorBoundary label="Automations panel">
+          <WorkspaceSidebarPanelShell
+            title="Automations"
+            icon={<Timer size={15} aria-hidden="true" />}
+            active={state.active}
+            collapsed={state.collapsed}
+            onCollapse={() => props.api.group.api.collapse()}
+          >
+            <AutomationPanel active={state.active && !state.collapsed} />
+          </WorkspaceSidebarPanelShell>
+        </ErrorBoundary>
+      </ProPanelBoundary>
+    </WindowPanelShell>
+  )
+}
+
 function AgentSessionsContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
@@ -428,6 +454,7 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   sourceControl: SourceControlContentPanel,
   gitHistory: GitHistoryContentPanel,
   gitBranches: GitBranchesContentPanel,
+  automation: AutomationContentPanel,
   workbench: WorkbenchContentPanel,
   agent: AgentContentPanel,
   orchestration: OrchestrationContentPanel,

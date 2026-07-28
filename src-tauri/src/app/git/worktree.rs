@@ -1,58 +1,16 @@
 use super::exec::{git_read, git_read_allow_fail, git_write};
 use super::paths::validate_base_ref;
+#[cfg(test)]
+pub use crate::worktree_storage::DEFAULT_WORKTREE_FOLDER;
+use crate::worktree_storage::{drive_root, requested_root};
+pub use crate::worktree_storage::{WorktreeStorage, WorktreeStorageMode};
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf, Prefix};
+use serde::Serialize;
+use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 /// Folder created inside the app data root when worktrees are stored there.
 const APP_DATA_WORKTREE_DIR: &str = "worktrees";
-/// Root folder name used when the user has not chosen one.
-pub(crate) const DEFAULT_WORKTREE_FOLDER: &str = "VibeLinkWorktrees";
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum WorktreeStorageMode {
-    /// Store on a drive: the source repository's drive by default, or an explicit one.
-    #[default]
-    Drive,
-    /// Store under the flavor's app data directory.
-    AppData,
-    /// Store under an explicit absolute folder.
-    Custom,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorktreeStorage {
-    #[serde(default)]
-    pub mode: WorktreeStorageMode,
-    /// `""` means "same drive as the source repository"; otherwise a `C:`-style prefix.
-    #[serde(default)]
-    pub drive: String,
-    #[serde(default)]
-    pub folder_name: String,
-    #[serde(default)]
-    pub custom_root: String,
-    #[serde(default = "default_group_by_repository")]
-    pub group_by_repository: bool,
-}
-
-fn default_group_by_repository() -> bool {
-    true
-}
-
-impl Default for WorktreeStorage {
-    fn default() -> Self {
-        Self {
-            mode: WorktreeStorageMode::Drive,
-            drive: String::new(),
-            folder_name: DEFAULT_WORKTREE_FOLDER.to_string(),
-            custom_root: String::new(),
-            group_by_repository: true,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,10 +69,11 @@ pub fn resolve_root(
     name: Option<&str>,
 ) -> Result<WorktreeStorageResolution> {
     let app_data_root = app_data_worktree_root()?;
-    let (requested, requested_error) = match requested_root(repo, storage) {
-        Ok(root) => (Some(root), None),
-        Err(error) => (None, Some(error.to_string())),
-    };
+    let (requested, requested_error) =
+        match requested_root(Path::new(repo), storage, &app_data_root) {
+            Ok(root) => (Some(root), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
 
     let (base, fallback_reason) = match requested {
         Some(root) => match probe_writable(&root) {
@@ -271,79 +230,6 @@ pub fn move_to(repo: &str, worktree_path: &str, destination: &str) -> Result<Wor
         worktree_path: destination_string,
         branch,
     })
-}
-
-fn requested_root(repo: &str, storage: &WorktreeStorage) -> Result<PathBuf> {
-    match storage.mode {
-        WorktreeStorageMode::AppData => app_data_worktree_root(),
-        WorktreeStorageMode::Custom => {
-            let custom = storage.custom_root.trim();
-            if custom.is_empty() {
-                bail!("custom worktree folder is not set");
-            }
-            let path = PathBuf::from(custom);
-            if !path.is_absolute() {
-                bail!("custom worktree folder must be an absolute path");
-            }
-            Ok(path)
-        }
-        WorktreeStorageMode::Drive => {
-            let folder = folder_name(storage)?;
-            let drive = storage.drive.trim();
-            let base = if drive.is_empty() {
-                drive_root(Path::new(repo)).ok_or_else(|| {
-                    anyhow!("could not resolve the source repository drive for {repo}")
-                })?
-            } else {
-                normalized_drive_root(drive)?
-            };
-            Ok(base.join(folder))
-        }
-    }
-}
-
-fn folder_name(storage: &WorktreeStorage) -> Result<String> {
-    let folder = storage.folder_name.trim();
-    if folder.is_empty() {
-        return Ok(DEFAULT_WORKTREE_FOLDER.to_string());
-    }
-    if folder.contains(['/', '\\']) || folder.contains("..") {
-        bail!("worktree folder name must be a single folder");
-    }
-    Ok(folder.to_string())
-}
-
-fn normalized_drive_root(drive: &str) -> Result<PathBuf> {
-    let trimmed = drive.trim().trim_end_matches(['\\', '/']);
-    let letter = trimmed.trim_end_matches(':');
-    if letter.len() != 1 || !letter.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        bail!("worktree drive must be a single drive letter");
-    }
-    Ok(PathBuf::from(format!("{}:\\", letter.to_ascii_uppercase())))
-}
-
-/// The volume root that owns `path`: the Windows drive prefix, else the filesystem
-/// root. `canonicalize` returns a `\\?\` verbatim prefix that `git worktree add`
-/// rejects ("could not create leading directories"), so the drive letter is
-/// re-emitted as a plain `E:\` root.
-fn drive_root(path: &Path) -> Option<PathBuf> {
-    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut components = absolute.components();
-    match components.next() {
-        Some(Component::Prefix(prefix)) => match prefix.kind() {
-            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => Some(PathBuf::from(format!(
-                "{}:\\",
-                (letter as char).to_ascii_uppercase()
-            ))),
-            _ => {
-                let mut root = PathBuf::from(prefix.as_os_str());
-                root.push(std::path::MAIN_SEPARATOR_STR);
-                Some(root)
-            }
-        },
-        Some(Component::RootDir) => Some(PathBuf::from(std::path::MAIN_SEPARATOR_STR)),
-        _ => None,
-    }
 }
 
 fn available_drives() -> Vec<String> {
@@ -574,16 +460,22 @@ mod tests {
     fn drive_mode_defaults_to_the_repository_drive() {
         let repo = std::env::temp_dir().join(format!("vibelink-storage-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&repo).expect("create repo");
+        let storage = storage(WorktreeStorageMode::Drive);
+        let expected_root = requested_root(
+            &repo,
+            &storage,
+            &app_data_worktree_root().expect("app data root"),
+        )
+        .expect("requested root");
         let resolved = resolve_root(
             repo.to_str().expect("utf8 repo"),
-            &storage(WorktreeStorageMode::Drive),
+            &storage,
             Some("Fix Login"),
         )
         .expect("resolve root");
 
-        let expected_drive = drive_root(&repo).expect("repo drive");
         assert!(resolved.writable, "{:?}", resolved.fallback_reason);
-        assert!(Path::new(&resolved.root).starts_with(expected_drive.join(DEFAULT_WORKTREE_FOLDER)));
+        assert!(Path::new(&resolved.root).starts_with(expected_root));
         assert!(resolved.example.ends_with("fix-login-<id>"));
         std::fs::remove_dir_all(repo).expect("cleanup repo");
     }
@@ -633,20 +525,6 @@ mod tests {
             Path::new(&resolved.root).starts_with(app_data_worktree_root().expect("app data root"))
         );
         std::fs::remove_dir_all(repo).expect("cleanup repo");
-    }
-
-    #[test]
-    fn folder_name_rejects_nested_or_escaping_values() {
-        let mut nested = storage(WorktreeStorageMode::Drive);
-        nested.folder_name = "a/b".to_string();
-        assert!(folder_name(&nested).is_err());
-        nested.folder_name = "..".to_string();
-        assert!(folder_name(&nested).is_err());
-        nested.folder_name = "  ".to_string();
-        assert_eq!(
-            folder_name(&nested).expect("blank falls back"),
-            DEFAULT_WORKTREE_FOLDER
-        );
     }
 
     #[test]

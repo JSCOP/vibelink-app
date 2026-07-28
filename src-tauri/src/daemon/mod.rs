@@ -16,7 +16,7 @@ use crate::computer_use::{
     SnapshotRequest, WindowIdentity, WindowsProcessSpawner,
 };
 use crate::control_plane::{ControlCommand, ControlPlane};
-use crate::daemon::automation::{AutomationService, CreateAutomation};
+use crate::daemon::automation::AutomationService;
 use crate::daemon::persistence::{load_sessions, save_sessions};
 use crate::daemon::pty::{Pane, SharedChild};
 use crate::daemon::session::{
@@ -62,7 +62,7 @@ use std::{
         Arc, LazyLock, Mutex, MutexGuard,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -79,6 +79,8 @@ const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_QUEUE_CAPACITY: usize = 256;
 const PERSIST_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 const REMOTE_PANE_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+const AUTOMATION_SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
+const AUTOMATION_SCHEDULER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 static PERSISTENCE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static DEBOUNCED_PERSISTER: LazyLock<Mutex<Option<DebouncedPersister>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -319,63 +321,85 @@ fn run_inner() -> Result<()> {
         warn!(?err, "failed to persist state during shutdown");
     }
     drop(lock_file);
-    fn start_automation_scheduler(
-        automation: Arc<AutomationService>,
-        state: SharedState,
-        shutdown: Arc<AtomicBool>,
-    ) -> Result<()> {
-        thread::Builder::new()
-            .name("vibelink-automation-scheduler".to_string())
-            .spawn(move || {
-                while !shutdown.load(Ordering::Acquire) {
-                    match automation.claim_due(chrono::Utc::now()) {
-                        Ok(claims) => {
-                            for claim in claims {
-                                let workspace = automation
-                                    .get(&claim.automation_id)
-                                    .ok()
-                                    .and_then(|record| {
-                                        automation_workspace(&state, &record.session_id).ok()
-                                    })
-                                    .unwrap_or_else(|| {
-                                        PathBuf::from("__vibelink_missing_workspace__")
-                                    });
-                                let automation = Arc::clone(&automation);
-                                let _ = thread::Builder::new()
-                                    .name(format!("vibelink-automation-{}", &claim.id[..8]))
-                                    .spawn(move || {
-                                        if let Err(error) = automation.execute(&claim, &workspace) {
-                                            error!(automation_run_id = %claim.id, ?error, "automation run failed");
-                                        }
-                                    });
-                            }
-                        }
-                        Err(error) => warn!(?error, "automation scheduler scan failed"),
-                    }
-
-
-                    if let Ok(records) = automation.list(None) {
-                        for record in records {
-                            let Ok(workspace) = automation_workspace(&state, &record.session_id)
-                            else {
-                                continue;
-                            };
-                            if let Ok(runs) = automation.runs(&record.id, 100) {
-                                for run in runs.into_iter().filter(|run| run.status == "running") {
-                                    if let Err(error) = automation.sync_run(&run.id, &workspace) {
-                                        warn!(automation_run_id = %run.id, ?error, "automation reconciliation failed");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    thread::sleep(Duration::from_secs(1));
-                }
-            })?;
-        Ok(())
-    }
 
     Ok(())
+}
+
+fn start_automation_scheduler(
+    automation: Arc<AutomationService>,
+    state: SharedState,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("vibelink-automation-scheduler".to_string())
+        .spawn(move || {
+            automation_scheduler_loop(&shutdown, || {
+                run_automation_scheduler_tick(&automation, &state);
+            });
+        })?;
+    Ok(())
+}
+
+fn automation_scheduler_loop<F>(shutdown: &AtomicBool, mut tick: F)
+where
+    F: FnMut(),
+{
+    while !shutdown.load(Ordering::Acquire) {
+        tick();
+        if wait_for_automation_scheduler_shutdown(shutdown, AUTOMATION_SCHEDULER_INTERVAL) {
+            break;
+        }
+    }
+}
+
+fn wait_for_automation_scheduler_shutdown(shutdown: &AtomicBool, timeout: Duration) -> bool {
+    if shutdown.load(Ordering::Acquire) {
+        return true;
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return shutdown.load(Ordering::Acquire);
+        }
+        thread::sleep(remaining.min(AUTOMATION_SCHEDULER_SHUTDOWN_POLL_INTERVAL));
+        if shutdown.load(Ordering::Acquire) {
+            return true;
+        }
+    }
+}
+
+fn run_automation_scheduler_tick(automation: &Arc<AutomationService>, state: &SharedState) {
+    let claims = match automation.claim_due(orchestration_now_millis()) {
+        Ok(claims) => claims,
+        Err(error) => {
+            warn!(?error, "automation scheduler scan failed");
+            return;
+        }
+    };
+
+    for claim in claims {
+        let workspace = automation
+            .get(&claim.automation_id)
+            .ok()
+            .and_then(|record| automation_workspace(state, &record.session_id).ok())
+            .unwrap_or_else(|| PathBuf::from("__vibelink_missing_workspace__"));
+        let automation = Arc::clone(automation);
+        let spawn_run_id = claim.id.clone();
+        let execution_run_id = spawn_run_id.clone();
+        let thread_name = format!(
+            "vibelink-automation-{}",
+            spawn_run_id.get(..8).unwrap_or(&spawn_run_id)
+        );
+        if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
+            if let Err(error) = automation.execute_and_notify(&claim, &workspace) {
+                error!(automation_run_id = %execution_run_id, ?error, "automation run failed");
+            }
+        }) {
+            error!(automation_run_id = %spawn_run_id, ?error, "failed to spawn automation run thread");
+        }
+    }
 }
 
 fn start_remote_pane_lease_expiry_sweep(
@@ -2861,148 +2885,110 @@ fn dispatch_automation_cli(
         }
         AutomationAction::Create => {
             let session_id = resolve_cli_session(state, command.selectors.workspace.as_deref())?;
-            let name = required_cli_option(&command.arguments, "name")?.to_string();
-            let schedule_kind =
-                required_cli_option(&command.arguments, "schedule-kind")?.to_string();
-            let schedule_value =
-                required_cli_option(&command.arguments, "schedule-value")?.to_string();
-            let timezone = cli_option(&command.arguments, "timezone")?
-                .unwrap_or("UTC")
-                .to_string();
-            let workspace_mode = cli_option(&command.arguments, "workspace-mode")?
-                .unwrap_or("reuse")
-                .to_string();
-            let legacy_command = required_cli_option(&command.arguments, "command")?.to_string();
-            let precheck_timeout_seconds = cli_option(&command.arguments, "timeout-seconds")?
-                .unwrap_or("60")
-                .parse::<u64>()
-                .context("--timeout-seconds must be an unsigned integer")?
-                .clamp(1, 600);
-            let goal = cli_option(&command.arguments, "goal")?
-                .unwrap_or(&legacy_command)
-                .to_string();
-            Ok(serde_json::to_value(automation.create(
-                CreateAutomation {
-                    session_id: session_id.to_string(),
-                    name,
-                    schedule_kind,
-                    schedule_value,
-                    timezone,
-                    workspace_mode,
-                    precheck: json!({
-                        "requireWorkspace": true,
-                        "timeoutSeconds": precheck_timeout_seconds,
-                    }),
-                    policy: json!({
-                        "goal": goal,
-                        "maxConcurrent": 4,
-                        "resourceBudget": { "maxActiveRuns": 1 },
-                    }),
-                },
-            )?)?)
-        }
-        AutomationAction::Update => {
-            let id = command
-                .arguments
-                .positionals
-                .first()
-                .map(String::as_str)
-                .or_else(|| cli_option(&command.arguments, "id").ok().flatten())
-                .context("automation id is required")?;
-            let mut patch = serde_json::Map::new();
-            for (option_name, json_name) in [
-                ("name", "name"),
-                ("schedule-kind", "scheduleKind"),
-                ("schedule-value", "scheduleValue"),
-                ("timezone", "timezone"),
-                ("workspace-mode", "workspaceMode"),
-            ] {
-                if let Some(value) = cli_option(&command.arguments, option_name)? {
-                    patch.insert(json_name.to_string(), Value::String(value.to_string()));
-                }
-            }
-            if command.arguments.switches.contains("enable") {
-                patch.insert("enabled".to_string(), Value::Bool(true));
-            }
-            if command.arguments.switches.contains("disable") {
-                patch.insert("enabled".to_string(), Value::Bool(false));
-            }
-            let existing = automation.get(id)?;
-            let mut policy = existing.policy;
-            if let Some(value) = cli_option(&command.arguments, "command")? {
-                policy["goal"] = Value::String(value.to_string());
-            }
-            if let Some(value) = cli_option(&command.arguments, "goal")? {
-                policy["goal"] = Value::String(value.to_string());
-            }
-            let mut precheck = existing.precheck;
-            if let Some(value) = cli_option(&command.arguments, "timeout-seconds")? {
-                precheck["timeoutSeconds"] = json!(value
-                    .parse::<u64>()
-                    .context("--timeout-seconds must be an unsigned integer")?
-                    .clamp(1, 600));
-            }
-            patch.insert("precheck".to_string(), precheck);
-            patch.insert("policy".to_string(), policy);
+            let payload = automation_json_payload(&command.arguments)?;
             Ok(serde_json::to_value(
-                automation.update(id, &Value::Object(patch))?,
+                automation.create(&session_id.to_string(), &payload)?,
             )?)
         }
+        AutomationAction::Update => {
+            let id = automation_cli_id(&command.arguments, "automation id")?;
+            let payload = automation_json_payload(&command.arguments)?;
+            Ok(serde_json::to_value(automation.update(id, &payload)?)?)
+        }
         AutomationAction::Delete => {
-            let id = command
-                .arguments
-                .positionals
-                .first()
-                .map(String::as_str)
-                .or_else(|| cli_option(&command.arguments, "id").ok().flatten())
-                .context("automation id is required")?;
+            let id = automation_cli_id(&command.arguments, "automation id")?;
             automation.delete(id)?;
             Ok(json!({ "id": id, "deleted": true }))
         }
         AutomationAction::Run => {
-            let id = command
-                .arguments
-                .positionals
-                .first()
-                .map(String::as_str)
-                .or_else(|| cli_option(&command.arguments, "id").ok().flatten())
-                .context("automation id is required")?;
+            let id = automation_cli_id(&command.arguments, "automation id")?;
             let record = automation.get(id)?;
             let workspace = automation_workspace(state, &record.session_id)?;
             let claim = automation.trigger(id)?;
             Ok(serde_json::to_value(
-                automation.execute(&claim, &workspace)?,
+                automation.execute_and_notify(&claim, &workspace)?,
             )?)
         }
         AutomationAction::Runs => {
-            let id = command
-                .arguments
-                .positionals
-                .first()
-                .map(String::as_str)
-                .or_else(|| cli_option(&command.arguments, "id").ok().flatten())
-                .context("automation id is required")?;
+            let id = automation_cli_id(&command.arguments, "automation id")?;
             let limit = cli_option(&command.arguments, "limit")?
                 .unwrap_or("50")
                 .parse::<u32>()
                 .context("--limit must be an unsigned integer")?;
             Ok(serde_json::to_value(automation.runs(id, limit)?)?)
         }
+        AutomationAction::SchedulePreview => {
+            let payload = automation_json_payload(&command.arguments)?;
+            Ok(automation.schedule_preview(&payload)?)
+        }
         AutomationAction::Precheck => {
-            let id = command
-                .arguments
-                .positionals
-                .first()
-                .map(String::as_str)
-                .or_else(|| cli_option(&command.arguments, "id").ok().flatten())
-                .context("automation id is required")?;
+            let id = automation_cli_id(&command.arguments, "automation id")?;
             let record = automation.get(id)?;
             let workspace = automation_workspace(state, &record.session_id)?;
             Ok(serde_json::to_value(
                 automation.precheck(&record, &workspace),
             )?)
         }
+        AutomationAction::Cancel => {
+            let id = automation_cli_id(&command.arguments, "automation run id")?;
+            Ok(serde_json::to_value(automation.cancel(id)?)?)
+        }
+        AutomationAction::ImportPreview => {
+            let session_id = resolve_cli_session(state, command.selectors.workspace.as_deref())?;
+            let workspace = automation_workspace(state, &session_id.to_string())?;
+            Ok(serde_json::to_value(
+                automation.import_preview(&session_id.to_string(), &workspace)?,
+            )?)
+        }
+        AutomationAction::Import => {
+            let session_id = resolve_cli_session(state, command.selectors.workspace.as_deref())?;
+            let workspace = automation_workspace(state, &session_id.to_string())?;
+            let payload = automation_json_payload(&command.arguments)?;
+            Ok(serde_json::to_value(automation.import(
+                &session_id.to_string(),
+                &workspace,
+                &payload,
+            )?)?)
+        }
+        AutomationAction::DraftPreview => {
+            let session_id = resolve_cli_session(state, command.selectors.workspace.as_deref())?;
+            let payload = automation_json_payload(&command.arguments)?;
+            Ok(serde_json::to_value(
+                automation.draft_preview(&session_id.to_string(), &payload)?,
+            )?)
+        }
+        AutomationAction::DraftCancel => {
+            let id = automation_cli_id(&command.arguments, "automation draft request id")?;
+            Ok(serde_json::to_value(automation.cancel_draft(id)?)?)
+        }
     }
+}
+
+fn automation_cli_id<'a>(
+    arguments: &'a crate::dedicated_cli::OperationArguments,
+    label: &str,
+) -> Result<&'a str> {
+    let positional = arguments.positionals.first().map(String::as_str);
+    let option = cli_option(arguments, "id")?;
+    let id = match (positional, option) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("{label} must be supplied either positionally or with --id, not both")
+        }
+        (Some(id), None) | (None, Some(id)) => id,
+        (None, None) => anyhow::bail!("{label} is required"),
+    };
+    Uuid::parse_str(id).with_context(|| format!("{label} must be a UUID"))?;
+    Ok(id)
+}
+
+fn automation_json_payload(arguments: &crate::dedicated_cli::OperationArguments) -> Result<Value> {
+    let raw = required_cli_option(arguments, "json")?;
+    let payload: Value =
+        serde_json::from_str(raw).context("automation --json must be valid JSON")?;
+    if !payload.is_object() {
+        anyhow::bail!("automation --json must contain a JSON object");
+    }
+    Ok(payload)
 }
 
 fn automation_workspace(state: &SharedState, session_id: &str) -> Result<PathBuf> {
@@ -5634,5 +5620,86 @@ mod tests {
         }
 
         assert!(!path.exists());
+    }
+    #[test]
+    fn automation_cli_id_validation() {
+        let valid_uuid = Uuid::new_v4().to_string();
+
+        let mut args_valid = crate::dedicated_cli::OperationArguments::default();
+        args_valid.positionals.push(valid_uuid.clone());
+        let res = automation_cli_id(&args_valid, "automation id");
+        assert_eq!(res.unwrap(), valid_uuid);
+
+        let mut args_opt = crate::dedicated_cli::OperationArguments::default();
+        args_opt
+            .options
+            .insert("id".to_string(), vec![valid_uuid.clone()]);
+        let res = automation_cli_id(&args_opt, "automation id");
+        assert_eq!(res.unwrap(), valid_uuid);
+
+        let mut args_conflict = crate::dedicated_cli::OperationArguments::default();
+        args_conflict.positionals.push(valid_uuid.clone());
+        args_conflict
+            .options
+            .insert("id".to_string(), vec![valid_uuid.clone()]);
+        let res = automation_cli_id(&args_conflict, "automation id");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("either positionally or with --id, not both"));
+
+        let args_missing = crate::dedicated_cli::OperationArguments::default();
+        let res = automation_cli_id(&args_missing, "automation id");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("automation id is required"));
+
+        let mut args_invalid = crate::dedicated_cli::OperationArguments::default();
+        args_invalid.positionals.push("not-a-uuid".to_string());
+        let res = automation_cli_id(&args_invalid, "automation id");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("automation id must be a UUID"));
+    }
+
+    #[test]
+    fn automation_json_payload_validation() {
+        let mut args_valid = crate::dedicated_cli::OperationArguments::default();
+        args_valid.options.insert(
+            "json".to_string(),
+            vec![r#"{"name":"test","prompt":"hello"}"#.to_string()],
+        );
+        let payload = automation_json_payload(&args_valid).unwrap();
+        assert!(payload.is_object());
+        assert_eq!(payload.get("name").and_then(Value::as_str), Some("test"));
+
+        let mut args_non_object = crate::dedicated_cli::OperationArguments::default();
+        args_non_object
+            .options
+            .insert("json".to_string(), vec!["[1, 2, 3]".to_string()]);
+        let res = automation_json_payload(&args_non_object);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("must contain a JSON object"));
+
+        let mut args_malformed = crate::dedicated_cli::OperationArguments::default();
+        args_malformed
+            .options
+            .insert("json".to_string(), vec!["{invalid json".to_string()]);
+        let res = automation_json_payload(&args_malformed);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("must be valid JSON"));
+
+        let args_missing = crate::dedicated_cli::OperationArguments::default();
+        let res = automation_json_payload(&args_missing);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("--json is required"));
     }
 }

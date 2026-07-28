@@ -16,6 +16,7 @@ export type WorkspaceContentKind =
   | 'sourceControl'
   | 'gitHistory'
   | 'gitBranches'
+  | 'automation'
   | 'workbench'
   | 'agent'
   | 'orchestration'
@@ -30,7 +31,7 @@ export type WorkspaceContentParams =
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
   | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
-  | { schema: 1; kind: 'workspaces' | 'explorer' | 'workspaceFiles' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
+  | { schema: 1; kind: 'workspaces' | 'explorer' | 'workspaceFiles' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'automation' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
 
 export type WorkspaceLayoutEnvelope = {
   version: 3
@@ -51,6 +52,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
   sourceControl: 'singleton',
   gitHistory: 'singleton',
   gitBranches: 'singleton',
+  automation: 'singleton',
   workbench: 'singleton',
   agent: 'singleton',
   orchestration: 'singleton',
@@ -67,6 +69,7 @@ const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
   sourceControl: true,
   gitHistory: true,
   gitBranches: true,
+  automation: true,
   workbench: true,
   agent: true,
   orchestration: true,
@@ -87,6 +90,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
   sourceControl: true,
   gitHistory: true,
   gitBranches: true,
+  automation: true,
   workbench: true,
   agent: true,
   orchestration: true,
@@ -99,6 +103,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
 const leftStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {
   workspaces: true,
   explorer: true,
+  automation: true,
 }
 
 const rightStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {

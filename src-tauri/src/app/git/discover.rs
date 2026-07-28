@@ -91,17 +91,30 @@ fn walk_repositories(
 
     let inside_repo = inside_repo || discovered_here;
     let mut entries = fs::read_dir(directory)
-        .with_context(|| format!("read repository discovery directory {}", directory.display()))?
+        .with_context(|| {
+            format!(
+                "read repository discovery directory {}",
+                directory.display()
+            )
+        })?
         .collect::<std::io::Result<Vec<_>>>()
-        .with_context(|| format!("read repository discovery entries in {}", directory.display()))?;
+        .with_context(|| {
+            format!(
+                "read repository discovery entries in {}",
+                directory.display()
+            )
+        })?;
     entries.sort_unstable_by(|left, right| left.file_name().cmp(&right.file_name()));
     for entry in entries {
         if repositories.len() >= DISCOVERED_REPO_LIMIT {
             break;
         }
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("inspect repository discovery entry {}", entry.path().display()))?;
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "inspect repository discovery entry {}",
+                entry.path().display()
+            )
+        })?;
         if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
@@ -147,11 +160,7 @@ fn is_ignored_directory(name: &OsStr) -> bool {
         )
 }
 
-fn push_repository(
-    directory: &Path,
-    is_submodule: bool,
-    repositories: &mut Vec<DiscoveredRepo>,
-) {
+fn push_repository(directory: &Path, is_submodule: bool, repositories: &mut Vec<DiscoveredRepo>) {
     if repositories.len() >= DISCOVERED_REPO_LIMIT {
         return;
     }
@@ -195,8 +204,8 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("vibelink-git-discovery-{}", Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("vibelink-git-discovery-{}", Uuid::new_v4()));
             fs::create_dir_all(&root).expect("create discovery fixture");
             Self(root)
         }
@@ -338,8 +347,7 @@ mod tests {
         }
 
         let root_arg = root.path().to_string_lossy().into_owned();
-        let repositories =
-            discover_repos_native(&root_arg, Some(1)).expect("capped discovery");
+        let repositories = discover_repos_native(&root_arg, Some(1)).expect("capped discovery");
 
         assert_eq!(repositories.len(), DISCOVERED_REPO_LIMIT);
         assert!(repositories

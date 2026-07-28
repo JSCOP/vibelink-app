@@ -34,6 +34,7 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   sourceControl: { kind: 'sourceControl', component: 'sourceControl', title: 'Source Control', icon: 'git-compare-arrows' },
   gitHistory: { kind: 'gitHistory', component: 'gitHistory', title: 'Git History', icon: 'history' },
   gitBranches: { kind: 'gitBranches', component: 'gitBranches', title: 'Branches', icon: 'git-branch' },
+  automation: { kind: 'automation', component: 'automation', title: 'Automations', icon: 'timer' },
   workbench: { kind: 'workbench', component: 'workbench', title: 'Workbench', icon: 'git-branch' },
   agent: { kind: 'agent', component: 'agent', title: 'VibeLink Agent', icon: 'bot' },
   orchestration: { kind: 'orchestration', component: 'orchestration', title: 'Orchestration', icon: 'monitor-cog' },
@@ -48,7 +49,7 @@ export const workspaceRightEdgeGroupId = 'workspace-right-tools'
 export const workspaceEdgeCollapsedSize = 38
 export const workspaceMinimumCenterWidth = 640
 
-export const workspaceLeftStructuralKinds = ['workspaces', 'explorer'] as const
+export const workspaceLeftStructuralKinds = ['workspaces', 'explorer', 'automation'] as const
 export const workspaceRightStructuralKinds = ['workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'agentSessions'] as const
 
 export const workspaceEdgeGroupOptions = {

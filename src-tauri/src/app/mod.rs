@@ -54,7 +54,8 @@ impl Default for ExitPrefs {
 
 impl ExitPrefs {
     pub fn set_clean(&self, value: bool) {
-        self.clean.store(value, std::sync::atomic::Ordering::Release);
+        self.clean
+            .store(value, std::sync::atomic::Ordering::Release);
     }
 
     pub fn set_minimize_to_tray(&self, value: bool) {

@@ -30,6 +30,7 @@ import {
   LayoutGrid,
   ListTodo,
   MonitorCog,
+  Timer,
 } from 'lucide-react'
 
 type BrandIconProps = { size?: number | string; className?: string }
@@ -88,6 +89,7 @@ export const profileIcons: Record<string, IconComponent> = {
   'layout-grid': LayoutGrid,
   'list-todo': ListTodo,
   'monitor-cog': MonitorCog,
+  timer: Timer,
 }
 
 export const defaultProfileIconName = 'terminal'

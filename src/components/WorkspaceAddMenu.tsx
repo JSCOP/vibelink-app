@@ -1,4 +1,4 @@
-import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, Plus, Search, Workflow, type LucideIcon } from 'lucide-react'
+import { Bot, FileCode2, GitBranch, GitCompare, Globe, LayoutGrid, ListTodo, Plus, Search, Timer, Workflow, type LucideIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { AgentCliStatus } from '../ipc/agents'
@@ -9,9 +9,12 @@ import { ProfileIcon } from './ProfileIcon'
 import { steppedPickerId, type PickerEntry } from './pickerModel'
 
 type WorkspaceWindowKind = 'browser' | 'agent' | 'orchestration' | 'workbench' | 'kanban' | 'todo' | 'diff'
+/** Singleton structural sidebar panels: revealed on their edge, never opened as a central tab. */
+type WorkspaceStructuralPanelKind = 'automation'
 type WorkspaceAddMenuItem =
   | { id: string; section: 'Terminals'; label: string; profile: Profile; disabled: boolean; hint?: string }
   | { id: string; section: 'Windows'; label: string; icon: LucideIcon; kind: WorkspaceWindowKind | 'editor'; disabled: false }
+  | { id: string; section: 'Panels'; label: string; icon: LucideIcon; kind: WorkspaceStructuralPanelKind; disabled: false }
 
 type WorkspaceAddMenuProps = {
   actions: WorkspaceContentActions | null
@@ -31,6 +34,10 @@ const windowItems: Array<{ kind: WorkspaceWindowKind | 'editor'; label: string; 
   { kind: 'kanban', label: 'Kanban', icon: LayoutGrid },
   { kind: 'todo', label: 'Todo List', icon: ListTodo },
   { kind: 'diff', label: 'Task Diff', icon: GitCompare },
+]
+
+const panelItems: Array<{ kind: WorkspaceStructuralPanelKind; label: string; icon: LucideIcon }> = [
+  { kind: 'automation', label: 'Automations', icon: Timer },
 ]
 
 function profileInstallHint(profile: Profile, statusById: Record<string, AgentCliStatus>): string | undefined {
@@ -75,6 +82,14 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
       kind: item.kind,
       disabled: false as const,
     })),
+    ...panelItems.map((item) => ({
+      id: `panel:${item.kind}`,
+      section: 'Panels' as const,
+      label: item.label,
+      icon: item.icon,
+      kind: item.kind,
+      disabled: false as const,
+    })),
   ], [profiles, statusById])
   const filteredItems = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase()
@@ -83,6 +98,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
   const [activeId, setActiveId] = useState<string | null>(() => steppedPickerId(selectableEntries(items), null, 1))
   const terminalItems = filteredItems.filter((item) => item.section === 'Terminals')
   const workspaceWindowItems = filteredItems.filter((item) => item.section === 'Windows')
+  const structuralPanelItems = filteredItems.filter((item) => item.section === 'Panels')
 
   useEffect(() => {
     setWorkspaceOverlayOpen?.(overlayId, open)
@@ -107,6 +123,13 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
     closeMenu()
     if (item.section === 'Terminals') {
       void actions.openContent({ kind: 'terminal', targetGroupId, profileId: item.profile.id })
+      return
+    }
+    // Structural panels are left-edge singletons. Reveal that panel rather than
+    // routing through the central group this + button belongs to, so the menu
+    // can never create a second, central copy.
+    if (item.section === 'Panels') {
+      void actions.openContent({ kind: item.kind })
       return
     }
     if (item.kind === 'editor') {
@@ -139,7 +162,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
 
   const renderItem = (item: WorkspaceAddMenuItem) => {
     const isActive = item.id === activeId
-    const Icon = item.section === 'Windows' ? item.icon : null
+    const Icon = item.section === 'Terminals' ? null : item.icon
     const hint = item.section === 'Terminals' ? item.hint : undefined
     return (
       <button
@@ -237,6 +260,13 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
                 <section className="workspace-add-menu-section" aria-label="Windows">
                   <div className="workspace-add-menu-section-title">Windows</div>
                   {workspaceWindowItems.map(renderItem)}
+                </section>
+              ) : null}
+              {(terminalItems.length > 0 || workspaceWindowItems.length > 0) && structuralPanelItems.length > 0 ? <div className="workspace-group-menu-separator" role="separator" /> : null}
+              {structuralPanelItems.length > 0 ? (
+                <section className="workspace-add-menu-section" aria-label="Panels">
+                  <div className="workspace-add-menu-section-title">Panels</div>
+                  {structuralPanelItems.map(renderItem)}
                 </section>
               ) : null}
               {filteredItems.length === 0 ? <div className="workspace-add-menu-empty">No commands match “{filter}”.</div> : null}

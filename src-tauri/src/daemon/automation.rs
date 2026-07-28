@@ -1,93 +1,57 @@
-use crate::{
-    agent_runtime::WorktreeManager,
-    orchestration::{
-        CoordinatorService, CreateRunRequest, CreateTaskRequest, RunPolicy, RunRevisionRequest,
-        ScheduleRequest,
-    },
+#[path = "automation/draft.rs"]
+mod draft;
+#[path = "automation/import.rs"]
+mod import;
+#[path = "automation/model.rs"]
+mod model;
+#[path = "automation/payload.rs"]
+mod payload;
+#[path = "automation/precheck.rs"]
+mod precheck;
+#[path = "automation/process_registry.rs"]
+pub mod process_registry;
+#[path = "automation/runner.rs"]
+pub mod runner;
+#[cfg(test)]
+#[path = "automation/runner_behavior_tests.rs"]
+mod runner_behavior_tests;
+#[path = "automation/schedule.rs"]
+pub mod schedule;
+#[path = "automation/store.rs"]
+mod store;
+#[path = "automation/types.rs"]
+mod types;
+#[path = "automation/worktree.rs"]
+pub mod worktree;
+
+pub use model::{AutomationPrecheckResult, AutomationRecord, AutomationRunRecord};
+pub use process_registry::AutomationProcessRegistry;
+pub use runner::{AutomationRunner, RunnerOutcome};
+pub use worktree::{
+    AutomationWorktreeController, CleanupOutcome, CleanupReason, PreparedWorkspace,
 };
-use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
-use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::{Deserialize, Serialize};
+
+use crate::{agent_runtime::WorktreeManager, orchestration::CoordinatorService};
+use anyhow::{anyhow, bail, Context, Result};
+use model::{apply_patch, parse_create};
+use rusqlite::{Connection, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Arc, Mutex, MutexGuard},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use store::AutomationStore;
 use uuid::Uuid;
-
-const MAX_PRECHECK_SECONDS: u64 = 600;
-const DEFAULT_PRECHECK_SECONDS: u64 = 60;
-const MAX_PRECHECK_OUTPUT_BYTES: usize = 64 * 1024;
-const RETAIN_FINAL_RUNS: i64 = 100;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutomationRecord {
-    pub id: String,
-    pub session_id: String,
-    pub name: String,
-    pub schedule_kind: String,
-    pub schedule_value: String,
-    pub timezone: String,
-    pub enabled: bool,
-    pub workspace_mode: String,
-    pub precheck: Value,
-    pub policy: Value,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutomationRunRecord {
-    pub id: String,
-    pub automation_id: String,
-    pub orchestration_run_id: Option<String>,
-    pub status: String,
-    pub dispatch_token: String,
-    pub output_summary: Option<String>,
-    pub output_truncated: bool,
-    pub precheck: Option<Value>,
-    pub worktree_path: Option<String>,
-    pub branch: Option<String>,
-    pub started_at: Option<u64>,
-    pub finished_at: Option<u64>,
-    pub created_at: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct CreateAutomation {
-    pub session_id: String,
-    pub name: String,
-    pub schedule_kind: String,
-    pub schedule_value: String,
-    pub timezone: String,
-    pub workspace_mode: String,
-    pub precheck: Value,
-    pub policy: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrecheckResult {
-    pub ok: bool,
-    pub workspace_exists: bool,
-    pub git_ready: bool,
-    pub timed_out: bool,
-    pub output: String,
-    pub output_truncated: bool,
-}
 
 pub struct AutomationService {
     connection: Mutex<Connection>,
     coordinator: Arc<CoordinatorService>,
-    worktrees: WorktreeManager,
+    worktrees: AutomationWorktreeController,
+    process_registry: Arc<AutomationProcessRegistry>,
+    runner: AutomationRunner,
+    draft_root: PathBuf,
 }
 
 impl AutomationService {
@@ -96,160 +60,257 @@ impl AutomationService {
         artifact_root: PathBuf,
         coordinator: Arc<CoordinatorService>,
     ) -> Result<Self> {
-        fs::create_dir_all(&artifact_root)?;
-        let connection = Connection::open(database_path)?;
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("create automation database directory {}", parent.display())
+            })?;
+        }
+        fs::create_dir_all(&artifact_root).with_context(|| {
+            format!(
+                "create automation artifact directory {}",
+                artifact_root.display()
+            )
+        })?;
+        let draft_root = artifact_root.join("drafts");
+        fs::create_dir_all(&draft_root).with_context(|| {
+            format!("create automation draft directory {}", draft_root.display())
+        })?;
+
+        let connection = Connection::open(database_path)
+            .with_context(|| format!("open automation database {}", database_path.display()))?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
         )?;
-        Ok(Self {
+
+        let process_registry = Arc::new(AutomationProcessRegistry::new());
+        let runner = AutomationRunner::new(Arc::clone(&process_registry), None);
+        let service = Self {
             connection: Mutex::new(connection),
             coordinator,
-            worktrees: WorktreeManager::new(artifact_root.join("worktrees"))?,
-        })
+            worktrees: AutomationWorktreeController::new(WorktreeManager::new(
+                artifact_root.join("worktrees"),
+            )?),
+            process_registry,
+            runner,
+            draft_root,
+        };
+        service.reconcile_startup()?;
+        Ok(service)
+    }
+
+    fn reconcile_startup(&self) -> Result<()> {
+        let recovered = {
+            let now = now_millis();
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let active = AutomationStore::active_runs(&transaction)?;
+            let mut recovered = Vec::with_capacity(active.len());
+            for mut run in active {
+                let reason = if run.status == "pending" {
+                    "VibeLink daemon restarted before Hermes dispatch began; rerun manually."
+                        .to_string()
+                } else if let Some(identity) = run.runtime_identity.as_ref() {
+                    match process_registry::terminate_persisted_process(identity) {
+                        Ok(true) => format!(
+                            "VibeLink daemon restarted during Hermes execution; exact process {} generation {} was terminated safely. Rerun manually.",
+                            identity.pid, identity.generation
+                        ),
+                        Ok(false) => format!(
+                            "VibeLink daemon restarted and Hermes process {} generation {} is no longer active. Rerun manually.",
+                            identity.pid, identity.generation
+                        ),
+                        Err(error) => {
+                            tracing::warn!(automation_run_id = %run.id, pid = identity.pid, ?error, "could not safely reconcile persisted automation process identity");
+                            continue;
+                        }
+                    }
+                } else {
+                    "VibeLink daemon restarted before Hermes process identity was persisted; rerun manually.".to_string()
+                };
+                let expected_status = run.status.clone();
+                run.status = "dispatch_failed".to_string();
+                run.error = Some(reason);
+                run.finished_at = Some(now);
+                if let Some(worktree) = run.worktree.as_mut() {
+                    if worktree.disposition == "live" {
+                        worktree.disposition = "retained".to_string();
+                    }
+                }
+                recovered.push(AutomationStore::save_run_if_status(
+                    &transaction,
+                    &run,
+                    &expected_status,
+                )?);
+            }
+            transaction.commit()?;
+            recovered
+        };
+        for run in recovered {
+            if let Err(error) = self.create_final_notification(&run) {
+                tracing::warn!(automation_run_id = %run.id, ?error, "failed to persist recovered automation notification");
+            }
+        }
+        Ok(())
     }
 
     pub fn list(&self, session_id: Option<&str>) -> Result<Vec<AutomationRecord>> {
         let connection = self.lock()?;
-        let sql = if session_id.is_some() {
-            "SELECT id,session_id,name,schedule_kind,schedule_value,timezone,enabled,workspace_mode,precheck_json,policy_json,created_at,updated_at FROM automations WHERE session_id=?1 ORDER BY name,id"
-        } else {
-            "SELECT id,session_id,name,schedule_kind,schedule_value,timezone,enabled,workspace_mode,precheck_json,policy_json,created_at,updated_at FROM automations ORDER BY name,id"
-        };
-        let mut statement = connection.prepare(sql)?;
-        let records = if let Some(session_id) = session_id {
-            statement
-                .query_map([session_id], read_automation)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            statement
-                .query_map([], read_automation)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        Ok(records)
+        AutomationStore::list(&connection, session_id)
     }
 
     pub fn get(&self, id: &str) -> Result<AutomationRecord> {
-        self.lock()?
-            .query_row(
-                "SELECT id,session_id,name,schedule_kind,schedule_value,timezone,enabled,workspace_mode,precheck_json,policy_json,created_at,updated_at FROM automations WHERE id=?1",
-                [id],
-                read_automation,
-            )
-            .optional()?
-            .with_context(|| format!("automation not found: {id}"))
+        let connection = self.lock()?;
+        AutomationStore::get(&connection, id)
     }
 
-    pub fn create(&self, request: CreateAutomation) -> Result<AutomationRecord> {
-        validate_automation(&request)?;
-        let id = Uuid::new_v4().to_string();
+    pub fn create(&self, session_id: &str, payload: &Value) -> Result<AutomationRecord> {
         let now = now_millis();
-        self.lock()?.execute(
-            "INSERT INTO automations(id,session_id,name,schedule_kind,schedule_value,timezone,enabled,workspace_mode,precheck_json,policy_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?8,?9,?10,?10)",
-            params![id,request.session_id,request.name.trim(),request.schedule_kind,request.schedule_value,request.timezone,request.workspace_mode,request.precheck.to_string(),request.policy.to_string(),now as i64],
+        let mut record = parse_create(session_id, payload, now, Uuid::new_v4().to_string())?;
+        schedule::validate_schedule(
+            &record.schedule_kind,
+            &record.schedule_value,
+            &record.timezone,
+            record.dtstart,
         )?;
-        self.get(&id)
+        if record.requires_review && record.enabled {
+            bail!("automation requiring review cannot be enabled");
+        }
+        record.next_run_at = if record.enabled {
+            schedule::next_after(&record, record.created_at)?
+        } else {
+            None
+        };
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted = AutomationStore::insert(&transaction, &record)?;
+        transaction.commit()?;
+        Ok(inserted)
     }
 
-    pub fn update(&self, id: &str, patch: &Value) -> Result<AutomationRecord> {
-        let mut record = self.get(id)?;
-        if let Some(value) = patch.get("name").and_then(Value::as_str) {
-            record.name = value.to_string();
-        }
-        if let Some(value) = patch.get("scheduleKind").and_then(Value::as_str) {
-            record.schedule_kind = value.to_string();
-        }
-        if let Some(value) = patch.get("scheduleValue").and_then(Value::as_str) {
-            record.schedule_value = value.to_string();
-        }
-        if let Some(value) = patch.get("timezone").and_then(Value::as_str) {
-            record.timezone = value.to_string();
-        }
-        if let Some(value) = patch.get("enabled").and_then(Value::as_bool) {
-            record.enabled = value;
-        }
-        if let Some(value) = patch.get("workspaceMode").and_then(Value::as_str) {
-            record.workspace_mode = value.to_string();
-        }
-        if let Some(value) = patch.get("precheck") {
-            record.precheck = value.clone();
-        }
-        if let Some(value) = patch.get("policy") {
-            record.policy = value.clone();
-        }
-        validate_automation(&CreateAutomation {
-            session_id: record.session_id.clone(),
-            name: record.name.clone(),
-            schedule_kind: record.schedule_kind.clone(),
-            schedule_value: record.schedule_value.clone(),
-            timezone: record.timezone.clone(),
-            workspace_mode: record.workspace_mode.clone(),
-            precheck: record.precheck.clone(),
-            policy: record.policy.clone(),
-        })?;
-        record.updated_at = now_millis();
-        self.lock()?.execute(
-            "UPDATE automations SET name=?2,schedule_kind=?3,schedule_value=?4,timezone=?5,enabled=?6,workspace_mode=?7,precheck_json=?8,policy_json=?9,updated_at=?10 WHERE id=?1",
-            params![record.id,record.name,record.schedule_kind,record.schedule_value,record.timezone,record.enabled as i64,record.workspace_mode,record.precheck.to_string(),record.policy.to_string(),record.updated_at as i64],
+    pub fn update(&self, id: &str, payload: &Value) -> Result<AutomationRecord> {
+        let now = now_millis();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = AutomationStore::get(&transaction, id)?;
+        let mut updated = apply_patch(&existing, payload, now)?;
+        schedule::validate_schedule(
+            &updated.schedule_kind,
+            &updated.schedule_value,
+            &updated.timezone,
+            updated.dtstart,
         )?;
-        self.get(id)
+        if updated.requires_review && updated.enabled {
+            bail!("automation requiring review cannot be enabled");
+        }
+
+        let schedule_changed = existing.schedule_kind != updated.schedule_kind
+            || existing.schedule_value != updated.schedule_value
+            || existing.timezone != updated.timezone
+            || existing.dtstart != updated.dtstart;
+        updated.next_run_at = if !updated.enabled {
+            None
+        } else if !existing.enabled || schedule_changed || existing.next_run_at.is_none() {
+            schedule::next_after(&updated, updated.updated_at)?
+        } else {
+            existing.next_run_at
+        };
+
+        let saved = AutomationStore::update(&transaction, &updated)?;
+        transaction.commit()?;
+        Ok(saved)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        let changed = self
-            .lock()?
-            .execute("DELETE FROM automations WHERE id=?1", [id])?;
-        if changed == 0 {
-            bail!("automation not found: {id}");
-        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        AutomationStore::delete(&transaction, id)?;
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn runs(&self, automation_id: &str, limit: u32) -> Result<Vec<AutomationRunRecord>> {
         let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,output_truncated,precheck_json,worktree_path,branch,started_at,finished_at,created_at FROM automation_runs WHERE automation_id=?1 ORDER BY created_at DESC,id DESC LIMIT ?2",
-        )?;
-        let runs = statement
-            .query_map(params![automation_id, limit.clamp(1, 500)], read_run)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(runs)
+        AutomationStore::runs(&connection, automation_id, limit)
     }
 
     pub fn trigger(&self, automation_id: &str) -> Result<AutomationRunRecord> {
-        let automation = self.get(automation_id)?;
-        self.enforce_resource_budget(&automation)?;
-        self.insert_claim(automation_id, format!("manual:{}", Uuid::new_v4()))
+        let now = now_millis();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let automation = AutomationStore::get(&transaction, automation_id)?;
+        if automation.requires_review {
+            bail!("automation must be reviewed and saved before it can run");
+        }
+        if let Some(active) = AutomationStore::active_run(&transaction, automation_id)? {
+            bail!(
+                "automation already has active run {} ({})",
+                active.id,
+                active.status
+            );
+        }
+        let run = AutomationRunRecord {
+            id: Uuid::new_v4().to_string(),
+            automation_id: automation_id.to_string(),
+            run_number: AutomationStore::next_run_number(&transaction, automation_id)?,
+            trigger: "manual".to_string(),
+            scheduled_for: now,
+            status: "pending".to_string(),
+            runtime_identity: None,
+            worktree: None,
+            precheck_result: None,
+            output_snapshot: None,
+            usage: None,
+            error: None,
+            started_at: None,
+            finished_at: None,
+            created_at: now,
+        };
+        let inserted = AutomationStore::insert_run(&transaction, &run)?;
+        transaction.commit()?;
+        Ok(inserted)
     }
 
-    pub fn claim_due(&self, now: DateTime<Utc>) -> Result<Vec<AutomationRunRecord>> {
-        let records = self.list(None)?;
-        let mut claims = Vec::new();
-        for automation in records.into_iter().filter(|record| record.enabled) {
-            if self.enforce_resource_budget(&automation).is_err() {
-                continue;
-            }
-            let last_created = self
-                .lock()?
-                .query_row(
-                    "SELECT MAX(created_at) FROM automation_runs WHERE automation_id=?1",
-                    [automation.id.as_str()],
-                    |row| row.get::<_, Option<i64>>(0),
-                )?
-                .map(|value| value as u64);
-            if let Some(token) = due_token(&automation, now, last_created)? {
-                match self.insert_claim(&automation.id, token) {
-                    Ok(claim) => claims.push(claim),
-                    Err(error) if error.to_string().contains("UNIQUE constraint failed") => {}
-                    Err(error) => return Err(error),
+    pub fn claim_due(&self, now: u64) -> Result<Vec<AutomationRunRecord>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let records = AutomationStore::due(&transaction, now)?;
+        let mut claims = Vec::with_capacity(records.len());
+
+        for record in records {
+            transaction.execute_batch("SAVEPOINT automation_due_claim")?;
+            match AutomationStore::claim_due(&transaction, &record, now) {
+                Ok(run) => {
+                    transaction.execute_batch("RELEASE SAVEPOINT automation_due_claim")?;
+                    if run.status == "pending" {
+                        claims.push(run);
+                    }
+                }
+                Err(error) => {
+                    transaction.execute_batch(
+                        "ROLLBACK TO SAVEPOINT automation_due_claim; RELEASE SAVEPOINT automation_due_claim",
+                    )?;
+                    tracing::warn!(
+                        automation_id = %record.id,
+                        ?error,
+                        "failed to claim due automation; continuing scheduler scan"
+                    );
                 }
             }
         }
+
+        transaction.commit()?;
         Ok(claims)
     }
 
-    pub fn precheck(&self, automation: &AutomationRecord, workspace: &Path) -> PrecheckResult {
-        run_precheck(automation, workspace)
+    pub fn precheck(
+        &self,
+        record: &AutomationRecord,
+        workspace: &Path,
+    ) -> AutomationPrecheckResult {
+        precheck::run_precheck(record, workspace)
     }
 
     pub fn execute(
@@ -258,775 +319,749 @@ impl AutomationService {
         workspace: &Path,
     ) -> Result<AutomationRunRecord> {
         let automation = self.get(&claim.automation_id)?;
-        let precheck = self.precheck(&automation, workspace);
-        if !precheck.ok {
-            self.finish(
-                &claim.id,
-                "skipped",
-                Some(&format!("precheck failed: {}", precheck.output)),
-                precheck.output_truncated,
-                Some(&serde_json::to_value(&precheck)?),
-            )?;
-            return self.run(&claim.id);
+        if automation.requires_review {
+            bail!("automation must be reviewed and saved before it can run");
         }
-
-        let mut worktree = None;
-        let run_workspace = if automation.workspace_mode == "worktree" {
-            let assignment = self
-                .worktrees
-                .create(workspace, &claim.id, &automation.id, 1)?;
-            let path = PathBuf::from(&assignment.worktree_path);
-            worktree = Some(assignment);
-            path
-        } else {
-            workspace.to_path_buf()
-        };
-        let goal = automation
-            .policy
-            .get("goal")
-            .and_then(Value::as_str)
-            .context("automation mission goal missing")?
-            .trim()
-            .to_string();
-        let max_concurrent = automation
-            .policy
-            .get("maxConcurrent")
-            .and_then(Value::as_u64)
-            .unwrap_or(4)
-            .clamp(1, 32) as u32;
-        let run = self
-            .coordinator
-            .create_run(
-                Uuid::new_v4(),
-                CreateRunRequest {
-                    session_id: automation.session_id.clone(),
-                    goal: goal.clone(),
-                    policy: RunPolicy { max_concurrent },
-                },
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let task_titles = automation
-            .policy
-            .get("tasks")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_else(|| vec![Value::String(goal)]);
-        let mut run_revision = run.revision;
-        for task in task_titles {
-            let (title, description) = match task {
-                Value::String(title) => (title, String::new()),
-                Value::Object(object) => (
-                    object
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Automation mission")
-                        .to_string(),
-                    object
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                ),
-                _ => continue,
-            };
-            self.coordinator
-                .create_task(
-                    Uuid::new_v4(),
-                    CreateTaskRequest {
-                        run_id: run.id.clone(),
-                        title,
-                        description,
-                        dependencies: Vec::new(),
-                        expected_run_revision: run_revision,
-                    },
-                )
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            run_revision = self
-                .coordinator
-                .run(&run.id)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                .revision;
-        }
-        let started = self
-            .coordinator
-            .start_run(
-                Uuid::new_v4(),
-                RunRevisionRequest {
-                    run_id: run.id.clone(),
-                    expected_run_revision: run_revision,
-                },
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        self.coordinator
-            .schedule_ready(
-                Uuid::new_v4(),
-                ScheduleRequest {
-                    run_id: run.id.clone(),
-                    expected_run_revision: started.revision,
-                },
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-
-        let now = now_millis();
-        self.lock()?.execute(
-            "UPDATE automation_runs SET orchestration_run_id=?2,status='running',precheck_json=?3,worktree_path=?4,branch=?5,started_at=?6,output_summary=?7 WHERE id=?1",
-            params![claim.id,run.id,serde_json::to_string(&precheck)?,worktree.as_ref().map(|value| value.worktree_path.as_str()),worktree.as_ref().map(|value| value.branch.as_str()),now as i64,format!("Mission launched in {}",run_workspace.display())],
-        )?;
-        self.run(&claim.id)
-    }
-
-    pub fn sync_run(&self, run_id: &str, workspace: &Path) -> Result<AutomationRunRecord> {
-        let record = self.run(run_id)?;
-        if record.status != "running" {
-            return Ok(record);
-        }
-        let Some(orchestration_run_id) = record.orchestration_run_id.as_deref() else {
-            return Ok(record);
-        };
-        let run = self
-            .coordinator
-            .run(orchestration_run_id)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let status = match run.status {
-            crate::orchestration::RunStatus::Completed => Some("completed"),
-            crate::orchestration::RunStatus::Failed => Some("failed"),
-            crate::orchestration::RunStatus::Cancelled => Some("cancelled"),
-            _ => None,
-        };
-        if let Some(status) = status {
-            self.finish(
-                &record.id,
-                status,
-                Some(&format!("Coordinator run {} {status}", run.id)),
-                false,
-                record.precheck.as_ref(),
-            )?;
-            let automation = self.get(&record.automation_id)?;
-            if automation
-                .policy
-                .get("cleanupOnFinish")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                if let (Some(path), Some(branch)) =
-                    (record.worktree_path.as_deref(), record.branch.as_deref())
-                {
-                    let assignment = crate::orchestration::WorktreeAssignment {
-                        base_revision: String::new(),
-                        branch: branch.to_string(),
-                        worktree_path: path.to_string(),
-                    };
-                    self.worktrees.cleanup(workspace, &assignment, true)?;
-                }
+        let dispatch_started_at = now_millis();
+        {
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut current = AutomationStore::get_run(&transaction, &claim.id)?;
+            if current.automation_id != automation.id {
+                bail!(
+                    "automation run {} belongs to {}, not {}",
+                    current.id,
+                    current.automation_id,
+                    automation.id
+                );
+            }
+            if current.status == "cancelled" {
+                transaction.commit()?;
+                return Ok(current);
+            }
+            if current.status != "pending" {
+                bail!(
+                    "automation run cannot dispatch from status {}: {}",
+                    current.status,
+                    current.id
+                );
+            }
+            current.status = "dispatching".to_string();
+            current.started_at = Some(dispatch_started_at);
+            current.finished_at = None;
+            current.error = None;
+            let saved = AutomationStore::save_run_if_status(&transaction, &current, "pending")?;
+            transaction.commit()?;
+            if saved.status != "dispatching" {
+                return Ok(saved);
             }
         }
-        self.run(run_id)
-    }
 
-    fn enforce_resource_budget(&self, automation: &AutomationRecord) -> Result<()> {
-        let max_active = automation
-            .policy
-            .get("resourceBudget")
-            .and_then(|value| value.get("maxActiveRuns"))
-            .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .clamp(1, 32) as i64;
-        let active = self.lock()?.query_row(
-            "SELECT COUNT(*) FROM automation_runs WHERE automation_id=?1 AND status IN ('queued','running')",
-            [&automation.id],
-            |row| row.get::<_,i64>(0),
-        )?;
-        if active >= max_active {
-            bail!("automation resource budget is full");
+        let prepared =
+            match self
+                .worktrees
+                .prepare(&claim.id, claim.run_number, &automation, workspace)
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return self.finish_prepare_failure(
+                        &claim.id,
+                        format!("prepare automation workspace: {error:#}"),
+                    )
+                }
+            };
+
+        let saved = self.persist_prepared_worktree(&claim.id, &prepared)?;
+        if saved.status == "cancelled" {
+            return self.finish_cancelled(&claim.id, &prepared, None, None, "dispatching");
         }
-        Ok(())
-    }
 
-    fn insert_claim(
-        &self,
-        automation_id: &str,
-        dispatch_token: String,
-    ) -> Result<AutomationRunRecord> {
-        let id = Uuid::new_v4().to_string();
-        let now = now_millis();
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO automation_runs(id,automation_id,status,dispatch_token,output_truncated,created_at) VALUES(?1,?2,'queued',?3,0,?4)",
-            params![id,automation_id,dispatch_token,now as i64],
+        let precheck = self.precheck(&automation, &prepared.cwd);
+        if !precheck.ok {
+            let cleanup = self
+                .worktrees
+                .cleanup_if_safe(&prepared, CleanupReason::PrecheckFailed);
+            return self.persist_terminal_outcome(
+                &claim.id,
+                "dispatching",
+                "skipped_precheck",
+                cleanup,
+                Some(&precheck),
+                None,
+                Some(precheck_failure_message(&precheck)),
+                now_millis(),
+            );
+        }
+
+        let saved = self.persist_precheck_result(&claim.id, &precheck)?;
+        if saved.status == "cancelled" {
+            return self.finish_cancelled(
+                &claim.id,
+                &prepared,
+                Some(&precheck),
+                None,
+                "dispatching",
+            );
+        }
+
+        let outcome = self.runner.run(&claim.id, &automation, &prepared.cwd);
+        let runner_status = match outcome.status.as_str() {
+            "completed"
+            | "skipped_unavailable"
+            | "skipped_needs_interactive_auth"
+            | "dispatch_failed"
+            | "cancelled" => outcome.status.clone(),
+            unexpected => {
+                tracing::error!(
+                    run_id = %claim.id,
+                    status = unexpected,
+                    "automation runner returned a non-canonical status"
+                );
+                "dispatch_failed".to_string()
+            }
+        };
+        let runner_error = if runner_status == outcome.status {
+            outcome.error.clone()
+        } else {
+            Some(format!(
+                "automation runner returned unsupported status: {}",
+                outcome.status
+            ))
+        };
+
+        let saved = self.persist_dispatched_outcome(&claim.id, &outcome, runner_error.clone())?;
+        if saved.status == "cancelled" {
+            return self.finish_cancelled(
+                &claim.id,
+                &prepared,
+                Some(&precheck),
+                Some(&outcome),
+                "dispatching",
+            );
+        }
+
+        let (cleanup_reason, cleanup_was_cancelled) = match runner_status.as_str() {
+            "completed" => (CleanupReason::Completed, false),
+            "skipped_unavailable" => (CleanupReason::SetupUnavailable, false),
+            "skipped_needs_interactive_auth" => (CleanupReason::InteractiveAuth, false),
+            "dispatch_failed" => (CleanupReason::DispatchFailed, false),
+            "cancelled" => (CleanupReason::Cancelled, true),
+            _ => unreachable!("runner status was canonicalized above"),
+        };
+        let cleanup = self.worktrees.cleanup_if_safe(&prepared, cleanup_reason);
+        let saved = self.persist_terminal_outcome(
+            &claim.id,
+            "dispatched",
+            &runner_status,
+            cleanup,
+            Some(&precheck),
+            Some(&outcome),
+            runner_error,
+            outcome.finished_at,
         )?;
-        transaction.commit()?;
-        drop(connection);
-        self.run(&id)
+
+        if saved.status == "cancelled" && !cleanup_was_cancelled {
+            return self.finish_cancelled(
+                &claim.id,
+                &prepared,
+                Some(&precheck),
+                Some(&outcome),
+                "cancelled",
+            );
+        }
+        Ok(saved)
     }
 
-    fn finish(
+    pub fn execute_and_notify(
+        &self,
+        claim: &AutomationRunRecord,
+        workspace: &Path,
+    ) -> Result<AutomationRunRecord> {
+        let run = self.execute(claim, workspace)?;
+        if model::is_final_status(&run.status) {
+            if let Err(error) = self.create_final_notification(&run) {
+                tracing::warn!(automation_run_id = %run.id, ?error, "failed to persist automation notification");
+            }
+        }
+        Ok(run)
+    }
+
+    fn create_final_notification(&self, run: &AutomationRunRecord) -> Result<()> {
+        let automation = self.get(&run.automation_id)?;
+        let kind = match run.status.as_str() {
+            "completed" => "automation.completed",
+            "cancelled" => "automation.cancelled",
+            _ => "automation.failed",
+        };
+        let worktree_path = run.worktree.as_ref().map(|worktree| worktree.path.clone());
+        let branch = run
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.branch.clone());
+        let output_summary = run
+            .output_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.final_response.clone());
+        self.coordinator
+            .create_notification(
+                kind,
+                &run.id,
+                json!({
+                    "sessionId": automation.session_id,
+                    "automationId": automation.id,
+                    "automationName": automation.name,
+                    "automationRunId": run.id,
+                    "status": run.status,
+                    "worktreePath": worktree_path,
+                    "branch": branch,
+                    "outputSummary": output_summary,
+                    "error": run.error,
+                }),
+            )
+            .map(|_| ())
+            .map_err(|error| anyhow!("create automation notification: {error}"))
+    }
+
+    fn persist_prepared_worktree(
         &self,
         run_id: &str,
-        status: &str,
-        summary: Option<&str>,
-        truncated: bool,
-        precheck: Option<&Value>,
-    ) -> Result<()> {
+        prepared: &PreparedWorkspace,
+    ) -> Result<AutomationRunRecord> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut current = AutomationStore::get_run(&transaction, run_id)?;
+        if current.status == "cancelled" {
+            transaction.commit()?;
+            return Ok(current);
+        }
+        if current.status != "dispatching" {
+            bail!(
+                "automation run cannot persist prepared workspace from status {}: {}",
+                current.status,
+                current.id
+            );
+        }
+        current.worktree = Some(prepared.worktree.clone());
+        let saved = AutomationStore::save_run_if_status(&transaction, &current, "dispatching")?;
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    fn persist_precheck_result(
+        &self,
+        run_id: &str,
+        precheck: &AutomationPrecheckResult,
+    ) -> Result<AutomationRunRecord> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut current = AutomationStore::get_run(&transaction, run_id)?;
+        if current.status == "cancelled" {
+            transaction.commit()?;
+            return Ok(current);
+        }
+        if current.status != "dispatching" {
+            bail!(
+                "automation run cannot persist precheck from status {}: {}",
+                current.status,
+                current.id
+            );
+        }
+        current.precheck_result = Some(precheck.clone());
+        let saved = AutomationStore::save_run_if_status(&transaction, &current, "dispatching")?;
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    fn persist_dispatched_outcome(
+        &self,
+        run_id: &str,
+        outcome: &RunnerOutcome,
+        error: Option<String>,
+    ) -> Result<AutomationRunRecord> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut current = AutomationStore::get_run(&transaction, run_id)?;
+        if current.status == "cancelled" {
+            transaction.commit()?;
+            return Ok(current);
+        }
+        if current.status != "dispatching" {
+            bail!(
+                "automation run cannot persist dispatch from status {}: {}",
+                current.status,
+                current.id
+            );
+        }
+
+        current.status = "dispatched".to_string();
+        current.runtime_identity = outcome.runtime_identity.clone();
+        current.output_snapshot = outcome.output_snapshot.clone();
+        current.usage = outcome.usage.clone();
+        current.error = error;
+        current.started_at = Some(
+            current
+                .started_at
+                .unwrap_or(outcome.started_at)
+                .min(outcome.started_at),
+        );
+        current.finished_at = None;
+        let saved = AutomationStore::save_run_if_status(&transaction, &current, "dispatching")?;
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    fn finish_prepare_failure(&self, run_id: &str, error: String) -> Result<AutomationRunRecord> {
+        loop {
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut current = AutomationStore::get_run(&transaction, run_id)?;
+            if current.status != "dispatching" && current.status != "cancelled" {
+                transaction.commit()?;
+                return Ok(current);
+            }
+            let expected = current.status.clone();
+            if expected != "cancelled" {
+                current.status = "skipped_precheck".to_string();
+                current.error = Some(error.clone());
+                current.finished_at = Some(now_millis());
+            }
+            let intended = current.status.clone();
+            let saved = AutomationStore::save_run_if_status(&transaction, &current, &expected)?;
+            if model::is_final_status(&saved.status) {
+                AutomationStore::prune_final_runs(&transaction, &saved.automation_id)?;
+            }
+            transaction.commit()?;
+            if saved.status == intended || saved.status != "cancelled" {
+                return Ok(saved);
+            }
+        }
+    }
+
+    fn finish_cancelled(
+        &self,
+        run_id: &str,
+        prepared: &PreparedWorkspace,
+        precheck: Option<&AutomationPrecheckResult>,
+        outcome: Option<&RunnerOutcome>,
+        expected_status: &str,
+    ) -> Result<AutomationRunRecord> {
+        let cleanup = self
+            .worktrees
+            .cleanup_if_safe(prepared, CleanupReason::Cancelled);
+        self.persist_terminal_outcome(
+            run_id,
+            expected_status,
+            "cancelled",
+            cleanup,
+            precheck,
+            outcome,
+            None,
+            now_millis(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_terminal_outcome(
+        &self,
+        run_id: &str,
+        expected_status: &str,
+        terminal_status: &str,
+        cleanup: CleanupOutcome,
+        precheck: Option<&AutomationPrecheckResult>,
+        outcome: Option<&RunnerOutcome>,
+        error: Option<String>,
+        finished_at: u64,
+    ) -> Result<AutomationRunRecord> {
+        loop {
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut current = AutomationStore::get_run(&transaction, run_id)?;
+            if current.status != expected_status && current.status != "cancelled" {
+                transaction.commit()?;
+                return Ok(current);
+            }
+
+            let expected = current.status.clone();
+            let cancelled = expected == "cancelled";
+            current.status = if cancelled {
+                "cancelled".to_string()
+            } else {
+                terminal_status.to_string()
+            };
+            current.worktree = Some(cleanup.worktree.clone());
+            if let Some(precheck) = precheck {
+                current.precheck_result = Some(precheck.clone());
+            }
+            if let Some(outcome) = outcome {
+                current.runtime_identity = outcome.runtime_identity.clone();
+                current.output_snapshot = outcome.output_snapshot.clone();
+                current.usage = outcome.usage.clone();
+                current.started_at = Some(
+                    current
+                        .started_at
+                        .unwrap_or(outcome.started_at)
+                        .min(outcome.started_at),
+                );
+            }
+            if !cancelled {
+                current.error = error.clone();
+                current.finished_at = Some(finished_at);
+            }
+            if let Some(cleanup_error) = cleanup.error.as_deref() {
+                current.error = append_error(
+                    current.error.take(),
+                    format!("automation worktree cleanup failed: {cleanup_error}"),
+                );
+            }
+
+            let intended = current.status.clone();
+            let saved = AutomationStore::save_run_if_status(&transaction, &current, &expected)?;
+            if model::is_final_status(&saved.status) {
+                AutomationStore::prune_final_runs(&transaction, &saved.automation_id)?;
+            }
+            transaction.commit()?;
+            if saved.status == intended || saved.status != "cancelled" {
+                return Ok(saved);
+            }
+        }
+    }
+
+    pub fn cancel(&self, run_id: &str) -> Result<AutomationRunRecord> {
+        self.process_registry.cancel(run_id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = AutomationStore::get_run(&transaction, run_id)?;
+        if existing.status == "cancelled" {
+            transaction.commit()?;
+            return Ok(existing);
+        }
+        let cancelled = AutomationStore::cancel_run(&transaction, run_id, now_millis())?;
+        AutomationStore::prune_final_runs(&transaction, &cancelled.automation_id)?;
+        transaction.commit()?;
+        Ok(cancelled)
+    }
+
+    pub fn schedule_preview(&self, payload: &Value) -> Result<Value> {
+        validate_object(payload, "schedule preview")?;
+        let object = payload.as_object().expect("validated object");
+        for key in object.keys() {
+            if !matches!(
+                key.as_str(),
+                "scheduleKind" | "scheduleValue" | "timezone" | "dtstart" | "after" | "count"
+            ) {
+                bail!("unknown schedule preview field '{key}'");
+            }
+        }
+        let required = |key: &str| -> Result<&str> {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("schedule preview field '{key}' is required"))
+        };
+        let dtstart =
+            match object.get("dtstart") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_u64().ok_or_else(|| {
+                    anyhow!("schedule preview dtstart must be an integer or null")
+                })?),
+            };
+        let after = object
+            .get("after")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("schedule preview after must be an integer"))
+            })
+            .transpose()?
+            .unwrap_or_else(now_millis);
+        let count = object
+            .get("count")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| anyhow!("schedule preview count must be an integer"))
+            })
+            .transpose()?
+            .unwrap_or(5);
+        Ok(serde_json::to_value(schedule::preview_occurrences(
+            required("scheduleKind")?,
+            required("scheduleValue")?,
+            required("timezone")?,
+            dtstart,
+            after,
+            count,
+        )?)?)
+    }
+
+    pub fn import_preview(&self, session_id: &str, workspace: &Path) -> Result<Value> {
+        validate_session_id(session_id)?;
+        let existing = self.list(Some(session_id))?;
+        import::preview(workspace, &existing)
+    }
+
+    pub fn import(&self, session_id: &str, workspace: &Path, payload: &Value) -> Result<Value> {
+        validate_session_id(session_id)?;
+        validate_object(payload, "import")?;
+        let existing = self.list(Some(session_id))?;
+        let (selected, mut skipped) = import::selected(workspace, payload, &existing)?;
         let now = now_millis();
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "UPDATE automation_runs SET status=?2,output_summary=?3,output_truncated=?4,precheck_json=COALESCE(?5,precheck_json),finished_at=?6 WHERE id=?1",
-            params![run_id,status,summary,truncated as i64,precheck.map(Value::to_string),now as i64],
-        )?;
-        let sequence = transaction.query_row(
-            "SELECT COALESCE(MAX(sequence),0)+1 FROM notifications",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        transaction.execute(
-            "INSERT INTO notifications(id,sequence,kind,entity_id,payload_json,created_at) VALUES(?1,?2,'automation.completed',?3,?4,?5)",
-            params![Uuid::new_v4().to_string(),sequence,run_id,json!({"status":status}).to_string(),now as i64],
-        )?;
-        transaction.execute(
-            "DELETE FROM automation_runs WHERE id IN (SELECT id FROM automation_runs WHERE automation_id=(SELECT automation_id FROM automation_runs WHERE id=?1) AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT -1 OFFSET ?2)",
-            params![run_id,RETAIN_FINAL_RUNS],
-        )?;
+        let current = AutomationStore::list(&transaction, Some(session_id))?;
+        let mut imported = Vec::new();
+        for candidate in selected {
+            if current.iter().any(|automation| {
+                automation.source.as_ref().is_some_and(|source| {
+                    source.provider == "hermes" && source.source_id == candidate.source_id
+                })
+            }) || imported.iter().any(|automation: &AutomationRecord| {
+                automation.source.as_ref().is_some_and(|source| {
+                    source.provider == "hermes" && source.source_id == candidate.source_id
+                })
+            }) {
+                skipped.push(serde_json::json!({
+                    "sourceId": candidate.source_id,
+                    "reason": "this Hermes cron job was already imported",
+                }));
+                continue;
+            }
+            let record = parse_create(
+                session_id,
+                &candidate.payload,
+                now,
+                Uuid::new_v4().to_string(),
+            )?;
+            schedule::validate_schedule(
+                &record.schedule_kind,
+                &record.schedule_value,
+                &record.timezone,
+                record.dtstart,
+            )?;
+            imported.push(AutomationStore::insert(&transaction, &record)?);
+        }
         transaction.commit()?;
-        Ok(())
+        Ok(serde_json::json!({
+            "imported": imported,
+            "skipped": skipped,
+        }))
     }
 
-    fn run(&self, id: &str) -> Result<AutomationRunRecord> {
-        self.lock()?.query_row(
-            "SELECT id,automation_id,orchestration_run_id,status,dispatch_token,output_summary,output_truncated,precheck_json,worktree_path,branch,started_at,finished_at,created_at FROM automation_runs WHERE id=?1",
-            [id],read_run,
-        ).optional()?.with_context(||format!("automation run not found: {id}"))
+    pub fn draft_preview(&self, session_id: &str, payload: &Value) -> Result<Value> {
+        validate_session_id(session_id)?;
+        validate_object(payload, "draft")?;
+        let request = draft::parse_request(payload)?;
+        let cwd = self.draft_root.join(&request.request_id);
+        fs::create_dir(&cwd)
+            .with_context(|| format!("create isolated Hermes draft workspace {}", cwd.display()))?;
+
+        let outcome = self
+            .runner
+            .run_draft(&request.request_id, &request.prompt, &cwd);
+        fs::remove_dir_all(&cwd)
+            .with_context(|| format!("remove isolated Hermes draft workspace {}", cwd.display()))?;
+
+        match outcome.status.as_str() {
+            "completed" => {
+                let response = outcome
+                    .output_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.final_response.as_deref())
+                    .filter(|response| !response.trim().is_empty())
+                    .ok_or_else(|| anyhow!("Hermes draft generation returned no final response"))?;
+                draft::parse_response(&request.request_id, response)
+            }
+            "cancelled" => bail!("Hermes draft generation was cancelled"),
+            _ => bail!(
+                "Hermes draft generation failed: {}",
+                outcome
+                    .error
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(&outcome.status)
+            ),
+        }
+    }
+
+    pub fn cancel_draft(&self, request_id: &str) -> Result<Value> {
+        let request_id = request_id.trim();
+        Uuid::parse_str(request_id).context("draft request id must be a UUID")?;
+        let cancelled = self.process_registry.cancel(request_id)?;
+        Ok(serde_json::json!({
+            "id": request_id,
+            "cancelled": cancelled,
+        }))
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("automation database mutex poisoned"))
+            .map_err(|_| anyhow!("automation database mutex poisoned"))
     }
 }
 
-fn validate_automation(request: &CreateAutomation) -> Result<()> {
-    validate_schedule(
-        &request.schedule_kind,
-        &request.schedule_value,
-        &request.timezone,
-    )?;
-    if request.name.trim().is_empty() {
-        bail!("automation name is required");
+fn validate_session_id(session_id: &str) -> Result<()> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        bail!("workspace session id is required");
     }
-    if !matches!(request.workspace_mode.as_str(), "reuse" | "worktree") {
-        bail!("workspace mode must be reuse or worktree");
-    }
-    let goal = request
-        .policy
-        .get("goal")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if goal.is_empty() {
-        bail!("automation policy mission goal is required");
-    }
-    if let Some(seconds) = request
-        .precheck
-        .get("timeoutSeconds")
-        .and_then(Value::as_u64)
-    {
-        if seconds == 0 || seconds > MAX_PRECHECK_SECONDS {
-            bail!("precheck timeout must be between 1 and 600 seconds");
-        }
+    Uuid::parse_str(session_id).context("workspace session id must be a UUID")?;
+    Ok(())
+}
+
+fn validate_object(payload: &Value, label: &str) -> Result<()> {
+    if !payload.is_object() {
+        bail!("{label} payload must be an object");
     }
     Ok(())
 }
 
-fn run_precheck(automation: &AutomationRecord, workspace: &Path) -> PrecheckResult {
-    let workspace_exists = workspace.is_dir();
-    let require_git = automation.workspace_mode == "worktree"
-        || automation
-            .precheck
-            .get("requireGit")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-    let git_ready = !require_git
-        || (workspace_exists
-            && Command::new("git")
-                .args(["rev-parse", "--is-inside-work-tree"])
-                .current_dir(workspace)
-                .output()
-                .is_ok_and(|output| output.status.success()));
-    let Some(command) = automation
-        .precheck
-        .get("command")
-        .and_then(Value::as_str)
+fn precheck_failure_message(result: &AutomationPrecheckResult) -> String {
+    if let Some(error) = result
+        .error
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
-    else {
-        return PrecheckResult {
-            ok: workspace_exists && git_ready,
-            workspace_exists,
-            git_ready,
-            timed_out: false,
-            output: String::new(),
-            output_truncated: false,
-        };
-    };
-    if !workspace_exists || !git_ready {
-        return PrecheckResult {
-            ok: false,
-            workspace_exists,
-            git_ready,
-            timed_out: false,
-            output: "workspace or Git precheck failed".to_string(),
-            output_truncated: false,
-        };
-    }
-    let timeout = automation
-        .precheck
-        .get("timeoutSeconds")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_PRECHECK_SECONDS)
-        .clamp(1, MAX_PRECHECK_SECONDS);
-    let output_file =
-        std::env::temp_dir().join(format!("vibelink-precheck-{}.log", Uuid::new_v4()));
-    let result = (|| -> Result<(bool, bool, Vec<u8>)> {
-        let output = fs::File::create(&output_file)?;
-        let error_output = output.try_clone()?;
-        #[cfg(windows)]
-        let mut child = Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", command])
-            .current_dir(workspace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(output))
-            .stderr(Stdio::from(error_output))
-            .spawn()?;
-        #[cfg(not(windows))]
-        let mut child = Command::new("sh")
-            .args(["-c", command])
-            .current_dir(workspace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(output))
-            .stderr(Stdio::from(error_output))
-            .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(timeout);
-        let (success, timed_out) = loop {
-            if let Some(status) = child.try_wait()? {
-                break (status.success(), false);
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break (false, true);
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-        Ok((
-            success,
-            timed_out,
-            fs::read(&output_file).unwrap_or_default(),
-        ))
-    })();
-    let _ = fs::remove_file(&output_file);
-    match result {
-        Ok((success, timed_out, bytes)) => {
-            let truncated = bytes.len() > MAX_PRECHECK_OUTPUT_BYTES;
-            let start = bytes.len().saturating_sub(MAX_PRECHECK_OUTPUT_BYTES);
-            PrecheckResult {
-                ok: success && !timed_out,
-                workspace_exists,
-                git_ready,
-                timed_out,
-                output: String::from_utf8_lossy(&bytes[start..]).to_string(),
-                output_truncated: truncated,
-            }
-        }
-        Err(error) => PrecheckResult {
-            ok: false,
-            workspace_exists,
-            git_ready,
-            timed_out: false,
-            output: error.to_string(),
-            output_truncated: false,
-        },
-    }
-}
-
-fn validate_schedule(kind: &str, value: &str, timezone: &str) -> Result<()> {
-    let _: Tz = timezone
-        .parse()
-        .with_context(|| format!("unknown timezone: {timezone}"))?;
-    match kind {
-        "once" => {
-            DateTime::parse_from_rfc3339(value).context("once schedule must be RFC3339")?;
-        }
-        "interval" => {
-            if value
-                .parse::<u64>()
-                .context("interval schedule must be seconds")?
-                == 0
-            {
-                bail!("interval must be positive");
-            }
-        }
-        "hourly" => validate_minute(value)?,
-        "daily" | "weekdays" => {
-            parse_time(value)?;
-        }
-        "weekly" => {
-            parse_weekly(value)?;
-        }
-        "cron" => {
-            let fields = value.split_whitespace().collect::<Vec<_>>();
-            if fields.len() != 5 {
-                bail!("cron schedule must have five fields");
-            }
-            for field in fields {
-                validate_cron_field(field)?;
-            }
-        }
-        "rrule" => {
-            parse_rrule(value)?;
-        }
-        _ => bail!("unsupported automation schedule kind"),
-    }
-    Ok(())
-}
-
-fn due_token(
-    record: &AutomationRecord,
-    now: DateTime<Utc>,
-    last_created: Option<u64>,
-) -> Result<Option<String>> {
-    let timezone: Tz = record.timezone.parse()?;
-    let local = now.with_timezone(&timezone);
-    let last = last_created.unwrap_or(0);
-    let token = match record.schedule_kind.as_str() {
-        "once" => {
-            if last_created.is_some() {
-                return Ok(None);
-            }
-            let when = DateTime::parse_from_rfc3339(&record.schedule_value)?.with_timezone(&Utc);
-            (now >= when).then(|| format!("once:{}", when.timestamp()))
-        }
-        "interval" => {
-            let seconds = record.schedule_value.parse::<u64>()?;
-            (now.timestamp_millis().max(0) as u64 >= last.saturating_add(seconds * 1000))
-                .then(|| format!("interval:{}", now.timestamp() / seconds as i64))
-        }
-        "hourly" => {
-            let minute = record.schedule_value.parse::<u32>()?;
-            (local.minute() >= minute).then(|| format!("hourly:{}", now.timestamp() / 3600))
-        }
-        "daily" => {
-            let (hour, minute) = parse_time(&record.schedule_value)?;
-            ((local.hour(), local.minute()) >= (hour, minute))
-                .then(|| format!("daily:{}", local.date_naive()))
-        }
-        "weekdays" => {
-            let (hour, minute) = parse_time(&record.schedule_value)?;
-            (!matches!(local.weekday(), Weekday::Sat | Weekday::Sun)
-                && (local.hour(), local.minute()) >= (hour, minute))
-                .then(|| format!("weekdays:{}", local.date_naive()))
-        }
-        "weekly" => {
-            let (weekday, hour, minute) = parse_weekly(&record.schedule_value)?;
-            (local.weekday() == weekday && (local.hour(), local.minute()) >= (hour, minute)).then(
-                || {
-                    format!(
-                        "weekly:{}-{}",
-                        local.iso_week().year(),
-                        local.iso_week().week()
-                    )
-                },
-            )
-        }
-        "cron" => {
-            let fields = record.schedule_value.split_whitespace().collect::<Vec<_>>();
-            (cron_matches(fields[0], local.minute())
-                && cron_matches(fields[1], local.hour())
-                && cron_matches(fields[2], local.day())
-                && cron_matches(fields[3], local.month())
-                && cron_matches(fields[4], local.weekday().num_days_from_sunday()))
-            .then(|| format!("cron:{}", now.timestamp() / 60))
-        }
-        "rrule" => rrule_due_token(&record.schedule_value, local, now)?,
-        _ => None,
-    };
-    Ok(token)
-}
-
-fn validate_minute(value: &str) -> Result<()> {
-    let minute = value
-        .parse::<u32>()
-        .context("hourly schedule must be a minute")?;
-    if minute > 59 {
-        bail!("hourly minute must be 0-59");
-    }
-    Ok(())
-}
-fn parse_time(value: &str) -> Result<(u32, u32)> {
-    let (hour, minute) = value
-        .split_once(':')
-        .context("schedule time must be HH:MM")?;
-    let hour = hour.parse::<u32>()?;
-    let minute = minute.parse::<u32>()?;
-    if hour > 23 || minute > 59 {
-        bail!("invalid schedule time");
-    }
-    Ok((hour, minute))
-}
-fn parse_weekly(value: &str) -> Result<(Weekday, u32, u32)> {
-    let (day, time) = value
-        .split_once('@')
-        .context("weekly schedule must be DAY@HH:MM")?;
-    Ok((
-        parse_weekday(day)?,
-        parse_time(time)?.0,
-        parse_time(time)?.1,
-    ))
-}
-fn parse_weekday(value: &str) -> Result<Weekday> {
-    match value.to_ascii_uppercase().as_str() {
-        "MON" => Ok(Weekday::Mon),
-        "TUE" => Ok(Weekday::Tue),
-        "WED" => Ok(Weekday::Wed),
-        "THU" => Ok(Weekday::Thu),
-        "FRI" => Ok(Weekday::Fri),
-        "SAT" => Ok(Weekday::Sat),
-        "SUN" => Ok(Weekday::Sun),
-        _ => bail!("invalid weekday"),
-    }
-}
-
-fn parse_rrule(value: &str) -> Result<(String, u32, Option<Vec<Weekday>>)> {
-    let mut frequency = None;
-    let mut interval = 1;
-    let mut byday = None;
-    for part in value.split(';') {
-        let (key, value) = part.split_once('=').context("invalid RRULE component")?;
-        match key.to_ascii_uppercase().as_str() {
-            "FREQ" => frequency = Some(value.to_ascii_uppercase()),
-            "INTERVAL" => interval = value.parse::<u32>()?.max(1),
-            "BYDAY" => {
-                byday = Some(
-                    value
-                        .split(',')
-                        .map(parse_weekday)
-                        .collect::<Result<Vec<_>>>()?,
-                )
-            }
-            _ => {}
-        }
-    }
-    let frequency = frequency.context("RRULE FREQ is required")?;
-    if !matches!(frequency.as_str(), "HOURLY" | "DAILY" | "WEEKLY") {
-        bail!("RRULE supports HOURLY, DAILY, or WEEKLY");
-    }
-    Ok((frequency, interval, byday))
-}
-fn rrule_due_token(value: &str, local: DateTime<Tz>, now: DateTime<Utc>) -> Result<Option<String>> {
-    let (frequency, interval, byday) = parse_rrule(value)?;
-    let allowed = byday
-        .as_ref()
-        .is_none_or(|days| days.contains(&local.weekday()));
-    if !allowed {
-        return Ok(None);
-    }
-    let bucket = match frequency.as_str() {
-        "HOURLY" => now.timestamp() / 3600 / interval as i64,
-        "DAILY" => now.timestamp() / 86400 / interval as i64,
-        "WEEKLY" => now.timestamp() / (86400 * 7) / interval as i64,
-        _ => 0,
-    };
-    Ok(Some(format!("rrule:{frequency}:{bucket}")))
-}
-fn validate_cron_field(field: &str) -> Result<()> {
-    if field == "*" {
-        return Ok(());
-    }
-    if let Some(step) = field.strip_prefix("*/") {
-        if step.parse::<u32>().is_ok_and(|value| value > 0) {
-            return Ok(());
-        }
-    }
-    for part in field.split(',') {
-        if part.parse::<u32>().is_err() {
-            bail!("unsupported cron field: {field}");
-        }
-    }
-    Ok(())
-}
-fn cron_matches(field: &str, value: u32) -> bool {
-    if field == "*" {
-        return true;
-    }
-    if let Some(step) = field
-        .strip_prefix("*/")
-        .and_then(|value| value.parse::<u32>().ok())
     {
-        return step > 0 && value % step == 0;
+        return format!("automation precheck failed: {}", error.trim());
     }
-    field
-        .split(',')
-        .filter_map(|part| part.parse::<u32>().ok())
-        .any(|candidate| candidate == value)
+    if !result.stderr.trim().is_empty() {
+        return format!("automation precheck failed: {}", result.stderr.trim());
+    }
+    if !result.stdout.trim().is_empty() {
+        return format!("automation precheck failed: {}", result.stdout.trim());
+    }
+    if result.timed_out {
+        return "automation precheck timed out".to_string();
+    }
+    "automation precheck failed".to_string()
 }
 
-fn read_automation(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRecord> {
-    let precheck: String = row.get(8)?;
-    let policy: String = row.get(9)?;
-    Ok(AutomationRecord {
-        id: row.get(0)?,
-        session_id: row.get(1)?,
-        name: row.get(2)?,
-        schedule_kind: row.get(3)?,
-        schedule_value: row.get(4)?,
-        timezone: row.get(5)?,
-        enabled: row.get::<_, i64>(6)? != 0,
-        workspace_mode: row.get(7)?,
-        precheck: serde_json::from_str(&precheck).unwrap_or(Value::Null),
-        policy: serde_json::from_str(&policy).unwrap_or(Value::Null),
-        created_at: row.get::<_, i64>(10)?.max(0) as u64,
-        updated_at: row.get::<_, i64>(11)?.max(0) as u64,
+fn append_error(existing: Option<String>, additional: String) -> Option<String> {
+    Some(match existing.filter(|value| !value.trim().is_empty()) {
+        Some(existing) => format!("{existing}; {additional}"),
+        None => additional,
     })
 }
-fn read_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRunRecord> {
-    let precheck: Option<String> = row.get(7)?;
-    Ok(AutomationRunRecord {
-        id: row.get(0)?,
-        automation_id: row.get(1)?,
-        orchestration_run_id: row.get(2)?,
-        status: row.get(3)?,
-        dispatch_token: row.get(4)?,
-        output_summary: row.get(5)?,
-        output_truncated: row.get::<_, i64>(6)? != 0,
-        precheck: precheck.and_then(|value| serde_json::from_str(&value).ok()),
-        worktree_path: row.get(8)?,
-        branch: row.get(9)?,
-        started_at: row
-            .get::<_, Option<i64>>(10)?
-            .map(|value| value.max(0) as u64),
-        finished_at: row
-            .get::<_, Option<i64>>(11)?
-            .map(|value| value.max(0) as u64),
-        created_at: row.get::<_, i64>(12)?.max(0) as u64,
-    })
-}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
-mod tests {
+mod lifecycle_tests {
     use super::*;
     use crate::control_plane::ControlPlane;
+    use serde_json::json;
 
-    struct Fixture {
-        root: PathBuf,
-        service: AutomationService,
-        coordinator: Arc<CoordinatorService>,
-        workspace: PathBuf,
+    fn fixture() -> (PathBuf, Arc<CoordinatorService>, AutomationService) {
+        let root =
+            std::env::temp_dir().join(format!("vibelink-automation-service-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create automation service fixture");
+        let control = Arc::new(ControlPlane::open(&root).expect("open control plane"));
+        let coordinator = Arc::new(CoordinatorService::new(control));
+        let service = AutomationService::open(
+            &root.join("control").join("vibelink-control.sqlite3"),
+            root.join("automation-artifacts"),
+            Arc::clone(&coordinator),
+        )
+        .expect("open automation service");
+        (root, coordinator, service)
     }
-    impl Fixture {
-        fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("vibelink-automation-{}", Uuid::new_v4()));
-            let workspace = root.join("workspace");
-            fs::create_dir_all(&workspace).expect("workspace");
-            let control = Arc::new(ControlPlane::open(&root).expect("control"));
-            let coordinator = Arc::new(CoordinatorService::new(control));
-            let service = AutomationService::open(
-                &root.join("control").join("vibelink-control.sqlite3"),
-                root.join("artifacts"),
-                Arc::clone(&coordinator),
-            )
-            .expect("automation");
-            Self {
-                root,
-                service,
-                coordinator,
-                workspace,
-            }
-        }
-        fn create(&self, precheck: Value) -> AutomationRecord {
-            self.service.create(CreateAutomation{session_id:Uuid::new_v4().to_string(),name:"Mission".to_string(),schedule_kind:"interval".to_string(),schedule_value:"3600".to_string(),timezone:"UTC".to_string(),workspace_mode:"reuse".to_string(),precheck,policy:json!({"goal":"Inspect workspace","maxConcurrent":2,"resourceBudget":{"maxActiveRuns":200}})}).expect("create")
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
-        }
+
+    fn create_payload(enabled: bool, requires_review: bool) -> Value {
+        json!({
+            "name": "Lifecycle review",
+            "prompt": "Review the workspace",
+            "scheduleKind": "daily",
+            "scheduleValue": "09:00",
+            "timezone": "UTC",
+            "enabled": enabled,
+            "requiresReview": requires_review,
+        })
     }
 
     #[test]
-    fn failed_precheck_skips_without_creating_coordinator_run() {
-        let fixture = Fixture::new();
-        let automation = fixture.create(json!({"requireGit":true}));
-        let claim = fixture.service.trigger(&automation.id).expect("claim");
-        let completed = fixture
-            .service
-            .execute(&claim, &fixture.workspace)
-            .expect("execute");
-        assert_eq!(completed.status, "skipped");
-        assert!(completed.orchestration_run_id.is_none());
-        assert!(fixture
-            .coordinator
-            .runs_for_session(&automation.session_id)
-            .expect("runs")
-            .is_empty());
+    fn review_gate_blocks_enable_and_manual_run_until_saved() {
+        let (root, _coordinator, service) = fixture();
+        let session_id = Uuid::new_v4().to_string();
+        let error = service
+            .create(&session_id, &create_payload(true, true))
+            .expect_err("unreviewed automation cannot be enabled");
+        assert!(error
+            .to_string()
+            .contains("requiring review cannot be enabled"));
+
+        let imported = service
+            .create(&session_id, &create_payload(false, true))
+            .expect("create paused review record");
+        let error = service
+            .trigger(&imported.id)
+            .expect_err("unreviewed automation cannot run");
+        assert!(error.to_string().contains("reviewed and saved"));
+
+        service
+            .update(&imported.id, &json!({"requiresReview": false}))
+            .expect("confirm review");
+        let pending = service
+            .trigger(&imported.id)
+            .expect("trigger reviewed automation");
+        assert_eq!(pending.status, "pending");
+        let error = service
+            .trigger(&imported.id)
+            .expect_err("second active run must be rejected");
+        assert!(error.to_string().contains("already has active run"));
+        drop(service);
+        drop(_coordinator);
+        fs::remove_dir_all(root).expect("remove automation service fixture");
     }
 
     #[test]
-    fn successful_automation_launches_durable_mission() {
-        let fixture = Fixture::new();
-        let automation = fixture.create(json!({}));
-        let claim = fixture.service.trigger(&automation.id).expect("claim");
-        let running = fixture
-            .service
-            .execute(&claim, &fixture.workspace)
-            .expect("execute");
-        assert_eq!(running.status, "running");
-        let run_id = running.orchestration_run_id.expect("run id");
-        let run = fixture.coordinator.run(&run_id).expect("run");
-        assert_eq!(run.goal, "Inspect workspace");
-        assert_eq!(fixture.coordinator.tasks(&run_id).expect("tasks").len(), 1);
+    fn restart_marks_pending_run_failed_and_emits_one_durable_notification() {
+        let (root, coordinator, service) = fixture();
+        let session_id = Uuid::new_v4().to_string();
+        let automation = service
+            .create(&session_id, &create_payload(false, false))
+            .expect("create automation");
+        let pending = service.trigger(&automation.id).expect("create pending run");
+        drop(service);
+
+        let reopened = AutomationService::open(
+            &root.join("control").join("vibelink-control.sqlite3"),
+            root.join("automation-artifacts"),
+            Arc::clone(&coordinator),
+        )
+        .expect("reopen automation service");
+        let recovered = reopened
+            .runs(&automation.id, 10)
+            .expect("read recovered run");
+        assert_eq!(recovered[0].id, pending.id);
+        assert_eq!(recovered[0].status, "dispatch_failed");
+        assert!(recovered[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("restarted before Hermes dispatch")));
+
+        let notifications = coordinator
+            .notifications_after(0, 10)
+            .expect("read notifications");
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].kind, "automation.failed");
         assert_eq!(
-            fixture
-                .coordinator
-                .dispatches(&run_id)
-                .expect("dispatches")
-                .len(),
-            1
+            notifications[0].entity_id.as_deref(),
+            Some(pending.id.as_str())
         );
-    }
 
-    #[test]
-    fn retention_keeps_newest_one_hundred_final_runs() {
-        let fixture = Fixture::new();
-        let automation = fixture.create(json!({"requireGit":true}));
-        for _ in 0..105 {
-            let claim = fixture.service.trigger(&automation.id).expect("claim");
-            fixture
-                .service
-                .execute(&claim, &fixture.workspace)
-                .expect("skip");
-        }
-        let runs = fixture.service.runs(&automation.id, 500).expect("runs");
-        assert_eq!(runs.len(), 100);
-        assert!(runs.iter().all(|run| run.status == "skipped"));
-    }
-
-    #[test]
-    fn schedule_validation_covers_plan_kinds() {
-        for (kind, value) in [
-            ("hourly", "15"),
-            ("daily", "09:30"),
-            ("weekdays", "09:30"),
-            ("weekly", "MON@09:30"),
-            ("cron", "*/5 * * * *"),
-            ("rrule", "FREQ=WEEKLY;INTERVAL=1;BYDAY=MON,FRI"),
-        ] {
-            validate_schedule(kind, value, "UTC").expect(kind);
-        }
+        drop(reopened);
+        drop(coordinator);
+        fs::remove_dir_all(root).expect("remove automation service fixture");
     }
 }

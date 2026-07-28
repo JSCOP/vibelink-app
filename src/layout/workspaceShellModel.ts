@@ -26,6 +26,7 @@ type StructuralWorkspaceContentKind = typeof workspaceLeftStructuralKinds[number
 const workspaceStructuralPlacement: Record<StructuralWorkspaceContentKind, { groupId: string; index: number }> = {
   workspaces: { groupId: workspaceLeftEdgeGroupId, index: 0 },
   explorer: { groupId: workspaceLeftEdgeGroupId, index: 1 },
+  automation: { groupId: workspaceLeftEdgeGroupId, index: 2 },
   workspaceFiles: { groupId: workspaceRightEdgeGroupId, index: 0 },
   sourceControl: { groupId: workspaceRightEdgeGroupId, index: 1 },
   gitHistory: { groupId: workspaceRightEdgeGroupId, index: 2 },

@@ -92,7 +92,7 @@ describe('workspaceLayoutModel v3', () => {
 
   it('defines every built-in content descriptor and Preview singleton identity', () => {
     expect(Object.keys(workspaceContentDescriptors)).toEqual([
-      'terminal', 'terminalWindow', 'browser', 'editor', 'preview', 'workspaces', 'explorer', 'workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions',
+      'terminal', 'terminalWindow', 'browser', 'editor', 'preview', 'workspaces', 'explorer', 'workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'automation', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions',
     ])
     expect(createSingletonContentParams('workspaces')).toEqual({
       schema: 1,
@@ -115,6 +115,13 @@ describe('workspaceLayoutModel v3', () => {
       instanceId: 'sourceControl',
       title: 'Source Control',
       icon: 'git-compare-arrows',
+    })
+    expect(createSingletonContentParams('automation')).toEqual({
+      schema: 1,
+      kind: 'automation',
+      instanceId: 'automation',
+      title: 'Automations',
+      icon: 'timer',
     })
     const preview = createPreviewContentParams('src\\changed.ts')
     expect(preview).toEqual({ schema: 1, kind: 'preview', instanceId: 'preview', title: 'changed.ts', icon: 'file-search', relPath: 'src/changed.ts' })

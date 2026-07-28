@@ -603,18 +603,9 @@ pub fn command_contracts() -> Vec<CommandContract> {
         contract!(
             "automation",
             "create",
-            "Create a scheduled automation.",
+            "Create a scheduled automation from one JSON payload.",
             WORKSPACE,
-            &[
-                O::required_string("name"),
-                O::required_string("schedule-kind"),
-                O::required_string("schedule-value"),
-                O::string("timezone"),
-                O::string("workspace-mode"),
-                O::required_string("command"),
-                O::string("goal"),
-                O::unsigned("timeout-seconds")
-            ],
+            &[O::required_string("json")],
             NONE,
             Some(0),
             None,
@@ -624,20 +615,10 @@ pub fn command_contracts() -> Vec<CommandContract> {
         contract!(
             "automation",
             "update",
-            "Update an automation.",
+            "Update an automation from one JSON payload.",
             NONE,
-            &[
-                O::string("id"),
-                O::string("name"),
-                O::string("schedule-kind"),
-                O::string("schedule-value"),
-                O::string("timezone"),
-                O::string("workspace-mode"),
-                O::string("command"),
-                O::string("goal"),
-                O::unsigned("timeout-seconds")
-            ],
-            &["enable", "disable"],
+            &[O::required_uuid("id"), O::required_string("json")],
+            NONE,
             Some(1),
             Some("id"),
             false,
@@ -648,7 +629,7 @@ pub fn command_contracts() -> Vec<CommandContract> {
             "delete",
             "Delete an automation.",
             NONE,
-            &[O::string("id")],
+            &[O::required_uuid("id")],
             &["confirm"],
             Some(1),
             Some("id"),
@@ -660,7 +641,7 @@ pub fn command_contracts() -> Vec<CommandContract> {
             "run",
             "Run an automation now.",
             NONE,
-            &[O::string("id")],
+            &[O::required_uuid("id")],
             NONE,
             Some(1),
             Some("id"),
@@ -672,7 +653,7 @@ pub fn command_contracts() -> Vec<CommandContract> {
             "runs",
             "List retained automation runs.",
             NONE,
-            &[O::string("id"), O::unsigned("limit")],
+            &[O::required_uuid("id"), O::unsigned("limit")],
             NONE,
             Some(1),
             Some("id"),
@@ -681,15 +662,87 @@ pub fn command_contracts() -> Vec<CommandContract> {
         ),
         contract!(
             "automation",
+            "schedule-preview",
+            "Preview deterministic automation schedule occurrences.",
+            NONE,
+            &[O::required_string("json")],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "automation",
             "precheck",
             "Run automation prechecks without launching an agent.",
             NONE,
-            &[O::string("id")],
+            &[O::required_uuid("id")],
             NONE,
             Some(1),
             Some("id"),
             false,
             ReadOnly
+        ),
+        contract!(
+            "automation",
+            "cancel",
+            "Cancel an active automation run.",
+            NONE,
+            &[O::required_uuid("id")],
+            NONE,
+            Some(1),
+            Some("id"),
+            false,
+            Mutating
+        ),
+        contract!(
+            "automation",
+            "import-preview",
+            "Preview matching Hermes cron jobs without changing them.",
+            WORKSPACE,
+            &[],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "automation",
+            "import",
+            "Import reviewed Hermes cron jobs from one JSON payload.",
+            WORKSPACE,
+            &[O::required_string("json")],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "automation",
+            "draft-preview",
+            "Generate a review-only Hermes automation draft from one JSON payload.",
+            WORKSPACE,
+            &[O::required_string("json")],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "automation",
+            "draft-cancel",
+            "Cancel an active review-only Hermes automation draft.",
+            NONE,
+            &[O::required_uuid("id")],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
         ),
         contract!(
             "computer",
@@ -1474,6 +1527,13 @@ fn validate_against_contract(
             contract.action
         )));
     }
+    if let Some(pos_name) = contract.positional_satisfies {
+        if !arguments.positionals.is_empty() && arguments.options.contains_key(pos_name) {
+            return Err(CliError::invalid(format!(
+                "cannot specify both positional {pos_name} and --{pos_name}"
+            )));
+        }
+    }
     if contract.requires_expected_revision && expected_revision.is_none() {
         return Err(CliError::invalid(format!(
             "--expected-revision is required for {} {}",
@@ -1547,6 +1607,7 @@ pub fn contract_for_command(command: &Command) -> Option<CommandContract> {
 mod tests {
     use super::*;
     use crate::dedicated_cli::parse_args;
+    use uuid::Uuid;
 
     #[test]
     fn contracts_cover_all_non_browser_actions() {
@@ -1604,5 +1665,14 @@ mod tests {
         ])
         .expect_err("revision required");
         assert!(error.message.contains("--expected-revision"));
+    }
+    #[test]
+    fn positional_and_option_id_conflicts_fail_contract_validation() {
+        let uuid_str = Uuid::new_v4().to_string();
+        let error = parse_args(["automation", "cancel", &uuid_str, "--id", &uuid_str])
+            .expect_err("positional and --id conflict");
+        assert!(error
+            .message
+            .contains("cannot specify both positional id and --id"));
     }
 }
