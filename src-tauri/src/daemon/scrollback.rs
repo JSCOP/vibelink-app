@@ -40,9 +40,20 @@ impl ScrollbackRing {
         };
 
         let mut reset = false;
+        let mut preserved_state = Vec::new();
         let bytes_to_store = if let Some((start, end)) = find_last_clear_span(detection_bytes) {
             reset = true;
             let preserve_restored_prefix = self.protected_prefix_len > 0;
+            let mut discarded = self
+                .buf
+                .iter()
+                .skip(self.protected_prefix_len)
+                .copied()
+                .collect::<Vec<_>>();
+            discarded.extend_from_slice(&detection_bytes[..start]);
+            for sequence in terminal_state_sequences(&discarded) {
+                preserved_state.extend_from_slice(sequence);
+            }
             self.clear_live_output();
             if preserve_restored_prefix {
                 &detection_bytes[end..]
@@ -54,6 +65,7 @@ impl ScrollbackRing {
         };
 
         let next_pending_clear_prefix = trailing_clear_prefix(detection_bytes).to_vec();
+        self.buf.extend(preserved_state);
         self.buf.extend(bytes_to_store.iter().copied());
         self.pending_clear_prefix = next_pending_clear_prefix;
         let overflow = self.buf.len().saturating_sub(self.cap);
@@ -116,6 +128,85 @@ fn include_adjacent_clear_prefix(bytes: &[u8], mut start: usize) -> usize {
         };
         start -= sequence.len();
     }
+}
+
+fn terminal_state_sequences(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut preserved = Vec::new();
+    let mut last_title = None;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            index += 1;
+            continue;
+        }
+        match bytes.get(index + 1).copied() {
+            Some(b'[') => {
+                let mut cursor = index + 2;
+                let params_start = cursor;
+                while cursor < bytes.len() && (0x30..=0x3f).contains(&bytes[cursor]) {
+                    cursor += 1;
+                }
+                let params_end = cursor;
+                while cursor < bytes.len() && (0x20..=0x2f).contains(&bytes[cursor]) {
+                    cursor += 1;
+                }
+                let Some(final_byte) = bytes.get(cursor).copied() else {
+                    break;
+                };
+                if !(0x40..=0x7e).contains(&final_byte) {
+                    index += 2;
+                    continue;
+                }
+                let intermediates = &bytes[params_end..cursor];
+                let first_param = bytes.get(params_start).copied();
+                let mode_toggle = matches!(final_byte, b'h' | b'l') && intermediates.is_empty();
+                let kitty_state = final_byte == b'u'
+                    && intermediates.is_empty()
+                    && matches!(first_param, Some(b'>') | Some(b'<') | Some(b'='));
+                let cursor_style = final_byte == b'q' && intermediates == b" ";
+                if mode_toggle || kitty_state || cursor_style {
+                    preserved.push(&bytes[index..=cursor]);
+                }
+                index = cursor + 1;
+            }
+            Some(b'=') | Some(b'>') => {
+                preserved.push(&bytes[index..index + 2]);
+                index += 2;
+            }
+            Some(b'(') | Some(b')') => {
+                if index + 2 < bytes.len() {
+                    preserved.push(&bytes[index..index + 3]);
+                }
+                index += 3;
+            }
+            Some(b']') => {
+                let mut cursor = index + 2;
+                while cursor < bytes.len()
+                    && bytes[cursor] != 0x07
+                    && !(bytes[cursor] == 0x1b && bytes.get(cursor + 1) == Some(&b'\\'))
+                {
+                    cursor += 1;
+                }
+                if cursor >= bytes.len() {
+                    break;
+                }
+                let terminator_len = if bytes[cursor] == 0x07 { 1 } else { 2 };
+                if matches!(bytes.get(index + 2), Some(b'0') | Some(b'2'))
+                    && bytes.get(index + 3) == Some(&b';')
+                {
+                    last_title = Some(&bytes[index..cursor + terminator_len]);
+                }
+                index = cursor + terminator_len;
+            }
+            _ => index += 2,
+        }
+    }
+
+    if let Some(title) = last_title {
+        preserved.push(title);
+    }
+    preserved
 }
 
 fn trailing_clear_prefix(bytes: &[u8]) -> &[u8] {
@@ -228,7 +319,20 @@ mod tests {
         ring.push(b"before");
         ring.push(b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[Hafter");
 
-        assert_eq!(ring.snapshot(), b"\x1b[2J\x1b[3J\x1b[Hafter");
+        assert_eq!(
+            ring.snapshot(),
+            b"\x1b[?1049l\x1b[2J\x1b[3J\x1b[Hafter",
+        );
+    }
+
+    #[test]
+    fn ring_replays_alt_screen_state_before_a_later_clear() {
+        let mut ring = ScrollbackRing::new(128);
+
+        ring.push(b"\x1b[?1049hfull-screen");
+        ring.push(b"\x1b[2Jredraw");
+
+        assert_eq!(ring.snapshot(), b"\x1b[?1049h\x1b[2Jredraw");
     }
 
     #[test]

@@ -1,8 +1,10 @@
 use super::daemon_client::{parse_uuid, DaemonClient, TerminalEvent};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use super::license::LicenseService;
 use crate::protocol::{
     AttentionSnapshotData, ClientToDaemon, DesktopSelection, PaneCommandOrigin, PaneConfig,
     PaneMeta, RemotePaneLeaseAdminReclaimRequest, RemotePaneLeaseResult, ReplyResult, SessionMeta,
+    TerminalSnapshot,
 };
 use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
 use serde::de::DeserializeOwned;
@@ -18,6 +20,34 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub struct AttachedSession {
     pub layout_json: Option<String>,
     pub panes: Vec<PaneMeta>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSnapshotResult {
+    pub session_id: String,
+    pub pane_id: String,
+    pub pane_generation: String,
+    pub output_sequence: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub alive: bool,
+    pub data_base64: String,
+}
+
+impl From<TerminalSnapshot> for TerminalSnapshotResult {
+    fn from(snapshot: TerminalSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id.to_string(),
+            pane_id: snapshot.pane_id.to_string(),
+            pane_generation: snapshot.pane_generation.to_string(),
+            output_sequence: snapshot.output_sequence.to_string(),
+            cols: snapshot.cols,
+            rows: snapshot.rows,
+            alive: snapshot.alive,
+            data_base64: BASE64_STANDARD.encode(snapshot.data),
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -535,6 +565,27 @@ pub async fn attach_pane(
             pane_id,
         })
         .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn subscribe_pane(
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    pane_id: String,
+) -> Result<TerminalSnapshotResult, String> {
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    match client
+        .request_reply(|req| ClientToDaemon::SubscribePane {
+            req,
+            session_id,
+            pane_id,
+        })
+        .map_err(to_string)?
+    {
+        ReplyResult::TerminalSnapshot(snapshot) => Ok(snapshot.into()),
+        other => Err(format!("unexpected daemon response: {other:?}")),
+    }
 }
 
 #[tauri::command]

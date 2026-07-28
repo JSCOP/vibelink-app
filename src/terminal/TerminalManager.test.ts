@@ -21,6 +21,7 @@ vi.mock('@xterm/xterm', () => {
     resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined
     focusCalls = 0
     writes: unknown[] = []
+    resetCalls = 0
     loadAddon(addon: { activate?: (terminal: MockTerminal) => void }): void { addon.activate?.(this) }
     attachCustomKeyEventHandler(): void {}
     attachCustomWheelEventHandler(): void {}
@@ -52,6 +53,7 @@ vi.mock('@xterm/xterm', () => {
     refresh(): void {}
     scrollToBottom(): void {}
     write(data: unknown, callback?: () => void): void { this.writes.push(data); callback?.() }
+    reset(): void { this.resetCalls += 1; this.writes = [] }
     hasSelection(): boolean { return false }
 
     resize(cols: number, rows: number): void {
@@ -144,14 +146,44 @@ function emitResize(target: Element, width: number, height: number): void {
 beforeEach(() => {
   resizeObservers.clear()
   invokeMock.mockReset()
-  invokeMock.mockResolvedValue(undefined)
+  invokeMock.mockImplementation((command, args) => {
+    if (command === 'subscribe_pane') {
+      return Promise.resolve(terminalSnapshot(
+        String(args?.paneId),
+        0n,
+        '',
+        String(args?.sessionId),
+        1n,
+      ))
+    }
+    return Promise.resolve()
+  })
   useRemotePaneLeaseStore.setState({ leases: {} })
 })
 
 vi.stubGlobal('ResizeObserver', StubResizeObserver)
 
+function terminalSnapshot(
+  paneId: string,
+  outputSequence: bigint,
+  text: string,
+  sessionId = 'session-replay',
+  paneGeneration = 9n,
+) {
+  return {
+    sessionId,
+    paneId,
+    paneGeneration: paneGeneration.toString(),
+    outputSequence: outputSequence.toString(),
+    cols: 80,
+    rows: 24,
+    alive: true,
+    dataBase64: btoa(text),
+  }
+}
+
 describe('TerminalManager pre-session input buffering', () => {
-  it('holds emulator input while the pane has no session and flushes it on the session-bound attach', () => {
+  it('holds emulator input while the pane has no session and flushes it on the session-bound attach', async () => {
     const paneId = 'pane-presession-flush'
     const container = makeContainer()
 
@@ -165,13 +197,14 @@ describe('TerminalManager pre-session input buffering', () => {
 
     // spawn_pane resolved; the store update re-renders the panel with a session.
     TerminalManager.attach(paneId, container, { sessionId: 'session-1' })
+    await TerminalManager.waitForReplay('session-1', [paneId])
 
     const writes = invokeMock.mock.calls.filter(([command]) => command === 'write_pane')
     expect(writes).toEqual([
       ['write_pane', { sessionId: 'session-1', paneId, data: '\x1b[O' }],
       ['write_pane', { sessionId: 'session-1', paneId, data: '\x1b[1;1R' }],
     ])
-    expect(invokeMock).toHaveBeenCalledWith('attach_pane', { sessionId: 'session-1', paneId })
+    expect(invokeMock).toHaveBeenCalledWith('subscribe_pane', { sessionId: 'session-1', paneId })
 
     // The buffer must not replay on later input.
     emitTerminalData(paneId, 'x')
@@ -182,19 +215,20 @@ describe('TerminalManager pre-session input buffering', () => {
     TerminalManager.dispose(paneId)
   })
 
-  it('sends input immediately when the pane already has a session', () => {
+  it('sends input immediately when the pane already has a session', async () => {
     const paneId = 'pane-live-input'
     const container = makeContainer()
 
     TerminalManager.attach(paneId, container, { sessionId: 'session-2' })
     emitTerminalData(paneId, 'ls\r')
+    await TerminalManager.waitForReplay('session-2', [paneId])
 
     expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-2', paneId, data: 'ls\r' })
 
     TerminalManager.dispose(paneId)
   })
 
-  it('flushes held input when the daemon reattaches the pane', () => {
+  it('flushes held input when the daemon reattaches the pane', async () => {
     const paneId = 'pane-reattach-flush'
     const container = makeContainer()
 
@@ -203,10 +237,61 @@ describe('TerminalManager pre-session input buffering', () => {
     expect(invokeMock).not.toHaveBeenCalledWith('write_pane', expect.anything())
 
     TerminalManager.reattachToDaemon('session-3', [paneId])
+    await TerminalManager.waitForReplay('session-3', [paneId])
 
-    expect(invokeMock).toHaveBeenCalledWith('attach_pane', { sessionId: 'session-3', paneId })
+    expect(invokeMock).toHaveBeenCalledWith('subscribe_pane', { sessionId: 'session-3', paneId })
     expect(invokeMock).toHaveBeenCalledWith('write_pane', { sessionId: 'session-3', paneId, data: '\x1b[1;1R' })
 
+    TerminalManager.dispose(paneId)
+  })
+})
+
+describe('TerminalManager atomic snapshot replay', () => {
+  it('hydrates the atomic snapshot before live frames that arrive while subscribing', async () => {
+    const paneId = 'pane-atomic-replay'
+    const container = makeContainer()
+    const snapshotResult = Promise.withResolvers<unknown>()
+    invokeMock.mockImplementation((command) => {
+      if (command === 'subscribe_pane') return snapshotResult.promise
+      return Promise.resolve()
+    })
+
+    TerminalManager.attach(paneId, container, { sessionId: 'session-replay' })
+    TerminalManager.writeSequenced(paneId, 9n, 3n, new TextEncoder().encode('live'))
+    snapshotResult.resolve(terminalSnapshot(paneId, 2n, 'snapshot'))
+    await TerminalManager.waitForReplay('session-replay', [paneId])
+
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { writes: Uint8Array[]; resetCalls: number } }>
+    }
+    const entry = manager.entries.get(paneId)
+    expect(invokeMock).toHaveBeenCalledWith('subscribe_pane', { sessionId: 'session-replay', paneId })
+    expect(entry?.term.resetCalls).toBe(1)
+    expect(entry?.term.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['snapshot', 'live'])
+    TerminalManager.dispose(paneId)
+  })
+
+  it('resubscribes and replaces the pane when a live output sequence has a gap', async () => {
+    const paneId = 'pane-gap-replay'
+    const container = makeContainer()
+    const snapshots = [terminalSnapshot(paneId, 1n, 'initial'), terminalSnapshot(paneId, 3n, 'healed')]
+    invokeMock.mockImplementation((command) => {
+      if (command === 'subscribe_pane') return Promise.resolve(snapshots.shift())
+      return Promise.resolve()
+    })
+
+    TerminalManager.attach(paneId, container, { sessionId: 'session-replay' })
+    await TerminalManager.waitForReplay('session-replay', [paneId])
+    TerminalManager.writeSequenced(paneId, 9n, 3n, new TextEncoder().encode('gap frame'))
+    await TerminalManager.waitForReplay('session-replay', [paneId])
+
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { writes: Uint8Array[]; resetCalls: number } }>
+    }
+    const entry = manager.entries.get(paneId)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'subscribe_pane')).toHaveLength(2)
+    expect(entry?.term.resetCalls).toBe(2)
+    expect(entry?.term.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['healed'])
     TerminalManager.dispose(paneId)
   })
 })

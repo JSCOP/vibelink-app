@@ -227,6 +227,7 @@ pub fn run() {
             android_device_lab::device_lab_process_cancel,
             android_device_lab::device_lab_owned_processes,
             commands::attach_pane,
+            commands::subscribe_pane,
             commands::attach_session,
             commands::close_pane,
             commands::clear_session,

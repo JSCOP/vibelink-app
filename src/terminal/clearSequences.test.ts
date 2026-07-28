@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
+import { terminalOutputAfterLastHardClear, terminalQuerySequences, terminalStateSequences } from './clearSequences'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -114,5 +114,36 @@ describe('terminalStateSequences', () => {
 
   it('returns nothing for plain output', () => {
     expect(terminalStateSequences(enc.encode('hello \x1b[31mred\x1b[0m'))).toEqual([])
+  })
+})
+
+describe('terminalQuerySequences', () => {
+  it('extracts answerable CSI, OSC, and DCS probes without visual or mode bytes', () => {
+    const input = enc.encode([
+      'visible',
+      '\x1b[?1049h',
+      '\x1b[c',
+      '\x1b[6n',
+      '\x1b[?2026$p',
+      '\x1b[>0q',
+      '\x1b[?u',
+      '\x1b[18t',
+      '\x1b]11;?\x07',
+      '\x1bP+q544e\x1b\\',
+      '\x1b[31m',
+    ].join(''))
+
+    const queries = terminalQuerySequences(input).map((bytes) => decode(bytes))
+
+    expect(queries).toEqual([
+      '\x1b[c',
+      '\x1b[6n',
+      '\x1b[?2026$p',
+      '\x1b[>0q',
+      '\x1b[?u',
+      '\x1b[18t',
+      '\x1b]11;?\x07',
+      '\x1bP+q544e\x1b\\',
+    ])
   })
 })

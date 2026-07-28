@@ -446,7 +446,12 @@ fn daemon_channels(output_capacity: usize) -> (DaemonSenders, DaemonInbox) {
 
 fn route_daemon_message(senders: &DaemonSenders, message: DaemonToClient) -> bool {
     match message {
-        DaemonToClient::Output { pane_id, data } => {
+        DaemonToClient::Output {
+            pane_id,
+            pane_generation,
+            output_sequence,
+            data,
+        } => {
             let bytes = data.len();
             let reserved = senders
                 .output_bytes
@@ -457,7 +462,12 @@ fn route_daemon_message(senders: &DaemonSenders, message: DaemonToClient) -> boo
                 .is_ok();
             if reserved {
                 match senders.output.try_send(QueuedDaemonOutput {
-                    message: DaemonToClient::Output { pane_id, data },
+                    message: DaemonToClient::Output {
+                        pane_id,
+                        pane_generation,
+                        output_sequence,
+                        data,
+                    },
                     reserved_bytes: bytes,
                 }) {
                     Ok(()) => return true,
@@ -1592,7 +1602,7 @@ fn pump_v2_terminal_output(
                 break;
             };
             dequeued_frames += 1;
-            let DaemonToClient::Output { pane_id, data } = message else {
+            let DaemonToClient::Output { pane_id, data, .. } = message else {
                 continue;
             };
             PendingTerminalOutput {
@@ -3440,7 +3450,7 @@ fn run_authenticated(
             let Some(message) = daemon_inbox.try_output()? else {
                 break;
             };
-            if let DaemonToClient::Output { pane_id, data } = message {
+            if let DaemonToClient::Output { pane_id, data, .. } = message {
                 output_bytes = output_bytes.saturating_add(data.len());
                 if attached_panes.contains(&pane_id) {
                     ws.send(Message::Binary(
@@ -4368,6 +4378,8 @@ mod tests {
             &senders,
             DaemonToClient::Output {
                 pane_id: buffered_pane,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: vec![1; DAEMON_OUTPUT_QUEUE_MAX_BYTES],
             }
         ));
@@ -4376,6 +4388,8 @@ mod tests {
             &senders,
             DaemonToClient::Output {
                 pane_id: gapped_pane,
+                pane_generation: 1,
+                output_sequence: 2,
                 data: vec![2],
             }
         ));
@@ -4399,7 +4413,7 @@ mod tests {
             })
         );
         match inbox.try_output().expect("output receive") {
-            Some(DaemonToClient::Output { pane_id, data }) => {
+            Some(DaemonToClient::Output { pane_id, data, .. }) => {
                 assert_eq!(pane_id, buffered_pane);
                 assert_eq!(data.len(), DAEMON_OUTPUT_QUEUE_MAX_BYTES);
             }
@@ -4421,6 +4435,8 @@ mod tests {
                 &senders,
                 DaemonToClient::Output {
                     pane_id,
+                    pane_generation: 1,
+                    output_sequence: 1,
                     data: vec![3; frame_bytes],
                 },
             ) {

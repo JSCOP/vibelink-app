@@ -56,6 +56,8 @@ pub struct PaneExitEffect {
 }
 
 pub struct PaneOutputEffect {
+    pub pane_generation: u64,
+    pub output_sequence: u64,
     pub senders: Vec<Sender<DaemonToClient>>,
     pub snapshot: Option<Vec<u8>>,
 }
@@ -1102,7 +1104,9 @@ impl DaemonState {
                 cols: pane.config.cols,
                 rows: pane.config.rows,
                 alive: pane.alive,
-                data: pane.scrollback_snapshot(),
+                data: crate::daemon::query_filter::strip_terminal_queries(
+                    &pane.scrollback_snapshot(),
+                ),
             }
         };
         self.attach_client_to_pane(client_id, pane_id);
@@ -1132,9 +1136,15 @@ impl DaemonState {
         session_id: Uuid,
         pane_id: Uuid,
     ) -> anyhow::Result<()> {
-        let (snapshot, alive) = {
+        let (snapshot, alive, pane_generation, output_sequence) = {
             let pane = self.pane_in_session(session_id, pane_id)?;
-            (pane.scrollback_snapshot(), pane.alive)
+            let (pane_generation, output_sequence) = pane.output_cursor();
+            (
+                pane.scrollback_snapshot(),
+                pane.alive,
+                pane_generation,
+                output_sequence,
+            )
         };
         // A client that is already attached (e.g. it spawned the pane and was
         // attached at spawn time) has received every byte live; replaying the
@@ -1151,7 +1161,12 @@ impl DaemonState {
                 // into its prompt as stray keystrokes.
                 let data = crate::daemon::query_filter::strip_terminal_queries(&snapshot);
                 if !data.is_empty() {
-                    let _ = tx.try_send(DaemonToClient::Output { pane_id, data });
+                    let _ = tx.try_send(DaemonToClient::Output {
+                        pane_id,
+                        pane_generation,
+                        output_sequence,
+                        data,
+                    });
                 }
             }
             if !alive {
@@ -1233,6 +1248,8 @@ impl DaemonState {
             })
             .flatten();
         Some(PaneOutputEffect {
+            pane_generation: generation,
+            output_sequence: record.sequence,
             senders: self.senders_for_pane(pane_id),
             snapshot,
         })
@@ -1858,6 +1875,8 @@ mod tests {
         senders[0]
             .send(DaemonToClient::Output {
                 pane_id,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: b"hello".to_vec(),
             })
             .expect("send output");
@@ -1865,9 +1884,31 @@ mod tests {
             rx.recv().expect("output event"),
             DaemonToClient::Output {
                 pane_id,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: b"hello".to_vec(),
             }
         );
+    }
+
+    #[test]
+    fn output_effect_carries_exact_generation_and_sequence() {
+        let mut state = DaemonState::new();
+        let workspace = state.create_session("Workspace".to_string(), None);
+        let pane_id = Uuid::new_v4();
+        state
+            .insert_pane(workspace.id, Pane::for_test(test_config(pane_id), true))
+            .expect("insert pane");
+        let generation = state
+            .pane_output_generation(pane_id)
+            .expect("pane generation");
+
+        let effect = state
+            .record_output_and_push_for_generation(pane_id, generation, b"hello", false)
+            .expect("output effect");
+
+        assert_eq!(effect.pane_generation, generation);
+        assert_eq!(effect.output_sequence, 1);
     }
 
     #[test]
@@ -1900,6 +1941,8 @@ mod tests {
         senders[0]
             .send(DaemonToClient::Output {
                 pane_id,
+                pane_generation: 1,
+                output_sequence: 2,
                 data: b"after subscribe".to_vec(),
             })
             .expect("send live output");
@@ -1907,6 +1950,8 @@ mod tests {
             rx.recv().expect("live output"),
             DaemonToClient::Output {
                 pane_id,
+                pane_generation: 1,
+                output_sequence: 2,
                 data: b"after subscribe".to_vec(),
             }
         );
@@ -1981,6 +2026,8 @@ mod tests {
         senders[0]
             .send(DaemonToClient::Output {
                 pane_id: pane_a,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: b"live".to_vec(),
             })
             .expect("send remaining route");
@@ -1989,6 +2036,8 @@ mod tests {
             rx_b.recv().expect("client b live output"),
             DaemonToClient::Output {
                 pane_id: pane_a,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: b"live".to_vec(),
             }
         );
@@ -2046,6 +2095,8 @@ mod tests {
             rx.try_recv().expect("snapshot replay"),
             DaemonToClient::Output {
                 pane_id,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: b"banner".to_vec(),
             }
         );
@@ -2080,6 +2131,8 @@ mod tests {
             rx.try_recv().expect("snapshot replay"),
             DaemonToClient::Output {
                 pane_id,
+                pane_generation: 1,
+                output_sequence: 1,
                 data: b"omp ready".to_vec(),
             }
         );

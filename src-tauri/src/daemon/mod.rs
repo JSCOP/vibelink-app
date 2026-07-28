@@ -5732,7 +5732,12 @@ fn read_pane_loop(
                 let capture_snapshot = history
                     .as_ref()
                     .is_some_and(|writer| writer.should_compact(bytes.len()));
-                let Some(PaneOutputEffect { senders, snapshot }) = lock_state(&state)
+                let Some(PaneOutputEffect {
+                    pane_generation,
+                    output_sequence,
+                    senders,
+                    snapshot,
+                }) = lock_state(&state)
                     .record_output_and_push_for_generation(
                         pane_id,
                         generation,
@@ -5748,7 +5753,13 @@ fn read_pane_loop(
                     }
                 }
                 if !senders.is_empty() {
-                    send_output_to_clients(senders, pane_id, bytes.to_vec());
+                    send_output_to_clients(
+                        senders,
+                        pane_id,
+                        pane_generation,
+                        output_sequence,
+                        bytes.to_vec(),
+                    );
                 }
             }
             Err(err) => {
@@ -5793,7 +5804,13 @@ fn read_pane_loop(
     }
 }
 
-fn send_output_to_clients(senders: Vec<Sender<DaemonToClient>>, pane_id: Uuid, data: Vec<u8>) {
+fn send_output_to_clients(
+    senders: Vec<Sender<DaemonToClient>>,
+    pane_id: Uuid,
+    pane_generation: u64,
+    output_sequence: u64,
+    data: Vec<u8>,
+) {
     if senders.is_empty() {
         return;
     }
@@ -5809,7 +5826,12 @@ fn send_output_to_clients(senders: Vec<Sender<DaemonToClient>>, pane_id: Uuid, d
                 .expect("original output frame present")
                 .clone()
         };
-        match sender.try_send(DaemonToClient::Output { pane_id, data }) {
+        match sender.try_send(DaemonToClient::Output {
+            pane_id,
+            pane_generation,
+            output_sequence,
+            data,
+        }) {
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
     }
@@ -6128,7 +6150,7 @@ mod tests {
 
         tx.send(DaemonToClient::Pong { req: 1 })
             .expect("fill client queue");
-        send_output_to_clients(vec![tx], pane_id, b"dropped".to_vec());
+        send_output_to_clients(vec![tx], pane_id, 1, 1, b"dropped".to_vec());
 
         assert_eq!(
             rx.recv().expect("queued control frame"),

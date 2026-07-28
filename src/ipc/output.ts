@@ -75,12 +75,22 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
     socket.binaryType = 'arraybuffer'
     socket.onmessage = (event) => {
       if (!(event.data instanceof ArrayBuffer)) return
-      const view = new Uint8Array(event.data)
-      if (view.byteLength < 2) return
-      const idLen = (view[0] << 8) | view[1]
-      if (view.byteLength < 2 + idLen) return
-      const paneId = paneIdDecoder.decode(view.subarray(2, 2 + idLen))
-      TerminalManager.write(paneId, view.subarray(2 + idLen))
+      const bytes = new Uint8Array(event.data)
+      if (bytes.byteLength < 2) return
+      const idLen = (bytes[0] << 8) | bytes[1]
+      const cursorOffset = 2 + idLen
+      const dataOffset = cursorOffset + 16
+      if (bytes.byteLength < dataOffset) return
+      const paneId = paneIdDecoder.decode(bytes.subarray(2, cursorOffset))
+      const cursor = new DataView(event.data)
+      const paneGeneration = cursor.getBigUint64(cursorOffset, false)
+      const outputSequence = cursor.getBigUint64(cursorOffset + 8, false)
+      TerminalManager.writeSequenced(
+        paneId,
+        paneGeneration,
+        outputSequence,
+        bytes.subarray(dataOffset),
+      )
     }
     socket.onclose = () => {
       if (outputSocket === socket) outputSocket = undefined

@@ -545,6 +545,8 @@ pub enum DaemonToClient {
     },
     Output {
         pane_id: Uuid,
+        pane_generation: u64,
+        output_sequence: u64,
         data: Vec<u8>,
     },
     PaneExited {

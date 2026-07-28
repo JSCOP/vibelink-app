@@ -42,6 +42,59 @@ export function terminalStateSequences(bytes: Uint8Array): Uint8Array[] {
   return terminalStateSequencesIn(bytes, bytes.byteLength)
 }
 
+/** Collect terminal queries that were received live but are covered by a
+ * stripped daemon snapshot. Replaying only these queries lets xterm answer a
+ * current ConPTY/TUI handshake without re-answering historical probes. */
+export function terminalQuerySequences(bytes: Uint8Array): Uint8Array[] {
+  const queries: Uint8Array[] = []
+  let index = 0
+
+  while (index < bytes.byteLength) {
+    if (bytes[index] !== 0x1b) {
+      index += 1
+      continue
+    }
+    const kind = bytes[index + 1]
+    if (kind === 0x5b) {
+      let cursor = index + 2
+      const paramsStart = cursor
+      while (cursor < bytes.byteLength && bytes[cursor] >= 0x30 && bytes[cursor] <= 0x3f) cursor += 1
+      const paramsEnd = cursor
+      while (cursor < bytes.byteLength && bytes[cursor] >= 0x20 && bytes[cursor] <= 0x2f) cursor += 1
+      const final = bytes[cursor]
+      if (cursor >= bytes.byteLength || final === undefined || final < 0x40 || final > 0x7e) break
+      if (csiIsTerminalQuery(
+        bytes.subarray(paramsStart, paramsEnd),
+        bytes.subarray(paramsEnd, cursor),
+        final,
+      )) {
+        queries.push(bytes.subarray(index, cursor + 1))
+      }
+      index = cursor + 1
+      continue
+    }
+    if (kind === 0x5d || kind === 0x50) {
+      const parsed = parseTerminalStringSequence(bytes, index)
+      if (!parsed) break
+      const payload = bytes.subarray(parsed.payloadStart, parsed.end)
+      const dcsPayload = kind === 0x50 ? stripTerminalStringTerminator(payload) : undefined
+      const isQuery = kind === 0x5d
+        ? isOscTerminalQuery(payload)
+        : Boolean(dcsPayload
+          && dcsPayload.byteLength >= 2
+          && (dcsPayload[0] === 0x2b || dcsPayload[0] === 0x24)
+          && dcsPayload[1] === 0x71)
+      if (isQuery) queries.push(bytes.subarray(index, parsed.end))
+      index = parsed.end
+      continue
+    }
+    index += 2
+  }
+
+  return queries
+}
+
+
 /** Collect terminal-state-changing sequences from `bytes[0..end)`, in order:
  *  SM/RM and DECSET/DECRST (`CSI [?] Pm h|l` — alt screen, mouse tracking,
  *  bracketed paste, cursor visibility, ...), kitty keyboard push/pop/set
@@ -116,6 +169,70 @@ function terminalStateSequencesIn(bytes: Uint8Array, end: number): Uint8Array[] 
 
   if (lastTitle) preserved.push(lastTitle)
   return preserved
+}
+
+function csiIsTerminalQuery(params: Uint8Array, intermediates: Uint8Array, final: number): boolean {
+  if (intermediates.byteLength === 0) {
+    if (final === 0x63 || final === 0x6e) return true
+    if (final === 0x71 && params[0] === 0x3e) return true
+    if (final === 0x75 && params.byteLength === 1 && params[0] === 0x3f) return true
+    if (final === 0x74) {
+      const leading = leadingTerminalNumber(params)
+      return leading === 14 || leading === 16 || leading === 18
+    }
+  }
+  return final === 0x70 && intermediates.byteLength === 1 && intermediates[0] === 0x24
+}
+
+function leadingTerminalNumber(params: Uint8Array): number | undefined {
+  let cursor = 0
+  let value = 0
+  while (cursor < params.byteLength && params[cursor] >= 0x30 && params[cursor] <= 0x39) {
+    value = value * 10 + params[cursor] - 0x30
+    cursor += 1
+  }
+  if (cursor === 0) return undefined
+  const separator = params[cursor]
+  return separator === undefined || separator === 0x3b || separator === 0x3a ? value : undefined
+}
+
+function parseTerminalStringSequence(bytes: Uint8Array, start: number): { end: number; payloadStart: number } | undefined {
+  const payloadStart = start + 2
+  let cursor = payloadStart
+  while (cursor < bytes.byteLength) {
+    if (bytes[cursor] === 0x07) return { end: cursor + 1, payloadStart }
+    if (bytes[cursor] === 0x1b && bytes[cursor + 1] === 0x5c) return { end: cursor + 2, payloadStart }
+    cursor += 1
+  }
+  return undefined
+}
+
+function isOscTerminalQuery(payloadWithTerminator: Uint8Array): boolean {
+  const payload = stripTerminalStringTerminator(payloadWithTerminator)
+  const firstSeparator = payload.indexOf(0x3b)
+  if (firstSeparator < 0) return false
+  let code = 0
+  for (let index = 0; index < firstSeparator; index += 1) {
+    const digit = payload[index]
+    if (digit < 0x30 || digit > 0x39) return false
+    code = code * 10 + digit - 0x30
+  }
+  const answerable = code === 4 || code === 5 || (code >= 10 && code <= 19) || code === 52
+  if (!answerable) return false
+  const args = payload.subarray(firstSeparator + 1)
+  return (args.byteLength === 1 && args[0] === 0x3f)
+    || (args.byteLength >= 2 && args[args.byteLength - 2] === 0x3b && args[args.byteLength - 1] === 0x3f)
+}
+
+
+function stripTerminalStringTerminator(payload: Uint8Array): Uint8Array {
+  if (payload[payload.byteLength - 1] === 0x07) return payload.subarray(0, payload.byteLength - 1)
+  if (payload.byteLength >= 2
+    && payload[payload.byteLength - 2] === 0x1b
+    && payload[payload.byteLength - 1] === 0x5c) {
+    return payload.subarray(0, payload.byteLength - 2)
+  }
+  return payload
 }
 
 function includeAdjacentClearPrefix(bytes: Uint8Array, start: number): number {

@@ -12,7 +12,7 @@ import { terminalHostBecameMeasurable, terminalHostMeasureState, type TerminalHo
 import { INTERACTIVE_FIT_FRAME_BUDGET_MS, interactivePassDelay, isViewportViable, shouldSyncPtyNow } from './layoutPassPolicy'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
-import { terminalOutputAfterLastHardClear, terminalStateSequences } from './clearSequences'
+import { terminalOutputAfterLastHardClear, terminalQuerySequences, terminalStateSequences } from './clearSequences'
 import { agentActivityTracker, type AgentActivityActions } from './agentActivity'
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
@@ -69,6 +69,23 @@ const MAX_DIVIDER_STABILITY_FRAMES = 8
 
 
 
+type SequencedOutputFrame = {
+  paneGeneration: bigint
+  outputSequence: bigint
+  bytes: Uint8Array
+}
+
+type TerminalSnapshotResult = {
+  sessionId: string
+  paneId: string
+  paneGeneration: string
+  outputSequence: string
+  cols: number
+  rows: number
+  alive: boolean
+  dataBase64: string
+}
+
 type Entry = {
   paneId: string
   term: Terminal
@@ -88,6 +105,15 @@ type Entry = {
   pendingOutput?: Uint8Array[]
   pendingOutputBytes?: number
   outputHighPriority?: boolean
+  pendingSequencedOutput?: SequencedOutputFrame[]
+  pendingSequencedOutputBytes?: number
+  paneGeneration?: bigint
+  outputSequence?: bigint
+  replayPending?: boolean
+  replayPromise?: Promise<void>
+  replayRevision?: number
+  replayAgain?: boolean
+  replayedContainer?: HTMLElement
   visible?: boolean
   fitForcePending?: boolean
   measureState?: TerminalHostMeasureState
@@ -142,6 +168,7 @@ class TerminalManagerImpl {
   private outputDelayDueAt: number | undefined
   private outputFallbackTimer: number | undefined
   private titleCoalescer = new PaneTitleCoalescer()
+  private replayTail: Promise<void> = Promise.resolve()
 
   constructor() {
     if (typeof document !== 'undefined') {
@@ -374,6 +401,13 @@ class TerminalManagerImpl {
     const entry = this.getOrCreate(paneId)
     const previousSessionId = entry.sessionId
     entry.sessionId = options.sessionId
+    const sessionChanged = previousSessionId !== options.sessionId
+    if (sessionChanged) {
+      entry.daemonAttached = false
+      entry.paneGeneration = undefined
+      entry.outputSequence = undefined
+      entry.replayRevision = (entry.replayRevision ?? 0) + 1
+    }
     // Dockview re-parents panes on maximize/restore and pane swaps; a size
     // observed against the old container must not survive into the new one.
     if (entry.container !== container) {
@@ -441,12 +475,13 @@ class TerminalManagerImpl {
         : undefined
     }
 
-    if (options.sessionId && (!entry.daemonAttached || previousSessionId !== options.sessionId)) {
-      // Fit synchronously before the daemon attach so a scrollback replay
-      // parses at the pane's real geometry instead of the constructor default.
+    if (options.sessionId && (!entry.daemonAttached || sessionChanged)) {
+      // Subscribe atomically before replaying: the snapshot cursor and the
+      // live route become valid in one daemon lock, so output cannot land in
+      // the gap between a history read and attachment.
       this.safeFit(entry)
       entry.daemonAttached = true
-      void invoke('attach_pane', { sessionId: options.sessionId, paneId })
+      this.requestSnapshotReplay(entry)
     }
     if (options.sessionId) this.flushPendingInput(entry)
 
@@ -465,7 +500,7 @@ class TerminalManagerImpl {
     // synchronous fit above sized the grid to the real host. Route every pane
     // through the shared drain so restoring a busy workspace cannot make all
     // xterm instances parse and paint their replay in the same frame.
-    if (entry.pendingOutput?.length) {
+    if (entry.pendingOutput?.length && !entry.replayPending) {
       this.safeFit(entry)
       this.enqueueOutput(entry, this.isForegroundOutput(entry))
     }
@@ -473,15 +508,44 @@ class TerminalManagerImpl {
     this.fitAfterFontsLoad(entry)
   }
 
-  reattachToDaemon(sessionId: string | undefined, paneIds: string[]): void {
+  reattachToDaemon(
+    sessionId: string | undefined,
+    paneIds: string[],
+    options: { force?: boolean } = {},
+  ): void {
     if (!sessionId) return
-    for (const paneId of paneIds) {
-      const entry = this.entries.get(paneId)
-      if (!entry) continue
+    const force = options.force ?? true
+    const entries = paneIds
+      .map((paneId) => this.entries.get(paneId))
+      .filter((entry): entry is Entry => entry !== undefined)
+      .sort((left, right) => Number(this.isForegroundOutput(right)) - Number(this.isForegroundOutput(left)))
+    for (const entry of entries) {
+      const currentReplayIsEnough = !force
+        && entry.sessionId === sessionId
+        && (entry.replayPending || (entry.paneGeneration !== undefined && entry.replayedContainer === entry.container))
       entry.sessionId = sessionId
       entry.daemonAttached = true
-      void invoke('attach_pane', { sessionId, paneId })
+      if (!currentReplayIsEnough) {
+        entry.paneGeneration = undefined
+        entry.outputSequence = undefined
+        entry.replayRevision = (entry.replayRevision ?? 0) + 1
+        this.requestSnapshotReplay(entry)
+      }
       this.flushPendingInput(entry)
+    }
+  }
+
+  async waitForReplay(sessionId: string | undefined, paneIds: string[]): Promise<void> {
+    if (!sessionId) return
+    for (;;) {
+      const pending = paneIds
+        .map((paneId) => this.entries.get(paneId))
+        .filter((entry): entry is Entry => entry?.sessionId === sessionId)
+        .map((entry) => entry.replayPromise)
+        .filter((promise): promise is Promise<void> => promise !== undefined)
+      if (pending.length === 0) return
+      await Promise.allSettled(pending)
+      await Promise.resolve()
     }
   }
 
@@ -554,22 +618,204 @@ class TerminalManagerImpl {
     }
   }
 
-  write(paneId: string, bytes: Uint8Array, options: { foreground?: boolean } = {}): void {
+  private requestSnapshotReplay(entry: Entry): void {
+    const sessionId = entry.sessionId
+    if (!sessionId || !entry.opened) return
+    if (entry.replayPromise) {
+      entry.replayAgain = true
+      return
+    }
+
+    entry.replayPending = true
+    entry.replayAgain = false
+    const revision = entry.replayRevision ?? 0
+    const run = this.replayTail
+      .catch(() => undefined)
+      .then(() => this.replayPane(entry, sessionId, revision))
+    const tracked = run.finally(() => {
+      if (entry.replayPromise !== tracked) return
+      entry.replayPromise = undefined
+      entry.replayPending = false
+      if (!entry.replayAgain) return
+      entry.replayAgain = false
+      queueMicrotask(() => {
+        if (this.entries.get(entry.paneId) === entry) this.requestSnapshotReplay(entry)
+      })
+    })
+    entry.replayPromise = tracked
+    this.replayTail = tracked.catch(() => undefined)
+  }
+
+  private async replayPane(entry: Entry, sessionId: string, revision: number): Promise<void> {
+    try {
+      const snapshot = await invoke<TerminalSnapshotResult>('subscribe_pane', {
+        sessionId,
+        paneId: entry.paneId,
+      })
+      if (this.entries.get(entry.paneId) !== entry
+        || entry.sessionId !== sessionId
+        || (entry.replayRevision ?? 0) !== revision) return
+      if (snapshot.sessionId !== sessionId || snapshot.paneId !== entry.paneId) {
+        throw new Error('terminal snapshot identity mismatch')
+      }
+
+      const paneGeneration = BigInt(snapshot.paneGeneration)
+      const outputSequence = BigInt(snapshot.outputSequence)
+      const snapshotBytes = decodeBase64Bytes(snapshot.dataBase64)
+      this.removeQueuedOutput(entry)
+      entry.pendingOutput = undefined
+      entry.pendingOutputBytes = 0
+      entry.outputTrimNoticeWritten = false
+      entry.lastSentPtyCols = snapshot.cols
+      entry.lastSentPtyRows = snapshot.rows
+      if (entry.term.cols !== snapshot.cols || entry.term.rows !== snapshot.rows) {
+        entry.term.resize(snapshot.cols, snapshot.rows)
+      }
+      entry.term.reset()
+      entry.paneGeneration = paneGeneration
+      entry.outputSequence = outputSequence
+      entry.daemonAttached = true
+      await this.writeReplayBytes(entry, snapshotBytes)
+
+      for (;;) {
+        const frames = entry.pendingSequencedOutput ?? []
+        entry.pendingSequencedOutput = undefined
+        entry.pendingSequencedOutputBytes = 0
+        if (frames.length === 0) break
+
+        const coveredChunks: Uint8Array[] = []
+        let coveredBytes = 0
+        const liveChunks: Uint8Array[] = []
+        let liveBytes = 0
+        for (let index = 0; index < frames.length; index += 1) {
+          const frame = frames[index]
+          if (frame.paneGeneration === entry.paneGeneration
+            && frame.outputSequence <= outputSequence) {
+            coveredChunks.push(frame.bytes)
+            coveredBytes += frame.bytes.byteLength
+            continue
+          }
+          if (frame.paneGeneration === entry.paneGeneration
+            && frame.outputSequence <= (entry.outputSequence ?? 0n)) continue
+          if (frame.paneGeneration !== entry.paneGeneration
+            || frame.outputSequence !== (entry.outputSequence ?? 0n) + 1n) {
+            for (const pending of frames.slice(index)) this.queueSequencedOutput(entry, pending)
+            entry.replayAgain = true
+            break
+          }
+          entry.outputSequence = frame.outputSequence
+          liveChunks.push(frame.bytes)
+          liveBytes += frame.bytes.byteLength
+        }
+
+        const queryChunks = coveredBytes > 0
+          ? terminalQuerySequences(concatUint8Arrays(coveredChunks, coveredBytes))
+          : []
+        const queryBytes = queryChunks.reduce((total, chunk) => total + chunk.byteLength, 0)
+        if (queryBytes + liveBytes > 0) {
+          await this.writeReplayBytes(
+            entry,
+            concatUint8Arrays([...queryChunks, ...liveChunks], queryBytes + liveBytes),
+          )
+        }
+        if (entry.replayAgain) break
+      }
+
+      entry.replayedContainer = entry.container
+      entry.forceFitOnNextMeasure = true
+      entry.rendererResetPending = true
+      this.scheduleLayoutPass({
+        paneIds: [entry.paneId],
+        force: true,
+        repaint: true,
+        syncPty: true,
+        clearWebglTextureAtlas: true,
+      })
+      this.nudgeAlternateBuffer(entry)
+      if (!snapshot.alive) this.markExited(entry.paneId)
+    } catch {
+      if (this.entries.get(entry.paneId) === entry && entry.sessionId === sessionId) {
+        entry.daemonAttached = false
+      }
+    }
+  }
+
+  private writeReplayBytes(entry: Entry, bytes: Uint8Array): Promise<void> {
+    if (bytes.byteLength === 0) return Promise.resolve()
+    const output = terminalOutputAfterLastHardClear(bytes)
+    const { promise, resolve } = Promise.withResolvers<void>()
+    entry.term.write(output.bytes, () => {
+      if (entry.rendererReloadPending) this.performRendererReload(entry)
+      resolve()
+    })
+    return promise
+  }
+
+  private queueSequencedOutput(entry: Entry, frame: SequencedOutputFrame): void {
+    entry.pendingSequencedOutput ??= []
+    entry.pendingSequencedOutput.push(frame)
+    entry.pendingSequencedOutputBytes = (entry.pendingSequencedOutputBytes ?? 0) + frame.bytes.byteLength
+    while ((entry.pendingSequencedOutputBytes ?? 0) > MAX_PENDING_OUTPUT_BYTES
+      && entry.pendingSequencedOutput.length > 1) {
+      const dropped = entry.pendingSequencedOutput.shift()
+      if (!dropped) break
+      entry.pendingSequencedOutputBytes = Math.max(
+        0,
+        (entry.pendingSequencedOutputBytes ?? 0) - dropped.bytes.byteLength,
+      )
+    }
+  }
+
+  writeSequenced(
+    paneId: string,
+    paneGeneration: bigint,
+    outputSequence: bigint,
+    bytes: Uint8Array,
+  ): void {
     if (bytes.byteLength === 0) return
     agentActivityTracker.noteOutput(paneId, bytes)
     const entry = this.getOrCreate(paneId)
+    const frame = { paneGeneration, outputSequence, bytes }
+    if (!entry.opened
+      || !entry.sessionId
+      || !entry.daemonAttached
+      || entry.replayPending
+      || entry.paneGeneration === undefined
+      || entry.outputSequence === undefined) {
+      this.queueSequencedOutput(entry, frame)
+      if (entry.opened && entry.sessionId && entry.daemonAttached && !entry.replayPending) {
+        this.requestSnapshotReplay(entry)
+      }
+      return
+    }
+    if (paneGeneration === entry.paneGeneration && outputSequence <= entry.outputSequence) return
+    if (paneGeneration !== entry.paneGeneration || outputSequence !== entry.outputSequence + 1n) {
+      this.queueSequencedOutput(entry, frame)
+      this.requestSnapshotReplay(entry)
+      return
+    }
+    entry.outputSequence = outputSequence
+    this.writeEntry(entry, bytes)
+  }
+
+  write(paneId: string, bytes: Uint8Array, options: { foreground?: boolean } = {}): void {
+    if (bytes.byteLength === 0) return
+    agentActivityTracker.noteOutput(paneId, bytes)
+    this.writeEntry(this.getOrCreate(paneId), bytes, options.foreground)
+  }
+
+  private writeEntry(entry: Entry, bytes: Uint8Array, foregroundOverride?: boolean): void {
     // Output can start streaming before the pane's panel mounts (panes are
     // attached daemon-side at spawn). Parsing it into an unopened terminal
-    // would use the constructor's default grid, not the pane's real one —
-    // hold the bytes until attach() has opened and fitted the terminal.
+    // would use the constructor's default grid, not the pane's real one.
     if (!entry.opened) {
       entry.pendingOutput ??= []
       entry.pendingOutput.push(bytes)
       entry.pendingOutputBytes = (entry.pendingOutputBytes ?? 0) + bytes.byteLength
-      if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.trimPendingOutput(entry)
+      if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.handlePendingOutputOverflow(entry)
       return
     }
-    const foreground = options.foreground ?? this.isForegroundOutput(entry)
+    const foreground = foregroundOverride ?? this.isForegroundOutput(entry)
     if (foreground
       && bytes.byteLength < INSTANT_OUTPUT_BYTES
       && (entry.pendingOutputBytes ?? 0) === 0
@@ -581,8 +827,19 @@ class TerminalManagerImpl {
     entry.pendingOutput ??= []
     entry.pendingOutput.push(bytes)
     entry.pendingOutputBytes = (entry.pendingOutputBytes ?? 0) + bytes.byteLength
-    if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.trimPendingOutput(entry)
-    this.enqueueOutput(entry, foreground)
+    if (entry.pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES) this.handlePendingOutputOverflow(entry)
+    if (entry.pendingOutput?.length) this.enqueueOutput(entry, foreground)
+  }
+
+  private handlePendingOutputOverflow(entry: Entry): void {
+    if (entry.sessionId && entry.paneGeneration !== undefined) {
+      this.removeQueuedOutput(entry)
+      entry.pendingOutput = undefined
+      entry.pendingOutputBytes = 0
+      this.requestSnapshotReplay(entry)
+      return
+    }
+    this.trimPendingOutput(entry)
   }
 
   copyContentsToClipboard(paneId: string): void {
@@ -690,8 +947,22 @@ class TerminalManagerImpl {
     this.setPaneVisible(paneId, true)
   }
 
-  recoverAllVisiblePanes(): void {
-    this.scheduleLayoutPass({ force: true, repaint: true, syncPty: true })
+  recoverAllVisiblePanes(paneIds?: string[]): void {
+    const targets = (paneIds ?? [...this.entries.keys()])
+      .map((paneId) => this.entries.get(paneId))
+      .filter((entry): entry is Entry => Boolean(entry?.opened && !entry.remoteLease))
+    for (const entry of targets) {
+      entry.forceFitOnNextMeasure = true
+      entry.rendererResetPending = true
+      this.nudgeAlternateBuffer(entry)
+    }
+    this.scheduleLayoutPass({
+      paneIds: targets.map((entry) => entry.paneId),
+      force: true,
+      repaint: true,
+      syncPty: true,
+      clearWebglTextureAtlas: true,
+    })
   }
 
   reflowAll(forceFit = false): void {
@@ -717,8 +988,13 @@ class TerminalManagerImpl {
     entry.lastClickRepairAt = now
     this.scheduleLayoutPass({ paneIds: [paneId], force: true, clearWebglTextureAtlas: true })
 
-    if (entry.term.buffer.active.type !== 'alternate') return
+    this.nudgeAlternateBuffer(entry)
+  }
+
+  private nudgeAlternateBuffer(entry: Entry): void {
+    if (entry.remoteLease || entry.term.buffer.active.type !== 'alternate') return
     const sessionId = entry.sessionId
+    const paneId = entry.paneId
     const cols = entry.term.cols
     const rows = entry.term.rows
     if (!sessionId || rows <= MIN_FIT_ROWS) return
@@ -1384,6 +1660,13 @@ class TerminalManagerImpl {
       }
     })
   }
+}
+
+function decodeBase64Bytes(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }
 
 function concatUint8Arrays(chunks: Uint8Array[], byteLength: number): Uint8Array {
