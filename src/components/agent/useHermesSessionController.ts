@@ -28,6 +28,7 @@ export type HermesSessionController = {
   conversationsLoading: boolean
   actionsDisabled: boolean
   refreshSessions: () => Promise<boolean>
+  refreshConversations: () => Promise<void>
   newSession: () => Promise<string | null>
   resumeSession: (acpSessionId: string) => Promise<boolean>
 }
@@ -136,6 +137,7 @@ export function useHermesSessionController(): HermesSessionController {
     conversations,
     conversationsLoading,
     actionsDisabled: status === 'busy' || status === 'starting',
+    refreshConversations: reloadConversations,
     refreshSessions,
     newSession,
     resumeSession,

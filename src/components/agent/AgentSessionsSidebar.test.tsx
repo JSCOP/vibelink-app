@@ -3,8 +3,20 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { WorkspaceContentActionsContext, type OpenContentRequest, type WorkspaceContentActions } from '../../layout/contentActions'
-import { useWorkspaceStore } from '../../state/store'
+import { clearOpenContentSnapshot, publishOpenContentSnapshot } from '../../layout/openContentRegistry'
+import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
+import type { PaneMeta } from '../../ipc/types'
+import { agentResumeLaunch } from './agentSessionsModel'
 import { AgentSessionsSidebar } from './AgentSessionsSidebar'
+
+const conversation = {
+  id: 'omp-1',
+  title: 'Resumable omp',
+  agent: 'omp',
+  updatedAt: '2026-07-22T09:00:00.000Z',
+  cwd: 'E:/repo',
+  path: 'E:/repo/.omp/agent/sessions/x.jsonl',
+}
 
 const mocks = vi.hoisted(() => ({
   controller: {
@@ -12,41 +24,43 @@ const mocks = vi.hoisted(() => ({
     workspaceName: 'Workspace A',
     workspaceFolder: 'E:/repo' as string | null,
     commandOverride: null,
-    status: 'busy' as 'idle' | 'starting' | 'running' | 'busy' | 'error',
+    status: 'running' as 'idle' | 'starting' | 'running' | 'busy' | 'error',
     error: null as string | null,
     currentSessionId: 'current-acp' as string | null,
-    sessions: [
-      { id: 'older-acp', title: 'Older', updatedAt: '2026-07-21T10:00:00.000Z', cwd: 'D:/other/project' },
-      { id: 'current-acp', title: 'Current task', updatedAt: '2026-07-22T10:00:00.000Z', cwd: 'E:/repo' },
-      { id: 'newest-acp', title: 'Newest fix', updatedAt: '2026-07-22T12:00:00.000Z', cwd: 'E:/repo/src' },
-      { id: 'no-time-acp', title: null, updatedAt: null, cwd: null },
-    ],
-    permissions: [{ requestId: 1, title: 'Allow edit', toolKind: 'edit', options: [] }],
-    conversations: [] as { id: string; title: string; agent: string; updatedAt: string | null; cwd: string | null; path: string }[],
+    sessions: [{ id: 'current-acp', title: 'VIBELINK_ACP_OK', updatedAt: '2026-07-22T10:00:00.000Z', cwd: 'E:/repo' }],
+    permissions: [],
+    conversations: [] as Array<{ id: string; title: string; agent: string; updatedAt: string | null; cwd: string | null; path: string }>,
     conversationsLoading: false,
     actionsDisabled: false,
+    refreshConversations: vi.fn(async () => undefined),
     refreshSessions: vi.fn(async () => true),
     newSession: vi.fn(async () => 'new-acp'),
     resumeSession: vi.fn(async () => true),
   },
+  store: {
+    setError: vi.fn(),
+    activePaneId: undefined as string | undefined,
+    panes: {} as Record<string, PaneMeta>,
+  },
 }))
-
+vi.mock('../../state/store', () => ({
+  useWorkspaceStore: (selector: (state: typeof mocks.store) => unknown) => selector(mocks.store),
+}))
 vi.mock('./useHermesSessionController', () => ({
   useHermesSessionController: () => mocks.controller,
 }))
 
 vi.mock('../WorkspaceSidebarPanelShell', () => ({
-  WorkspaceSidebarPanelShell: ({ title, actions, filter, children, footer }: { title: string; actions?: React.ReactNode; filter?: React.ReactNode; children: React.ReactNode; footer?: React.ReactNode }) => (
+  WorkspaceSidebarPanelShell: ({ title, actions, filter, children }: { title: string; actions?: React.ReactNode; filter?: React.ReactNode; children: React.ReactNode }) => (
     <section aria-label={title}>
       <header><h2>{title}</h2>{actions}</header>
       {filter}
       <main>{children}</main>
-      <footer>{footer}</footer>
     </section>
   ),
 }))
 
-const openContent = vi.fn<(request: OpenContentRequest) => Promise<string>>(async () => 'content:agent:agent')
+const openContent = vi.fn<(request: OpenContentRequest) => Promise<string>>(async () => workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-selected' }))
 const activateContent = vi.fn()
 const actions: WorkspaceContentActions = {
   openContent,
@@ -63,6 +77,14 @@ const actions: WorkspaceContentActions = {
   getContentParams: vi.fn(() => null),
 }
 
+function pane(id: string, args: string[]): PaneMeta {
+  return {
+    id,
+    alive: true,
+    config: { paneId: id, shell: 'pwsh.exe', args, cwd: 'E:/repo', env: [], title: id, cols: 120, rows: 32 },
+  }
+}
+
 function renderSidebar() {
   return render(
     <WorkspaceContentActionsContext.Provider value={actions}>
@@ -73,128 +95,88 @@ function renderSidebar() {
 
 describe('AgentSessionsSidebar', () => {
   beforeEach(() => {
-    window.localStorage.clear()
     vi.clearAllMocks()
-    mocks.controller.status = 'busy'
-    mocks.controller.permissions = [{ requestId: 1, title: 'Allow edit', toolKind: 'edit', options: [] }]
-    mocks.controller.actionsDisabled = false
-    mocks.controller.currentSessionId = 'current-acp'
-    useWorkspaceStore.setState({ activePaneId: undefined })
-    mocks.controller.sessions = [
-      { id: 'older-acp', title: 'Older', updatedAt: '2026-07-21T10:00:00.000Z', cwd: 'D:/other/project' },
-      { id: 'current-acp', title: 'Current task', updatedAt: '2026-07-22T10:00:00.000Z', cwd: 'E:/repo' },
-      { id: 'newest-acp', title: 'Newest fix', updatedAt: '2026-07-22T12:00:00.000Z', cwd: 'E:/repo/src' },
-      { id: 'no-time-acp', title: null, updatedAt: null, cwd: null },
-    ]
-    mocks.controller.conversations = []
+    clearOpenContentSnapshot()
+    mocks.controller.conversations = [conversation]
+    mocks.controller.conversationsLoading = false
+    openContent.mockResolvedValue(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-selected' }))
+    mocks.store.activePaneId = undefined
+    mocks.store.panes = {}
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
   })
 
-  afterEach(cleanup)
-
-  test('sorts/searches rows and renders authoritative status only for the current session', () => {
-    const { container } = renderSidebar()
-    const rows = screen.getAllByRole('option')
-    expect(rows.map((row) => row.textContent)).toEqual([
-      expect.stringContaining('Newest fix'),
-      expect.stringContaining('Current task'),
-      expect.stringContaining('Older'),
-      expect.stringContaining('no-time'),
-    ])
-    expect(container.querySelectorAll('.agent-session-status')).toHaveLength(1)
-    expect(screen.getByLabelText('Waiting for input')).toBeInTheDocument()
-
-    fireEvent.change(screen.getByRole('searchbox', { name: 'Search agent sessions' }), { target: { value: 'repo/src' } })
-    expect(screen.getAllByRole('option')).toHaveLength(1)
-    expect(screen.getByRole('option')).toHaveTextContent('Newest fix')
+  afterEach(() => {
+    cleanup()
+    clearOpenContentSnapshot()
+    vi.unstubAllGlobals()
   })
 
-  test('disables new and historical resume while Hermes is busy or starting', () => {
-    mocks.controller.actionsDisabled = true
-    renderSidebar()
-
-    expect(screen.getByRole('button', { name: 'New agent session' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('option', { name: /Older/ }))
-    expect(screen.getByRole('button', { name: 'Resume' })).toBeDisabled()
-  })
-
-  test('preserves a valid user selection across refresh and derives a current fallback when it disappears', () => {
-    const view = renderSidebar()
-    fireEvent.click(screen.getByRole('option', { name: /Older/ }))
-    expect(screen.getByRole('option', { name: /Older/ })).toHaveAttribute('aria-selected', 'true')
-
-    mocks.controller.currentSessionId = 'newest-acp'
-    mocks.controller.sessions = [...mocks.controller.sessions].reverse()
-    view.rerender(
-      <WorkspaceContentActionsContext.Provider value={actions}>
-        <AgentSessionsSidebar />
-      </WorkspaceContentActionsContext.Provider>,
-    )
-    expect(screen.getByRole('option', { name: /Older/ })).toHaveAttribute('aria-selected', 'true')
-
-    mocks.controller.sessions = mocks.controller.sessions.filter((session) => session.id !== 'older-acp')
-    view.rerender(
-      <WorkspaceContentActionsContext.Provider value={actions}>
-        <AgentSessionsSidebar />
-      </WorkspaceContentActionsContext.Provider>,
-    )
-    expect(screen.getByRole('option', { name: /Newest fix/ })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument()
-  })
-
-  test('resumes a historical row, activates Agent, and records it as viewed', async () => {
-    mocks.controller.status = 'running'
-    mocks.controller.permissions = []
-    renderSidebar()
-
-    fireEvent.click(screen.getByRole('option', { name: /Older/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
-
-    await waitFor(() => expect(mocks.controller.resumeSession).toHaveBeenCalledWith('older-acp'))
-    expect(openContent).toHaveBeenCalledWith({ kind: 'agent' })
-    expect(activateContent).toHaveBeenCalledWith('content:agent:agent')
-    const viewed = JSON.parse(window.localStorage.getItem('vibelink:agentSessionViews') || '{}')
-    expect(viewed.version).toBe(1)
-    expect(viewed.workspaces['workspace-a']['older-acp']).toEqual(expect.any(Number))
-  })
-
-  test('opens the current row and creates a new session through the same activation callback', async () => {
-    mocks.controller.status = 'running'
-    mocks.controller.permissions = []
-    renderSidebar()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
-    await waitFor(() => expect(openContent).toHaveBeenCalledTimes(1))
-    expect(mocks.controller.resumeSession).not.toHaveBeenCalled()
-
-    fireEvent.click(screen.getByRole('button', { name: 'New agent session' }))
-    await waitFor(() => expect(mocks.controller.newSession).toHaveBeenCalledTimes(1))
-    expect(openContent).toHaveBeenCalledTimes(2)
-    const viewed = JSON.parse(window.localStorage.getItem('vibelink:agentSessionViews') || '{}')
-    expect(viewed.workspaces['workspace-a']['current-acp']).toEqual(expect.any(Number))
-    expect(viewed.workspaces['workspace-a']['new-acp']).toEqual(expect.any(Number))
-  })
-
-  test('replaces the highlighted terminal for a recent conversation, or opens a new window on Ctrl+click', async () => {
-    mocks.controller.status = 'running'
-    mocks.controller.permissions = []
+  test('shows only terminal conversation history, not raw Hermes ACP sessions or details', async () => {
     mocks.controller.conversations = [
-      { id: 'omp-1', title: 'Resumable omp', agent: 'omp', updatedAt: '2026-07-22T09:00:00.000Z', cwd: 'E:/repo', path: 'E:/repo/.omp/agent/sessions/x.jsonl' },
+      conversation,
+      { ...conversation, id: 'omp-2', title: 'Automation UI', path: 'E:/repo/.omp/agent/sessions/y.jsonl' },
     ]
-    useWorkspaceStore.setState({ activePaneId: 'pane-selected' })
-    openContent.mockResolvedValueOnce('content:terminal:pane-selected')
     renderSidebar()
 
+    expect(screen.queryByText('VIBELINK_ACP_OK')).not.toBeInTheDocument()
+    expect(screen.queryByText('Live sessions')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'New agent session' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('2 shown of 2 conversations')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search agent sessions' }), { target: { value: 'Automation' } })
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh agent sessions' }))
+    await waitFor(() => expect(mocks.controller.refreshConversations).toHaveBeenCalledTimes(1))
+    expect(mocks.controller.refreshSessions).not.toHaveBeenCalled()
+  })
+
+  test('resumes a closed conversation in the selected pane and keeps Ctrl+click as a new window', async () => {
+    mocks.store.activePaneId = 'pane-selected'
+    mocks.store.panes = { 'pane-selected': pane('pane-selected', ['pwsh']) }
+    renderSidebar()
     const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
+
     fireEvent.click(row)
-    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', replacePaneId: 'pane-selected', newWindow: false, shell: 'pwsh.exe' })))
-    expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-selected')
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'terminal', replacePaneId: 'pane-selected', newWindow: false, shell: 'pwsh.exe',
+    })))
+    expect(activateContent).toHaveBeenCalledWith(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-selected' }))
 
     openContent.mockClear()
     activateContent.mockClear()
-    openContent.mockResolvedValueOnce('content:terminal:pane-2')
+    openContent.mockResolvedValueOnce(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-3' }))
     fireEvent.click(row, { ctrlKey: true })
     await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'terminal', newWindow: true })))
     expect(openContent.mock.calls.at(-1)?.[0]).not.toHaveProperty('replacePaneId')
+  })
+
+  test('marks an open conversation with its pane number and reveals the active pane without resuming', () => {
+    const launch = agentResumeLaunch(conversation)
+    mocks.store.activePaneId = 'pane-2'
+    mocks.store.panes = {
+      'pane-1': pane('pane-1', ['pwsh']),
+      'pane-2': pane('pane-2', launch?.args ?? []),
+    }
+    publishOpenContentSnapshot([
+      { panelId: 'content:terminalWindow:window-1', kind: 'terminalWindow', title: 'Terminal window', icon: 'terminal', active: false, parentPanelId: null },
+      { panelId: 'content:terminal:pane-1', kind: 'terminal', title: 'Pane 1', icon: 'terminal', active: false, parentPanelId: 'content:terminalWindow:window-1' },
+      { panelId: 'content:terminal:pane-2', kind: 'terminal', title: 'Pane 2', icon: 'oh-my-pi', active: true, parentPanelId: 'content:terminalWindow:window-1' },
+    ])
+    const shell = document.createElement('div')
+    shell.className = 'terminal-panel-shell'
+    shell.dataset.paneId = 'pane-2'
+    document.body.append(shell)
+    renderSidebar()
+
+    const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
+    expect(row).toHaveTextContent('Pane 2')
+    expect(row).toHaveClass('is-open', 'is-active')
+    expect(row).toHaveAttribute('aria-current', 'true')
+
+    fireEvent.click(row)
+    expect(openContent).not.toHaveBeenCalled()
     expect(activateContent).toHaveBeenCalledWith('content:terminal:pane-2')
+    expect(shell).toHaveClass('agent-session-pane-reveal')
+    shell.remove()
   })
 })
