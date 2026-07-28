@@ -213,6 +213,9 @@ describe('workspace store profiles', () => {
         title: 'Codex',
         icon: 'sparkles',
         profileId: 'agent',
+        // User-created panes are restorable, so an unclean exit can rebuild
+        // them; a deliberate quit is excluded by the daemon's clean-exit gate.
+        restoreOnStart: true,
         cols: 120,
         rows: 32,
       },
