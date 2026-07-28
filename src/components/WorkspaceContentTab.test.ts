@@ -107,6 +107,25 @@ describe('WorkspaceContentTab', () => {
     expect(screen.getByLabelText('2 changed paths, 1 conflicted').textContent).toBe('2')
   })
 
+  it('re-samples a structural panel location after subscribing to Dockview changes', () => {
+    const api = panelApi('content:sourceControl:sourceControl', 'Source Control')
+    api.location = { type: 'grid' }
+    api.onDidLocationChange.mockImplementation(() => {
+      // Model a restored panel moving to its edge group before React's effect
+      // subscription is installed. Dockview's location event has already fired.
+      api.location = { type: 'edge' }
+      return disposable()
+    })
+
+    renderWithActions(createElement(WorkspaceContentTab, {
+      api,
+      containerApi,
+      params: createSingletonContentParams('sourceControl'),
+    } as never))
+
+    expect(screen.getByRole('tab', { name: 'Source Control' }).classList.contains('workspace-edge-rail-tab')).toBe(true)
+  })
+
   it('keeps central terminal actions targeted at the owning grid group', () => {
     const params = createTerminalContentParams({ id: 'pane-a', config: { paneId: 'pane-a', args: [], env: [], title: 'Shell', icon: 'terminal', cols: 80, rows: 24 } })
     const items = buildWorkspaceContentTabContextMenu({

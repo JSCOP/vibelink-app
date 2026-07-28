@@ -57,12 +57,18 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   useEffect(() => {
     const syncActive = () => setIsActive(api.isActive)
     const syncMaximized = () => setIsMaximized(api.isMaximized())
+    const syncLocation = () => setLocation(api.location)
     const active = api.onDidActiveChange(syncActive)
     const group = api.onDidGroupChange(syncMaximized)
     const maximized = containerApi.onDidMaximizedGroupChange(syncMaximized)
-    const locationChange = api.onDidLocationChange((event) => setLocation(event.location))
+    const locationChange = api.onDidLocationChange(syncLocation)
     syncActive()
     syncMaximized()
+    // Dockview may move a restored structural panel into its edge group between
+    // the initial render and this effect. Re-sample after subscribing so a move
+    // whose event already fired cannot leave the full horizontal tab squeezed
+    // into the 38px rail (and intercepted by WorkspaceView's pointer handler).
+    syncLocation()
     return () => {
       active.dispose()
       group.dispose()
@@ -70,6 +76,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       locationChange.dispose()
     }
   }, [api, containerApi])
+
 
   const activateAndStop = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
     actions.activateContent(api.id)
