@@ -91,6 +91,9 @@ export function NotificationCenter({ onOpenAutomation }: NotificationCenterProps
   }, [])
 
   useEffect(() => {
+    // Async daemon catch-up: every setState lands after an await, in a later
+    // task, so this is a subscription rather than a render cascade.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void catchup()
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void catchup()

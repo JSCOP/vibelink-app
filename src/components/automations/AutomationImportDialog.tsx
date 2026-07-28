@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, LoaderCircle, RefreshCw, X } from 'lucide-react'
 import {
@@ -23,7 +23,7 @@ export function AutomationImportDialog({ sessionId, onClose, onImported }: Autom
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<string | null>(null)
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -35,11 +35,14 @@ export function AutomationImportDialog({ sessionId, onClose, onImported }: Autom
     } finally {
       setLoading(false)
     }
-  }
+  }, [sessionId])
 
   useEffect(() => {
+    // Mount/session load, not a render cascade: the spinner is already `true`
+    // here, so this sets no new state before the first await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh()
-  }, [sessionId])
+  }, [refresh])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

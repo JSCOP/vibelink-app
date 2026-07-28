@@ -135,6 +135,8 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
 
   useEffect(() => {
     if (!sessionId) {
+      // Clearing on session teardown: external sync, not a derived-state cascade.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setRecords([])
       setSelectedId(null)
       setRuns([])
@@ -145,6 +147,8 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
 
   useEffect(() => {
     if (!navigationRequest || navigationRequest.sessionId !== sessionId) return
+    // Applies a one-shot external navigation request, then consumes it.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedId(navigationRequest.automationId)
     setDetailTab(navigationRequest.runId ? 'runs' : 'overview')
     clearAutomationNavigation(navigationRequest)
@@ -152,6 +156,8 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
 
   useEffect(() => {
     if (!selectedId) {
+      // Clearing run history when nothing is selected.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setRuns([])
       setPrecheckResult(null)
       return

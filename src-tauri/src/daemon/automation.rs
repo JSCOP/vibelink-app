@@ -1052,7 +1052,7 @@ mod lifecycle_tests {
 
     #[test]
     fn review_gate_blocks_enable_and_manual_run_until_saved() {
-        let (root, _coordinator, _registry, service) = fixture();
+        let (root, _coordinator, registry, service) = fixture();
         let session_id = Uuid::new_v4().to_string();
         let error = service
             .create(&session_id, &create_payload(true, true))
@@ -1080,7 +1080,10 @@ mod lifecycle_tests {
             .trigger(&imported.id)
             .expect_err("second active run must be rejected");
         assert!(error.to_string().contains("already has active run"));
+        // Every handle owns an Arc<ControlPlane> with an open SQLite/WAL file.
+        // Windows refuses to delete the directory while any of them survives.
         drop(service);
+        drop(registry);
         drop(_coordinator);
         fs::remove_dir_all(root).expect("remove automation service fixture");
     }
@@ -1123,6 +1126,7 @@ mod lifecycle_tests {
         );
 
         drop(reopened);
+        drop(registry);
         drop(coordinator);
         fs::remove_dir_all(root).expect("remove automation service fixture");
     }

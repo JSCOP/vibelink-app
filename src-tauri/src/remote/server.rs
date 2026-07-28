@@ -620,6 +620,17 @@ impl RemoteServer {
         Ok(self.status())
     }
 
+    fn pairing_v1_qr_payload(status: &RemoteStatus, code: &str) -> Result<String> {
+        Ok(serde_json::to_string(&serde_json::json!({
+            "v": 1,
+            "name": desktop_name(),
+            "hosts": status.hosts,
+            "port": status.port,
+            "fp": status.fingerprint,
+            "code": code,
+        }))?)
+    }
+
     pub fn create_pairing(&self) -> Result<PairingPayload> {
         let _authorization = self
             .shared
@@ -637,11 +648,7 @@ impl RemoteServer {
             .lock()
             .expect("remote devices mutex")
             .create_pairing_code();
-        let desktop_name = desktop_name();
-        let qr_payload = serde_json::to_string(&serde_json::json!({
-            "v": 1, "name": desktop_name, "hosts": status.hosts, "port": status.port,
-            "fp": status.fingerprint, "code": code,
-        }))?;
+        let qr_payload = Self::pairing_v1_qr_payload(&status, &code)?;
         Ok(PairingPayload {
             code,
             expires_at,
@@ -979,10 +986,27 @@ mod tests {
             Duration::from_secs(1),
         )
         .expect("connect remote listener");
-        let pairing = server.create_pairing().expect("create pairing");
-        let payload: Value = serde_json::from_str(&pairing.qr_payload).expect("parse QR payload");
+
+        // Loopback-only Remote never pairs: LAN/VPN must be enabled behind the
+        // firewall approval first.
+        assert_eq!(
+            server
+                .create_pairing()
+                .expect_err("loopback-only remote must refuse pairing")
+                .to_string(),
+            "LAN/VPN remote access must be explicitly enabled before pairing"
+        );
+
+        // The protocol-v1 QR shape is still what a LAN-enabled desktop emits.
+        let payload: Value = serde_json::from_str(
+            &RemoteServer::pairing_v1_qr_payload(&server.status(), "PAIRCODE")
+                .expect("build v1 QR payload"),
+        )
+        .expect("parse QR payload");
         assert_eq!(payload["v"], 1);
-        assert_eq!(payload["code"], pairing.code);
+        assert_eq!(payload["code"], "PAIRCODE");
+        assert_eq!(payload["port"], port);
+
         server.stop();
         assert!(!server.status().running);
         let _ = std::fs::remove_dir_all(directory);

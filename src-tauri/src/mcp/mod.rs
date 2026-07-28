@@ -1850,14 +1850,20 @@ mod tests {
         });
         let client = placeholder_client();
 
+        // A tool-level failure is a protocol-level SUCCESS carrying isError,
+        // so only the authorization denial escapes as a transport error.
         let first =
             handle_message_with_authorizer(&client, Uuid::nil(), &request, Some(&authorize))
-                .expect_err("first call reaches tool dispatch");
+                .expect("first call reaches tool dispatch");
+        assert_eq!(first["result"]["isError"], true);
+        assert!(first["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool error text")
+            .contains("unknown tool"));
+
         let second =
             handle_message_with_authorizer(&client, Uuid::nil(), &request, Some(&authorize))
                 .expect_err("revoked second call fails closed");
-
-        assert!(first.to_string().contains("unknown tool"));
         assert_eq!(second.to_string(), "ENTITLEMENT_REQUIRED");
         assert_eq!(calls.get(), 2);
     }

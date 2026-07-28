@@ -1059,21 +1059,35 @@ fn migrate_worktree_schema_v4(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add worktree identity columns to `dispatches`.
+///
+/// `automation_runs` is deliberately excluded: schema v6 rebuilds that table with
+/// `worktree_json` as the single worktree record, and this migration runs after that
+/// rebuild, so adding the columns here would re-pollute every canonical v6 database.
 fn migrate_worktree_identity_v5(connection: &Connection) -> Result<()> {
+    if !table_exists(connection, "dispatches")? {
+        return Ok(());
+    }
     let mut migration = String::from("BEGIN IMMEDIATE;\n");
-    for (table, column) in [
-        ("dispatches", "worktree_id"),
-        ("dispatches", "worktree_instance_id"),
-        ("automation_runs", "worktree_id"),
-        ("automation_runs", "worktree_instance_id"),
-    ] {
-        if !table_has_column(connection, table, column)? {
-            migration.push_str(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;\n"));
+    for column in ["worktree_id", "worktree_instance_id"] {
+        if !table_has_column(connection, "dispatches", column)? {
+            migration.push_str(&format!(
+                "ALTER TABLE dispatches ADD COLUMN {column} TEXT;\n"
+            ));
         }
     }
     migration.push_str("PRAGMA user_version = 5;\nCOMMIT;");
     connection.execute_batch(&migration)?;
     Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -1561,6 +1575,9 @@ mod tests {
                   precheck_json TEXT, worktree_path TEXT, branch TEXT,
                   started_at INTEGER, finished_at INTEGER, created_at INTEGER NOT NULL
                 );
+                CREATE TABLE dispatches (
+                  id TEXT PRIMARY KEY
+                );
                 PRAGMA user_version = 3;",
             )
             .expect("seed version three automation schema");
@@ -1572,6 +1589,8 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE automation_runs ADD COLUMN worktree_id TEXT;
                  ALTER TABLE automation_runs ADD COLUMN worktree_instance_id TEXT;
+                 ALTER TABLE dispatches ADD COLUMN worktree_id TEXT;
+                 ALTER TABLE dispatches ADD COLUMN worktree_instance_id TEXT;
                  PRAGMA user_version = 5;",
             )
             .expect("seed version five automation schema");
@@ -1604,15 +1623,16 @@ mod tests {
                 .expect("query worktree schema object");
             assert_eq!(exists, 1, "missing {object}");
         }
-        for (table, column) in [
-            ("dispatches", "worktree_id"),
-            ("dispatches", "worktree_instance_id"),
-            ("automation_runs", "worktree_id"),
-            ("automation_runs", "worktree_instance_id"),
-        ] {
+        for column in ["worktree_id", "worktree_instance_id"] {
             assert!(
-                table_has_column(connection, table, column).expect("inspect identity column"),
-                "missing {table}.{column}"
+                table_has_column(connection, "dispatches", column)
+                    .expect("inspect identity column"),
+                "missing dispatches.{column}"
+            );
+            assert!(
+                !table_has_column(connection, "automation_runs", column)
+                    .expect("inspect automation run column"),
+                "canonical v6 automation_runs must not carry {column}"
             );
         }
     }
