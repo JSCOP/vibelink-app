@@ -92,6 +92,7 @@ beforeEach(() => {
   invoke.mockReset()
   openContent.mockClear()
   invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_discover_repos') return []
     if (command === 'git_repo_info') return repoInfo
     if (command === 'git_working_status') return status
     if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
@@ -104,10 +105,12 @@ beforeEach(() => {
   })
   useGitStore.setState({ sessions: {} })
   useExplorerStore.setState({ sessions: {} })
+  const settings = useWorkspaceStore.getState().settings
   useWorkspaceStore.setState({
     activeSessionId: 'session-1',
     sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
     license: { ready: true, status: { state: 'development', entitled: true } as never },
+    settings: { ...settings, workspaceGroups: [], workspaceGroupIds: {} },
   })
 })
 
@@ -159,6 +162,61 @@ describe('Git sidebar and Workbench projection', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_working_file_contents', { workspaceFolder: 'C:/repo/vendor/tool', path: 'src/nested.ts', area: 'unstaged' }))
     expect((await screen.findAllByText('vendor/tool')).length).toBeGreaterThan(0)
     expect(useWorkspaceStore.getState().activeSessionId).toBe('session-1')
+  })
+
+  test('lists group repositories and reroots Git without changing workspace scope', async () => {
+    const groupRoot = 'C:\\group'
+    const rootRepoInfo: RepoInfo = { isRepo: false, root: null, branch: null, detachedSha: null, headSha: null, upstream: null, ahead: 0, behind: 0, state: 'clean', remotes: [] }
+    const cleanStatus: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      const folder = typeof args?.workspaceFolder === 'string' ? args.workspaceFolder.replace(/\\/g, '/') : ''
+      if (command === 'git_discover_repos') return [
+        { name: 'vibelink-app', path: 'C:/group/vibelink-app', isSubmodule: false },
+        { name: 'shared', path: 'C:/group/vibelink-app/modules/shared', isSubmodule: true },
+        { name: 'vibelink-mobile', path: 'C:/group/vibelink-mobile', isSubmodule: false },
+        { name: 'orca-reference', path: 'C:/group/orca-reference', isSubmodule: false },
+      ]
+      if (command === 'git_repo_info') {
+        if (folder === 'C:/group') return rootRepoInfo
+        return { ...repoInfo, root: folder, branch: folder.endsWith('/vibelink-mobile') ? 'mobile-main' : folder.endsWith('/shared') ? 'shared-main' : 'app-main' }
+      }
+      if (command === 'git_working_status') return folder.endsWith('/vibelink-app') ? status : cleanStatus
+      if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+      if (command === 'git_working_file_contents') return { old: 'before', new: 'after', binary: false }
+      if (command === 'fs_list_dir' || command === 'git_dir_entries') return []
+      return null
+    })
+    const currentSettings = useWorkspaceStore.getState().settings
+    useWorkspaceStore.setState({
+      activeSessionId: 'group-root',
+      sessions: [
+        { id: 'group-root', name: 'vibelink', paneCount: 0, createdAt: 1, workspaceFolder: groupRoot },
+        { id: 'app', name: 'vibelink-app', paneCount: 0, createdAt: 2, workspaceFolder: 'C:/group/vibelink-app' },
+        { id: 'mobile', name: 'vibelink-mobile', paneCount: 0, createdAt: 3, workspaceFolder: 'C:/group/vibelink-mobile' },
+      ],
+      settings: {
+        ...currentSettings,
+        workspaceGroups: [{ id: 'vibelink-group', name: 'vibelink', collapsed: false, rootFolder: groupRoot }],
+        workspaceGroupIds: { 'group-root': 'vibelink-group', app: 'vibelink-group', mobile: 'vibelink-group' },
+      },
+    })
+
+    renderGit()
+
+    expect(await screen.findByRole('region', { name: 'vibelink repositories' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open Git repository vibelink-app' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open Git repository vibelink-app/modules/shared' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open Git repository vibelink-mobile' })).toBeTruthy()
+    expect(screen.queryByText('orca-reference')).toBeNull()
+    expect(screen.getByText('SUB')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Initialize Repository' })).toBeNull()
+    expect(invoke).toHaveBeenCalledWith('git_discover_repos', { root: groupRoot, maxDepth: 4 })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Git repository vibelink-mobile' }))
+    await waitFor(() => expect(useGitStore.getState().sessions['group-root'].activeRepoRoot).toBe('vibelink-mobile'))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_repo_info', { workspaceFolder: 'C:\\group/vibelink-mobile' }))
+    expect(useWorkspaceStore.getState().activeSessionId).toBe('group-root')
+    expect(await screen.findAllByText('mobile-main')).toHaveLength(2)
   })
 
   test('keeps Assigned and Pull Requests reachable from Source Control', async () => {

@@ -79,7 +79,6 @@ fn walk_repositories(
             push_repository(directory, true, repositories);
             true
         }
-        Some(GitMarker::Directory) if inside_repo => return Ok(()),
         Some(GitMarker::Directory) => {
             push_repository(directory, false, repositories);
             true
@@ -250,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn discovers_plain_repo_and_submodule_but_skips_ignored_and_nested_repos() {
+    fn discovers_plain_nested_and_submodule_repositories_but_skips_ignored_paths() {
         let root = TestDir::new();
         create_plain_repo(root.path());
         let submodule = root.path().join("crates").join("submodule");
@@ -267,8 +266,9 @@ mod tests {
             discover_repos_native(&root_arg, Some(4)).expect("discover repositories");
         let root_path = expected_path(root.path());
         let submodule_path = expected_path(&submodule);
+        let nested_repo_path = expected_path(&nested_repo);
 
-        assert_eq!(repositories.len(), 2);
+        assert_eq!(repositories.len(), 3);
         let root_repo = repositories
             .iter()
             .find(|repository| repository.path == root_path)
@@ -280,9 +280,11 @@ mod tests {
             .expect("submodule repository");
         assert_eq!(discovered_submodule.name, "submodule");
         assert!(discovered_submodule.is_submodule);
-        assert!(!repositories
+        let discovered_nested = repositories
             .iter()
-            .any(|repository| repository.path == expected_path(&nested_repo)));
+            .find(|repository| repository.path == nested_repo_path)
+            .expect("nested repository");
+        assert!(!discovered_nested.is_submodule);
         assert!(!repositories
             .iter()
             .any(|repository| repository.path == expected_path(&ignored_repo)));

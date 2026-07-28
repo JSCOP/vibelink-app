@@ -14,18 +14,24 @@ export type GitWindowViewProps = {
 export function GitWindowView({ assignedContent }: GitWindowViewProps) {
   const git = useGitWorkspace()
   const repoInfo = git.repoInfo
+  const hasRepositoryTargets = git.repositoryTargets.length > 0
 
   if (!git.workspaceFolder) {
     return <div className="git-window git-window-empty" data-git-window="true"><FolderGit2 size={28} strokeWidth={1.6} aria-hidden="true" /><h2>No workspace folder</h2><p>Set a workspace folder to use Git.</p></div>
   }
-  if (!repoInfo) {
+  if (!repoInfo && !hasRepositoryTargets) {
     return <div className="git-window git-window-empty" data-git-window="true"><GitBranch size={26} strokeWidth={1.6} aria-hidden="true" /><p data-error={git.repository.error ? 'true' : undefined}>{git.repository.error ?? 'Loading repository…'}</p><div className="git-window-empty-actions"><button type="button" onClick={() => { void git.refresh() }}><RefreshCw size={14} aria-hidden="true" /> Refresh</button></div></div>
   }
-  if (!repoInfo.isRepo) {
+  if (!repoInfo?.isRepo) {
+    if (hasRepositoryTargets) {
+      const scope = git.repositoryScopeName ? `the ${git.repositoryScopeName} workspace group` : 'this workspace'
+      return <div className="git-window git-window-empty" data-git-window="true"><FolderGit2 size={28} strokeWidth={1.6} aria-hidden="true" /><h2>Select a Git repository</h2><p>Choose one of the {git.repositoryTargets.length} repositories in {scope} from Source Control. Workspace, terminal, and AI scope stay unchanged.</p></div>
+    }
     return <div className="git-window git-window-empty" data-git-window="true"><GitBranch size={28} strokeWidth={1.6} aria-hidden="true" /><h2>No Git repository</h2><p>Use Source Control to initialize this target or clone a repository.</p><div className="git-window-empty-actions"><button type="button" onClick={git.openClone}><CloudDownload size={14} aria-hidden="true" /> Clone Repository…</button></div></div>
   }
 
   const repositoryDescription = git.activeRepoRoot ? `nested repository ${git.activeRepoRoot}` : 'workspace repository'
+  const workspaceTargetLabel = git.repositoryTargets.some((target) => target.root === '') ? 'Workspace repo' : 'Workspace root'
   const branchLabel = repoInfo.branch ?? repoInfo.detachedSha?.slice(0, 8) ?? 'Detached'
   const tabs: Array<{ id: GitTab; label: string }> = [
     { id: 'changes', label: 'Changes' },
@@ -38,7 +44,7 @@ export function GitWindowView({ assignedContent }: GitWindowViewProps) {
     <div className="git-window git-workbench-detail" data-git-window="true">
       <header className="git-window-statusbar">
         <strong className="git-window-title">Workbench</strong>
-        <div className="git-window-repository-context" title={`Git target: ${repositoryDescription}. Workspace, terminals, and AI scope stay unchanged.`}><span className="git-window-repository-label">Git target</span><button type="button" onClick={() => git.activateRepository('')} disabled={!git.activeRepoRoot} aria-label={git.activeRepoRoot ? 'Open workspace repository' : 'Workspace repository'}><FolderGit2 size={13} strokeWidth={1.9} aria-hidden="true" /><span>Workspace repo</span></button>{git.activeRepoRoot ? <><ChevronRight size={11} aria-hidden="true" /><code>{git.activeRepoRoot}</code></> : null}</div>
+        <div className="git-window-repository-context" title={`Git target: ${repositoryDescription}. Workspace, terminals, and AI scope stay unchanged.`}><span className="git-window-repository-label">Git target</span><button type="button" onClick={() => git.activateRepository('')} disabled={!git.activeRepoRoot} aria-label={git.activeRepoRoot ? `Open ${workspaceTargetLabel.toLowerCase()}` : workspaceTargetLabel}><FolderGit2 size={13} strokeWidth={1.9} aria-hidden="true" /><span>{workspaceTargetLabel}</span></button>{git.activeRepoRoot ? <><ChevronRight size={11} aria-hidden="true" /><code>{git.activeRepoRoot}</code></> : null}</div>
         <button type="button" className="git-window-branch-pill" onClick={git.openBranchPicker} title={repoInfo.upstream ? `Switch branch in ${repositoryDescription} — tracking ${repoInfo.upstream}` : `Switch branch in ${repositoryDescription}`}><GitBranch size={13} strokeWidth={1.9} aria-hidden="true" /><span className="git-window-branch-name">{branchLabel}</span><ChevronDown size={12} aria-hidden="true" /></button>
         <span className="git-window-upstream" title={repoInfo.upstream ? `Upstream ${repoInfo.upstream}` : 'No upstream configured'}>{repoInfo.upstream ?? 'No upstream'}</span>
         {git.repository.ciStatus ? <span className="git-window-ci-dot" data-state={git.repository.ciStatus.state} title={`CI: ${git.repository.ciStatus.state}`} /> : null}

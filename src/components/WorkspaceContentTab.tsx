@@ -26,15 +26,18 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const hermesStatus = useWorkspaceStore((state) => activeSessionId ? state.hermesStatus[activeSessionId] ?? 'idle' : 'idle')
   const hermesPendingPermissions = useWorkspaceStore((state) => activeSessionId ? state.hermesPermissions[activeSessionId]?.length ?? 0 : 0)
-  const gitStatus = useGitStore((state) => {
-    const session = activeSessionId ? state.sessions[activeSessionId] : undefined
-    return session?.repositories[session.activeRepoRoot]?.status ?? null
-  })
+  const gitRepositories = useGitStore((state) => activeSessionId ? state.sessions[activeSessionId]?.repositories : undefined)
   const gitRailState = useMemo(() => {
-    if (!gitStatus) return { changed: 0, conflicted: 0 }
-    const changedPaths = new Set([...gitStatus.conflicted, ...gitStatus.staged, ...gitStatus.unstaged, ...gitStatus.untracked].map((entry) => entry.path))
-    return { changed: changedPaths.size, conflicted: new Set(gitStatus.conflicted.map((entry) => entry.path)).size }
-  }, [gitStatus])
+    const changedPaths = new Set<string>()
+    const conflictedPaths = new Set<string>()
+    for (const [root, repository] of Object.entries(gitRepositories ?? {})) {
+      const status = repository.status
+      if (!status) continue
+      for (const entry of [...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked]) changedPaths.add(`${root}\0${entry.path}`)
+      for (const entry of status.conflicted) conflictedPaths.add(`${root}\0${entry.path}`)
+    }
+    return { changed: changedPaths.size, conflicted: conflictedPaths.size }
+  }, [gitRepositories])
   const [title, setTitle] = useState(api.title ?? content?.title ?? 'Content')
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
