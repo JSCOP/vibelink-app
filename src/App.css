@@ -920,8 +920,8 @@ button {
 
 .terminal-panel-shell {
   /* Visual inset around the terminal content. Lives here (not on
-     .dock-terminal-host) so it is NOT counted by FitAddon's height measurement,
-     which would otherwise over-allocate a row and clip the prompt line. */
+     .dock-terminal-host) so it is NOT counted by PaneFitAddon's height
+     measurement, which would otherwise over-allocate a row and clip the prompt line. */
   padding: 5px;
 }
 
@@ -1276,11 +1276,11 @@ button {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  /* No padding here: FitAddon measures this element (xterm's parent) via
+  /* No padding here: PaneFitAddon measures this element (xterm's parent) via
      getComputedStyle(height), which returns the BORDER-BOX height under the
      global `box-sizing: border-box`. Any padding here is counted as usable
-     space, so FitAddon allocates one row too many and the bottom prompt line
-     clips. The visual inset lives on .terminal-panel-shell instead. */
+     space, so the addon allocates one row too many and clips the bottom prompt
+     line. The visual inset lives on .terminal-panel-shell instead. */
   padding: 0;
   background: var(--vibelink-terminal-bg);
 }
@@ -1290,6 +1290,14 @@ button {
 .dock-terminal-host .xterm-screen {
   height: 100%;
   background: var(--vibelink-terminal-bg) !important;
+}
+
+/* xterm 6 keeps an empty legacy `.xterm-viewport` beside its real
+ * SmoothScrollableElement. WebView2 paints that node's native vertical
+ * scrollbar button as the small down-arrow in each pane. The custom overlay
+ * scrollbar below is the only scroll UI VibeLink uses. */
+.dock-terminal-host .xterm-viewport {
+  overflow: hidden !important;
 }
 
 /* Pane scrollbar. xterm renders VS Code's scrollable element: a 14px-wide

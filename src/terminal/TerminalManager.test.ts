@@ -66,8 +66,8 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: MockTerminal }
 })
 
-vi.mock('@xterm/addon-fit', () => {
-  class MockFitAddon {
+vi.mock('./scrollbar', () => {
+  class PaneFitAddon {
     private terminal: { resize(cols: number, rows: number): void } | undefined
     activate(terminal: { resize(cols: number, rows: number): void }): void { this.terminal = terminal }
     proposeDimensions(): { cols: number; rows: number } {
@@ -75,7 +75,7 @@ vi.mock('@xterm/addon-fit', () => {
     }
     fit(): void { this.terminal?.resize(80, 24) }
   }
-  return { FitAddon: MockFitAddon }
+  return { PaneFitAddon, showPaneScrollbar: () => true }
 })
 
 vi.mock('@xterm/addon-webgl', () => {

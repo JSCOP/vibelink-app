@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Terminal } from '@xterm/xterm'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
-import { FitAddon } from '@xterm/addon-fit'
+import { PaneFitAddon, showPaneScrollbar } from './scrollbar'
 import { SearchAddon } from '@xterm/addon-search'
 import type { ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -18,7 +18,6 @@ import { agentActivityTracker, type AgentActivityActions } from './agentActivity
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
 import { PaneTitleCoalescer } from './titleCoalescing'
-import { showPaneScrollbar } from './scrollbar'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_FRAME = 64 * 1024
@@ -30,7 +29,7 @@ const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
 const MAX_REPLAY_BYTES_PER_FRAME = 64 * 1024
 const MAX_CACHED_BACKGROUND_TERMINALS = 16
-// A real terminal is never this small. If FitAddon proposes fewer than these,
+// A real terminal is never this small. If PaneFitAddon proposes fewer than these,
 // the container is mid-layout (transiently ~1px during a dockview maximize/
 // restore) and fitting would reflow-corrupt the buffer — skip and retry.
 const MIN_FIT_COLS = 10
@@ -115,7 +114,7 @@ type TerminalSnapshotResult = {
 type Entry = {
   paneId: string
   term: Terminal
-  fit: FitAddon
+  fit: PaneFitAddon
   search: SearchAddon
   opened: boolean
   daemonAttached: boolean
@@ -387,7 +386,7 @@ class TerminalManagerImpl {
     if (existing) return existing
 
     const term = new Terminal(createTerminalOptions(this.settings))
-    const fit = new FitAddon()
+    const fit = new PaneFitAddon()
     const search = new SearchAddon()
     term.loadAddon(fit)
     term.loadAddon(search)
@@ -1393,9 +1392,9 @@ class TerminalManagerImpl {
     }
   }
 
-  /** Every pane keeps its own always-visible scrollbar. xterm builds the
-   *  scrollable element lazily inside `term.open()`, so this runs after the
-   *  terminal is opened and only needs to succeed once per pane. */
+  /** Every pane owns a persistent scrollbar instance. xterm builds the
+   *  scrollable element lazily inside `term.open()`; App.css exposes its slider
+   *  only while that pane is active. */
   private ensurePersistentScrollbar(entry: Entry): void {
     if (entry.scrollbarPersistent || !entry.opened) return
     entry.scrollbarPersistent = showPaneScrollbar(entry.term)
@@ -1421,12 +1420,13 @@ class TerminalManagerImpl {
   }
 
 
-  // Fit only when FitAddon proposes sane dimensions. During dockview's maximize/
-  // restore the container can be transiently ~1px (measurable by width/height > 0,
-  // but not yet laid out), and FitAddon then proposes something like 2x1. Resizing
-  // xterm to that reflows the buffer into thousands of 2-column rows and destroys
-  // the content — so every fit path must go through this guard, not entry.fit.fit()
-  // directly. Returns true when a fit was applied (or none was needed).
+  // Fit only when PaneFitAddon proposes sane dimensions. During dockview's
+  // maximize/restore the container can be transiently ~1px (measurable by
+  // width/height > 0, but not yet laid out), and the addon then proposes
+  // something like 2x1. Resizing xterm to that reflows the buffer into thousands
+  // of 2-column rows and destroys the content — so every fit path must go through
+  // this guard, not entry.fit.fit() directly. Returns true when a fit was applied
+  // (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
     if (entry.remoteLease) return true
     const proposed = entry.fit.proposeDimensions()

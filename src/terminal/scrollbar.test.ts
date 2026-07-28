@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { Terminal } from '@xterm/xterm'
-import { showPaneScrollbar } from './scrollbar'
+import { PaneFitAddon, showPaneScrollbar } from './scrollbar'
 
 // jsdom implements neither of these; xterm's CoreBrowserService needs both to
 // open a terminal, and this test's whole point is exercising the real xterm
@@ -43,5 +43,41 @@ describe('pane scrollbar', () => {
   it('reports failure instead of throwing when the viewport is missing', () => {
     expect(showPaneScrollbar(new Terminal())).toBe(false)
     expect(showPaneScrollbar(undefined)).toBe(false)
+  })
+})
+
+describe('pane terminal fit', () => {
+  it('uses the full host width without reserving a hidden scrollbar gutter', () => {
+    const parent = document.createElement('div')
+    parent.style.width = '100px'
+    parent.style.height = '80px'
+    const element = document.createElement('div')
+    parent.appendChild(element)
+    document.body.appendChild(parent)
+
+    const clear = vi.fn()
+    const resize = vi.fn()
+    const terminal = {
+      element,
+      cols: 2,
+      rows: 1,
+      resize,
+      _core: {
+        _renderService: {
+          clear,
+          dimensions: { css: { cell: { width: 10, height: 10 } } },
+        },
+      },
+    } as unknown as Terminal
+    const fit = new PaneFitAddon()
+    fit.activate(terminal)
+
+    expect(fit.proposeDimensions()).toEqual({ cols: 10, rows: 8 })
+    fit.fit()
+    expect(clear).toHaveBeenCalledOnce()
+    expect(resize).toHaveBeenCalledWith(10, 8)
+
+    fit.dispose()
+    parent.remove()
   })
 })
