@@ -19,10 +19,7 @@ pub const fn main_webview_cdp_port(debug_build: bool) -> u16 {
     }
 }
 
-pub fn configured_main_webview_cdp_port(
-    debug_build: bool,
-    configured: Option<&str>,
-) -> u16 {
+pub fn configured_main_webview_cdp_port(debug_build: bool, configured: Option<&str>) -> u16 {
     if !debug_build {
         return PROD_MAIN_WEBVIEW_CDP_PORT;
     }
@@ -48,7 +45,8 @@ pub const fn default_remote_port(debug_build: bool) -> u16 {
 }
 
 pub fn browser_profile_port_candidates(main_port: u16) -> Range<u16> {
-    let start = if (DEV_MAIN_WEBVIEW_CDP_PORT..=DEV_MAIN_WEBVIEW_CDP_PORT_END).contains(&main_port) {
+    let start = if (DEV_MAIN_WEBVIEW_CDP_PORT..=DEV_MAIN_WEBVIEW_CDP_PORT_END).contains(&main_port)
+    {
         DEV_BROWSER_PROFILE_PORT_START
     } else if main_port == PROD_MAIN_WEBVIEW_CDP_PORT {
         PROD_BROWSER_PROFILE_PORT_START
@@ -59,12 +57,17 @@ pub fn browser_profile_port_candidates(main_port: u16) -> Range<u16> {
 }
 
 pub fn is_dev_vite_url(value: &str) -> bool {
-    ["http://localhost:", "https://localhost:", "http://127.0.0.1:", "https://127.0.0.1:"]
-        .iter()
-        .filter_map(|prefix| value.strip_prefix(prefix))
-        .filter_map(|rest| rest.split(['/', '?', '#']).next())
-        .filter_map(|port| port.parse::<u16>().ok())
-        .any(|port| (DEV_VITE_PORT_START..=DEV_VITE_PORT_END).contains(&port))
+    [
+        "http://localhost:",
+        "https://localhost:",
+        "http://127.0.0.1:",
+        "https://127.0.0.1:",
+    ]
+    .iter()
+    .filter_map(|prefix| value.strip_prefix(prefix))
+    .filter_map(|rest| rest.split(['/', '?', '#']).next())
+    .filter_map(|port| port.parse::<u16>().ok())
+    .any(|port| (DEV_VITE_PORT_START..=DEV_VITE_PORT_END).contains(&port))
 }
 
 #[cfg(test)]

@@ -481,7 +481,6 @@ pub fn run() {
             fixed_remote_debugging_arguments(&existing, port),
         );
     }
-
 }
 
 fn fixed_remote_debugging_arguments(existing: &str, port: u16) -> String {
