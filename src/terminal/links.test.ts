@@ -140,7 +140,28 @@ describe('terminal link matchers', () => {
           end: { x: 10, y: 2 },
         },
       })
-      expect(continuationLinks).toBe(firstRowLinks)
+      expect(continuationLinks).toHaveLength(1)
+    })
+
+    it('returns fresh link objects because xterm mutates link decorations', () => {
+      const term = stubTerminal(12, [
+        { text: 'run C:\\very\\' },
+        { text: 'deep\\x.png', isWrapped: true },
+      ])
+      const provider = createPathLinkProvider(term, () => ({
+        onOpenPath: () => {},
+        resolveMarker: () => undefined,
+      }))
+      let firstRowLinks: ILink[] | undefined
+      let continuationLinks: ILink[] | undefined
+
+      provider.provideLinks(1, (links) => { firstRowLinks = links })
+      if (!firstRowLinks) throw new Error('Expected first-row link')
+      firstRowLinks[0].decorations = { pointerCursor: false, underline: false }
+      provider.provideLinks(2, (links) => { continuationLinks = links })
+
+      expect(continuationLinks?.[0]).not.toBe(firstRowLinks[0])
+      expect(continuationLinks?.[0].decorations).toEqual({ pointerCursor: true, underline: true })
     })
 
     it('routes a modified click to the first requested Read selector line', () => {

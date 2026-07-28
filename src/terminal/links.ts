@@ -14,6 +14,7 @@ const MARKER_RE = /\[Image #(\d+)(?:,\s*\d+x\d+)?\]/g
 const TRAILING_LINK_PUNCTUATION_RE = /[.,;:!?)}\]]+$/
 
 type LinkMatch = { index: number; text: string }
+type PathLinkSpec = { range: ILink['range']; text: string; target: TerminalOpenTarget }
 
 // Joined buffer text with, per UTF-16 unit, the 0-based virtual column of its
 // cell and that cell's width. Wide (CJK) glyphs occupy two columns but one
@@ -54,7 +55,7 @@ export function findImageMarkerMatches(line: string): { index: number; text: str
 }
 
 export function createPathLinkProvider(term: Terminal, getActions: () => CaptureLinkActions): ILinkProvider {
-  let cachedGroup: { key: string; links: ILink[] | undefined } | undefined
+  let cachedGroup: { key: string; links: PathLinkSpec[] | undefined } | undefined
 
   return {
     provideLinks(bufferLineNumber, callback) {
@@ -66,18 +67,18 @@ export function createPathLinkProvider(term: Terminal, getActions: () => Capture
 
       const key = `${term.cols}:${group.start}:${group.end}:${group.text}`
       if (!cachedGroup || cachedGroup.key !== key) {
-        const links = findTerminalLinkMatches(group.text).map(({ index, text }) => createLink(
-          rangeForMappedSpan(group, group.start, term.cols, index, text.length),
+        const links = findTerminalLinkMatches(group.text).map(({ index, text }) => ({
+          range: rangeForMappedSpan(group, group.start, term.cols, index, text.length),
           text,
-          (event) => {
-            if (!isModifiedClick(event)) return
-            getActions().onOpenPath(parseTerminalOpenTarget(text))
-          },
-        ))
+          target: parseTerminalOpenTarget(text),
+        }))
         cachedGroup = { key, links: links.length > 0 ? links : undefined }
       }
 
-      callback(cachedGroup.links)
+      callback(cachedGroup.links?.map(({ range, text, target }) => createLink(range, text, (event) => {
+        if (!isModifiedClick(event)) return
+        getActions().onOpenPath(target)
+      })))
     },
   }
 }
