@@ -35,6 +35,21 @@ const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
 const MAX_REPLAY_BYTES_PER_FRAME = 64 * 1024
 const MAX_CACHED_BACKGROUND_TERMINALS = 16
+// Chromium keeps a fixed budget of live WebGL contexts per renderer process.
+// The retained-instance cache above plus a full visible grid can ask for far
+// more than that, and the moment a layout change reallocates the atlases the
+// browser starts evicting live contexts — every eviction costs a forced re-fit
+// and a full repaint, which reads as the workspace re-aligning itself over and
+// over. Keep the accelerated renderer for the panes the user can actually see.
+const MAX_WEBGL_PANES = 12
+// Two renderer swaps this close together mean promotion itself is what evicts
+// the context (or output keeps demoting the pane). Stop swapping and stay on
+// the DOM renderer instead of re-arming the churn.
+const WEBGL_SWAP_WINDOW_MS = 30_000
+const MAX_WEBGL_SWAPS_PER_WINDOW = 2
+// A latched pane gets one fresh chance at a recovery boundary once it has been
+// stable for this long, so a transient pressure spike is not permanent.
+const WEBGL_SWAP_LATCH_RESET_MS = 5 * 60_000
 // A real terminal is never this small. If PaneFitAddon proposes fewer than these,
 // the container is mid-layout (transiently ~1px during a dockview maximize/
 // restore) and fitting would reflow-corrupt the buffer — skip and retry.
@@ -252,6 +267,19 @@ type Entry = {
   webglPromotionPending?: boolean
   webglPromotionTimer?: number
   demotedForOutputBurst?: boolean
+  /** Renderer swaps inside the current window, and whether they exhausted the
+   *  budget. A latched pane renders through the DOM until a recovery boundary
+   *  finds it stable again. */
+  webglSwapCount?: number
+  webglSwapWindowStartedAt?: number
+  webglSwapsLatched?: boolean
+  /** Set when the browser took the context away, as opposed to us demoting the
+   *  pane for an output burst. A lost context must NOT be re-attached on the
+   *  quiet timer: reallocating it is what evicted a sibling pane. */
+  webglContextLost?: boolean
+  /** WebGL was handed back because the pane went off-screen; promote it again
+   *  when it returns. */
+  webglReleasedWhileHidden?: boolean
   webglContextLossDisposable?: { dispose(): void }
   titleHandler?: (title: string) => void
 }
@@ -363,9 +391,11 @@ class TerminalManagerImpl {
   private redrawVisibleWake(clearWebglTextureAtlas: boolean): void {
     for (const entry of this.entries.values()) {
       if (!entry.opened || entry.visible !== true || entry.remoteLease) continue
-      const retryAfterContextLoss = entry.webgl === undefined && entry.webglAttachFailed === true
-      if (retryAfterContextLoss) entry.webglAttachFailed = false
-      const promoted = (retryAfterContextLoss || this.shouldPromoteQuietWebgl(entry))
+      const retryAttach = entry.webgl === undefined
+        && entry.webglAttachFailed === true
+        && this.webglRetryAllowedAtWakeBoundary(entry)
+      if (retryAttach) this.clearWebglSwapLatch(entry)
+      const promoted = (retryAttach || this.shouldPromoteQuietWebgl(entry))
         && this.promoteToWebglRenderer(entry)
       if (!promoted) this.redraw(entry, { clearWebglTextureAtlas })
     }
@@ -681,7 +711,17 @@ class TerminalManagerImpl {
         this.requestStableDividerFit(entry)
         return
       }
-      this.scheduleLayoutPass({ paneIds: [paneId] })
+      // Fit inside the observer callback: it runs after layout and before paint,
+      // so the pane's new rect and its new grid reach the screen in the SAME
+      // frame. Deferring to an animation frame paints a correctly-placed pane
+      // holding a wrongly-sized terminal first, which is what reads as the
+      // layout re-aligning itself a moment after it already moved. Interactive
+      // gestures keep the throttled, frame-budgeted path.
+      if (this.interactive) {
+        this.scheduleLayoutPass({ paneIds: [paneId] })
+        return
+      }
+      this.fitNow({ paneIds: [paneId], remeasure: false })
     })
     entry.observer.observe(container)
     // Output held while the terminal was unopened parses now, after the
@@ -1283,7 +1323,23 @@ class TerminalManagerImpl {
     if (!entry) return
     entry.visible = visible
     if (visible) entry.lastUsedAt = Date.now()
-    if (!visible) return
+    if (!visible) {
+      // A retained hidden xterm keeps its WebGL context alive even though it
+      // paints nothing. Sixteen cached panes behind a full visible grid is
+      // exactly what pushes the process past Chromium's context budget, so the
+      // next resize evicts the contexts of panes the user is looking at. Give
+      // this one back and re-attach when the pane returns.
+      if (entry.webgl) {
+        this.dropToDomRenderer(entry)
+        entry.webglReleasedWhileHidden = true
+      }
+      return
+    }
+    if (entry.webglReleasedWhileHidden) {
+      entry.webglReleasedWhileHidden = false
+      entry.webglAttachFailed = false
+      this.promoteToWebglRenderer(entry, { allowUnmeasured: true })
+    }
     // A pane that was hidden may have missed output-driven draws entirely, so
     // becoming visible is one of the few genuine repaint triggers.
     this.scheduleLayoutPass({ paneIds: [paneId], force: true, repaint: true, syncPty: true })
@@ -1379,6 +1435,34 @@ class TerminalManagerImpl {
       })
     }
     this.requestPassFlush()
+  }
+
+  /** Fit in the CURRENT task instead of the next animation frame, so a pane's
+   *  grid reaches the screen in the same frame as its new rect. Callers that
+   *  already hold a fresh measurement (the ResizeObserver) pass
+   *  `remeasure: false`; callers reacting to a structural change that Dockview
+   *  applied synchronously let the pass measure the live rect. Interactive
+   *  gestures keep their own throttled, frame-budgeted path. */
+  fitNow(options: { paneIds?: string[]; syncPty?: boolean; remeasure?: boolean } = {}): void {
+    if (options.remeasure !== false) {
+      for (const paneId of options.paneIds ?? this.entries.keys()) {
+        const entry = this.entries.get(paneId)
+        if (entry) entry.observedSize = undefined
+      }
+    }
+    this.scheduleLayoutPass({ paneIds: options.paneIds, syncPty: options.syncPty, force: true })
+    if (!this.viewportViable || this.interactive || this.pendingPass.size === 0) return
+    if (this.passFrame !== undefined) {
+      cancelAnimationFrame(this.passFrame)
+      this.passFrame = undefined
+    }
+    if (this.passTimer !== undefined) {
+      window.clearTimeout(this.passTimer)
+      this.passTimer = undefined
+    }
+    this.lastPassAt = Date.now()
+    this.flushLayoutPass()
+    if (this.pendingPass.size > 0) this.requestPassFlush()
   }
 
   /** Queue one animation-frame flush. Divider panes arrive here only after an
@@ -1555,7 +1639,9 @@ class TerminalManagerImpl {
 
   private promoteToWebglRenderer(entry: Entry, options: { allowUnmeasured?: boolean } = {}): boolean {
     if (entry.webgl || entry.webglPromotionPending || entry.webglAttachFailed) return false
+    if (entry.webglSwapsLatched) return false
     if (!entry.opened || !entry.container || entry.remoteLease || entry.attachFailureNoticeWritten) return false
+    if (this.attachedWebglPaneCount() >= MAX_WEBGL_PANES) return false
     const rect = entry.observedSize ?? entry.container.getBoundingClientRect()
     if (!options.allowUnmeasured && (entry.visible !== true || rect.width < 1 || rect.height < 1)) {
       entry.forceFitOnNextMeasure = true
@@ -1570,13 +1656,18 @@ class TerminalManagerImpl {
       webgl = addon
       contextLossDisposable = addon.onContextLoss(() => {
         if (entry.webgl !== addon) return
+        // The browser took this context away. Re-attaching on the quiet timer
+        // reallocates the atlas that caused the eviction and starts a cascade
+        // across the grid, so latch the loss and let a genuine recovery
+        // boundary decide once the pane has been stable.
         entry.webglAttachFailed = true
-        entry.demotedForOutputBurst = true
+        entry.webglContextLost = true
+        entry.demotedForOutputBurst = false
+        this.noteWebglSwap(entry)
         this.dropToDomRenderer(entry)
         entry.forceFitOnNextMeasure = true
         entry.rendererResetPending = true
         this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, repaint: true, syncPty: true })
-        this.scheduleWebglPromotion(entry)
       })
       entry.term.loadAddon(addon)
       entry.webgl = addon
@@ -1604,6 +1695,7 @@ class TerminalManagerImpl {
 
   private shouldPromoteQuietWebgl(entry: Entry): boolean {
     return entry.demotedForOutputBurst === true
+      && entry.webglSwapsLatched !== true
       && entry.webgl === undefined
       && entry.webglPromotionTimer === undefined
       && (entry.pendingOutputBytes ?? 0) === 0
@@ -1611,7 +1703,7 @@ class TerminalManagerImpl {
   }
 
   private scheduleWebglPromotion(entry: Entry): void {
-    if (entry.demotedForOutputBurst !== true) return
+    if (entry.demotedForOutputBurst !== true || entry.webglSwapsLatched) return
     clearTimeout(entry.webglPromotionTimer)
     entry.webglPromotionTimer = window.setTimeout(() => {
       entry.webglPromotionTimer = undefined
@@ -1620,9 +1712,48 @@ class TerminalManagerImpl {
         this.scheduleWebglPromotion(entry)
         return
       }
-      entry.webglAttachFailed = false
+      if (!entry.webglContextLost) entry.webglAttachFailed = false
       this.promoteToWebglRenderer(entry)
     }, WEBGL_REPROMOTION_QUIET_MS)
+  }
+
+  private attachedWebglPaneCount(): number {
+    let attached = 0
+    for (const entry of this.entries.values()) {
+      if (entry.webgl !== undefined) attached += 1
+    }
+    return attached
+  }
+
+  /** Each renderer swap costs a forced re-fit and a full repaint, so a pane that
+   *  keeps swapping is pure visible churn. Count the swaps and latch the pane to
+   *  the DOM renderer once they exceed the budget for this window. */
+  private noteWebglSwap(entry: Entry): void {
+    const now = Date.now()
+    const windowStartedAt = entry.webglSwapWindowStartedAt
+    if (windowStartedAt === undefined || now - windowStartedAt > WEBGL_SWAP_WINDOW_MS) {
+      entry.webglSwapWindowStartedAt = now
+      entry.webglSwapCount = 0
+    }
+    entry.webglSwapCount = (entry.webglSwapCount ?? 0) + 1
+    if (entry.webglSwapCount >= MAX_WEBGL_SWAPS_PER_WINDOW) entry.webglSwapsLatched = true
+  }
+
+  /** Wake boundaries may re-attach WebGL, but only after the pane has gone a
+   *  whole swap window without one: otherwise alt-tabbing restarts the cascade. */
+  private webglRetryAllowedAtWakeBoundary(entry: Entry): boolean {
+    const windowStartedAt = entry.webglSwapWindowStartedAt
+    if (windowStartedAt === undefined) return true
+    const stableFor = Date.now() - windowStartedAt
+    return stableFor >= (entry.webglSwapsLatched ? WEBGL_SWAP_LATCH_RESET_MS : WEBGL_SWAP_WINDOW_MS)
+  }
+
+  private clearWebglSwapLatch(entry: Entry): void {
+    entry.webglAttachFailed = false
+    entry.webglContextLost = false
+    entry.webglSwapsLatched = false
+    entry.webglSwapCount = 0
+    entry.webglSwapWindowStartedAt = undefined
   }
 
   /** Every pane owns a persistent scrollbar instance. xterm builds the
@@ -1952,6 +2083,7 @@ class TerminalManagerImpl {
     if (this.webviewRenderMode === 'software'
       && (entry.pendingOutputBytes ?? 0) >= HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES
       && entry.webgl) {
+      this.noteWebglSwap(entry)
       this.dropToDomRenderer(entry)
       entry.demotedForOutputBurst = true
     }
@@ -2012,6 +2144,7 @@ class TerminalManagerImpl {
       if (this.webviewRenderMode === 'software'
         && entry.webgl
         && (entry.pendingOutputBytes ?? 0) >= SOFTWARE_WEBGL_BACKPRESSURE_DOM_THRESHOLD_BYTES) {
+        this.noteWebglSwap(entry)
         this.dropToDomRenderer(entry)
         entry.demotedForOutputBurst = true
       }

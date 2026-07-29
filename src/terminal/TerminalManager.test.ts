@@ -1145,16 +1145,77 @@ describe('TerminalManager output scheduling', () => {
     }
   })
 
-  it('recovers one pane after its WebGL context is lost', () => {
+  it('stops re-attaching WebGL once a pane keeps flapping between renderers', () => {
     vi.useFakeTimers()
-    const paneId = 'pane-webgl-context-recovery'
+    const paneId = 'pane-webgl-flap'
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 1
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame++
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      visible?: boolean
+      container?: HTMLElement
+      webgl?: { dispose(): void }
+      webglSwapsLatched?: boolean
+    }
+    entry.opened = true
+    entry.container = container
+    entry.visible = true
+    entry.webgl = { dispose: vi.fn() }
+    Reflect.set(TerminalManager, 'webviewRenderMode', 'software')
+
+    const runNextFrame = () => {
+      const callback = frames.values().next().value
+      if (!callback) throw new Error('missing scheduled output frame')
+      frames.delete(frames.keys().next().value as number)
+      callback(performance.now())
+    }
+    const burst = () => {
+      TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
+      vi.advanceTimersByTime(50)
+      for (let index = 0; index < 4; index += 1) runNextFrame()
+    }
+
+    try {
+      webglMock.fail = false
+      burst()
+      expect(entry.webgl).toBeUndefined()
+      vi.advanceTimersByTime(2_000)
+      expect(entry.webgl).toBe(webglMock.instances[0])
+
+      burst()
+      expect(entry.webgl).toBeUndefined()
+      expect(entry.webglSwapsLatched).toBe(true)
+
+      vi.advanceTimersByTime(10_000)
+      expect(webglMock.instances).toHaveLength(1)
+      expect(entry.webgl).toBeUndefined()
+    } finally {
+      TerminalManager.dispose(paneId)
+      container.remove()
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('holds a lost WebGL context on the DOM renderer instead of re-attaching on a timer', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-webgl-context-latched'
     const container = makeContainer()
     vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
     webglMock.fail = false
     TerminalManager.attach(paneId, container)
     TerminalManager.setPaneVisible(paneId, true)
     const manager = TerminalManager as unknown as {
-      entries: Map<string, { webgl?: unknown; webglAttachFailed?: boolean; demotedForOutputBurst?: boolean }>
+      entries: Map<string, { webgl?: unknown; webglAttachFailed?: boolean; webglContextLost?: boolean; demotedForOutputBurst?: boolean }>
     }
     const entry = manager.entries.get(paneId)
     if (!entry) throw new Error('missing WebGL recovery entry')
@@ -1165,19 +1226,128 @@ describe('TerminalManager output scheduling', () => {
       firstRenderer.triggerContextLoss()
       expect(entry.webgl).toBeUndefined()
       expect(entry.webglAttachFailed).toBe(true)
-      expect(entry.demotedForOutputBurst).toBe(true)
-
-      vi.advanceTimersByTime(1_999)
-      expect(entry.webgl).toBeUndefined()
-      vi.advanceTimersByTime(1)
-      expect(webglMock.instances).toHaveLength(2)
-      expect(entry.webgl).toBe(webglMock.instances[1])
-      expect(entry.webglAttachFailed).toBe(false)
+      expect(entry.webglContextLost).toBe(true)
+      // A lost context must never look like an output-burst demotion: that is
+      // the path whose quiet timer re-attaches and evicts a sibling pane.
       expect(entry.demotedForOutputBurst).toBe(false)
+
+      vi.advanceTimersByTime(10_000)
+      expect(webglMock.instances).toHaveLength(1)
+      expect(entry.webgl).toBeUndefined()
     } finally {
       TerminalManager.dispose(paneId)
       container.remove()
       vi.useRealTimers()
+    }
+  })
+
+  it('re-attaches a lost WebGL context at a wake boundary once the pane is stable', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-webgl-wake-retry'
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    webglMock.fail = false
+    TerminalManager.attach(paneId, container)
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as { entries: Map<string, { webgl?: unknown }> }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing wake-retry entry')
+    const firstRenderer = webglMock.instances[0]
+    if (!firstRenderer) throw new Error('missing initial WebGL renderer')
+
+    try {
+      firstRenderer.triggerContextLoss()
+      vi.advanceTimersByTime(29_000)
+      window.dispatchEvent(new Event('focus'))
+      expect(entry.webgl).toBeUndefined()
+
+      vi.advanceTimersByTime(2_000)
+      window.dispatchEvent(new Event('focus'))
+      expect(webglMock.instances).toHaveLength(2)
+      expect(entry.webgl).toBe(webglMock.instances[1])
+    } finally {
+      TerminalManager.dispose(paneId)
+      container.remove()
+      vi.useRealTimers()
+    }
+  })
+
+  it('hands the WebGL context back while a pane is hidden', () => {
+    const paneId = 'pane-webgl-hidden-release'
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    webglMock.fail = false
+    TerminalManager.attach(paneId, container)
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { webgl?: unknown; webglReleasedWhileHidden?: boolean }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing hidden-release entry')
+    const attached = webglMock.instances[0]
+    if (!attached) throw new Error('missing initial WebGL renderer')
+
+    try {
+      TerminalManager.setPaneVisible(paneId, false)
+      expect(entry.webgl).toBeUndefined()
+      expect(entry.webglReleasedWhileHidden).toBe(true)
+      expect(attached.lostContextCalls).toBe(1)
+
+      TerminalManager.setPaneVisible(paneId, true)
+      expect(webglMock.instances).toHaveLength(2)
+      expect(entry.webgl).toBe(webglMock.instances[1])
+      expect(entry.webglReleasedWhileHidden).toBe(false)
+    } finally {
+      TerminalManager.dispose(paneId)
+      container.remove()
+    }
+  })
+
+  it('refuses WebGL beyond the process context budget', () => {
+    webglMock.fail = false
+    const containers: HTMLElement[] = []
+    const paneIds = Array.from({ length: 13 }, (_, index) => `pane-webgl-budget-${index}`)
+
+    try {
+      for (const paneId of paneIds) {
+        const container = makeContainer()
+        vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+        containers.push(container)
+        TerminalManager.attach(paneId, container)
+        TerminalManager.setPaneVisible(paneId, true)
+      }
+
+      const manager = TerminalManager as unknown as { entries: Map<string, { webgl?: unknown }> }
+      expect(webglMock.instances).toHaveLength(12)
+      expect(manager.entries.get(paneIds[12])?.webgl).toBeUndefined()
+    } finally {
+      for (const paneId of paneIds) TerminalManager.dispose(paneId)
+      for (const container of containers) container.remove()
+    }
+  })
+
+  it('fits panes in the same task when a structural toggle lands', () => {
+    const paneId = 'pane-fit-now'
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    TerminalManager.attach(paneId, container, { sessionId: 'session-fit-now' })
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as { entries: Map<string, { term: { cols: number; rows: number } }> }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing fitNow entry')
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1)
+
+    try {
+      entry.term.cols = 20
+      invokeMock.mockClear()
+      TerminalManager.fitNow({ syncPty: true })
+
+      expect(entry.term.cols).toBe(80)
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toHaveLength(1)
+    } finally {
+      requestFrame.mockRestore()
+      TerminalManager.dispose(paneId)
+      container.remove()
     }
   })
 

@@ -1162,7 +1162,7 @@ button {
   inset: 6px;
   pointer-events: none;
   position: absolute;
-  transition: background 80ms ease, border-color 80ms ease, top 80ms ease, right 80ms ease, bottom 80ms ease, left 80ms ease;
+  transition: background 80ms ease, border-color 80ms ease;
   z-index: 4;
 }
 

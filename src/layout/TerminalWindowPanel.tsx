@@ -72,7 +72,13 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     if (!api || !host) return
     const rect = host.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0) return
-    api.layout(rect.width, rect.height, true)
+    // Round before handing the size to Dockview. The settle loop lays the inner
+    // grid out several times while the outer overlays converge, and a host rect
+    // that differs by a fraction of a pixel makes the splitview redistribute
+    // pane widths by 1-3 px each round. Every redistribution re-fits the
+    // terminals, which is visible as the grid re-aligning itself after it
+    // already landed.
+    api.layout(Math.round(rect.width), Math.round(rect.height), true)
   }, [])
 
   const settleInner = useCallback(async () => {
