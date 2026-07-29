@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 type AnchoredPopoverProps = {
   anchorRef: RefObject<HTMLElement | null>
   className: string
-  role: 'listbox' | 'dialog'
+  role: 'listbox' | 'dialog' | 'menu'
   label: string
   onDismiss: () => void
   children: ReactNode

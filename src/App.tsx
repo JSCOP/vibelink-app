@@ -14,6 +14,7 @@ import { WorkspaceSettingsDialog } from './components/WorkspaceSettingsDialog'
 import { ImportReposDialog } from './components/workspaces/ImportReposDialog'
 import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
 import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
+import { useAppChromeStore } from './state/appChrome'
 import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
@@ -86,8 +87,15 @@ function App() {
   const dirtyPromptDialogRef = useRef<HTMLElement | null>(null)
   const dirtyPromptCancelRef = useRef<HTMLButtonElement | null>(null)
   const appShellRef = useRef<HTMLElement | null>(null)
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [isBugReportOpen, setIsBugReportOpen] = useState(false)
+  // Settings and bug reporting are also reachable from the sidebar toolbar, so
+  // the open/close state lives in a shared store instead of local component state.
+  const settingsSection = useAppChromeStore((state) => state.settingsSection)
+  const isBugReportOpen = useAppChromeStore((state) => state.bugReportOpen)
+  const openSettings = useAppChromeStore((state) => state.openSettings)
+  const closeSettings = useAppChromeStore((state) => state.closeSettings)
+  const openBugReport = useAppChromeStore((state) => state.openBugReport)
+  const closeBugReport = useAppChromeStore((state) => state.closeBugReport)
+  const isSettingsOpen = settingsSection !== null
   const [isCreateOpen, setIsCreateOpen] = useState(false)
   const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null)
   // ImportReposDialog is mounted by the repository import slice.
@@ -782,16 +790,16 @@ function App() {
 
   const runSetupWizardAgain = () => {
     prepareSetupWizardRun()
-    setIsSettingsOpen(false)
+    closeSettings()
     setIsSetupWizardOpen(true)
   }
 
   const paletteCommands: PaletteItem[] = [
-    { id: 'cmd:settings', category: 'command', label: 'Open settings', detail: 'Configure VibeLink', icon: Settings2, run: () => setIsSettingsOpen(true) },
+    { id: 'cmd:settings', category: 'command', label: 'Open settings', detail: 'Configure VibeLink', icon: Settings2, run: () => openSettings() },
     { id: 'cmd:monitor', category: 'command', label: 'Resource monitor', detail: 'Processes and memory', icon: Activity, run: () => setIsResourceMonitorOpen(true) },
     { id: 'cmd:capture-image', category: 'command', label: 'Capture image', detail: 'Screenshot a region', icon: Camera, run: () => { openImageCapture() } },
     { id: 'cmd:capture-video', category: 'command', label: 'Capture video', detail: 'Record a region', icon: Video, run: () => { void openVideoCapture() } },
-    { id: 'cmd:bug-report', category: 'command', label: 'Report a bug', detail: 'Account bug report', icon: Bug, run: () => setIsBugReportOpen(true) },
+    { id: 'cmd:bug-report', category: 'command', label: 'Report a bug', detail: 'Account bug report', icon: Bug, run: () => openBugReport() },
     { id: 'cmd:run-setup', category: 'command', label: 'Run setup wizard', detail: 'Account, theme, and font', icon: Sparkles, run: () => { runSetupWizardAgain() } },
     {
       id: 'cmd:reset-layout', category: 'command', label: 'Reset workspace layout', detail: 'Panes keep running', icon: LayoutGrid,
@@ -809,8 +817,8 @@ function App() {
   if (appLocked) {
     return (
       <main className="app-shell app-shell-locked" style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
-        <AppLockedScreen onReportBug={license.status?.email ? () => setIsBugReportOpen(true) : undefined} />
-        {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
+        <AppLockedScreen onReportBug={license.status?.email ? openBugReport : undefined} />
+        {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
       </main>
     )
   }
@@ -845,11 +853,11 @@ function App() {
           <button type="button" className="topbar-icon-button" title="Capture video" aria-label="Capture video" onClick={() => void openVideoCapture()}>
             <Video size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="topbar-icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setIsBugReportOpen(true)}>
+          <button type="button" className="topbar-icon-button" title="Report a bug" aria-label="Report a bug" onClick={openBugReport}>
             <Bug size={16} aria-hidden="true" />
           </button>
           <NotificationCenter onOpenAutomation={openAutomationNotification} />
-          <button type="button" className="topbar-icon-button" title="Open settings" aria-label="Open settings" onClick={() => setIsSettingsOpen(true)}>
+          <button type="button" className="topbar-icon-button" title="Open settings" aria-label="Open settings" onClick={() => openSettings()}>
             <Settings2 size={16} aria-hidden="true" />
           </button>
           <div className="window-controls">
@@ -897,10 +905,10 @@ function App() {
             onCreate={() => setIsCreateOpen(true)}
           />
         ) : null}
-        {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} onOpenSettings={() => setIsSettingsOpen(true)} /> : null}
+        {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} onOpenSettings={() => openSettings()} /> : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
-        {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={() => setIsSettingsOpen(false)} onRunSetupWizard={runSetupWizardAgain} /> : null}
-        {isBugReportOpen ? <BugReportDialog onClose={() => setIsBugReportOpen(false)} /> : null}
+        {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={closeSettings} onRunSetupWizard={runSetupWizardAgain} initialSection={settingsSection ?? 'account'} /> : null}
+        {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
         {editingWorkspace ? <WorkspaceSettingsDialog session={editingWorkspace} settings={settings} onChange={updateSettings} onRename={renameSession} onClose={() => setEditingWorkspaceId(null)} /> : null}
         {isImportReposOpen ? <ImportReposDialog onClose={() => setIsImportReposOpen(false)} /> : null}

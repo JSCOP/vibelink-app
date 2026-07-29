@@ -493,6 +493,9 @@ impl LicenseService {
     }
 
     pub fn authorization_snapshot(&self, policy_epoch: u64) -> Result<AuthorizationSnapshot> {
+        if self.development_entitlement {
+            return Ok(development_authorization_snapshot(policy_epoch));
+        }
         let cache = self
             .cache
             .read()
@@ -510,6 +513,13 @@ impl LicenseService {
         status: LicenseStatusDto,
         policy_epoch: u64,
     ) -> Result<AuthorizationSnapshot> {
+        // A development build reports `state: "development"` with no grace or
+        // trial window, which would otherwise resolve to a lease that expires
+        // the instant it is issued and deny every capability as
+        // AUTHORIZATION_STALE.
+        if self.development_entitlement {
+            return Ok(development_authorization_snapshot(policy_epoch));
+        }
         let observed_at = self
             .cache
             .read()
@@ -726,15 +736,7 @@ impl HeadlessLicenseCache {
 
     pub fn authorization_snapshot(&self, policy_epoch: u64) -> AuthorizationSnapshot {
         if self.development_entitlement {
-            let now = Utc::now();
-            return AuthorizationSnapshot {
-                state: AuthorizationState::ValidOnline,
-                entitled: true,
-                observed_at: now,
-                lease_until: now + ChronoDuration::days(3650),
-                offline_grace_until: None,
-                policy_epoch,
-            };
+            return development_authorization_snapshot(policy_epoch);
         }
         authorization_snapshot_from_cache(
             self.stored.as_ref(),
@@ -785,6 +787,21 @@ fn development_entitlement_policy(debug_build: bool, enforce_license: Option<&st
             || value.eq_ignore_ascii_case("yes")
             || value.eq_ignore_ascii_case("on")
     })
+}
+
+/// Lease granted while `development_entitlement` is on. It must outlive the
+/// supervisor's revalidation period, because every capability check compares
+/// `now` against this lease and a same-instant lease denies the whole app.
+fn development_authorization_snapshot(policy_epoch: u64) -> AuthorizationSnapshot {
+    let now = Utc::now();
+    AuthorizationSnapshot {
+        state: AuthorizationState::ValidOnline,
+        entitled: true,
+        observed_at: now,
+        lease_until: now + ChronoDuration::days(3650),
+        offline_grace_until: None,
+        policy_epoch,
+    }
 }
 
 fn credential_service() -> &'static str {

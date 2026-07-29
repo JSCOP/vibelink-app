@@ -38,6 +38,7 @@ import { GitHistorySidebar } from '../components/git/GitHistorySidebar'
 import { GitBranchesSidebar } from '../components/git/GitBranchesSidebar'
 import { AutomationPanel } from '../components/AutomationPanel'
 import { WorkspaceSidebarPanelShell } from '../components/WorkspaceSidebarPanelShell'
+import { SidebarChromeContext } from '../components/sidebar/sidebarChrome'
 import { GitWorkspaceProvider } from '../components/git/GitWorkspaceProvider'
 import { AgentSessionsSidebar } from '../components/agent/AgentSessionsSidebar'
 import { OrchestratorChat } from '../components/OrchestratorChat'
@@ -227,7 +228,7 @@ function useEdgePanelState(api: WorkspaceContentPanelProps['api']) {
 function WorkspacesContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
   const integration = useContext(WorkspaceIntegrationContext)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-workspaces"><ProPanelBoundary feature="Workspaces"><ErrorBoundary label="Workspaces panel"><WorkspacesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} integration={integration} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-workspaces"><ProPanelBoundary feature="Workspaces"><ErrorBoundary label="Workspaces panel"><SidebarChromeContext.Provider value={true}><WorkspacesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} integration={integration} /></SidebarChromeContext.Provider></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function SourceControlContentPanel(props: WorkspaceContentPanelProps) {
@@ -254,15 +255,17 @@ function AutomationContentPanel(props: WorkspaceContentPanelProps) {
     <WindowPanelShell panelId={props.api.id} className="workspace-window-automation">
       <ProPanelBoundary feature="Automations">
         <ErrorBoundary label="Automations panel">
-          <WorkspaceSidebarPanelShell
-            title="Automations"
-            icon={<Timer size={15} aria-hidden="true" />}
-            active={state.active}
-            collapsed={state.collapsed}
-            onCollapse={() => props.api.group.api.collapse()}
-          >
-            <AutomationPanel active={state.active && !state.collapsed} />
-          </WorkspaceSidebarPanelShell>
+          <SidebarChromeContext.Provider value={true}>
+            <WorkspaceSidebarPanelShell
+              title="Automations"
+              icon={<Timer size={15} aria-hidden="true" />}
+              active={state.active}
+              collapsed={state.collapsed}
+              onCollapse={() => props.api.group.api.collapse()}
+            >
+              <AutomationPanel active={state.active && !state.collapsed} />
+            </WorkspaceSidebarPanelShell>
+          </SidebarChromeContext.Provider>
         </ErrorBoundary>
       </ProPanelBoundary>
     </WindowPanelShell>
@@ -411,7 +414,7 @@ function ContextualExplorerContentPanel({ variant, ...props }: ContextualExplore
   const placeholder = workspaceFiles ? 'Select a workspace or worktree to browse its files.' : 'Select a workspace to browse files.'
   return (
     <WindowPanelShell panelId={props.api.id} className={panelClass}>
-      <ProPanelBoundary feature="Explorer"><ErrorBoundary label={errorLabel}>{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><Sidebar sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">{placeholder}</div>}</ErrorBoundary></ProPanelBoundary>
+      <ProPanelBoundary feature="Explorer"><ErrorBoundary label={errorLabel}><SidebarChromeContext.Provider value={!workspaceFiles}>{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><Sidebar sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">{placeholder}</div>}</SidebarChromeContext.Provider></ErrorBoundary></ProPanelBoundary>
     </WindowPanelShell>
   )
 }

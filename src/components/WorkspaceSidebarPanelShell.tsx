@@ -1,5 +1,7 @@
 import { PanelLeftClose } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useContext, type ReactNode } from 'react'
+import { SidebarChromeContext } from './sidebar/sidebarChrome'
+import { WorkspaceSidebarToolbar } from './sidebar/WorkspaceSidebarToolbar'
 
 export type WorkspaceSidebarPanelState =
   | { kind: 'loading'; message: string; detail?: string }
@@ -37,6 +39,7 @@ export function WorkspaceSidebarPanelShell({
   ariaLabel,
   collapseLabel = `Collapse ${title}`,
 }: WorkspaceSidebarPanelShellProps) {
+  const chrome = useContext(SidebarChromeContext)
   const shellClassName = ['workspace-sidebar-panel-shell', active ? 'is-active' : '', className ?? ''].filter(Boolean).join(' ')
   const body = state ? (
     <div
@@ -49,7 +52,7 @@ export function WorkspaceSidebarPanelShell({
     </div>
   ) : children
 
-  return (
+  const shell = (
     <section className={shellClassName} aria-label={ariaLabel ?? title} aria-busy={state?.kind === 'loading' || undefined}>
       <header className="workspace-sidebar-panel-header">
         <span className="workspace-sidebar-panel-icon" aria-hidden="true">{icon}</span>
@@ -72,5 +75,13 @@ export function WorkspaceSidebarPanelShell({
       <div className="workspace-sidebar-panel-body">{body}</div>
       {footer ? <footer className="workspace-sidebar-panel-footer">{footer}</footer> : null}
     </section>
+  )
+
+  if (!chrome) return shell
+  return (
+    <div className="workspace-sidebar-chrome-host">
+      {shell}
+      <WorkspaceSidebarToolbar />
+    </div>
   )
 }

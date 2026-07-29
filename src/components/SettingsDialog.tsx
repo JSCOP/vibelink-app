@@ -116,6 +116,8 @@ type SettingsDialogProps = {
   onChange: (patch: Partial<Settings>) => void
   onClose: () => void
   onRunSetupWizard: () => void
+  /** Section to land on; callers deep-link straight to shortcuts or About. */
+  initialSection?: SettingsSectionId
 }
 
 type WorktreeStorageChoice = 'sameDrive' | 'specificDrive' | 'appData' | 'custom'
@@ -131,9 +133,9 @@ const profileKindLabels: Record<ProfileKind, string> = {
   command: 'Command',
 }
 
-export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard }: SettingsDialogProps) {
+export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, initialSection = 'account' }: SettingsDialogProps) {
   const [draft, setDraft] = useState(settings)
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>('account')
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>(initialSection)
   const [search, setSearch] = useState('')
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
   const [defaultCaptureDir, setDefaultCaptureDir] = useState('')
