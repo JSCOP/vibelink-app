@@ -23,6 +23,7 @@ const TERMINAL_CAPABILITY_ENV: [(&str, &str); 5] = [
 ];
 
 const COLD_RESTORE_NOTICE: &[u8] = b"\r\n\x1b[?1049l\x1b[0m\x1b[38;5;214m[VibeLink cold restore: the previous terminal process stopped; a new process started from this pane's profile.]\x1b[0m\r\n";
+const MIN_COLD_RESTORE_CLEAR_ROWS: u16 = 200;
 
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 pub type SharedKiller = Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>;
@@ -35,7 +36,10 @@ fn lock_scrollback(scrollback: &Mutex<ScrollbackRing>) -> MutexGuard<'_, Scrollb
 
 fn cold_restore_scrollback(mut scrollback: Vec<u8>, rows: u16) -> Vec<u8> {
     scrollback.extend_from_slice(COLD_RESTORE_NOTICE);
-    for _ in 0..rows.clamp(1, 200) {
+    // The frontend can be taller than the persisted PTY when a restored window
+    // is maximized. Clear at least a full large viewport so old prompt cells do
+    // not reappear below the new process cursor after xterm fits the pane.
+    for _ in 0..rows.max(MIN_COLD_RESTORE_CLEAR_ROWS) {
         scrollback.extend_from_slice(b"\r\n");
     }
     scrollback
@@ -840,14 +844,15 @@ mod tests {
     }
 
     #[test]
-    fn cold_restore_scrollback_preserves_history_and_marks_new_process_boundary() {
+    fn cold_restore_scrollback_clears_frontends_taller_than_the_persisted_pty() {
         let snapshot = cold_restore_scrollback(b"saved output".to_vec(), 2);
+        let viewport_clear = b"\r\n".repeat(MIN_COLD_RESTORE_CLEAR_ROWS.into());
 
         assert!(snapshot.starts_with(b"saved output"));
         assert!(snapshot
             .windows(COLD_RESTORE_NOTICE.len())
             .any(|window| window == COLD_RESTORE_NOTICE));
-        assert!(snapshot.ends_with(b"\r\n\r\n"));
+        assert!(snapshot.ends_with(&viewport_clear));
     }
 
     fn test_config(shell: Option<&str>) -> PaneConfig {

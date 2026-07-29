@@ -135,9 +135,33 @@ function snapshotCursorQueries(bytes: Uint8Array): SnapshotCursorQuery[] {
   return queries
 }
 
+function isAsciiDigit(code: number): boolean {
+  return code >= 0x30 && code <= 0x39
+}
+
 function hasCursorResponse(input: readonly string[], query: SnapshotCursorQuery): boolean {
-  const pattern = query === 'private' ? /\x1b\[\?\d+;\d+R/ : /\x1b\[\d+;\d+R/
-  return input.some((value) => pattern.test(value))
+  return input.some((value) => {
+    for (let start = 0; start < value.length - 5; start += 1) {
+      if (value.charCodeAt(start) !== 0x1b || value.charCodeAt(start + 1) !== 0x5b) continue
+      let cursor = start + 2
+      if (query === 'private') {
+        if (value.charCodeAt(cursor) !== 0x3f) continue
+        cursor += 1
+      } else if (value.charCodeAt(cursor) === 0x3f) {
+        continue
+      }
+
+      const rowStart = cursor
+      while (isAsciiDigit(value.charCodeAt(cursor))) cursor += 1
+      if (cursor === rowStart || value.charCodeAt(cursor) !== 0x3b) continue
+      cursor += 1
+
+      const columnStart = cursor
+      while (isAsciiDigit(value.charCodeAt(cursor))) cursor += 1
+      if (cursor > columnStart && value.charCodeAt(cursor) === 0x52) return true
+    }
+    return false
+  })
 }
 
 
