@@ -351,7 +351,7 @@ fn inspect_hook(
 ) -> Result<HookInspection> {
     match spec.kind {
         HookKind::Json(json_spec) => inspect_json_hook(spec, json_spec, app_data_dir, config_path),
-        HookKind::DropIn(_) => inspect_drop_in_hook(config_path),
+        HookKind::DropIn(kind) => inspect_drop_in_hook(spec, kind, config_path),
         HookKind::KimiToml => inspect_kimi_hook(spec, app_data_dir, config_path),
         HookKind::HermesPlugin => inspect_hermes_hook(config_path),
     }
@@ -464,6 +464,9 @@ fn inspect_json_hook(
         bail!("{} exists but is not owned by VibeLink", script.display());
     }
 
+    if managed_events == json_spec.events.len() && script_state == GeneratedFileState::Managed {
+        rewrite_managed_file_if_stale(&script, &render_managed_script(spec)?, true)?;
+    }
     let mut installed =
         managed_events == json_spec.events.len() && script_state == GeneratedFileState::Managed;
     if installed && spec.id == "codex" {
@@ -924,22 +927,26 @@ fn managed_command(_spec: &AgentHookSpec, json_spec: JsonHookSpec, script_path: 
     }
 }
 
-fn write_managed_script(spec: &AgentHookSpec, path: &Path) -> Result<()> {
-    ensure_parent(path)?;
-    let content = if cfg!(windows) {
+fn render_managed_script(spec: &AgentHookSpec) -> Result<String> {
+    if cfg!(windows) {
         if spec.id == "antigravity" {
-            render_antigravity_batch(spec)?
+            render_antigravity_batch(spec)
         } else if spec.id == "copilot" {
-            render_powershell_script(spec)?
+            render_powershell_script(spec)
         } else if spec.id == "kimi" {
-            render_posix_script(spec)?
+            render_posix_script(spec)
         } else {
-            render_batch_script(spec)?
+            render_batch_script(spec)
         }
     } else {
-        render_posix_script(spec)?
-    };
-    fs::write(path, content).with_context(|| format!("write {}", path.display()))?;
+        render_posix_script(spec)
+    }
+}
+
+fn write_managed_script(spec: &AgentHookSpec, path: &Path) -> Result<()> {
+    ensure_parent(path)?;
+    fs::write(path, render_managed_script(spec)?)
+        .with_context(|| format!("write {}", path.display()))?;
     set_executable_if_posix(path)?;
     Ok(())
 }
@@ -952,7 +959,7 @@ fn render_batch_script(spec: &AgentHookSpec) -> Result<String> {
         ""
     };
     Ok(format!(
-        "@echo off\r\nrem {HOOK_MARKER}\r\n\"%SystemRoot%\\System32\\more.com\" >nul 2>nul\r\nif not \"%VIBELINK_SESSION_ID%\"==\"\" if not \"%VIBELINK_PANE_ID%\"==\"\" \"{}\" terminal complete --session \"%VIBELINK_SESSION_ID%\" --pane \"%VIBELINK_PANE_ID%\" --agent \"{}\" >nul 2>nul\r\n{output}exit /b 0\r\n",
+        "@echo off\r\nrem {HOOK_MARKER}\r\n\"%SystemRoot%\\System32\\more.com\" >nul 2>nul\r\nif not \"%VIBELINK_SESSION_ID%\"==\"\" if not \"%VIBELINK_PANE_ID%\"==\"\" \"{}\" terminal complete --workspace \"%VIBELINK_SESSION_ID%\" --pane \"%VIBELINK_PANE_ID%\" --agent-id \"{}\" >nul 2>nul\r\n{output}exit /b 0\r\n",
         cli.display(),
         spec.id,
     ))
@@ -961,7 +968,7 @@ fn render_batch_script(spec: &AgentHookSpec) -> Result<String> {
 fn render_powershell_script(spec: &AgentHookSpec) -> Result<String> {
     let cli = hook_cli_path()?;
     Ok(format!(
-        "# {HOOK_MARKER}\n[Console]::In.ReadToEnd() | Out-Null\nif ($env:VIBELINK_SESSION_ID -and $env:VIBELINK_PANE_ID) {{\n  & {} terminal complete --session $env:VIBELINK_SESSION_ID --pane $env:VIBELINK_PANE_ID --agent {} *> $null\n}}\nexit 0\n",
+        "# {HOOK_MARKER}\n[Console]::In.ReadToEnd() | Out-Null\nif ($env:VIBELINK_SESSION_ID -and $env:VIBELINK_PANE_ID) {{\n  & {} terminal complete --workspace $env:VIBELINK_SESSION_ID --pane $env:VIBELINK_PANE_ID --agent-id {} *> $null\n}}\nexit 0\n",
         quote_powershell(&cli.to_string_lossy()),
         quote_powershell(spec.id),
     ))
@@ -970,7 +977,7 @@ fn render_powershell_script(spec: &AgentHookSpec) -> Result<String> {
 fn render_antigravity_batch(spec: &AgentHookSpec) -> Result<String> {
     let cli = hook_cli_path()?;
     let powershell = format!(
-        "$raw=[Console]::In.ReadToEnd(); Write-Output '{{\"decision\":\"\"}}'; try {{ $payload=if ([string]::IsNullOrWhiteSpace($raw)) {{ @{{}} }} else {{ $raw | ConvertFrom-Json }} }} catch {{ exit 0 }}; if ($payload.fullyIdle -eq $false -or $payload.fully_idle -eq $false) {{ exit 0 }}; if ($env:VIBELINK_SESSION_ID -and $env:VIBELINK_PANE_ID) {{ & {} terminal complete --session $env:VIBELINK_SESSION_ID --pane $env:VIBELINK_PANE_ID --agent {} *> $null }}; exit 0",
+        "$raw=[Console]::In.ReadToEnd(); Write-Output '{{\"decision\":\"\"}}'; try {{ $payload=if ([string]::IsNullOrWhiteSpace($raw)) {{ @{{}} }} else {{ $raw | ConvertFrom-Json }} }} catch {{ exit 0 }}; if ($payload.fullyIdle -eq $false -or $payload.fully_idle -eq $false) {{ exit 0 }}; if ($env:VIBELINK_SESSION_ID -and $env:VIBELINK_PANE_ID) {{ & {} terminal complete --workspace $env:VIBELINK_SESSION_ID --pane $env:VIBELINK_PANE_ID --agent-id {} *> $null }}; exit 0",
         quote_powershell(&cli.to_string_lossy()),
         quote_powershell(spec.id),
     );
@@ -1002,7 +1009,7 @@ fn render_posix_script(spec: &AgentHookSpec) -> Result<String> {
         "if [ -n \"$VIBELINK_SESSION_ID\" ] && [ -n \"$VIBELINK_PANE_ID\" ]; then".to_string(),
     );
     lines.push(format!(
-        "  {} terminal complete --session \"$VIBELINK_SESSION_ID\" --pane \"$VIBELINK_PANE_ID\" --agent {} >/dev/null 2>&1 || true",
+        "  {} terminal complete --workspace \"$VIBELINK_SESSION_ID\" --pane \"$VIBELINK_PANE_ID\" --agent-id {} >/dev/null 2>&1 || true",
         quote_posix(&cli_path),
         quote_posix(spec.id),
     ));
@@ -1015,32 +1022,41 @@ fn render_posix_script(spec: &AgentHookSpec) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn inspect_drop_in_hook(path: &Path) -> Result<HookInspection> {
+fn inspect_drop_in_hook(
+    spec: &AgentHookSpec,
+    kind: DropInKind,
+    path: &Path,
+) -> Result<HookInspection> {
     match generated_file_state(path)? {
         GeneratedFileState::Absent => Ok(HookInspection {
             installed: false,
             blocked_reason: None,
         }),
-        GeneratedFileState::Managed => Ok(HookInspection {
-            installed: true,
-            blocked_reason: None,
-        }),
+        GeneratedFileState::Managed => {
+            rewrite_managed_file_if_stale(path, &render_drop_in_hook(spec, kind)?, false)?;
+            Ok(HookInspection {
+                installed: true,
+                blocked_reason: None,
+            })
+        }
         GeneratedFileState::Conflict => {
             bail!("{} exists but is not owned by VibeLink", path.display())
         }
     }
 }
 
+fn render_drop_in_hook(spec: &AgentHookSpec, kind: DropInKind) -> Result<String> {
+    let cli = hook_cli_path()?;
+    Ok(match kind {
+        DropInKind::Amp => render_amp_plugin(&cli, spec.id),
+        DropInKind::OpenCode | DropInKind::MimoCode => render_opencode_plugin(&cli, spec.id),
+        DropInKind::Pi | DropInKind::Omp => render_pi_extension(&cli, spec.id),
+    })
+}
+
 fn install_drop_in_hook(spec: &AgentHookSpec, kind: DropInKind, path: &Path) -> Result<()> {
     ensure_generated_file_writable(path)?;
-    let cli = hook_cli_path()?;
-    let source = match kind {
-        DropInKind::Amp => render_amp_plugin(&cli, spec.id),
-        DropInKind::OpenCode => render_opencode_plugin(&cli, spec.id),
-        DropInKind::MimoCode => render_opencode_plugin(&cli, spec.id),
-        DropInKind::Pi => render_pi_extension(&cli, spec.id),
-        DropInKind::Omp => render_pi_extension(&cli, spec.id),
-    };
+    let source = render_drop_in_hook(spec, kind)?;
     ensure_parent(path)?;
     fs::write(path, source).with_context(|| format!("write {}", path.display()))?;
     if matches!(kind, DropInKind::Omp) {
@@ -1059,7 +1075,7 @@ fn uninstall_drop_in_hook(_spec: &AgentHookSpec, kind: DropInKind, path: &Path) 
 
 fn render_amp_plugin(cli: &Path, agent_id: &str) -> String {
     format!(
-        "import {{ execFile }} from 'node:child_process'\nimport type {{ PluginAPI }} from '@ampcode/plugin'\n\n// {HOOK_MARKER}\nconst cliPath = {}\nconst agentId = {}\n\nfunction reportCompletion(): void {{\n  if (!process.env.VIBELINK_SESSION_ID || !process.env.VIBELINK_PANE_ID) return\n  try {{\n    const child = execFile(cliPath, ['terminal', 'complete', '--session', process.env.VIBELINK_SESSION_ID, '--pane', process.env.VIBELINK_PANE_ID, '--agent', agentId], {{ windowsHide: true }})\n    child.unref()\n  }} catch {{}}\n}}\n\nexport default function (amp: PluginAPI) {{\n  amp.on('agent.end', (event) => {{\n    if (event?.status === 'cancelled') return\n    reportCompletion()\n  }})\n}}\n",
+        "import {{ execFile }} from 'node:child_process'\nimport type {{ PluginAPI }} from '@ampcode/plugin'\n\n// {HOOK_MARKER}\nconst cliPath = {}\nconst agentId = {}\n\nfunction reportCompletion(): void {{\n  if (!process.env.VIBELINK_SESSION_ID || !process.env.VIBELINK_PANE_ID) return\n  try {{\n    const child = execFile(cliPath, ['terminal', 'complete', '--workspace', process.env.VIBELINK_SESSION_ID, '--pane', process.env.VIBELINK_PANE_ID, '--agent-id', agentId], {{ windowsHide: true }})\n    child.unref()\n  }} catch {{}}\n}}\n\nexport default function (amp: PluginAPI) {{\n  amp.on('agent.end', (event) => {{\n    if (event?.status === 'cancelled') return\n    reportCompletion()\n  }})\n}}\n",
         json_string(&cli.to_string_lossy()),
         json_string(agent_id),
     )
@@ -1083,7 +1099,7 @@ fn remove_legacy_shared_script(spec: &AgentHookSpec, current_app_data_dir: &Path
 
 fn render_opencode_plugin(cli: &Path, agent_id: &str) -> String {
     format!(
-        "// {HOOK_MARKER}\nimport {{ spawn }} from 'node:child_process'\n\nconst cliPath = {}\nconst agentId = {}\n\nfunction reportCompletion() {{\n  if (!process.env.VIBELINK_SESSION_ID || !process.env.VIBELINK_PANE_ID) return\n  try {{\n    const child = spawn(cliPath, ['terminal', 'complete', '--session', process.env.VIBELINK_SESSION_ID, '--pane', process.env.VIBELINK_PANE_ID, '--agent', agentId], {{ detached: true, stdio: 'ignore', windowsHide: true }})\n    child.unref()\n  }} catch {{}}\n}}\n\nexport const VibeLinkCompletion = async ({{ client }}) => ({{\n  event: async ({{ event }}) => {{\n    if (event.type !== 'session.idle') return\n    const sessionID = event.properties?.sessionID\n    if (!sessionID) return\n    try {{\n      const response = await client.session.get({{ path: {{ id: sessionID }} }})\n      const session = response?.data ?? response\n      if (session?.parentID) return\n    }} catch {{\n      return\n    }}\n    reportCompletion()\n  }},\n}})\n",
+        "// {HOOK_MARKER}\nimport {{ spawn }} from 'node:child_process'\n\nconst cliPath = {}\nconst agentId = {}\n\nfunction reportCompletion() {{\n  if (!process.env.VIBELINK_SESSION_ID || !process.env.VIBELINK_PANE_ID) return\n  try {{\n    const child = spawn(cliPath, ['terminal', 'complete', '--workspace', process.env.VIBELINK_SESSION_ID, '--pane', process.env.VIBELINK_PANE_ID, '--agent-id', agentId], {{ detached: true, stdio: 'ignore', windowsHide: true }})\n    child.unref()\n  }} catch {{}}\n}}\n\nexport const VibeLinkCompletion = async ({{ client }}) => ({{\n  event: async ({{ event }}) => {{\n    if (event.type !== 'session.idle') return\n    const sessionID = event.properties?.sessionID\n    if (!sessionID) return\n    try {{\n      const response = await client.session.get({{ path: {{ id: sessionID }} }})\n      const session = response?.data ?? response\n      if (session?.parentID) return\n    }} catch {{\n      return\n    }}\n    reportCompletion()\n  }},\n}})\n",
         json_string(&cli.to_string_lossy()),
         json_string(agent_id),
     )
@@ -1091,7 +1107,7 @@ fn render_opencode_plugin(cli: &Path, agent_id: &str) -> String {
 
 fn render_pi_extension(cli: &Path, agent_id: &str) -> String {
     format!(
-        "import {{ execFile }} from 'node:child_process'\n\n// {HOOK_MARKER}\nconst cliPath = {}\nconst agentId = {}\n\nfunction reportCompletion() {{\n  if (!process.env.VIBELINK_SESSION_ID || !process.env.VIBELINK_PANE_ID) return\n  try {{\n    const child = execFile(cliPath, ['terminal', 'complete', '--session', process.env.VIBELINK_SESSION_ID, '--pane', process.env.VIBELINK_PANE_ID, '--agent', agentId], {{ windowsHide: true }})\n    child.unref()\n  }} catch {{}}\n}}\n\nexport default function (pi) {{\n  let pending = null\n  let settledSupported = false\n\n  const clearPending = () => {{\n    clearTimeout(pending)\n    pending = null\n  }}\n\n  const reportWhenIdle = (ctx) => {{\n    clearPending()\n    const check = () => {{\n      if (typeof ctx?.isIdle === 'function' && !ctx.isIdle()) {{\n        pending = setTimeout(check, 125)\n        return\n      }}\n      pending = null\n      reportCompletion()\n    }}\n    pending = setTimeout(check, 0)\n  }}\n\n  pi.on('agent_start', clearPending)\n  pi.on('session_shutdown', clearPending)\n  pi.on('agent_settled', (_event, _ctx) => {{\n    settledSupported = true\n    clearPending()\n    reportCompletion()\n  }})\n  pi.on('agent_end', (event, ctx) => {{\n    if (event?.reason === 'reload' || settledSupported) return\n    reportWhenIdle(ctx)\n  }})\n}}\n",
+        "import {{ execFile }} from 'node:child_process'\n\n// {HOOK_MARKER}\nconst cliPath = {}\nconst agentId = {}\n\nfunction reportCompletion() {{\n  if (!process.env.VIBELINK_SESSION_ID || !process.env.VIBELINK_PANE_ID) return\n  try {{\n    const child = execFile(cliPath, ['terminal', 'complete', '--workspace', process.env.VIBELINK_SESSION_ID, '--pane', process.env.VIBELINK_PANE_ID, '--agent-id', agentId], {{ windowsHide: true }})\n    child.unref()\n  }} catch {{}}\n}}\n\nexport default function (pi) {{\n  let pending = null\n  let settledSupported = false\n\n  const clearPending = () => {{\n    clearTimeout(pending)\n    pending = null\n  }}\n\n  const reportWhenIdle = (ctx) => {{\n    clearPending()\n    const check = () => {{\n      if (typeof ctx?.isIdle === 'function' && !ctx.isIdle()) {{\n        pending = setTimeout(check, 125)\n        return\n      }}\n      pending = null\n      reportCompletion()\n    }}\n    pending = setTimeout(check, 0)\n  }}\n\n  pi.on('agent_start', clearPending)\n  pi.on('session_shutdown', clearPending)\n  pi.on('agent_settled', (_event, _ctx) => {{\n    settledSupported = true\n    clearPending()\n    reportCompletion()\n  }})\n  pi.on('agent_end', (event, ctx) => {{\n    if (event?.reason === 'reload' || settledSupported) return\n    reportWhenIdle(ctx)\n  }})\n}}\n",
         json_string(&cli.to_string_lossy()),
         json_string(agent_id),
     )
@@ -1120,9 +1136,13 @@ fn inspect_kimi_hook(
         bail!("{} exists but is not owned by VibeLink", script.display());
     }
     let expected_command = kimi_command(&script);
+    let installed = block.is_some_and(|block| block.contains(&expected_command))
+        && script_state == GeneratedFileState::Managed;
+    if installed {
+        rewrite_managed_file_if_stale(&script, &render_managed_script(spec)?, true)?;
+    }
     Ok(HookInspection {
-        installed: block.is_some_and(|block| block.contains(&expected_command))
-            && script_state == GeneratedFileState::Managed,
+        installed,
         blocked_reason: None,
     })
 }
@@ -1221,17 +1241,25 @@ fn inspect_hermes_hook(config_path: &Path) -> Result<HookInspection> {
     let plugin_dir = hermes_plugin_dir(config_path)?;
     let manifest = plugin_dir.join("plugin.yaml");
     let init = plugin_dir.join("__init__.py");
-    for path in [&manifest, &init] {
-        if generated_file_state(path)? == GeneratedFileState::Conflict {
+    let manifest_state = generated_file_state(&manifest)?;
+    let init_state = generated_file_state(&init)?;
+    for (path, state) in [(&manifest, manifest_state), (&init, init_state)] {
+        if state == GeneratedFileState::Conflict {
             bail!("{} exists but is not owned by VibeLink", path.display());
         }
     }
     let config = read_hermes_config(config_path)?;
     let enabled = hermes_plugin_enabled(&config)?;
+    let installed = enabled
+        && manifest_state == GeneratedFileState::Managed
+        && init_state == GeneratedFileState::Managed;
+    if installed {
+        rewrite_managed_file_if_stale(&manifest, &render_hermes_manifest(), false)?;
+        let cli = hook_cli_path()?;
+        rewrite_managed_file_if_stale(&init, &render_hermes_plugin(&cli), false)?;
+    }
     Ok(HookInspection {
-        installed: enabled
-            && generated_file_state(&manifest)? == GeneratedFileState::Managed
-            && generated_file_state(&init)? == GeneratedFileState::Managed,
+        installed,
         blocked_reason: None,
     })
 }
@@ -1389,7 +1417,7 @@ fn render_hermes_manifest() -> String {
 
 fn render_hermes_plugin(cli: &Path) -> String {
     format!(
-        "# {HOOK_MARKER}\nfrom __future__ import annotations\n\nimport os\nimport subprocess\nimport threading\nfrom typing import Any\n\nCLI_PATH = {}\nAGENT_ID = \"hermes\"\n_lock = threading.Lock()\n_timer: threading.Timer | None = None\n_reported = False\n\ndef _cancel_pending(*_args: Any, **_kwargs: Any) -> None:\n    global _timer, _reported\n    with _lock:\n        timer = _timer\n        _timer = None\n        _reported = False\n    if timer is not None:\n        timer.cancel()\n\ndef _report_completion() -> None:\n    global _timer, _reported\n    with _lock:\n        if _reported:\n            return\n        _reported = True\n        _timer = None\n    session_id = os.environ.get(\"VIBELINK_SESSION_ID\", \"\")\n    pane_id = os.environ.get(\"VIBELINK_PANE_ID\", \"\")\n    if not session_id or not pane_id:\n        return\n    try:\n        subprocess.Popen(\n            [CLI_PATH, \"terminal\", \"complete\", \"--session\", session_id, \"--pane\", pane_id, \"--agent\", AGENT_ID],\n            stdin=subprocess.DEVNULL,\n            stdout=subprocess.DEVNULL,\n            stderr=subprocess.DEVNULL,\n            creationflags=getattr(subprocess, \"CREATE_NO_WINDOW\", 0),\n        )\n    except OSError:\n        pass\n\ndef _schedule_completion(**_kwargs: Any) -> None:\n    global _timer\n    with _lock:\n        if _timer is not None:\n            _timer.cancel()\n        _timer = threading.Timer(0.75, _report_completion)\n        _timer.daemon = True\n        _timer.start()\n\ndef _session_end(**_kwargs: Any) -> None:\n    _cancel_pending()\n    _report_completion()\n\ndef register(ctx: Any) -> None:\n    ctx.register_hook(\"pre_llm_call\", _cancel_pending)\n    ctx.register_hook(\"pre_tool_call\", _cancel_pending)\n    ctx.register_hook(\"post_llm_call\", _schedule_completion)\n    ctx.register_hook(\"on_session_end\", _session_end)\n",
+        "# {HOOK_MARKER}\nfrom __future__ import annotations\n\nimport os\nimport subprocess\nimport threading\nfrom typing import Any\n\nCLI_PATH = {}\nAGENT_ID = \"hermes\"\n_lock = threading.Lock()\n_timer: threading.Timer | None = None\n_reported = False\n\ndef _cancel_pending(*_args: Any, **_kwargs: Any) -> None:\n    global _timer, _reported\n    with _lock:\n        timer = _timer\n        _timer = None\n        _reported = False\n    if timer is not None:\n        timer.cancel()\n\ndef _report_completion() -> None:\n    global _timer, _reported\n    with _lock:\n        if _reported:\n            return\n        _reported = True\n        _timer = None\n    session_id = os.environ.get(\"VIBELINK_SESSION_ID\", \"\")\n    pane_id = os.environ.get(\"VIBELINK_PANE_ID\", \"\")\n    if not session_id or not pane_id:\n        return\n    try:\n        subprocess.Popen(\n            [CLI_PATH, \"terminal\", \"complete\", \"--workspace\", session_id, \"--pane\", pane_id, \"--agent-id\", AGENT_ID],\n            stdin=subprocess.DEVNULL,\n            stdout=subprocess.DEVNULL,\n            stderr=subprocess.DEVNULL,\n            creationflags=getattr(subprocess, \"CREATE_NO_WINDOW\", 0),\n        )\n    except OSError:\n        pass\n\ndef _schedule_completion(**_kwargs: Any) -> None:\n    global _timer\n    with _lock:\n        if _timer is not None:\n            _timer.cancel()\n        _timer = threading.Timer(0.75, _report_completion)\n        _timer.daemon = True\n        _timer.start()\n\ndef _session_end(**_kwargs: Any) -> None:\n    _cancel_pending()\n    _report_completion()\n\ndef register(ctx: Any) -> None:\n    ctx.register_hook(\"pre_llm_call\", _cancel_pending)\n    ctx.register_hook(\"pre_tool_call\", _cancel_pending)\n    ctx.register_hook(\"post_llm_call\", _schedule_completion)\n    ctx.register_hook(\"on_session_end\", _session_end)\n",
         json_string(&cli.to_string_lossy()),
     )
 }
@@ -1420,6 +1448,21 @@ fn content_is_vibelink_managed(content: &str) -> bool {
         || (content.contains("vibelink-agent-hook v")
             && (content.contains("generated by VibeLink")
                 || content.contains("retired compatibility launcher")))
+}
+
+fn rewrite_managed_file_if_stale(path: &Path, expected: &str, executable: bool) -> Result<()> {
+    if generated_file_state(path)? != GeneratedFileState::Managed {
+        return Ok(());
+    }
+    let current = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    if current == expected {
+        return Ok(());
+    }
+    fs::write(path, expected).with_context(|| format!("rewrite {}", path.display()))?;
+    if executable {
+        set_executable_if_posix(path)?;
+    }
+    Ok(())
 }
 
 fn ensure_generated_file_writable(path: &Path) -> Result<()> {
@@ -1874,6 +1917,38 @@ mod tests {
             .find(|spec| spec.id == id)
             .expect("agent hook spec")
     }
+    fn rendered_completion_artifact(spec: &AgentHookSpec) -> String {
+        let mut source = match spec.kind {
+            HookKind::Json(_) | HookKind::KimiToml => {
+                render_managed_script(spec).expect("render managed script")
+            }
+            HookKind::DropIn(kind) => {
+                render_drop_in_hook(spec, kind).expect("render drop-in hook")
+            }
+            HookKind::HermesPlugin => {
+                let cli = hook_cli_path().expect("resolve hook cli");
+                render_hermes_plugin(&cli)
+            }
+        };
+        if cfg!(windows) && spec.id == "antigravity" {
+            source = decode_powershell_encoded_command(&source)
+                .expect("decode Antigravity completion command");
+        }
+        source
+    }
+
+    fn contains_cli_flag(source: &str, flag: &str) -> bool {
+        source.match_indices(flag).any(|(index, _)| {
+            let before = source[..index].chars().next_back();
+            let after = source[index + flag.len()..].chars().next();
+            let is_name_character = |character: char| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            };
+            before.is_none_or(|character| !is_name_character(character))
+                && after.is_none_or(|character| !is_name_character(character))
+        })
+    }
+
 
     #[test]
     fn supported_hook_agents_match_orca_event_source_parity() {
@@ -2003,6 +2078,44 @@ mod tests {
         assert!(script.contains(&cli.display().to_string()));
         assert!(script.contains("terminal complete"));
     }
+    #[test]
+    fn every_generated_completion_command_matches_the_dedicated_cli_contract() {
+        for spec in AGENT_HOOK_SPECS {
+            let source = rendered_completion_artifact(spec);
+            for flag in ["--workspace", "--pane", "--agent-id"] {
+                assert!(
+                    contains_cli_flag(&source, flag),
+                    "{} generated hook is missing {flag}: {source}",
+                    spec.id
+                );
+            }
+            for legacy_flag in ["--session", "--agent"] {
+                assert!(
+                    !contains_cli_flag(&source, legacy_flag),
+                    "{} generated hook still uses {legacy_flag}: {source}",
+                    spec.id
+                );
+            }
+
+            crate::dedicated_cli::parse_args([
+                "terminal",
+                "complete",
+                "--workspace",
+                "workspace-1",
+                "--pane",
+                "pane-1",
+                "--agent-id",
+                spec.id,
+            ])
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} generated completion argv must satisfy the dedicated CLI contract: {}",
+                    spec.id, error.message
+                )
+            });
+        }
+    }
+
 
     #[test]
     fn antigravity_script_rejects_non_idle_stop() {
@@ -2037,6 +2150,39 @@ mod tests {
         fs::remove_dir_all(&dir).expect("remove temp dir");
     }
     #[test]
+    fn status_inspection_repairs_stale_managed_drop_in() {
+        let dir = std::env::temp_dir().join(format!(
+            "vibelink-agent-hook-stale-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("plugin.ts");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        fs::write(
+            &path,
+            format!(
+                "// {HOOK_MARKER}\nconst argv = ['terminal', 'complete', '--session', 'old-workspace', '--pane', 'old-pane', '--agent', 'amp']\n"
+            ),
+        )
+        .expect("write stale managed plugin");
+
+        let amp = spec("amp");
+        let HookKind::DropIn(kind) = amp.kind else {
+            panic!("Amp drop-in spec");
+        };
+        assert!(
+            inspect_drop_in_hook(amp, kind, &path)
+                .expect("inspect stale managed plugin")
+                .installed
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read repaired plugin"),
+            render_drop_in_hook(amp, kind).expect("render current plugin")
+        );
+
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
     fn legacy_generated_hooks_are_migratable() {
         assert!(content_is_vibelink_managed(
             "// vibelink-agent-hook v3 - generated by VibeLink. Safe to delete."
@@ -2066,12 +2212,22 @@ mod tests {
                     write_json_config(&config_path, &initial).expect("write fixture config");
                     install_json_hook(spec, json_spec, &app_data, &config_path)
                         .expect("install JSON hook");
+                    let script = script_path(spec, &app_data);
+                    fs::write(
+                        &script,
+                        format!("rem {HOOK_MARKER}\nterminal complete --session old --pane old --agent {}\n", spec.id),
+                    )
+                    .expect("write stale managed script");
                     assert!(
                         inspect_json_hook(spec, json_spec, &app_data, &config_path)
                             .expect("inspect JSON hook")
                             .installed,
                         "{} should install",
                         spec.id
+                    );
+                    assert_eq!(
+                        fs::read_to_string(&script).expect("read repaired managed script"),
+                        render_managed_script(spec).expect("render current managed script"),
                     );
                     uninstall_json_hook(spec, json_spec, &app_data, &config_path)
                         .expect("remove JSON hook");
@@ -2095,10 +2251,19 @@ mod tests {
                         install_drop_in_hook(spec, kind, &config_path)
                             .expect("install drop-in hook");
                     }
+                    fs::write(
+                        &config_path,
+                        format!("// {HOOK_MARKER}\nconst argv = ['terminal', 'complete', '--session', 'old', '--pane', 'old', '--agent', '{}']\n", spec.id),
+                    )
+                    .expect("write stale managed drop-in");
                     assert!(
-                        inspect_drop_in_hook(&config_path)
+                        inspect_drop_in_hook(spec, kind, &config_path)
                             .expect("inspect drop-in hook")
                             .installed
+                    );
+                    assert_eq!(
+                        fs::read_to_string(&config_path).expect("read repaired drop-in"),
+                        render_drop_in_hook(spec, kind).expect("render current drop-in"),
                     );
                     remove_generated_file_if_managed(&config_path).expect("remove drop-in hook");
                     assert!(!config_path.exists());
@@ -2107,10 +2272,20 @@ mod tests {
                     ensure_parent(&config_path).expect("create Kimi config parent");
                     fs::write(&config_path, "model = \"moonshot\"\n").expect("write Kimi fixture");
                     install_kimi_hook(spec, &app_data, &config_path).expect("install Kimi hook");
+                    let script = script_path(spec, &app_data);
+                    fs::write(
+                        &script,
+                        format!("# {HOOK_MARKER}\nterminal complete --session old --pane old --agent {}\n", spec.id),
+                    )
+                    .expect("write stale Kimi script");
                     assert!(
                         inspect_kimi_hook(spec, &app_data, &config_path)
                             .expect("inspect Kimi hook")
                             .installed
+                    );
+                    assert_eq!(
+                        fs::read_to_string(&script).expect("read repaired Kimi script"),
+                        render_managed_script(spec).expect("render current Kimi script"),
                     );
                     uninstall_kimi_hook(spec, &app_data, &config_path).expect("remove Kimi hook");
                     let restored = fs::read_to_string(&config_path).expect("read Kimi config");
@@ -2125,10 +2300,29 @@ mod tests {
                     )
                     .expect("write Hermes fixture");
                     install_hermes_hook(&config_path).expect("install Hermes hook");
+                    let plugin_dir = hermes_plugin_dir(&config_path).expect("Hermes plugin dir");
+                    let manifest = plugin_dir.join("plugin.yaml");
+                    let init = plugin_dir.join("__init__.py");
+                    fs::write(&manifest, format!("# {HOOK_MARKER}\nversion: old\n"))
+                        .expect("write stale Hermes manifest");
+                    fs::write(
+                        &init,
+                        format!("# {HOOK_MARKER}\nargv = ['terminal', 'complete', '--session', 'old', '--pane', 'old', '--agent', 'hermes']\n"),
+                    )
+                    .expect("write stale Hermes plugin");
                     assert!(
                         inspect_hermes_hook(&config_path)
                             .expect("inspect Hermes hook")
                             .installed
+                    );
+                    assert_eq!(
+                        fs::read_to_string(&manifest).expect("read repaired Hermes manifest"),
+                        render_hermes_manifest(),
+                    );
+                    let cli = hook_cli_path().expect("resolve hook cli");
+                    assert_eq!(
+                        fs::read_to_string(&init).expect("read repaired Hermes plugin"),
+                        render_hermes_plugin(&cli),
                     );
                     uninstall_hermes_hook(&config_path).expect("remove Hermes hook");
                     let restored = fs::read_to_string(&config_path).expect("read Hermes config");

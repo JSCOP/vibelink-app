@@ -6,6 +6,8 @@ import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
 import { useWorkspaceStore } from '../../state/store'
 import { ProfileIcon } from '../ProfileIcon'
 import { groupOpenContentItems } from './openContentGroups'
+import { useAgentPaneStatuses } from '../../state/useAgentPaneStatuses'
+import { aggregateAgentPaneStatus, type AgentPaneStatus } from '../../state/agentPaneStatus'
 
 export type OpenWorkspaceItemsProps = {
   completionHighlights: Readonly<Record<string, unknown>>
@@ -33,20 +35,29 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
   const actions = useContext(WorkspaceContentActionsContext)
   const items = useSyncExternalStore(subscribeOpenContent, getOpenContentSnapshot, getOpenContentSnapshot)
   const groups = useMemo(() => groupOpenContentItems(items), [items])
+  const agentStatuses = useAgentPaneStatuses()
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => readCollapsedGroups(activeSessionId ?? undefined))
   if (groups.length === 0) return null
 
+  const paneIdOf = (item: OpenContentItem) => item.kind === 'terminal' && item.panelId.startsWith(terminalPanelIdPrefix)
+    ? item.panelId.slice(terminalPanelIdPrefix.length) || null
+    : null
+
   const responseCompleteFor = (item: OpenContentItem) => {
-    const paneId = item.kind === 'terminal' && item.panelId.startsWith(terminalPanelIdPrefix)
-      ? item.panelId.slice(terminalPanelIdPrefix.length) || null
-      : null
+    const paneId = paneIdOf(item)
     return Boolean(paneId && completionHighlights[paneId])
+  }
+
+  const agentStatusFor = (item: OpenContentItem): AgentPaneStatus | null => {
+    const paneId = paneIdOf(item)
+    return paneId ? agentStatuses[paneId] ?? null : null
   }
 
   const activate = (item: OpenContentItem) => actions?.activateContent(item.panelId)
 
   const renderItem = (item: OpenContentItem) => {
     const responseComplete = responseCompleteFor(item)
+    const agentStatus = agentStatusFor(item)
     return (
       <div
         key={item.panelId}
@@ -68,8 +79,8 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
         <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={item.icon} size={11} strokeWidth={1.8} /></span>
         <span className="workspace-open-content-title" title={item.title}>{item.title}</span>
         <span
-          className={`workspace-open-content-status${item.active ? ' is-active' : ''}${responseComplete ? ' is-complete' : ''}`}
-          title={responseComplete ? 'Response complete' : item.active ? 'Active item' : 'Open item'}
+          className={`workspace-open-content-status${item.active ? ' is-active' : ''}${responseComplete ? ' is-complete' : ''}${agentStatus ? ` is-agent-${agentStatus.state}${agentStatus.pulsing ? ' is-pulsing' : ''}` : ''}`}
+          title={agentStatus ? agentStatus.label : responseComplete ? 'Response complete' : item.active ? 'Active item' : 'Open item'}
           aria-hidden="true"
         />
       </div>
@@ -94,6 +105,7 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
         const active = group.window.active || group.panes.some((pane) => pane.active)
         const completionCount = group.panes.filter(responseCompleteFor).length
         const hasCompletion = completionCount > 0
+        const groupStatus = aggregateAgentPaneStatus(group.panes.flatMap((pane) => agentStatusFor(pane) ?? []))
         return (
           <div key={group.window.panelId} className={`workspace-open-content-group${active ? ' is-active' : ''}${hasCompletion ? ' has-completions' : ''}${collapsed ? ' is-collapsed' : ''}`} role="listitem">
             <button
@@ -107,18 +119,19 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
               <span className="workspace-open-content-group-chevron" aria-hidden="true">{collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}</span>
               <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={group.window.icon} size={11} strokeWidth={1.8} /></span>
               <span className="workspace-open-content-title" title={group.window.title}>{group.window.title}</span>
-              <span className={`workspace-open-content-status${active ? ' is-active' : ''}${hasCompletion ? ' is-complete' : ''}`} title={hasCompletion ? `${completionCount} completed ${completionCount === 1 ? 'pane' : 'panes'}` : active ? 'Active terminal window' : 'Open terminal window'} aria-hidden="true" />
+              <span className={`workspace-open-content-status${active ? ' is-active' : ''}${hasCompletion ? ' is-complete' : ''}${groupStatus ? ` is-agent-${groupStatus.state}${groupStatus.pulsing ? ' is-pulsing' : ''}` : ''}`} title={groupStatus ? `${group.window.title} · ${groupStatus.label}` : hasCompletion ? `${completionCount} completed ${completionCount === 1 ? 'pane' : 'panes'}` : active ? 'Active terminal window' : 'Open terminal window'} aria-hidden="true" />
             </button>
             {collapsed ? (
               <div className="workspace-open-content-icon-strip" role="group" aria-label={`${group.window.title} programs`}>
                 {group.panes.map((pane) => {
                   const responseComplete = responseCompleteFor(pane)
+                  const paneStatus = agentStatusFor(pane)
                   return (
                     <button
                       key={pane.panelId}
                       type="button"
                       className={`workspace-open-content-icon-button${pane.active ? ' is-active' : ''}${responseComplete ? ' is-complete' : ''}`}
-                      title={pane.title}
+                      title={paneStatus ? `${pane.title} · ${paneStatus.label}` : pane.title}
                       aria-label={`Activate ${pane.title}`}
                       aria-current={pane.active ? 'true' : undefined}
                       disabled={!actions}
@@ -126,7 +139,7 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
                       onClick={(event) => { event.stopPropagation(); activate(pane) }}
                     >
                       <ProfileIcon name={pane.icon} size={12} strokeWidth={1.8} />
-                      <span className="workspace-open-content-icon-button-status" aria-hidden="true" />
+                      <span className={`workspace-open-content-icon-button-status${paneStatus ? ` is-agent-${paneStatus.state}${paneStatus.pulsing ? ' is-pulsing' : ''}` : ''}`} aria-hidden="true" />
                     </button>
                   )
                 })}

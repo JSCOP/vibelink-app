@@ -3,7 +3,6 @@ import {
   builtInCompletionSounds,
   customCompletionSoundValidationError,
   defaultCompletionSoundId,
-  hasNewCompletionHighlight,
   isCompletionSoundId,
   maxCustomCompletionSoundBytes,
   playCompletionSound,
@@ -42,14 +41,6 @@ describe('completion sounds', () => {
     expect(customCompletionSoundValidationError({ name: 'done.exe', size: 128 })).toMatch(/MP3/)
     expect(customCompletionSoundValidationError({ name: 'done.wav', size: 0 })).toMatch(/empty/)
     expect(customCompletionSoundValidationError({ name: 'done.wav', size: maxCustomCompletionSoundBytes + 1 })).toMatch(/10 MB/)
-  })
-
-  test('recognizes only newly created or refreshed completion highlights', () => {
-    const previous = { paneA: { completedAt: 10 } }
-    expect(hasNewCompletionHighlight(previous, previous)).toBe(false)
-    expect(hasNewCompletionHighlight({ ...previous, paneB: { completedAt: 11 } }, previous)).toBe(true)
-    expect(hasNewCompletionHighlight({ paneA: { completedAt: 12 } }, previous)).toBe(true)
-    expect(hasNewCompletionHighlight({}, previous)).toBe(false)
   })
 
   test('primes and reuses one audio context for later completion playback', async () => {

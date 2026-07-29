@@ -5620,15 +5620,23 @@ button.git-window-primary-action,
   right: 4px;
 }
 
+/* One vocabulary across every agent dot: working is yellow, finished is green,
+ * and an acknowledged pane simply loses its state class and falls back to the
+ * muted base. Waiting shifts toward red so "act now" never reads as "busy". */
 .workspace-agent-status-dot.is-waiting {
-  background: var(--vibelink-warning);
+  background: color-mix(in srgb, var(--vibelink-warning) 45%, var(--vibelink-danger));
 }
+
 .workspace-agent-status-dot.is-working {
-  background: var(--vibelink-accent);
+  background: var(--vibelink-warning);
 }
 
 .workspace-agent-status-dot.is-error {
   background: var(--vibelink-danger);
+}
+
+.workspace-agent-status-dot.is-done {
+  background: var(--vibelink-success, #3fb950);
 }
 
 .workspace-agent-status-dot.is-pulsing {
@@ -6214,15 +6222,56 @@ button.git-window-primary-action,
   width: 4px;
 }
 
+/* Green means "the agent finished", nothing else. Selection is already carried
+ * by the row background and aria-current, so an acknowledged (open, checked)
+ * terminal keeps the neutral dot. */
 .workspace-open-content-status.is-active {
-  background: var(--vibelink-success, #3fb950);
-  opacity: 1;
+  background: var(--vibelink-muted);
+  opacity: 0.8;
 }
 
 .workspace-open-content-status.is-complete {
   background: var(--vibelink-alarm-highlight);
   box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
   opacity: 1;
+}
+
+/* Agent state outranks "active"/"complete" on the dot: the row already carries
+ * selection and alert chrome, so the dot is free to answer the only question
+ * the sidebar cannot otherwise answer — is this agent still working? */
+.workspace-open-content-status.is-agent-working {
+  background: var(--vibelink-warning);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-warning) 55%, transparent);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-agent-waiting {
+  background: color-mix(in srgb, var(--vibelink-warning) 45%, var(--vibelink-danger));
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-danger) 45%, transparent);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-agent-error {
+  background: var(--vibelink-danger);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-agent-done {
+  background: var(--vibelink-success, #3fb950);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success, #3fb950) 55%, transparent);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-pulsing {
+  animation: workspace-agent-status-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-open-content-status.is-pulsing {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .profile-brand-icon {
@@ -6389,12 +6438,46 @@ button.git-window-primary-action,
 }
 
 .workspace-open-content-icon-button.is-active .workspace-open-content-icon-button-status {
-  background: var(--vibelink-success, #3fb950);
+  background: var(--vibelink-muted);
 }
 
 .workspace-open-content-icon-button.is-complete .workspace-open-content-icon-button-status {
   background: var(--vibelink-alarm-highlight);
   box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
+}
+
+/* Declared after the active/complete rules so equal specificity resolves in
+ * favour of live agent state on a collapsed terminal group's icon strip. */
+.workspace-open-content-icon-button-status.is-agent-working {
+  background: var(--vibelink-warning);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-warning) 55%, transparent);
+}
+
+.workspace-open-content-icon-button-status.is-agent-waiting {
+  background: color-mix(in srgb, var(--vibelink-warning) 45%, var(--vibelink-danger));
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-danger) 45%, transparent);
+}
+
+.workspace-open-content-icon-button-status.is-agent-error {
+  background: var(--vibelink-danger);
+  box-shadow: none;
+}
+
+.workspace-open-content-icon-button-status.is-agent-done {
+  background: var(--vibelink-success, #3fb950);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success, #3fb950) 55%, transparent);
+}
+
+.workspace-open-content-icon-button-status.is-pulsing {
+  animation: workspace-agent-status-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-open-content-icon-button-status.is-pulsing {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .workspace-context-menu-backdrop {

@@ -153,6 +153,7 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'notifications', label: 'Completion alert', keywords: 'response complete highlight 완료 알림' },
   { section: 'notifications', label: 'Completion sound & volume', keywords: 'play audio sound volume 소리 볼륨' },
   { section: 'notifications', label: 'Custom sound file', keywords: 'add file mp3 wav 파일' },
+  { section: 'notifications', label: 'Desktop notification', keywords: 'windows toast os banner background 윈도우 알림 데스크톱' },
   { section: 'agents', label: 'Installed agents', keywords: 'claude codex omp opencode gemini cursor 설치 에이전트' },
   { section: 'agents', label: 'Agent hooks', keywords: 'install completion hooks 후크 설치' },
   { section: 'model', label: 'Hermes runtime', keywords: 'hermes-acp path command override override 헤르메스 경로' },

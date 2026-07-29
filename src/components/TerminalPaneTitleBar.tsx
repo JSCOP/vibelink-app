@@ -5,6 +5,8 @@ import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useWorkspaceContentActions } from '../layout/contentActions'
 import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
+import { agentPaneStatusClassName } from '../state/agentPaneStatus'
+import { useAgentPaneStatus } from '../state/useAgentPaneStatuses'
 
 type TerminalPaneTitleBarProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
 
@@ -19,6 +21,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
   const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId ? Boolean(state.paneCompletionHighlights[paneId]) : false)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
+  const agentStatus = useAgentPaneStatus(paneId)
   const [title, setTitle] = useState(api.title ?? content?.title ?? 'Shell')
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
@@ -54,7 +57,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
     else if (event.key === 'Escape') { event.preventDefault(); setDraftTitle(title); setIsEditing(false) }
   }
 
-  const accessibleTitle = [title, role ? `role ${role}` : ''].filter(Boolean).join(' · ')
+  const accessibleTitle = [title, role ? `role ${role}` : '', agentStatus?.label ?? ''].filter(Boolean).join(' · ')
 
   return (
     <div
@@ -68,6 +71,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
       aria-label={accessibleTitle}
     >
       <span aria-hidden="true"><ProfileIcon name={content?.icon} size={13} className="terminal-tab-icon" /></span>
+      {agentStatus ? <span className={agentPaneStatusClassName(agentStatus)} title={agentStatus.label} aria-label={agentStatus.label} /> : null}
       <span className={`terminal-tab-role${role ? '' : ' terminal-tab-role-unset'}`} title={role ? `Pane role: ${role}` : 'No pane role assigned'}>{role ?? 'No role'}</span>
       {isEditing && paneId ? (
         <input

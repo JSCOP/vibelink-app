@@ -9,6 +9,7 @@ import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } fro
 import { authorizationErrorMessage } from './licenseGate'
 import type { Settings } from './profiles'
 import type { AttentionSnapshot } from './worktreeAttention'
+import type { AgentPaneActivity } from './agentPaneStatus'
 import type { WorktreeBlockerKind, WorktreeCheckpoint, WorktreeCheckpointKind, WorktreeCreateRequest, WorktreeCreateResult, WorktreeProjection, WorktreeRecord, WorktreeRemovalPreflight, WorktreeRemovalResult, WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetupPolicy } from '../ipc/worktrees'
 import { cancelWorktreeOperation, createWorktree, createWorktreeCheckpoint, importWorktree, listWorktrees, moveWorktree, preflightWorktreeRemoval as preflightWorktreeRemovalIpc, putWorktreeReviewComment as putWorktreeReviewCommentIpc, reconcileWorktrees, removeWorktree, setWorktreeMetadata as setWorktreeMetadataIpc } from '../ipc/worktrees'
 import type { LegacyWorkspaceWorktree, PendingWorktreeCreation } from './worktrees'
@@ -122,9 +123,13 @@ type WorkspaceState = {
   activePaneId?: string
   paneCompletionHighlights: Record<string, PaneCompletionHighlight>
   paneReviewMarkers: Record<string, PaneReviewMarker>
+  /** Panes whose agent turn VibeLink observed starting locally. Cleared when
+   *  the turn completes; see `agentPaneStatus.resolveAgentPaneStatus`. */
+  paneAgentActivity: Record<string, AgentPaneActivity>
   capturesByPane: Record<string, string[]>
   recentCaptures: string[]
   setActivePaneId: (paneId?: string) => void
+  notePaneAgentTurnStart: (paneId: string) => void
   markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource, sessionId?: string) => void
   clearPaneCompletionHighlight: (paneId: string) => void
   togglePaneReviewed: (paneId: string) => void
@@ -257,6 +262,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activePaneId: undefined,
   paneCompletionHighlights: loadPaneCompletionHighlights(),
   paneReviewMarkers: loadPaneReviewMarkers(),
+  paneAgentActivity: {},
   capturesByPane: {},
   recentCaptures: [],
 
@@ -777,6 +783,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         activePaneId: state.activePaneId === paneId ? undefined : state.activePaneId,
         paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
         paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
+        paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
       }
     })
     await get().refreshSessions()
@@ -788,6 +795,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       panes: state.activeSessionId === sessionId ? {} : state.panes,
       paneLifecycle: state.activeSessionId === sessionId ? {} : state.paneLifecycle,
       activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
+      paneAgentActivity: state.activeSessionId === sessionId ? {} : state.paneAgentActivity,
       paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
       paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
     }))
@@ -836,6 +844,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
   setActivePaneId: (paneId) => set({ activePaneId: paneId }),
+  // A turn only "starts" for a live agent pane in the attached workspace; the
+  // tracker never observes anything else, and a stray entry would keep an
+  // unrelated pane spinning.
+  notePaneAgentTurnStart: (paneId) => set((state) => {
+    const pane = state.panes[paneId]
+    if (!pane?.alive || !isAgentPane(pane, state.settings)) return {}
+    return { paneAgentActivity: { ...state.paneAgentActivity, [paneId]: { startedAt: Date.now() } } }
+  }),
   markPaneResponseComplete: (paneId, source = 'agent-response', reportedSessionId) => set((state) => {
     const sessionId = reportedSessionId ?? state.activeSessionId
     if (!sessionId) return {}
@@ -850,6 +866,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return {}
     }
     return {
+      paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
       paneCompletionHighlights: {
         ...state.paneCompletionHighlights,
         [paneId]: { completedAt: Date.now(), source, sessionId },

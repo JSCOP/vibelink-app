@@ -18,6 +18,7 @@
     "core:window:allow-is-maximized",
     "window-state:default",
     "dialog:default",
+    "notification:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister"
   ]

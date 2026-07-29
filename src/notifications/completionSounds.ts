@@ -30,10 +30,6 @@ type StoredCustomCompletionSound = CustomCompletionSound & {
   blob: Blob
 }
 
-type CompletionHighlight = {
-  completedAt: number
-}
-
 type Tone = {
   frequency: number
   start: number
@@ -101,13 +97,6 @@ export function isCompletionSoundId(value: unknown): value is CompletionSoundId 
 
 function isCustomCompletionSoundId(value: CompletionSoundId): value is `custom:${string}` {
   return value.startsWith('custom:')
-}
-
-export function hasNewCompletionHighlight(
-  current: Readonly<Record<string, CompletionHighlight>>,
-  previous: Readonly<Record<string, CompletionHighlight>>,
-): boolean {
-  return Object.entries(current).some(([paneId, highlight]) => previous[paneId]?.completedAt !== highlight.completedAt)
 }
 
 export function customCompletionSoundValidationError(file: Pick<File, 'name' | 'size'>): string | null {

@@ -50,7 +50,8 @@ import { isAppLocked } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
 import { desktopSelectionPayload } from './remote/desktopSelection'
-import { hasNewCompletionHighlight, playCompletionSound, prepareCompletionSoundPlayback } from './notifications/completionSounds'
+import { playCompletionSound, prepareCompletionSoundPlayback } from './notifications/completionSounds'
+import { newCompletionPaneIds, notifyPaneCompletion } from './notifications/completionNotifications'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -206,8 +207,26 @@ function App() {
   }, [])
 
   useEffect(() => useWorkspaceStore.subscribe((state, previousState) => {
-    if (!hasNewCompletionHighlight(state.paneCompletionHighlights, previousState.paneCompletionHighlights)) return
+    const completedPaneIds = newCompletionPaneIds(state.paneCompletionHighlights, previousState.paneCompletionHighlights)
+    if (completedPaneIds.length === 0) return
     void playCompletionSound(state.settings).catch((caught) => console.warn('Failed to play completion sound', caught))
+    // One toast per finished pane, with the pane's own workspace in the title:
+    // a hook signal can arrive for a workspace the user already left behind.
+    for (const paneId of completedPaneIds) {
+      const highlight = state.paneCompletionHighlights[paneId]
+      if (!highlight) continue
+      const workspace = state.sessions.find((session) => session.id === highlight.sessionId)
+      void notifyPaneCompletion({
+        paneId,
+        paneTitle: state.panes[paneId]?.config.title ?? 'Terminal',
+        workspaceName: workspace?.name ?? 'VibeLink',
+        agentName: highlight.source === 'task-done' ? 'Assigned task' : undefined,
+      }, {
+        settings: state.settings,
+        windowFocused: document.hasFocus(),
+        paneVisible: state.activeSessionId === highlight.sessionId && state.activePaneId === paneId,
+      }).catch((caught) => console.warn('Failed to raise completion notification', caught))
+    }
   }), [])
 
   useEffect(() => {
@@ -306,7 +325,7 @@ function App() {
         const pane = state.panes[paneId]
         return Boolean(pane && isAgentPane(pane, state.settings))
       },
-      onResponseStart: () => {},
+      onResponseStart: (paneId) => useWorkspaceStore.getState().notePaneAgentTurnStart(paneId),
       onResponseComplete: (paneId) => useWorkspaceStore.getState().markPaneResponseComplete(paneId),
     })
     let worktreeRefresh = Promise.resolve()

@@ -924,6 +924,19 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   ))}
                   {completionSoundMessage ? <SettingsMessage icon={Info}>{completionSoundMessage}</SettingsMessage> : null}
                 </SettingsCard>
+                <SettingsCard
+                  icon={Bell}
+                  title="Desktop notification"
+                  hint="Raises a Windows notification when an agent turn finishes, so a background workspace still reaches you."
+                  status={<SettingsSwitch label="Show desktop notification" checked={draft.completionNotificationEnabled} onChange={(checked) => patchDraft({ completionNotificationEnabled: checked })} />}
+                >
+                  <SettingsRow
+                    icon={Info}
+                    label="Notify even for the pane you are watching"
+                    hint="Off by default: a finished pane already on screen shows its highlight, so a toast would only repeat it."
+                    control={<SettingsSwitch label="Notify while the pane is focused" checked={draft.completionNotificationWhileFocused} disabled={!draft.completionNotificationEnabled} onChange={(checked) => patchDraft({ completionNotificationWhileFocused: checked })} />}
+                  />
+                </SettingsCard>
                 <SettingsCard icon={Sparkles} title="Agent completion hooks" hint="Each agent reports its own turn end. Configure them on the Agents page.">
                   <SettingsRow icon={Sparkles} label="Manage agent hooks" control={<SettingsButton icon={ChevronRight} label="Agents" onClick={() => setActiveSection('agents')} />} />
                 </SettingsCard>
