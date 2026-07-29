@@ -88,7 +88,7 @@ import { paneIdFromEventTarget } from './paneActivation'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
 import { arrangeTerminalPaneGrid } from './innerPaneLayout'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
-import { settleDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleDockviewOverlayLayout, settleDockviewOverlayReposition } from './splitOverlayLayout'
 import { isDividerResizeActive, isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
 import { withSuppressedPanelRemoval } from './suppression'
 import {
@@ -541,6 +541,7 @@ export function WorkspaceView({
   const resizeEpochRef = useRef(0)
   const resizeSettlingRef = useRef(false)
   const resizeSettlePendingRef = useRef(false)
+  const edgeSettleEpochRef = useRef(0)
   // Set when the quiet timer wanted to settle while a drag was still running.
   const resizeSettleDeferredRef = useRef(false)
   const layoutLoadQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -719,6 +720,24 @@ export function WorkspaceView({
       },
     })
   }, [layoutDockview, ownsLayout])
+
+  const settleEdgeLayout = useCallback(async (api: DockviewApi) => {
+    const epoch = edgeSettleEpochRef.current + 1
+    edgeSettleEpochRef.current = epoch
+    await settleDockviewOverlayReposition({
+      refresh: () => {
+        if (edgeSettleEpochRef.current === epoch && apiRef.current === api) forceOverlayReposition(api)
+      },
+      isSettled: () => edgeSettleEpochRef.current !== epoch
+        || apiRef.current !== api
+        || dockviewOverlaysSettled(api),
+      complete: () => {
+        if (edgeSettleEpochRef.current !== epoch || apiRef.current !== api) return
+        reflowTerminalsAfterLayout({ syncPty: true })
+        focusActiveContentAfterLayout(api, () => !workspaceInteractionSuspendedRef.current)
+      },
+    })
+  }, [])
 
   const getContentParams = useCallback((panelId: string) => parseWorkspaceContentParams(apiRef.current?.getPanel(panelId)?.params), [])
 
@@ -1694,23 +1713,21 @@ export function WorkspaceView({
         })
       }),
       ...(['left', 'right'] as const).flatMap((position) => {
-        // Collapsing/expanding a structural edge sidebar resizes the center grid
-        // but does NOT emit onDidLayoutChange, so the terminal's absolutely
-        // positioned Dockview render overlay is never repositioned to the freed
-        // width. The pane then fits to the stale overlay (one toggle behind) and
-        // only corrects on a manual click. Route edge collapse through the same
-        // settle pipeline every other layout mutation uses: retry overlay
-        // reposition until it matches the owning group, then reflow + sync PTY.
+        // Dockview resizes the center grid synchronously but leaves always-
+        // rendered overlays at their previous bounds. Coalesce rapid toggles,
+        // reposition overlays after paint, then fit/sync terminals exactly once.
         const edge = event.api.getEdgeGroup(position)
         if (!edge) return []
         return [edge.onDidCollapsedChange(() => {
           if (suppressPanelRemovalRef.current) return
-          void settleLayout({ syncPty: true })
+          syncChromeState()
+          void settleEdgeLayout(event.api)
+          persistLayoutSoon()
         })]
       }),
     ]
     requestAnimationFrame(() => { void loadActiveSessionLayout() })
-  }, [addContentPanel, loadActiveSessionLayout, onApiReady, ownsLayout, persistLayoutSoon, requestLiveWorkspaceResize, settleLayout, syncChromeState])
+  }, [addContentPanel, loadActiveSessionLayout, onApiReady, ownsLayout, persistLayoutSoon, requestLiveWorkspaceResize, settleEdgeLayout, settleLayout, syncChromeState])
 
   useEffect(() => {
     onActionsReady?.(actions)

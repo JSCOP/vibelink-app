@@ -22,6 +22,8 @@ pub mod orchestration;
 pub mod provider_integrations;
 pub mod skills;
 pub mod spawn_daemon;
+#[cfg(windows)]
+mod system_wake;
 pub mod tray;
 #[cfg(windows)]
 mod webview_renderer;
@@ -112,6 +114,12 @@ pub fn run() {
                 // Child processes must not inherit the debugging port, so the
                 // variable is removed per spawned command instead
                 // (`daemon::pty` and `app::spawn_daemon`).
+                let wake_relay = system_wake::SystemWakeRelay::start(app.handle().clone())
+                    .map_err(|error| {
+                        let boxed: Box<dyn std::error::Error> = error.into();
+                        boxed
+                    })?;
+                app.manage(wake_relay);
             }
             if let Ok(cli_executable) = cli_path::dedicated_cli_path() {
                 std::env::set_var("VIBELINK_CLI_EXE", cli_executable);
@@ -273,6 +281,7 @@ pub fn run() {
             commands::init_terminal_output,
             commands::terminal_ws_port,
             commands::terminal_ws_token,
+            commands::webview_render_mode,
             commands::remote_get_status,
             commands::remote_get_pane_lease,
             commands::remote_reclaim_pane_lease,
@@ -446,6 +455,10 @@ pub fn run() {
         if let tauri::RunEvent::Exit = event {
             if let Some(client) = app.try_state::<DaemonClient>() {
                 client.prepare_shutdown();
+            }
+            #[cfg(windows)]
+            if let Some(relay) = app.try_state::<system_wake::SystemWakeRelay>() {
+                relay.shutdown();
             }
             if let Some(manager) = app.try_state::<Arc<hermes::HermesManager>>() {
                 manager.shutdown_all();

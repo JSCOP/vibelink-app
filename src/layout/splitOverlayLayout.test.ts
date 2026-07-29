@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { settleDockviewOverlayLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
+import { settleDockviewOverlayLayout, settleDockviewOverlayReposition, waitForDockviewOverlayLayout } from './splitOverlayLayout'
 
 describe('waitForDockviewOverlayLayout', () => {
   it('waits for two distinct animation frames before continuing a split layout', async () => {
@@ -72,5 +72,22 @@ describe('waitForDockviewOverlayLayout', () => {
     expect(refresh).toHaveBeenCalledTimes(12)
     expect(isSettled).toHaveBeenCalledTimes(12)
     expect(complete).toHaveBeenCalledTimes(1)
+  })
+
+  it('repairs edge overlays without repeating the whole Dockview layout', async () => {
+    const scheduleFrame = vi.fn((callback: FrameRequestCallback) => {
+      callback(scheduleFrame.mock.calls.length)
+      return scheduleFrame.mock.calls.length
+    })
+    const refresh = vi.fn()
+    const isSettled = vi.fn(() => isSettled.mock.calls.length === 2)
+    const complete = vi.fn()
+
+    await settleDockviewOverlayReposition({ refresh, isSettled, complete }, scheduleFrame)
+
+    expect(scheduleFrame).toHaveBeenCalledTimes(2)
+    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(isSettled).toHaveBeenCalledTimes(2)
+    expect(complete).toHaveBeenCalledOnce()
   })
 })

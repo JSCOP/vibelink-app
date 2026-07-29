@@ -23,3 +23,18 @@ export async function settleDockviewOverlayLayout(
   }
   callbacks.complete?.()
 }
+
+/** Edge-group collapse already resizes Dockview's grid synchronously. Wait for
+ * that geometry to paint, then repair only the detached renderer overlays;
+ * re-running the whole Dockview layout on every retry causes visible flicker. */
+export async function settleDockviewOverlayReposition(
+  callbacks: Omit<DockviewOverlayLayoutCallbacks, 'layout'>,
+  scheduleFrame: (callback: FrameRequestCallback) => number = requestAnimationFrame,
+): Promise<void> {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await new Promise<void>((resolve) => scheduleFrame(() => resolve()))
+    callbacks.refresh?.()
+    if (callbacks.isSettled?.() ?? true) break
+  }
+  callbacks.complete?.()
+}

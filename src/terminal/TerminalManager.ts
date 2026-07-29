@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import { PaneFitAddon, showPaneScrollbar } from './scrollbar'
@@ -18,12 +19,14 @@ import { agentActivityTracker, type AgentActivityActions } from './agentActivity
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
 import { PaneTitleCoalescer } from './titleCoalescing'
+import { forceRepaintThroughRenderPause } from './renderPauseRelease'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_WRITE = 16 * 1024
 const MAX_OUTPUT_WRITES_PER_DRAIN = 2
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024
 const HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES = 64 * 1024
+const WEBGL_REPROMOTION_QUIET_MS = 2_000
 const BACKGROUND_OUTPUT_COALESCE_MS = 50
 const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
@@ -92,6 +95,29 @@ const withSearchDecorations = (options?: TerminalSearchOptions): ISearchOptions 
   ...options,
   decorations: SEARCH_DECORATION_COLORS,
 })
+
+type WebglAddonInternals = {
+  _renderer?: {
+    _gl?: { getExtension(name: string): unknown }
+    _canvas?: { width: number; height: number }
+  }
+}
+
+function releaseXtermWebglContext(addon: WebglAddon): void {
+  try {
+    const renderer = (addon as unknown as WebglAddonInternals)._renderer
+    const extension = renderer?._gl?.getExtension('WEBGL_lose_context')
+    if (extension && typeof extension === 'object' && 'loseContext' in extension && typeof extension.loseContext === 'function') {
+      extension.loseContext()
+    }
+    if (renderer?._canvas) {
+      renderer._canvas.width = 0
+      renderer._canvas.height = 0
+    }
+  } catch {
+    // WebGL teardown must never block fallback to xterm's DOM renderer.
+  }
+}
 
 type PendingInputChunk = { data: string; bytes: number }
 type SnapshotCursorQuery = 'standard' | 'private'
@@ -195,7 +221,10 @@ type Entry = {
   /** Whether this pane's xterm scrollbar was switched to always-visible. */
   scrollbarPersistent?: boolean
   webgl?: WebglAddon
-  webglAttempted?: boolean
+  webglAttachFailed?: boolean
+  webglPromotionPending?: boolean
+  webglPromotionTimer?: number
+  demotedForOutputBurst?: boolean
   webglContextLossDisposable?: { dispose(): void }
   titleHandler?: (title: string) => void
 }
@@ -225,22 +254,93 @@ class TerminalManagerImpl {
   private outputFallbackTimer: number | undefined
   private titleCoalescer = new PaneTitleCoalescer()
   private replayTail: Promise<void> = Promise.resolve()
+  private wakeRecoveryFrame: number | undefined
+  private settledWakeClearsAtlas = false
+  private webviewRenderMode: 'software' | 'hardware' | '' = ''
 
   constructor() {
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', () => {
-        // Returning from hidden re-measures against geometry that may have
-        // changed while we were not painting, so this one is a forced settle.
-        if (document.visibilityState === 'visible') this.settleLayout({ repaint: true })
+    if (typeof document !== 'undefined') document.addEventListener('pointerdown', this.handlePointerDown, true)
+    if (typeof window !== 'undefined') window.addEventListener('resize', this.handleWindowResize)
+    this.installWakeRecoveryListeners()
+    this.loadWebviewRenderMode()
+  }
+
+  private loadWebviewRenderMode(): void {
+    void invoke<unknown>('webview_render_mode')
+      .then((mode) => {
+        this.webviewRenderMode = mode === 'software' || mode === 'hardware' ? mode : ''
       })
-      document.addEventListener('pointerdown', this.handlePointerDown, true)
+      .catch(() => {})
+  }
+
+  private installWakeRecoveryListeners(): void {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return
+    const wakeGlobal = globalThis as typeof globalThis & { __vibelinkTerminalWakeCleanup?: () => void }
+    wakeGlobal.__vibelinkTerminalWakeCleanup?.()
+    let disposed = false
+    let systemUnlisten: (() => void) | undefined
+    const onFocus = () => {
+      // Plain refocus keeps the glyph atlas warm and lets ordinary rect guards
+      // decide whether geometry changed; only the pane pixels are re-presented.
+      this.reflowAll()
+      this.recoverVisibleWake(false)
     }
-    if (typeof window !== 'undefined') {
-      // A plain focus regain must NOT force a refit + full repaint of every
-      // pane: nothing has resized, and the forced pass was visible as a flash
-      // on every window switch. Let the ordinary rect guards decide.
-      window.addEventListener('focus', () => this.reflowAll())
-      window.addEventListener('resize', this.handleWindowResize)
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return
+      this.settleLayout({ repaint: true, clearWebglTextureAtlas: true })
+      this.recoverVisibleWake(true)
+    }
+    const onSystemResumed = () => {
+      if (document.visibilityState !== 'visible') return
+      this.settleLayout({ repaint: true, clearWebglTextureAtlas: true })
+      this.recoverVisibleWake(true)
+    }
+    const cleanup = () => {
+      if (disposed) return
+      disposed = true
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      systemUnlisten?.()
+      if (this.wakeRecoveryFrame !== undefined) cancelAnimationFrame(this.wakeRecoveryFrame)
+      this.wakeRecoveryFrame = undefined
+      this.settledWakeClearsAtlas = false
+    }
+
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    wakeGlobal.__vibelinkTerminalWakeCleanup = cleanup
+    void listen('system-resumed', onSystemResumed)
+      .then((unlisten) => {
+        if (disposed) unlisten()
+        else systemUnlisten = unlisten
+      })
+      .catch(() => {})
+  }
+
+  private recoverVisibleWake(clearWebglTextureAtlas: boolean): void {
+    if (this.wakeRecoveryFrame !== undefined) {
+      this.settledWakeClearsAtlas ||= clearWebglTextureAtlas
+      return
+    }
+    this.redrawVisibleWake(clearWebglTextureAtlas)
+    this.settledWakeClearsAtlas = clearWebglTextureAtlas
+    this.wakeRecoveryFrame = requestAnimationFrame(() => {
+      this.wakeRecoveryFrame = undefined
+      const settledClear = this.settledWakeClearsAtlas
+      this.settledWakeClearsAtlas = false
+      if (document.visibilityState !== 'visible') return
+      this.redrawVisibleWake(settledClear)
+    })
+  }
+
+  private redrawVisibleWake(clearWebglTextureAtlas: boolean): void {
+    for (const entry of this.entries.values()) {
+      if (!entry.opened || entry.visible !== true || entry.remoteLease) continue
+      const retryAfterContextLoss = entry.webgl === undefined && entry.webglAttachFailed === true
+      if (retryAfterContextLoss) entry.webglAttachFailed = false
+      const promoted = (retryAfterContextLoss || this.shouldPromoteQuietWebgl(entry))
+        && this.promoteToWebglRenderer(entry)
+      if (!promoted) this.redraw(entry, { clearWebglTextureAtlas })
     }
   }
 
@@ -368,8 +468,14 @@ class TerminalManagerImpl {
    *  settle only panes whose ResizeObserver marked them dirty; native window
    *  resizes and visibility recovery still settle every pane. `repaint` is
    *  reserved for panes that may have missed draws entirely. */
-  private settleLayout(options: { paneIds?: string[]; repaint?: boolean } = {}): void {
-    this.scheduleLayoutPass({ paneIds: options.paneIds, force: true, repaint: options.repaint, syncPty: true })
+  private settleLayout(options: { paneIds?: string[]; repaint?: boolean; clearWebglTextureAtlas?: boolean } = {}): void {
+    this.scheduleLayoutPass({
+      paneIds: options.paneIds,
+      force: true,
+      repaint: options.repaint,
+      syncPty: true,
+      clearWebglTextureAtlas: options.clearWebglTextureAtlas,
+    })
   }
 
   setLinkActions(actions: CaptureLinkActions): void {
@@ -976,6 +1082,10 @@ class TerminalManagerImpl {
   }
 
   private writeEntry(entry: Entry, bytes: Uint8Array, foregroundOverride?: boolean): void {
+    if (entry.webglPromotionTimer !== undefined) {
+      clearTimeout(entry.webglPromotionTimer)
+      entry.webglPromotionTimer = undefined
+    }
     // Output can start streaming before the pane's panel mounts (panes are
     // attached daemon-side at spawn). Parsing it into an unopened terminal
     // would use the constructor's default grid, not the pane's real one.
@@ -1315,6 +1425,11 @@ class TerminalManagerImpl {
       const rect = entry.observedSize ?? entry.container?.getBoundingClientRect()
       const measurement = this.observeMeasureState(entry, rect)
       if (!rect || !measurement.measurable) continue
+      if (this.shouldPromoteQuietWebgl(entry) && this.promoteToWebglRenderer(entry)) {
+        entry.lastFitRect = { width: rect.width, height: rect.height }
+        if (shouldSyncPtyNow({ interactive, syncPtyRequested: pass.syncPty, now: Date.now(), lastPtySyncAt: entry.lastPtySyncAt })) this.syncEntryPtySize(entry)
+        continue
+      }
       const lastRect = entry.lastFitRect
       const rectUnchanged = lastRect !== undefined
         && Math.abs(lastRect.width - rect.width) <= 1
@@ -1378,12 +1493,13 @@ class TerminalManagerImpl {
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadPending = false
     clearTimeout(entry.clickRepairTimer)
+    clearTimeout(entry.webglPromotionTimer)
+    entry.webglPromotionTimer = undefined
     this.removeQueuedOutput(entry)
     entry.titleDisposable?.dispose()
     this.titleCoalescer.clear(paneId)
     entry.linkDisposables?.forEach((d) => d.dispose())
-    entry.webglContextLossDisposable?.dispose()
-    entry.webgl?.dispose()
+    this.dropToDomRenderer(entry)
     entry.term.dispose()
     this.entries.delete(paneId)
   }
@@ -1400,24 +1516,29 @@ class TerminalManagerImpl {
   }
 
   private loadWebglRenderer(entry: Entry): void {
-    if (entry.webglAttempted) return
-    entry.webglAttempted = true
+    this.promoteToWebglRenderer(entry, { allowUnmeasured: true })
+  }
 
+  private promoteToWebglRenderer(entry: Entry, options: { allowUnmeasured?: boolean } = {}): boolean {
+    if (entry.webgl || entry.webglPromotionPending || entry.webglAttachFailed) return false
+    if (!entry.opened || !entry.container || entry.remoteLease || entry.attachFailureNoticeWritten) return false
+    const rect = entry.observedSize ?? entry.container.getBoundingClientRect()
+    if (!options.allowUnmeasured && (entry.visible !== true || rect.width < 1 || rect.height < 1)) {
+      entry.forceFitOnNextMeasure = true
+      return false
+    }
+
+    entry.webglPromotionPending = true
     let webgl: WebglAddon | undefined
     let contextLossDisposable: { dispose(): void } | undefined
     try {
       const addon = new WebglAddon()
       webgl = addon
       contextLossDisposable = addon.onContextLoss(() => {
-        contextLossDisposable?.dispose()
-        if (entry.webglContextLossDisposable === contextLossDisposable) entry.webglContextLossDisposable = undefined
-        if (entry.webgl === addon) entry.webgl = undefined
-        addon.dispose()
-        // addon.dispose() swaps xterm back to the DOM renderer but only calls
-        // renderService.handleResize — a no-op for a hidden pane (0×0 while a
-        // sibling is maximized). Nothing repaints the buffer, so the pane shows
-        // blank until a click. Mark it dirty and schedule recovery so the DOM
-        // renderer repaints once the pane is measurable again.
+        if (entry.webgl !== addon) return
+        entry.webglAttachFailed = true
+        entry.demotedForOutputBurst = false
+        this.dropToDomRenderer(entry)
         entry.forceFitOnNextMeasure = true
         entry.rendererResetPending = true
         this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, repaint: true, syncPty: true })
@@ -1425,11 +1546,44 @@ class TerminalManagerImpl {
       entry.term.loadAddon(addon)
       entry.webgl = addon
       entry.webglContextLossDisposable = contextLossDisposable
+      entry.webglAttachFailed = false
+      entry.demotedForOutputBurst = false
+      if (!this.safeFit(entry)) entry.forceFitOnNextMeasure = true
+      this.redraw(entry)
+      return true
     } catch {
-      contextLossDisposable?.dispose()
-      webgl?.dispose()
-      if (entry.webgl === webgl) entry.webgl = undefined
+      if (entry.webgl === webgl) this.dropToDomRenderer(entry)
+      else {
+        contextLossDisposable?.dispose()
+        if (webgl) {
+          releaseXtermWebglContext(webgl)
+          webgl.dispose()
+        }
+      }
+      entry.webglAttachFailed = true
+      return false
+    } finally {
+      entry.webglPromotionPending = false
     }
+  }
+
+  private shouldPromoteQuietWebgl(entry: Entry): boolean {
+    return entry.demotedForOutputBurst === true
+      && entry.webgl === undefined
+      && entry.webglPromotionTimer === undefined
+      && (entry.pendingOutputBytes ?? 0) === 0
+      && !entry.pendingOutput?.length
+  }
+
+  private scheduleWebglPromotion(entry: Entry): void {
+    if (entry.demotedForOutputBurst !== true) return
+    clearTimeout(entry.webglPromotionTimer)
+    entry.webglPromotionTimer = window.setTimeout(() => {
+      entry.webglPromotionTimer = undefined
+      if (this.entries.get(entry.paneId) !== entry || !entry.opened) return
+      if ((entry.pendingOutputBytes ?? 0) !== 0 || entry.pendingOutput?.length) return
+      this.promoteToWebglRenderer(entry)
+    }, WEBGL_REPROMOTION_QUIET_MS)
   }
 
   /** Every pane owns a persistent scrollbar instance. xterm builds the
@@ -1451,7 +1605,7 @@ class TerminalManagerImpl {
   private redraw(entry: Entry, options: { clearWebglTextureAtlas?: boolean } = {}): void {
     if (!entry.opened) return
     if (options.clearWebglTextureAtlas) this.clearWebglTextureAtlas(entry)
-    entry.term.refresh(0, Math.max(0, entry.term.rows - 1))
+    if (!forceRepaintThroughRenderPause(entry.term)) entry.term.refresh(0, Math.max(0, entry.term.rows - 1))
   }
 
   private redrawAfterNextFrame(entry: Entry, options: { clearWebglTextureAtlas?: boolean } = {}): void {
@@ -1558,25 +1712,15 @@ class TerminalManagerImpl {
     this.resetRenderer(entry, { immediate: true })
   }
 
-  // Repaint a pane whose WebGL glyphs went stale after a maximize/restore by
-  // dropping to xterm's DOM renderer. Disposing the WebGL addon calls
-  // RenderService.setRenderer(), which sets _needsSelectionRefresh and forces a
-  // full refresh — the DOM renderer then paints every visible cell from the
-  // buffer we still hold. This is the reliable repaint.
-  //
-  // We do NOT re-upgrade to WebGL afterwards: a freshly created GL context paints
-  // a blank surface for an idle pane (it never re-emits the existing buffer even
-  // after a full refresh), which is the blank-pane bug. The DOM renderer stays;
-  // it is more than adequate for a terminal pane. WebGL is only re-acquired if
-  // the pane is disposed and recreated.
-  //
-  //  - immediate (normal shell): swap now.
-  //  - deferred (alternate TUI): swap after the app's resize redraw arrives, so
-  //    the DOM renderer captures the settled frame, not a transitional one.
+  // Stale glyphs usually mean xterm's WebGL texture atlas lost coherent GPU
+  // contents, not that the terminal buffer or renderer is invalid. Clear the
+  // atlas and repaint in place so healthy panes keep accelerated rendering.
+  // Alternate-buffer TUIs defer the same repair until their resize redraw has
+  // landed, avoiding a refresh of a transitional frame.
   private resetRenderer(entry: Entry, options: { immediate: boolean }): void {
     if (!entry.opened || !entry.container) return
     if (options.immediate) {
-      this.dropToDomRenderer(entry)
+      this.clearWebglTextureAtlas(entry)
       this.redraw(entry)
       return
     }
@@ -1586,45 +1730,28 @@ class TerminalManagerImpl {
     entry.rendererReloadTimer = window.setTimeout(() => this.performRendererReload(entry), RENDERER_RESET_SETTLE_MS)
   }
 
-  // Force the pane onto a fresh DOM renderer and full-refresh it. Two cases:
-  //  - WebGL still attached: disposing the addon calls RenderService.setRenderer()
-  //    with a fresh DOM renderer (sets _needsSelectionRefresh + full refresh).
-  //  - WebGL already gone (its context was lost while the pane was hidden at 0x0,
-  //    so onContextLoss already disposed it): there is nothing to dispose, and the
-  //    DOM renderer xterm swapped in was created against the 0x0 host and is stale.
-  //    Re-install a fresh DOM renderer directly through xterm core so it lays out
-  //    at the real size and full-refreshes — otherwise the pane stays blank.
+  // xterm swaps back to its DOM renderer when the addon is disposed. Explicitly
+  // lose and zero the native context first so rapid pane churn cannot exhaust
+  // Chromium/ANGLE's active WebGL context budget.
   private dropToDomRenderer(entry: Entry): void {
-    if (entry.webgl) {
-      entry.webglContextLossDisposable?.dispose()
-      entry.webglContextLossDisposable = undefined
-      entry.webgl.dispose()
-      entry.webgl = undefined
-      return
-    }
-    const core = (entry.term as unknown as {
-      _core?: {
-        _renderService?: { setRenderer?: (r: unknown) => void }
-        _createRenderer?: () => unknown
-      }
-    })._core
-    const renderService = core?._renderService
-    const createRenderer = core?._createRenderer
-    if (renderService?.setRenderer && createRenderer) {
-      renderService.setRenderer(createRenderer.call(core))
-    }
+    const webgl = entry.webgl
+    if (!webgl) return
+    entry.webglContextLossDisposable?.dispose()
+    entry.webglContextLossDisposable = undefined
+    releaseXtermWebglContext(webgl)
+    webgl.dispose()
+    entry.webgl = undefined
   }
 
-  // Deferred swap for alternate-buffer TUIs. Fires from writeTerminalOutput after
-  // the app's resize redraw has landed (or a settle timeout), so the DOM renderer
-  // full-refreshes the settled frame rather than a transitional one.
+  // Deferred atlas repair for alternate-buffer TUIs. The output callback or
+  // settle timeout runs this after the TUI's resize redraw has landed.
   private performRendererReload(entry: Entry): void {
     if (!entry.rendererReloadPending) return
     entry.rendererReloadPending = false
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadTimer = undefined
     if (this.entries.get(entry.paneId) !== entry || !entry.opened || !entry.container) return
-    this.dropToDomRenderer(entry)
+    this.clearWebglTextureAtlas(entry)
     this.redraw(entry)
   }
 
@@ -1777,13 +1904,14 @@ class TerminalManagerImpl {
       return
     }
 
-    // WebGL inside a software-rendered WebView turns sustained ANSI output into
-    // 80-90 ms paint stalls. A burst this large is throughput work, not typed
-    // echo; switch the pane once to xterm's responsive DOM renderer before the
-    // parser starts draining it. Existing renderer recovery already establishes
-    // that the DOM renderer remains authoritative until this pane is recreated.
-    if ((entry.pendingOutputBytes ?? 0) >= HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES && entry.webgl) {
+    // Software WebView2 turns sustained WebGL ANSI painting into 80-90 ms
+    // renderer-thread stalls. Hardware WebView2 keeps WebGL; its parser work is
+    // already bounded by the 16 KiB chunk and drain budgets below.
+    if (this.webviewRenderMode === 'software'
+      && (entry.pendingOutputBytes ?? 0) >= HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES
+      && entry.webgl) {
       this.dropToDomRenderer(entry)
+      entry.demotedForOutputBurst = true
     }
 
     // xterm applies its 12 ms cooperative timeout BETWEEN write() chunks, not
@@ -1810,8 +1938,10 @@ class TerminalManagerImpl {
     entry.pendingOutputBytes = Math.max(0, (entry.pendingOutputBytes ?? bytesToWrite) - bytesToWrite)
     this.writeTerminalOutput(entry, concatUint8Arrays(chunks, bytesToWrite))
     if (pending.length === 0) {
+      entry.pendingOutput = undefined
       entry.outputTrimNoticeWritten = false
       this.removeQueuedOutput(entry)
+      this.scheduleWebglPromotion(entry)
     }
 
   }
