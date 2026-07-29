@@ -74,10 +74,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const [hermesDetected, setHermesDetected] = useState(false)
   const [reclaimingLease, setReclaimingLease] = useState(false)
   const [reclaimError, setReclaimError] = useState<string | null>(null)
-  const [leaseCoverCollapsed, setLeaseCoverCollapsed] = useState(false)
+  const [collapsedLeaseKey, setCollapsedLeaseKey] = useState<string | null>(null)
   const leaseKey = remoteLease ? `${remoteLease.paneId}:${remoteLease.deviceId}` : ''
-  // A new lease always announces itself; only this lease stays collapsed.
-  useEffect(() => { setLeaseCoverCollapsed(false) }, [leaseKey])
+  // A new lease key derives an expanded cover without an effect-driven render.
+  const leaseCoverCollapsed = leaseKey !== '' && collapsedLeaseKey === leaseKey
   const onTitleChange = useCallback((title: string) => {
     if (!paneId) return
     void applyTerminalTitle(paneId, title)
@@ -328,7 +328,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}
         >
           {leaseCoverCollapsed ? (
-            <button type="button" className="remote-pane-lease-badge" onClick={() => setLeaseCoverCollapsed(false)}>
+            <button type="button" className="remote-pane-lease-badge" onClick={() => setCollapsedLeaseKey(null)}>
               <span aria-hidden="true" /> On phone · {remoteLease.cols} × {remoteLease.rows}
             </button>
           ) : (
@@ -343,7 +343,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
                 {shortRemoteDeviceId(remoteLease.deviceId)} · phone size {remoteLease.cols} × {remoteLease.rows}
               </span>
               <div className="remote-pane-lease-actions">
-                <button type="button" className="remote-pane-lease-secondary" onClick={() => setLeaseCoverCollapsed(true)}>
+                <button type="button" className="remote-pane-lease-secondary" onClick={() => setCollapsedLeaseKey(leaseKey)}>
                   Collapse
                 </button>
                 <button

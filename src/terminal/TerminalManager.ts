@@ -23,8 +23,10 @@ import { forceRepaintThroughRenderPause } from './renderPauseRelease'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_WRITE = 16 * 1024
+const SOFTWARE_WEBGL_OUTPUT_BYTES_PER_WRITE = 2 * 1024
 const MAX_OUTPUT_WRITES_PER_DRAIN = 2
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024
+const SOFTWARE_WEBGL_BACKPRESSURE_DOM_THRESHOLD_BYTES = 2 * 1024
 const HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES = 64 * 1024
 const WEBGL_REPROMOTION_QUIET_MS = 2_000
 const BACKGROUND_OUTPUT_COALESCE_MS = 50
@@ -210,6 +212,7 @@ type Entry = {
   pendingOutput?: Uint8Array[]
   pendingOutputBytes?: number
   outputHighPriority?: boolean
+  outputWritePending?: boolean
   pendingSequencedOutput?: SequencedOutputFrame[]
   pendingSequencedOutputBytes?: number
   paneGeneration?: bigint
@@ -1121,14 +1124,21 @@ class TerminalManagerImpl {
       return
     }
     const foreground = foregroundOverride ?? this.isForegroundOutput(entry)
+    const pendingOutputBytes = entry.pendingOutputBytes ?? 0
     if (foreground
-      && bytes.byteLength < INSTANT_OUTPUT_BYTES
-      && (entry.pendingOutputBytes ?? 0) === 0
-      && !entry.pendingOutput?.length) {
-      this.writeTerminalOutput(entry, bytes)
+      && !entry.outputWritePending
+      && pendingOutputBytes + bytes.byteLength <= INSTANT_OUTPUT_BYTES) {
+      if (entry.pendingOutput?.length) {
+        entry.pendingOutput.push(bytes)
+        entry.pendingOutputBytes = pendingOutputBytes + bytes.byteLength
+        this.flushOutput(entry, INSTANT_OUTPUT_BYTES)
+      } else {
+        this.writeTerminalOutput(entry, bytes)
+      }
       entry.outputTrimNoticeWritten = false
       return
     }
+
     entry.pendingOutput ??= []
     entry.pendingOutput.push(bytes)
     entry.pendingOutputBytes = (entry.pendingOutputBytes ?? 0) + bytes.byteLength
@@ -1561,11 +1571,12 @@ class TerminalManagerImpl {
       contextLossDisposable = addon.onContextLoss(() => {
         if (entry.webgl !== addon) return
         entry.webglAttachFailed = true
-        entry.demotedForOutputBurst = false
+        entry.demotedForOutputBurst = true
         this.dropToDomRenderer(entry)
         entry.forceFitOnNextMeasure = true
         entry.rendererResetPending = true
         this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true, repaint: true, syncPty: true })
+        this.scheduleWebglPromotion(entry)
       })
       entry.term.loadAddon(addon)
       entry.webgl = addon
@@ -1605,7 +1616,11 @@ class TerminalManagerImpl {
     entry.webglPromotionTimer = window.setTimeout(() => {
       entry.webglPromotionTimer = undefined
       if (this.entries.get(entry.paneId) !== entry || !entry.opened) return
-      if ((entry.pendingOutputBytes ?? 0) !== 0 || entry.pendingOutput?.length) return
+      if ((entry.pendingOutputBytes ?? 0) !== 0 || entry.pendingOutput?.length) {
+        this.scheduleWebglPromotion(entry)
+        return
+      }
+      entry.webglAttachFailed = false
       this.promoteToWebglRenderer(entry)
     }, WEBGL_REPROMOTION_QUIET_MS)
   }
@@ -1788,9 +1803,11 @@ class TerminalManagerImpl {
   private isForegroundOutput(entry: Entry): boolean {
     if (!entry.visible) return false
     if (typeof document === 'undefined') return true
+    const shellActive = entry.container?.parentElement?.dataset.active === 'true'
+    const terminalFocused = entry.container?.contains(document.activeElement) === true
     return document.visibilityState === 'visible'
       && document.hasFocus()
-      && entry.container?.parentElement?.dataset.active === 'true'
+      && (shellActive || terminalFocused)
   }
 
   private enqueueOutput(entry: Entry, foreground: boolean): void {
@@ -1916,17 +1933,18 @@ class TerminalManagerImpl {
   private flushAllOutput(entry: Entry): void {
     this.removeQueuedOutput(entry)
     while (entry.pendingOutput?.length) {
-      this.flushOutput(entry)
+      this.flushOutput(entry, MAX_OUTPUT_BYTES_PER_WRITE, true)
     }
     if (!entry.pendingOutput?.length) entry.outputTrimNoticeWritten = false
   }
 
-  private flushOutput(entry: Entry, maxBytes = MAX_OUTPUT_BYTES_PER_WRITE): void {
+  private flushOutput(entry: Entry, maxBytes?: number, force = false): void {
     const pending = entry.pendingOutput
     if (!pending?.length) {
       entry.outputTrimNoticeWritten = false
       return
     }
+    if (entry.outputWritePending && !force) return
 
     // Software WebView2 turns sustained WebGL ANSI painting into 80-90 ms
     // renderer-thread stalls. Hardware WebView2 keeps WebGL; its parser work is
@@ -1937,6 +1955,9 @@ class TerminalManagerImpl {
       this.dropToDomRenderer(entry)
       entry.demotedForOutputBurst = true
     }
+    const writeBudget = maxBytes ?? (this.webviewRenderMode === 'software' && entry.webgl
+      ? SOFTWARE_WEBGL_OUTPUT_BYTES_PER_WRITE
+      : MAX_OUTPUT_BYTES_PER_WRITE)
 
     // xterm applies its 12 ms cooperative timeout BETWEEN write() chunks, not
     // while parsing one chunk. Daemon reads can be 64 KiB, and forwarding one
@@ -1945,9 +1966,9 @@ class TerminalManagerImpl {
     // Dockview layout, paint, and input regain control between parser chunks.
     const chunks: Uint8Array[] = []
     let bytesToWrite = 0
-    while (pending.length > 0 && bytesToWrite < maxBytes) {
+    while (pending.length > 0 && bytesToWrite < writeBudget) {
       const next = pending[0]
-      const remaining = maxBytes - bytesToWrite
+      const remaining = writeBudget - bytesToWrite
       if (next.byteLength <= remaining) {
         chunks.push(next)
         pending.shift()
@@ -1960,7 +1981,7 @@ class TerminalManagerImpl {
     }
 
     entry.pendingOutputBytes = Math.max(0, (entry.pendingOutputBytes ?? bytesToWrite) - bytesToWrite)
-    this.writeTerminalOutput(entry, concatUint8Arrays(chunks, bytesToWrite))
+    this.writeTerminalOutput(entry, concatUint8Arrays(chunks, bytesToWrite), { trackPending: !force })
     if (pending.length === 0) {
       entry.pendingOutput = undefined
       entry.outputTrimNoticeWritten = false
@@ -1970,7 +1991,7 @@ class TerminalManagerImpl {
 
   }
 
-  private writeTerminalOutput(entry: Entry, bytes: Uint8Array): void {
+  private writeTerminalOutput(entry: Entry, bytes: Uint8Array, options: { trackPending?: boolean } = {}): void {
     // Drop output that a hard clear later in the same chunk would erase anyway,
     // but do NOT call entry.term.clear(): the retained bytes still start with the
     // clear sequence, and xterm interprets it natively and correctly — ESC[2J /
@@ -1979,17 +2000,30 @@ class TerminalManagerImpl {
     // which destroyed a shell's history whenever it merely repainted on a resize
     // (e.g. a hidden pane getting SIGWINCH during a sibling's maximize).
     const output = terminalOutputAfterLastHardClear(bytes)
-    // write() parses asynchronously; run any pending (deferred, alternate-buffer)
-    // renderer reload only after xterm has applied this output — the app's resize
-    // redraw — so the rebuilt renderer captures the settled cursor, not a ghost.
-    entry.term.write(output.bytes, entry.rendererReloadPending ? () => this.performRendererReload(entry) : undefined)
+    const trackPending = options.trackPending !== false
+    const needsCallback = trackPending || entry.rendererReloadPending
+    if (trackPending) entry.outputWritePending = true
+    // xterm applies write() asynchronously. Keep at most one normal parser write
+    // in flight so a sustained stream cannot build an unbounded private xterm
+    // queue that traps later keyboard echo behind already-submitted frames.
+    entry.term.write(output.bytes, needsCallback ? () => {
+      if (this.entries.get(entry.paneId) !== entry) return
+      if (trackPending) entry.outputWritePending = false
+      if (this.webviewRenderMode === 'software'
+        && entry.webgl
+        && (entry.pendingOutputBytes ?? 0) >= SOFTWARE_WEBGL_BACKPRESSURE_DOM_THRESHOLD_BYTES) {
+        this.dropToDomRenderer(entry)
+        entry.demotedForOutputBurst = true
+      }
+      if (entry.rendererReloadPending) this.performRendererReload(entry)
+    } : undefined)
   }
 
   private syncEntryPtySize(entry: Entry): void {
     if (entry.remoteLease || isDividerResizeActive()) return
     const sessionId = entry.sessionId
     if (!sessionId || !entry.opened) return
-    this.flushOutput(entry)
+    this.flushOutput(entry, MAX_OUTPUT_BYTES_PER_WRITE, true)
     const cols = entry.term.cols
     const rows = entry.term.rows
     if (entry.lastSentPtyCols === cols && entry.lastSentPtyRows === rows) return

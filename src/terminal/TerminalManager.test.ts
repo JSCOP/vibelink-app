@@ -796,6 +796,142 @@ describe('TerminalManager output scheduling', () => {
     }
   })
 
+  it('keeps focused terminal echo immediate while the active marker is restoring', () => {
+    const paneId = 'pane-focused-output'
+    const container = document.createElement('div')
+    const textarea = document.createElement('textarea')
+    container.appendChild(textarea)
+    document.body.appendChild(container)
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    TerminalManager.attach(paneId, container, { sessionId: 'session-output' })
+    TerminalManager.setPaneVisible(paneId, true)
+    textarea.focus()
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { writes: unknown[] } }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing focused output entry')
+
+    try {
+      TerminalManager.write(paneId, new TextEncoder().encode('typed echo'))
+      expect(entry.term.writes).toHaveLength(1)
+    } finally {
+      TerminalManager.dispose(paneId)
+      hasFocus.mockRestore()
+      container.remove()
+    }
+  })
+
+  it('flushes a small coalesced frame immediately when focused echo arrives', () => {
+    const paneId = 'pane-coalesced-foreground-output'
+    const shell = document.createElement('div')
+    shell.dataset.active = 'true'
+    const container = document.createElement('div')
+    shell.appendChild(container)
+    document.body.appendChild(shell)
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    TerminalManager.attach(paneId, container, { sessionId: 'session-output' })
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { writes: unknown[] } }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing coalesced foreground entry')
+
+    try {
+      TerminalManager.write(paneId, new TextEncoder().encode('background'), { foreground: false })
+      expect(entry.term.writes).toHaveLength(0)
+
+      TerminalManager.write(paneId, new TextEncoder().encode(' echo'), { foreground: true })
+      expect(entry.term.writes).toHaveLength(1)
+      expect(new TextDecoder().decode(entry.term.writes[0] as Uint8Array)).toBe('background echo')
+    } finally {
+      TerminalManager.dispose(paneId)
+      hasFocus.mockRestore()
+      shell.remove()
+    }
+  })
+
+  it('queues foreground frames while xterm is still parsing the previous write', () => {
+    const paneId = 'pane-parser-backpressure'
+    const shell = document.createElement('div')
+    shell.dataset.active = 'true'
+    const container = document.createElement('div')
+    shell.appendChild(container)
+    document.body.appendChild(shell)
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    TerminalManager.attach(paneId, container, { sessionId: 'session-output' })
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { writes: unknown[]; write(data: unknown, callback?: () => void): void } }>
+      drainOutputQueue(): void
+      cancelOutputDrainSchedule(): void
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing parser backpressure entry')
+    const callbacks: Array<() => void> = []
+    entry.term.write = (data, callback) => {
+      entry.term.writes.push(data)
+      if (callback) callbacks.push(callback)
+    }
+
+    try {
+      TerminalManager.write(paneId, new TextEncoder().encode('first frame'))
+      TerminalManager.write(paneId, new TextEncoder().encode('second frame'))
+      expect(entry.term.writes).toHaveLength(1)
+
+      callbacks.shift()?.()
+      manager.drainOutputQueue()
+      expect(entry.term.writes).toHaveLength(2)
+    } finally {
+      TerminalManager.dispose(paneId)
+      manager.cancelOutputDrainSchedule()
+      hasFocus.mockRestore()
+      shell.remove()
+    }
+  })
+
+  it('drops software WebGL when parser backpressure builds behind a live write', () => {
+    const paneId = 'pane-software-parser-backpressure'
+    const shell = document.createElement('div')
+    shell.dataset.active = 'true'
+    const container = document.createElement('div')
+    shell.appendChild(container)
+    document.body.appendChild(shell)
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    Reflect.set(TerminalManager, 'webviewRenderMode', 'software')
+    TerminalManager.attach(paneId, container, { sessionId: 'session-output' })
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { webgl?: { dispose(): void }; term: { writes: unknown[]; write(data: unknown, callback?: () => void): void } }>
+      cancelOutputDrainSchedule(): void
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing software backpressure entry')
+    const disposeWebgl = vi.fn()
+    const callbacks: Array<() => void> = []
+    entry.webgl = { dispose: disposeWebgl }
+    entry.term.write = (data, callback) => {
+      entry.term.writes.push(data)
+      if (callback) callbacks.push(callback)
+    }
+
+    try {
+      TerminalManager.write(paneId, new Uint8Array(128))
+      TerminalManager.write(paneId, new Uint8Array(3 * 1024))
+      callbacks.shift()?.()
+
+      expect(disposeWebgl).toHaveBeenCalledOnce()
+      expect(entry.webgl).toBeUndefined()
+    } finally {
+      TerminalManager.dispose(paneId)
+      manager.cancelOutputDrainSchedule()
+      hasFocus.mockRestore()
+      shell.remove()
+    }
+  })
+
+
   it('coalesces inactive TUI redraws before parsing them', () => {
     vi.useFakeTimers()
     const paneId = 'pane-background-output'
@@ -1005,6 +1141,42 @@ describe('TerminalManager output scheduling', () => {
       container.remove()
       requestFrame.mockRestore()
       cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('recovers one pane after its WebGL context is lost', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-webgl-context-recovery'
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    webglMock.fail = false
+    TerminalManager.attach(paneId, container)
+    TerminalManager.setPaneVisible(paneId, true)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { webgl?: unknown; webglAttachFailed?: boolean; demotedForOutputBurst?: boolean }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing WebGL recovery entry')
+    const firstRenderer = webglMock.instances[0]
+    if (!firstRenderer) throw new Error('missing initial WebGL renderer')
+
+    try {
+      firstRenderer.triggerContextLoss()
+      expect(entry.webgl).toBeUndefined()
+      expect(entry.webglAttachFailed).toBe(true)
+      expect(entry.demotedForOutputBurst).toBe(true)
+
+      vi.advanceTimersByTime(1_999)
+      expect(entry.webgl).toBeUndefined()
+      vi.advanceTimersByTime(1)
+      expect(webglMock.instances).toHaveLength(2)
+      expect(entry.webgl).toBe(webglMock.instances[1])
+      expect(entry.webglAttachFailed).toBe(false)
+      expect(entry.demotedForOutputBurst).toBe(false)
+    } finally {
+      TerminalManager.dispose(paneId)
+      container.remove()
       vi.useRealTimers()
     }
   })
