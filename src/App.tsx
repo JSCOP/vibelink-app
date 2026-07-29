@@ -19,6 +19,8 @@ import { AppLockedScreen } from './components/AppLockedScreen'
 import { BugReportDialog } from './components/BugReportDialog'
 import { AppDialogHost } from './components/AppDialog'
 import { ToastHost } from './components/toast/ToastHost'
+import { UpdateCard } from './components/update/UpdateCard'
+import { startAppUpdateChecks } from './components/update/updateStore'
 import { CommandPaletteHost } from './components/palette/CommandPalette'
 import type { PaletteItem } from './components/palette/paletteModel'
 import { StatusBar } from './components/statusbar/StatusBar'
@@ -237,6 +239,8 @@ function App() {
       useWorkspaceStore.getState().setError(String(caught))
     })
   }, [bootstrap])
+
+  useEffect(() => startAppUpdateChecks(), [])
 
   useEffect(() => {
     let disposed = false
@@ -975,6 +979,7 @@ function App() {
     ) : null}
     <AppDialogHost />
     <ToastHost />
+    <UpdateCard />
     <CommandPaletteHost contentActions={contentActions} commands={paletteCommands} />
     </>
   )

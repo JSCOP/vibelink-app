@@ -2,6 +2,7 @@ pub mod agent_history;
 pub mod agent_hooks;
 pub mod agents;
 pub mod android_device_lab;
+pub mod app_update;
 pub mod authorization;
 pub mod board;
 pub mod browser;
@@ -204,6 +205,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             agents::agent_cli_status,
+            app_update::app_update_check,
             agent_history::agent_conversations_list,
             board::board_read,
             board::board_write,

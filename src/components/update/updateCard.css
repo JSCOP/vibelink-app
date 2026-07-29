@@ -1,0 +1,107 @@
+.vibelink-update-card {
+  position: fixed;
+  z-index: 180;
+  right: 16px;
+  /* Clears the 24px status bar plus its 1px top border. */
+  bottom: 39px;
+  display: flex;
+  width: min(320px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 11px;
+  background: var(--vibelink-dialog);
+  box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
+  color: var(--vibelink-text);
+  font: 12px/1.5 var(--vibelink-sans);
+  animation: vibelink-update-enter 150ms ease-out both;
+}
+
+.vibelink-update-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vibelink-update-card h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vibelink-update-summary {
+  margin: 0;
+  color: var(--vibelink-text);
+}
+
+.vibelink-update-note {
+  margin: 0;
+  color: var(--vibelink-muted);
+  font-size: 11px;
+}
+
+.vibelink-update-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: -4px -4px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+}
+
+.vibelink-update-link {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vibelink-muted);
+  font: inherit;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.vibelink-update-dismiss:hover,
+.vibelink-update-link:hover {
+  color: var(--vibelink-text);
+}
+
+.vibelink-update-dismiss:focus-visible,
+.vibelink-update-link:focus-visible,
+.vibelink-update-action:focus-visible {
+  outline: 1px solid var(--vibelink-accent-border);
+  outline-offset: 2px;
+}
+
+.vibelink-update-action {
+  width: 100%;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+@keyframes vibelink-update-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vibelink-update-card {
+    animation: none;
+  }
+}
