@@ -13,6 +13,8 @@ use interprocess::{
 };
 use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -157,6 +159,8 @@ const RECORDED_UNHEALTHY_RECOVERY_DELAY: Duration = Duration::from_secs(3);
 const DAEMON_BIN_DIR: &str = "daemon-bin";
 #[cfg(windows)]
 const DAEMON_EXE_PREFIX: &str = "app-daemon";
+#[cfg(windows)]
+const CONPTY_FILES: [&str; 2] = ["conpty.dll", "OpenConsole.exe"];
 enum SpawnedDaemon {
     Standard(Child),
     #[cfg(windows)]
@@ -1007,6 +1011,7 @@ fn prepare_daemon_executable_in(source: &Path, data_dir: &Path) -> Result<PathBu
     if !target.exists() {
         copy_daemon_executable(source, &target)?;
     }
+    copy_conpty_bundle_to_daemon_dir(source, &dir)?;
     cleanup_old_daemon_executables(&dir, &target);
 
     Ok(target)
@@ -1025,6 +1030,106 @@ fn daemon_copy_path(dir: &Path, identity: &str) -> PathBuf {
         paths::app_flavor(),
         identity
     ))
+}
+
+#[cfg(windows)]
+fn conpty_bundle_candidates(app_executable: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(configured) = std::env::var_os("VIBELINK_CONPTY_DIR") {
+        candidates.push(PathBuf::from(configured));
+    }
+    if let Some(exe_dir) = app_executable.parent() {
+        candidates.push(exe_dir.to_path_buf());
+        candidates.push(exe_dir.join("resources").join("conpty").join("x64"));
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn copy_conpty_bundle_to_daemon_dir(app_executable: &Path, destination: &Path) -> Result<()> {
+    copy_conpty_bundle_from_candidates(conpty_bundle_candidates(app_executable), destination)
+}
+
+#[cfg(windows)]
+fn copy_conpty_bundle_from_candidates<I>(candidates: I, destination: &Path) -> Result<()>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let candidates: Vec<PathBuf> = candidates.into_iter().collect();
+    let source_dir = candidates.iter().find(|candidate| {
+        CONPTY_FILES
+            .iter()
+            .all(|file_name| candidate.join(file_name).is_file())
+    });
+    let Some(source_dir) = source_dir else {
+        tracing::warn!(
+            searched_directories = ?candidates,
+            "bundled ConPTY source is missing; daemon will use the system ConPTY"
+        );
+        return Ok(());
+    };
+
+    fs::create_dir_all(destination).with_context(|| {
+        format!(
+            "create daemon ConPTY bundle directory {}",
+            destination.display()
+        )
+    })?;
+    for file_name in CONPTY_FILES {
+        copy_conpty_file_if_changed(&source_dir.join(file_name), &destination.join(file_name))?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_conpty_file_if_changed(source: &Path, destination: &Path) -> Result<bool> {
+    if conpty_files_identical(source, destination)? {
+        return Ok(false);
+    }
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "copy bundled ConPTY file {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn conpty_files_identical(source: &Path, destination: &Path) -> Result<bool> {
+    let source_metadata = fs::metadata(source)
+        .with_context(|| format!("inspect bundled ConPTY source {}", source.display()))?;
+    let destination_metadata = match fs::metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("inspect daemon ConPTY file {}", destination.display()))
+        }
+    };
+    if source_metadata.len() != destination_metadata.len() {
+        return Ok(false);
+    }
+    Ok(file_sha256(source)? == file_sha256(destination)?)
+}
+
+#[cfg(windows)]
+fn file_sha256(path: &Path) -> Result<[u8; 32]> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open ConPTY file for hashing {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash ConPTY file {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 #[cfg(windows)]
@@ -1082,6 +1187,12 @@ fn cleanup_old_daemon_executables(dir: &Path, current: &Path) {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if CONPTY_FILES
+            .iter()
+            .any(|bundle_name| file_name.eq_ignore_ascii_case(bundle_name))
+        {
+            continue;
+        }
         if file_name.starts_with(&prefix) && file_name.ends_with(".exe") {
             let _ = fs::remove_file(path);
         }
@@ -1314,6 +1425,136 @@ mod tests {
     use super::*;
     use crate::protocol::{constant_time_eq, read_frame, write_frame};
     use std::io::{Cursor, Read, Result as IoResult, Write};
+    #[cfg(windows)]
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl TempDir {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[cfg(windows)]
+    fn tempdir() -> io::Result<TempDir> {
+        let path = std::env::temp_dir().join(format!(
+            "vibelink-spawn-conpty-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&path)?;
+        Ok(TempDir { path })
+    }
+    #[cfg(windows)]
+    #[test]
+    fn conpty_bundle_is_copied_into_fresh_daemon_bin() {
+        let source = tempdir().expect("create source dir");
+        let destination_root = tempdir().expect("create destination root");
+        let destination = destination_root.path().join(DAEMON_BIN_DIR);
+        fs::write(source.path().join(CONPTY_FILES[0]), b"dll bytes").expect("write dll");
+        fs::write(source.path().join(CONPTY_FILES[1]), b"console bytes")
+            .expect("write console host");
+
+        copy_conpty_bundle_from_candidates([source.path().to_path_buf()], &destination)
+            .expect("copy bundle");
+
+        assert_eq!(
+            fs::read(destination.join(CONPTY_FILES[0])).expect("read copied dll"),
+            b"dll bytes"
+        );
+        assert_eq!(
+            fs::read(destination.join(CONPTY_FILES[1])).expect("read copied console host"),
+            b"console bytes"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn identical_conpty_bundle_files_are_left_untouched() {
+        let source = tempdir().expect("create source dir");
+        let destination = tempdir().expect("create destination dir");
+        for file_name in CONPTY_FILES {
+            fs::write(source.path().join(file_name), b"identical bytes").expect("write source");
+            let target = destination.path().join(file_name);
+            fs::write(&target, b"identical bytes").expect("write destination");
+            let mut permissions = fs::metadata(&target)
+                .expect("destination metadata")
+                .permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&target, permissions).expect("make destination read-only");
+        }
+
+        copy_conpty_bundle_from_candidates([source.path().to_path_buf()], destination.path())
+            .expect("identical bundle is a no-op");
+
+        for file_name in CONPTY_FILES {
+            let target = destination.path().join(file_name);
+            assert_eq!(
+                fs::read(&target).expect("read destination"),
+                b"identical bytes"
+            );
+            let mut permissions = fs::metadata(&target)
+                .expect("destination metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(target, permissions).expect("restore destination permissions");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_conpty_source_is_a_successful_noop() {
+        let missing = tempdir().expect("create missing source parent");
+        let destination = tempdir().expect("create destination dir");
+
+        copy_conpty_bundle_from_candidates(
+            [missing.path().join("not-present")],
+            destination.path(),
+        )
+        .expect("missing source must not block daemon startup");
+
+        for file_name in CONPTY_FILES {
+            assert!(!destination.path().join(file_name).exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn daemon_cleanup_keeps_conpty_bundle_files() {
+        let temp = tempdir().expect("create daemon bin dir");
+        let current = temp.path().join(format!(
+            "{}-{}-current.exe",
+            DAEMON_EXE_PREFIX,
+            paths::app_flavor()
+        ));
+        let old = temp.path().join(format!(
+            "{}-{}-old.exe",
+            DAEMON_EXE_PREFIX,
+            paths::app_flavor()
+        ));
+        fs::write(&current, b"current").expect("write current daemon");
+        fs::write(&old, b"old").expect("write old daemon");
+        for file_name in CONPTY_FILES {
+            fs::write(temp.path().join(file_name), b"bundle").expect("write bundle file");
+        }
+
+        cleanup_old_daemon_executables(temp.path(), &current);
+
+        assert!(current.exists());
+        assert!(!old.exists());
+        for file_name in CONPTY_FILES {
+            assert!(temp.path().join(file_name).exists());
+        }
+    }
 
     struct ScriptedStream {
         read: Cursor<Vec<u8>>,

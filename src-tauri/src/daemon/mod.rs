@@ -1,5 +1,7 @@
 pub mod automation;
 mod browser_cdp;
+pub mod conpty;
+mod lifecycle;
 pub mod paths;
 pub mod persistence;
 pub mod proc;
@@ -42,7 +44,8 @@ use crate::daemon::session::{
     DaemonState, PaneExitEffect, PaneLeaseEffect, PaneLeaseTransition, PaneOutputEffect,
 };
 use crate::daemon::terminal_history::{
-    load_pane_history, remove_pane_history, remove_session_history, TerminalHistoryWriter,
+    load_pane_history, prune_orphan_history, remove_pane_history, remove_session_history,
+    TerminalHistoryWriter,
 };
 use crate::dedicated_cli::{
     AutomationAction, CliControlRequest, Command as DedicatedCommand, ComputerAction,
@@ -361,6 +364,11 @@ fn run_inner() -> Result<()> {
 
     let _pid_file = PidFileGuard::create(paths.pid.clone())?;
 
+    // Bind the bundled ConPTY before the first pane spawns; otherwise
+    // portable-pty's bare `LoadLibrary("conpty.dll")` picks up whatever install
+    // happens to be on PATH.
+    conpty::ensure_bundled_conpty();
+
     let state = Arc::new(Mutex::new(DaemonState::new()));
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
     let mut startup_pane_cleanup = StartupPaneCleanup::new(Arc::clone(&state));
@@ -425,6 +433,14 @@ fn run_inner() -> Result<()> {
         Arc::clone(&policy_heartbeat),
         Arc::clone(&shutdown),
     )?;
+    start_lifecycle_monitor(
+        Arc::clone(&state),
+        Arc::clone(&sessions_path),
+        Arc::clone(&connections),
+        Arc::clone(&automation),
+        Arc::clone(&remote),
+        Arc::clone(&shutdown),
+    )?;
     let socket_name = paths::socket_name_string();
     let name = socket_name.as_str().to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
@@ -487,6 +503,99 @@ fn run_inner() -> Result<()> {
     Ok(())
 }
 
+/// Sweeps pane process trees the daemon still parents without owning, and ends
+/// a daemon that has nothing left to serve. See `daemon::lifecycle`.
+fn start_lifecycle_monitor(
+    state: SharedState,
+    sessions_path: Arc<PathBuf>,
+    connections: SharedConnections,
+    automation: Arc<AutomationService>,
+    remote: Arc<RemoteServer>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    let config = lifecycle::LifecycleConfig::from_env();
+    thread::Builder::new()
+        .name("vibelink-daemon-lifecycle".to_string())
+        .spawn(move || {
+            let mut tracker = lifecycle::IdleTracker::new(Instant::now(), config);
+            let mut sys = sysinfo::System::new();
+            let daemon_pid = std::process::id();
+            while !wait_for_daemon_shutdown(&shutdown, config.sweep_interval) {
+                sweep_orphan_pane_processes(&state, &mut sys, daemon_pid);
+                let activity = collect_daemon_activity(&state, &connections, &automation, &remote);
+                if let Some(reason) = tracker.observe(activity, Instant::now()) {
+                    info!(
+                        reason = reason.as_str(),
+                        "daemon has nothing left to serve; shutting down"
+                    );
+                    shutdown.store(true, Ordering::Release);
+                    exit_daemon_process(&state, &sessions_path);
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Terminates shell processes that are still parented by this daemon while no
+/// live pane owns them. Console hosts are left alone: they belong to a pseudo
+/// console, not to a pane root PID, and exit with it.
+fn sweep_orphan_pane_processes(state: &SharedState, sys: &mut sysinfo::System, daemon_pid: u32) {
+    let live_roots: HashSet<u32> = lock_state(state)
+        .resource_targets()
+        .into_iter()
+        .filter_map(|(_, _, pid)| pid)
+        .collect();
+    let children = lifecycle::daemon_children(sys, daemon_pid);
+    for pid in lifecycle::orphan_pane_pids(&children, &live_roots) {
+        warn!(
+            orphan_pid = pid,
+            "terminating pane process tree without a live pane owner"
+        );
+        proc::kill_process_tree(pid);
+    }
+}
+
+/// A probe failure must read as busy so a transient error can never terminate a
+/// working daemon.
+fn collect_daemon_activity(
+    state: &SharedState,
+    connections: &SharedConnections,
+    automation: &AutomationService,
+    remote: &RemoteServer,
+) -> lifecycle::DaemonActivity {
+    let scheduled_automations = match automation.list(None) {
+        Ok(records) => records
+            .iter()
+            .filter(|record| record.next_run_at.is_some())
+            .count(),
+        Err(error) => {
+            warn!(
+                ?error,
+                "failed to read automations; treating daemon as busy"
+            );
+            1
+        }
+    };
+    lifecycle::DaemonActivity {
+        clients: lock_mutex(connections).len(),
+        live_panes: lock_state(state).resource_targets().len(),
+        scheduled_automations,
+        remote_running: remote.status().running,
+    }
+}
+
+/// Persists restorable panes, drops the PID record, and ends the process. The
+/// accept loop blocks on the listener, so exiting is what unblocks the daemon.
+fn exit_daemon_process(state: &SharedState, sessions_path: &Path) -> ! {
+    if let Err(err) = persist_restorable_panes_and_kill_all(state, sessions_path) {
+        warn!(?err, "failed to persist state during shutdown");
+    }
+    if let Ok(paths) = paths::daemon_paths() {
+        let _ = fs::remove_file(paths.pid);
+    }
+    std::process::exit(0);
+}
+
 fn start_automation_scheduler(
     automation: Arc<AutomationService>,
     state: SharedState,
@@ -517,13 +626,13 @@ where
 {
     while !shutdown.load(Ordering::Acquire) {
         tick();
-        if wait_for_automation_scheduler_shutdown(shutdown, AUTOMATION_SCHEDULER_INTERVAL) {
+        if wait_for_daemon_shutdown(shutdown, AUTOMATION_SCHEDULER_INTERVAL) {
             break;
         }
     }
 }
 
-fn wait_for_automation_scheduler_shutdown(shutdown: &AtomicBool, timeout: Duration) -> bool {
+fn wait_for_daemon_shutdown(shutdown: &AtomicBool, timeout: Duration) -> bool {
     if shutdown.load(Ordering::Acquire) {
         return true;
     }
@@ -1012,6 +1121,7 @@ fn reconcile_orchestration_startup(
 
 fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> {
     let mut panes_to_restore = Vec::new();
+    let mut persisted_history: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
     for persisted in load_sessions(sessions_path)? {
         let session_id = persisted.id;
         let workspace_folder = persisted.workspace_folder;
@@ -1022,7 +1132,9 @@ fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> 
         // therefore rebuilds its panes. This is what makes "close, then open"
         // predictable instead of always resurrecting the previous screen.
         let restorable = !sleeping && !persisted.clean_exit;
+        let owned_panes = persisted_history.entry(session_id).or_default();
         for cfg in persisted.panes {
+            owned_panes.insert(cfg.pane_id);
             if restorable && cfg.restore_on_start {
                 panes_to_restore.push((session_id, workspace_folder.clone(), cfg));
             }
@@ -1081,6 +1193,17 @@ fn reconstruct_sessions(state: SharedState, sessions_path: &Path) -> Result<()> 
             warn!(?error, %session_id, %pane_id, "failed to cold-restore pane");
             let _ = remove_pane_history(sessions_path, session_id, pane_id);
         }
+    }
+    // Scrollback is normally dropped on an explicit close or a clean exit, so a
+    // crash or a lost session record used to leak its history files forever.
+    match prune_orphan_history(sessions_path, &persisted_history) {
+        Ok(pruned) if !pruned.is_empty() => info!(
+            sessions = pruned.sessions,
+            panes = pruned.panes,
+            "pruned terminal history without a persisted owner"
+        ),
+        Ok(_) => {}
+        Err(error) => warn!(?error, "failed to prune orphaned terminal history"),
     }
     persist_state(&state, sessions_path)
 }
@@ -5394,15 +5517,7 @@ fn dispatch_message(
                 lock_state(&state).mark_clean_exit();
             }
             info!("daemon shutting down, preserving restorable panes");
-            if let Err(err) = persist_restorable_panes_and_kill_all(&state, sessions_path) {
-                warn!(?err, "failed to persist state during shutdown");
-            }
-
-            if let Ok(paths) = paths::daemon_paths() {
-                let _ = fs::remove_file(paths.pid);
-            }
-            // Exit the process to unblock the main thread's accept() loop
-            std::process::exit(0);
+            exit_daemon_process(&state, sessions_path);
         }
     }
 }
