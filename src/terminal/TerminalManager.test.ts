@@ -700,6 +700,111 @@ describe('TerminalManager output scheduling', () => {
     }
   })
 
+  it('slices daemon output frames to keep pointer interaction responsive', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-resume-output'
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 1
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame
+      nextFrame += 1
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; term: { writes: unknown[] } }
+    entry.opened = true
+    const runNextFrame = () => {
+      const callback = frames.values().next().value
+      if (!callback) throw new Error('missing scheduled output frame')
+      frames.clear()
+      callback(performance.now())
+    }
+
+    try {
+      TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
+      vi.advanceTimersByTime(50)
+      runNextFrame()
+
+      expect(entry.term.writes).toHaveLength(1)
+      expect((entry.term.writes[0] as Uint8Array).byteLength).toBe(16 * 1024)
+
+      runNextFrame()
+      expect(entry.term.writes).toHaveLength(2)
+      expect((entry.term.writes[1] as Uint8Array).byteLength).toBe(16 * 1024)
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops software WebGL before parsing a high-volume resume burst', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-resume-webgl'
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 1
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame
+      nextFrame += 1
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const disposeWebgl = vi.fn()
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      webgl?: { dispose(): void }
+    }
+    entry.opened = true
+    entry.webgl = { dispose: disposeWebgl }
+
+    try {
+      TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
+      vi.advanceTimersByTime(50)
+      const callback = frames.values().next().value
+      if (!callback) throw new Error('missing scheduled output frame')
+      frames.clear()
+      callback(performance.now())
+
+      expect(disposeWebgl).toHaveBeenCalledOnce()
+      expect(entry.webgl).toBeUndefined()
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps process-exit backlog split into cooperative parser chunks', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-exit-backlog'
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      term: { writes: unknown[] }
+    }
+    entry.opened = true
+
+    try {
+      TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
+      TerminalManager.markExited(paneId, 0)
+
+      expect(entry.term.writes).toHaveLength(5)
+      expect(entry.term.writes.slice(0, 4).map((write) => (write as Uint8Array).byteLength))
+        .toEqual([16 * 1024, 16 * 1024, 16 * 1024, 16 * 1024])
+      expect(entry.term.writes[4]).toContain('[process exited (0)]')
+    } finally {
+      TerminalManager.dispose(paneId)
+      vi.useRealTimers()
+    }
+  })
+
   it('shares each frame budget fairly across busy panes', () => {
     vi.useFakeTimers()
     const paneIds = ['pane-output-a', 'pane-output-b', 'pane-output-c']

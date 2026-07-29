@@ -20,9 +20,10 @@ import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, ty
 import { PaneTitleCoalescer } from './titleCoalescing'
 
 const MAX_FIT_ATTEMPTS = 120
-const MAX_OUTPUT_BYTES_PER_FRAME = 64 * 1024
+const MAX_OUTPUT_BYTES_PER_WRITE = 16 * 1024
 const MAX_OUTPUT_WRITES_PER_DRAIN = 2
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024
+const HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES = 64 * 1024
 const BACKGROUND_OUTPUT_COALESCE_MS = 50
 const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
@@ -1704,6 +1705,7 @@ class TerminalManagerImpl {
 
   private drainOutputQueue(): void {
     let writes = 0
+    const requeueAfterDrain: Entry[] = []
     const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
     while (this.outputQueue.length > 0 && writes < MAX_OUTPUT_WRITES_PER_DRAIN) {
       const priorityIndex = this.outputQueue.findIndex((entry) => entry.outputHighPriority)
@@ -1715,13 +1717,17 @@ class TerminalManagerImpl {
       this.flushOutput(entry)
       writes += 1
       if (entry.pendingOutput?.length) {
+        // Do not let one resume flood consume both writes in this drain. Keep
+        // the remaining slot available to another pane, then revisit this pane
+        // only after the browser has had a paint/input opportunity.
         entry.outputHighPriority = this.isForegroundOutput(entry)
         this.queuedOutputPaneIds.add(entry.paneId)
-        this.outputQueue.push(entry)
+        requeueAfterDrain.push(entry)
       }
       const now = typeof performance === 'undefined' ? Date.now() : performance.now()
       if (now - startedAt >= OUTPUT_DRAIN_TIME_BUDGET_MS) break
     }
+    this.outputQueue.push(...requeueAfterDrain)
     if (this.outputQueue.length > 0) this.scheduleOutputDrain(0)
   }
 
@@ -1759,29 +1765,48 @@ class TerminalManagerImpl {
   private flushAllOutput(entry: Entry): void {
     this.removeQueuedOutput(entry)
     while (entry.pendingOutput?.length) {
-      this.flushOutput(entry, Number.MAX_SAFE_INTEGER)
+      this.flushOutput(entry)
     }
     if (!entry.pendingOutput?.length) entry.outputTrimNoticeWritten = false
   }
 
-  private flushOutput(entry: Entry, maxBytes = MAX_OUTPUT_BYTES_PER_FRAME): void {
+  private flushOutput(entry: Entry, maxBytes = MAX_OUTPUT_BYTES_PER_WRITE): void {
     const pending = entry.pendingOutput
     if (!pending?.length) {
       entry.outputTrimNoticeWritten = false
       return
     }
 
-    let bytesToWrite = 0
-    let chunkCount = 0
-    while (chunkCount < pending.length) {
-      const nextSize = pending[chunkCount].byteLength
-      if (chunkCount > 0 && bytesToWrite + nextSize > maxBytes) break
-      bytesToWrite += nextSize
-      chunkCount += 1
-      if (bytesToWrite >= maxBytes) break
+    // WebGL inside a software-rendered WebView turns sustained ANSI output into
+    // 80-90 ms paint stalls. A burst this large is throughput work, not typed
+    // echo; switch the pane once to xterm's responsive DOM renderer before the
+    // parser starts draining it. Existing renderer recovery already establishes
+    // that the DOM renderer remains authoritative until this pane is recreated.
+    if ((entry.pendingOutputBytes ?? 0) >= HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES && entry.webgl) {
+      this.dropToDomRenderer(entry)
     }
 
-    const chunks = pending.splice(0, chunkCount)
+    // xterm applies its 12 ms cooperative timeout BETWEEN write() chunks, not
+    // while parsing one chunk. Daemon reads can be 64 KiB, and forwarding one
+    // whole frame therefore creates a 25-30 ms renderer-thread task for dense
+    // ANSI resume output. Split even a single incoming frame so pointermove,
+    // Dockview layout, paint, and input regain control between parser chunks.
+    const chunks: Uint8Array[] = []
+    let bytesToWrite = 0
+    while (pending.length > 0 && bytesToWrite < maxBytes) {
+      const next = pending[0]
+      const remaining = maxBytes - bytesToWrite
+      if (next.byteLength <= remaining) {
+        chunks.push(next)
+        pending.shift()
+        bytesToWrite += next.byteLength
+        continue
+      }
+      chunks.push(next.subarray(0, remaining))
+      pending[0] = next.subarray(remaining)
+      bytesToWrite += remaining
+    }
+
     entry.pendingOutputBytes = Math.max(0, (entry.pendingOutputBytes ?? bytesToWrite) - bytesToWrite)
     this.writeTerminalOutput(entry, concatUint8Arrays(chunks, bytesToWrite))
     if (pending.length === 0) {
