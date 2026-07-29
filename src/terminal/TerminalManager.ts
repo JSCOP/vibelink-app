@@ -93,6 +93,26 @@ const withSearchDecorations = (options?: TerminalSearchOptions): ISearchOptions 
 })
 
 type PendingInputChunk = { data: string; bytes: number }
+type SnapshotCursorQuery = 'standard' | 'private'
+
+function snapshotCursorQueries(bytes: Uint8Array): SnapshotCursorQuery[] {
+  const queries: SnapshotCursorQuery[] = []
+  for (let index = 0; index + 3 < bytes.byteLength; index += 1) {
+    if (bytes[index] !== 0x1b || bytes[index + 1] !== 0x5b) continue
+    const privateQuery = bytes[index + 2] === 0x3f
+    const parameterOffset = privateQuery ? index + 3 : index + 2
+    if (bytes[parameterOffset] !== 0x36 || bytes[parameterOffset + 1] !== 0x6e) continue
+    queries.push(privateQuery ? 'private' : 'standard')
+    index = parameterOffset + 1
+  }
+  return queries
+}
+
+function hasCursorResponse(input: readonly string[], query: SnapshotCursorQuery): boolean {
+  const pattern = query === 'private' ? /\x1b\[\?\d+;\d+R/ : /\x1b\[\d+;\d+R/
+  return input.some((value) => pattern.test(value))
+}
+
 
 type SequencedOutputFrame = {
   paneGeneration: bigint
@@ -128,6 +148,7 @@ type Entry = {
   attachingSessionId?: string
   attachPromise?: Promise<void>
   inputFlush?: Promise<void>
+  replayInputCapture?: string[]
   observer?: ResizeObserver
   fitFrame?: number
   rendererReloadPending?: boolean
@@ -471,11 +492,13 @@ class TerminalManagerImpl {
 
     if (!entry.dataWired) {
       entry.term.onData((data) => {
+        const replayGenerated = entry.replayInputCapture !== undefined
+        entry.replayInputCapture?.push(data)
         if (entry.remoteLease) return
         // OMP 17.1+ renders its interactive TUI in xterm's normal buffer.
         // AgentActivityTracker already capability-gates the pane, so buffer
         // type must not suppress prompt tracking for inline agent renderers.
-        agentActivityTracker.noteUserInput(paneId, data)
+        if (!replayGenerated) agentActivityTracker.noteUserInput(paneId, data)
         this.enqueueInput(entry, data)
       })
       entry.term.onResize(({ cols, rows }) => {
@@ -849,16 +872,32 @@ class TerminalManagerImpl {
   private async writeReplayBytes(entry: Entry, bytes: Uint8Array): Promise<void> {
     if (bytes.byteLength === 0) return
     const replayBytes = terminalOutputAfterLastHardClear(bytes).bytes
-    for (let offset = 0; offset < replayBytes.byteLength; offset += MAX_REPLAY_BYTES_PER_FRAME) {
-      if (this.entries.get(entry.paneId) !== entry) return
-      const chunk = replayBytes.subarray(offset, Math.min(offset + MAX_REPLAY_BYTES_PER_FRAME, replayBytes.byteLength))
-      const { promise, resolve } = Promise.withResolvers<void>()
-      entry.term.write(chunk, () => {
-        if (entry.rendererReloadPending) this.performRendererReload(entry)
-        resolve()
-      })
-      await promise
-      if (offset + chunk.byteLength < replayBytes.byteLength) await this.yieldReplayFrame()
+    const generatedInput: string[] = []
+    entry.replayInputCapture = generatedInput
+    try {
+      for (let offset = 0; offset < replayBytes.byteLength; offset += MAX_REPLAY_BYTES_PER_FRAME) {
+        if (this.entries.get(entry.paneId) !== entry) return
+        const chunk = replayBytes.subarray(offset, Math.min(offset + MAX_REPLAY_BYTES_PER_FRAME, replayBytes.byteLength))
+        const { promise, resolve } = Promise.withResolvers<void>()
+        entry.term.write(chunk, () => {
+          if (entry.rendererReloadPending) this.performRendererReload(entry)
+          resolve()
+        })
+        await promise
+        if (offset + chunk.byteLength < replayBytes.byteLength) await this.yieldReplayFrame()
+      }
+    } finally {
+      entry.replayInputCapture = undefined
+    }
+
+    if (entry.remoteLease) return
+    const queries = new Set(snapshotCursorQueries(replayBytes))
+    const row = entry.term.buffer.active.cursorY + 1
+    const column = entry.term.buffer.active.cursorX + 1
+    for (const query of queries) {
+      if (hasCursorResponse(generatedInput, query)) continue
+      const prefix = query === 'private' ? '?' : ''
+      this.enqueueInput(entry, `\x1b[${prefix}${row};${column}R`)
     }
   }
 

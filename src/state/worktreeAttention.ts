@@ -188,7 +188,7 @@ export function buildAttentionByWorkspace(
       if (fallbacks.conflictSessionIds?.has(session.id)) best = consider(best, 1, now, 'git', 'conflict')
       const permissions = fallbacks.hermesPermissions?.[session.id]?.length ?? 0
       if (permissions > 0) best = consider(best, 1, now, 'hermes', 'permission')
-      else if (fallbacks.hermesStatus[session.id] === 'busy' || fallbacks.hermesStatus[session.id] === 'running') best = consider(best, 3, now, 'hermes', 'working')
+      else if (fallbacks.hermesStatus[session.id] === 'busy') best = consider(best, 3, now, 'hermes', 'working')
     }
 
     const state: WorkspaceAttentionState = best.attentionClass === 1 ? 'blocked' : best.attentionClass === 2 ? 'done' : best.attentionClass === 3 ? 'working' : 'idle'

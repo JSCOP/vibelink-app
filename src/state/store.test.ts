@@ -503,6 +503,45 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(stored.get('vibelink:settings') ?? '{}')).not.toHaveProperty('workspaceWorktrees')
   })
 
+  test('recovers a lost folder group during bootstrap and persists the recovered membership', async () => {
+    const root: SessionMeta = { id: 'workspace-root', name: 'VibeLink', paneCount: 1, createdAt: 120, workspaceFolder: 'E:/VibeCodingProject/vibelink' }
+    const app: SessionMeta = { id: 'workspace-app', name: 'vibelink-app', paneCount: 1, createdAt: 121, workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-app' }
+    const web: SessionMeta = { id: 'workspace-web', name: 'vibelink-web', paneCount: 1, createdAt: 122, workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-web' }
+    const stored = new Map<string, string>()
+    localStorageStub.getItem.mockImplementation((key: string) => stored.get(key) ?? null)
+    localStorageStub.setItem.mockImplementation((key: string, value: string) => { stored.set(key, value) })
+    useWorkspaceStore.setState({
+      settings: normalizeSettings({
+        ...useWorkspaceStore.getState().settings,
+        workspaceGroups: [],
+        workspaceGroupIds: {},
+        worktreeRegistryMigrationVersion: 1,
+      }),
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'license_status') return unlicensedStatus
+      if (command === 'agent_cli_status') return []
+      if (command === 'list_sessions') return [root, app, web]
+      if (command === 'worktree_registry_reconcile') return []
+      if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
+      return null
+    })
+
+    await useWorkspaceStore.getState().bootstrap()
+
+    const settings = useWorkspaceStore.getState().settings
+    expect(settings.workspaceGroups).toEqual([expect.objectContaining({ name: 'vibelink', rootFolder: 'E:/VibeCodingProject/vibelink' })])
+    const groupId = settings.workspaceGroups[0]?.id
+    expect(groupId).toBe('recovered-workspace-root')
+    expect(settings.workspaceGroupIds).toEqual({
+      'workspace-root': groupId,
+      'workspace-app': groupId,
+      'workspace-web': groupId,
+    })
+    expect(stored.get('vibelink:workspaceGroupRecovery:v1')).toBe('1')
+    expect(JSON.parse(stored.get('vibelink:settings') ?? '{}').workspaceGroupIds).toEqual(settings.workspaceGroupIds)
+  })
+
   test('keeps the migration marker unset when a legacy reconcile fails', async () => {
     const stored = new Map<string, string>([['vibelink:settings', JSON.stringify({
       workspaceWorktrees: {

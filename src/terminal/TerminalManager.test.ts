@@ -16,7 +16,7 @@ vi.mock('@xterm/xterm', () => {
     rows = 24
     unicode = { activeVersion: '' }
     modes = { mouseTrackingMode: 'none' }
-    buffer = { active: { type: 'normal', viewportY: 0, baseY: 0, length: 0 } }
+    buffer = { active: { type: 'normal', viewportY: 0, baseY: 0, length: 0, cursorX: 0, cursorY: 0 } }
     dataHandler: ((data: string) => void) | undefined
     resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined
     focusCalls = 0
@@ -355,6 +355,23 @@ describe('TerminalManager atomic snapshot replay', () => {
     expect(invokeMock).toHaveBeenCalledWith('subscribe_pane', { sessionId: 'session-replay', paneId })
     expect(entry?.term.resetCalls).toBe(1)
     expect(entry?.term.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['snapshot', 'live'])
+    TerminalManager.dispose(paneId)
+  })
+
+  it('answers a cold-snapshot cursor query when the emulator emits no CPR', async () => {
+    const paneId = 'pane-cold-dsr'
+    invokeMock.mockImplementation((command) => command === 'subscribe_pane'
+      ? Promise.resolve(terminalSnapshot(paneId, 1n, '\x1b[?9001h\x1b[?1004h\x1b[6n', 'session-cold-dsr'))
+      : Promise.resolve())
+
+    TerminalManager.attach(paneId, makeContainer(), { sessionId: 'session-cold-dsr' })
+    await TerminalManager.waitForReplay('session-cold-dsr', [paneId])
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('write_pane', {
+      sessionId: 'session-cold-dsr',
+      paneId,
+      data: '\x1b[1;1R',
+    }))
     TerminalManager.dispose(paneId)
   })
 

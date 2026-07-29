@@ -3,7 +3,7 @@ import type { SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import { useWorkspaceStore } from './store'
 import type { WorktreeProjection, WorktreeRecord } from './worktrees'
-import { flattenWorkspaceRows, workspaceRows, type WorkspaceGroup } from './workspaceGroups'
+import { flattenWorkspaceRows, recoverWorkspaceGroups, workspaceRows, type WorkspaceGroup } from './workspaceGroups'
 
 function session(id: string): SessionMeta {
   return {
@@ -58,6 +58,24 @@ describe('workspace groups', () => {
 
     expect(rows[0].kind === 'group' ? rows[0].sessions.map(({ session: item }) => item.id) : []).toEqual(['root', 'member'])
     expect(rows.slice(1).map((row) => row.kind === 'session' ? row.node.session.id : row.group.id)).toEqual(['ungrouped'])
+  })
+
+  test('recovers a lost folder group from a surviving root workspace and direct child sessions', () => {
+    const root = { ...session('root'), name: 'VibeLink', workspaceFolder: 'E:\\VibeCodingProject\\vibelink\\' }
+    const app = { ...session('app'), workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-app' }
+    const web = { ...session('web'), workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-web' }
+    const unrelated = { ...session('unrelated'), workspaceFolder: 'E:/workspaces/updraft' }
+
+    expect(recoverWorkspaceGroups([root, app, web, unrelated])).toEqual({
+      groups: [{
+        id: 'recovered-root',
+        name: 'vibelink',
+        collapsed: false,
+        rootFolder: 'E:/VibeCodingProject/vibelink',
+      }],
+      groupIds: { root: 'recovered-root', app: 'recovered-root', web: 'recovered-root' },
+    })
+    expect(recoverWorkspaceGroups([root, app, unrelated])).toBeNull()
   })
 
 

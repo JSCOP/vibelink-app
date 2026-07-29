@@ -39,6 +39,52 @@ export function workspaceGroupRootNode(group: WorkspaceGroup, nodes: readonly Wo
   return nodes.find((node) => workspaceFolderKey(node.session.workspaceFolder) === rootFolder) ?? null
 }
 
+export type RecoveredWorkspaceGroups = {
+  groups: WorkspaceGroup[]
+  groupIds: Record<string, string>
+}
+
+/**
+ * Recovers the structural group that existed before WebView localStorage was
+ * cleared while daemon-owned sessions survived. Only a workspace with at least
+ * two direct child workspaces is strong enough evidence; a one-child folder is
+ * left alone so ordinary nested repositories are not grouped by surprise.
+ */
+export function recoverWorkspaceGroups(sessions: readonly SessionMeta[]): RecoveredWorkspaceGroups | null {
+  const groups: WorkspaceGroup[] = []
+  const groupIds: Record<string, string> = {}
+  const folderBySession = new Map(sessions.flatMap((session) => {
+    const folder = session.workspaceFolder?.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+    return folder ? [[session.id, folder] as const] : []
+  }))
+
+  for (const root of sessions) {
+    const rootFolder = folderBySession.get(root.id)
+    const rootKey = workspaceFolderKey(rootFolder)
+    if (!rootFolder || !rootKey) continue
+    const children = sessions.filter((candidate) => {
+      if (candidate.id === root.id) return false
+      const folder = folderBySession.get(candidate.id)
+      if (!folder) return false
+      const separator = folder.lastIndexOf('/')
+      return separator > 0 && workspaceFolderKey(folder.slice(0, separator)) === rootKey
+    })
+    if (children.length < 2) continue
+
+    const id = `recovered-${root.id}`
+    const separator = rootFolder.lastIndexOf('/')
+    groups.push({
+      id,
+      name: rootFolder.slice(separator + 1) || root.name,
+      collapsed: false,
+      rootFolder,
+    })
+    for (const member of [root, ...children]) groupIds[member.id] = id
+  }
+
+  return groups.length > 0 ? { groups, groupIds } : null
+}
+
 function normalizeRepositoryPath(path: string | null | undefined): string {
   return (path ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }

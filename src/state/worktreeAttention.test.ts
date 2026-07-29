@@ -97,6 +97,22 @@ describe('smart workspace attention', () => {
     expect(build(pane({ state: 'idle', stateUpdatedAt: 0 }))).toMatchObject({ attentionClass: 1, state: 'blocked', source: 'git' })
   })
 
+  test('treats an available Hermes runtime as idle and only an active turn as working', () => {
+    const now = 30_000_000
+    const target = session('workspace-a')
+    const build = (status: 'starting' | 'running' | 'busy') => buildAttentionByWorkspace(
+      [target],
+      [],
+      null,
+      { completionHighlights: {}, hermesStatus: { [target.id]: status } },
+      now,
+    )[target.id]
+
+    expect(build('starting')).toMatchObject({ attentionClass: 4, state: 'idle' })
+    expect(build('running')).toMatchObject({ attentionClass: 4, state: 'idle' })
+    expect(build('busy')).toMatchObject({ attentionClass: 3, state: 'working', source: 'hermes' })
+  })
+
   test('orders the canonical blocked, done, working, idle fixture deterministically', () => {
     const sessions = [
       session('idle', 'Idle'),

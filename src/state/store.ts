@@ -14,7 +14,7 @@ import { cancelWorktreeOperation, createWorktree, createWorktreeCheckpoint, impo
 import type { LegacyWorkspaceWorktree, PendingWorktreeCreation } from './worktrees'
 import { indexWorktrees, legacyRowsByRepository, worktreeBySession } from './worktrees'
 import { useGitStore } from './git'
-import type { WorkspaceGroup } from './workspaceGroups'
+import { recoverWorkspaceGroups, type WorkspaceGroup } from './workspaceGroups'
 import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
@@ -30,6 +30,7 @@ const initialKanban = loadKanban()
 const migratedLegacySessions = new Set<string>()
 const paneCompletionHighlightsStorageKey = 'vibelink:paneCompletionHighlights'
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
+const workspaceGroupRecoveryStorageKey = 'vibelink:workspaceGroupRecovery:v1'
 let workspaceSessionEpoch = 0
 let workspaceSessionReadyEpoch = 0
 let workspaceSessionTargetId: string | null = null
@@ -280,13 +281,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       // The migration marker is only durable proof once the daemon accepted
       // every legacy payload. A partial failure leaves the marker at 0 so the
       // next launch replays the same rows under the same operation hash.
-      const settings = migration.migrated
+      const migratedSettings = migration.migrated
         ? { ...get().settings, worktreeRegistryMigrationVersion: 1 }
         : get().settings
-      if (migration.migrated) {
-        persistSettings(settings)
-        forgetLegacyWorkspaceWorktrees()
-      }
+      const groupRecovery = recoverWorkspaceGroupsOnce(migratedSettings, sessions)
+      const settings = groupRecovery.settings
+      if (migration.migrated || groupRecovery.recovered) persistSettings(settings)
+      if (migration.migrated) forgetLegacyWorkspaceWorktrees()
       set({
         sessions,
         ...projectionState(migration.projections),
@@ -1996,6 +1997,27 @@ function loadSettings(): Settings {
     return normalizeSettings(JSON.parse(raw))
   } catch {
     return defaultSettings
+  }
+}
+
+function recoverWorkspaceGroupsOnce(settings: Settings, sessions: readonly SessionMeta[]): { settings: Settings; recovered: boolean } {
+  if (typeof window === 'undefined') return { settings, recovered: false }
+  try {
+    if (window.localStorage.getItem(workspaceGroupRecoveryStorageKey) === '1') return { settings, recovered: false }
+    window.localStorage.setItem(workspaceGroupRecoveryStorageKey, '1')
+    if (settings.workspaceGroups.length > 0) return { settings, recovered: false }
+    const recovered = recoverWorkspaceGroups(sessions)
+    if (!recovered) return { settings, recovered: false }
+    return {
+      settings: normalizeSettings({
+        ...settings,
+        workspaceGroups: recovered.groups,
+        workspaceGroupIds: recovered.groupIds,
+      }),
+      recovered: true,
+    }
+  } catch {
+    return { settings, recovered: false }
   }
 }
 
