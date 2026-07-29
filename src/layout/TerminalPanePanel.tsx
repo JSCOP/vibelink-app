@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, TextSelect, X } from 'lucide-react'
+import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, SquareTerminal, TextSelect, X } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { TerminalSearchBar } from '../components/TerminalSearchBar'
@@ -13,6 +13,7 @@ import type { WorkspaceContentParams } from './workspaceContentModel'
 import { reclaimAllRemotePaneLeases, reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { findTerminalWindowForPane } from './terminalWindowRegistry'
 import { toast } from '../components/toast/toastStore'
+import { agentSessionDragEndEvent, clearAgentSessionDragPayload, hasAgentSessionDragPayload, readAgentSessionDragPayload } from '../components/agent/agentSessionsModel'
 
 type TerminalPanelParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
 
@@ -69,6 +70,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const remoteLease = useRemotePaneLeaseStore((state) => paneId ? state.leases[paneId] : undefined)
   const actions = useWorkspaceContentActions()
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [agentSessionDropActive, setAgentSessionDropActive] = useState(false)
   const [hermesDetected, setHermesDetected] = useState(false)
   const [reclaimingLease, setReclaimingLease] = useState(false)
   const [reclaimError, setReclaimError] = useState<string | null>(null)
@@ -103,6 +105,50 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   const closeContextMenu = useCallback(() => setContextMenu(null), [])
+
+  const onAgentSessionDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasAgentSessionDragPayload(event.dataTransfer)) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'copy'
+    setAgentSessionDropActive(true)
+  }
+
+  const onAgentSessionDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
+    setAgentSessionDropActive(false)
+  }
+
+  const onAgentSessionDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasAgentSessionDragPayload(event.dataTransfer)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const payload = readAgentSessionDragPayload(event.dataTransfer)
+    setAgentSessionDropActive(false)
+    clearAgentSessionDragPayload()
+    window.dispatchEvent(new Event(agentSessionDragEndEvent))
+    if (!payload) {
+      toast.error('Could not read the agent session drag data.')
+      return
+    }
+    const windowId = findTerminalWindowForPane(paneId)?.windowId
+    if (!windowId) {
+      toast.error('Could not find the target terminal window.')
+      return
+    }
+    void actions.openContent({
+      kind: 'terminal',
+      windowId,
+      referencePaneId: paneId,
+      cwd: payload.cwd,
+      shell: payload.shell,
+      args: payload.args,
+      title: payload.title,
+    }).then((panelId) => {
+      if (panelId) actions.activateContent(panelId)
+    }).catch((error) => toast.error(`Could not resume the agent session: ${String(error)}`))
+  }
 
   const copySelection = () => {
     if (paneId) TerminalManager.copySelectionToClipboard(paneId)
@@ -204,6 +250,12 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   useEffect(() => {
+    const clearDropTarget = () => setAgentSessionDropActive(false)
+    window.addEventListener(agentSessionDragEndEvent, clearDropTarget)
+    return () => window.removeEventListener(agentSessionDragEndEvent, clearDropTarget)
+  }, [])
+
+  useEffect(() => {
     if (!contextMenu) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeContextMenu()
@@ -270,9 +322,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   return (
-    <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} onContextMenu={onContextMenu}>
+    <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} data-agent-session-drop-target={agentSessionDropActive ? 'true' : undefined} onContextMenu={onContextMenu} onDragEnter={onAgentSessionDragOver} onDragOver={onAgentSessionDragOver} onDragLeave={onAgentSessionDragLeave} onDrop={onAgentSessionDrop}>
       <div ref={hostRef} className="dock-terminal-host" />
       <TerminalSearchBar paneId={paneId} />
+      {agentSessionDropActive ? <div className="agent-session-terminal-drop"><SquareTerminal size={24} aria-hidden="true" /><strong>Resume in a new terminal here</strong><span>The running process in this pane stays untouched.</span></div> : null}
       {remoteLease ? (
         <div
           className="remote-pane-lease-cover"

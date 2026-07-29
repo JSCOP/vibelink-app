@@ -12,8 +12,11 @@ import {
   agentConversationLabel,
   agentConversationPaneIds,
   agentResumeLaunch,
+  agentSessionDragEndEvent,
+  clearAgentSessionDragPayload,
   formatAgentSessionUpdatedAt,
   visibleAgentConversations,
+  writeAgentSessionDragPayload,
 } from './agentSessionsModel'
 import { useHermesSessionController } from './useHermesSessionController'
 import './AgentSessionsSidebar.css'
@@ -67,7 +70,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
         shell: launch.shell,
         args: launch.args,
         title: launch.title,
-        newWindow: true,
+        referencePaneId: activePaneId && panes[activePaneId]?.alive ? activePaneId : undefined,
       })
       if (!panelId) return
       contentActions.activateContent(panelId)
@@ -75,7 +78,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
     } catch (reason) {
       setError(String(reason))
     }
-  }, [activePaneId, contentActions, conversationPaneIds, revealPane, setError])
+  }, [activePaneId, contentActions, conversationPaneIds, panes, revealPane, setError])
 
   const refresh = async () => {
     setRefreshing(true)
@@ -131,6 +134,8 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
             {shownConversations.map((conversation) => {
               const openPaneIds = conversationPaneIds(conversation)
               const active = Boolean(activePaneId && openPaneIds.includes(activePaneId))
+              const launch = agentResumeLaunch(conversation)
+              const draggable = openPaneIds.length === 0 && Boolean(launch)
               const paneNumbers = openPaneIds.flatMap((paneId) => {
                 const paneNumber = paneNumberById.get(paneId)
                 return paneNumber ? [paneNumber] : []
@@ -138,15 +143,29 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
               const paneLabel = paneNumbers.length === 1 ? `Pane ${paneNumbers[0]}` : paneNumbers.length > 1 ? `Panes ${paneNumbers.join(', ')}` : null
               const actionTitle = paneLabel
                 ? `${active ? 'Active in' : 'Open in'} terminal ${paneLabel.toLocaleLowerCase()}. Click to reveal · ${conversation.path}`
-                : `Resume in a new terminal window · ${conversation.path}`
+                : `Click to resume beside the active terminal, or drag onto a terminal pane · ${conversation.path}`
               return (
                 <button
                   key={`${conversation.agent}:${conversation.path}`}
                   type="button"
-                  className={`agent-session-row agent-conversation-row${openPaneIds.length ? ' is-open' : ''}${active ? ' is-active' : ''}`}
+                  className={`agent-session-row agent-conversation-row${openPaneIds.length ? ' is-open' : ''}${active ? ' is-active' : ''}${draggable ? ' is-draggable' : ''}`}
                   role="listitem"
                   aria-current={active ? 'true' : undefined}
                   title={actionTitle}
+                  draggable={draggable}
+                  onDragStart={(event) => {
+                    if (!launch || !draggable) {
+                      event.preventDefault()
+                      return
+                    }
+                    writeAgentSessionDragPayload(event.dataTransfer, { ...launch, cwd: conversation.cwd })
+                    const dragIcon = event.currentTarget.querySelector('.agent-conversation-brand')
+                    if (dragIcon) event.dataTransfer.setDragImage(dragIcon, 7, 7)
+                  }}
+                  onDragEnd={() => {
+                    clearAgentSessionDragPayload()
+                    window.dispatchEvent(new Event(agentSessionDragEndEvent))
+                  }}
                   onClick={() => { void resumeConversation(conversation) }}
                 >
                   <span className="agent-session-row-title">

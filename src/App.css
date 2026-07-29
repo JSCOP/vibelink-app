@@ -925,6 +925,36 @@ button {
   padding: 5px;
 }
 
+.agent-session-terminal-drop {
+  align-items: center;
+  backdrop-filter: blur(3px);
+  background: color-mix(in srgb, var(--vibelink-terminal-bg) 76%, var(--vibelink-accent-soft));
+  border: 2px solid var(--vibelink-accent);
+  color: var(--vibelink-text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  inset: 5px;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  z-index: 12;
+}
+
+.agent-session-terminal-drop svg {
+  color: var(--vibelink-accent);
+}
+
+.agent-session-terminal-drop strong {
+  font: 600 13px/1.2 var(--vibelink-sans);
+}
+
+.agent-session-terminal-drop span {
+  color: var(--vibelink-muted);
+  font: 11px/1.35 var(--vibelink-sans);
+}
+
 /* Terminal WINDOW: hosts the nested pane Dockview. Fills its outer panel; the
  * inner Dockview lays out the pane grid. */
 .terminal-window-panel {

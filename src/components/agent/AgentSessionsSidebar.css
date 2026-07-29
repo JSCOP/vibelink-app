@@ -61,6 +61,14 @@
   color: var(--vibelink-text);
 }
 
+.agent-conversation-row.is-draggable {
+  cursor: grab;
+}
+
+.agent-conversation-row.is-draggable:active {
+  cursor: grabbing;
+}
+
 
 .agent-conversation-row.is-open {
   border-color: color-mix(in srgb, var(--vibelink-selected-pane-highlight) 42%, var(--vibelink-border));

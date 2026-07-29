@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest'
 
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { IDockviewPanelProps } from 'dockview-react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from './contentActions'
 import { TerminalPanePanel } from './TerminalPanePanel'
+import { writeAgentSessionDragPayload } from '../components/agent/agentSessionsModel'
 
 const mockStore = vi.hoisted(() => ({
   activePaneId: undefined as string | undefined,
@@ -28,6 +30,9 @@ const managerMock = vi.hoisted(() => ({
   setRemotePaneLease: vi.fn(),
   syncPtySize: vi.fn(),
 }))
+
+const openContentMock = vi.fn(async () => 'content:terminal:pane-resumed')
+const activateContentMock = vi.fn()
 
 vi.mock('../state/store', () => ({
   useWorkspaceStore: (selector: (state: {
@@ -70,9 +75,13 @@ vi.mock('../remote/paneLease', () => ({
   }),
 }))
 
+vi.mock('./terminalWindowRegistry', () => ({
+  findTerminalWindowForPane: () => ({ windowId: 'window-target' }),
+}))
+
 const actions: WorkspaceContentActions = {
-  openContent: vi.fn(async () => ''),
-  activateContent: vi.fn(),
+  openContent: openContentMock,
+  activateContent: activateContentMock,
   requestCloseContent: vi.fn(async () => 'closed' as const),
   splitTerminal: vi.fn(async () => undefined),
   arrangeTerminals: vi.fn(async () => undefined),
@@ -123,6 +132,8 @@ describe('TerminalPanePanel', () => {
     managerMock.reflow.mockClear()
     managerMock.setPaneVisible.mockClear()
     managerMock.syncPtySize.mockClear()
+    openContentMock.mockClear()
+    activateContentMock.mockClear()
   })
 
 
@@ -175,6 +186,41 @@ describe('TerminalPanePanel', () => {
     expect(reviewedPane).not.toContain('data-active=')
   })
 
+  test('drops an agent session onto a pane by creating a fresh sibling terminal', async () => {
+    mockStore.panes = { 'pane-target': { config: { title: 'Target' } } }
+    const dataTransfer = dragDataTransfer()
+    writeAgentSessionDragPayload(dataTransfer, {
+      cwd: 'E:/repo',
+      shell: 'pwsh.exe',
+      args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
+      title: 'Oh My Pi: Resumable omp',
+    })
+    render(
+      <WorkspaceContentActionsContext.Provider value={actions}>
+        <TerminalPanePanel {...terminalPaneProps('pane-target')} />
+      </WorkspaceContentActionsContext.Provider>,
+    )
+    const shell = document.querySelector<HTMLElement>('.terminal-panel-shell[data-pane-id="pane-target"]')
+    expect(shell).not.toBeNull()
+
+    fireEvent.dragOver(shell as HTMLElement, { dataTransfer })
+    expect(screen.getByText('Resume in a new terminal here')).toBeInTheDocument()
+
+    fireEvent.drop(shell as HTMLElement, { dataTransfer })
+
+    await waitFor(() => expect(openContentMock).toHaveBeenCalledWith({
+      kind: 'terminal',
+      windowId: 'window-target',
+      referencePaneId: 'pane-target',
+      cwd: 'E:/repo',
+      shell: 'pwsh.exe',
+      args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
+      title: 'Oh My Pi: Resumable omp',
+    }))
+    expect(activateContentMock).toHaveBeenCalledWith('content:terminal:pane-resumed')
+    expect(screen.queryByText('Resume in a new terminal here')).not.toBeInTheDocument()
+  })
+
   test('keeps the terminal mounted beneath an actionable remote lease cover', () => {
     mockStore.lease = {
       sessionId: 'session-1',
@@ -197,3 +243,19 @@ describe('TerminalPanePanel', () => {
     expect(leasedPane).toContain('Collapse')
   })
 })
+
+function dragDataTransfer(): DataTransfer {
+  const values = new Map<string, string>()
+  const types: string[] = []
+  return {
+    types,
+    effectAllowed: 'none',
+    dropEffect: 'none',
+    files: {} as FileList,
+    items: {} as DataTransferItemList,
+    setData: (type: string, value: string) => { values.set(type, value); if (!types.includes(type)) types.push(type) },
+    getData: (type: string) => values.get(type) ?? '',
+    clearData: (type?: string) => { if (type) values.delete(type); else values.clear() },
+    setDragImage: () => undefined,
+  }
+}
