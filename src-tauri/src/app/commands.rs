@@ -146,6 +146,11 @@ pub fn terminal_ws_token(
 }
 
 #[tauri::command]
+pub fn webview_render_mode() -> &'static str {
+    crate::app::webview_renderer::resolved_renderer_mode()
+}
+
+#[tauri::command]
 pub fn remote_get_status(
     supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,

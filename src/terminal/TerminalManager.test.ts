@@ -6,6 +6,30 @@ const invokeMock = vi.hoisted(() => {
   return vi.fn(invoke)
 })
 
+const eventMock = vi.hoisted(() => {
+  const state: { systemResumed?: () => void } = {}
+  return {
+    state,
+    listen: vi.fn(async (event: string, handler: () => void) => {
+      if (event === 'system-resumed') state.systemResumed = handler
+      return () => { if (state.systemResumed === handler) state.systemResumed = undefined }
+    }),
+  }
+})
+
+const webglMock = vi.hoisted(() => {
+  type Instance = {
+    clearAtlasCalls: number
+    disposeCalls: number
+    lostContextCalls: number
+    canvas: { width: number; height: number }
+    triggerContextLoss(): void
+  }
+  return { fail: true, instances: [] as Instance[] }
+})
+
+vi.mock('@tauri-apps/api/event', () => ({ listen: eventMock.listen }))
+
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 
 vi.mock('@xterm/xterm', () => {
@@ -22,6 +46,15 @@ vi.mock('@xterm/xterm', () => {
     focusCalls = 0
     writes: unknown[] = []
     resetCalls = 0
+    refreshCalls: Array<[number, number]> = []
+    renderRowsCalls: Array<[number, number, boolean | undefined]> = []
+    _core = {
+      _renderService: {
+        _isPaused: false,
+        _needsFullRefresh: false,
+        refreshRows: (start: number, end: number, sync?: boolean) => { this.renderRowsCalls.push([start, end, sync]) },
+      },
+    }
     loadAddon(addon: { activate?: (terminal: MockTerminal) => void }): void { addon.activate?.(this) }
     attachCustomKeyEventHandler(): void {}
     attachCustomWheelEventHandler(): void {}
@@ -50,7 +83,7 @@ vi.mock('@xterm/xterm', () => {
       container.appendChild(this.element)
     }
     focus(): void { this.focusCalls += 1 }
-    refresh(): void {}
+    refresh(start: number, end: number): void { this.refreshCalls.push([start, end]) }
     scrollToBottom(): void {}
     write(data: unknown, callback?: () => void): void { this.writes.push(data); callback?.() }
     reset(): void { this.resetCalls += 1; this.writes = [] }
@@ -80,9 +113,33 @@ vi.mock('./scrollbar', () => {
 
 vi.mock('@xterm/addon-webgl', () => {
   class MockWebglAddon {
-    constructor() {
-      throw new Error('webgl unavailable in tests')
+    clearAtlasCalls = 0
+    disposeCalls = 0
+    lostContextCalls = 0
+    canvas = { width: 640, height: 480 }
+    private contextLossHandler: (() => void) | undefined
+    _renderer = {
+      _canvas: this.canvas,
+      _gl: {
+        getExtension: (name: string) => name === 'WEBGL_lose_context'
+          ? { loseContext: () => { this.lostContextCalls += 1 } }
+          : null,
+      },
     }
+
+    constructor() {
+      if (webglMock.fail) throw new Error('webgl unavailable in tests')
+      webglMock.instances.push(this)
+    }
+
+    onContextLoss(handler: () => void): { dispose(): void } {
+      this.contextLossHandler = handler
+      return { dispose: () => { this.contextLossHandler = undefined } }
+    }
+
+    clearTextureAtlas(): void { this.clearAtlasCalls += 1 }
+    dispose(): void { this.disposeCalls += 1 }
+    triggerContextLoss(): void { this.contextLossHandler?.() }
   }
   return { WebglAddon: MockWebglAddon }
 })
@@ -151,6 +208,9 @@ function emitResize(target: Element, width: number, height: number): void {
 
 beforeEach(() => {
   resizeObservers.clear()
+  webglMock.fail = true
+  webglMock.instances.length = 0
+  Reflect.set(TerminalManager, 'webviewRenderMode', '')
   invokeMock.mockReset()
   invokeMock.mockImplementation((command, args) => {
     if (command === 'subscribe_pane') {
@@ -630,6 +690,85 @@ describe('TerminalManager remote pane leases', () => {
   })
 })
 
+describe('TerminalManager repaint recovery', () => {
+  it('forces a paused render service instead of losing the repaint to xterm refresh', () => {
+    const paneId = 'pane-paused-renderer'
+    const manager = TerminalManager as unknown as {
+      redraw(entry: unknown): void
+    }
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      term: {
+        rows: number
+        refreshCalls: Array<[number, number]>
+        renderRowsCalls: Array<[number, number, boolean | undefined]>
+        _core: { _renderService: { _isPaused: boolean; _needsFullRefresh: boolean } }
+      }
+    }
+    entry.opened = true
+    entry.term._core._renderService._isPaused = true
+    entry.term._core._renderService._needsFullRefresh = true
+
+    manager.redraw(entry)
+
+    expect(entry.term.renderRowsCalls).toEqual([[0, entry.term.rows - 1, true]])
+    expect(entry.term.refreshCalls).toEqual([])
+    expect(entry.term._core._renderService._isPaused).toBe(false)
+    expect(entry.term._core._renderService._needsFullRefresh).toBe(false)
+    TerminalManager.dispose(paneId)
+  })
+})
+
+describe('TerminalManager window-wake recovery', () => {
+  it('defers hidden system-resume events and coalesces one visible event into immediate and settled repaints', async () => {
+    const paneId = 'pane-system-resume'
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; visible?: boolean }
+    entry.opened = true
+    entry.visible = true
+    const manager = TerminalManager as unknown as {
+      redraw(entry: unknown, options?: { clearWebglTextureAtlas?: boolean }): void
+      scheduleLayoutPass(options?: Record<string, unknown>): void
+    }
+    const redraw = vi.spyOn(manager, 'redraw')
+    const layout = vi.spyOn(manager, 'scheduleLayoutPass').mockImplementation(() => {})
+    let settledFrame: FrameRequestCallback | undefined
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      settledFrame = callback
+      return 501
+    })
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+
+    try {
+      await vi.waitFor(() => expect(eventMock.state.systemResumed).toBeTypeOf('function'))
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+      eventMock.state.systemResumed?.()
+      expect(redraw).not.toHaveBeenCalled()
+      expect(layout).not.toHaveBeenCalled()
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+      eventMock.state.systemResumed?.()
+      expect(redraw).toHaveBeenCalledTimes(1)
+      expect(redraw).toHaveBeenCalledWith(entry, { clearWebglTextureAtlas: true })
+      expect(layout).toHaveBeenCalledWith(expect.objectContaining({
+        force: true,
+        repaint: true,
+        syncPty: true,
+        clearWebglTextureAtlas: true,
+      }))
+
+      settledFrame?.(performance.now())
+      expect(redraw).toHaveBeenCalledTimes(2)
+      expect(redraw).toHaveBeenLastCalledWith(entry, { clearWebglTextureAtlas: true })
+    } finally {
+      requestFrame.mockRestore()
+      redraw.mockRestore()
+      layout.mockRestore()
+      if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility)
+      TerminalManager.dispose(paneId)
+    }
+  })
+})
+
 describe('TerminalManager output scheduling', () => {
   it('keeps focused active-pane echo on the immediate path', () => {
     const paneId = 'pane-foreground-output'
@@ -745,6 +884,7 @@ describe('TerminalManager output scheduling', () => {
   it('drops software WebGL before parsing a high-volume resume burst', () => {
     vi.useFakeTimers()
     const paneId = 'pane-resume-webgl'
+    Reflect.set(TerminalManager, 'webviewRenderMode', 'software')
     const frames = new Map<number, FrameRequestCallback>()
     let nextFrame = 1
     const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
@@ -780,6 +920,139 @@ describe('TerminalManager output scheduling', () => {
       cancelFrame.mockRestore()
       vi.useRealTimers()
     }
+  })
+
+  it('keeps WebGL attached for the same burst on a hardware-rendered WebView', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-resume-hardware-webgl'
+    const frames = new Map<number, FrameRequestCallback>()
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.set(1, callback)
+      return 1
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => { frames.clear() })
+    const disposeWebgl = vi.fn()
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; webgl?: { dispose(): void } }
+    entry.opened = true
+    entry.webgl = { dispose: disposeWebgl }
+    Reflect.set(TerminalManager, 'webviewRenderMode', 'hardware')
+
+    try {
+      TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
+      vi.advanceTimersByTime(50)
+      frames.get(1)?.(performance.now())
+      expect(disposeWebgl).not.toHaveBeenCalled()
+      expect(entry.webgl).toBeDefined()
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-promotes a software-burst pane after the backlog drains and stays quiet', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-resume-repromote'
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 1
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame++
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      visible?: boolean
+      container?: HTMLElement
+      webgl?: { dispose(): void }
+      term: { refreshCalls: Array<[number, number]> }
+    }
+    entry.opened = true
+    entry.container = container
+    entry.visible = true
+    entry.webgl = { dispose: vi.fn() }
+    Reflect.set(TerminalManager, 'webviewRenderMode', 'software')
+
+    const runNextFrame = () => {
+      const callback = frames.values().next().value
+      if (!callback) throw new Error('missing scheduled output frame')
+      frames.delete(frames.keys().next().value as number)
+      callback(performance.now())
+    }
+
+    try {
+      TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
+      vi.advanceTimersByTime(50)
+      runNextFrame()
+      runNextFrame()
+      runNextFrame()
+      webglMock.fail = false
+      runNextFrame()
+      expect(entry.webgl).toBeUndefined()
+
+      vi.advanceTimersByTime(1_999)
+      expect(entry.webgl).toBeUndefined()
+      vi.advanceTimersByTime(1)
+      expect(webglMock.instances).toHaveLength(1)
+      expect(entry.webgl).toBe(webglMock.instances[0])
+      expect(entry.term.refreshCalls.at(-1)).toEqual([0, 23])
+    } finally {
+      TerminalManager.dispose(paneId)
+      container.remove()
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('repairs stale glyphs without disposing an attached WebGL renderer', () => {
+    const paneId = 'pane-webgl-glyph-repair'
+    const clearTextureAtlas = vi.fn()
+    const dispose = vi.fn()
+    const container = makeContainer()
+    const manager = TerminalManager as unknown as {
+      resetRenderer(entry: unknown, options: { immediate: boolean }): void
+      performRendererReload(entry: unknown): void
+    }
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      container?: HTMLElement
+      rendererReloadPending?: boolean
+      webgl?: { clearTextureAtlas(): void; dispose(): void }
+    }
+    entry.opened = true
+    entry.container = container
+    entry.webgl = { clearTextureAtlas, dispose }
+
+    manager.resetRenderer(entry, { immediate: true })
+    entry.rendererReloadPending = true
+    manager.performRendererReload(entry)
+
+    expect(clearTextureAtlas).toHaveBeenCalledTimes(2)
+    expect(dispose).not.toHaveBeenCalled()
+    expect(entry.webgl).toBeDefined()
+    TerminalManager.dispose(paneId)
+    container.remove()
+  })
+
+  it('releases the driver context when a WebGL pane is disposed', () => {
+    webglMock.fail = false
+    const paneId = 'pane-webgl-release'
+    const container = makeContainer()
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+    TerminalManager.attach(paneId, container)
+    const instance = webglMock.instances[0]
+    expect(instance).toBeDefined()
+
+    TerminalManager.dispose(paneId)
+
+    expect(instance.lostContextCalls).toBe(1)
+    expect(instance.canvas).toEqual({ width: 0, height: 0 })
+    container.remove()
   })
 
   it('keeps process-exit backlog split into cooperative parser chunks', () => {

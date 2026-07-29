@@ -60,6 +60,13 @@ pub(crate) fn configure_main_webview() {
     }
 }
 
+pub(crate) fn resolved_renderer_mode() -> &'static str {
+    match std::env::var(RESOLVED_RENDERER_ENV).ok().as_deref() {
+        Some("software") => "software",
+        _ => "hardware",
+    }
+}
+
 impl RendererPreference {
     fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
