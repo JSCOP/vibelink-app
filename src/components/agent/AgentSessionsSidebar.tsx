@@ -143,7 +143,7 @@ export function AgentSessionsSidebar({ onCollapse }: AgentSessionsSidebarProps) 
               const paneLabel = paneNumbers.length === 1 ? `Pane ${paneNumbers[0]}` : paneNumbers.length > 1 ? `Panes ${paneNumbers.join(', ')}` : null
               const actionTitle = paneLabel
                 ? `${active ? 'Active in' : 'Open in'} terminal ${paneLabel.toLocaleLowerCase()}. Click to reveal · ${conversation.path}`
-                : `Click to resume beside the active terminal, or drag onto a terminal pane · ${conversation.path}`
+                : `Click to resume beside the active terminal, or drag onto a terminal pane to replace it · ${conversation.path}`
               return (
                 <button
                   key={`${conversation.agent}:${conversation.path}`}

@@ -132,15 +132,9 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
       toast.error('Could not read the agent session drag data.')
       return
     }
-    const windowId = findTerminalWindowForPane(paneId)?.windowId
-    if (!windowId) {
-      toast.error('Could not find the target terminal window.')
-      return
-    }
     void actions.openContent({
       kind: 'terminal',
-      windowId,
-      referencePaneId: paneId,
+      replacePaneId: paneId,
       cwd: payload.cwd,
       shell: payload.shell,
       args: payload.args,
@@ -325,7 +319,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} data-agent-session-drop-target={agentSessionDropActive ? 'true' : undefined} onContextMenu={onContextMenu} onDragEnter={onAgentSessionDragOver} onDragOver={onAgentSessionDragOver} onDragLeave={onAgentSessionDragLeave} onDrop={onAgentSessionDrop}>
       <div ref={hostRef} className="dock-terminal-host" />
       <TerminalSearchBar paneId={paneId} />
-      {agentSessionDropActive ? <div className="agent-session-terminal-drop"><SquareTerminal size={24} aria-hidden="true" /><strong>Resume in a new terminal here</strong><span>The running process in this pane stays untouched.</span></div> : null}
+      {agentSessionDropActive ? <div className="agent-session-terminal-drop"><SquareTerminal size={24} aria-hidden="true" /><strong>Resume in this terminal</strong><span>The current process in this pane will stop.</span></div> : null}
       {remoteLease ? (
         <div
           className="remote-pane-lease-cover"

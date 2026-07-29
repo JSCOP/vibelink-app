@@ -186,8 +186,9 @@ describe('TerminalPanePanel', () => {
     expect(reviewedPane).not.toContain('data-active=')
   })
 
-  test('drops an agent session onto a pane by creating a fresh sibling terminal', async () => {
+  test('drops an agent session onto a pane by replacing that pane process', async () => {
     mockStore.panes = { 'pane-target': { config: { title: 'Target' } } }
+    openContentMock.mockResolvedValueOnce('content:terminal:pane-target')
     const dataTransfer = dragDataTransfer()
     writeAgentSessionDragPayload(dataTransfer, {
       cwd: 'E:/repo',
@@ -204,21 +205,21 @@ describe('TerminalPanePanel', () => {
     expect(shell).not.toBeNull()
 
     fireEvent.dragOver(shell as HTMLElement, { dataTransfer })
-    expect(screen.getByText('Resume in a new terminal here')).toBeInTheDocument()
+    expect(screen.getByText('Resume in this terminal')).toBeInTheDocument()
+    expect(screen.getByText('The current process in this pane will stop.')).toBeInTheDocument()
 
     fireEvent.drop(shell as HTMLElement, { dataTransfer })
 
     await waitFor(() => expect(openContentMock).toHaveBeenCalledWith({
       kind: 'terminal',
-      windowId: 'window-target',
-      referencePaneId: 'pane-target',
+      replacePaneId: 'pane-target',
       cwd: 'E:/repo',
       shell: 'pwsh.exe',
       args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
       title: 'Oh My Pi: Resumable omp',
     }))
-    expect(activateContentMock).toHaveBeenCalledWith('content:terminal:pane-resumed')
-    expect(screen.queryByText('Resume in a new terminal here')).not.toBeInTheDocument()
+    expect(activateContentMock).toHaveBeenCalledWith('content:terminal:pane-target')
+    expect(screen.queryByText('Resume in this terminal')).not.toBeInTheDocument()
   })
 
   test('keeps the terminal mounted beneath an actionable remote lease cover', () => {
