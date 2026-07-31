@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Collect every descendant PID below `root` from a parent -> children map.
 pub fn descendant_pids(children: &HashMap<u32, Vec<u32>>, root: u32) -> Vec<u32> {
@@ -39,10 +39,25 @@ fn child_map(sys: &System) -> HashMap<u32, Vec<u32>> {
     map
 }
 
-/// Kill `root` first, then every currently visible descendant process deepest-first.
-pub fn kill_process_tree(root: u32) {
+/// One process listing with NO per-process detail. `refresh_processes` defaults
+/// to exe + memory + CPU + disk usage, which opens a handle and reads the PEB of
+/// EVERY process on the machine — measured at 250-300 ms with ~490 processes
+/// live. PID and parent PID both come straight from the kernel snapshot, so the
+/// tree walk and the liveness check need nothing more.
+fn process_snapshot() -> System {
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    sys
+}
+
+/// Kill `root` first, then every currently visible descendant process deepest-first.
+///
+/// This is the FALLBACK path: a pane whose root sits in a `PaneProcessJob` is
+/// killed through `PaneProcessJob::terminate`, one syscall for the whole tree.
+/// Walking the tree here is expensive on Windows because `sysinfo`'s `kill()`
+/// shells out to `taskkill.exe /F` once per process.
+pub fn kill_process_tree(root: u32) {
+    let sys = process_snapshot();
     let children = child_map(&sys);
     let mut descendants = descendant_pids(&children, root);
 
@@ -60,14 +75,12 @@ pub fn kill_process_tree(root: u32) {
 
 /// Return whether the exact PID is still present.
 pub fn process_exists(pid: u32) -> bool {
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    sys.process(Pid::from_u32(pid)).is_some()
+    process_snapshot().process(Pid::from_u32(pid)).is_some()
 }
 
 #[cfg(windows)]
 pub struct PaneProcessJob {
-    _handle: OwnedHandle,
+    handle: OwnedHandle,
 }
 
 #[cfg(windows)]
@@ -79,17 +92,16 @@ impl PaneProcessJob {
             core::PCWSTR,
             Win32::System::{
                 JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW,
-                    JobObjectExtendedLimitInformation, SetInformationJobObject,
-                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
             },
         };
 
-        let job = OwnedHandle(
-            unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(windows_error)?,
-        );
+        let job =
+            OwnedHandle(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(windows_error)?);
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         unsafe {
@@ -108,7 +120,16 @@ impl PaneProcessJob {
         );
         unsafe { AssignProcessToJobObject(job.0, process.0) }.map_err(windows_error)?;
 
-        Ok(Self { _handle: job })
+        Ok(Self { handle: job })
+    }
+
+    /// Kill every process in the job with one syscall. Descendants inherit the
+    /// job (no `JOB_OBJECT_LIMIT_BREAKAWAY_OK`), so this replaces a whole
+    /// process-tree walk — see `kill_process_tree` for why that matters.
+    pub fn terminate(&self) -> std::io::Result<()> {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+
+        unsafe { TerminateJobObject(self.handle.0, 1) }.map_err(windows_error)
     }
 }
 
@@ -294,6 +315,55 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(100));
         }
+        let _ = root.wait();
+    }
+
+    /// `Pane::kill` terminates the job while still HOLDING its handle, so the
+    /// tree must die from `TerminateJobObject` alone — not from the drop.
+    #[cfg(windows)]
+    #[test]
+    fn pane_process_job_terminate_kills_tree_while_handle_is_held() {
+        let mut root = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Seconds 1; $child = Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo -NoProfile -Command Start-Sleep -Seconds 60' -PassThru; Start-Sleep -Seconds 60",
+            ])
+            .spawn()
+            .expect("spawn pane job root powershell");
+        let root_pid = root.id();
+        let job = match super::PaneProcessJob::assign(root_pid) {
+            Ok(job) => job,
+            Err(error) => {
+                kill_process_tree(root_pid);
+                let _ = root.wait();
+                panic!("assign pane root to kill-on-close job: {error}");
+            }
+        };
+        let targets = wait_for_descendant(root_pid);
+
+        job.terminate().expect("terminate pane job");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut sys = System::new();
+            sys.refresh_processes(ProcessesToUpdate::All, true);
+            if targets
+                .iter()
+                .all(|pid| sys.process(Pid::from_u32(*pid)).is_none())
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                drop(job);
+                kill_process_tree(root_pid);
+                let _ = root.wait();
+                panic!("pane job process tree still alive after terminate: {targets:?}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        drop(job);
         let _ = root.wait();
     }
 

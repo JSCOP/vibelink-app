@@ -92,7 +92,7 @@ pub struct Pane {
     killer: SharedKiller,
     root_pid: Option<u32>,
     #[cfg(windows)]
-    _process_job: Option<crate::daemon::proc::PaneProcessJob>,
+    process_job: Option<crate::daemon::proc::PaneProcessJob>,
     pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     pub(crate) scrollback: Arc<Mutex<ScrollbackRing>>,
@@ -175,7 +175,7 @@ impl Pane {
                 killer: Arc::new(Mutex::new(killer)),
                 root_pid,
                 #[cfg(windows)]
-                _process_job: process_job,
+                process_job,
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
                 scrollback: Arc::new(Mutex::new(scrollback)),
@@ -217,8 +217,26 @@ impl Pane {
 
     pub fn kill(&mut self) -> Result<()> {
         self.alive = false;
-        if let Some(pid) = self.root_pid {
-            crate::daemon::proc::kill_process_tree(pid);
+        // The pane root and every descendant it spawned live in one kill-on-close
+        // job, so `TerminateJobObject` ends the whole tree in a single syscall.
+        // The `kill_process_tree` fallback costs a full-machine process listing
+        // plus one `taskkill.exe` spawn per process (measured: ~480 ms to close
+        // one idle pane), so it now runs only when job assignment failed.
+        #[cfg(windows)]
+        let terminated_via_job = match self.process_job.as_ref().map(|job| job.terminate()) {
+            Some(Ok(())) => true,
+            Some(Err(error)) => {
+                tracing::warn!(?error, pane_id = %self.id, "terminate pane job; falling back to process tree walk");
+                false
+            }
+            None => false,
+        };
+        #[cfg(not(windows))]
+        let terminated_via_job = false;
+        if !terminated_via_job {
+            if let Some(pid) = self.root_pid {
+                crate::daemon::proc::kill_process_tree(pid);
+            }
         }
         let _ = self
             .killer
@@ -295,7 +313,7 @@ impl Pane {
             )),
             root_pid: None,
             #[cfg(windows)]
-            _process_job: None,
+            process_job: None,
             writer: Arc::new(Mutex::new(
                 Box::new(std::io::sink()) as Box<dyn Write + Send>
             )),
