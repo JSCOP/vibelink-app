@@ -184,6 +184,8 @@ type WorkspaceLayoutOwner = {
   epoch: number
 }
 type WorkspaceLayoutIdentity = Pick<WorkspaceLayoutOwner, 'sessionId' | 'sessionEpoch'>
+/** A terminal panel already placed in a window, whose PTY has not spawned yet. */
+type PendingPaneSpawn = { pending: PaneMeta; panelId: string }
 
 function TerminalContentPanel(props: WorkspaceContentPanelProps) {
   const params = parseWorkspaceContentParams(props.params)
@@ -862,22 +864,31 @@ export function WorkspaceView({
     return waitForTerminalWindow(windowId, owner)
   }, [addContentPanel, ownsLayout, resolveTerminalWindowId, settleLayout, waitForTerminalWindow])
 
-  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; inactive?: boolean; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string; deferLayoutCommit?: boolean } = {}) => {
-    if (!ownsLayout(owner)) return ''
-    const handle = await ensureTerminalWindow(owner, { windowId: options.windowId, targetGroupId: options.targetGroupId, forceNew: options.forceNewWindow })
-    if (!handle || !ownsLayout(owner)) return ''
+  /** Synchronously place a pending pane panel. Kept separate from the PTY spawn
+   *  so grid creation can add every panel first, arrange the final grid, settle
+   *  ONCE, and then spawn all PTYs concurrently. */
+  const addPendingPane = useCallback((handle: TerminalWindowHandle, owner: WorkspaceLayoutOwner, options: { referencePaneId?: string; direction?: 'right' | 'below'; inactive?: boolean; profileId?: string | null; batch?: boolean } = {}): PendingPaneSpawn | null => {
     const profile = options.profileId === undefined
       ? selectedProfileForWorkspace(useWorkspaceStore.getState().settings, owner.sessionId)
       : profileById(useWorkspaceStore.getState().settings, options.profileId)
     const pending = pendingPaneMeta(crypto.randomUUID(), profile.name, profile.icon)
     const panelId = workspaceContentPanelId({ kind: 'terminal', instanceId: pending.id })
     pendingTerminalPaneIdsRef.current.add(pending.id)
+    const panel = handle.addPane(createTerminalContentParams(pending), { referencePaneId: options.referencePaneId, direction: options.direction, inactive: options.inactive, batch: options.batch })
+    if (!panel) {
+      pendingTerminalPaneIdsRef.current.delete(pending.id)
+      return null
+    }
+    return { pending, panelId }
+  }, [])
+
+  /** Measure the placed panel and spawn its PTY. The panel must already sit at
+   *  its final geometry (one settle for a single pane, one for a whole grid). */
+  const spawnIntoPendingPane = useCallback(async (handle: TerminalWindowHandle, owner: WorkspaceLayoutOwner, entry: PendingPaneSpawn, options: { inactive?: boolean; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string; deferLayoutCommit?: boolean } = {}) => {
+    const { pending, panelId } = entry
     let spawnedPaneId: string | null = null
     let committed = false
     try {
-      const panel = handle.addPane(createTerminalContentParams(pending), { referencePaneId: options.referencePaneId, direction: options.direction, inactive: options.inactive })
-      if (!panel || !ownsLayout(owner)) return ''
-      await handle.settle()
       if (!ownsLayout(owner) || !handle.getInnerApi()?.getPanel(panelId)) return ''
       const size = await measuredSpawnSize(pending.id)
       const spawned = await spawnPane(owner.sessionId, {
@@ -922,7 +933,17 @@ export function WorkspaceView({
         pendingTerminalPaneIdsRef.current.delete(pending.id)
       }
     }
-  }, [closePaneInStore, ensureTerminalWindow, ownsLayout, persistLayoutSoon, spawnPane])
+  }, [closePaneInStore, ownsLayout, persistLayoutSoon, spawnPane])
+
+  const spawnTerminal = useCallback(async (owner: WorkspaceLayoutOwner, options: { windowId?: string; targetGroupId?: string; forceNewWindow?: boolean; referencePaneId?: string; direction?: 'right' | 'below'; inactive?: boolean; profileId?: string | null; cwd?: string | null; shell?: string | null; args?: string[]; title?: string; deferLayoutCommit?: boolean } = {}) => {
+    if (!ownsLayout(owner)) return ''
+    const handle = await ensureTerminalWindow(owner, { windowId: options.windowId, targetGroupId: options.targetGroupId, forceNew: options.forceNewWindow })
+    if (!handle || !ownsLayout(owner)) return ''
+    const entry = addPendingPane(handle, owner, { referencePaneId: options.referencePaneId, direction: options.direction, inactive: options.inactive, profileId: options.profileId })
+    if (!entry) return ''
+    await handle.settle()
+    return spawnIntoPendingPane(handle, owner, entry, options)
+  }, [addPendingPane, ensureTerminalWindow, ownsLayout, spawnIntoPendingPane])
 
   const replaceTerminalProcess = useCallback(async (owner: WorkspaceLayoutOwner, paneId: string, options: { cwd?: string | null; shell?: string | null; args?: string[]; title?: string } = {}) => {
     if (!ownsLayout(owner)) return ''
@@ -1059,20 +1080,20 @@ export function WorkspaceView({
         innerApi.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal').map((panel) => panel.id),
         getContentRect,
       )
-      const newPanelIds: string[] = []
-      let lastPanelId = ''
+      const additions: PendingPaneSpawn[] = []
       const gridCreationPending = targetCount > existingPanelIds.length
       if (gridCreationPending) handle.setGridCreationPending(true, `Creating ${requestedGrid.cols}×${requestedGrid.rows} terminal grid…`)
       try {
+        // Place every panel first. Each add is a pure layout mutation, so the
+        // whole batch costs one Dockview pass instead of N settle/measure/IPC
+        // round trips against a layout that is normalized below anyway.
         for (let index = existingPanelIds.length; index < targetCount; index += 1) {
           if (!ownsLayout(owner)) return ''
-          const panelId = await spawnTerminal(owner, { windowId: handle.windowId, profileId: request.grid.profileId, inactive: true, deferLayoutCommit: true })
-          if (!ownsLayout(owner)) return ''
-          if (panelId) {
-            newPanelIds.push(panelId)
-            lastPanelId = panelId
-          }
+          const added = addPendingPane(handle, owner, { profileId: request.grid.profileId, inactive: true, batch: true })
+          if (!added) break
+          additions.push(added)
         }
+        const newPanelIds = additions.map((entry) => entry.panelId)
         const occupied = occupiedGridForPaneCount(existingPanelIds.length, request.grid.occupiedGrid)
         const orderedPanelIds = expandPaneIdsIntoGrid(existingPanelIds, newPanelIds, occupied, requestedGrid)
         const includedPanelIds = new Set(orderedPanelIds)
@@ -1084,10 +1105,15 @@ export function WorkspaceView({
         const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
         arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
         if (!ownsLayout(owner)) return ''
+        // One settle on the FINAL topology, so every PTY spawns at the size its
+        // pane actually ends up with and no program redraws across a resize.
         await handle.settle()
+        if (!ownsLayout(owner)) return ''
+        const spawnedPanelIds = await Promise.all(additions.map((entry) => spawnIntoPendingPane(handle, owner, entry, { profileId: request.grid.profileId, inactive: true, deferLayoutCommit: true })))
+        if (!ownsLayout(owner)) return ''
         handle.persist()
         persistLayoutSoon()
-        return lastPanelId
+        return spawnedPanelIds.filter(Boolean).at(-1) ?? ''
       } finally {
         if (gridCreationPending) handle.setGridCreationPending(false)
       }
@@ -1195,7 +1221,7 @@ export function WorkspaceView({
     }
     persistLayoutSoon()
     return panel.id
-  }, [activateContent, addContentPanel, ensureTerminalWindow, findContentByResource, ownsLayout, persistLayoutSoon, replaceTerminalProcess, settleLayout, spawnTerminal, waitForLayoutOwner])
+  }, [activateContent, addContentPanel, addPendingPane, ensureTerminalWindow, findContentByResource, ownsLayout, persistLayoutSoon, replaceTerminalProcess, settleLayout, spawnIntoPendingPane, spawnTerminal, waitForLayoutOwner])
 
   const requestCloseContent = useCallback(async (panelId: string, ownership?: WorkspaceContentOwnership): Promise<'closed' | 'cancelled'> => {
     const owner = currentLayoutOwner()

@@ -178,13 +178,18 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     const referencePanel = requestedReference ?? api.activePanel ?? api.panels.at(-1)
     let direction = options.direction
     if (referencePanel && !direction) {
-      try {
-        direction = defaultTerminalPaneSplitDirection(api.toJSON())
-      } catch {
-        direction = 'right'
+      // A batch add is followed by a whole-grid arrangement, so the compact
+      // growth heuristic (and its `toJSON`) buys nothing.
+      if (options.batch) direction = 'right'
+      else {
+        try {
+          direction = defaultTerminalPaneSplitDirection(api.toJSON())
+        } catch {
+          direction = 'right'
+        }
       }
     }
-    const localSplit = referencePanel && direction
+    const localSplit = referencePanel && direction && !options.batch
       ? {
           beforeLayout: api.toJSON(),
           initialSize: localSplitInitialSize(getGridLocation(referencePanel.group.element), direction),

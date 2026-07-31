@@ -7,6 +7,10 @@ export type TerminalWindowAddOptions = {
   referencePaneId?: string
   direction?: 'right' | 'below'
   inactive?: boolean
+  /** Skip the local-split sizing rewrite. Grid creation normalizes the whole
+   *  inner layout afterwards, so per-pane sizing is discarded work — and it is
+   *  the expensive kind: a full `toJSON`/`fromJSON` rebuild per added pane. */
+  batch?: boolean
 }
 
 /** Imperative handle over one terminal window's INNER Dockview. WorkspaceView

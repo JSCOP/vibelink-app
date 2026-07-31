@@ -1233,6 +1233,30 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().paneLifecycle[spawnedPane.id]).toBe('closed')
   })
 
+  test('collapses a burst of session refreshes into one in-flight pass plus one follow-up', async () => {
+    let release: (() => void) | undefined
+    const listed: Promise<void>[] = []
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command !== 'list_sessions') return null
+      // Hold the FIRST pass open so the rest of the burst arrives while it runs.
+      if (listed.length === 0) {
+        listed.push(new Promise<void>((resolve) => { release = resolve }))
+        await listed[0]
+      }
+      return [createdSession]
+    })
+    useWorkspaceStore.setState({ sessions: [] })
+
+    const burst = Array.from({ length: 7 }, () => useWorkspaceStore.getState().refreshSessions())
+    release?.()
+    await Promise.all(burst)
+
+    // A parallel grid spawn must not fan out to one list_sessions per pane, and
+    // two passes must never reconcile removed workspaces at the same time.
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'list_sessions')).toHaveLength(2)
+    expect(useWorkspaceStore.getState().sessions).toEqual([createdSession])
+  })
+
   test('claims, releases, and acknowledges Hermes prompts without duplication', () => {
     const store = useWorkspaceStore.getState()
 

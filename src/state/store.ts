@@ -36,6 +36,27 @@ let workspaceSessionEpoch = 0
 let workspaceSessionReadyEpoch = 0
 let workspaceSessionTargetId: string | null = null
 let workspaceInitialPanePending: { sessionId: string; epoch: number } | null = null
+/** A batch of concurrent spawns would otherwise issue one `list_sessions` per
+ *  pane AND let two passes reconcile a removed workspace at the same time.
+ *  Callers arriving while a pass runs share ONE follow-up pass, so any burst
+ *  costs two round trips and every caller still observes post-burst state. */
+let sessionsRefreshActive: Promise<void> | null = null
+let sessionsRefreshFollowUp: Promise<void> | null = null
+
+function coalesceSessionsRefresh(run: () => Promise<void>): Promise<void> {
+  if (!sessionsRefreshActive) {
+    const active = run().finally(() => { if (sessionsRefreshActive === active) sessionsRefreshActive = null })
+    sessionsRefreshActive = active
+    return active
+  }
+  sessionsRefreshFollowUp ??= sessionsRefreshActive
+    .catch(() => undefined)
+    .then(() => {
+      sessionsRefreshFollowUp = null
+      return coalesceSessionsRefresh(run)
+    })
+  return sessionsRefreshFollowUp
+}
 
 export function isWorkspaceInitialPanePending(sessionId: string, epoch: number): boolean {
   return workspaceInitialPanePending?.sessionId === sessionId && workspaceInitialPanePending.epoch === epoch
@@ -342,7 +363,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return status
   },
 
-  refreshSessions: async () => {
+  refreshSessions: async () => coalesceSessionsRefresh(async () => {
     const previousSessions = get().sessions
     const sessions = await invoke<SessionMeta[]>('list_sessions')
     const remainingIds = new Set(sessions.map((session) => session.id))
@@ -366,7 +387,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       persistCurrentKanban(get())
     }
     if (failures.length > 0) throw new Error(`Workspace resource cleanup failed: ${failures.join('; ')}`)
-  },
+  }),
 
   refreshWorktrees: async () => {
     const projections = await listWorktrees({ repositoryPath: null, includeExternal: true, includeHidden: true })
