@@ -180,7 +180,7 @@ impl AutomationRunner {
             self.build_command(&executable, automation, spec, cwd, &usage_path);
         self.execute_command(
             run_id,
-            "automation",
+            spec.display_name,
             Duration::from_secs(u64::from(automation.timeout_seconds)),
             usage_path,
             command,
@@ -238,7 +238,7 @@ impl AutomationRunner {
         configure_draft_command(&mut command, prompt, cwd, &usage_path, &configured_model);
         self.execute_command(
             request_id,
-            "draft preview",
+            "Hermes draft preview",
             Duration::from_secs(120),
             usage_path,
             command,
@@ -385,7 +385,7 @@ impl AutomationRunner {
                 )
             }
             WaitResult::Exited(status) => {
-                finish_exited(status, runtime_identity, snapshot, usage, started_at)
+                finish_exited(label, status, runtime_identity, snapshot, usage, started_at)
             }
         }
     }
@@ -776,6 +776,7 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 }
 
 fn finish_exited(
+    label: &str,
     status: ExitStatus,
     runtime_identity: Option<AutomationRuntimeIdentity>,
     snapshot: Option<AutomationOutputSnapshot>,
@@ -803,7 +804,7 @@ fn finish_exited(
             runtime_identity,
             snapshot,
             usage.ok().flatten(),
-            Some(format!("Hermes one-shot exited with {code}")),
+            Some(format!("{label} exited with {code}")),
             started_at,
         );
     }
@@ -817,7 +818,9 @@ fn finish_exited(
             runtime_identity,
             snapshot,
             usage.ok().flatten(),
-            Some("Hermes one-shot exited successfully but produced no final response".into()),
+            Some(format!(
+                "{label} exited successfully but produced no final response"
+            )),
             started_at,
         );
     }

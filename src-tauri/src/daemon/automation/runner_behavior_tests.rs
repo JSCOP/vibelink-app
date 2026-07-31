@@ -204,16 +204,13 @@ fn current_default_omits_model_and_provider_from_real_child_argv() {
 }
 
 #[test]
-fn nonzero_exit_is_dispatch_failed_with_captured_stderr() {
+fn nonzero_exit_names_the_selected_agent_and_captures_stderr() {
     let fake = FakeHermes::new("nonzero", "nonzero");
-    let outcome = fake.run("nonzero", &canonical_record(json!({})));
+    let outcome = fake.run("nonzero", &canonical_record(json!({ "agent": "omp" })));
 
     assert_eq!(outcome.status, "dispatch_failed");
     assert!(outcome.runtime_identity.is_some());
-    assert_eq!(
-        outcome.error.as_deref(),
-        Some("Hermes one-shot exited with 7")
-    );
+    assert_eq!(outcome.error.as_deref(), Some("Oh My Pi exited with 7"));
     let snapshot = outcome.output_snapshot.expect("nonzero output snapshot");
     assert!(snapshot.stderr.contains("intentional nonzero exit"));
     assert!(!fake.registry.cancel("nonzero").expect("query registry"));
@@ -281,10 +278,7 @@ fn interactive_auth_failure_is_classified_for_user_action() {
         .output_snapshot
         .as_ref()
         .is_some_and(|snapshot| snapshot.stderr.contains("Authentication required")));
-    assert_eq!(
-        outcome.error.as_deref(),
-        Some("Hermes one-shot exited with 7")
-    );
+    assert_eq!(outcome.error.as_deref(), Some("Hermes exited with 7"));
 }
 
 #[test]
