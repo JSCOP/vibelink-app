@@ -1830,6 +1830,10 @@ class TerminalManagerImpl {
   // (or none was needed).
   private safeFit(entry: Entry, force = false): boolean {
     if (entry.remoteLease) return true
+    // Mid-transaction geometry is not the pane's geometry, so report it the same
+    // way a degenerate container is reported: callers already retry or set
+    // `forceFitOnNextMeasure`, and the transaction's closing pass fits for real.
+    if (this.topologyDepth > 0) return false
     const proposed = entry.fit.proposeDimensions()
     if (!proposed || proposed.cols < MIN_FIT_COLS || proposed.rows < MIN_FIT_ROWS) return false
     if (force || entry.term.cols !== proposed.cols || entry.term.rows !== proposed.rows) entry.fit.fit()
