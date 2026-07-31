@@ -38,7 +38,7 @@ afterEach(() => {
 })
 
 describe('WorkspaceAddMenu', () => {
-  it('filters commands and selects a profile terminal row with the keyboard', () => {
+  it('filters commands and opens the selected profile in a new terminal window', () => {
     render(
       <WorkspaceAddMenu
         actions={actions}
@@ -61,7 +61,7 @@ describe('WorkspaceAddMenu', () => {
     expect(screen.queryByRole('button', { name: 'New Terminal: Codex' })).toBeNull()
 
     fireEvent.keyDown(filter, { key: 'Enter' })
-    expect(openContent).toHaveBeenCalledWith({ kind: 'terminal', targetGroupId: 'grid-main', profileId: 'powershell' })
+    expect(openContent).toHaveBeenCalledWith({ kind: 'terminal', targetGroupId: 'grid-main', profileId: 'powershell', newWindow: true })
     expect(screen.queryByRole('dialog', { name: 'Add terminal or window' })).toBeNull()
   })
 

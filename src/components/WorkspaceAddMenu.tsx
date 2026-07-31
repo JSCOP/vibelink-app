@@ -124,7 +124,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
     if (!item || item.disabled) return
     closeMenu()
     if (item.section === 'Terminals') {
-      void actions.openContent({ kind: 'terminal', targetGroupId, profileId: item.profile.id })
+      void actions.openContent({ kind: 'terminal', targetGroupId, profileId: item.profile.id, newWindow: true })
       return
     }
     // Structural panels are left-edge singletons. Reveal that panel rather than
