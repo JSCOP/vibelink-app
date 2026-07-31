@@ -18,6 +18,7 @@ import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverl
 import { isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { removePanelPreservingLayout } from './paneCloseLayout'
+import { applySerializedGridSizes, serializedActiveViewId } from './liveGridSizes'
 import {
   defaultTerminalPaneSplitDirection,
   preventTerminalPaneStackDrop,
@@ -223,18 +224,31 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     const panelId = workspaceContentPanelId({ kind: 'terminal', instanceId: paneId })
     const panel = api.getPanel(panelId)
     if (!panel) return
+    let nextLayout: SerializedDockview | null
     try {
-      const nextLayout = removePanelPreservingLayout(api.toJSON(), panelId)
-      if (nextLayout) {
-        api.fromJSON(unstackSerializedDockview(nextLayout), { reuseExistingPanels: true })
-        return
-      }
+      nextLayout = removePanelPreservingLayout(api.toJSON(), panelId)
     } catch {
       // Fall back to Dockview's native close if the live layout cannot be
       // serialized. A single/invalid layout has no unrelated pane to preserve.
+      nextLayout = null
     }
+    if (!nextLayout) {
+      panel.api.close()
+      repairStackedInnerLayout(api)
+      return
+    }
+    // Native close is one splitview removal but redistributes the freed extent
+    // across every sibling; restore the transform's exact sizes in place. The
+    // fromJSON rebuild (~100 ms per surviving pane) stays as the fallback for
+    // layouts the size applier refuses (maximized/hidden/topology mismatch).
     panel.api.close()
-    repairStackedInnerLayout(api)
+    if (applySerializedGridSizes(api, nextLayout)) {
+      const activeViewId = serializedActiveViewId(nextLayout)
+      const activePanel = activeViewId ? api.getPanel(activeViewId) : undefined
+      if (activePanel && api.activePanel !== activePanel) activePanel.api.setActive()
+      return
+    }
+    api.fromJSON(unstackSerializedDockview(nextLayout), { reuseExistingPanels: true })
   }, [repairStackedInnerLayout])
 
   const paneIds = useCallback((): string[] => {

@@ -1,4 +1,5 @@
-import { Sizing, type DockviewApi, type SplitSizing } from 'dockview-core'
+import { Sizing, type DockviewApi, type SerializedDockview, type SplitSizing } from 'dockview-core'
+import { applySerializedGridSizes } from './liveGridSizes'
 
 export type LocalSplitDirection = 'right' | 'below'
 
@@ -101,7 +102,13 @@ export function finalizeLocalSplitLayout(
 ): boolean {
   const next = localSplitLayout(beforeLayout, api.toJSON(), referencePanelId, createdPanelId, direction)
   if (!next) return false
-  api.fromJSON(next as ReturnType<DockviewApi['toJSON']>, { reuseExistingPanels: true })
+  // localSplitLayout only rewrites sizes on a clone of a real toJSON result,
+  // so the value is still a serialized dockview.
+  const target = next as SerializedDockview
+  // The live grid already has the post-add topology; restoring sizes in place
+  // skips the fromJSON rebuild (~100 ms per pane already in the window).
+  if (applySerializedGridSizes(api, target)) return true
+  api.fromJSON(target, { reuseExistingPanels: true })
   return true
 }
 
