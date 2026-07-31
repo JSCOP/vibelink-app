@@ -510,6 +510,15 @@ impl DaemonState {
             .retain(|_, expires_at| *expires_at > now);
     }
 
+    pub fn terminate_pane(&mut self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<bool> {
+        let session = self.session_mut(session_id)?;
+        let Some(pane) = session.panes.get_mut(&pane_id) else {
+            return Ok(false);
+        };
+        pane.kill()?;
+        Ok(true)
+    }
+
     pub fn close_pane(&mut self, session_id: Uuid, pane_id: Uuid) -> anyhow::Result<Option<Pane>> {
         self.session(session_id)?;
         if !self

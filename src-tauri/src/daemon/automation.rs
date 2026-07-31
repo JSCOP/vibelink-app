@@ -250,6 +250,12 @@ impl AutomationService {
         AutomationStore::runs(&connection, automation_id, limit)
     }
 
+    pub(crate) fn run_is_cancelled(&self, run_id: &str) -> bool {
+        self.lock()
+            .and_then(|connection| AutomationStore::get_run(&connection, run_id))
+            .is_ok_and(|run| run.status == "cancelled")
+    }
+
     pub fn trigger(&self, automation_id: &str) -> Result<AutomationRunRecord> {
         let now = now_millis();
         let mut connection = self.lock()?;
@@ -351,6 +357,35 @@ impl AutomationService {
             &WorktreeAssignment,
         ) -> Result<AutomationWorktreeProvision>,
     {
+        self.execute_with_worktree_and_runner(
+            claim,
+            workspace,
+            create_worktree,
+            |runner, claim, automation, prepared| runner.run(&claim.id, automation, &prepared.cwd),
+        )
+    }
+
+    fn execute_with_worktree_and_runner<F, R>(
+        &self,
+        claim: &AutomationRunRecord,
+        workspace: &Path,
+        create_worktree: F,
+        run_agent: R,
+    ) -> Result<AutomationRunRecord>
+    where
+        F: FnOnce(
+            &AutomationRecord,
+            &AutomationRunRecord,
+            &Path,
+            &WorktreeAssignment,
+        ) -> Result<AutomationWorktreeProvision>,
+        R: FnOnce(
+            &AutomationRunner,
+            &AutomationRunRecord,
+            &AutomationRecord,
+            &PreparedWorkspace,
+        ) -> RunnerOutcome,
+    {
         let automation = self.get(&claim.automation_id)?;
         if automation.requires_review {
             bail!("automation must be reviewed and saved before it can run");
@@ -440,7 +475,7 @@ impl AutomationService {
             );
         }
 
-        let outcome = self.runner.run(&claim.id, &automation, &prepared.cwd);
+        let outcome = run_agent(&self.runner, claim, &automation, &prepared);
         let runner_status = match outcome.status.as_str() {
             "completed"
             | "skipped_unavailable"
@@ -532,7 +567,37 @@ impl AutomationService {
             &WorktreeAssignment,
         ) -> Result<AutomationWorktreeProvision>,
     {
-        let run = self.execute_with_worktree(claim, workspace, create_worktree)?;
+        self.execute_and_notify_with_worktree_and_runner(
+            claim,
+            workspace,
+            create_worktree,
+            |runner, claim, automation, prepared| runner.run(&claim.id, automation, &prepared.cwd),
+        )
+    }
+
+    pub(crate) fn execute_and_notify_with_worktree_and_runner<F, R>(
+        &self,
+        claim: &AutomationRunRecord,
+        workspace: &Path,
+        create_worktree: F,
+        run_agent: R,
+    ) -> Result<AutomationRunRecord>
+    where
+        F: FnOnce(
+            &AutomationRecord,
+            &AutomationRunRecord,
+            &Path,
+            &WorktreeAssignment,
+        ) -> Result<AutomationWorktreeProvision>,
+        R: FnOnce(
+            &AutomationRunner,
+            &AutomationRunRecord,
+            &AutomationRecord,
+            &PreparedWorkspace,
+        ) -> RunnerOutcome,
+    {
+        let run =
+            self.execute_with_worktree_and_runner(claim, workspace, create_worktree, run_agent)?;
         if model::is_final_status(&run.status) {
             if let Err(error) = self.create_final_notification(&run) {
                 tracing::warn!(automation_run_id = %run.id, ?error, "failed to persist automation notification");

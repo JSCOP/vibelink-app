@@ -37,7 +37,11 @@ use crate::computer_use::{
     SnapshotRequest, WindowIdentity, WindowsProcessSpawner,
 };
 use crate::control_plane::{ControlCommand, ControlPlane};
-use crate::daemon::automation::{AutomationService, AutomationWorktreeProvision};
+use crate::daemon::automation::{
+    runner::{AutomationTerminalLaunch, AutomationTerminalResult},
+    AutomationRecord, AutomationRunRecord, AutomationRunner, AutomationService,
+    AutomationWorktreeProvision, PreparedWorkspace, RunnerOutcome,
+};
 use crate::daemon::persistence::{load_sessions, save_sessions};
 use crate::daemon::pty::{Pane, SharedChild};
 use crate::daemon::session::{
@@ -80,6 +84,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -683,7 +688,7 @@ fn run_automation_scheduler_tick(
             spawn_run_id.get(..8).unwrap_or(&spawn_run_id)
         );
         if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
-            if let Err(error) = automation.execute_and_notify_with_worktree(
+            if let Err(error) = automation.execute_and_notify_with_worktree_and_runner(
                 &claim,
                 &workspace,
                 |record, claim, workspace, planned| {
@@ -696,6 +701,17 @@ fn run_automation_scheduler_tick(
                         claim,
                         workspace,
                         planned,
+                    )
+                },
+                |runner, claim, record, prepared| {
+                    run_automation_in_visible_terminal(
+                        &automation,
+                        runner,
+                        &state,
+                        &sessions_path,
+                        claim,
+                        record,
+                        prepared,
                     )
                 },
             ) {
@@ -4121,7 +4137,7 @@ fn dispatch_automation_cli(
             let workspace = automation_workspace(state, &record.session_id)?;
             let claim = automation.trigger(id)?;
             Ok(serde_json::to_value(
-                automation.execute_and_notify_with_worktree(
+                automation.execute_and_notify_with_worktree_and_runner(
                     &claim,
                     &workspace,
                     |record, claim, workspace, planned| {
@@ -4134,6 +4150,17 @@ fn dispatch_automation_cli(
                             claim,
                             workspace,
                             planned,
+                        )
+                    },
+                    |runner, claim, record, prepared| {
+                        run_automation_in_visible_terminal(
+                            automation,
+                            runner,
+                            state,
+                            sessions_path,
+                            claim,
+                            record,
+                            prepared,
                         )
                     },
                 )?,
@@ -4230,6 +4257,202 @@ fn automation_workspace(state: &SharedState, session_id: &str) -> Result<PathBuf
         .and_then(|session| session.workspace_folder)
         .map(PathBuf::from)
         .context("automation workspace folder is unavailable")
+}
+fn run_automation_in_visible_terminal(
+    automation_service: &AutomationService,
+    runner: &AutomationRunner,
+    state: &SharedState,
+    sessions_path: &Path,
+    claim: &AutomationRunRecord,
+    automation: &AutomationRecord,
+    prepared: &PreparedWorkspace,
+) -> RunnerOutcome {
+    let launch = match runner.prepare_terminal(&claim.id, automation, &prepared.cwd) {
+        Ok(launch) => launch,
+        Err(outcome) => return outcome,
+    };
+    let session_id = prepared
+        .worktree
+        .session_id
+        .as_deref()
+        .unwrap_or(&automation.session_id);
+    let session_id = match Uuid::parse_str(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            return runner.finish_terminal(
+                launch,
+                AutomationTerminalResult::Failed(format!(
+                    "automation terminal session id is invalid: {error}"
+                )),
+                &[],
+                None,
+            )
+        }
+    };
+    let (script_path, result_path) = match write_automation_terminal_script(&claim.id, &launch) {
+        Ok(paths) => paths,
+        Err(error) => {
+            return runner.finish_terminal(
+                launch,
+                AutomationTerminalResult::Failed(format!(
+                    "prepare visible automation terminal: {error:#}"
+                )),
+                &[],
+                None,
+            )
+        }
+    };
+    let pane_id = Uuid::new_v4();
+    let config = PaneConfig {
+        pane_id,
+        shell: Some("powershell.exe".to_string()),
+        args: vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NoExit".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script_path.to_string_lossy().into_owned(),
+        ],
+        cwd: Some(prepared.cwd.to_string_lossy().into_owned()),
+        env: launch
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect(),
+        title: Some(format!("Automation · {}", automation.name)),
+        icon: Some("bot".to_string()),
+        profile_id: Some(automation.agent.clone()),
+        role: Some("automation-agent".to_string()),
+        restore_on_start: false,
+        cols: 120,
+        rows: 30,
+    };
+    if let Err(error) = spawn_pane_for_session(
+        Arc::clone(state),
+        sessions_path.to_path_buf(),
+        session_id,
+        config,
+        None,
+    ) {
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(&result_path);
+        return runner.finish_terminal(
+            launch,
+            AutomationTerminalResult::Failed(format!(
+                "start visible automation terminal: {error:#}"
+            )),
+            &[],
+            None,
+        );
+    }
+    if let Err(error) = persist_state(state, sessions_path) {
+        warn!(?error, %pane_id, "failed to persist automation terminal pane");
+    }
+    if let Err(error) = notify_session_changed(state, session_id) {
+        warn!(?error, %pane_id, "failed to announce automation terminal pane");
+    }
+
+    let started = Instant::now();
+    let result = loop {
+        match fs::read_to_string(&result_path) {
+            Ok(value) => match value.trim().parse::<i32>() {
+                Ok(exit_code) => break AutomationTerminalResult::Exited(Some(exit_code)),
+                Err(error) => {
+                    break AutomationTerminalResult::Failed(format!(
+                        "parse automation terminal exit code: {error}"
+                    ))
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                break AutomationTerminalResult::Failed(format!(
+                    "read automation terminal exit code: {error}"
+                ))
+            }
+        }
+        if automation_service.run_is_cancelled(&claim.id) {
+            if let Err(error) = lock_state(state).terminate_pane(session_id, pane_id) {
+                warn!(?error, %pane_id, "failed to terminate cancelled automation pane");
+            }
+            break AutomationTerminalResult::Cancelled;
+        }
+        if started.elapsed() >= launch.timeout {
+            if let Err(error) = lock_state(state).terminate_pane(session_id, pane_id) {
+                warn!(?error, %pane_id, "failed to terminate timed out automation pane");
+            }
+            break AutomationTerminalResult::TimedOut;
+        }
+        thread::sleep(AUTOMATION_SCHEDULER_SHUTDOWN_POLL_INTERVAL);
+    };
+    thread::sleep(Duration::from_millis(100));
+    let output = lock_state(state)
+        .get_scrollback(session_id, pane_id)
+        .unwrap_or_default();
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&result_path);
+    runner.finish_terminal(launch, result, &output, None)
+}
+
+fn write_automation_terminal_script(
+    run_id: &str,
+    launch: &AutomationTerminalLaunch,
+) -> Result<(PathBuf, PathBuf)> {
+    let root = std::env::temp_dir();
+    let script_path = root.join(format!("vibelink-automation-{run_id}.ps1"));
+    let result_path = root.join(format!("vibelink-automation-{run_id}.exit"));
+    let _ = fs::remove_file(&result_path);
+    let program = powershell_single_quoted(&launch.program);
+    let args = launch
+        .args
+        .iter()
+        .map(|argument| powershell_single_quoted(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let invocation = match launch.stdin_prompt.as_deref() {
+        Some(prompt) => format!(
+            "{} | & {} {}",
+            powershell_single_quoted(OsStr::new(prompt)),
+            program,
+            args
+        ),
+        None => format!("& {program} {args}"),
+    };
+    let env_remove = launch
+        .env_remove
+        .iter()
+        .map(|key| {
+            format!(
+                "[Environment]::SetEnvironmentVariable({}, $null, 'Process')",
+                powershell_single_quoted(key)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let result = powershell_single_quoted(result_path.as_os_str());
+    fs::write(
+        &script_path,
+        format!(
+            "$ErrorActionPreference = 'Stop'\r\n{env_remove}\r\n$automationExitCode = 1\r\ntry {{\r\n  {invocation}\r\n  if ($null -eq $LASTEXITCODE) {{ $automationExitCode = 0 }} else {{ $automationExitCode = $LASTEXITCODE }}\r\n}} catch {{\r\n  Write-Error $_\r\n}}\r\nWrite-Host \"[VibeLink automation finished with exit code $automationExitCode]\"\r\n[IO.File]::WriteAllText({result}, [string]$automationExitCode)\r\n"
+        ),
+    )
+    .with_context(|| {
+        format!(
+            "write automation terminal script {}",
+            script_path.display()
+        )
+    })?;
+    Ok((script_path, result_path))
+}
+
+fn powershell_single_quoted(value: &OsStr) -> String {
+    format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
 
 fn provision_automation_worktree(
@@ -6740,6 +6963,128 @@ mod tests {
             },
             secret,
         )
+    }
+
+    #[test]
+    fn automation_terminal_script_reports_agent_exit_code() {
+        let run_id = Uuid::new_v4().to_string();
+        let launch = AutomationTerminalLaunch {
+            program: std::ffi::OsString::from("powershell.exe"),
+            args: vec![
+                std::ffi::OsString::from("-NoLogo"),
+                std::ffi::OsString::from("-NoProfile"),
+                std::ffi::OsString::from("-Command"),
+                std::ffi::OsString::from("if ($env:VIBELINK_SESSION_ID) { Write-Output 'LEAKED' } else { Write-Output 'SCRIPT_VISIBLE' }; exit 7"),
+            ],
+            env: Vec::new(),
+            env_remove: vec![std::ffi::OsString::from("VIBELINK_SESSION_ID")],
+            stdin_prompt: None,
+            label: "test",
+            timeout: Duration::from_secs(5),
+            usage_path: std::env::temp_dir().join(format!("{run_id}.usage.json")),
+            started_at: 0,
+        };
+        let (script_path, result_path) =
+            write_automation_terminal_script(&run_id, &launch).expect("write terminal script");
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script_path)
+            .env("VIBELINK_SESSION_ID", "must-not-reach-agent")
+            .output()
+            .expect("run terminal script");
+
+        assert!(
+            output.status.success(),
+            "wrapper script itself exits cleanly"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("SCRIPT_VISIBLE"),
+            "agent output reaches the terminal"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("LEAKED"),
+            "pane identity is removed before the agent starts"
+        );
+        assert_eq!(
+            fs::read_to_string(&result_path)
+                .expect("read terminal result")
+                .trim(),
+            "7"
+        );
+        fs::remove_file(script_path).expect("remove terminal script");
+        fs::remove_file(result_path).expect("remove terminal result");
+    }
+
+    #[test]
+    fn automation_pane_streams_output_and_remains_visible() {
+        let root =
+            std::env::temp_dir().join(format!("vibelink-automation-pane-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create automation pane test directory");
+        let sessions_path = root.join("sessions.json");
+
+        let state = Arc::new(Mutex::new(DaemonState::new()));
+        let session_id = lock_state(&state)
+            .create_session(
+                "Automation".to_string(),
+                Some(root.to_string_lossy().into_owned()),
+            )
+            .id;
+        let pane_id = Uuid::new_v4();
+        let config = PaneConfig {
+            pane_id,
+            shell: Some("cmd.exe".to_string()),
+            args: vec![
+                "/D".to_string(),
+                "/K".to_string(),
+                "echo VISIBLE_AUTOMATION".to_string(),
+            ],
+            cwd: Some(root.to_string_lossy().into_owned()),
+            env: Vec::new(),
+            title: Some("Automation · test".to_string()),
+            icon: Some("bot".to_string()),
+            profile_id: Some("omp".to_string()),
+            role: Some("automation-agent".to_string()),
+            restore_on_start: false,
+            cols: 120,
+            rows: 30,
+        };
+
+        spawn_pane_for_session(Arc::clone(&state), sessions_path, session_id, config, None)
+            .expect("spawn automation pane");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let output = lock_state(&state)
+                .get_scrollback(session_id, pane_id)
+                .expect("read automation pane output");
+            if String::from_utf8_lossy(&output).contains("VISIBLE_AUTOMATION") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "automation output did not reach the visible pane"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let panes = lock_state(&state)
+            .pane_metas(session_id)
+            .expect("read automation pane metadata");
+        assert!(
+            panes.iter().any(|pane| pane.id == pane_id && pane.alive),
+            "completed automation terminal remains available in the workspace"
+        );
+        let pane = lock_state(&state)
+            .close_pane(session_id, pane_id)
+            .expect("remove automation pane")
+            .expect("automation pane exists");
+        kill_owned_panes(vec![pane], "automation pane test cleanup")
+            .expect("stop automation pane process");
+        fs::remove_dir_all(root).expect("remove automation pane test directory");
     }
 
     #[test]

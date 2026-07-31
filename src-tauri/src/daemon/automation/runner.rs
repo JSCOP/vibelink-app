@@ -4,7 +4,6 @@ use super::{
     process_registry::AutomationProcessRegistry,
 };
 use serde_json::Value;
-#[cfg(test)]
 use std::ffi::OsString;
 use std::{
     fs,
@@ -77,6 +76,26 @@ pub struct RunnerOutcome {
     pub finished_at: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct AutomationTerminalLaunch {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
+    pub env_remove: Vec<OsString>,
+    pub stdin_prompt: Option<String>,
+    pub label: &'static str,
+    pub timeout: Duration,
+    pub(crate) usage_path: PathBuf,
+    pub(crate) started_at: u64,
+}
+
+pub(crate) enum AutomationTerminalResult {
+    Exited(Option<i32>),
+    Cancelled,
+    TimedOut,
+    Failed(String),
+}
+
 #[derive(Clone)]
 pub struct AutomationRunner {
     registry: Arc<AutomationProcessRegistry>,
@@ -124,9 +143,58 @@ impl AutomationRunner {
     }
 
     pub fn run(&self, run_id: &str, automation: &AutomationRecord, cwd: &Path) -> RunnerOutcome {
+        let launch = match self.prepare_terminal(run_id, automation, cwd) {
+            Ok(launch) => launch,
+            Err(outcome) => return outcome,
+        };
+        let AutomationTerminalLaunch {
+            program,
+            args,
+            env,
+            env_remove,
+            stdin_prompt,
+            label,
+            timeout,
+            usage_path,
+            started_at,
+        } = launch;
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .stdin(if stdin_prompt.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .envs(env);
+        for key in env_remove {
+            command.env_remove(key);
+        }
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        self.execute_command(
+            run_id,
+            label,
+            timeout,
+            usage_path,
+            command,
+            stdin_prompt,
+            started_at,
+        )
+    }
+
+    pub(crate) fn prepare_terminal(
+        &self,
+        run_id: &str,
+        automation: &AutomationRecord,
+        cwd: &Path,
+    ) -> Result<AutomationTerminalLaunch, RunnerOutcome> {
         let started_at = now_millis();
         let Some(spec) = agents::spec(&automation.agent) else {
-            return RunnerOutcome::new(
+            return Err(RunnerOutcome::new(
                 "skipped_unavailable",
                 None,
                 None,
@@ -136,33 +204,30 @@ impl AutomationRunner {
                     automation.agent
                 )),
                 started_at,
-            );
+            ));
         };
-        let executable = match self.resolve_executable(spec) {
-            Ok(value) => value,
-            Err(error) => {
-                return RunnerOutcome::new(
-                    "skipped_unavailable",
-                    None,
-                    None,
-                    None,
-                    Some(error),
-                    started_at,
-                )
-            }
-        };
+        let executable = self.resolve_executable(spec).map_err(|error| {
+            RunnerOutcome::new(
+                "skipped_unavailable",
+                None,
+                None,
+                None,
+                Some(error),
+                started_at,
+            )
+        })?;
         if !cwd.is_dir() {
-            return unavailable_cwd(cwd, started_at);
+            return Err(unavailable_cwd(cwd, started_at));
         }
         if !automation.use_agent_default_model
             && automation
                 .model
                 .as_deref()
                 .map(str::trim)
-                .filter(|v| !v.is_empty())
+                .filter(|value| !value.is_empty())
                 .is_none()
         {
-            return RunnerOutcome::new(
+            return Err(RunnerOutcome::new(
                 "skipped_unavailable",
                 None,
                 None,
@@ -172,21 +237,79 @@ impl AutomationRunner {
                     spec.display_name
                 )),
                 started_at,
-            );
+            ));
         }
 
         let usage_path = usage_file_path(run_id);
         let (command, stdin_prompt) =
             self.build_command(&executable, automation, spec, cwd, &usage_path);
-        self.execute_command(
-            run_id,
-            spec.display_name,
-            Duration::from_secs(u64::from(automation.timeout_seconds)),
-            usage_path,
-            command,
+        Ok(AutomationTerminalLaunch {
+            program: command.get_program().to_owned(),
+            args: command.get_args().map(OsString::from).collect(),
+            env: command
+                .get_envs()
+                .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+                .collect(),
+            env_remove: command
+                .get_envs()
+                .filter_map(|(key, value)| value.is_none().then(|| key.to_owned()))
+                .collect(),
             stdin_prompt,
+            label: spec.display_name,
+            timeout: Duration::from_secs(u64::from(automation.timeout_seconds)),
+            usage_path,
             started_at,
-        )
+        })
+    }
+
+    pub(crate) fn finish_terminal(
+        &self,
+        launch: AutomationTerminalLaunch,
+        result: AutomationTerminalResult,
+        output: &[u8],
+        runtime_identity: Option<AutomationRuntimeIdentity>,
+    ) -> RunnerOutcome {
+        let snapshot = terminal_output_snapshot(output);
+        let usage = read_usage(&launch.usage_path);
+        let _ = fs::remove_file(&launch.usage_path);
+        match result {
+            AutomationTerminalResult::Exited(exit_code) => finish_exit_code(
+                launch.label,
+                exit_code,
+                runtime_identity,
+                snapshot,
+                usage,
+                launch.started_at,
+            ),
+            AutomationTerminalResult::Cancelled => RunnerOutcome::new(
+                "cancelled",
+                runtime_identity,
+                snapshot,
+                usage.ok().flatten(),
+                None,
+                launch.started_at,
+            ),
+            AutomationTerminalResult::TimedOut => RunnerOutcome::new(
+                "dispatch_failed",
+                runtime_identity,
+                snapshot,
+                usage.ok().flatten(),
+                Some(format!(
+                    "{} exceeded its hard timeout of {} seconds",
+                    launch.label,
+                    launch.timeout.as_secs()
+                )),
+                launch.started_at,
+            ),
+            AutomationTerminalResult::Failed(error) => RunnerOutcome::new(
+                "dispatch_failed",
+                runtime_identity,
+                snapshot,
+                usage.ok().flatten(),
+                Some(error),
+                launch.started_at,
+            ),
+        }
     }
 
     pub fn run_draft(&self, request_id: &str, prompt: &str, cwd: &Path) -> RunnerOutcome {
@@ -783,11 +906,29 @@ fn finish_exited(
     usage: Result<Option<Value>, String>,
     started_at: u64,
 ) -> RunnerOutcome {
+    finish_exit_code(
+        label,
+        status.code(),
+        runtime_identity,
+        snapshot,
+        usage,
+        started_at,
+    )
+}
+
+fn finish_exit_code(
+    label: &str,
+    exit_code: Option<i32>,
+    runtime_identity: Option<AutomationRuntimeIdentity>,
+    snapshot: Option<AutomationOutputSnapshot>,
+    usage: Result<Option<Value>, String>,
+    started_at: u64,
+) -> RunnerOutcome {
     let combined = snapshot
         .as_ref()
-        .map(|v| format!("{}\n{}", v.stdout, v.stderr))
+        .map(|value| format!("{}\n{}", value.stdout, value.stderr))
         .unwrap_or_default();
-    if !status.success() {
+    if exit_code != Some(0) {
         let mapped = if needs_interactive_auth(&combined) {
             "skipped_needs_interactive_auth"
         } else if setup_unavailable(&combined) {
@@ -795,9 +936,8 @@ fn finish_exited(
         } else {
             "dispatch_failed"
         };
-        let code = status
-            .code()
-            .map(|v| v.to_string())
+        let code = exit_code
+            .map(|value| value.to_string())
             .unwrap_or_else(|| "terminated by signal".into());
         return RunnerOutcome::new(
             mapped,
@@ -810,8 +950,8 @@ fn finish_exited(
     }
     let has_response = snapshot
         .as_ref()
-        .and_then(|v| v.final_response.as_deref())
-        .is_some_and(|v| !v.trim().is_empty());
+        .and_then(|value| value.final_response.as_deref())
+        .is_some_and(|value| !value.trim().is_empty());
     if !has_response {
         return RunnerOutcome::new(
             "dispatch_failed",
@@ -966,6 +1106,25 @@ fn output_snapshot(
         stdout: stdout_text,
         stderr: stderr_text,
         truncated: stdout.truncated || stderr.truncated,
+    })
+}
+
+fn terminal_output_snapshot(output: &[u8]) -> Option<AutomationOutputSnapshot> {
+    if output.is_empty() {
+        return None;
+    }
+    let truncated = output.len() > MAX_CAPTURE_BYTES;
+    let output = if truncated {
+        &output[output.len() - MAX_CAPTURE_BYTES..]
+    } else {
+        output
+    };
+    let text = crate::mcp::strip_ansi(&String::from_utf8_lossy(output)).into_owned();
+    Some(AutomationOutputSnapshot {
+        final_response: (!text.trim().is_empty()).then(|| text.trim().to_string()),
+        stdout: text,
+        stderr: String::new(),
+        truncated,
     })
 }
 

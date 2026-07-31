@@ -459,7 +459,7 @@ fn scope_mcp_invocation(
     Ok(())
 }
 
-fn strip_ansi(text: &str) -> Cow<'_, str> {
+pub(crate) fn strip_ansi(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
     let mut output: Option<String> = None;
     let mut last_keep = 0;
