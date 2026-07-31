@@ -971,24 +971,6 @@ button {
   width: 100%;
 }
 
-.terminal-grid-creation-cover {
-  align-items: center;
-  background: var(--vibelink-terminal-bg);
-  display: flex;
-  inset: 0;
-  justify-content: center;
-  position: absolute;
-  z-index: 20;
-}
-
-.terminal-grid-creation-status {
-  border: 1px solid var(--vibelink-border-soft);
-  background: var(--vibelink-panel-3);
-  color: var(--vibelink-muted);
-  font: 12px/1.35 var(--vibelink-sans);
-  padding: 9px 12px;
-}
-
 /* Per-pane title bar (the inner Dockview tab). Reuses terminal tab chrome but
  * always reads as a status/title bar, never an addable tab strip. */
 .terminal-pane-title-bar {

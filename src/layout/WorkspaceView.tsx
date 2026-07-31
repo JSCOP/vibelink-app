@@ -1081,42 +1081,40 @@ export function WorkspaceView({
         getContentRect,
       )
       const additions: PendingPaneSpawn[] = []
-      const gridCreationPending = targetCount > existingPanelIds.length
-      if (gridCreationPending) handle.setGridCreationPending(true, `Creating ${requestedGrid.cols}×${requestedGrid.rows} terminal grid…`)
-      try {
-        // Place every panel first. Each add is a pure layout mutation, so the
-        // whole batch costs one Dockview pass instead of N settle/measure/IPC
-        // round trips against a layout that is normalized below anyway.
-        for (let index = existingPanelIds.length; index < targetCount; index += 1) {
-          if (!ownsLayout(owner)) return ''
-          const added = addPendingPane(handle, owner, { profileId: request.grid.profileId, inactive: true, batch: true })
-          if (!added) break
-          additions.push(added)
-        }
-        const newPanelIds = additions.map((entry) => entry.panelId)
-        const occupied = occupiedGridForPaneCount(existingPanelIds.length, request.grid.occupiedGrid)
-        const orderedPanelIds = expandPaneIdsIntoGrid(existingPanelIds, newPanelIds, occupied, requestedGrid)
-        const includedPanelIds = new Set(orderedPanelIds)
-        for (const panelId of [...existingPanelIds, ...newPanelIds]) {
-          if (includedPanelIds.has(panelId)) continue
-          includedPanelIds.add(panelId)
-          orderedPanelIds.push(panelId)
-        }
-        const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
-        arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
+      // No progress cover: the panels below are placed synchronously, so the
+      // grid is on screen in the first frame and each pane's shell appears as
+      // its PTY answers. Covering that hides exactly the per-pane cost this
+      // path is tuned against.
+      // Place every panel first. Each add is a pure layout mutation, so the
+      // whole batch costs one Dockview pass instead of N settle/measure/IPC
+      // round trips against a layout that is normalized below anyway.
+      for (let index = existingPanelIds.length; index < targetCount; index += 1) {
         if (!ownsLayout(owner)) return ''
-        // One settle on the FINAL topology, so every PTY spawns at the size its
-        // pane actually ends up with and no program redraws across a resize.
-        await handle.settle()
-        if (!ownsLayout(owner)) return ''
-        const spawnedPanelIds = await Promise.all(additions.map((entry) => spawnIntoPendingPane(handle, owner, entry, { profileId: request.grid.profileId, inactive: true, deferLayoutCommit: true })))
-        if (!ownsLayout(owner)) return ''
-        handle.persist()
-        persistLayoutSoon()
-        return spawnedPanelIds.filter(Boolean).at(-1) ?? ''
-      } finally {
-        if (gridCreationPending) handle.setGridCreationPending(false)
+        const added = addPendingPane(handle, owner, { profileId: request.grid.profileId, inactive: true, batch: true })
+        if (!added) break
+        additions.push(added)
       }
+      const newPanelIds = additions.map((entry) => entry.panelId)
+      const occupied = occupiedGridForPaneCount(existingPanelIds.length, request.grid.occupiedGrid)
+      const orderedPanelIds = expandPaneIdsIntoGrid(existingPanelIds, newPanelIds, occupied, requestedGrid)
+      const includedPanelIds = new Set(orderedPanelIds)
+      for (const panelId of [...existingPanelIds, ...newPanelIds]) {
+        if (includedPanelIds.has(panelId)) continue
+        includedPanelIds.add(panelId)
+        orderedPanelIds.push(panelId)
+      }
+      const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
+      arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
+      if (!ownsLayout(owner)) return ''
+      // One settle on the FINAL topology, so every PTY spawns at the size its
+      // pane actually ends up with and no program redraws across a resize.
+      await handle.settle()
+      if (!ownsLayout(owner)) return ''
+      const spawnedPanelIds = await Promise.all(additions.map((entry) => spawnIntoPendingPane(handle, owner, entry, { profileId: request.grid.profileId, inactive: true, deferLayoutCommit: true })))
+      if (!ownsLayout(owner)) return ''
+      handle.persist()
+      persistLayoutSoon()
+      return spawnedPanelIds.filter(Boolean).at(-1) ?? ''
     }
 
     if (request.kind === 'browser') {

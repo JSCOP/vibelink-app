@@ -22,7 +22,6 @@ export type TerminalWindowHandle = {
   removePane: (paneId: string) => void
   settle: () => Promise<void>
   persist: () => void
-  setGridCreationPending: (pending: boolean, label?: string) => void
   paneIds: () => string[]
   focusFirst: () => void
 }

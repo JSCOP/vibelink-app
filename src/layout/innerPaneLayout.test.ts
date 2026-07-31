@@ -133,6 +133,44 @@ describe('inner terminal pane layout', () => {
       host.remove()
     }
   })
+
+  // A group left without an active panel renders as a watermark, reports
+  // `isVisible === false`, and is skipped by BOTH the overlay reposition and the
+  // settled check — the pane then never paints and its PTY spawns at the
+  // unpositioned overlay's geometry. Grid creation adds every pane inactive and
+  // to the right, exactly as `openContent({kind:'terminal-grid'})` does.
+  it('leaves every arranged group with an active, visible panel', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const api = createDockview(host, {
+      createComponent: () => ({ element: document.createElement('div'), init: () => undefined }),
+    })
+
+    try {
+      api.layout(1200, 800)
+      const paneIds = Array.from({ length: 8 }, (_, index) => `pane-${index + 1}`)
+      for (const paneId of paneIds) {
+        const reference = api.activePanel ?? api.panels.at(-1)
+        api.addPanel({
+          id: paneId,
+          component: 'test',
+          inactive: true,
+          ...(reference ? { position: { referencePanel: reference, direction: 'right' as const } } : {}),
+        })
+      }
+
+      arrangeTerminalPaneGrid(api, paneIds, { cols: 4, rows: 2 }, paneIds[0])
+      api.layout(1200, 800)
+
+      expect(api.groups).toHaveLength(8)
+      expect(api.groups.filter((group) => group.activePanel === undefined)).toEqual([])
+      expect(api.panels.filter((panel) => !panel.api.isVisible)).toEqual([])
+      expect(api.activePanel?.id).toBe(paneIds[0])
+    } finally {
+      api.dispose()
+      host.remove()
+    }
+  })
 })
 
 type TestLeaf = {

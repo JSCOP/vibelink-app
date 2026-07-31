@@ -124,7 +124,26 @@ export function arrangeTerminalPaneGrid(
     if (panel && reference) panel.api.moveTo({ group: reference.group, position: step.position, skipSetActive: true })
   }
   equalizeGridTracks(api)
+  activateOrphanedPaneGroups(api)
   if (activePanelId) api.getPanel(activePanelId)?.api.setActive()
+}
+
+/** `skipSetActive` moves a pane into a group without opening it there, so a group
+ * the move CREATED is left with no active panel. Dockview then renders that group
+ * as an empty watermark, reports `panel.api.isVisible === false`, never positions
+ * the panel's `renderer: 'always'` overlay (it stays `visibility: hidden` at the
+ * container's default rect), and `dockviewOverlaysSettled` skips it — so the settle
+ * loop reports success while the pane is invisible. Its terminal then fits to the
+ * unpositioned overlay and spawns its PTY at that bogus geometry (353x75 observed
+ * live on a 4x2 grid), which a later activation reflows into a duplicated,
+ * wrongly-wrapped scrollback for any normal-buffer TUI (OMP). Re-open the panel in
+ * every group that lost its active panel; the caller restores the intended active
+ * panel afterwards. */
+export function activateOrphanedPaneGroups(api: DockviewApi): void {
+  for (const group of api.groups) {
+    if (group.activePanel) continue
+    group.panels[0]?.api.setActive()
+  }
 }
 
 /** Give every sibling branch/leaf an equal share of its parent's extent, so an
