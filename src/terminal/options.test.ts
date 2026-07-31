@@ -1,4 +1,6 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
+import { Terminal } from '@xterm/xterm'
 import { createTerminalOptions, defaultTerminalSettings, terminalLetterSpacing, terminalLineHeight } from './options'
 
 describe('terminal options', () => {
@@ -40,5 +42,23 @@ describe('terminal options', () => {
 
     expect(options.fontWeight).toBe('300')
     expect(options.fontWeightBold).toBe('700')
+  })
+
+  /** A pane spawns at 120x32 and grows to the measured grid moments later. With
+   *  no ConPTY backend declared, xterm's row-growth path scrolls scrollback back
+   *  into the viewport, stranding a fragment of the previous TUI frame above the
+   *  redraw. ConPTY reprints its own screen, so growth must append blank rows. */
+  it('keeps ConPTY scrollback out of the viewport when rows grow', async () => {
+    const term = new Terminal({ ...createTerminalOptions(defaultTerminalSettings), cols: 20, rows: 5 })
+    await new Promise<void>((resolve) => term.write('one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\n', resolve))
+    const buffer = term.buffer.active
+    const topRow = () => buffer.getLine(buffer.viewportY)?.translateToString(true)
+
+    expect(buffer.viewportY).toBeGreaterThan(0)
+    const before = topRow()
+    term.resize(20, 7)
+
+    expect(topRow()).toBe(before)
+    term.dispose()
   })
 })

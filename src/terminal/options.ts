@@ -43,6 +43,16 @@ export function createTerminalOptions(settings: TerminalVisualSettings): ITermin
     scrollback: settings.scrollback,
     minimumContrastRatio: 1,
     theme: terminalThemeById(settings.terminalThemeId),
+    // VibeLink always drives a local ConPTY. Without this, xterm treats a row
+    // *growth* like a Unix PTY and scrolls scrollback back down into the
+    // viewport (Buffer.resize: `this.ybase--; this.ydisp--`). ConPTY instead
+    // reprints its own view of the screen, so those recovered lines are stale
+    // debris — a freshly spawned pane that grows from its 120x32 spawn size to
+    // the measured grid ends up with a stranded fragment of the previous TUI
+    // frame above the redraw. Naming the backend takes the "append blank rows"
+    // branch; leaving buildNumber unset keeps modern reflow on and the legacy
+    // pre-21376 wrapped-row heuristics off.
+    windowsPty: { backend: 'conpty' },
     ...(settings.cursorStyle === 'bar' ? { cursorWidth: settings.cursorWidth } : {}),
   }
 }
