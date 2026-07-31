@@ -1612,3 +1612,62 @@ describe('TerminalManager recent output capture', () => {
     manager.entries.delete(paneId)
   })
 })
+
+describe('TerminalManager whole-grid layout transactions', () => {
+  it('never fits a pane to the intermediate geometry a topology command passes through', async () => {
+    // Arrange/grid-creation move panes group by group, so a pane briefly owns a
+    // fraction of its row (20 cols observed live on a 4x2 grid). Fitting that is
+    // destructive, not just wasteful: the narrow reflow pushes wrapped lines
+    // into scrollback and xterm never pulls them back when the pane widens
+    // again, which is the "the pre-arrange screen is still up there" report.
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, {
+        fit: { fit(): void; proposeDimensions(): { cols: number; rows: number } }
+        term: { cols: number; rows: number }
+      }>
+    }
+    const paneId = 'pane-layout-transaction'
+    const container = makeContainer()
+    let hostWidth = 800
+    vi.spyOn(container, 'getBoundingClientRect').mockImplementation(() => ({
+      x: 0, y: 0, width: hostWidth, height: 300, top: 0, right: hostWidth, bottom: 300, left: 0, toJSON: () => ({}),
+    }))
+    TerminalManager.attach(paneId, container, { sessionId: 'session-transaction' })
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing layout transaction entry')
+    await vi.waitFor(() => expect(entry.term.cols).toBe(80))
+
+    let proposed = { cols: 80, rows: 24 }
+    vi.spyOn(entry.fit, 'proposeDimensions').mockImplementation(() => proposed)
+    const fitSpy = vi.spyOn(entry.fit, 'fit').mockImplementation(() => {
+      entry.term.cols = proposed.cols
+      entry.term.rows = proposed.rows
+    })
+    invokeMock.mockClear()
+
+    await TerminalManager.runLayoutTransaction(async () => {
+      // Two intermediate geometries, exactly as a moveTo + equalize pass emits.
+      proposed = { cols: 20, rows: 24 }
+      hostWidth = 200
+      emitResize(container, hostWidth, 300)
+      await Promise.resolve()
+      proposed = { cols: 57, rows: 24 }
+      hostWidth = 570
+      emitResize(container, hostWidth, 300)
+      await Promise.resolve()
+      expect(fitSpy).not.toHaveBeenCalled()
+      expect(entry.term.cols).toBe(80)
+      expect(invokeMock).not.toHaveBeenCalledWith('resize_pane', expect.anything())
+      // Final geometry, which is the only one the pane should ever see.
+      proposed = { cols: 87, rows: 24 }
+      hostWidth = 870
+    })
+
+    await vi.waitFor(() => expect(entry.term.cols).toBe(87))
+    expect(fitSpy).toHaveBeenCalledTimes(1)
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
+      ['resize_pane', { sessionId: 'session-transaction', paneId, cols: 87, rows: 24 }],
+    ])
+    TerminalManager.dispose(paneId)
+  })
+})

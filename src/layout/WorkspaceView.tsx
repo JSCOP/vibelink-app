@@ -1034,9 +1034,12 @@ export function WorkspaceView({
     if (terminalIds.length < 2) return
     const preferred = requestedGrid ?? balancedGridForPaneCount(terminalIds.length, workspaceAspectRatio(dockRef.current))
     const grid = expandGridRowsForPaneCount(preferred, terminalIds.length)
-    arrangeTerminalPaneGrid(innerApi, terminalIds, grid, activePanelId)
+    await TerminalManager.runLayoutTransaction(async () => {
+      arrangeTerminalPaneGrid(innerApi, terminalIds, grid, activePanelId)
+      if (!ownsLayout(layoutOwner)) return
+      await handle.settle()
+    })
     if (!ownsLayout(layoutOwner)) return
-    await handle.settle()
     handle.persist()
     persistLayoutSoon()
   }, [currentLayoutOwner, ownsLayout, persistLayoutSoon])
@@ -1104,11 +1107,15 @@ export function WorkspaceView({
         orderedPanelIds.push(panelId)
       }
       const finalGrid = expandGridRowsForPaneCount(requestedGrid, orderedPanelIds.length)
-      arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
-      if (!ownsLayout(owner)) return ''
       // One settle on the FINAL topology, so every PTY spawns at the size its
-      // pane actually ends up with and no program redraws across a resize.
-      await handle.settle()
+      // pane actually ends up with and no program redraws across a resize. The
+      // transaction keeps the intermediate split geometry off the terminals
+      // that already exist in this window.
+      await TerminalManager.runLayoutTransaction(async () => {
+        arrangeTerminalPaneGrid(innerApi, orderedPanelIds, finalGrid, activePanelId ?? orderedPanelIds[0] ?? null)
+        if (!ownsLayout(owner)) return
+        await handle.settle()
+      })
       if (!ownsLayout(owner)) return ''
       const spawnedPanelIds = await Promise.all(additions.map((entry) => spawnIntoPendingPane(handle, owner, entry, { profileId: request.grid.profileId, inactive: true, deferLayoutCommit: true })))
       if (!ownsLayout(owner)) return ''

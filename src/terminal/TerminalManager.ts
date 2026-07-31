@@ -298,6 +298,8 @@ class TerminalManagerImpl {
   private lastPassDurationMs: number | undefined
   // Non-zero while a divider drag or a native window drag-resize is in flight.
   private interactionDepth = 0
+  // Non-zero while a whole-grid topology command owns the layout.
+  private topologyDepth = 0
   private dividerResizePaneIds = new Set<string>()
   private windowResizeTimer: number | undefined
   private viewportViable = true
@@ -1372,6 +1374,36 @@ class TerminalManagerImpl {
     this.scheduleLayoutPass({ force: forceFit })
   }
 
+  /** Run a whole-grid topology command (Arrange, grid creation) without letting
+   *  its INTERMEDIATE geometry reach the terminals.
+   *
+   *  Such a command walks every pane through sizes it never lands on: each
+   *  `moveTo` splits a group so the moved pane briefly owns a fraction of its
+   *  row, and `equalizeGridTracks`' `fromJSON` rebuilds the grid again on top.
+   *  Measured live on a 4x2 OMP grid, one Arrange fitted panes to 20x34 and
+   *  57x34 before landing back on 87x34 and forwarded every step to the PTY.
+   *  That is not merely wasted work: a narrow fit re-wraps the whole buffer, and
+   *  xterm does NOT pull re-wrapped lines back out of scrollback when the grid
+   *  widens again, so pane scrollback went from 28 to 194 lines — the reported
+   *  "the pre-arrange screen is still up there, and every terminal can scroll
+   *  now". Each PTY step also makes a normal-buffer TUI repaint its whole frame.
+   *
+   *  Passes stay QUEUED for the duration and run once on the final geometry. */
+  async runLayoutTransaction<T>(run: () => Promise<T>): Promise<T> {
+    this.topologyDepth += 1
+    try {
+      return await run()
+    } finally {
+      this.topologyDepth -= 1
+      if (this.topologyDepth === 0) {
+        // Sizes observed mid-transaction describe geometry that no longer
+        // exists; make the settling pass measure the panes it actually landed on.
+        for (const entry of this.entries.values()) entry.observedSize = undefined
+        this.scheduleLayoutPass({ force: true, syncPty: true })
+      }
+    }
+  }
+
   syncPtySize(paneId: string): void {
     this.scheduleLayoutPass({ paneIds: [paneId], syncPty: true })
   }
@@ -1470,6 +1502,8 @@ class TerminalManagerImpl {
    *  adaptive frame budget without the stability gate. */
   private requestPassFlush(): void {
     if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
+    // A topology command re-arms the flush itself once the grid is final.
+    if (this.topologyDepth > 0) return
     // While the window is minimized the webview reports a degenerate viewport.
     // Hold the requests: handleWindowResize settles once the window is back.
     if (!this.viewportViable) return
@@ -1511,6 +1545,9 @@ class TerminalManagerImpl {
   }
 
   private flushLayoutPass(): void {
+    // Keep every request queued while a topology command owns the layout, so no
+    // pane is ever fitted to geometry the command is about to discard.
+    if (this.topologyDepth > 0) return
     const pending = this.pendingPass
     this.pendingPass = new Map()
     const interactive = this.interactive
@@ -2179,6 +2216,12 @@ class TerminalManagerImpl {
   private fit(entry: Entry, attempt: number, force = false): void {
     if (isDividerResizeActive()) {
       this.requestStableDividerFit(entry)
+      return
+    }
+    // Font-load and settings fits must not slip inside a topology command
+    // either; the closing pass fits every pane on the final geometry.
+    if (this.topologyDepth > 0) {
+      this.scheduleLayoutPass({ paneIds: [entry.paneId], force: true })
       return
     }
     entry.fitForcePending = Boolean(entry.fitForcePending || force)

@@ -1196,13 +1196,6 @@ button {
   padding: 0 7px 0 9px;
 }
 
-.workspace-tab-kind {
-  color: var(--vibelink-muted);
-  flex: 0 0 auto;
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
 .terminal-tab-title {
   flex: 1;
   min-width: 0;
@@ -1239,16 +1232,72 @@ button {
   align-items: center;
   background: transparent;
   border: 0;
+  border-radius: 5px;
   color: var(--vibelink-muted);
   display: flex;
   height: 20px;
   justify-content: center;
   padding: 0;
+  transition: background-color 120ms ease, color 120ms ease;
   width: 20px;
 }
 
 .terminal-tab-actions button:hover {
+  background: var(--vibelink-hover);
   color: var(--vibelink-text);
+}
+
+.terminal-tab-close:hover {
+  background: color-mix(in srgb, var(--vibelink-danger) 22%, transparent);
+  color: var(--vibelink-danger);
+}
+
+/* Collapsing action rail. A resting tab is icon + title + close; the rest of
+   the row is revealed on hover, on keyboard focus, or while the tab is active.
+   `grid-template-columns: 0fr -> 1fr` animates to the row's INTRINSIC width, so
+   nothing has to hard-code how many buttons a tab kind renders. */
+.terminal-tab-quick-actions {
+  display: grid;
+  grid-template-columns: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-columns 190ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 130ms ease 40ms;
+}
+
+.terminal-tab-quick-actions > div {
+  display: flex;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.terminal-tab-quick-actions > div > * {
+  transform: translateX(4px);
+  transition: transform 190ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* "Active" has to mean the active GROUP's active tab. Every terminal pane sits
+   alone in its own group, so `.dv-active-tab` alone is true for all of them and
+   would expand every rail at once — which is the clutter this replaces. */
+.workspace-content-tab:hover .terminal-tab-quick-actions,
+.workspace-content-tab:focus-within .terminal-tab-quick-actions,
+.dv-active-group .dv-tab.dv-active-tab .terminal-tab-quick-actions {
+  grid-template-columns: 1fr;
+  opacity: 1;
+}
+
+.workspace-content-tab:hover .terminal-tab-quick-actions > div > *,
+.workspace-content-tab:focus-within .terminal-tab-quick-actions > div > *,
+.dv-active-group .dv-tab.dv-active-tab .terminal-tab-quick-actions > div > * {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-tab-quick-actions,
+  .terminal-tab-quick-actions > div > * {
+    transition-duration: 1ms;
+  }
 }
 
 .workspace-dock {
@@ -1260,6 +1309,41 @@ button {
 .workspace-dock .dv-tabs-container,
 .workspace-dock .dv-tab {
   height: var(--dv-tabs-and-actions-container-height);
+}
+
+/* Tab chrome. The strip reads as a rail of quiet labels with ONE lit tab: the
+   active tab lifts out of the bar with a rounded top and an accent hairline,
+   everything else stays flat and muted. Dockview owns the background colors
+   through its `--dv-*` variables, so only shape/edges are set here. */
+.workspace-dock .dv-tab {
+  border-radius: 7px 7px 0 0;
+  position: relative;
+  transition: background-color 140ms ease;
+}
+
+.workspace-dock .dv-tab:not(.dv-active-tab):hover {
+  background: var(--vibelink-hover);
+}
+
+.workspace-dock .dv-tab.dv-active-tab::after {
+  background: var(--vibelink-accent);
+  border-radius: 2px;
+  content: '';
+  height: 2px;
+  left: 8px;
+  position: absolute;
+  right: 8px;
+  top: 0;
+}
+
+/* Inner pane title bars are status bars, not a tab rail: no lifted corners. */
+.workspace-dock .terminal-window-panel .dv-tab {
+  border-radius: 0;
+}
+
+.workspace-dock .terminal-window-panel .dv-tab.dv-active-tab::after {
+  left: 0;
+  right: 0;
 }
 
 .workspace-dock .dv-default-tab,
@@ -2302,20 +2386,6 @@ button {
   padding: 2px 6px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.terminal-tab-role-unset {
-  font-style: italic;
-  opacity: 0.6;
-}
-
-.workspace-tab-kind {
-  border: 1px solid var(--vibelink-blue-soft);
-  color: var(--vibelink-blue);
-  flex: 0 0 auto;
-  font: 700 10px/1 var(--vibelink-sans);
-  padding: 2px 6px;
-  text-transform: uppercase;
 }
 
 .window-controls {

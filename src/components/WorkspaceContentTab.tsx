@@ -159,9 +159,10 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           silently failed to move/split while an already-active one worked. */}
       <span aria-hidden="true"><ProfileIcon name={content?.icon} size={13} className="terminal-tab-icon" /></span>
       {displaysAgentStatus ? <span className={`workspace-agent-status-dot is-${agentStatus.tone}${agentStatus.pulsing ? ' is-pulsing' : ''}`} title={agentStatus.label} aria-label={agentStatus.label} /> : null}
-      {paneId
-        ? <span className={`terminal-tab-role${role ? '' : ' terminal-tab-role-unset'}`} title={role ? `Pane role: ${role}` : 'No pane role assigned'}>{role ?? 'No role'}</span>
-        : <span className="workspace-tab-kind">{content?.kind ?? 'content'}</span>}
+      {/* The icon already names the content kind, and an unassigned pane role is
+          not information — both chips only made every tab wider. Show the role
+          chip when a role actually exists. */}
+      {paneId && role ? <span className="terminal-tab-role" title={`Pane role: ${role}`}>{role}</span> : null}
       {isEditing && paneId ? (
         <input
           className="terminal-tab-title-input"
@@ -187,6 +188,11 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
         </span>
       )}
       <div className="terminal-tab-actions" data-dockview-dnd-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
+        {/* Everything except Close lives in the collapsing rail: a resting tab is
+            icon + title + close, and the rail expands on hover, focus, or while
+            the tab is active. `:focus-within` is what keeps it keyboard-usable
+            without a visibility hack. */}
+        <div className="terminal-tab-quick-actions"><div>
         {paneId ? (
           <>
             {/* Terminal pane tab: only split + close. The tab body itself is the
@@ -232,7 +238,8 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
             {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
           </button>
         )}
-        <button type="button" title={paneId ? 'Close terminal' : 'Close content'} aria-label={paneId ? 'Close terminal' : 'Close content'} onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
+        </div></div>
+        <button type="button" className="terminal-tab-close" title={paneId ? 'Close terminal' : 'Close content'} aria-label={paneId ? 'Close terminal' : 'Close content'} onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
           <X size={12} aria-hidden="true" />
         </button>
       </div>

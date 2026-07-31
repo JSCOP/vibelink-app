@@ -72,7 +72,9 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
     >
       <span aria-hidden="true"><ProfileIcon name={content?.icon} size={13} className="terminal-tab-icon" /></span>
       {agentStatus ? <span className={agentPaneStatusClassName(agentStatus)} title={agentStatus.label} aria-label={agentStatus.label} /> : null}
-      <span className={`terminal-tab-role${role ? '' : ' terminal-tab-role-unset'}`} title={role ? `Pane role: ${role}` : 'No pane role assigned'}>{role ?? 'No role'}</span>
+      {/* An unassigned role is not information; the chip only made every pane
+          title bar wider. Show it when a role actually exists. */}
+      {role ? <span className="terminal-tab-role" title={`Pane role: ${role}`}>{role}</span> : null}
       {isEditing && paneId ? (
         <input
           className="terminal-tab-title-input"
@@ -94,6 +96,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
         </span>
       )}
       <div className="terminal-tab-actions" data-dockview-dnd-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
+        <div className="terminal-tab-quick-actions"><div>
         {paneId ? (
           <>
             <button type="button" title="Split terminal right" aria-label="Split terminal right" onClick={(event) => { activateAndStop(event); void actions.splitTerminal(paneId, 'right') }}>
@@ -104,7 +107,8 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
             </button>
           </>
         ) : null}
-        <button type="button" title="Close terminal" aria-label="Close terminal" onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
+        </div></div>
+        <button type="button" className="terminal-tab-close" title="Close terminal" aria-label="Close terminal" onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
           <X size={12} aria-hidden="true" />
         </button>
       </div>
