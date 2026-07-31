@@ -86,8 +86,7 @@ export function resetWorkspaceSessionOwnershipForTests(): void {
 type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 
 type Status = 'booting' | 'ready' | 'error'
-export type PaneCompletionSource = 'agent-response' | 'task-done' | 'agent-hook'
-export type PaneCompletionHighlight = { completedAt: number; source: PaneCompletionSource; sessionId: string }
+export type PaneCompletionHighlight = { completedAt: number; source: 'agent-hook'; sessionId: string }
 export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
 export type CreateWorkspaceWorktreeInput = {
   parentSessionId: string
@@ -151,7 +150,8 @@ type WorkspaceState = {
   recentCaptures: string[]
   setActivePaneId: (paneId?: string) => void
   notePaneAgentTurnStart: (paneId: string) => void
-  markPaneResponseComplete: (paneId: string, source?: PaneCompletionSource, sessionId?: string) => void
+  notePaneAgentTurnEnd: (paneId: string) => void
+  markPaneHookComplete: (paneId: string, sessionId: string) => void
   clearPaneCompletionHighlight: (paneId: string) => void
   togglePaneReviewed: (paneId: string) => void
   recordCapture: (paneId: string | undefined, path: string) => void
@@ -865,35 +865,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   clearError: () => set({ error: undefined, status: 'ready' }),
   dismissError: () => set({ error: undefined }),
   setActivePaneId: (paneId) => set({ activePaneId: paneId }),
-  // A turn only "starts" for a live agent pane in the attached workspace; the
-  // tracker never observes anything else, and a stray entry would keep an
-  // unrelated pane spinning.
+  // Local terminal activity tracks working/idle only. It never raises completion alerts.
   notePaneAgentTurnStart: (paneId) => set((state) => {
     const pane = state.panes[paneId]
     if (!pane?.alive || !isAgentPane(pane, state.settings)) return {}
     return { paneAgentActivity: { ...state.paneAgentActivity, [paneId]: { startedAt: Date.now() } } }
   }),
-  markPaneResponseComplete: (paneId, source = 'agent-response', reportedSessionId) => set((state) => {
-    const sessionId = reportedSessionId ?? state.activeSessionId
-    if (!sessionId) return {}
-    const pane = state.panes[paneId]
-    // The terminal-output heuristic only observes the attached workspace, so
-    // it still requires a live recognized agent pane. Hook/task signals carry
-    // their daemon-validated workspace id and remain authoritative even after
-    // the user switched elsewhere and the pane left the frontend snapshot.
-    if (source === 'agent-response') {
-      if (sessionId !== state.activeSessionId || !pane?.alive || !isAgentPane(pane, state.settings)) return {}
-    } else if (!reportedSessionId && (!pane?.alive || sessionId !== state.activeSessionId)) {
-      return {}
-    }
-    return {
-      paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
-      paneCompletionHighlights: {
-        ...state.paneCompletionHighlights,
-        [paneId]: { completedAt: Date.now(), source, sessionId },
-      },
-    }
+  notePaneAgentTurnEnd: (paneId) => set((state) => {
+    if (!state.paneAgentActivity[paneId]) return {}
+    return { paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId) }
   }),
+  // A daemon-validated agent hook is the only completion-alert authority.
+  markPaneHookComplete: (paneId, sessionId) => set((state) => ({
+    paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
+    paneCompletionHighlights: {
+      ...state.paneCompletionHighlights,
+      [paneId]: { completedAt: Date.now(), source: 'agent-hook', sessionId },
+    },
+  })),
   clearPaneCompletionHighlight: (paneId) => set((state) => {
     if (!state.paneCompletionHighlights[paneId]) return {}
     return { paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId) }
@@ -1645,7 +1634,7 @@ export function loadPaneCompletionHighlights(storage?: Pick<Storage, 'getItem'> 
         && typeof highlight.completedAt === 'number'
         && Number.isFinite(highlight.completedAt)
         && highlight.completedAt > 0
-        && (highlight.source === 'agent-response' || highlight.source === 'task-done' || highlight.source === 'agent-hook')
+        && highlight.source === 'agent-hook'
         && typeof highlight.sessionId === 'string'
         && highlight.sessionId.length > 0
     }))

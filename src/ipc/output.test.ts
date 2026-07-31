@@ -8,8 +8,13 @@ import { TerminalManager } from '../terminal/TerminalManager'
 
 type TestTerminalEvent =
   | { kind: 'sessionChanged'; sessionId: string }
-  | { kind: 'task'; sessionId: string; signal: { kind: 'paneCompleted'; paneId: string; agent?: string | null } }
-
+  | {
+      kind: 'task'
+      sessionId: string
+      signal:
+        | { kind: 'paneCompleted'; paneId: string; agent?: string | null }
+        | { kind: 'done'; taskId: string; paneId?: string | null }
+    }
 let emitTerminalEvent: ((event: TestTerminalEvent) => void) | undefined
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -187,6 +192,17 @@ describe('terminal session change reloads', () => {
     expect(highlights).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: 'agent-hook', sessionId: session.id }),
     ]))
+  })
+  test('does not create a completion alert for task done', async () => {
+    await startTerminalOutputStream({ force: true })
+
+    emitTerminalEvent?.({
+      kind: 'task',
+      sessionId: session.id,
+      signal: { kind: 'done', taskId: 'task-1', paneId: pane.id },
+    })
+
+    expect(useWorkspaceStore.getState().paneCompletionHighlights).toEqual({})
   })
   test('cancels the pending terminal fallback after an authoritative agent hook', async () => {
     const fallbackCompletions: string[] = []

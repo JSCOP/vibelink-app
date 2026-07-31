@@ -25,9 +25,6 @@ import { startAppUpdateChecks } from './components/update/updateStore'
 import { CommandPaletteHost } from './components/palette/CommandPalette'
 import type { PaletteItem } from './components/palette/paletteModel'
 import { StatusBar } from './components/statusbar/StatusBar'
-import { NotificationCenter } from './components/notifications/NotificationCenter'
-import { requestAutomationNavigation } from './components/automations/navigation'
-import type { AutomationNotificationPayload } from './ipc/notifications'
 import { choiceDialog, confirmDialog, isAppDialogOpen } from './components/appDialogStore'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
@@ -220,7 +217,6 @@ function App() {
         paneId,
         paneTitle: state.panes[paneId]?.config.title ?? 'Terminal',
         workspaceName: workspace?.name ?? 'VibeLink',
-        agentName: highlight.source === 'task-done' ? 'Assigned task' : undefined,
       }, {
         settings: state.settings,
         windowFocused: document.hasFocus(),
@@ -326,7 +322,7 @@ function App() {
         return Boolean(pane && isAgentPane(pane, state.settings))
       },
       onResponseStart: (paneId) => useWorkspaceStore.getState().notePaneAgentTurnStart(paneId),
-      onResponseComplete: (paneId) => useWorkspaceStore.getState().markPaneResponseComplete(paneId),
+      onResponseComplete: (paneId) => useWorkspaceStore.getState().notePaneAgentTurnEnd(paneId),
     })
     let worktreeRefresh = Promise.resolve()
     const unlisteners = [
@@ -650,20 +646,6 @@ function App() {
     void openSession(sessionId)
   }, [openSession])
 
-  const openAutomationNotification = useCallback(async (payload: AutomationNotificationPayload) => {
-    if (useWorkspaceStore.getState().activeSessionId !== payload.sessionId) {
-      await openSession(payload.sessionId)
-    }
-    if (useWorkspaceStore.getState().activeSessionId !== payload.sessionId) return
-    const actions = contentActionsRef.current
-    const panelId = await actions?.openContent({ kind: 'automation' })
-    if (panelId) actions?.activateContent(panelId)
-    requestAutomationNavigation({
-      sessionId: payload.sessionId,
-      automationId: payload.automationId,
-      runId: payload.automationRunId,
-    })
-  }, [openSession])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -875,7 +857,6 @@ function App() {
           <button type="button" className="topbar-icon-button" title="Report a bug" aria-label="Report a bug" onClick={openBugReport}>
             <Bug size={16} aria-hidden="true" />
           </button>
-          <NotificationCenter onOpenAutomation={openAutomationNotification} />
           <button type="button" className="topbar-icon-button" title="Open settings" aria-label="Open settings" onClick={() => openSettings()}>
             <Settings2 size={16} aria-hidden="true" />
           </button>

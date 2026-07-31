@@ -34,14 +34,13 @@ pub use worktree::{
 };
 
 use crate::{
-    agent_runtime::WorktreeManager,
-    app::git::worktree_registry::WorktreeRegistry,
-    orchestration::{CoordinatorService, WorktreeAssignment},
+    agent_runtime::WorktreeManager, app::git::worktree_registry::WorktreeRegistry,
+    orchestration::WorktreeAssignment,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use model::{apply_patch, parse_create};
 use rusqlite::{Connection, TransactionBehavior};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -59,7 +58,6 @@ pub struct AutomationWorktreeProvision {
 
 pub struct AutomationService {
     connection: Mutex<Connection>,
-    coordinator: Arc<CoordinatorService>,
     worktrees: AutomationWorktreeController,
     process_registry: Arc<AutomationProcessRegistry>,
     runner: AutomationRunner,
@@ -70,7 +68,6 @@ impl AutomationService {
     pub fn open(
         database_path: &Path,
         artifact_root: PathBuf,
-        coordinator: Arc<CoordinatorService>,
         registry: Arc<WorktreeRegistry>,
     ) -> Result<Self> {
         if let Some(parent) = database_path.parent() {
@@ -100,7 +97,6 @@ impl AutomationService {
         let runner = AutomationRunner::new(Arc::clone(&process_registry), None);
         let service = Self {
             connection: Mutex::new(connection),
-            coordinator,
             worktrees: AutomationWorktreeController::new(
                 WorktreeManager::new(artifact_root.join("worktrees"), Arc::clone(&registry))?,
                 registry,
@@ -114,13 +110,12 @@ impl AutomationService {
     }
 
     fn reconcile_startup(&self) -> Result<()> {
-        let recovered = {
+        {
             let now = now_millis();
             let mut connection = self.lock()?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let active = AutomationStore::active_runs(&transaction)?;
-            let mut recovered = Vec::with_capacity(active.len());
             for mut run in active {
                 let reason = if run.status == "pending" {
                     "VibeLink daemon restarted before Hermes dispatch began; rerun manually."
@@ -152,20 +147,10 @@ impl AutomationService {
                         worktree.disposition = "retained".to_string();
                     }
                 }
-                recovered.push(AutomationStore::save_run_if_status(
-                    &transaction,
-                    &run,
-                    &expected_status,
-                )?);
+                AutomationStore::save_run_if_status(&transaction, &run, &expected_status)?;
             }
             transaction.commit()?;
-            recovered
         };
-        for run in recovered {
-            if let Err(error) = self.create_final_notification(&run) {
-                tracing::warn!(automation_run_id = %run.id, ?error, "failed to persist recovered automation notification");
-            }
-        }
         Ok(())
     }
 
@@ -365,7 +350,7 @@ impl AutomationService {
         )
     }
 
-    fn execute_with_worktree_and_runner<F, R>(
+    pub(crate) fn execute_with_worktree_and_runner<F, R>(
         &self,
         claim: &AutomationRunRecord,
         workspace: &Path,
@@ -541,105 +526,6 @@ impl AutomationService {
             );
         }
         Ok(saved)
-    }
-
-    pub fn execute_and_notify(
-        &self,
-        claim: &AutomationRunRecord,
-        workspace: &Path,
-    ) -> Result<AutomationRunRecord> {
-        self.execute_and_notify_with_worktree(claim, workspace, |_, _, _, _| {
-            bail!("automation worktree provisioning requires the daemon lifecycle service")
-        })
-    }
-
-    pub(crate) fn execute_and_notify_with_worktree<F>(
-        &self,
-        claim: &AutomationRunRecord,
-        workspace: &Path,
-        create_worktree: F,
-    ) -> Result<AutomationRunRecord>
-    where
-        F: FnOnce(
-            &AutomationRecord,
-            &AutomationRunRecord,
-            &Path,
-            &WorktreeAssignment,
-        ) -> Result<AutomationWorktreeProvision>,
-    {
-        self.execute_and_notify_with_worktree_and_runner(
-            claim,
-            workspace,
-            create_worktree,
-            |runner, claim, automation, prepared| runner.run(&claim.id, automation, &prepared.cwd),
-        )
-    }
-
-    pub(crate) fn execute_and_notify_with_worktree_and_runner<F, R>(
-        &self,
-        claim: &AutomationRunRecord,
-        workspace: &Path,
-        create_worktree: F,
-        run_agent: R,
-    ) -> Result<AutomationRunRecord>
-    where
-        F: FnOnce(
-            &AutomationRecord,
-            &AutomationRunRecord,
-            &Path,
-            &WorktreeAssignment,
-        ) -> Result<AutomationWorktreeProvision>,
-        R: FnOnce(
-            &AutomationRunner,
-            &AutomationRunRecord,
-            &AutomationRecord,
-            &PreparedWorkspace,
-        ) -> RunnerOutcome,
-    {
-        let run =
-            self.execute_with_worktree_and_runner(claim, workspace, create_worktree, run_agent)?;
-        if model::is_final_status(&run.status) {
-            if let Err(error) = self.create_final_notification(&run) {
-                tracing::warn!(automation_run_id = %run.id, ?error, "failed to persist automation notification");
-            }
-        }
-        Ok(run)
-    }
-
-    fn create_final_notification(&self, run: &AutomationRunRecord) -> Result<()> {
-        let automation = self.get(&run.automation_id)?;
-        let kind = match run.status.as_str() {
-            "completed" => "automation.completed",
-            "cancelled" => "automation.cancelled",
-            _ => "automation.failed",
-        };
-        let worktree_path = run.worktree.as_ref().map(|worktree| worktree.path.clone());
-        let branch = run
-            .worktree
-            .as_ref()
-            .map(|worktree| worktree.branch.clone());
-        let output_summary = run
-            .output_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.final_response.clone());
-        self.coordinator
-            .create_notification(
-                kind,
-                &run.id,
-                json!({
-                    "sessionId": automation.session_id,
-                    "automationId": automation.id,
-                    "automationName": automation.name,
-                    "automationRunId": run.id,
-                    "status": run.status,
-                    "worktreePath": worktree_path,
-                    "branch": branch,
-                    "outputSummary": output_summary,
-                    "error": run.error,
-                }),
-            )
-            .map(|_| ())
-            .map_err(|error| anyhow!("create automation notification: {error}"))
     }
 
     fn persist_prepared_worktree(
@@ -1078,7 +964,7 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    use crate::control_plane::ControlPlane;
+    use crate::{control_plane::ControlPlane, orchestration::CoordinatorService};
     use serde_json::json;
 
     fn fixture() -> (
@@ -1096,7 +982,6 @@ mod lifecycle_tests {
         let service = AutomationService::open(
             &root.join("control").join("vibelink-control.sqlite3"),
             root.join("automation-artifacts"),
-            Arc::clone(&coordinator),
             Arc::clone(&registry),
         )
         .expect("open automation service");
@@ -1154,7 +1039,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn restart_marks_pending_run_failed_and_emits_one_durable_notification() {
+    fn restart_marks_pending_run_failed_without_notification() {
         let (root, coordinator, registry, service) = fixture();
         let session_id = Uuid::new_v4().to_string();
         let automation = service
@@ -1166,7 +1051,6 @@ mod lifecycle_tests {
         let reopened = AutomationService::open(
             &root.join("control").join("vibelink-control.sqlite3"),
             root.join("automation-artifacts"),
-            Arc::clone(&coordinator),
             Arc::clone(&registry),
         )
         .expect("reopen automation service");
@@ -1183,12 +1067,7 @@ mod lifecycle_tests {
         let notifications = coordinator
             .notifications_after(0, 10)
             .expect("read notifications");
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].kind, "automation.failed");
-        assert_eq!(
-            notifications[0].entity_id.as_deref(),
-            Some(pending.id.as_str())
-        );
+        assert!(notifications.is_empty());
 
         drop(reopened);
         drop(registry);

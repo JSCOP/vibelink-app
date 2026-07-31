@@ -752,8 +752,7 @@ impl CoordinatorService {
              )
              SELECT r.pane_id,c.dispatch_status,c.task_status,c.agent_status,c.state_updated_at,
                     EXISTS(SELECT 1 FROM decision_gates g WHERE g.status='pending' AND (g.dispatch_id=c.dispatch_id OR g.task_id=c.task_id)),
-                    (SELECT COUNT(*) FROM messages m WHERE m.unread=1 AND (m.dispatch_id=c.dispatch_id OR m.task_id=c.task_id)),
-                    (SELECT COUNT(*) FROM notifications n WHERE n.unread=1 AND n.entity_id IN (c.dispatch_id,c.task_id,c.agent_instance_id))
+                    (SELECT COUNT(*) FROM messages m WHERE m.unread=1 AND (m.dispatch_id=c.dispatch_id OR m.task_id=c.task_id))
              FROM requested r LEFT JOIN current c ON c.pane_id=r.pane_id"
         );
         self.control.with_connection(|connection| {
@@ -766,11 +765,7 @@ impl CoordinatorService {
                 let state_updated_at =
                     row.get::<_, Option<i64>>(4)?.unwrap_or_default().max(0) as u64;
                 let pending_gate = row.get::<_, i64>(5)? != 0;
-                let unread_messages = row.get::<_, i64>(6)?.max(0) as u64;
-                let unread_notifications = row.get::<_, i64>(7)?.max(0) as u64;
-                let unread_count = unread_messages
-                    .saturating_add(unread_notifications)
-                    .min(u64::from(u32::MAX)) as u32;
+                let unread_count = row.get::<_, i64>(6)?.max(0).min(i64::from(u32::MAX)) as u32;
                 let interrupted = pane_interrupted(
                     dispatch_status.as_deref(),
                     task_status.as_deref(),
@@ -4615,7 +4610,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_projection_states_batches_latest_binding_gates_and_unread() {
+    fn pane_projection_states_batches_latest_binding_gates_and_unread_messages() {
         let fixture = Fixture::new();
         let run_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -4656,10 +4651,6 @@ mod tests {
                     "INSERT INTO messages(id,run_id,task_id,dispatch_id,sender_kind,message_type,payload_json,unread,created_at) VALUES(?1,?2,?3,?4,'agent','status','{}',1,2)",
                     rusqlite::params![Uuid::new_v4().to_string(), run_id, task_id, dispatch_id],
                 )?;
-                connection.execute(
-                    "INSERT INTO notifications(id,sequence,kind,entity_id,unread,payload_json,created_at) VALUES(?1,1,'agent',?2,1,'{}',2)",
-                    rusqlite::params![Uuid::new_v4().to_string(), agent_id],
-                )?;
                 Ok(())
             })
             .unwrap();
@@ -4673,7 +4664,7 @@ mod tests {
             states.get(&pane_id),
             Some(&PaneProjectionState {
                 activity: RemotePaneActivity::Waiting,
-                unread_count: 2,
+                unread_count: 1,
                 state_updated_at: 2,
                 blocked: true,
                 interrupted: false,

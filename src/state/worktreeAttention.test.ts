@@ -47,10 +47,10 @@ function attention(attentionClass: 1 | 2 | 3 | 4, timestamp: number, recentActiv
 
 
 describe('smart workspace attention', () => {
-  test('uses fresh native evidence for 30 minutes and only then permits title fallback', () => {
+  test('uses fresh native evidence without treating hookless done as completion', () => {
     const now = 2_000_000
     expect(resolveAttention(pane({ state: 'waiting', stateUpdatedAt: now - 10 }), now).attentionClass).toBe(1)
-    expect(resolveAttention(pane({ state: 'done', stateUpdatedAt: now - 10 }), now).attentionClass).toBe(2)
+    expect(resolveAttention(pane({ state: 'done', stateUpdatedAt: now - 10 }), now).attentionClass).toBe(4)
     expect(resolveAttention(pane({ state: 'done', stateUpdatedAt: now - 10, interrupted: true }), now).attentionClass).toBe(4)
     expect(resolveAttention(pane({ state: 'idle', stateUpdatedAt: now - 10, title: 'Waiting for permission' }), now).attentionClass).toBe(4)
     expect(resolveAttention(pane({ state: 'error', stateUpdatedAt: now - EXPLICIT_ATTENTION_TTL_MS - 1 }), now).attentionClass).toBe(4)
@@ -73,7 +73,7 @@ describe('smart workspace attention', () => {
       now,
     )[target.id]
 
-    expect(build([pane()])).toMatchObject({ attentionClass: 2, completionCount: 1, source: 'agent-hook' })
+    expect(build([pane({ state: 'done', stateUpdatedAt: now - 1 })])).toMatchObject({ attentionClass: 2, completionCount: 1, source: 'agent-hook' })
     expect(build([pane({ state: 'working', stateUpdatedAt: now - 1 })])).toMatchObject({ attentionClass: 3, completionCount: 0 })
     expect(build([pane()], new Set(['pane-a']))).toMatchObject({ attentionClass: 4, completionCount: 0 })
     expect(build([

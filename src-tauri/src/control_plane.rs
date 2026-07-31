@@ -11,7 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const CONTROL_SCHEMA_VERSION: i64 = 8;
+const CONTROL_SCHEMA_VERSION: i64 = 9;
 const MAX_BACKUPS: usize = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -880,6 +880,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     migrate_worktree_schema_v4(connection)?;
     migrate_worktree_identity_v5(connection)?;
     migrate_automation_agents_v8(connection)?;
+    if version < 9 && table_exists(connection, "notifications")? {
+        // v9 removes every persisted automation/completion alert from the former hookless path.
+        connection.execute("DELETE FROM notifications", [])?;
+    }
     connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
     Ok(())
 }
@@ -2410,6 +2414,40 @@ mod tests {
             "legacy board must not re-import"
         );
         assert!(legacy_path.with_extension("json.rollback-v1").exists());
+        drop(reopened);
+        fs::remove_dir_all(directory).expect("cleanup control plane");
+    }
+    #[test]
+    fn schema_v9_removes_legacy_notifications() {
+        let (directory, plane) = plane();
+        plane.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO notifications(id,sequence,kind,unread,payload_json,created_at) VALUES('legacy',1,'automation.completed',1,'{}',1)",
+                    [],
+                )
+                .expect("seed legacy notification");
+            connection
+                .pragma_update(None, "user_version", 8)
+                .expect("mark legacy schema");
+        });
+        drop(plane);
+
+        let reopened = ControlPlane::open(&directory).expect("migrate control plane");
+        let (count, version) = reopened.with_connection(|connection| {
+            let count = connection
+                .query_row("SELECT COUNT(*) FROM notifications", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count notifications");
+            let version = connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("read schema version");
+            (count, version)
+        });
+        assert_eq!(count, 0);
+        assert_eq!(version, CONTROL_SCHEMA_VERSION);
+
         drop(reopened);
         fs::remove_dir_all(directory).expect("cleanup control plane");
     }

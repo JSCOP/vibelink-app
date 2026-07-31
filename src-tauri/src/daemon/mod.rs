@@ -397,7 +397,6 @@ fn run_inner() -> Result<()> {
             .join("control")
             .join("vibelink-control.sqlite3"),
         paths.data_dir.join("automation-artifacts"),
-        Arc::clone(&coordinator),
         Arc::clone(&worktree_registry),
     )?);
     let computer_host_executable = std::env::var_os("VIBELINK_COMPUTER_HOST_EXE")
@@ -688,7 +687,7 @@ fn run_automation_scheduler_tick(
             spawn_run_id.get(..8).unwrap_or(&spawn_run_id)
         );
         if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
-            if let Err(error) = automation.execute_and_notify_with_worktree_and_runner(
+            if let Err(error) = automation.execute_with_worktree_and_runner(
                 &claim,
                 &workspace,
                 |record, claim, workspace, planned| {
@@ -4137,7 +4136,7 @@ fn dispatch_automation_cli(
             let workspace = automation_workspace(state, &record.session_id)?;
             let claim = automation.trigger(id)?;
             Ok(serde_json::to_value(
-                automation.execute_and_notify_with_worktree_and_runner(
+                automation.execute_with_worktree_and_runner(
                     &claim,
                     &workspace,
                     |record, claim, workspace, planned| {

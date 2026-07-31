@@ -950,7 +950,7 @@ describe('workspace store profiles', () => {
     ])
   })
 
-  test('pane completion survives active-state changes until explicitly acknowledged', () => {
+  test('hook completion survives active-state changes until explicitly acknowledged', () => {
     vi.stubGlobal('document', { hasFocus: () => true })
     useWorkspaceStore.setState({
       activeSessionId: createdSession.id,
@@ -959,9 +959,9 @@ describe('workspace store profiles', () => {
       paneCompletionHighlights: {},
     })
 
-    useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+    useWorkspaceStore.getState().markPaneHookComplete('pane-test', createdSession.id)
 
-    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response', sessionId: createdSession.id })
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-hook', sessionId: createdSession.id })
 
     useWorkspaceStore.getState().setActivePaneId('pane-test')
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeDefined()
@@ -976,7 +976,7 @@ describe('workspace store profiles', () => {
       activePaneId: 'pane-test',
       panes: { 'pane-test': spawnedPane },
       paneCompletionHighlights: {
-        'pane-test': { completedAt: 1, source: 'agent-response', sessionId: createdSession.id },
+        'pane-test': { completedAt: 1, source: 'agent-hook', sessionId: createdSession.id },
       },
       paneReviewMarkers: {},
     })
@@ -1016,7 +1016,8 @@ describe('workspace store profiles', () => {
       getItem: () => JSON.stringify({
         'pane-valid': { completedAt: 123, source: 'agent-hook', sessionId: 'session-1' },
         'pane-invalid-source': { completedAt: 124, source: 'unknown', sessionId: 'session-1' },
-        'pane-invalid-time': { completedAt: 'now', source: 'task-done', sessionId: 'session-1' },
+        'pane-non-hook': { completedAt: 125, source: 'task-done', sessionId: 'session-1' },
+        'pane-invalid-time': { completedAt: 'now', source: 'agent-hook', sessionId: 'session-1' },
       }),
     })
     expect(stored).toEqual({ 'pane-valid': { completedAt: 123, source: 'agent-hook', sessionId: 'session-1' } })
@@ -1040,7 +1041,7 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().settings.workspaceOrder).toEqual(['b', 'a'])
   })
 
-  test('pane completion highlights the active agent pane while the app is unfocused', () => {
+  test('hook completion highlights the active agent pane while the app is unfocused', () => {
     useWorkspaceStore.setState({
       activeSessionId: createdSession.id,
       activePaneId: 'pane-test',
@@ -1048,12 +1049,12 @@ describe('workspace store profiles', () => {
       paneCompletionHighlights: {},
     })
 
-    useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+    useWorkspaceStore.getState().markPaneHookComplete('pane-test', createdSession.id)
 
-    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-hook' })
   })
 
-  test('pane completion remains while an inactive workspace or pane becomes active', () => {
+  test('hook completion remains while an inactive workspace or pane becomes active', () => {
     vi.stubGlobal('document', { hasFocus: () => true })
     useWorkspaceStore.setState({
       activeSessionId: createdSession.id,
@@ -1062,33 +1063,32 @@ describe('workspace store profiles', () => {
       paneCompletionHighlights: {},
     })
 
-    useWorkspaceStore.getState().markPaneResponseComplete('pane-test')
+    useWorkspaceStore.getState().markPaneHookComplete('pane-test', createdSession.id)
     useWorkspaceStore.getState().setActivePaneId('pane-test')
 
-    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-response' })
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toMatchObject({ source: 'agent-hook' })
 
     useWorkspaceStore.getState().clearPaneCompletionHighlight('pane-test')
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
   })
 
-  test('pane completion does not highlight a non-agent pane', () => {
+  test('terminal quiet completion only clears working state', () => {
     useWorkspaceStore.setState({
-      activeSessionId: createdSession.id,
-      activePaneId: 'pane-shell',
-      panes: { 'pane-shell': nonAgentPane },
+      paneAgentActivity: { 'pane-test': { startedAt: 1 } },
       paneCompletionHighlights: {},
     })
 
-    useWorkspaceStore.getState().markPaneResponseComplete('pane-shell')
+    useWorkspaceStore.getState().notePaneAgentTurnEnd('pane-test')
 
-    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-shell']).toBeUndefined()
+    expect(useWorkspaceStore.getState().paneAgentActivity['pane-test']).toBeUndefined()
+    expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
   })
 
   test('completion counts stay associated with their workspace', () => {
     expect(paneCompletionCountsBySession({
-      'pane-a': { completedAt: 1, source: 'agent-response', sessionId: createdSession.id },
-      'pane-b': { completedAt: 2, source: 'task-done', sessionId: createdSession.id },
-      'pane-c': { completedAt: 3, source: 'agent-response', sessionId: secondSession.id },
+      'pane-a': { completedAt: 1, source: 'agent-hook', sessionId: createdSession.id },
+      'pane-b': { completedAt: 2, source: 'agent-hook', sessionId: createdSession.id },
+      'pane-c': { completedAt: 3, source: 'agent-hook', sessionId: secondSession.id },
     })).toEqual({ [createdSession.id]: 2, [secondSession.id]: 1 })
   })
 
@@ -1103,7 +1103,7 @@ describe('workspace store profiles', () => {
       activeSessionId: createdSession.id,
       panes: { [spawnedPane.id]: spawnedPane },
       paneCompletionHighlights: {
-        [spawnedPane.id]: { completedAt: 1, source: 'agent-response', sessionId: createdSession.id },
+        [spawnedPane.id]: { completedAt: 1, source: 'agent-hook', sessionId: createdSession.id },
       },
     })
 

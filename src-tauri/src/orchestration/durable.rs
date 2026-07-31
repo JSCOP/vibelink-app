@@ -210,33 +210,6 @@ impl CoordinatorService {
         )
     }
 
-    pub fn create_notification(
-        &self,
-        kind: &str,
-        entity_id: &str,
-        payload: Value,
-    ) -> CoordinatorResult<NotificationRecord> {
-        let kind = required(kind, "notification kind")?;
-        let entity_id = required(entity_id, "notification entity id")?;
-        self.control.with_connection_mut(|connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let existing = transaction
-                .query_row(
-                    "SELECT id,sequence,kind,entity_id,unread,acknowledged_at,payload_json,created_at FROM notifications WHERE kind=?1 AND entity_id=?2 ORDER BY sequence DESC LIMIT 1",
-                    params![kind, entity_id],
-                    read_notification,
-                )
-                .optional()?;
-            if let Some(existing) = existing {
-                transaction.commit()?;
-                return Ok(existing);
-            }
-            let inserted = insert_notification(&transaction, &kind, Some(&entity_id), payload)?;
-            transaction.commit()?;
-            Ok(inserted)
-        })
-    }
-
     pub fn notifications_after(
         &self,
         after_sequence: u64,
@@ -447,7 +420,6 @@ impl CoordinatorService {
                 )?;
                 let worktrees = worktrees_for_run(transaction, &run.id)?;
                 insert_event(transaction,Some(&run.id),"orchestration",if decision=="accepted"{"run.accepted"}else{"run.rejected"},Some(&run.id),operation_id,json!({"worktrees": worktrees}))?;
-                insert_notification(transaction,if decision=="accepted"{"orchestration.accepted"}else{"orchestration.rejected"},Some(&run.id),json!({"runId":run.id}))?;
                 Ok(RunDecisionResult { run, decision: decision.to_string(), worktrees })
             },
         )
@@ -609,23 +581,6 @@ fn worktrees_for_run(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(worktrees)
-}
-
-fn insert_notification(
-    transaction: &Transaction<'_>,
-    kind: &str,
-    entity_id: Option<&str>,
-    payload: Value,
-) -> CoordinatorResult<NotificationRecord> {
-    let sequence = transaction.query_row(
-        "SELECT COALESCE(MAX(sequence),0)+1 FROM notifications",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    let id = Uuid::new_v4().to_string();
-    let now = now_millis();
-    transaction.execute("INSERT INTO notifications(id,sequence,kind,entity_id,unread,payload_json,created_at) VALUES(?1,?2,?3,?4,1,?5,?6)",params![id,sequence,kind,entity_id,payload.to_string(),now as i64])?;
-    read_notification_by_id(transaction, &id)
 }
 
 fn read_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventRecord> {

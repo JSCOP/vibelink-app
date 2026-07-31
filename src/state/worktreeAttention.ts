@@ -80,7 +80,6 @@ function isFreshNativeEvidence(pane: NativeAttentionPane, now: number): boolean 
 export function resolveAttention(
   pane: NativeAttentionPane,
   now: number,
-  explicitlyReviewed = false,
 ): ResolvedPaneAttention {
   const stateTimestamp = finiteTimestamp(pane.stateUpdatedAt)
   const fallbackTimestamp = Math.max(stateTimestamp, finiteTimestamp(pane.lastOutputAt))
@@ -89,9 +88,7 @@ export function resolveAttention(
     if (pane.state === 'blocked' || pane.state === 'waiting' || pane.state === 'error') {
       return { attentionClass: 1, timestamp: stateTimestamp, source: pane.source, cause: pane.state, freshNativeEvidence }
     }
-    if (pane.state === 'done' && !pane.interrupted && !explicitlyReviewed) {
-      return { attentionClass: 2, timestamp: stateTimestamp, source: pane.source, cause: 'done', freshNativeEvidence }
-    }
+    // Completed automation or dispatch state is not an agent-hook completion alert.
     if (pane.state === 'working') {
       return { attentionClass: 3, timestamp: stateTimestamp, source: pane.source, cause: 'working', freshNativeEvidence }
     }
@@ -170,16 +167,16 @@ export function buildAttentionByWorkspace(
     }
 
     for (const pane of panes) {
-      const resolved = resolveAttention(pane, now, fallbacks.reviewedPaneIds?.has(pane.paneId))
+      const resolved = resolveAttention(pane, now)
       hasFreshNative ||= resolved.freshNativeEvidence
       best = consider(best, resolved.attentionClass, resolved.timestamp, resolved.source, resolved.cause)
-      if (resolved.attentionClass === 2) completedPaneIds.add(pane.paneId)
     }
 
     for (const [paneId, highlight] of highlightsByWorkspace.get(session.id) ?? []) {
       const pane = paneById.get(paneId)
       if (snapshot && !pane) continue
-      if (fallbacks.reviewedPaneIds?.has(paneId) || pane?.interrupted || (pane && isFreshNativeEvidence(pane, now))) continue
+      const freshLiveState = pane && isFreshNativeEvidence(pane, now) && pane.state !== 'done' && pane.state !== 'idle'
+      if (fallbacks.reviewedPaneIds?.has(paneId) || pane?.interrupted || freshLiveState) continue
       completedPaneIds.add(paneId)
       best = consider(best, 2, finiteTimestamp(highlight.completedAt), highlight.source, 'completion-marker')
     }

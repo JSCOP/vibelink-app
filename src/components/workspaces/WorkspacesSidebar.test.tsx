@@ -29,7 +29,7 @@ const mocks = vi.hoisted(() => ({
       { id: 'delta', name: 'Delta', paneCount: 1, createdAt: 4, workspaceFolder: null },
     ] as SessionMeta[],
     activeSessionId: 'gamma',
-    paneCompletionHighlights: {} as Record<string, { completedAt: number; source: 'agent-response' | 'task-done' | 'agent-hook'; sessionId: string }>,
+    paneCompletionHighlights: {} as Record<string, { completedAt: number; source: 'agent-hook'; sessionId: string }>,
     paneReviewMarkers: {} as Record<string, { reviewedAt: number; sessionId: string }>,
     attentionSnapshot: null as null | { capturedAt: number; panes: Array<{ workspaceId: string; paneId: string; state: 'idle' | 'working' | 'waiting' | 'blocked' | 'error' | 'done'; stateUpdatedAt: number; lastOutputAt: number; unreadCount: number; interrupted: boolean; source: string; alive: boolean; title: string }> },
     panes: {},
@@ -211,17 +211,17 @@ describe('WorkspacesSidebar', () => {
   test('marks a workspace row and badge with its AI completion count', () => {
     mocks.state.paneCompletionHighlights = {
       'pane-beta-1': { completedAt: 1, source: 'agent-hook', sessionId: 'beta' },
-      'pane-beta-2': { completedAt: 2, source: 'task-done', sessionId: 'beta' },
+      'pane-beta-2': { completedAt: 2, source: 'agent-hook', sessionId: 'beta' },
     }
     renderSidebar()
 
     const row = screen.getByText('Beta').closest('[data-session-id]') as HTMLElement
     expect(row).toHaveClass('session-row', 'has-completions')
     expect(row).toHaveAttribute('data-completion-count', '2')
-    expect(within(row).getByLabelText(/Done · 2 completions · source agent-hook, task-done · completion-marker/)).toHaveTextContent('2')
+    expect(within(row).getByLabelText(/Done · 2 completions · source agent-hook · completion-marker/)).toHaveTextContent('2')
   })
 
-  test('renders canonical smart attention order and disables manual dragging', () => {
+  test('renders hook-only smart attention order and disables manual dragging', () => {
     const now = Date.now()
     mocks.state.settings.workspaceGroups = []
     mocks.state.settings.workspaceGroupIds = {}
@@ -237,7 +237,7 @@ describe('WorkspacesSidebar', () => {
     }
     renderSidebar()
 
-    expect(screen.getAllByRole('button').filter((row) => row.hasAttribute('data-session-id')).map((row) => row.dataset.sessionId)).toEqual(['alpha', 'beta', 'gamma', 'delta'])
+    expect(screen.getAllByRole('button').filter((row) => row.hasAttribute('data-session-id')).map((row) => row.dataset.sessionId)).toEqual(['alpha', 'gamma', 'delta', 'beta'])
     const alpha = screen.getByText('Alpha').closest('[data-session-id]') as HTMLElement
     expect(alpha).not.toHaveAttribute('data-workspace-reorder-id')
     expect(within(alpha).getByLabelText(/Needs attention · 2 unread · source orchestration · blocked/)).toBeInTheDocument()
