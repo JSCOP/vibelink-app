@@ -1311,6 +1311,118 @@ button {
   height: var(--dv-tabs-and-actions-container-height);
 }
 
+/* One window strip for the whole workspace.
+   Dockview renders a tab strip per GROUP, so splitting the dock produced two
+   disconnected strips side by side. `WorkspaceTabStrip` renders every grid
+   group's tabs as one ordered row above the dock instead; the native grid
+   strips are hidden but kept in the DOM, because they still own Dockview's drag
+   sources (a strip tab replays its pointerdown onto the real `.dv-tab`). Edge
+   groups keep their own rails, and the nested terminal-window Dockview keeps
+   its pane title bars. */
+.workspace-window-strip {
+  align-items: center;
+  background: var(--vibelink-panel-3);
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  height: var(--vibelink-pane-header-height, 28px);
+  padding: 0 4px;
+}
+
+.workspace-window-strip-row {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 2px;
+}
+
+/* The Chrome-style split pill. It appears exactly when more than one grid group
+   is on screen, so it states something true: these windows are visible at the
+   same time. One group -> no pill, and the row reads as a plain tab strip. */
+.workspace-window-strip-row.is-split {
+  background: color-mix(in srgb, var(--vibelink-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--vibelink-accent) 45%, transparent);
+}
+
+.workspace-split-pill-label {
+  color: var(--vibelink-accent);
+  flex: 0 0 auto;
+  font: 700 10px/1 var(--vibelink-sans);
+  letter-spacing: 0.04em;
+  padding: 0 6px 0 4px;
+  text-transform: uppercase;
+}
+
+.workspace-window-strip-group {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-window-strip-divider {
+  background: color-mix(in srgb, var(--vibelink-accent) 45%, transparent);
+  flex: 0 0 auto;
+  height: 14px;
+  margin: 0 4px;
+  width: 1px;
+}
+
+.workspace-window-strip-tab {
+  border-radius: 7px;
+  height: 24px;
+  min-width: 0;
+  transition: background-color 140ms ease;
+}
+
+.workspace-window-strip-tab:hover {
+  background: var(--vibelink-hover);
+}
+
+.workspace-window-strip-tab[data-active='true'] {
+  background: var(--vibelink-panel-2);
+  box-shadow: inset 0 2px 0 var(--vibelink-accent);
+}
+
+/* Sidebar counterpart of the split pill, so the tree and the strip never tell
+   different stories about what is on screen together. */
+.workspace-open-content-list.is-split {
+  background: color-mix(in srgb, var(--vibelink-accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-accent) 38%, transparent);
+  border-radius: 9px;
+  padding: 4px 3px 3px;
+  position: relative;
+}
+
+.workspace-open-content-split-label {
+  color: var(--vibelink-accent);
+  display: block;
+  font: 700 9px/1 var(--vibelink-sans);
+  letter-spacing: 0.06em;
+  padding: 1px 0 4px 6px;
+  text-transform: uppercase;
+}
+
+.workspace-window-strip-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+/* Hidden, not removed: Dockview's drag sources live on these elements. */
+.workspace-dock .dv-groupview:not(.dv-edge-group) > .dv-tabs-and-actions-container {
+  display: none;
+}
+
+.workspace-dock .terminal-window-panel .dv-groupview > .dv-tabs-and-actions-container {
+  display: flex;
+}
+
 /* While a workspace WINDOW tab is being dragged, the always-rendered panel
    overlays must not answer the pointer: Dockview hit-tests topmost-first and
    would otherwise hand every point over a window's body to that window's own

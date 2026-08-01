@@ -97,8 +97,14 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
     })
   }
 
+  // Same rule as the window strip: while the dock is split, every open window is
+  // on screen at once, so the sidebar wraps them in the same labelled pill
+  // instead of listing them as unrelated siblings.
+  const isSplit = groups.some((group) => (group.kind === 'item' ? group.item : group.window).split)
+
   return (
-    <div className="workspace-open-content-list" role="list" aria-label="Open workspace items">
+    <div className={`workspace-open-content-list${isSplit ? ' is-split' : ''}`} role="list" aria-label="Open workspace items">
+      {isSplit ? <span className="workspace-open-content-split-label" aria-hidden="true">Split</span> : null}
       {groups.map((group) => {
         if (group.kind === 'item') return renderItem(group.item)
         const collapsed = collapsedGroups.has(group.window.panelId)

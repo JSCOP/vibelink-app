@@ -17,6 +17,9 @@ export type OpenContentItem = {
   icon: string
   active: boolean
   parentPanelId?: string | null
+  /** Set on a top-level window while the dock is split, so the sidebar can show
+   *  the same "these are on screen together" grouping the window strip shows. */
+  split?: boolean
 }
 
 export type OpenContentSnapshot = readonly OpenContentItem[]
@@ -48,6 +51,9 @@ export function clearOpenContentSnapshot(): boolean {
 export function publishOpenContentFromDockview(api: DockviewApi): boolean {
   const state = useWorkspaceStore.getState()
   const activeOuterPanelId = api.activePanel?.id ?? null
+  // The window strip draws its split pill when more than one grid group is on
+  // screen at once; use the same rule here so the two surfaces never disagree.
+  const split = (api.groups ?? []).filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
   const items: OpenContentItem[] = []
 
   for (const panel of api.panels) {
@@ -72,6 +78,7 @@ export function publishOpenContentFromDockview(api: DockviewApi): boolean {
         : workspaceContentDescriptors[content.kind].icon,
       active: outerActive && paneIds.length === 0,
       parentPanelId: null,
+      split,
     })
 
     if (content.kind !== 'terminalWindow') continue
@@ -107,7 +114,8 @@ function openContentSnapshotsEqual(left: OpenContentSnapshot, right: OpenContent
       || a.title !== b.title
       || a.icon !== b.icon
       || a.active !== b.active
-      || a.parentPanelId !== b.parentPanelId) return false
+      || a.parentPanelId !== b.parentPanelId
+      || a.split !== b.split) return false
   }
   return true
 }

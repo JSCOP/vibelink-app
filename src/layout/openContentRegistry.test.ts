@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import type { DockviewApi, IDockviewPanel } from 'dockview-react'
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, it, test, vi } from 'vitest'
 import {
   clearOpenContentSnapshot,
   getOpenContentSnapshot,
@@ -94,8 +94,8 @@ describe('openContentRegistry', () => {
     try {
       publishOpenContentFromDockview({ panels: [browser, terminalWindow], activePanel: terminalWindow } as DockviewApi)
       expect(getOpenContentSnapshot()).toEqual([
-        { panelId: browser.id, kind: 'browser', title: 'Docs', icon: 'globe', active: false, parentPanelId: null },
-        { panelId: terminalWindow.id, kind: 'terminalWindow', title: 'Terminal window', icon: 'terminal', active: false, parentPanelId: null },
+        { panelId: browser.id, kind: 'browser', title: 'Docs', icon: 'globe', active: false, parentPanelId: null, split: false },
+        { panelId: terminalWindow.id, kind: 'terminalWindow', title: 'Terminal window', icon: 'terminal', active: false, parentPanelId: null, split: false },
         { panelId: panePanelId, kind: 'terminal', title: 'Registry Agent', icon: 'bot', active: true, parentPanelId: terminalWindow.id },
       ])
     } finally {
@@ -106,5 +106,28 @@ describe('openContentRegistry', () => {
         settings: previousState.settings,
       })
     }
+  })
+})
+
+describe('open content split grouping', () => {
+  it('marks top-level windows as split exactly when more than one grid group is on screen', () => {
+    const gridGroup = (panels: number) => ({ api: { location: { type: 'grid' } }, panels: Array.from({ length: panels }, () => ({})) })
+    const edgeGroup = () => ({ api: { location: { type: 'edge' } }, panels: [{}] })
+    const browser = {
+      id: 'content:browser:split-page',
+      params: { schema: 1, kind: 'browser', instanceId: 'split-page', pageId: 'split-page', profileId: 'default', title: 'Docs', icon: 'terminal' },
+    } as unknown as IDockviewPanel
+
+    const publish = (groups: unknown[]) => {
+      clearOpenContentSnapshot()
+      publishOpenContentFromDockview({ panels: [browser], activePanel: undefined, groups } as unknown as DockviewApi)
+      return getOpenContentSnapshot()[0]?.split
+    }
+
+    // One window on screen, plus the always-present sidebars: not a split.
+    expect(publish([gridGroup(1), edgeGroup(), edgeGroup()])).toBe(false)
+    // An empty grid group is a leftover, not a visible window.
+    expect(publish([gridGroup(1), gridGroup(0)])).toBe(false)
+    expect(publish([gridGroup(1), gridGroup(1)])).toBe(true)
   })
 })
