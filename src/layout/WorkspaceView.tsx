@@ -88,6 +88,7 @@ import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelsInDockviewAp
 import { paneIdFromEventTarget } from './paneActivation'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
 import { arrangeTerminalPaneGrid } from './innerPaneLayout'
+import { WorkspaceEmptyState } from './WorkspaceEmptyState'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout, settleDockviewOverlayReposition } from './splitOverlayLayout'
 import { isDividerResizeActive, isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
@@ -557,6 +558,7 @@ export function WorkspaceView({
   const lastMainGroupIdRef = useRef<string | null>(null)
   const [currentMainGroupId, setCurrentMainGroupId] = useState<string | null>(null)
   const [apiVersion, setApiVersion] = useState(0)
+  const [dockApi, setDockApi] = useState<DockviewApi | null>(null)
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null)
   const [loadedLayoutOwner, setLoadedLayoutOwner] = useState<WorkspaceLayoutIdentity | null>(null)
   const [workspaceOverlayIds, setWorkspaceOverlayIds] = useState<ReadonlySet<string>>(() => new Set())
@@ -1688,6 +1690,7 @@ export function WorkspaceView({
     layoutOwnerRef.current = null
     setLoadedLayoutOwner(null)
     apiRef.current = event.api
+    setDockApi(event.api)
     lastChromeStateRef.current = null
     clearOpenContentSnapshot()
     const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
@@ -1936,7 +1939,10 @@ export function WorkspaceView({
       if (effectiveWorkspaceInteractionSuspended || isAppDialogOpen() || isPaletteOpen()) return
       const api = apiRef.current
       const active = api?.activePanel
-      if (!api || !active) return
+      // An empty centre area has no active panel, and gating the WHOLE handler
+      // on one made Ctrl+N dead exactly when it was the only way back in.
+      // Shortcuts that act on the focused content still check `active` below.
+      if (!api) return
       if ((event.ctrlKey || event.metaKey) && !event.altKey) {
         const key = event.key.toLowerCase()
         if (key === 'n' && !event.shiftKey) {
@@ -1952,6 +1958,7 @@ export function WorkspaceView({
           return
         }
         if (key === 's') {
+          if (!active) return
           const content = parseWorkspaceContentParams(active.params)
           if (content?.kind === 'editor') {
             event.preventDefault()
@@ -1977,7 +1984,9 @@ export function WorkspaceView({
           }
         }
       }
-      handleCapturedKeybindingEvent(keybindings, event, (action) => runKeybindingAction(action, api, active, actions, onDeleteWorkspaceRequested, persistLayoutNow))
+      // Every configurable keybinding acts on the focused content, so those
+      // stay gated on a live panel; the empty state offers buttons instead.
+      if (active) handleCapturedKeybindingEvent(keybindings, event, (action) => runKeybindingAction(action, api, active, actions, onDeleteWorkspaceRequested, persistLayoutNow))
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
@@ -2038,6 +2047,7 @@ export function WorkspaceView({
           activateContent(panelId)
         }}
         >
+          <WorkspaceEmptyState api={dockApi} actions={actions} />
           <DockviewReact
           components={components}
           tabComponents={{ workspaceContentTab: WorkspaceContentTab }}

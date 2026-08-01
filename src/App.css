@@ -7093,3 +7093,98 @@ button.git-window-primary-action,
   padding: 18px 12px;
   text-align: center;
 }
+
+/* Shown only when the centre area holds no windows at all. Without it, closing
+   the last window left nothing to click: the `+` lives in a group header, and
+   with no groups there is no header. Inset past the sidebar rails so it never
+   covers them. */
+.workspace-empty-state {
+  align-items: center;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  z-index: 1;
+}
+
+.workspace-empty-state-card {
+  color: var(--vibelink-muted);
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+  max-width: 420px;
+  pointer-events: auto;
+  text-align: center;
+}
+
+.workspace-empty-state-card h2 {
+  color: var(--vibelink-text);
+  font: 600 16px/1.3 var(--vibelink-sans);
+  margin: 0;
+}
+
+.workspace-empty-state-card p {
+  font: 12px/1.5 var(--vibelink-sans);
+  margin: 0;
+}
+
+.workspace-empty-state-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.workspace-empty-state-actions button {
+  align-items: center;
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 8px;
+  color: var(--vibelink-text);
+  display: inline-flex;
+  font: 12px/1 var(--vibelink-sans);
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+}
+
+.workspace-empty-state-actions button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+  border-color: var(--vibelink-border);
+}
+
+.workspace-empty-state-actions button:disabled {
+  opacity: 0.45;
+}
+
+.workspace-empty-state-shortcuts {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+  width: 100%;
+}
+
+.workspace-empty-state-shortcuts > div {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.workspace-empty-state-shortcuts dt {
+  font: 12px/1 var(--vibelink-sans);
+}
+
+.workspace-empty-state-shortcuts dd {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+}
+
+.workspace-empty-state-shortcuts kbd {
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 4px;
+  color: var(--vibelink-muted);
+  font: 10px/1 var(--vibelink-mono, var(--vibelink-sans));
+  padding: 4px 6px;
+}
