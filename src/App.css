@@ -7188,3 +7188,17 @@ button.git-window-primary-action,
   font: 10px/1 var(--vibelink-mono, var(--vibelink-sans));
   padding: 4px 6px;
 }
+
+/* Dockview paints its own watermark over an empty dock, and it sits above the
+   empty state, swallowing the clicks on its buttons. Ours replaces it. The
+   nested terminal-window Dockview keeps its watermark: an empty group there is
+   a real signal, not the workspace-level "nothing is open" case. */
+.workspace-dock .dv-watermark,
+.workspace-dock .dv-watermark-container {
+  display: none;
+}
+
+.workspace-dock .terminal-window-panel .dv-watermark,
+.workspace-dock .terminal-window-panel .dv-watermark-container {
+  display: block;
+}
