@@ -59,6 +59,7 @@ import {
 import type { DirEntryInfo, PaneMeta } from '../ipc/types'
 import type { WorkspaceCreationInput } from '../ipc/providerIntegrations'
 import { TerminalManager } from '../terminal/TerminalManager'
+import { waitForStableTerminalGrid } from '../terminal/geometry'
 import { openTerminalSearch } from '../terminal/search'
 import { isPaletteOpen, openPalette } from '../components/palette/paletteStore'
 import { handleCapturedKeybindingEvent, type KeybindingActionId } from '../state/keybindings'
@@ -1472,7 +1473,6 @@ export function WorkspaceView({
       const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
       const envelope = normalizeWorkspaceLayoutState(raw)
       const requiresFirstTerminalLayout = livePanes.length > 0 && centralGridIsEmpty(api)
-      if (!envelope.dockview && livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) return
       // A layout this view authored is already on screen — the store only echoed
       // our own save back (possibly an older in-flight one). Adopt the string and
       // skip the rebuild; clearing + restoring here would drop live pane titles
@@ -1544,6 +1544,10 @@ export function WorkspaceView({
       if (!ownsLayout(owner)) return
       await reconcileRestoredBrowserPanels(api, sessionId, suppressPanelRemovalRef, addContentPanel, () => ownsLayout(owner))
       if (!ownsLayout(owner)) return
+      if (livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) {
+        await spawnTerminal(owner)
+        return
+      }
       TerminalManager.pruneWorkspaceCache(sessionId, new Set(livePanes.map((pane) => pane.id)))
       await settleLayout({ syncPty: true }, owner)
       if (!ownsLayout(owner)) return
@@ -1560,7 +1564,7 @@ export function WorkspaceView({
     const result = layoutLoadQueueRef.current.then(run, run)
     layoutLoadQueueRef.current = result.catch((error) => { useWorkspaceStore.getState().setError(String(error)) })
     return layoutLoadQueueRef.current
-  }, [addContentPanel, ownsLayout, persistLayoutSoon, saveLayout, serializeCurrentLayout, settleLayout])
+  }, [addContentPanel, ownsLayout, persistLayoutSoon, saveLayout, serializeCurrentLayout, settleLayout, spawnTerminal])
 
   const syncOpenContentRegistry = useCallback(() => {
     const api = apiRef.current
@@ -2359,12 +2363,11 @@ function pendingPaneMeta(paneId: string, title: string | null, icon?: string | n
 }
 
 async function measuredSpawnSize(paneId: string, attempts = 30): Promise<{ cols: number; rows: number } | undefined> {
-  for (let index = 0; index < attempts; index += 1) {
-    const size = TerminalManager.measureForSpawn(paneId)
-    if (size) return size
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-  }
-  return undefined
+  return waitForStableTerminalGrid(
+    () => TerminalManager.measureForSpawn(paneId),
+    () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    attempts,
+  )
 }
 
 function reflowTerminalsAfterLayout(options: { syncPty?: boolean; paneIds?: string[] } = {}): void {

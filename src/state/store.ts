@@ -15,7 +15,7 @@ import { cancelWorktreeOperation, createWorktree, createWorktreeCheckpoint, impo
 import type { LegacyWorkspaceWorktree, PendingWorktreeCreation } from './worktrees'
 import { indexWorktrees, legacyRowsByRepository, worktreeBySession } from './worktrees'
 import { useGitStore } from './git'
-import { recoverWorkspaceGroups, type WorkspaceGroup } from './workspaceGroups'
+import { recoverWorkspaceGroupRoots, recoverWorkspaceGroups, type WorkspaceGroup } from './workspaceGroups'
 import type { KanbanData } from './kanban'
 import { composeAgentTaskPrompt, composeTaskPrompt } from './kanban'
 import { loadKanban, mergeLegacyTasksIntoBoard, persistKanban, type ViewMode } from './kanbanPersistence'
@@ -518,16 +518,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (previousSessionId && previousSessionId !== sessionId) {
       void invoke('detach_session', { sessionId: previousSessionId }).catch(() => {})
     }
-    if (attached.panes.length === 0
-      && workspaceSessionEpoch === epoch
-      && workspaceSessionTargetId === sessionId
-      && get().activeSessionId === sessionId) {
-      try {
-        await get().spawnPane(sessionId)
-      } finally {
-        if (isWorkspaceInitialPanePending(sessionId, epoch)) workspaceInitialPanePending = null
-      }
-    }
     if (get().license.ready && get().license.status?.entitled) {
       const boardJson = await invoke<string>('board_read', { sessionId })
       if (workspaceSessionEpoch !== epoch || workspaceSessionTargetId !== sessionId || get().activeSessionId !== sessionId) return attached
@@ -769,6 +759,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
       return pane
     } catch (error) {
+      if (isWorkspaceInitialPanePending(sessionId, sessionEpoch)) workspaceInitialPanePending = null
       set((state) => {
         const panes = { ...state.panes }
         delete panes[paneId]
@@ -2005,6 +1996,9 @@ async function runWorktreeCreation(
     const attached = await get().attachSession(result.sessionId)
     const prompt = request.initialPrompt?.trim()
     if (prompt) {
+      for (let attempt = 0; attached.panes.length === 0 && isWorkspaceInitialPanePending(result.sessionId, getWorkspaceSessionEpoch()) && attempt < 120; attempt += 1) {
+        await delay(16)
+      }
       const paneId = get().activeSessionId === result.sessionId
         ? get().activePaneId ?? Object.values(get().panes)[0]?.id
         : attached.panes[0]?.id
@@ -2030,14 +2024,17 @@ function loadSettings(): Settings {
 function recoverWorkspaceGroupsOnce(settings: Settings, sessions: readonly SessionMeta[]): { settings: Settings; recovered: boolean } {
   if (typeof window === 'undefined') return { settings, recovered: false }
   try {
-    if (window.localStorage.getItem(workspaceGroupRecoveryStorageKey) === '1') return { settings, recovered: false }
+    const repairedGroups = recoverWorkspaceGroupRoots(settings.workspaceGroups, settings.workspaceGroupIds, sessions)
+    const rootsRecovered = repairedGroups !== settings.workspaceGroups
+    const repairedSettings = rootsRecovered ? normalizeSettings({ ...settings, workspaceGroups: repairedGroups }) : settings
+    if (window.localStorage.getItem(workspaceGroupRecoveryStorageKey) === '1') return { settings: repairedSettings, recovered: rootsRecovered }
     window.localStorage.setItem(workspaceGroupRecoveryStorageKey, '1')
-    if (settings.workspaceGroups.length > 0) return { settings, recovered: false }
+    if (repairedSettings.workspaceGroups.length > 0) return { settings: repairedSettings, recovered: rootsRecovered }
     const recovered = recoverWorkspaceGroups(sessions)
-    if (!recovered) return { settings, recovered: false }
+    if (!recovered) return { settings: repairedSettings, recovered: rootsRecovered }
     return {
       settings: normalizeSettings({
-        ...settings,
+        ...repairedSettings,
         workspaceGroups: recovered.groups,
         workspaceGroupIds: recovered.groupIds,
       }),

@@ -3,7 +3,7 @@ import type { SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import { useWorkspaceStore } from './store'
 import type { WorktreeProjection, WorktreeRecord } from './worktrees'
-import { flattenWorkspaceRows, recoverWorkspaceGroups, workspaceRows, type WorkspaceGroup } from './workspaceGroups'
+import { flattenWorkspaceRows, recoverWorkspaceGroupRoots, recoverWorkspaceGroups, workspaceGroupRootNode, workspaceRows, type WorkspaceGroup } from './workspaceGroups'
 
 function session(id: string): SessionMeta {
   return {
@@ -76,6 +76,22 @@ describe('workspace groups', () => {
       groupIds: { root: 'recovered-root', app: 'recovered-root', web: 'recovered-root' },
     })
     expect(recoverWorkspaceGroups([root, app, unrelated])).toBeNull()
+  })
+
+  test('repairs a rootless group from its direct children and keeps a duplicate root workspace ungrouped', () => {
+    const root = { ...session('root'), createdAt: 10, workspaceFolder: 'E:/VibeCodingProject/vibelink' }
+    const duplicateRoot = { ...session('duplicate-root'), createdAt: 20, workspaceFolder: 'E:\\VibeCodingProject\\vibelink\\' }
+    const app = { ...session('app'), workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-app' }
+    const web = { ...session('web'), workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-web' }
+    const rootless = { ...group, rootFolder: null }
+    const groupIds = { app: group.id, web: group.id }
+    const groups = recoverWorkspaceGroupRoots([rootless], groupIds, [duplicateRoot, app, root, web])
+    const rows = workspaceRows([duplicateRoot, app, root, web], groups, groupIds, [])
+
+    expect(groups).toEqual([{ ...rootless, rootFolder: 'E:/VibeCodingProject/vibelink' }])
+    expect(rows[0].kind === 'group' ? workspaceGroupRootNode(rows[0].group, rows[0].sessions)?.session.id : null).toBe('root')
+    expect(rows[0].kind === 'group' ? rows[0].sessions.map(({ session: item }) => item.id) : []).toEqual(['app', 'root', 'web'])
+    expect(rows[1].kind === 'session' ? rows[1].node.session.id : null).toBe('duplicate-root')
   })
 
 

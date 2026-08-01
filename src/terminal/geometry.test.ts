@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isTerminalHostMeasurable, terminalHostBecameMeasurable, terminalHostMeasureState } from './geometry'
+import { isTerminalHostMeasurable, terminalHostBecameMeasurable, terminalHostMeasureState, waitForStableTerminalGrid } from './geometry'
 
 describe('terminal host geometry', () => {
   it('does not treat zero-sized dockview hosts as ready for fitting', () => {
@@ -20,5 +20,19 @@ describe('terminal host geometry', () => {
     expect(terminalHostBecameMeasurable(hidden, visible)).toBe(true)
     expect(terminalHostBecameMeasurable(undefined, visible)).toBe(false)
     expect(terminalHostBecameMeasurable(visible, visible)).toBe(false)
+  })
+
+  it('waits for the final repeated grid before spawning a terminal', async () => {
+    const measured = [
+      { cols: 272, rows: 79 },
+      { cols: 272, rows: 75 },
+      { cols: 272, rows: 77 },
+      { cols: 272, rows: 77 },
+    ]
+
+    await expect(waitForStableTerminalGrid(
+      () => measured.shift() ?? null,
+      () => Promise.resolve(),
+    )).resolves.toEqual({ cols: 272, rows: 77 })
   })
 })

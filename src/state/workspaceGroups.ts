@@ -33,15 +33,58 @@ function workspaceFolderKey(folder: string | null | undefined): string | null {
   return normalized || null
 }
 
+function normalizedWorkspaceFolder(folder: string | null | undefined): string | null {
+  const normalized = folder?.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  return normalized || null
+}
+
+function olderSession(left: SessionMeta, right: SessionMeta): SessionMeta {
+  return left.createdAt < right.createdAt || (left.createdAt === right.createdAt && left.id.localeCompare(right.id) < 0) ? left : right
+}
+
 export function workspaceGroupRootNode(group: WorkspaceGroup, nodes: readonly WorkspaceSessionNode[]): WorkspaceSessionNode | null {
   const rootFolder = workspaceFolderKey(group.rootFolder)
   if (!rootFolder) return null
-  return nodes.find((node) => workspaceFolderKey(node.session.workspaceFolder) === rootFolder) ?? null
+  return nodes
+    .filter((node) => workspaceFolderKey(node.session.workspaceFolder) === rootFolder)
+    .reduce<WorkspaceSessionNode | null>((oldest, node) => !oldest || olderSession(node.session, oldest.session) === node.session ? node : oldest, null)
 }
 
 export type RecoveredWorkspaceGroups = {
   groups: WorkspaceGroup[]
   groupIds: Record<string, string>
+}
+
+export function recoverWorkspaceGroupRoots(
+  groups: WorkspaceGroup[],
+  groupIds: Readonly<Record<string, string>>,
+  sessions: readonly SessionMeta[],
+): WorkspaceGroup[] {
+  let changed = false
+  const repaired = groups.map((group) => {
+    if (workspaceFolderKey(group.rootFolder)) return group
+    const childrenByParent = new Map<string, { folder: string; children: Set<string> }>()
+    for (const session of sessions) {
+      if (groupIds[session.id] !== group.id) continue
+      const folder = normalizedWorkspaceFolder(session.workspaceFolder)
+      const separator = folder?.lastIndexOf('/') ?? -1
+      if (!folder || separator <= 0) continue
+      const parent = folder.slice(0, separator)
+      const key = workspaceFolderKey(parent)
+      const child = workspaceFolderKey(folder)
+      if (!key || !child) continue
+      const candidate = childrenByParent.get(key) ?? { folder: parent, children: new Set<string>() }
+      candidate.children.add(child)
+      childrenByParent.set(key, candidate)
+    }
+    const candidates = [...childrenByParent.values()]
+      .filter((candidate) => candidate.children.size >= 2)
+      .sort((left, right) => right.children.size - left.children.size || left.folder.localeCompare(right.folder))
+    if (!candidates[0] || candidates[0].children.size === candidates[1]?.children.size) return group
+    changed = true
+    return { ...group, rootFolder: candidates[0].folder }
+  })
+  return changed ? repaired : groups
 }
 
 /**
@@ -54,21 +97,28 @@ export function recoverWorkspaceGroups(sessions: readonly SessionMeta[]): Recove
   const groups: WorkspaceGroup[] = []
   const groupIds: Record<string, string> = {}
   const folderBySession = new Map(sessions.flatMap((session) => {
-    const folder = session.workspaceFolder?.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+    const folder = normalizedWorkspaceFolder(session.workspaceFolder)
     return folder ? [[session.id, folder] as const] : []
   }))
+  const seenRootFolders = new Set<string>()
 
-  for (const root of sessions) {
+  for (const root of [...sessions].sort((left, right) => olderSession(left, right) === left ? -1 : 1)) {
     const rootFolder = folderBySession.get(root.id)
     const rootKey = workspaceFolderKey(rootFolder)
-    if (!rootFolder || !rootKey) continue
-    const children = sessions.filter((candidate) => {
-      if (candidate.id === root.id) return false
+    if (!rootFolder || !rootKey || seenRootFolders.has(rootKey)) continue
+    seenRootFolders.add(rootKey)
+    const childByFolder = new Map<string, SessionMeta>()
+    for (const candidate of sessions) {
+      if (candidate.id === root.id) continue
       const folder = folderBySession.get(candidate.id)
-      if (!folder) return false
+      if (!folder) continue
       const separator = folder.lastIndexOf('/')
-      return separator > 0 && workspaceFolderKey(folder.slice(0, separator)) === rootKey
-    })
+      const childKey = workspaceFolderKey(folder)
+      if (separator <= 0 || !childKey || workspaceFolderKey(folder.slice(0, separator)) !== rootKey) continue
+      const existing = childByFolder.get(childKey)
+      childByFolder.set(childKey, existing ? olderSession(existing, candidate) : candidate)
+    }
+    const children = [...childByFolder.values()]
     if (children.length < 2) continue
 
     const id = `recovered-${root.id}`
@@ -180,9 +230,15 @@ export function workspaceRows(
   }
 
   const groupIdByRootFolder = new Map<string, string>()
+  const groupIdByRootSession = new Map<string, string>()
   for (const group of groups) {
     const rootFolder = workspaceFolderKey(group.rootFolder)
-    if (rootFolder && !groupIdByRootFolder.has(rootFolder)) groupIdByRootFolder.set(rootFolder, group.id)
+    if (!rootFolder || groupIdByRootFolder.has(rootFolder)) continue
+    groupIdByRootFolder.set(rootFolder, group.id)
+    const root = ordered
+      .filter((session) => workspaceFolderKey(session.workspaceFolder) === rootFolder)
+      .reduce<SessionMeta | null>((oldest, session) => oldest ? olderSession(oldest, session) : session, null)
+    if (root) groupIdByRootSession.set(root.id, group.id)
   }
 
   const membersByGroup = new Map(groups.map((group) => [group.id, [] as WorkspaceSessionNode[]]))
@@ -195,8 +251,7 @@ export function workspaceRows(
       worktrees: rootWorktreesByParentSession.get(session.id) ?? [],
       detached: isWorktreeSession ? [] : detachedByRepository.get(normalizeRepositoryPath(session.workspaceFolder)) ?? [],
     }
-    const rootGroupId = workspaceFolderKey(session.workspaceFolder)
-    const members = membersByGroup.get((rootGroupId && groupIdByRootFolder.get(rootGroupId)) || groupIds[session.id])
+    const members = membersByGroup.get(groupIdByRootSession.get(session.id) || groupIds[session.id])
     if (members) members.push(node)
     else ungrouped.push(node)
   }

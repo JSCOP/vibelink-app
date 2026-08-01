@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import type { WorktreeProjection, WorktreeRecord } from './worktrees'
-import { loadPaneCompletionHighlights, loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneCompletionHighlights, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
+import { getWorkspaceSessionEpoch, isWorkspaceInitialPanePending, loadPaneCompletionHighlights, loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneCompletionHighlights, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
 
 const spawnedPane: PaneMeta = {
   id: 'pane-test',
@@ -255,7 +255,7 @@ describe('workspace store profiles', () => {
     })
   })
 
-  test('createSession persists a workspace folder and launches exactly one initial pane there', async () => {
+  test('createSession persists a workspace folder and accepts one measured initial pane there', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'create_session') return createdSession
       if (command === 'list_sessions') return [createdSession]
@@ -265,6 +265,8 @@ describe('workspace store profiles', () => {
     })
 
     await useWorkspaceStore.getState().createSession('Repo', 'E:/repo')
+    expect(isWorkspaceInitialPanePending(createdSession.id, getWorkspaceSessionEpoch())).toBe(true)
+    await useWorkspaceStore.getState().spawnPane(createdSession.id, { paneId: 'pane-test', cols: 222, rows: 77 })
 
     expect(invoke).toHaveBeenCalledWith('create_session', {
       name: 'Repo',
@@ -272,7 +274,7 @@ describe('workspace store profiles', () => {
     })
     expect(invoke).toHaveBeenCalledWith('spawn_pane', {
       sessionId: 'session-workspace',
-      cfg: expect.objectContaining({ cwd: 'E:/repo' }),
+      cfg: expect.objectContaining({ cwd: 'E:/repo', cols: 222, rows: 77 }),
     })
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'spawn_pane')).toHaveLength(1)
     expect(JSON.parse(useWorkspaceStore.getState().layoutJson ?? '{}')).toEqual({ version: 3, dockview: null })
@@ -299,9 +301,12 @@ describe('workspace store profiles', () => {
       return null
     })
 
-    const created = await useWorkspaceStore.getState().createWorktreeSession({
+    const creating = useWorkspaceStore.getState().createWorktreeSession({
       parentSessionId: createdSession.id, name: 'Fix Login', startRef: 'origin/main', branch: 'vibelink/fix-login', profileId: 'codex', initialAgent: 'claude', initialPrompt: 'Fix the login redirect',
     })
+    await vi.waitFor(() => expect(isWorkspaceInitialPanePending(childSession.id, getWorkspaceSessionEpoch())).toBe(true))
+    await useWorkspaceStore.getState().spawnPane(childSession.id, { paneId: 'pane-worktree', cols: 160, rows: 44 })
+    const created = await creating
 
     expect(created).toEqual(childSession)
     expect(invoke).toHaveBeenCalledWith('worktree_lifecycle_create', { request: expect.objectContaining({ parentSessionId: createdSession.id, branch: 'vibelink/fix-login', origin: 'manual' }) })
@@ -542,6 +547,37 @@ describe('workspace store profiles', () => {
     expect(JSON.parse(stored.get('vibelink:settings') ?? '{}').workspaceGroupIds).toEqual(settings.workspaceGroupIds)
   })
 
+  test('repairs a saved rootless group even after one-time group recovery already ran', async () => {
+    const root: SessionMeta = { id: 'workspace-root', name: 'VibeLink', paneCount: 1, createdAt: 120, workspaceFolder: 'E:/VibeCodingProject/vibelink' }
+    const duplicateRoot: SessionMeta = { ...root, id: 'workspace-root-duplicate', createdAt: 121 }
+    const app: SessionMeta = { id: 'workspace-app', name: 'vibelink-app', paneCount: 1, createdAt: 122, workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-app' }
+    const web: SessionMeta = { id: 'workspace-web', name: 'vibelink-web', paneCount: 1, createdAt: 123, workspaceFolder: 'E:/VibeCodingProject/vibelink/vibelink-web' }
+    const stored = new Map<string, string>([['vibelink:workspaceGroupRecovery:v1', '1']])
+    localStorageStub.getItem.mockImplementation((key: string) => stored.get(key) ?? null)
+    localStorageStub.setItem.mockImplementation((key: string, value: string) => { stored.set(key, value) })
+    useWorkspaceStore.setState({
+      settings: normalizeSettings({
+        ...useWorkspaceStore.getState().settings,
+        workspaceGroups: [{ id: 'group-vibelink', name: 'VibeLink', collapsed: false, rootFolder: null }],
+        workspaceGroupIds: { [app.id]: 'group-vibelink', [web.id]: 'group-vibelink' },
+        worktreeRegistryMigrationVersion: 1,
+      }),
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'license_status') return unlicensedStatus
+      if (command === 'agent_cli_status') return []
+      if (command === 'list_sessions') return [duplicateRoot, app, root, web]
+      if (command === 'worktree_registry_reconcile') return []
+      if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
+      return null
+    })
+
+    await useWorkspaceStore.getState().bootstrap()
+
+    expect(useWorkspaceStore.getState().settings.workspaceGroups[0]?.rootFolder).toBe('E:/VibeCodingProject/vibelink')
+    expect(JSON.parse(stored.get('vibelink:settings') ?? '{}').workspaceGroups[0].rootFolder).toBe('E:/VibeCodingProject/vibelink')
+  })
+
   test('keeps the migration marker unset when a legacy reconcile fails', async () => {
     const stored = new Map<string, string>([['vibelink:settings', JSON.stringify({
       workspaceWorktrees: {
@@ -744,7 +780,7 @@ describe('workspace store profiles', () => {
     expect(invoke).not.toHaveBeenCalledWith('spawn_pane', expect.anything())
   })
 
-  test('openSession launches an empty workspace pane in the workspace folder', async () => {
+  test('openSession leaves an empty workspace ready for a measured pane spawn', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'list_sessions') return [createdSession]
@@ -754,11 +790,13 @@ describe('workspace store profiles', () => {
     useWorkspaceStore.setState({ sessions: [createdSession] })
 
     await useWorkspaceStore.getState().openSession(createdSession.id)
+    expect(isWorkspaceInitialPanePending(createdSession.id, getWorkspaceSessionEpoch())).toBe(true)
+    await useWorkspaceStore.getState().spawnPane(createdSession.id, { paneId: 'pane-test', cols: 222, rows: 77 })
 
     expect(invoke).toHaveBeenCalledWith('attach_session', { sessionId: createdSession.id })
     expect(invoke).toHaveBeenCalledWith('spawn_pane', {
       sessionId: 'session-workspace',
-      cfg: expect.objectContaining({ cwd: 'E:/repo' }),
+      cfg: expect.objectContaining({ cwd: 'E:/repo', cols: 222, rows: 77 }),
     })
   })
 
@@ -792,6 +830,7 @@ describe('workspace store profiles', () => {
     })
 
     await useWorkspaceStore.getState().createSession('Remote', 'E:/repo', 'ssh-dev')
+    await useWorkspaceStore.getState().spawnPane(createdSession.id, { paneId: 'pane-test', cols: 222, rows: 77 })
 
     expect(invoke).toHaveBeenCalledWith('spawn_pane', {
       sessionId: 'session-workspace',
