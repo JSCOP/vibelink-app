@@ -1337,7 +1337,15 @@ button {
   flex: 0 0 auto;
   gap: 4px;
   height: var(--vibelink-pane-header-height, 28px);
+}
+
+.workspace-window-strip-inner {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
   padding: 0 4px;
+  width: 100%;
 }
 
 

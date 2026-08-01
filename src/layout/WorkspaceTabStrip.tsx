@@ -106,7 +106,12 @@ export function WorkspaceTabStrip({ api, renderActions }: WorkspaceTabStripProps
   const actionsGroup = groups.find(({ group }) => group.id === activeGroupId)?.group ?? groups[0]?.group
 
   return (
-    <div className="workspace-window-strip" role="tablist" aria-label="Workspace windows" style={insets}>
+    <div className="workspace-window-strip" role="tablist" aria-label="Workspace windows">
+      {/* The bar spans the dock so its background and bottom rule run in one
+          unbroken line; only the CONTENT is inset to the centre grid, which is
+          what keeps tabs off the sidebar rails. Insetting the bar itself left a
+          bare notch above the rails. */}
+      <div className="workspace-window-strip-inner" style={insets}>
       <div className={`workspace-window-strip-row${isSplit ? ' is-split' : ''}`}>
         {groups.map(({ group, panels }, groupIndex) => (
           <div className="workspace-window-strip-group" key={group.id} data-group-id={group.id}>
@@ -129,6 +134,7 @@ export function WorkspaceTabStrip({ api, renderActions }: WorkspaceTabStripProps
         ))}
       </div>
       {actionsGroup ? <div className="workspace-window-strip-actions">{renderActions(actionsGroup)}</div> : null}
+      </div>
     </div>
   )
 }
