@@ -1311,6 +1311,16 @@ button {
   height: var(--dv-tabs-and-actions-container-height);
 }
 
+/* While a workspace WINDOW tab is being dragged, the always-rendered panel
+   overlays must not answer the pointer: Dockview hit-tests topmost-first and
+   would otherwise hand every point over a window's body to that window's own
+   nested Dockview, which cannot accept a foreign panel. Dropping them out of
+   hit-testing exposes each group's `.dv-content-container`, which is what shows
+   the left/right/top/bottom split overlays. */
+[data-vl-window-drag='true'] .workspace-dock .dv-render-overlay {
+  pointer-events: none;
+}
+
 /* Tab chrome. The strip reads as a rail of quiet labels with ONE lit tab: the
    active tab lifts out of the bar with a rounded top and an accent hairline,
    everything else stays flat and muted. Dockview owns the background colors

@@ -1743,6 +1743,34 @@ export function WorkspaceView({
           )
         })
       }),
+      // Dropping a WINDOW tab beside another window. Dockview's pointer DnD
+      // picks exactly ONE drop target: `elementsFromPoint` topmost-first, then
+      // the nearest registered ancestor. Every window's content is a
+      // `renderer: 'always'` overlay stacked over its group's
+      // `.dv-content-container`, and a terminal window's overlay holds its own
+      // nested Dockview — so the nested group wins the hit test everywhere over
+      // a window's body, rejects the foreign `viewId`, and no overlay is shown
+      // by anyone. Take the overlays out of hit-testing for the length of the
+      // drag; the outer content containers become reachable and Dockview's own
+      // edge overlays and split-on-drop work unchanged. Terminal PANE drags run
+      // on the inner Dockview's api and never set this.
+      ...(() => {
+        const endWindowDrag = () => {
+          document.documentElement.removeAttribute('data-vl-window-drag')
+          document.removeEventListener('pointerup', endWindowDrag, true)
+          document.removeEventListener('pointercancel', endWindowDrag, true)
+        }
+        const beginWindowDrag = () => {
+          document.documentElement.setAttribute('data-vl-window-drag', 'true')
+          document.addEventListener('pointerup', endWindowDrag, true)
+          document.addEventListener('pointercancel', endWindowDrag, true)
+        }
+        return [
+          event.api.onWillDragPanel(beginWindowDrag),
+          event.api.onWillDragGroup(beginWindowDrag),
+          { dispose: endWindowDrag },
+        ]
+      })(),
       ...(['left', 'right'] as const).flatMap((position) => {
         // Dockview resizes the center grid synchronously but leaves always-
         // rendered overlays at their previous bounds. Coalesce rapid toggles,
