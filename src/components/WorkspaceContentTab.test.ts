@@ -168,10 +168,16 @@ describe('WorkspaceContentTab', () => {
       expect(within(actionBar as HTMLElement).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual([
         'Add panes',
         'Arrange panes',
+        'Clear panes',
         'Hide pane titles',
         'Maximize content',
         'Close content',
       ])
+      // Clear is window-scoped like Arrange: a workspace-wide clear would take
+      // no argument and wipe every other terminal window too.
+      actions.clearTerminals.mockClear()
+      fireEvent.click(within(actionBar as HTMLElement).getByLabelText('Clear panes'))
+      expect(actions.clearTerminals).toHaveBeenCalledWith('window-a')
 
       fireEvent.click(screen.getByRole('button', { name: 'Arrange panes' }))
       expect(actions.arrangeTerminals).toHaveBeenCalledWith(null, 'window-a')

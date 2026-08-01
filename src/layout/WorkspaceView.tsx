@@ -1338,8 +1338,9 @@ export function WorkspaceView({
     await spawnTerminal(owner, { windowId: handle.windowId, referencePaneId: paneId, direction })
   }, [currentLayoutOwner, spawnTerminal])
 
-  const clearTerminals = useCallback(async () => {
-    for (const handle of listTerminalWindows()) {
+  const clearTerminals = useCallback(async (windowId?: string) => {
+    const windows = windowId ? [getTerminalWindow(windowId)].filter((handle) => handle !== undefined) : listTerminalWindows()
+    for (const handle of windows) {
       for (const paneId of handle.paneIds()) await requestCloseContent(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
     }
   }, [requestCloseContent])

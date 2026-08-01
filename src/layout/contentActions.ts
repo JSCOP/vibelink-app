@@ -31,7 +31,9 @@ export type WorkspaceContentActions = {
   requestCloseContent(panelId: string, ownership?: WorkspaceContentOwnership): Promise<'closed' | 'cancelled'>
   splitTerminal(paneId: string, direction: 'right' | 'below'): Promise<void>
   arrangeTerminals(grid?: GridSize | null, windowId?: string): Promise<void>
-  clearTerminals(): Promise<void>
+  /** Close every terminal pane. Scoped to one terminal window when a
+   *  `windowId` is given, matching `arrangeTerminals`. */
+  clearTerminals(windowId?: string): Promise<void>
   toggleMaximizeContent(panelId: string): void
   /** Zoom the focused terminal pane inside its window; other content maximizes. */
   toggleZoomContent(panelId: string): void
