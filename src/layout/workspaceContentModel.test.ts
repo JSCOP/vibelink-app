@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { WorkspaceContentParams } from './workspaceContentModel'
 import {
+  AUTOMATION_PANE_ROLE,
   freshWorkspaceLayoutEnvelope,
   isCentralWorkspaceContentKind,
   isLeftStructuralWorkspaceContentKind,
@@ -199,5 +202,15 @@ describe('workspace content model', () => {
     expect(preview && workspaceContentResourceKey(preview)).toBe('preview')
     expect(parseWorkspaceContentParams({ ...preview, instanceId: 'src/changed.ts' })).toBeNull()
     expect(parseWorkspaceContentParams({ ...preview, icon: 'file-code' })).toBeNull()
+  })
+})
+
+describe('automation pane role', () => {
+  it('matches the role string the daemon stamps on a visible automation run', () => {
+    // The frontend routes these panes into their own terminal window purely by
+    // this string. Rename it on one side only and automation runs silently go
+    // back to landing in whichever window happens to be first.
+    const daemon = readFileSync(join(process.cwd(), 'src-tauri/src/daemon/mod.rs'), 'utf8')
+    expect(daemon).toContain(`role: Some("${AUTOMATION_PANE_ROLE}".to_string())`)
   })
 })

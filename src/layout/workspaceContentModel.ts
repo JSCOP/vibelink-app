@@ -1,3 +1,8 @@
+/** Pane role the daemon stamps on a visible automation run's pane
+ *  (`run_automation_in_visible_terminal`). The frontend gives those panes their
+ *  own terminal window so a run never interleaves with the user's panes. */
+export const AUTOMATION_PANE_ROLE = 'automation-agent'
+
 import type { SerializedDockview } from 'dockview-core'
 
 export type { SerializedDockview }

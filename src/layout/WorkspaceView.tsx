@@ -94,6 +94,7 @@ import { settleDockviewOverlayLayout, settleDockviewOverlayReposition } from './
 import { isDividerResizeActive, isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
 import { withSuppressedPanelRemoval } from './suppression'
 import {
+  AUTOMATION_PANE_ROLE,
   isStructuralWorkspaceContentKind,
   normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
@@ -1901,13 +1902,33 @@ export function WorkspaceView({
       }
     }
     const firstWindow = windows[0]
-    if (firstWindow.getInnerApi()) {
-      for (const pane of livePanes) {
-        if (owned.has(pane.id) || pendingTerminalPaneIdsRef.current.has(pane.id)) continue
-        if (firstWindow.addPane(createTerminalContentParams(pane), { inactive: true })) {
-          layoutChangedWindows.add(firstWindow)
-          changed = true
-        }
+    for (const pane of livePanes) {
+      if (owned.has(pane.id) || pendingTerminalPaneIdsRef.current.has(pane.id)) continue
+      // An automation run gets its OWN window. The daemon only spawns a pane
+      // (`role: 'automation-agent'`); without this it is adopted by whichever
+      // window happens to be first, so a scheduled run lands in the middle of
+      // the panes the user is working in.
+      if (pane.config.role === AUTOMATION_PANE_ROLE) {
+        pendingTerminalPaneIdsRef.current.add(pane.id)
+        const windowParams = createTerminalWindowParams(
+          crypto.randomUUID(),
+          [createTerminalContentParams(pane)],
+          { cols: 1, rows: 1 },
+        )
+        void withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => { addContentPanel(windowParams, { inactive: false }) })
+          .then(() => {
+            persistLayoutSoon()
+            // Release the guard only after the window has had a frame to mount
+            // and register, otherwise this effect re-runs first and spawns a
+            // second window for the same pane.
+            requestAnimationFrame(() => pendingTerminalPaneIdsRef.current.delete(pane.id))
+          })
+        changed = true
+        continue
+      }
+      if (firstWindow.getInnerApi() && firstWindow.addPane(createTerminalContentParams(pane), { inactive: true })) {
+        layoutChangedWindows.add(firstWindow)
+        changed = true
       }
     }
     if (!changed) return
