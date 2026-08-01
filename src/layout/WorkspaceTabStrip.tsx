@@ -20,18 +20,6 @@ function readStripGroups(api: DockviewApi): StripGroup[] {
     .map(({ group, panels }) => ({ group, panels }))
 }
 
-/** The strip must not sit above the sidebar rails. Those rails are Dockview
- * EDGE groups, so they cannot be lifted out of the dock — but the strip can be
- * inset to the centre grid's width, which leaves the rail columns untouched. */
-function edgeInsets(api: DockviewApi): { marginLeft: number; marginRight: number } {
-  const width = (position: 'left' | 'right') => {
-    const edgeId = api.getEdgeGroup(position)?.id
-    const edge = edgeId ? api.groups.find((group) => group.id === edgeId) : undefined
-    return edge ? Math.round(edge.element.getBoundingClientRect().width) : 0
-  }
-  return { marginLeft: width('left'), marginRight: width('right') }
-}
-
 /** Dockview owns the drag: its `PointerDragSource` is bound to the real
  * `.dv-tab` element, which the strip hides rather than removes. Replay the
  * pointerdown onto that element so a strip tab starts Dockview's own drag
@@ -95,8 +83,6 @@ export function WorkspaceTabStrip({ api, renderActions }: WorkspaceTabStripProps
   // list in place, so nothing else changes identity when a split appears.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const groups = useMemo(() => (api ? readStripGroups(api) : []), [api, revision])
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const insets = useMemo(() => (api ? edgeInsets(api) : { marginLeft: 0, marginRight: 0 }), [api, revision])
   if (!api || groups.length === 0) return null
 
   const isSplit = groups.length > 1
@@ -107,11 +93,12 @@ export function WorkspaceTabStrip({ api, renderActions }: WorkspaceTabStripProps
 
   return (
     <div className="workspace-window-strip" role="tablist" aria-label="Workspace windows">
-      {/* The bar spans the dock so its background and bottom rule run in one
-          unbroken line; only the CONTENT is inset to the centre grid, which is
-          what keeps tabs off the sidebar rails. Insetting the bar itself left a
-          bare notch above the rails. */}
-      <div className="workspace-window-strip-inner" style={insets}>
+      {/* The strip is the dock's own first row, spanning its full width. It
+          deliberately does NOT reach into Dockview's geometry: the sidebars are
+          EDGE groups that Dockview owns and lays out, and pulling their views
+          up to sit beside the strip put their headers under the bar, where they
+          could not be clicked. The dock row is the boundary. */}
+      <div className="workspace-window-strip-inner">
       <div className={`workspace-window-strip-row${isSplit ? ' is-split' : ''}`}>
         {groups.map(({ group, panels }, groupIndex) => (
           <div className="workspace-window-strip-group" key={group.id} data-group-id={group.id}>

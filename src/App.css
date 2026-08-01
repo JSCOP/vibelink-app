@@ -1415,16 +1415,6 @@ button {
   flex: 0 0 auto;
 }
 
-/* The strip takes a row of the dock, which pushed the sidebar rails down and
-   left a dead band above them. Pull the EDGE views back up by the strip height
-   so the rails start at the very top of the dock. Nothing overlaps: the strip's
-   own content is inset to the centre grid, and only the bar's background runs
-   behind the rails. */
-.workspace-dock .dv-view-container > .dv-view:has(> .dv-groupview.dv-edge-group) {
-  height: calc(100% + var(--vibelink-pane-header-height, 28px));
-  top: calc(-1 * var(--vibelink-pane-header-height, 28px));
-}
-
 /* Hidden, not removed: Dockview's drag sources live on these elements. */
 .workspace-dock .dv-groupview:not(.dv-edge-group) > .dv-tabs-and-actions-container {
   display: none;
