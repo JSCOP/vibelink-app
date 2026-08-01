@@ -20,7 +20,7 @@ import {
   type IDockviewPanel,
   type IDockviewPanelProps,
 } from 'dockview-react'
-import { getGridLocation, type AddPanelOptions, type DockviewGroupPanel } from 'dockview-core'
+import { getGridLocation, type AddPanelOptions } from 'dockview-core'
 import { FileCode2, Timer } from 'lucide-react'
 import { WorkspaceContentTab } from '../components/WorkspaceContentTab'
 import { WorkspaceAddMenu } from '../components/WorkspaceAddMenu'
@@ -88,7 +88,6 @@ import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelsInDockviewAp
 import { paneIdFromEventTarget } from './paneActivation'
 import { expandGridRowsForPaneCount, expandPaneIdsIntoGrid, occupiedGridForPaneCount } from './paneGridPlan'
 import { arrangeTerminalPaneGrid } from './innerPaneLayout'
-import { WorkspaceTabStrip } from './WorkspaceTabStrip'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout, settleDockviewOverlayReposition } from './splitOverlayLayout'
 import { isDividerResizeActive, isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
@@ -480,7 +479,7 @@ export function WorkspaceGroupActions(props: IDockviewHeaderActionsProps) {
 }
 
 
-function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & { fallbackActions?: WorkspaceContentActions | null; alwaysVisible?: boolean }) {
+function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & { fallbackActions?: WorkspaceContentActions | null }) {
   const actions = useContext(WorkspaceContentActionsContext) ?? props.fallbackActions ?? null
   const integration = useContext(WorkspaceIntegrationContext)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
@@ -489,10 +488,7 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
   const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
   const isCurrentMainGroup = workspaceGroupShowsCreationControls(props.group.api.location.type, groupId, integration.currentMainGroupId)
 
-  // The window strip is workspace-level chrome: it always carries exactly one
-  // `+`, so it opts out of the per-group "only the main group shows creation
-  // controls" rule that keeps native group headers from each sprouting one.
-  if (!props.alwaysVisible && !isCurrentMainGroup) return null
+  if (!isCurrentMainGroup) return null
 
   return (
     <div className="workspace-group-actions" onMouseDown={stop} onPointerDown={stop}>
@@ -561,9 +557,6 @@ export function WorkspaceView({
   const lastMainGroupIdRef = useRef<string | null>(null)
   const [currentMainGroupId, setCurrentMainGroupId] = useState<string | null>(null)
   const [apiVersion, setApiVersion] = useState(0)
-  // The strip renders from state, not the ref: a ref read during render is not
-  // a re-render trigger and React's rules-of-hooks lint rejects it.
-  const [stripApi, setStripApi] = useState<DockviewApi | null>(null)
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null)
   const [loadedLayoutOwner, setLoadedLayoutOwner] = useState<WorkspaceLayoutIdentity | null>(null)
   const [workspaceOverlayIds, setWorkspaceOverlayIds] = useState<ReadonlySet<string>>(() => new Set())
@@ -1694,7 +1687,6 @@ export function WorkspaceView({
     layoutOwnerRef.current = null
     setLoadedLayoutOwner(null)
     apiRef.current = event.api
-    setStripApi(event.api)
     lastChromeStateRef.current = null
     clearOpenContentSnapshot()
     const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
@@ -2045,22 +2037,6 @@ export function WorkspaceView({
           activateContent(panelId)
         }}
         >
-          <WorkspaceTabStrip
-            api={stripApi}
-            renderActions={(group: DockviewGroupPanel) => (
-              <WorkspaceGroupActionsWithContext
-                api={group.api as unknown as IDockviewHeaderActionsProps['api']}
-                containerApi={stripApi as unknown as IDockviewHeaderActionsProps['containerApi']}
-                group={group}
-                panels={group.panels}
-                activePanel={group.activePanel}
-                isGroupActive
-                headerPosition="top"
-                alwaysVisible
-                fallbackActions={actions}
-              />
-            )}
-          />
           <DockviewReact
           components={components}
           tabComponents={{ workspaceContentTab: WorkspaceContentTab }}
