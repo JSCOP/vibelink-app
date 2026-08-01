@@ -20,6 +20,18 @@ function readStripGroups(api: DockviewApi): StripGroup[] {
     .map(({ group, panels }) => ({ group, panels }))
 }
 
+/** The strip must not sit above the sidebar rails. Those rails are Dockview
+ * EDGE groups, so they cannot be lifted out of the dock — but the strip can be
+ * inset to the centre grid's width, which leaves the rail columns untouched. */
+function edgeInsets(api: DockviewApi): { marginLeft: number; marginRight: number } {
+  const width = (position: 'left' | 'right') => {
+    const edgeId = api.getEdgeGroup(position)?.id
+    const edge = edgeId ? api.groups.find((group) => group.id === edgeId) : undefined
+    return edge ? Math.round(edge.element.getBoundingClientRect().width) : 0
+  }
+  return { marginLeft: width('left'), marginRight: width('right') }
+}
+
 /** Dockview owns the drag: its `PointerDragSource` is bound to the real
  * `.dv-tab` element, which the strip hides rather than removes. Replay the
  * pointerdown onto that element so a strip tab starts Dockview's own drag
@@ -83,6 +95,8 @@ export function WorkspaceTabStrip({ api, renderActions }: WorkspaceTabStripProps
   // list in place, so nothing else changes identity when a split appears.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const groups = useMemo(() => (api ? readStripGroups(api) : []), [api, revision])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const insets = useMemo(() => (api ? edgeInsets(api) : { marginLeft: 0, marginRight: 0 }), [api, revision])
   if (!api || groups.length === 0) return null
 
   const isSplit = groups.length > 1
@@ -92,9 +106,8 @@ export function WorkspaceTabStrip({ api, renderActions }: WorkspaceTabStripProps
   const actionsGroup = groups.find(({ group }) => group.id === activeGroupId)?.group ?? groups[0]?.group
 
   return (
-    <div className="workspace-window-strip" role="tablist" aria-label="Workspace windows">
+    <div className="workspace-window-strip" role="tablist" aria-label="Workspace windows" style={insets}>
       <div className={`workspace-window-strip-row${isSplit ? ' is-split' : ''}`}>
-        {isSplit ? <span className="workspace-split-pill-label" aria-hidden="true">Split</span> : null}
         {groups.map(({ group, panels }, groupIndex) => (
           <div className="workspace-window-strip-group" key={group.id} data-group-id={group.id}>
             {groupIndex > 0 ? <span className="workspace-window-strip-divider" aria-hidden="true" /> : null}

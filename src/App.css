@@ -838,12 +838,22 @@ button {
 }
 
 .workspace-dock {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
   min-width: 0;
   position: relative;
   z-index: 0;
+}
+
+/* Dockview's root sits below the window strip and takes the remaining height.
+   Without this it keeps `height: 100%` of the dock and overflows by exactly the
+   strip's height, which pushes the sidebar rails off the bottom edge. */
+.workspace-dock > div:not(.workspace-window-strip) {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .connected-resize-layer {
@@ -1330,6 +1340,7 @@ button {
   padding: 0 4px;
 }
 
+
 .workspace-window-strip-row {
   align-items: center;
   border: 1px solid transparent;
@@ -1347,15 +1358,6 @@ button {
 .workspace-window-strip-row.is-split {
   background: color-mix(in srgb, var(--vibelink-accent) 12%, transparent);
   border-color: color-mix(in srgb, var(--vibelink-accent) 45%, transparent);
-}
-
-.workspace-split-pill-label {
-  color: var(--vibelink-accent);
-  flex: 0 0 auto;
-  font: 700 10px/1 var(--vibelink-sans);
-  letter-spacing: 0.04em;
-  padding: 0 6px 0 4px;
-  text-transform: uppercase;
 }
 
 .workspace-window-strip-group {
@@ -1395,17 +1397,8 @@ button {
   background: color-mix(in srgb, var(--vibelink-accent) 8%, transparent);
   border: 1px solid color-mix(in srgb, var(--vibelink-accent) 38%, transparent);
   border-radius: 9px;
-  padding: 4px 3px 3px;
+  padding: 3px;
   position: relative;
-}
-
-.workspace-open-content-split-label {
-  color: var(--vibelink-accent);
-  display: block;
-  font: 700 9px/1 var(--vibelink-sans);
-  letter-spacing: 0.06em;
-  padding: 1px 0 4px 6px;
-  text-transform: uppercase;
 }
 
 .workspace-window-strip-actions {

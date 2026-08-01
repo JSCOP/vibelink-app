@@ -104,7 +104,6 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
 
   return (
     <div className={`workspace-open-content-list${isSplit ? ' is-split' : ''}`} role="list" aria-label="Open workspace items">
-      {isSplit ? <span className="workspace-open-content-split-label" aria-hidden="true">Split</span> : null}
       {groups.map((group) => {
         if (group.kind === 'item') return renderItem(group.item)
         const collapsed = collapsedGroups.has(group.window.panelId)
