@@ -312,6 +312,7 @@ class TerminalManagerImpl {
   private topologyDepth = 0
   private dividerResizePaneIds = new Set<string>()
   private windowResizeTimer: number | undefined
+  private windowRestorePending = false
   private viewportViable = true
   private outputQueue: Entry[] = []
   private queuedOutputPaneIds = new Set<string>()
@@ -322,7 +323,7 @@ class TerminalManagerImpl {
   private titleCoalescer = new PaneTitleCoalescer()
   private replayTail: Promise<void> = Promise.resolve()
   private wakeRecoveryFrame: number | undefined
-  private settledWakeClearsAtlas = false
+  private wakeAtlasRecoveryFrame: number | undefined
   private webviewRenderMode: 'software' | 'hardware' | '' = ''
 
   constructor() {
@@ -354,12 +355,12 @@ class TerminalManagerImpl {
     }
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return
-      this.settleLayout({ repaint: true, clearWebglTextureAtlas: true })
+      this.settleLayout({ repaint: true })
       this.recoverVisibleWake(true)
     }
     const onSystemResumed = () => {
       if (document.visibilityState !== 'visible') return
-      this.settleLayout({ repaint: true, clearWebglTextureAtlas: true })
+      this.settleLayout({ repaint: true })
       this.recoverVisibleWake(true)
     }
     const cleanup = () => {
@@ -369,8 +370,9 @@ class TerminalManagerImpl {
       document.removeEventListener('visibilitychange', onVisibilityChange)
       systemUnlisten?.()
       if (this.wakeRecoveryFrame !== undefined) cancelAnimationFrame(this.wakeRecoveryFrame)
+      if (this.wakeAtlasRecoveryFrame !== undefined) cancelAnimationFrame(this.wakeAtlasRecoveryFrame)
       this.wakeRecoveryFrame = undefined
-      this.settledWakeClearsAtlas = false
+      this.wakeAtlasRecoveryFrame = undefined
     }
 
     window.addEventListener('focus', onFocus)
@@ -385,18 +387,26 @@ class TerminalManagerImpl {
   }
 
   private recoverVisibleWake(clearWebglTextureAtlas: boolean): void {
-    if (this.wakeRecoveryFrame !== undefined) {
-      this.settledWakeClearsAtlas ||= clearWebglTextureAtlas
+    if (clearWebglTextureAtlas) {
+      if (this.wakeAtlasRecoveryFrame !== undefined) return
+      this.wakeAtlasRecoveryFrame = requestAnimationFrame(() => {
+        // The first reveal frame can still use the minimized WebView geometry;
+        // clear and repaint only after one full layout/presentation frame.
+        this.wakeAtlasRecoveryFrame = requestAnimationFrame(() => {
+          this.wakeAtlasRecoveryFrame = undefined
+          if (document.visibilityState !== 'visible') return
+          this.redrawVisibleWake(true)
+        })
+      })
       return
     }
-    this.redrawVisibleWake(clearWebglTextureAtlas)
-    this.settledWakeClearsAtlas = clearWebglTextureAtlas
+
+    if (this.wakeRecoveryFrame !== undefined) return
+    this.redrawVisibleWake(false)
     this.wakeRecoveryFrame = requestAnimationFrame(() => {
       this.wakeRecoveryFrame = undefined
-      const settledClear = this.settledWakeClearsAtlas
-      this.settledWakeClearsAtlas = false
       if (document.visibilityState !== 'visible') return
-      this.redrawVisibleWake(settledClear)
+      this.redrawVisibleWake(false)
     })
   }
 
@@ -441,15 +451,20 @@ class TerminalManagerImpl {
     // Minimizing collapses the webview to a degenerate viewport; refitting every
     // pane to that and back on restore is the blank-then-rebuild flash.
     if (!viable) return
+    if (becameViable) this.windowRestorePending = true
     if (this.windowResizeTimer === undefined) this.beginInteraction('window')
     else window.clearTimeout(this.windowResizeTimer)
     this.windowResizeTimer = window.setTimeout(() => {
       this.windowResizeTimer = undefined
+      this.windowRestorePending = false
       this.endInteraction('window')
     }, WINDOW_RESIZE_SETTLE_MS)
     // Restore from minimize: the panes were held back at a degenerate viewport
     // and may hold nothing paintable, so this resume does repaint.
-    if (becameViable) this.settleLayout({ repaint: true })
+    if (becameViable) {
+      this.settleLayout({ repaint: true })
+      this.recoverVisibleWake(true)
+    }
   }
 
   private beginInteraction(kind: InteractiveResizeKind): void {
@@ -1539,9 +1554,9 @@ class TerminalManagerImpl {
     if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
     // A topology command re-arms the flush itself once the grid is final.
     if (this.topologyDepth > 0) return
-    // While the window is minimized the webview reports a degenerate viewport.
-    // Hold the requests: handleWindowResize settles once the window is back.
-    if (!this.viewportViable) return
+    // Minimize reports a degenerate viewport; restore reports the real window
+    // before Dockview has restored real pane rects. Hold both until settle.
+    if (!this.viewportViable || this.windowRestorePending) return
     const delay = interactivePassDelay({
       interactive: this.interactive,
       now: Date.now(),

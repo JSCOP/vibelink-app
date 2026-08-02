@@ -720,7 +720,7 @@ describe('TerminalManager repaint recovery', () => {
 })
 
 describe('TerminalManager window-wake recovery', () => {
-  it('defers hidden system-resume events and coalesces one visible event into immediate and settled repaints', async () => {
+  it('defers hidden resume events and waits two settled frames before repainting', async () => {
     const paneId = 'pane-system-resume'
     const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; visible?: boolean }
     entry.opened = true
@@ -731,12 +731,17 @@ describe('TerminalManager window-wake recovery', () => {
     }
     const redraw = vi.spyOn(manager, 'redraw')
     const layout = vi.spyOn(manager, 'scheduleLayoutPass').mockImplementation(() => {})
-    let settledFrame: FrameRequestCallback | undefined
+    const frames: FrameRequestCallback[] = []
     const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
-      settledFrame = callback
-      return 501
+      frames.push(callback)
+      return 500 + frames.length
     })
     const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    const runNextFrame = () => {
+      const callback = frames.shift()
+      if (!callback) throw new Error('missing settled wake frame')
+      callback(performance.now())
+    }
 
     try {
       await vi.waitFor(() => expect(eventMock.state.systemResumed).toBeTypeOf('function'))
@@ -744,21 +749,23 @@ describe('TerminalManager window-wake recovery', () => {
       eventMock.state.systemResumed?.()
       expect(redraw).not.toHaveBeenCalled()
       expect(layout).not.toHaveBeenCalled()
+      expect(frames).toHaveLength(0)
 
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
       eventMock.state.systemResumed?.()
-      expect(redraw).toHaveBeenCalledTimes(1)
-      expect(redraw).toHaveBeenCalledWith(entry, { clearWebglTextureAtlas: true })
+      expect(redraw).not.toHaveBeenCalled()
       expect(layout).toHaveBeenCalledWith(expect.objectContaining({
         force: true,
         repaint: true,
         syncPty: true,
-        clearWebglTextureAtlas: true,
+        clearWebglTextureAtlas: undefined,
       }))
 
-      settledFrame?.(performance.now())
-      expect(redraw).toHaveBeenCalledTimes(2)
-      expect(redraw).toHaveBeenLastCalledWith(entry, { clearWebglTextureAtlas: true })
+      runNextFrame()
+      expect(redraw).not.toHaveBeenCalled()
+      runNextFrame()
+      expect(redraw).toHaveBeenCalledOnce()
+      expect(redraw).toHaveBeenCalledWith(entry, { clearWebglTextureAtlas: true })
     } finally {
       requestFrame.mockRestore()
       redraw.mockRestore()
@@ -767,6 +774,159 @@ describe('TerminalManager window-wake recovery', () => {
       TerminalManager.dispose(paneId)
     }
   })
+
+  it('keeps the settled refocus repaint before the later atlas repair', () => {
+    const paneId = 'pane-focus-then-resume'
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; visible?: boolean }
+    entry.opened = true
+    entry.visible = true
+    const manager = TerminalManager as unknown as {
+      recoverVisibleWake(clearWebglTextureAtlas: boolean): void
+      redraw(entry: unknown, options?: { clearWebglTextureAtlas?: boolean }): void
+    }
+    const redraw = vi.spyOn(manager, 'redraw')
+    const frames: FrameRequestCallback[] = []
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback)
+      return 600 + frames.length
+    })
+    const runNextFrame = () => {
+      const callback = frames.shift()
+      if (!callback) throw new Error('missing wake frame')
+      callback(performance.now())
+    }
+
+    try {
+      manager.recoverVisibleWake(false)
+      manager.recoverVisibleWake(true)
+      expect(redraw).toHaveBeenCalledOnce()
+      expect(redraw).toHaveBeenLastCalledWith(entry, { clearWebglTextureAtlas: false })
+
+      runNextFrame()
+      expect(redraw).toHaveBeenCalledTimes(2)
+      expect(redraw).toHaveBeenLastCalledWith(entry, { clearWebglTextureAtlas: false })
+      runNextFrame()
+      expect(redraw).toHaveBeenCalledTimes(2)
+      runNextFrame()
+      expect(redraw).toHaveBeenCalledTimes(3)
+      expect(redraw).toHaveBeenLastCalledWith(entry, { clearWebglTextureAtlas: true })
+    } finally {
+      requestFrame.mockRestore()
+      redraw.mockRestore()
+      TerminalManager.dispose(paneId)
+    }
+  })
+
+  it('requests settled atlas recovery when a minimized viewport becomes viable again', () => {
+    vi.useFakeTimers()
+    const manager = TerminalManager as unknown as {
+      viewportViable: boolean
+      windowRestorePending: boolean
+      handleWindowResize(): void
+      settleLayout(options?: Record<string, unknown>): void
+      recoverVisibleWake(clearWebglTextureAtlas: boolean): void
+    }
+    const originalViewportViable = manager.viewportViable
+    const originalWindowRestorePending = manager.windowRestorePending
+    const originalWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight')
+    const settleLayout = vi.spyOn(manager, 'settleLayout').mockImplementation(() => {})
+    const recoverVisibleWake = vi.spyOn(manager, 'recoverVisibleWake').mockImplementation(() => {})
+
+    try {
+      manager.viewportViable = false
+      manager.windowRestorePending = false
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 2560 })
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 1392 })
+
+      manager.handleWindowResize()
+
+      expect(manager.windowRestorePending).toBe(true)
+      expect(settleLayout).toHaveBeenCalledWith({ repaint: true })
+      expect(recoverVisibleWake).toHaveBeenCalledWith(true)
+      vi.advanceTimersByTime(160)
+      expect(manager.windowRestorePending).toBe(false)
+    } finally {
+      vi.runOnlyPendingTimers()
+      manager.viewportViable = originalViewportViable
+      manager.windowRestorePending = originalWindowRestorePending
+      settleLayout.mockRestore()
+      recoverVisibleWake.mockRestore()
+      if (originalWidth) Object.defineProperty(window, 'innerWidth', originalWidth)
+      if (originalHeight) Object.defineProperty(window, 'innerHeight', originalHeight)
+      vi.useRealTimers()
+    }
+  })
+  it('holds queued restore fits until Dockview pane geometry settles', () => {
+    type PendingPass = {
+      fit: boolean
+      syncPty: boolean
+      force: boolean
+      repaint: boolean
+      clearWebglTextureAtlas: boolean
+    }
+    const manager = TerminalManager as unknown as {
+      interactionDepth: number
+      lastPassAt?: number
+      lastPassDurationMs?: number
+      passFrame?: number
+      passTimer?: number
+      pendingPass: Map<string, PendingPass>
+      topologyDepth: number
+      viewportViable: boolean
+      windowRestorePending: boolean
+      requestPassFlush(): void
+    }
+    const original = {
+      interactionDepth: manager.interactionDepth,
+      lastPassAt: manager.lastPassAt,
+      lastPassDurationMs: manager.lastPassDurationMs,
+      passFrame: manager.passFrame,
+      passTimer: manager.passTimer,
+      pendingPass: manager.pendingPass,
+      topologyDepth: manager.topologyDepth,
+      viewportViable: manager.viewportViable,
+      windowRestorePending: manager.windowRestorePending,
+    }
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 701)
+
+    try {
+      manager.interactionDepth = 0
+      manager.lastPassAt = undefined
+      manager.lastPassDurationMs = undefined
+      manager.passFrame = undefined
+      manager.passTimer = undefined
+      manager.pendingPass = new Map([['pane-restore-hold', {
+        fit: true,
+        syncPty: true,
+        force: true,
+        repaint: true,
+        clearWebglTextureAtlas: false,
+      }]])
+      manager.topologyDepth = 0
+      manager.viewportViable = true
+      manager.windowRestorePending = true
+
+      manager.requestPassFlush()
+      expect(requestFrame).not.toHaveBeenCalled()
+
+      manager.windowRestorePending = false
+      manager.requestPassFlush()
+      expect(requestFrame).toHaveBeenCalledOnce()
+    } finally {
+      manager.interactionDepth = original.interactionDepth
+      manager.lastPassAt = original.lastPassAt
+      manager.lastPassDurationMs = original.lastPassDurationMs
+      manager.passFrame = original.passFrame
+      manager.passTimer = original.passTimer
+      manager.pendingPass = original.pendingPass
+      manager.topologyDepth = original.topologyDepth
+      manager.viewportViable = original.viewportViable
+      manager.windowRestorePending = original.windowRestorePending
+      requestFrame.mockRestore()
+    }
+  })
+
 })
 
 describe('TerminalManager output scheduling', () => {
