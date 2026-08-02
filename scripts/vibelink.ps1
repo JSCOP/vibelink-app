@@ -17,6 +17,7 @@ $PackageJson = Join-Path $RepoRoot 'package.json'
 $CargoToml = Join-Path $RepoRoot 'src-tauri\Cargo.toml'
 $CargoLock = Join-Path $RepoRoot 'src-tauri\Cargo.lock'
 $TauriConfig = Join-Path $RepoRoot 'src-tauri\tauri.conf.json'
+$VerifyEmbeddedAssets = Join-Path $RepoRoot 'scripts\verify-embedded-assets.mjs'
 $DevVitePort = 1420
 $DevVitePortEnd = 1439
 $ProdWebViewCdpPort = 9333
@@ -436,8 +437,8 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Show-Bundles 'release'
 }
 
-function Invoke-CiInstaller {
-  Write-Section 'Installer: CI release flavor without version mutation'
+function Invoke-CiInstaller([switch]$IncrementalLocal) {
+  Write-Section $(if ($IncrementalLocal) { 'Installer: incremental local release flavor' } else { 'Installer: CI release flavor without version mutation' })
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
@@ -448,7 +449,7 @@ function Invoke-CiInstaller {
   if ($packageVersion -ne $cargoVersion -or $packageVersion -ne $tauriVersion) {
     throw "Version mismatch: package.json=$packageVersion, Cargo.toml=$cargoVersion, tauri.conf.json=$tauriVersion"
   }
-  Reset-ReleaseBuildArtifacts
+  if (-not $IncrementalLocal) { Reset-ReleaseBuildArtifacts }
   # Pass the flag explicitly: some runners export CI=1, which Tauri's boolean
   # environment parser rejects even though the CLI flag itself is valid.
   $arguments = @('exec', 'tauri', 'build', '--ci', '--bundles', 'msi', 'nsis')
@@ -457,7 +458,34 @@ function Invoke-CiInstaller {
     if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) { throw "Config overlay not found: $overlay" }
     $arguments += @('--config', $overlay)
   }
-  Invoke-Checked 'pnpm' $arguments
+
+  $previousCargoIncremental = [Environment]::GetEnvironmentVariable('CARGO_INCREMENTAL', 'Process')
+  try {
+    if ($IncrementalLocal) {
+      Assert-Tool 'node'
+      if (-not (Test-Path -LiteralPath $VerifyEmbeddedAssets -PathType Leaf)) { throw "Embedded asset verifier not found: $VerifyEmbeddedAssets" }
+      $env:CARGO_INCREMENTAL = '1'
+    }
+    Invoke-Checked 'pnpm' $arguments
+    if ($IncrementalLocal) {
+      try {
+        Invoke-Checked 'node' @($VerifyEmbeddedAssets)
+      } catch {
+        Write-Host "Incremental asset verification failed; retrying once from a clean app package. $($_.Exception.Message)" -ForegroundColor Yellow
+        Reset-ReleaseBuildArtifacts
+        Invoke-Checked 'pnpm' $arguments
+        Invoke-Checked 'node' @($VerifyEmbeddedAssets)
+      }
+    }
+  } finally {
+    if ($IncrementalLocal) {
+      if ($null -eq $previousCargoIncremental) {
+        Remove-Item Env:CARGO_INCREMENTAL -ErrorAction SilentlyContinue
+      } else {
+        $env:CARGO_INCREMENTAL = $previousCargoIncremental
+      }
+    }
+  }
   Show-Bundles 'release'
 }
 
@@ -488,7 +516,7 @@ Actions:
   installer-dev      Dev-flavor installer; auto-bumps patch version first.
   installer-release  Production installer; auto-bumps patch version first.
   installers         Builds both installers after one shared patch bump.
-  dev-release       Current-version local release installers without version bump or publication.
+  dev-release       Cached local release installers; verifies every embedded frontend asset.
   open-installers    Open existing dev and release NSIS installer output folders.
   version-preview    Shows the next installer version without changing files.
   version-bump       Promotes package.json/Cargo.toml/Cargo.lock/tauri.conf.json (patch bump, or -Version x.y.z) without building.
@@ -515,8 +543,9 @@ Release licensing:
   Any explicitly supplied value must still be exactly that HTTPS origin.
 
 Embedded frontend assets:
-  Production build actions clean only the app package's release artifacts first,
-  preventing Cargo incremental state from pairing a fresh index.html with stale JavaScript.
+  Public/CI production builds clean the app package first. Local dev-release
+  reuses Cargo's release cache, verifies every current asset in app.exe, and
+  automatically retries once with the clean path if verification fails.
 
 Safety:
   Development preflight automatically bypasses unrelated listeners only inside
@@ -538,7 +567,7 @@ function Invoke-Action([string]$Name) {
     'installer-dev' { Invoke-DevInstaller }
     'installer-release' { Invoke-ReleaseInstaller }
     'installer-ci' { Invoke-CiInstaller }
-    'dev-release' { Invoke-CiInstaller }
+    'dev-release' { Invoke-CiInstaller -IncrementalLocal }
     'installers' { Invoke-AllInstallers }
     'open-installers' { Open-InstallerOutputs }
     'version-preview' { Invoke-InstallerVersionBump -DryRun }
