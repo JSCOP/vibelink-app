@@ -148,12 +148,29 @@ describe('WorkspaceContentTab', () => {
     const params = createTerminalWindowParams('window-a', [], { cols: 1, rows: 1 })
     const unregister = registerTerminalWindow({
       windowId: 'window-a',
-      getInnerApi: () => null,
+      getInnerApi: () => ({
+        toJSON: () => ({
+          grid: {
+            width: 400,
+            height: 200,
+            orientation: 'HORIZONTAL',
+            root: {
+              type: 'branch',
+              size: 200,
+              data: ['pane-a', 'pane-b', 'pane-c', 'pane-d'].map((paneId) => ({
+                type: 'leaf',
+                size: 100,
+                data: { views: [`content:terminal:${paneId}`] },
+              })),
+            },
+          },
+        }),
+      } as never),
       addPane: () => null,
       removePane: () => undefined,
       settle: async () => undefined,
       persist: () => undefined,
-      paneIds: () => ['pane-a', 'pane-b'],
+      paneIds: () => ['pane-a', 'pane-b', 'pane-c', 'pane-d'],
       focusFirst: () => undefined,
     })
 
@@ -184,7 +201,10 @@ describe('WorkspaceContentTab', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add panes' }))
       expect(screen.getByRole('dialog', { name: 'Add terminal panes' })).toBeTruthy()
-      expect(screen.getByText('2 occupied · 2 new panes')).toBeTruthy()
+      expect(screen.getByText('4 occupied · 0 new panes')).toBeTruthy()
+      expect(screen.getByRole('button', { name: '4×1 occupied' })).toBeTruthy()
+      fireEvent.pointerDown(screen.getByRole('button', { name: '4×2 available' }))
+      expect(screen.getByText('4 occupied · 4 new panes')).toBeTruthy()
       fireEvent.click(screen.getByRole('button', { name: 'Create' }))
       expect(actions.openContent).toHaveBeenCalledWith(expect.objectContaining({
         kind: 'terminal-grid',

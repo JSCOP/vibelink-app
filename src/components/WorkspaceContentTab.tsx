@@ -3,6 +3,7 @@ import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { getPanelData } from 'dockview-core'
 import { Eraser, Grid3X3, LayoutGrid, Maximize2, Minimize2, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
+import { occupancyFromDockLayout } from './newTerminalGrid'
 import { ProfileIcon } from './ProfileIcon'
 import { useWorkspaceStore } from '../state/store'
 import { useGitStore } from '../state/git'
@@ -46,7 +47,16 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const [location, setLocation] = useState(api.location)
   const [addPanesOpen, setAddPanesOpen] = useState(false)
   const addPanesButtonRef = useRef<HTMLButtonElement | null>(null)
-  const terminalWindowPaneCount = content?.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId)?.paneIds().length ?? 0 : 0
+  const terminalWindow = content?.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId) : undefined
+  const terminalWindowPaneCount = terminalWindow?.paneIds().length ?? 0
+  let terminalWindowOccupancy = null
+  if (addPanesOpen && terminalWindow) {
+    try {
+      terminalWindowOccupancy = occupancyFromDockLayout(terminalWindow.getInnerApi()?.toJSON())
+    } catch {
+      // Fall back to count-based occupancy while the live Dockview is unavailable.
+    }
+  }
   const activeProfileId = selectedProfileForWorkspace(settings, activeSessionId).id
 
   useEffect(() => {
@@ -217,6 +227,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
               existingPaneCount={terminalWindowPaneCount}
               profiles={settings.profiles}
               activeProfileId={activeProfileId}
+              occupancyMatrix={terminalWindowOccupancy}
               onClose={() => setAddPanesOpen(false)}
               onLaunch={({ cols, rows, occupiedGrid, profileId }) => {
                 setAddPanesOpen(false)
