@@ -975,7 +975,7 @@ describe('TerminalManager output scheduling', () => {
     }
   })
 
-  it('slices daemon output frames to keep pointer interaction responsive', () => {
+  it('limits sustained inactive pane parsing to three updates per second', () => {
     vi.useFakeTimers()
     const paneId = 'pane-resume-output'
     const frames = new Map<number, FrameRequestCallback>()
@@ -989,8 +989,13 @@ describe('TerminalManager output scheduling', () => {
     const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
       frames.delete(id)
     })
-    const entry = TerminalManager.getOrCreate(paneId) as unknown as { opened: boolean; term: { writes: unknown[] } }
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      visible?: boolean
+      term: { writes: unknown[] }
+    }
     entry.opened = true
+    entry.visible = true
     const runNextFrame = () => {
       const callback = frames.values().next().value
       if (!callback) throw new Error('missing scheduled output frame')
@@ -1006,6 +1011,9 @@ describe('TerminalManager output scheduling', () => {
       expect(entry.term.writes).toHaveLength(1)
       expect((entry.term.writes[0] as Uint8Array).byteLength).toBe(16 * 1024)
 
+      vi.advanceTimersByTime(332)
+      expect(frames.size).toBe(0)
+      vi.advanceTimersByTime(1)
       runNextFrame()
       expect(entry.term.writes).toHaveLength(2)
       expect((entry.term.writes[1] as Uint8Array).byteLength).toBe(16 * 1024)
@@ -1013,6 +1021,61 @@ describe('TerminalManager output scheduling', () => {
       TerminalManager.dispose(paneId)
       requestFrame.mockRestore()
       cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('parks hidden snapshot-backed output and restores the latest frame on reveal', async () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-hidden-output'
+    const container = makeContainer()
+    let snapshotSequence = 0n
+    let snapshotText = 'initial frame'
+    invokeMock.mockImplementation((command, args) => command === 'subscribe_pane'
+      ? Promise.resolve(terminalSnapshot(
+        String(args?.paneId),
+        snapshotSequence,
+        snapshotText,
+        String(args?.sessionId),
+      ))
+      : Promise.resolve())
+    TerminalManager.attach(paneId, container, { sessionId: 'session-hidden-output' })
+    await TerminalManager.waitForReplay('session-hidden-output', [paneId])
+    TerminalManager.setPaneVisible(paneId, false)
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, {
+        outputParked?: boolean
+        outputSnapshotStale?: boolean
+        term: { writes: unknown[]; resetCalls: number }
+      }>
+    }
+    const entry = manager.entries.get(paneId)
+    if (!entry) throw new Error('missing hidden output entry')
+    entry.term.writes = []
+
+    try {
+      vi.advanceTimersByTime(30_000)
+      expect(entry.outputParked).toBe(true)
+
+      TerminalManager.writeSequenced(paneId, 9n, 1n, new TextEncoder().encode('discarded frame'))
+      TerminalManager.writeSequenced(paneId, 9n, 2n, new TextEncoder().encode('newest frame'))
+      expect(entry.term.writes).toHaveLength(0)
+      expect(entry.outputSnapshotStale).toBe(true)
+
+      snapshotSequence = 2n
+      snapshotText = 'latest snapshot'
+      TerminalManager.setPaneVisible(paneId, true)
+      await TerminalManager.waitForReplay('session-hidden-output', [paneId])
+
+      expect(entry.outputParked).toBe(false)
+      expect(entry.outputSnapshotStale).toBe(false)
+      expect(entry.term.resetCalls).toBeGreaterThan(1)
+      const lastWrite = entry.term.writes.at(-1) as Uint8Array
+      expect(new TextDecoder().decode(lastWrite)).toBe('latest snapshot')
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'subscribe_pane')).toHaveLength(2)
+    } finally {
+      TerminalManager.dispose(paneId)
+      container.remove()
       vi.useRealTimers()
     }
   })
@@ -1124,10 +1187,11 @@ describe('TerminalManager output scheduling', () => {
       TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
       vi.advanceTimersByTime(50)
       runNextFrame()
-      runNextFrame()
-      runNextFrame()
+      for (let index = 0; index < 3; index += 1) {
+        vi.advanceTimersByTime(333)
+        runNextFrame()
+      }
       webglMock.fail = false
-      runNextFrame()
       expect(entry.webgl).toBeUndefined()
 
       vi.advanceTimersByTime(1_999)
@@ -1180,7 +1244,11 @@ describe('TerminalManager output scheduling', () => {
     const burst = () => {
       TerminalManager.write(paneId, new Uint8Array(64 * 1024), { foreground: false })
       vi.advanceTimersByTime(50)
-      for (let index = 0; index < 4; index += 1) runNextFrame()
+      runNextFrame()
+      for (let index = 0; index < 3; index += 1) {
+        vi.advanceTimersByTime(333)
+        runNextFrame()
+      }
     }
 
     try {

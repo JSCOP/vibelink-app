@@ -30,6 +30,11 @@ const SOFTWARE_WEBGL_BACKPRESSURE_DOM_THRESHOLD_BYTES = 2 * 1024
 const HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES = 64 * 1024
 const WEBGL_REPROMOTION_QUIET_MS = 2_000
 const BACKGROUND_OUTPUT_COALESCE_MS = 50
+// Visible inactive panes update at most three times per second. xterm is
+// output-driven, so throttling parser writes is the effective paint limit.
+const INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS = 333
+const HIDDEN_OUTPUT_INTERVAL_MS = 1_000
+const HIDDEN_OUTPUT_PARK_DELAY_MS = 30_000
 const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
@@ -227,6 +232,11 @@ type Entry = {
   pendingOutput?: Uint8Array[]
   pendingOutputBytes?: number
   outputHighPriority?: boolean
+  outputNextDrainAt?: number
+  lastBackgroundOutputAt?: number
+  hiddenOutputParkTimer?: number
+  outputParked?: boolean
+  outputSnapshotStale?: boolean
   outputWritePending?: boolean
   pendingSequencedOutput?: SequencedOutputFrame[]
   pendingSequencedOutputBytes?: number
@@ -642,6 +652,9 @@ class TerminalManagerImpl {
       entry.daemonGeneration += 1
       entry.daemonAttached = false
       entry.attachingSessionId = undefined
+      this.cancelHiddenOutputParking(entry)
+      entry.outputParked = false
+      entry.outputSnapshotStale = false
     }
     entry.container = container
     entry.term.options.theme = terminalThemeById(this.settings.terminalThemeId)
@@ -664,7 +677,10 @@ class TerminalManagerImpl {
         // OMP 17.1+ renders its interactive TUI in xterm's normal buffer.
         // AgentActivityTracker already capability-gates the pane, so buffer
         // type must not suppress prompt tracking for inline agent renderers.
-        if (!replayGenerated) agentActivityTracker.noteUserInput(paneId, data)
+        if (!replayGenerated) {
+          if (entry.visible) this.resumeOutputConsumption(entry)
+          agentActivityTracker.noteUserInput(paneId, data)
+        }
         this.enqueueInput(entry, data)
       })
       entry.term.onResize(({ cols, rows }) => {
@@ -963,6 +979,7 @@ class TerminalManagerImpl {
       const paneGeneration = BigInt(snapshot.paneGeneration)
       const outputSequence = BigInt(snapshot.outputSequence)
       const retainedSnapshotCurrent = entry.opened
+        && !entry.outputSnapshotStale
         && entry.paneGeneration === paneGeneration
         && entry.outputSequence === outputSequence
       this.removeQueuedOutput(entry)
@@ -1029,6 +1046,9 @@ class TerminalManagerImpl {
       entry.replayedContainer = entry.container
       entry.forceFitOnNextMeasure = true
       if (!retainedSnapshotCurrent) entry.rendererResetPending = true
+      entry.outputParked = false
+      entry.outputSnapshotStale = false
+      if (!entry.visible) this.scheduleHiddenOutputParking(entry)
       this.scheduleLayoutPass({
         paneIds: [entry.paneId],
         force: true,
@@ -1134,6 +1154,10 @@ class TerminalManagerImpl {
       }
       return
     }
+    if (entry.outputParked) {
+      entry.outputSnapshotStale = true
+      return
+    }
     if (paneGeneration === entry.paneGeneration && outputSequence <= entry.outputSequence) return
     if (paneGeneration !== entry.paneGeneration || outputSequence !== entry.outputSequence + 1n) {
       this.queueSequencedOutput(entry, frame)
@@ -1154,6 +1178,10 @@ class TerminalManagerImpl {
     if (entry.webglPromotionTimer !== undefined) {
       clearTimeout(entry.webglPromotionTimer)
       entry.webglPromotionTimer = undefined
+    }
+    if (entry.outputParked && entry.sessionId && entry.daemonAttached) {
+      entry.outputSnapshotStale = true
+      return
     }
     // Output can start streaming before the pane's panel mounts (panes are
     // attached daemon-side at spawn). Parsing it into an unopened terminal
@@ -1312,7 +1340,9 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     if (entry.remoteLease) return
+    this.resumeOutputConsumption(entry)
     entry.term.focus()
+    if (entry.pendingOutput?.length) this.enqueueOutput(entry, true)
     this.scheduleLayoutPass({ paneIds: [paneId] })
   }
 
@@ -1324,8 +1354,8 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     entry.visible = visible
-    if (visible) entry.lastUsedAt = Date.now()
     if (!visible) {
+      this.scheduleHiddenOutputParking(entry)
       // A retained hidden xterm keeps its WebGL context alive even though it
       // paints nothing. Sixteen cached panes behind a full visible grid is
       // exactly what pushes the process past Chromium's context budget, so the
@@ -1337,6 +1367,9 @@ class TerminalManagerImpl {
       }
       return
     }
+
+    entry.lastUsedAt = Date.now()
+    const replayingParkedOutput = this.resumeOutputConsumption(entry)
     if (entry.webglReleasedWhileHidden) {
       entry.webglReleasedWhileHidden = false
       entry.webglAttachFailed = false
@@ -1345,7 +1378,9 @@ class TerminalManagerImpl {
     // A pane that was hidden may have missed output-driven draws entirely, so
     // becoming visible is one of the few genuine repaint triggers.
     this.scheduleLayoutPass({ paneIds: [paneId], force: true, repaint: true, syncPty: true })
-    if (entry.pendingOutput?.length) this.enqueueOutput(entry, this.isForegroundOutput(entry))
+    if (!replayingParkedOutput && entry.pendingOutput?.length) {
+      this.enqueueOutput(entry, this.isForegroundOutput(entry))
+    }
   }
 
   notifyPaneVisible(paneId: string): void {
@@ -1650,6 +1685,7 @@ class TerminalManagerImpl {
     clearTimeout(entry.clickRepairTimer)
     clearTimeout(entry.webglPromotionTimer)
     entry.webglPromotionTimer = undefined
+    this.cancelHiddenOutputParking(entry)
     this.removeQueuedOutput(entry)
     entry.titleDisposable?.dispose()
     this.titleCoalescer.clear(paneId)
@@ -1971,6 +2007,53 @@ class TerminalManagerImpl {
     if (!fonts) return
     void fonts.ready.then(() => this.fit(entry, 0, true))
   }
+  private cancelHiddenOutputParking(entry: Entry): void {
+    if (entry.hiddenOutputParkTimer !== undefined && typeof window !== 'undefined') {
+      window.clearTimeout(entry.hiddenOutputParkTimer)
+    }
+    entry.hiddenOutputParkTimer = undefined
+  }
+
+  private scheduleHiddenOutputParking(entry: Entry): void {
+    this.cancelHiddenOutputParking(entry)
+    if (entry.visible || typeof window === 'undefined') return
+    entry.hiddenOutputParkTimer = window.setTimeout(() => {
+      entry.hiddenOutputParkTimer = undefined
+      if (this.entries.get(entry.paneId) !== entry || entry.visible) return
+      if (!entry.sessionId || !entry.daemonAttached
+        || entry.paneGeneration === undefined || entry.outputSequence === undefined) return
+      if (entry.pendingOutput?.length || entry.outputWritePending) entry.outputSnapshotStale = true
+      this.removeQueuedOutput(entry)
+      entry.pendingOutput = undefined
+      entry.pendingOutputBytes = 0
+      entry.outputTrimNoticeWritten = false
+      entry.outputParked = true
+    }, HIDDEN_OUTPUT_PARK_DELAY_MS)
+  }
+
+  private resumeOutputConsumption(entry: Entry): boolean {
+    this.cancelHiddenOutputParking(entry)
+    entry.lastBackgroundOutputAt = undefined
+    entry.outputNextDrainAt = undefined
+    if (!entry.outputParked) return false
+    entry.outputParked = false
+    if (!entry.outputSnapshotStale) return false
+    this.removeQueuedOutput(entry)
+    entry.pendingOutput = undefined
+    entry.pendingOutputBytes = 0
+    entry.outputTrimNoticeWritten = false
+    if (!entry.sessionId || !entry.opened || !entry.daemonAttached) return false
+    this.requestSnapshotReplay(entry)
+    return true
+  }
+
+
+  private backgroundOutputDelay(entry: Entry, now: number): number {
+    if (entry.lastBackgroundOutputAt === undefined) return BACKGROUND_OUTPUT_COALESCE_MS
+    const interval = entry.visible ? INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS : HIDDEN_OUTPUT_INTERVAL_MS
+    return Math.max(0, entry.lastBackgroundOutputAt + interval - now)
+  }
+
 
   private isForegroundOutput(entry: Entry): boolean {
     if (!entry.visible) return false
@@ -1983,12 +2066,18 @@ class TerminalManagerImpl {
   }
 
   private enqueueOutput(entry: Entry, foreground: boolean): void {
-    entry.outputHighPriority ||= foreground
+    const now = Date.now()
+    if (foreground) {
+      entry.outputHighPriority = true
+      entry.outputNextDrainAt = undefined
+    } else if (entry.outputNextDrainAt === undefined) {
+      entry.outputNextDrainAt = now + this.backgroundOutputDelay(entry, now)
+    }
     if (!this.queuedOutputPaneIds.has(entry.paneId)) {
       this.queuedOutputPaneIds.add(entry.paneId)
       this.outputQueue.push(entry)
     }
-    this.scheduleOutputDrain(foreground ? 0 : BACKGROUND_OUTPUT_COALESCE_MS)
+    this.scheduleOutputDrain(foreground ? 0 : Math.max(0, (entry.outputNextDrainAt ?? now) - now))
   }
 
   private scheduleOutputDrain(delayMs: number): void {
@@ -2040,6 +2129,7 @@ class TerminalManagerImpl {
     if (!this.queuedOutputPaneIds.delete(entry.paneId)) return
     this.outputQueue = this.outputQueue.filter((queued) => queued !== entry)
     entry.outputHighPriority = false
+    entry.outputNextDrainAt = undefined
     if (this.outputQueue.length === 0) this.cancelOutputDrainSchedule()
   }
 
@@ -2048,27 +2138,50 @@ class TerminalManagerImpl {
     const requeueAfterDrain: Entry[] = []
     const startedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
     while (this.outputQueue.length > 0 && writes < MAX_OUTPUT_WRITES_PER_DRAIN) {
+      const now = Date.now()
       const priorityIndex = this.outputQueue.findIndex((entry) => entry.outputHighPriority)
-      const index = priorityIndex >= 0 ? priorityIndex : 0
-      const [entry] = this.outputQueue.splice(index, 1)
+      const eligibleIndex = priorityIndex >= 0
+        ? priorityIndex
+        : this.outputQueue.findIndex((entry) => (entry.outputNextDrainAt ?? 0) <= now)
+      if (eligibleIndex < 0) break
+      const [entry] = this.outputQueue.splice(eligibleIndex, 1)
       this.queuedOutputPaneIds.delete(entry.paneId)
+      const foreground = entry.outputHighPriority || this.isForegroundOutput(entry)
       entry.outputHighPriority = false
+      entry.outputNextDrainAt = undefined
       if (this.entries.get(entry.paneId) !== entry || !entry.pendingOutput?.length) continue
       this.flushOutput(entry)
       writes += 1
+      const completedAt = Date.now()
+      if (!foreground) entry.lastBackgroundOutputAt = completedAt
       if (entry.pendingOutput?.length) {
         // Do not let one resume flood consume both writes in this drain. Keep
         // the remaining slot available to another pane, then revisit this pane
-        // only after the browser has had a paint/input opportunity.
+        // only after the active pane has yielded, or the inactive cadence is due.
         entry.outputHighPriority = this.isForegroundOutput(entry)
+        if (!entry.outputHighPriority) {
+          entry.outputNextDrainAt = completedAt + (entry.visible
+            ? INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS
+            : HIDDEN_OUTPUT_INTERVAL_MS)
+        }
         this.queuedOutputPaneIds.add(entry.paneId)
         requeueAfterDrain.push(entry)
       }
-      const now = typeof performance === 'undefined' ? Date.now() : performance.now()
-      if (now - startedAt >= OUTPUT_DRAIN_TIME_BUDGET_MS) break
+      const elapsedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (elapsedAt - startedAt >= OUTPUT_DRAIN_TIME_BUDGET_MS) break
     }
     this.outputQueue.push(...requeueAfterDrain)
-    if (this.outputQueue.length > 0) this.scheduleOutputDrain(0)
+    if (this.outputQueue.length === 0) return
+    if (this.outputQueue.some((entry) => entry.outputHighPriority)) {
+      this.scheduleOutputDrain(0)
+      return
+    }
+    const now = Date.now()
+    let nextDrainAt = Number.POSITIVE_INFINITY
+    for (const entry of this.outputQueue) {
+      nextDrainAt = Math.min(nextDrainAt, entry.outputNextDrainAt ?? now)
+    }
+    this.scheduleOutputDrain(Math.max(0, nextDrainAt - now))
   }
 
   private trimPendingOutput(entry: Entry): void {
