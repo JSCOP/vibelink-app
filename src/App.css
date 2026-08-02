@@ -249,7 +249,7 @@ button {
 @media (max-width: 640px) {
   .topbar button[title="Capture image"],
   .topbar button[title="Capture video"],
-  .topbar button[title="Resource monitor"] {
+  .topbar button[title="Resource manager"] {
     display: none;
   }
 }

@@ -811,7 +811,7 @@ function App() {
 
   const paletteCommands: PaletteItem[] = [
     { id: 'cmd:settings', category: 'command', label: 'Open settings', detail: 'Configure VibeLink', icon: Settings2, run: () => openSettings() },
-    { id: 'cmd:monitor', category: 'command', label: 'Resource monitor', detail: 'Processes and memory', icon: Activity, run: () => setIsResourceMonitorOpen(true) },
+    { id: 'cmd:monitor', category: 'command', label: 'Resource manager', detail: 'CPU, memory, and terminal processes', icon: Activity, run: () => setIsResourceMonitorOpen(true) },
     { id: 'cmd:capture-image', category: 'command', label: 'Capture image', detail: 'Screenshot a region', icon: Camera, run: () => { openImageCapture() } },
     { id: 'cmd:capture-video', category: 'command', label: 'Capture video', detail: 'Record a region', icon: Video, run: () => { void openVideoCapture() } },
     { id: 'cmd:bug-report', category: 'command', label: 'Report a bug', detail: 'Account bug report', icon: Bug, run: () => openBugReport() },
@@ -864,7 +864,7 @@ function App() {
           <button type="button" className="topbar-icon-button" title="Capture image" aria-label="Capture image" onClick={openImageCapture}>
             <Camera size={16} aria-hidden="true" />
           </button>
-          <button type="button" className="topbar-icon-button" title="Resource monitor" aria-label="Open resource monitor" onClick={() => setIsResourceMonitorOpen(true)}>
+          <button type="button" className="topbar-icon-button" title="Resource manager" aria-label="Open resource manager" onClick={() => setIsResourceMonitorOpen(true)}>
             <Activity size={16} aria-hidden="true" />
           </button>
           <button type="button" className="topbar-icon-button" title="Capture video" aria-label="Capture video" onClick={() => void openVideoCapture()}>

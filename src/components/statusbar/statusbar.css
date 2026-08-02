@@ -57,3 +57,16 @@
   background: var(--vibelink-hover);
   color: var(--vibelink-text);
 }
+
+.statusbar-resources {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.statusbar-resource-separator {
+  opacity: 0.45;
+}
+
+.statusbar-resource-count {
+  color: var(--vibelink-text);
+}

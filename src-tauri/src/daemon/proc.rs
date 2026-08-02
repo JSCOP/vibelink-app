@@ -194,15 +194,20 @@ pub fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> std::io:
     Ok(true)
 }
 
+/// Return `root` followed by every currently visible descendant PID.
+pub fn tree_pids(sys: &System, root: u32) -> Vec<u32> {
+    let children = child_map(sys);
+    let mut pids = Vec::with_capacity(1);
+    pids.push(root);
+    pids.extend(descendant_pids(&children, root));
+    pids
+}
+
 /// Return working-set bytes and process count for `root` plus all descendants.
 pub fn tree_metrics(sys: &System, root: u32) -> (u64, u32) {
-    let children = child_map(sys);
-    let mut pids = descendant_pids(&children, root);
-    pids.push(root);
-
     let mut mem_bytes = 0u64;
     let mut process_count = 0u32;
-    for pid in pids {
+    for pid in tree_pids(sys, root) {
         if let Some(process) = sys.process(Pid::from_u32(pid)) {
             mem_bytes += process.memory();
             process_count += 1;

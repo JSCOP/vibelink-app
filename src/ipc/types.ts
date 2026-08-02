@@ -27,11 +27,13 @@ export type PaneMeta = {
   alive: boolean
 }
 
-export type ResourceProc = { pid: number; memBytes: number; processCount: number }
+export type ResourceProcess = { pid: number; name: string; cpuPercentX10: number; memBytes: number }
 
-export type ResourcePane = { sessionId: string; paneId: string; rootPid: number | null; memBytes: number; processCount: number }
+export type ResourceProc = { pid: number; cpuPercentX10: number; memBytes: number; processCount: number; processes: ResourceProcess[] }
 
-export type ResourceSnapshot = { daemon: ResourceProc; app: ResourceProc; panes: ResourcePane[]; totalMemBytes: number }
+export type ResourcePane = { sessionId: string; paneId: string; rootPid: number | null; title: string | null; role: string | null; cpuPercentX10: number; memBytes: number; processCount: number; processes: ResourceProcess[] }
+
+export type ResourceSnapshot = { daemon: ResourceProc; app: ResourceProc; panes: ResourcePane[]; totalCpuPercentX10: number; totalMemBytes: number }
 
 export type AttachedSession = {
   layoutJson?: string | null

@@ -13,10 +13,14 @@ import { StatusBar } from './StatusBar'
 const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, headSha: 'a'.repeat(40), upstream: 'origin/main', ahead: 2, behind: 1, state: 'clean', remotes: [] }
 
 const resourceSnapshot = {
-  daemon: { pid: 2, memBytes: 40 * 1024 * 1024, processCount: 1 },
-  app: { pid: 1, memBytes: 60 * 1024 * 1024, processCount: 3 },
-  panes: [{ sessionId: 's1', paneId: 'p1', rootPid: 9, memBytes: 12 * 1024 * 1024, processCount: 2 }],
-  totalMemBytes: 112 * 1024 * 1024,
+  daemon: { pid: 2, cpuPercentX10: 3, memBytes: 40 * 1024 * 1024, processCount: 1, processes: [{ pid: 2, name: 'app.exe', cpuPercentX10: 3, memBytes: 40 * 1024 * 1024 }] },
+  app: { pid: 1, cpuPercentX10: 7, memBytes: 60 * 1024 * 1024, processCount: 3, processes: [{ pid: 1, name: 'app.exe', cpuPercentX10: 7, memBytes: 60 * 1024 * 1024 }] },
+  panes: [
+    { sessionId: 's1', paneId: 'p1', rootPid: 9, title: 'Terminal 1', role: null, cpuPercentX10: 2, memBytes: 12 * 1024 * 1024, processCount: 2, processes: [] },
+    { sessionId: 's2', paneId: 'p4', rootPid: 10, title: 'Terminal 2', role: null, cpuPercentX10: 1, memBytes: 4 * 1024 * 1024, processCount: 1, processes: [] },
+  ],
+  totalCpuPercentX10: 13,
+  totalMemBytes: 116 * 1024 * 1024,
 }
 
 describe('StatusBar', () => {
@@ -35,30 +39,31 @@ describe('StatusBar', () => {
 
   afterEach(cleanup)
 
-  it('shows the workspace, branch, sync badge, live panes, and resource totals', async () => {
+  it('shows the workspace, branch, sync badge, memory, and all daemon terminals', async () => {
     render(<StatusBar onOpenCompletionHistory={() => undefined} onOpenResourceMonitor={() => undefined} />)
     expect(screen.getByText('vibelink')).toBeTruthy()
     expect(screen.getByText('main')).toBeTruthy()
     expect(screen.getByText('↑2↓1')).toBeTruthy()
-    expect(screen.getByText('2 panes')).toBeTruthy()
-    await waitFor(() => expect(screen.getByText('112 MB · 6 processes')).toBeTruthy())
+    await waitFor(() => expect(screen.getByTitle('Open resource manager · 116 MB · 2 terminals · 7 processes')).toBeTruthy())
+    expect(invoke).toHaveBeenCalledWith('resource_snapshot', { includeDetails: false })
   })
 
-  it('opens the resource monitor from the resources segment', async () => {
+  it('opens the resource manager from the combined memory and terminal segment', async () => {
     const onOpen = vi.fn()
     render(<StatusBar onOpenCompletionHistory={() => undefined} onOpenResourceMonitor={onOpen} />)
-    await waitFor(() => expect(screen.getByTitle('Open resource monitor')).toBeTruthy())
-    fireEvent.click(screen.getByTitle('Open resource monitor'))
+    const trigger = await screen.findByTitle('Open resource manager · 116 MB · 2 terminals · 7 processes')
+    fireEvent.click(trigger)
     expect(onOpen).toHaveBeenCalledOnce()
   })
 
-  it('renders without a repo or resources', async () => {
+  it('keeps the active terminal count when resource collection is unavailable', async () => {
     useGitStore.setState({ sessions: {} })
     invoke.mockRejectedValue(new Error('offline'))
     render(<StatusBar onOpenCompletionHistory={() => undefined} onOpenResourceMonitor={() => undefined} />)
     expect(screen.getByText('vibelink')).toBeTruthy()
     expect(screen.queryByText('main')).toBeNull()
-    await waitFor(() => expect(screen.getByText('Resources…')).toBeTruthy())
+    await waitFor(() => expect(screen.getByTitle('Open resource manager · 2 terminals')).toBeTruthy())
+    expect(screen.getByText('—')).toBeTruthy()
   })
 
   it('shows unread hook completions and opens their history', () => {

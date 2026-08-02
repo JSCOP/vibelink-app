@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Activity, Bell, GitBranch, SquareTerminal } from 'lucide-react'
+import { Bell, GitBranch, MemoryStick, SquareTerminal } from 'lucide-react'
 import { useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import type { ResourceSnapshot } from '../../ipc/types'
@@ -13,15 +13,16 @@ export type StatusBarProps = {
   onOpenCompletionHistory: () => void
 }
 
-const formatMiB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`
+const formatMemory = (bytes: number) => bytes >= 1024 * 1024 * 1024
+  ? `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  : `${(bytes / (1024 * 1024)).toFixed(0)} MB`
 
-/** Bottom status strip: workspace + branch on the left, live pane count and a
- *  resource summary on the right. Read-only; the resource poll pauses while
- *  the window is hidden so the bar costs nothing in the background. */
+/** Bottom status strip: workspace context on the left and one Orca-style
+ *  resource trigger on the right. Full process details are returned only when open. */
 export function StatusBar({ onOpenResourceMonitor, onOpenCompletionHistory }: StatusBarProps) {
   const session = useWorkspaceStore((state) => state.sessions.find((entry) => entry.id === state.activeSessionId))
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
-  const livePaneCount = useWorkspaceStore((state) => Object.values(state.panes).filter((pane) => pane.alive).length)
+  const activeLivePaneCount = useWorkspaceStore((state) => Object.values(state.panes).filter((pane) => pane.alive).length)
   const completionHistoryCount = useWorkspaceStore((state) => state.completionHistory.length)
   const unreadCompletionCount = useWorkspaceStore((state) => state.completionHistory.filter((entry) => !entry.read).length)
   const repoInfo = useGitStore((state) => (activeSessionId ? state.sessions[activeSessionId]?.repositories['']?.repoInfo ?? null : null))
@@ -29,18 +30,17 @@ export function StatusBar({ onOpenResourceMonitor, onOpenCompletionHistory }: St
 
   useEffect(() => {
     let cancelled = false
-    let timer = 0
     const poll = async () => {
       if (document.visibilityState === 'hidden') return
       try {
-        const snapshot = await invoke<ResourceSnapshot>('resource_snapshot')
+        const snapshot = await invoke<ResourceSnapshot>('resource_snapshot', { includeDetails: false })
         if (!cancelled) setResources(snapshot)
       } catch {
         if (!cancelled) setResources(null)
       }
     }
     void poll()
-    timer = window.setInterval(() => void poll(), RESOURCE_POLL_MS)
+    const timer = window.setInterval(() => void poll(), RESOURCE_POLL_MS)
     window.addEventListener('focus', poll)
     return () => {
       cancelled = true
@@ -49,7 +49,14 @@ export function StatusBar({ onOpenResourceMonitor, onOpenCompletionHistory }: St
     }
   }, [])
 
+  const terminalCount = resources?.panes.length ?? activeLivePaneCount
+  const terminalLabel = `${terminalCount} terminal${terminalCount === 1 ? '' : 's'}`
+  const memoryLabel = resources ? formatMemory(resources.totalMemBytes) : '—'
   const processCount = resources ? resources.app.processCount + resources.daemon.processCount + resources.panes.reduce((total, pane) => total + pane.processCount, 0) : null
+  const processLabel = processCount === null ? null : `${processCount} process${processCount === 1 ? '' : 'es'}`
+  const resourceTitle = resources
+    ? `Open resource manager · ${memoryLabel} · ${terminalLabel} · ${processLabel}`
+    : `Open resource manager · ${terminalLabel}`
 
   return (
     <footer className="statusbar" aria-label="Status bar">
@@ -62,14 +69,13 @@ export function StatusBar({ onOpenResourceMonitor, onOpenCompletionHistory }: St
         ) : null}
       </span>
       <span className="statusbar-spacer" />
-      <span className="statusbar-segment" title="Live terminal panes">
-        <SquareTerminal size={12} aria-hidden="true" />
-        {livePaneCount} {livePaneCount === 1 ? 'pane' : 'panes'}
-      </span>
       {completionHistoryCount > 0 ? <button type="button" className="statusbar-segment" title="Open completion history" onClick={onOpenCompletionHistory}><Bell size={12} aria-hidden="true" />{unreadCompletionCount}</button> : null}
-      <button type="button" className="statusbar-segment statusbar-resources" title="Open resource monitor" onClick={onOpenResourceMonitor}>
-        <Activity size={12} aria-hidden="true" />
-        {resources ? `${formatMiB(resources.totalMemBytes)} · ${processCount} processes` : 'Resources…'}
+      <button type="button" className="statusbar-segment statusbar-resources" title={resourceTitle} aria-label={resourceTitle} onClick={onOpenResourceMonitor}>
+        <MemoryStick size={12} aria-hidden="true" />
+        <span>{memoryLabel}</span>
+        <span className="statusbar-resource-separator" aria-hidden="true">·</span>
+        <SquareTerminal size={12} aria-hidden="true" />
+        <span className="statusbar-resource-count">{terminalCount}</span>
       </button>
     </footer>
   )

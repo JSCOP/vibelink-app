@@ -9,11 +9,16 @@ use crate::remote::{PairingPayload, RemotePaneLeaseStatus, RemoteStatus};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, LazyLock, Mutex},
+};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{ipc::Channel, AppHandle, Manager as _, State};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+static RESOURCE_SYSTEM: LazyLock<Mutex<System>> = LazyLock::new(|| Mutex::new(System::new()));
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,10 +57,21 @@ impl From<TerminalSnapshot> for TerminalSnapshotResult {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResourceProcess {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_percent_x10: u32,
+    pub mem_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceProc {
     pub pid: u32,
+    pub cpu_percent_x10: u32,
     pub mem_bytes: u64,
     pub process_count: u32,
+    pub processes: Vec<ResourceProcess>,
 }
 
 #[derive(serde::Serialize)]
@@ -64,8 +80,12 @@ pub struct ResourcePane {
     pub session_id: String,
     pub pane_id: String,
     pub root_pid: Option<u32>,
+    pub title: Option<String>,
+    pub role: Option<String>,
+    pub cpu_percent_x10: u32,
     pub mem_bytes: u64,
     pub process_count: u32,
+    pub processes: Vec<ResourceProcess>,
 }
 
 #[derive(serde::Serialize)]
@@ -74,7 +94,77 @@ pub struct ResourceSnapshotDto {
     pub daemon: ResourceProc,
     pub app: ResourceProc,
     pub panes: Vec<ResourcePane>,
+    pub total_cpu_percent_x10: u32,
     pub total_mem_bytes: u64,
+}
+
+fn cpu_percent_x10(value: f32) -> u32 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    (value * 10.0).round().min(u32::MAX as f32) as u32
+}
+
+fn process_resource(sys: &System, pid: u32, include_name: bool) -> Option<ResourceProcess> {
+    let process = sys.process(Pid::from_u32(pid))?;
+    Some(ResourceProcess {
+        pid,
+        name: if include_name {
+            process.name().to_string_lossy().into_owned()
+        } else {
+            String::new()
+        },
+        cpu_percent_x10: cpu_percent_x10(process.cpu_usage()),
+        mem_bytes: process.memory(),
+    })
+}
+
+fn tree_resources(sys: &System, root_pid: u32, include_names: bool) -> Vec<ResourceProcess> {
+    crate::daemon::proc::tree_pids(sys, root_pid)
+        .into_iter()
+        .filter_map(|pid| process_resource(sys, pid, include_names))
+        .collect()
+}
+
+fn resource_totals(
+    processes: &[ResourceProcess],
+    fallback_mem_bytes: u64,
+    fallback_process_count: u32,
+) -> (u32, u64, u32) {
+    if processes.is_empty() {
+        return (0, fallback_mem_bytes, fallback_process_count);
+    }
+    (
+        processes.iter().fold(0u32, |total, process| {
+            total.saturating_add(process.cpu_percent_x10)
+        }),
+        processes.iter().fold(0u64, |total, process| {
+            total.saturating_add(process.mem_bytes)
+        }),
+        processes.len() as u32,
+    )
+}
+
+fn resource_proc(
+    pid: u32,
+    processes: Vec<ResourceProcess>,
+    fallback_mem_bytes: u64,
+    fallback_process_count: u32,
+    include_details: bool,
+) -> ResourceProc {
+    let (cpu_percent_x10, mem_bytes, process_count) =
+        resource_totals(&processes, fallback_mem_bytes, fallback_process_count);
+    ResourceProc {
+        pid,
+        cpu_percent_x10,
+        mem_bytes,
+        process_count,
+        processes: if include_details {
+            processes
+        } else {
+            Vec::new()
+        },
+    }
 }
 
 #[tauri::command]
@@ -451,10 +541,12 @@ pub async fn attention_snapshot(
 pub async fn resource_snapshot(
     supervisor: State<'_, Arc<EntitlementSupervisor>>,
     client: State<'_, DaemonClient>,
+    include_details: Option<bool>,
 ) -> Result<ResourceSnapshotDto, String> {
     supervisor
         .authorize(Capability::TerminalRead)
         .map_err(to_string)?;
+    let include_details = include_details.unwrap_or(false);
     let data = match client
         .request_reply(|req| ClientToDaemon::ResourceSnapshot { req })
         .map_err(to_string)?
@@ -463,36 +555,104 @@ pub async fn resource_snapshot(
         other => return Err(format!("unexpected daemon response: {other:?}")),
     };
 
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let pane_details: HashMap<String, (Option<String>, Option<String>)> = if include_details {
+        match client.request_reply(|req| ClientToDaemon::RemoteWorkspaceProjection {
+            req,
+            workspace_id: None,
+        }) {
+            Ok(ReplyResult::RemoteWorkspaceProjection(projection)) => projection
+                .panes
+                .into_iter()
+                .map(|pane| {
+                    let title = (!pane.title.trim().is_empty()).then_some(pane.title);
+                    let role = (!pane.role.trim().is_empty()).then_some(pane.role);
+                    (pane.id, (title, role))
+                })
+                .collect(),
+            _ => HashMap::new(),
+        }
+    } else {
+        HashMap::new()
+    };
+
+    let mut sys = RESOURCE_SYSTEM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_memory().with_cpu(),
+    );
+
     let app_pid = std::process::id();
-    let (app_mem_bytes, app_process_count) = crate::daemon::proc::tree_metrics(&sys, app_pid);
+    let daemon_tree_pids: HashSet<_> = crate::daemon::proc::tree_pids(&sys, data.daemon_pid)
+        .into_iter()
+        .collect();
+    let app_processes = tree_resources(&sys, app_pid, include_details)
+        .into_iter()
+        .filter(|process| !daemon_tree_pids.contains(&process.pid))
+        .collect();
+    let app = resource_proc(app_pid, app_processes, 0, 0, include_details);
+    let daemon_processes = process_resource(&sys, data.daemon_pid, include_details)
+        .into_iter()
+        .collect();
+    let daemon = resource_proc(
+        data.daemon_pid,
+        daemon_processes,
+        data.daemon_mem_bytes,
+        1,
+        include_details,
+    );
+
     let panes: Vec<_> = data
         .panes
         .into_iter()
-        .map(|pane| ResourcePane {
-            session_id: pane.session_id.to_string(),
-            pane_id: pane.pane_id.to_string(),
-            root_pid: pane.root_pid,
-            mem_bytes: pane.mem_bytes,
-            process_count: pane.process_count,
+        .map(|pane| {
+            let pane_id = pane.pane_id.to_string();
+            let (title, role) = pane_details.get(&pane_id).cloned().unwrap_or((None, None));
+            let processes = pane
+                .root_pid
+                .map(|pid| tree_resources(&sys, pid, include_details))
+                .unwrap_or_default();
+            let (cpu_percent_x10, mem_bytes, process_count) =
+                resource_totals(&processes, pane.mem_bytes, pane.process_count);
+            ResourcePane {
+                session_id: pane.session_id.to_string(),
+                pane_id,
+                root_pid: pane.root_pid,
+                title,
+                role,
+                cpu_percent_x10,
+                mem_bytes,
+                process_count,
+                processes: if include_details {
+                    processes
+                } else {
+                    Vec::new()
+                },
+            }
         })
         .collect();
-    let pane_mem_bytes = panes.iter().map(|pane| pane.mem_bytes).sum::<u64>();
-    let total_mem_bytes = data.daemon_mem_bytes + app_mem_bytes + pane_mem_bytes;
+    let total_cpu_percent_x10 = app
+        .cpu_percent_x10
+        .saturating_add(daemon.cpu_percent_x10)
+        .saturating_add(panes.iter().fold(0u32, |total, pane| {
+            total.saturating_add(pane.cpu_percent_x10)
+        }));
+    let total_mem_bytes = app
+        .mem_bytes
+        .saturating_add(daemon.mem_bytes)
+        .saturating_add(
+            panes
+                .iter()
+                .fold(0u64, |total, pane| total.saturating_add(pane.mem_bytes)),
+        );
 
     Ok(ResourceSnapshotDto {
-        daemon: ResourceProc {
-            pid: data.daemon_pid,
-            mem_bytes: data.daemon_mem_bytes,
-            process_count: 1,
-        },
-        app: ResourceProc {
-            pid: app_pid,
-            mem_bytes: app_mem_bytes,
-            process_count: app_process_count,
-        },
+        daemon,
+        app,
         panes,
+        total_cpu_percent_x10,
         total_mem_bytes,
     })
 }
