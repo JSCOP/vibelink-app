@@ -156,8 +156,21 @@ export function createTerminalWindowParams(
   }
 }
 
+function countWorkspaceWindowGroups(node: unknown): number {
+  if (!node || typeof node !== 'object') return 0
+  const { type, data } = node as { type?: unknown; data?: unknown }
+  if (type === 'leaf') return 1
+  if (type === 'branch' && Array.isArray(data)) return data.reduce((count, child) => count + countWorkspaceWindowGroups(child), 0)
+  return 0
+}
+
+export function workspaceWindowGroupCount(inner: SerializedDockview | null): number {
+  return countWorkspaceWindowGroups(inner?.grid.root)
+}
+
 export function workspaceWindowTitle(inner: SerializedDockview | null): string {
   if (!inner) return 'Window Group'
+  if (workspaceWindowGroupCount(inner) > 1) return 'Group 1'
   const titles = Object.values(inner.panels).flatMap((panel) => {
     const params = parseWorkspaceContentParams(panel.params)
     return params?.kind === 'workspaceWindow' ? [] : [params?.title ?? panel.title ?? 'Window']

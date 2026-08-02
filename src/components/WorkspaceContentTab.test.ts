@@ -87,8 +87,12 @@ describe('WorkspaceContentTab', () => {
     const tab = screen.getByRole('tab', { name: 'Window Group' })
 
     expect(tab.getAttribute('data-dockview-dnd-disabled')).toBe('true')
+    expect(tab.getAttribute('data-workspace-window-grouped')).toBe('false')
     expect(within(tab).queryAllByRole('button')).toHaveLength(0)
-    expect(buildWorkspaceContentTabContextMenu({ panel: { id: api.id, params }, group: { id: 'workspace-window-group' } } as never, actions)).toEqual([])
+    const menu = buildWorkspaceContentTabContextMenu({ panel: { id: api.id, params }, group: { id: 'workspace-window-group' } } as never, actions)
+    expect(menu.map((item) => item.label)).toEqual(['Reset workspace layout'])
+    menu[0]?.action?.()
+    expect(actions.resetLayout).toHaveBeenCalled()
   })
 
   it('aggregates the Source Control badge across repositories in the active workspace group', () => {
@@ -172,7 +176,7 @@ describe('WorkspaceContentTab', () => {
     ])
   })
 
-  it('renders add and arrange controls on a terminal window tab and targets that window', () => {
+  it('keeps only Add panes and Close on a terminal window tab', () => {
     const params = createTerminalWindowParams('window-a', [], { cols: 1, rows: 1 })
     const unregister = registerTerminalWindow({
       windowId: 'window-a',
@@ -212,19 +216,8 @@ describe('WorkspaceContentTab', () => {
       expect(actionBar).not.toBeNull()
       expect(within(actionBar as HTMLElement).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual([
         'Add panes',
-        'Arrange panes',
-        'Clear panes',
-        'Hide pane titles',
         'Close content',
       ])
-      // Clear is window-scoped like Arrange: a workspace-wide clear would take
-      // no argument and wipe every other terminal window too.
-      actions.clearTerminals.mockClear()
-      fireEvent.click(within(actionBar as HTMLElement).getByLabelText('Clear panes'))
-      expect(actions.clearTerminals).toHaveBeenCalledWith('window-a')
-
-      fireEvent.click(screen.getByRole('button', { name: 'Arrange panes' }))
-      expect(actions.arrangeTerminals).toHaveBeenCalledWith(null, 'window-a')
 
       fireEvent.click(screen.getByRole('button', { name: 'Add panes' }))
       expect(screen.getByRole('dialog', { name: 'Add terminal panes' })).toBeTruthy()
@@ -240,6 +233,31 @@ describe('WorkspaceContentTab', () => {
     } finally {
       unregister()
     }
+  })
+
+  it('moves terminal window maintenance actions into its context menu', () => {
+    const params = createTerminalWindowParams('window-a', [], { cols: 1, rows: 1 })
+    const items = buildWorkspaceContentTabContextMenu({
+      panel: { id: 'content:terminalWindow:window-a', params },
+      group: { id: 'window-group' },
+    } as never, actions)
+
+    expect(items.map((item) => item.label)).toEqual([
+      'New terminal in this window',
+      'Arrange panes',
+      'Clear panes',
+      'Hide pane titles',
+      'Maximize / restore content',
+      'Close terminal window',
+    ])
+    items[0]?.action?.()
+    items[1]?.action?.()
+    items[2]?.action?.()
+    items[3]?.action?.()
+    expect(actions.arrangeTerminals).toHaveBeenCalledWith(null, 'window-a')
+    expect(actions.clearTerminals).toHaveBeenCalledWith('window-a')
+    expect(actions.toggleTerminalWindowTitles).toHaveBeenCalledWith('window-a')
+    expect(actions.openContent).toHaveBeenCalledWith({ kind: 'terminal', windowId: 'window-a' })
   })
 
   it('keeps arrange off the terminal pane title bar', () => {

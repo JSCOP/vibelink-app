@@ -49,31 +49,37 @@ describe('tab action rail reveal', () => {
 })
 
 /** Window-tab drops rely on a CSS rule and a TSX attribute agreeing on one
- * name. Rename either alone and the split overlays silently stop appearing,
- * which is invisible until someone drags a window again. */
-describe('window drag hit-testing', () => {
-  it('drops the always-rendered overlays out of hit-testing only while a window drag is active', () => {
+ * name. Rename either alone and the split overlays silently stop appearing. */
+describe('workspace window chrome', () => {
+  it('drops renderer overlays out of hit-testing only during an inner window drag', () => {
     const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
     const rule = css.match(/([^{}]*\.dv-render-overlay\s*)\{\s*pointer-events:\s*none/)
     if (!rule) throw new Error('no window-drag hit-testing rule in App.css')
     const selector = rule[1].trim()
 
-    document.body.innerHTML = ''
-    const dock = document.createElement('div')
-    dock.className = 'workspace-dock'
-    const overlay = document.createElement('div')
-    overlay.className = 'dv-render-overlay'
-    dock.appendChild(overlay)
-    document.body.appendChild(dock)
-
-    document.documentElement.removeAttribute('data-vl-window-drag')
+    document.body.innerHTML = '<div class="workspace-window-container"><div class="dv-render-overlay"></div></div>'
+    const container = document.querySelector('.workspace-window-container') as HTMLElement
+    const overlay = document.querySelector('.dv-render-overlay') as HTMLElement
     expect(overlay.matches(selector)).toBe(false)
-    document.documentElement.setAttribute('data-vl-window-drag', 'true')
+    container.setAttribute('data-vl-window-drag', 'true')
     expect(overlay.matches(selector)).toBe(true)
-    document.documentElement.removeAttribute('data-vl-window-drag')
 
-    const view = readFileSync(join(process.cwd(), 'src/layout/WorkspaceView.tsx'), 'utf8')
-    expect(view).toContain("setAttribute('data-vl-window-drag', 'true')")
-    expect(view).toContain("removeAttribute('data-vl-window-drag')")
+    const panel = readFileSync(join(process.cwd(), 'src/layout/WorkspaceWindowPanel.tsx'), 'utf8')
+    expect(panel).toContain("setAttribute('data-vl-window-drag', 'true')")
+    expect(panel).toContain("removeAttribute('data-vl-window-drag')")
+  })
+
+  it('hides the outer wrapper header until more than one window group exists', () => {
+    const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
+    const rule = css.match(/([^{}]*\.workspace-content-tab-workspaceWindow[^{}]*)\{\s*display:\s*none/)
+    if (!rule) throw new Error('no singleton workspace-window header rule in App.css')
+    const selector = rule[1].trim()
+
+    document.body.innerHTML = '<div class="workspace-dock"><div class="dv-groupview"><div class="dv-tabs-and-actions-container"><div class="workspace-content-tab-workspaceWindow" data-workspace-window-grouped="false"></div></div></div></div>'
+    const tab = document.querySelector('.workspace-content-tab-workspaceWindow') as HTMLElement
+    const header = document.querySelector('.dv-tabs-and-actions-container') as HTMLElement
+    expect(header.matches(selector)).toBe(true)
+    tab.setAttribute('data-workspace-window-grouped', 'true')
+    expect(header.matches(selector)).toBe(false)
   })
 })

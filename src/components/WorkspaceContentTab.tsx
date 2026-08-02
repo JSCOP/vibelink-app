@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { getPanelData } from 'dockview-core'
-import { Eraser, Grid3X3, LayoutGrid, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Grid3X3, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
 import { occupancyFromDockLayout } from './newTerminalGrid'
 import { ProfileIcon } from './ProfileIcon'
@@ -12,6 +12,7 @@ import { selectedProfileForWorkspace } from '../state/profiles'
 import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
 import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceContentTabModel'
 import { getTerminalWindow } from '../layout/terminalWindowRegistry'
+import { workspaceWindowGroupCount } from '../layout/workspaceLayoutModel'
 
 type WorkspaceContentTabProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
 
@@ -159,6 +160,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       data-content-panel-id={api.id}
       data-pane-id={paneId ?? undefined}
       data-dockview-dnd-disabled={content?.kind === 'workspaceWindow' ? 'true' : undefined}
+      data-workspace-window-grouped={content?.kind === 'workspaceWindow' ? String(workspaceWindowGroupCount(content.inner) > 1) : undefined}
       role="tab"
       tabIndex={0}
       aria-selected={isActive}
@@ -239,15 +241,6 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
                 void actions.openContent({ kind: 'terminal-grid', grid: { cols, rows, occupiedGrid, profileId, windowId: content.instanceId } })
               }}
             />
-            <button type="button" title="Arrange panes" aria-label="Arrange panes" onClick={(event) => { activateAndStop(event); void actions.arrangeTerminals(null, content.instanceId) }}>
-              <LayoutGrid size={12} aria-hidden="true" />
-            </button>
-            <button type="button" title="Close every pane in this window" aria-label="Clear panes" disabled={terminalWindowPaneCount === 0} onClick={(event) => { activateAndStop(event); void actions.clearTerminals(content.instanceId) }}>
-              <Eraser size={12} aria-hidden="true" />
-            </button>
-            <button type="button" title={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} aria-label={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} onClick={(event) => { activateAndStop(event); actions.toggleTerminalWindowTitles(content.instanceId) }}>
-              {content.titlesHidden ? <PanelTop size={12} aria-hidden="true" /> : <PanelTopClose size={12} aria-hidden="true" />}
-            </button>
           </>
         ) : null}
         </div></div>

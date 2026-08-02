@@ -17,6 +17,8 @@ import {
   workspaceRightEdgeGroupId,
   workspaceRightStructuralKinds,
   createTerminalWindowParams,
+  workspaceWindowGroupCount,
+  workspaceWindowTitle,
 } from './workspaceLayoutModel'
 import { isStructuralWorkspaceContentKind, parseWorkspaceContentParams, workspaceContentPanelId, workspaceContentResourceKey } from './workspaceContentModel'
 
@@ -80,6 +82,30 @@ describe('workspaceLayoutModel v3', () => {
     expect(JSON.stringify(groupedLayout.grid.root)).toContain(terminalWindowIds[0])
     expect(layout.activeGroup).toBe('workspace-window-group')
     expect(groupedLayout.activeGroup).toMatch(/^content-group-/)
+  })
+
+  it('uses a group label only when the workspace contains multiple window groups', () => {
+    const layout = createDefaultWorkspaceDockviewLayout([pane('pane-a')], 1600)
+    const params = Object.values(layout.panels).flatMap((panel) => {
+      const content = parseWorkspaceContentParams(panel.params)
+      return content?.kind === 'workspaceWindow' ? [content] : []
+    })[0]
+    if (!params?.inner) throw new Error('Missing workspace window layout')
+    expect(workspaceWindowGroupCount(params.inner)).toBe(1)
+    expect(workspaceWindowTitle(params.inner)).toBe('Terminal')
+
+    const split = structuredClone(params.inner)
+    const editor = { schema: 1 as const, kind: 'editor' as const, instanceId: 'README.md', title: 'README.md', icon: 'file-code', relPath: 'README.md' }
+    const editorId = workspaceContentPanelId(editor)
+    split.panels[editorId] = createWorkspaceContentPanel(editor)
+    split.grid.root = {
+      type: 'branch',
+      data: [split.grid.root, { type: 'leaf', data: { views: [editorId], activeView: editorId, id: 'editor-group' }, size: 500 }],
+      size: split.grid.width,
+    }
+
+    expect(workspaceWindowGroupCount(split)).toBe(2)
+    expect(workspaceWindowTitle(split)).toBe('Group 1')
   })
 
   it('moves a legacy editor and terminal split under one grouped outer tab without changing the split tree', () => {
