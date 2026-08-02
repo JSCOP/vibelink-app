@@ -266,10 +266,6 @@ button {
   color: #62d8ff;
 }
 
-.runtime-identity-release {
-  background: rgba(255, 159, 26, 0.12);
-  color: #ffae42;
-}
 
 .runtime-identity-badge-floating {
   left: 10px;

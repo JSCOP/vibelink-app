@@ -15,7 +15,7 @@ describe('runtimeIdentityFor', () => {
       kind: 'development',
       protected: false,
       browserTitle: 'VibeLink Dev',
-      badgeDetail: 'TEST TARGET',
+      badge: { detail: 'TEST TARGET' },
     })
   })
 
@@ -24,7 +24,7 @@ describe('runtimeIdentityFor', () => {
       kind: 'release',
       protected: true,
       browserTitle: 'VibeLink',
-      badgeDetail: 'PROTECTED',
+      badge: null,
     })
   })
 })

@@ -79,18 +79,21 @@ function hermesWarmupStatus(commandOverride: string | null): Promise<HermesRunti
 }
 
 function RuntimeIdentityBadge({ floating = false }: { floating?: boolean }) {
+  const badge = appRuntimeIdentity.badge
+  if (!badge) return null
+
   return (
     <div
       className={`runtime-identity-badge runtime-identity-${appRuntimeIdentity.kind}${floating ? ' runtime-identity-badge-floating' : ''}`}
       role="status"
-      aria-label={appRuntimeIdentity.description}
-      title={appRuntimeIdentity.description}
+      aria-label={badge.description}
+      title={badge.description}
       data-runtime-kind={appRuntimeIdentity.kind}
       data-runtime-protected={String(appRuntimeIdentity.protected)}
     >
       <span className="runtime-identity-dot" aria-hidden="true" />
-      <strong>{appRuntimeIdentity.badgeLabel}</strong>
-      <span className="runtime-identity-detail">· {appRuntimeIdentity.badgeDetail}</span>
+      <strong>{badge.label}</strong>
+      <span className="runtime-identity-detail">· {badge.detail}</span>
     </div>
   )
 }

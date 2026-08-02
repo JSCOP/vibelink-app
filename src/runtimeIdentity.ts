@@ -2,9 +2,11 @@ export type RuntimeIdentity = {
   kind: 'development' | 'release'
   protected: boolean
   browserTitle: string
-  badgeLabel: string
-  badgeDetail: string
-  description: string
+  badge: {
+    label: string
+    detail: string
+    description: string
+  } | null
 }
 export function isDevelopmentRuntime(
   configuredFlavor: string | undefined,
@@ -22,17 +24,17 @@ export function runtimeIdentityFor(development: boolean): RuntimeIdentity {
         kind: 'development',
         protected: false,
         browserTitle: 'VibeLink Dev',
-        badgeLabel: 'DEV BUILD',
-        badgeDetail: 'TEST TARGET',
-        description: 'Development build. Use this window to verify current source changes.',
+        badge: {
+          label: 'DEV BUILD',
+          detail: 'TEST TARGET',
+          description: 'Development build. Use this window to verify current source changes.',
+        },
       }
     : {
         kind: 'release',
         protected: true,
         browserTitle: 'VibeLink',
-        badgeLabel: 'RELEASE HOST',
-        badgeDetail: 'PROTECTED',
-        description: 'Protected release host. Do not use this window to verify development changes or close it during self-hosted development.',
+        badge: null,
       }
 }
 
