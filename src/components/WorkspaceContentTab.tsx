@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { getPanelData } from 'dockview-core'
-import { Eraser, Grid3X3, LayoutGrid, Maximize2, Minimize2, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Eraser, Grid3X3, LayoutGrid, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
 import { occupancyFromDockLayout } from './newTerminalGrid'
 import { ProfileIcon } from './ProfileIcon'
@@ -43,7 +43,6 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const [draftTitle, setDraftTitle] = useState(title)
   const [isEditing, setIsEditing] = useState(false)
   const [isActive, setIsActive] = useState(api.isActive)
-  const [isMaximized, setIsMaximized] = useState(() => api.isMaximized())
   const [location, setLocation] = useState(api.location)
   const [addPanesOpen, setAddPanesOpen] = useState(false)
   const addPanesButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -66,14 +65,10 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
 
   useEffect(() => {
     const syncActive = () => setIsActive(api.isActive)
-    const syncMaximized = () => setIsMaximized(api.isMaximized())
     const syncLocation = () => setLocation(api.location)
     const active = api.onDidActiveChange(syncActive)
-    const group = api.onDidGroupChange(syncMaximized)
-    const maximized = containerApi.onDidMaximizedGroupChange(syncMaximized)
     const locationChange = api.onDidLocationChange(syncLocation)
     syncActive()
-    syncMaximized()
     // Dockview may move a restored structural panel into its edge group between
     // the initial render and this effect. Re-sample after subscribing so a move
     // whose event already fired cannot leave the full horizontal tab squeezed
@@ -81,11 +76,9 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
     syncLocation()
     return () => {
       active.dispose()
-      group.dispose()
-      maximized.dispose()
       locationChange.dispose()
     }
-  }, [api, containerApi])
+  }, [api])
 
 
   const activateAndStop = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
@@ -208,10 +201,10 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
         </span>
       )}
       <div className="terminal-tab-actions" data-dockview-dnd-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
-        {/* Everything except Close lives in the collapsing rail: a resting tab is
-            icon + title + close, and the rail expands on hover, focus, or while
-            the tab is active. `:focus-within` is what keeps it keyboard-usable
-            without a visibility hack. */}
+        {/* Optional quick actions live in the collapsing rail: a resting tab is
+            icon + title + close, and the rail expands only on hover or keyboard
+            focus. `:focus-within` keeps the controls keyboard-usable without a
+            visibility hack. */}
         <div className="terminal-tab-quick-actions"><div>
         {paneId ? (
           <>
@@ -253,15 +246,8 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
             <button type="button" title={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} aria-label={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} onClick={(event) => { activateAndStop(event); actions.toggleTerminalWindowTitles(content.instanceId) }}>
               {content.titlesHidden ? <PanelTop size={12} aria-hidden="true" /> : <PanelTopClose size={12} aria-hidden="true" />}
             </button>
-            <button type="button" title={isMaximized ? 'Restore content' : 'Maximize content'} aria-label={isMaximized ? 'Restore content' : 'Maximize content'} onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id); setIsMaximized(api.isMaximized()) }}>
-              {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
-            </button>
           </>
-        ) : (
-          <button type="button" title={isMaximized ? 'Restore content' : 'Maximize content'} aria-label={isMaximized ? 'Restore content' : 'Maximize content'} onClick={(event) => { activateAndStop(event); actions.toggleMaximizeContent(api.id); setIsMaximized(api.isMaximized()) }}>
-            {isMaximized ? <Minimize2 size={12} aria-hidden="true" /> : <Maximize2 size={12} aria-hidden="true" />}
-          </button>
-        )}
+        ) : null}
         </div></div>
         <button type="button" className="terminal-tab-close" title={paneId ? 'Close terminal' : 'Close content'} aria-label={paneId ? 'Close terminal' : 'Close content'} onClick={(event) => { activateAndStop(event); void actions.requestCloseContent(api.id) }}>
           <X size={12} aria-hidden="true" />

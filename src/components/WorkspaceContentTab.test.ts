@@ -204,7 +204,6 @@ describe('WorkspaceContentTab', () => {
         'Arrange panes',
         'Clear panes',
         'Hide pane titles',
-        'Maximize content',
         'Close content',
       ])
       // Clear is window-scoped like Arrange: a workspace-wide clear would take

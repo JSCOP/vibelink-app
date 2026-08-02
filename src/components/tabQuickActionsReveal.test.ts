@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /** The collapsing tab action rail is pure CSS, and its one real failure mode is
- * a selector that is true for every pane: each terminal pane sits ALONE in its
- * own Dockview group, so `.dv-active-tab` by itself matches all of them and
- * every rail expands at once — the clutter the rail replaces. Pull the live
- * selector out of App.css and run it against the real Dockview DOM shape. */
+ * an active-tab selector that reveals controls before the pointer arrives.
+ * Pull the live expansion selector out of App.css and run it against active and
+ * inactive Dockview groups; none may match until its own tab is hovered or
+ * keyboard-focused. */
 function revealSelector(): string {
   const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
   const rule = css.match(/([^{}]*\.terminal-tab-quick-actions\s*\{\s*grid-template-columns:\s*1fr)/)
@@ -33,20 +33,18 @@ function group(active: boolean, tabs: Array<{ active: boolean }>): HTMLElement {
 }
 
 describe('tab action rail reveal', () => {
-  it('expands only the active group\'s active tab, never every single-pane group', () => {
+  it('keeps every rail collapsed until its own tab is hovered or focused', () => {
     document.body.innerHTML = ''
     // A 2x1 terminal window: one pane per group, exactly one group focused.
     document.body.appendChild(group(true, [{ active: true }]))
     document.body.appendChild(group(false, [{ active: true }]))
-    // Plus a stacked group, to keep the hidden tab of a focused group collapsed.
+    // Plus a stacked group, including the active tab of the focused group.
     document.body.appendChild(group(true, [{ active: true }, { active: false }]))
 
     const selector = revealSelector()
     const rails = Array.from(document.querySelectorAll('.terminal-tab-quick-actions'))
     expect(rails).toHaveLength(4)
-    // Hover/focus selectors cannot match without a pointer, so only the
-    // active-group rules can fire here: rails 0 and 2.
-    expect(rails.map((rail) => rail.matches(selector))).toEqual([true, false, true, false])
+    expect(rails.map((rail) => rail.matches(selector))).toEqual([false, false, false, false])
   })
 })
 
