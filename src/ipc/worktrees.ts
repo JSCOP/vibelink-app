@@ -114,6 +114,8 @@ export type WorktreeCheckpoint = {
   createdAt: number
 }
 
+export type WorktreeReviewCommentState = 'open' | 'sent' | 'resolved' | 'dismissed'
+
 export type WorktreeReviewComment = {
   id: string
   worktreeId: string
@@ -128,6 +130,7 @@ export type WorktreeReviewComment = {
   body: string
   createdAt: number
   updatedAt: number
+  state: WorktreeReviewCommentState
 }
 
 // Flattened shape of the pre-registry `settings.workspaceWorktrees` map, sent to
@@ -230,6 +233,13 @@ export type WorktreeReviewCommentRequest = {
   body: string
 }
 
+export type WorktreeReviewCommentStateRequest = {
+  worktreeId: string
+  expectedInstanceId: string
+  commentIds: string[]
+  state: WorktreeReviewCommentState
+}
+
 export type WorktreeCreateResult = { worktree: WorktreeRecord; sessionId: string }
 export type WorktreeMoveResult = { worktree: WorktreeRecord; previousPath: string }
 export type WorktreeRemovalResult = {
@@ -285,6 +295,10 @@ export function createWorktreeCheckpoint(request: WorktreeCheckpointRequest): Pr
 
 export function putWorktreeReviewComment(request: WorktreeReviewCommentRequest): Promise<WorktreeReviewComment> {
   return invoke<WorktreeReviewComment>('worktree_review_comment_create', { request })
+}
+
+export function setWorktreeReviewCommentState(request: WorktreeReviewCommentStateRequest): Promise<WorktreeReviewComment[]> {
+  return invoke<WorktreeReviewComment[]>('worktree_review_comment_set_state', { request })
 }
 
 export function worktreeStorageOptions(): Promise<WorktreeStorageOptions> {

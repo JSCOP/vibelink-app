@@ -24,6 +24,12 @@ let registration: Promise<void> | undefined
 const sessionReloadTimers = new Map<string, number>()
 let outputSocket: WebSocket | undefined
 const paneIdDecoder = new TextDecoder()
+const terminalExitListeners = new Set<(paneId: string) => void>()
+
+export function onTerminalExited(listener: (paneId: string) => void): () => void {
+  terminalExitListeners.add(listener)
+  return () => { terminalExitListeners.delete(listener) }
+}
 
 export async function startTerminalOutputStream(options: { force?: boolean } = {}): Promise<void> {
   if (registration && !options.force) return registration
@@ -31,6 +37,7 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
   const channel = new Channel<TerminalEvent>((event) => {
     if (event.kind === 'exited') {
       TerminalManager.markExited(event.paneId, event.exitCode)
+      for (const listener of terminalExitListeners) listener(event.paneId)
     } else if (event.kind === 'resized') {
       TerminalManager.adoptRemoteResize(event.paneId, event.cols, event.rows)
     } else if (event.kind === 'sessionChanged') {
@@ -40,7 +47,7 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
         // Authoritative and workspace-scoped: this must survive the originating
         // pane being detached from the frontend after a workspace switch.
         agentActivityTracker.clear(event.signal.paneId)
-        useWorkspaceStore.getState().markPaneHookComplete(event.signal.paneId, event.sessionId)
+        useWorkspaceStore.getState().markPaneHookComplete(event.signal.paneId, event.sessionId, event.signal.agent ?? null)
       } else if (event.signal.kind === 'paneConfigured') {
         useWorkspaceStore.getState().applyPaneConfiguration(event.signal.paneId, {
           title: event.signal.title ?? undefined,

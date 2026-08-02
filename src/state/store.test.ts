@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import type { WorktreeProjection, WorktreeRecord } from './worktrees'
-import { getWorkspaceSessionEpoch, isWorkspaceInitialPanePending, loadPaneCompletionHighlights, loadPaneReviewMarkers, paneCompletionCountsBySession, persistPaneCompletionHighlights, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
+import { getWorkspaceSessionEpoch, isWorkspaceInitialPanePending, loadCompletionHistory, loadPaneCompletionHighlights, loadPaneReviewMarkers, paneCompletionCountsBySession, persistCompletionHistory, persistPaneCompletionHighlights, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
 
 const spawnedPane: PaneMeta = {
   id: 'pane-test',
@@ -150,6 +150,7 @@ describe('workspace store profiles', () => {
       hermesTranscript: {},
       hermesCurrentSession: {},
       paneCompletionHighlights: {},
+      completionHistory: [],
       paneReviewMarkers: {},
       capturesByPane: {},
       recentCaptures: [],
@@ -1009,6 +1010,20 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().paneCompletionHighlights['pane-test']).toBeUndefined()
   })
 
+  test('hook completion records agent history independently from the pane highlight', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(123)
+    useWorkspaceStore.setState({ panes: { 'pane-test': spawnedPane }, paneCompletionHighlights: {}, completionHistory: [] })
+
+    useWorkspaceStore.getState().markPaneHookComplete('pane-test', createdSession.id, 'codex')
+    expect(useWorkspaceStore.getState().completionHistory).toEqual([{ id: 'pane-test:123', paneId: 'pane-test', sessionId: createdSession.id, paneTitle: 'Codex', agent: 'codex', completedAt: 123, read: false }])
+    useWorkspaceStore.getState().clearPaneCompletionHighlight('pane-test')
+    expect(useWorkspaceStore.getState().completionHistory).toHaveLength(1)
+    useWorkspaceStore.getState().markCompletionRead('pane-test:123')
+    expect(useWorkspaceStore.getState().completionHistory[0].read).toBe(true)
+    useWorkspaceStore.getState().markCompletionUnread('pane-test:123')
+    expect(useWorkspaceStore.getState().completionHistory[0].read).toBe(false)
+  })
+
   test('reviewed pane marker toggles explicitly and acknowledges completion', () => {
     useWorkspaceStore.setState({
       activeSessionId: createdSession.id,
@@ -1068,6 +1083,23 @@ describe('workspace store profiles', () => {
 
     persistPaneCompletionHighlights({}, storage)
     expect(storage.removeItem).toHaveBeenCalledWith('vibelink:paneCompletionHighlights')
+  })
+
+  test('completion history validates, persists, and removes its storage entry', () => {
+    const stored = loadCompletionHistory({
+      getItem: () => JSON.stringify([
+        { id: 'pane-1:123', paneId: 'pane-1', sessionId: 'session-1', paneTitle: 'Codex', agent: 'codex', completedAt: 123, read: true },
+        { id: '', paneId: 'pane-2', sessionId: 'session-1', completedAt: 124 },
+      ]),
+    })
+    expect(stored).toEqual([{ id: 'pane-1:123', paneId: 'pane-1', sessionId: 'session-1', paneTitle: 'Codex', agent: 'codex', completedAt: 123, read: true }])
+    expect(loadCompletionHistory({ getItem: () => '{broken' })).toEqual([])
+
+    const storage = { setItem: vi.fn(), removeItem: vi.fn() }
+    persistCompletionHistory(stored, storage)
+    expect(storage.setItem).toHaveBeenCalledWith('vibelink:completionHistory', JSON.stringify(stored))
+    persistCompletionHistory([], storage)
+    expect(storage.removeItem).toHaveBeenCalledWith('vibelink:completionHistory')
   })
 
   test('only manual mode can overwrite persisted workspace order', () => {

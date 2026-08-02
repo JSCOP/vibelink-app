@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { Channel, invoke } from '@tauri-apps/api/core'
@@ -7,17 +7,8 @@ import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
 import { Activity, AlertTriangle, Bug, Camera, Eraser, LayoutGrid, Minus, Settings2, Sparkles, Square, Video, X } from 'lucide-react'
-import { SettingsDialog } from './components/SettingsDialog'
-import { StartupWorkspaceDialog } from './components/StartupWorkspaceDialog'
-import { WorkspaceCreateDialog } from './components/WorkspaceCreateDialog'
-import { WorkspaceSettingsDialog } from './components/WorkspaceSettingsDialog'
-import { ImportReposDialog } from './components/workspaces/ImportReposDialog'
-import { ResourceMonitorDialog } from './components/ResourceMonitorDialog'
-import { CaptureAnnotator } from './components/CaptureAnnotator.tsx'
 import { useAppChromeStore } from './state/appChrome'
-import { SetupWizard } from './components/SetupWizard'
 import { AppLockedScreen } from './components/AppLockedScreen'
-import { BugReportDialog } from './components/BugReportDialog'
 import { AppDialogHost } from './components/AppDialog'
 import { ToastHost } from './components/toast/ToastHost'
 import { UpdateCard } from './components/update/UpdateCard'
@@ -28,13 +19,13 @@ import { StatusBar } from './components/statusbar/StatusBar'
 import { choiceDialog, confirmDialog, isAppDialogOpen } from './components/appDialogStore'
 import { WorkspaceView } from './layout/WorkspaceView'
 import type { WorkspaceContentActions, WorkspaceContentChromeState } from './layout/contentActions'
-import { isControlCharacterCode } from './layout/workspaceContentModel'
+import { isControlCharacterCode, workspaceContentPanelId } from './layout/workspaceContentModel'
 import { getEditorDocumentStore, type EditorDocumentStore } from './editor/documentStore'
 import { startTerminalOutputStream } from './ipc/output'
 import { getHermesRuntimeStatus, startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import type { CloneProgress, HermesRuntimeStatus } from './ipc/types'
 import type { WorkspaceCreationInput } from './ipc/providerIntegrations'
-import { getWorkspaceSessionEpoch, paneCompletionCountsBySession, useWorkspaceStore } from './state/store'
+import { getWorkspaceSessionEpoch, paneCompletionCountsBySession, useWorkspaceStore, type CompletionHistoryEntry } from './state/store'
 import { useGitStore } from './state/git'
 import { TerminalManager } from './terminal/TerminalManager'
 import { agentActivityTracker } from './terminal/agentActivity'
@@ -52,6 +43,17 @@ import { newCompletionPaneIds, notifyPaneCompletion } from './notifications/comp
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
+const SettingsDialog = lazy(() => import('./components/SettingsDialog').then((module) => ({ default: module.SettingsDialog })))
+const StartupWorkspaceDialog = lazy(() => import('./components/StartupWorkspaceDialog').then((module) => ({ default: module.StartupWorkspaceDialog })))
+const WorkspaceCreateDialog = lazy(() => import('./components/WorkspaceCreateDialog').then((module) => ({ default: module.WorkspaceCreateDialog })))
+const WorkspaceSettingsDialog = lazy(() => import('./components/WorkspaceSettingsDialog').then((module) => ({ default: module.WorkspaceSettingsDialog })))
+const ImportReposDialog = lazy(() => import('./components/workspaces/ImportReposDialog').then((module) => ({ default: module.ImportReposDialog })))
+const ResourceMonitorDialog = lazy(() => import('./components/ResourceMonitorDialog').then((module) => ({ default: module.ResourceMonitorDialog })))
+const CompletionHistoryDialog = lazy(() => import('./components/notifications/CompletionHistoryDialog').then((module) => ({ default: module.CompletionHistoryDialog })))
+const CaptureAnnotator = lazy(() => import('./components/CaptureAnnotator.tsx').then((module) => ({ default: module.CaptureAnnotator })))
+const SetupWizard = lazy(() => import('./components/SetupWizard').then((module) => ({ default: module.SetupWizard })))
+const BugReportDialog = lazy(() => import('./components/BugReportDialog').then((module) => ({ default: module.BugReportDialog })))
+
 
 
 type CaptureShortcutAction = 'captureImage' | 'captureQuickImage' | 'captureVideo'
@@ -105,6 +107,7 @@ function App() {
   const [workspaceLocalInteractionSuspended, setWorkspaceLocalInteractionSuspended] = useState(false)
 
   const [isResourceMonitorOpen, setIsResourceMonitorOpen] = useState(false)
+  const [isCompletionHistoryOpen, setIsCompletionHistoryOpen] = useState(false)
   const [ffmpegNotice, setFfmpegNotice] = useState<string | null>(null)
   const [ffmpegDownload, setFfmpegDownload] = useState<FfmpegDownloadProgress | null>(null)
   const [recordingStartedAtMs, setRecordingStartedAtMs] = useState<number | null>(null)
@@ -227,9 +230,11 @@ function App() {
 
   useEffect(() => {
     if (status !== 'ready') return undefined
-    const refresh = () => void useWorkspaceStore.getState().refreshAttentionSnapshot().catch(() => {})
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void useWorkspaceStore.getState().refreshAttentionSnapshot().catch(() => {})
+    }
     refresh()
-    const timer = window.setInterval(refresh, 5_000)
+    const timer = window.setInterval(refresh, 15_000)
     return () => window.clearInterval(timer)
   }, [status])
 
@@ -646,6 +651,15 @@ function App() {
     void openSession(sessionId)
   }, [openSession])
 
+  const activateCompletionHistoryEntry = useCallback(async (entry: CompletionHistoryEntry) => {
+    if (entry.sessionId !== useWorkspaceStore.getState().activeSessionId) await openSession(entry.sessionId)
+    contentActionsRef.current?.activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: entry.paneId }))
+    const state = useWorkspaceStore.getState()
+    state.clearPaneCompletionHighlight(entry.paneId)
+    state.markCompletionRead(entry.id)
+    setIsCompletionHistoryOpen(false)
+  }, [openSession])
+
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -819,7 +833,9 @@ function App() {
     return (
       <main className="app-shell app-shell-locked" style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
         <AppLockedScreen onReportBug={license.status?.email ? openBugReport : undefined} />
-        {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
+        <Suspense fallback={null}>
+          {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
+        </Suspense>
       </main>
     )
   }
@@ -897,6 +913,7 @@ function App() {
             />
           </div>
         )}
+        <Suspense fallback={null}>
         {startupDialogVisible ? (
           <StartupWorkspaceDialog
             sessions={orderedSessions}
@@ -907,12 +924,14 @@ function App() {
         ) : null}
         {setupWizardVisible ? <SetupWizard onComplete={() => setIsSetupWizardOpen(false)} onOpenSettings={() => openSettings()} /> : null}
         {isResourceMonitorOpen ? <ResourceMonitorDialog onClose={() => setIsResourceMonitorOpen(false)} onStopWorkspaceTerminals={clearWorkspace} onAfterRestart={reloadAfterRestart} /> : null}
+        {isCompletionHistoryOpen ? <CompletionHistoryDialog onClose={() => setIsCompletionHistoryOpen(false)} onActivate={activateCompletionHistoryEntry} /> : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={closeSettings} onRunSetupWizard={runSetupWizardAgain} initialSection={settingsSection ?? 'account'} /> : null}
         {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
         {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
         {editingWorkspace ? <WorkspaceSettingsDialog session={editingWorkspace} settings={settings} onChange={updateSettings} onRename={renameSession} onClose={() => setEditingWorkspaceId(null)} /> : null}
         {isImportReposOpen ? <ImportReposDialog onClose={() => setIsImportReposOpen(false)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}
+        </Suspense>
         {ffmpegDownload ? (
           <div className="ffmpeg-download-toast" role="status" aria-live="polite">
             <span className="ffmpeg-download-title">Downloading ffmpeg… {ffmpegDownloadLabel}</span>
@@ -958,7 +977,7 @@ function App() {
             </section>
           </div>
         ) : null}
-        {status === 'ready' && !setupWizardVisible ? <StatusBar onOpenResourceMonitor={() => setIsResourceMonitorOpen(true)} /> : null}
+        {status === 'ready' && !setupWizardVisible ? <StatusBar onOpenCompletionHistory={() => setIsCompletionHistoryOpen(true)} onOpenResourceMonitor={() => setIsResourceMonitorOpen(true)} /> : null}
       </section>
     </main>
     {dirtyEditorPrompt && typeof document !== 'undefined' ? createPortal(

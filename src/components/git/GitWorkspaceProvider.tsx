@@ -18,6 +18,8 @@ import type {
   UnifiedFileDiff,
   GitHunkAction,
 } from '../../ipc/types'
+import { sendAgentPromptToPane } from '../../ipc/panes'
+import { setWorktreeReviewCommentState, type WorktreeReviewCommentState } from '../../ipc/worktrees'
 import { discoverRepos, type DiscoveredRepo } from '../../ipc/gitDiscovery'
 import { useWorkspaceContentActions } from '../../layout/contentActions'
 import { useExplorerStore } from '../../state/explorer'
@@ -31,11 +33,13 @@ import {
   type GitTab,
 } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
+import { isAgentPane } from '../../state/profiles'
 import { worktreeBySession, type WorktreeCheckpoint, type WorktreeReviewComment } from '../../state/worktrees'
 import { QuickPick } from '../QuickPick'
-import { confirmDialog, promptDialog } from '../appDialogStore'
+import { choiceDialog, confirmDialog, promptDialog } from '../appDialogStore'
 import type { PickerEntry } from '../pickerModel'
 import { computeGraphLanes, type GraphLanes } from './graphLanes'
+import { buildReviewPrompt } from '../workspaces/reviewPrompt'
 import type {
   BranchRowAction,
   BranchRowView,
@@ -224,6 +228,8 @@ export type GitWorkspaceController = {
   reviewLoading: boolean
   reviewError: string | null
   refreshReview: () => Promise<void>
+  sendReviewCommentsToAgent: (commentIds: string[]) => Promise<void>
+  setReviewCommentState: (commentIds: string[], state: WorktreeReviewCommentState) => Promise<void>
   selectHunk: (hunkId: string) => void
   applyHunk: (action: GitHunkAction) => void
   commentHunk: () => void
@@ -278,7 +284,7 @@ export type GitWorkspaceProviderProps = {
 }
 
 
-export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWorkspaceProviderProps) {
+export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitWorkspaceProviderProps) {
   "use no memo"
   const contentActions = useWorkspaceContentActions()
   const sessionId = useWorkspaceStore((state) => state.activeSessionId ?? null)
@@ -469,11 +475,8 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
 
   const refresh = useCallback(async () => {
     if (!entitled || !sessionId) return
-    await Promise.all([
-      refreshRepository(sessionId, workspaceFolder, activeRepoRoot),
-      refreshHosting(sessionId, workspaceFolder, 'HEAD', false, activeRepoRoot),
-    ])
-  }, [activeRepoRoot, entitled, refreshHosting, refreshRepository, sessionId, workspaceFolder])
+    await refreshRepository(sessionId, workspaceFolder, activeRepoRoot)
+  }, [activeRepoRoot, entitled, refreshRepository, sessionId, workspaceFolder])
 
   useEffect(() => {
     if (!entitled || !sessionId) return
@@ -488,6 +491,12 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
       window.removeEventListener('focus', refreshVisible)
     }
   }, [entitled, pollIntervalMs, refresh, sessionId])
+  useEffect(() => {
+    if (!entitled || !sessionId) return
+    if (!repoInfo?.headSha && gitState.activeTab !== 'assigned') return
+    void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, activeRepoRoot)
+  }, [activeRepoRoot, entitled, gitState.activeTab, refreshHosting, repoInfo?.headSha, sessionId, workspaceFolder])
+
 
   useEffect(() => {
     setDiscoveredRepositoryTargets([])
@@ -624,6 +633,52 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
   }, [saveReviewComment, selectedHunkId, selectedPath])
 
   const selectedHunkComments = useMemo(() => reviewComments.filter((comment) => comment.path === selectedPath && comment.hunkId === selectedHunkId && isCurrentReviewComment(comment, reviewIdentity, reviewAnchorKeys)), [reviewAnchorKeys, reviewComments, reviewIdentity, selectedHunkId, selectedPath])
+
+  const setReviewCommentState = useCallback(async (commentIds: string[], state: WorktreeReviewCommentState) => {
+    if (!activeWorktree) {
+      setReviewError('Import this checkout before updating review comments.')
+      return
+    }
+    try {
+      setReviewError(null)
+      setReviewComments(await setWorktreeReviewCommentState({
+        worktreeId: activeWorktree.id,
+        expectedInstanceId: activeWorktree.instanceId,
+        commentIds,
+        state,
+      }))
+    } catch (reason) {
+      setReviewError(String(reason))
+    }
+  }, [activeWorktree])
+
+  const sendReviewCommentsToAgent = useCallback(async (commentIds: string[]) => {
+    const selected = commentIds.flatMap((id) => {
+      const comment = reviewComments.find((candidate) => candidate.id === id)
+      return comment && isCurrentReviewComment(comment, reviewIdentity, reviewAnchorKeys) ? [comment] : []
+    })
+    if (selected.length === 0) {
+      setReviewError('Select at least one current review comment.')
+      return
+    }
+    const { panes, settings } = useWorkspaceStore.getState()
+    const eligiblePanes = Object.values(panes).filter((pane) => pane.alive && isAgentPane(pane, settings))
+    if (eligiblePanes.length === 0 || !sessionId) {
+      setReviewError('No live agent pane in this workspace.')
+      return
+    }
+    const paneId = eligiblePanes.length === 1
+      ? eligiblePanes[0].id
+      : await choiceDialog({ title: 'Send review comments to', choices: eligiblePanes.map((pane) => ({ id: pane.id, label: pane.config.title ?? 'Terminal' })) })
+    if (!paneId) return
+    try {
+      setReviewError(null)
+      await sendAgentPromptToPane(sessionId, paneId, buildReviewPrompt(selected))
+      await setReviewCommentState(selected.map((comment) => comment.id), 'sent')
+    } catch (reason) {
+      setReviewError(String(reason))
+    }
+  }, [reviewAnchorKeys, reviewComments, reviewIdentity, sessionId, setReviewCommentState])
 
   // Clicking a change/commit/PR file is a DIFF gesture, not a navigation
   // gesture: it must not yank the left rail from Source Control over to
@@ -1245,6 +1300,8 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     reviewLoading,
     reviewError,
     refreshReview,
+    sendReviewCommentsToAgent,
+    setReviewCommentState,
     selectHunk: setSelectedHunkId,
     applyHunk,
     commentHunk,
@@ -1323,6 +1380,8 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 3_000 }: GitWo
     reviewIdentity,
     reviewLoading,
     reviewWarning,
+    sendReviewCommentsToAgent,
+    setReviewCommentState,
     repository,
     repositoryDiscoveryError,
     repositoryDiscoveryLoading,

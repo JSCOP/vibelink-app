@@ -13,6 +13,14 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCOUNT_LABEL_KEYS: [&str; 6] = [
+    "email",
+    "account_email",
+    "accountEmail",
+    "account",
+    "user",
+    "username",
+];
 
 #[derive(Clone, Copy)]
 struct AgentProbe {
@@ -63,6 +71,7 @@ pub struct AgentCliStatus {
     pub path: Option<String>,
     pub version: Option<String>,
     pub auth: AuthState,
+    pub account_label: Option<String>,
     pub login_hint: String,
 }
 
@@ -95,13 +104,17 @@ fn probe_agent(probe: &AgentProbe) -> Result<AgentCliStatus> {
         .as_deref()
         .and_then(|path| run_version_probe(Path::new(path), VERSION_TIMEOUT).ok())
         .and_then(first_non_empty_line);
-    let auth = probe.auth_file.map_or(AuthState::Unknown, |relative| {
+    let auth_path = probe.auth_file.and_then(|relative| {
         user_home()
             .map(|home| home.join(relative))
             .filter(|path| path.is_file())
-            .map(|_| AuthState::LoggedIn)
-            .unwrap_or(AuthState::Unknown)
     });
+    let auth = if auth_path.is_some() {
+        AuthState::LoggedIn
+    } else {
+        AuthState::Unknown
+    };
+    let account_label = auth_path.as_deref().and_then(read_account_label);
 
     Ok(AgentCliStatus {
         id: probe.id.to_string(),
@@ -110,8 +123,42 @@ fn probe_agent(probe: &AgentProbe) -> Result<AgentCliStatus> {
         path,
         version,
         auth,
+        account_label,
         login_hint: probe.login_hint.to_string(),
     })
+}
+
+fn read_account_label(path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str(&contents).ok()?;
+    account_label_from_value(&value)
+}
+
+fn account_label_from_value(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    for key in ACCOUNT_LABEL_KEYS {
+        if let Some(label) = object.get(key).and_then(non_empty_json_string) {
+            return Some(label.to_string());
+        }
+    }
+    object
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .find_map(|nested| {
+            ACCOUNT_LABEL_KEYS.iter().find_map(|key| {
+                nested
+                    .get(*key)
+                    .and_then(non_empty_json_string)
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn non_empty_json_string(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn run_version_probe(program: &Path, timeout: Duration) -> Result<String> {
@@ -205,6 +252,28 @@ mod tests {
         );
         assert_eq!(AGENT_PROBES[1].login_hint, "codex login");
         assert_eq!(AGENT_PROBES[3].login_hint, "opencode auth login");
+    }
+
+    #[test]
+    fn account_label_reads_only_supported_string_fields() {
+        assert_eq!(
+            account_label_from_value(&serde_json::json!({
+                "token": "secret",
+                "profile": { "username": "nested-user" }
+            })),
+            Some("nested-user".to_string())
+        );
+        assert_eq!(
+            account_label_from_value(&serde_json::json!({
+                "email": " direct@example.com ",
+                "profile": { "account": "nested" }
+            })),
+            Some("direct@example.com".to_string())
+        );
+        assert_eq!(
+            account_label_from_value(&serde_json::json!({ "access_token": "secret" })),
+            None
+        );
     }
 
     #[test]

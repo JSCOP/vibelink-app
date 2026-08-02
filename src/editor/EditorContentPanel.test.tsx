@@ -7,7 +7,7 @@ const { invoke, registerThemes, setTheme } = vi.hoisted(() => ({ invoke: vi.fn()
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('@monaco-editor/react', () => ({ default: () => null }))
 vi.mock('./monaco', () => ({ monaco: { editor: { setTheme, defineTheme: vi.fn() } } }))
-vi.mock('./monacoTheme', () => ({
+vi.mock('./editorTheme', () => ({
   registerVibeLinkMonacoThemes: registerThemes,
   vibeLinkMonacoThemeName: (themeId: string) => themeId === 'oneHalfLight' ? 'vibelink-light' : 'vibelink-dark',
 }))

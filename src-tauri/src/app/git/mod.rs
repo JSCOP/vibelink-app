@@ -29,11 +29,12 @@ use self::worktree_registry::{
     WorktreeImportRequest, WorktreeListRequest, WorktreeMoveRequest, WorktreeOperationIdRequest,
     WorktreeProjection, WorktreeReconcileRequest, WorktreeRemovalPreflight,
     WorktreeRemovalPreflightRequest, WorktreeRemovalResult, WorktreeRemoveRequest,
-    WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetRequest,
-    WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT, WORKTREE_METHOD_CHECKPOINTS,
-    WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT, WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE,
-    WORKTREE_METHOD_PREFLIGHT_REMOVE, WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE,
-    WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
+    WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeReviewCommentStateRequest,
+    WorktreeSetRequest, WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT,
+    WORKTREE_METHOD_CHECKPOINTS, WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT,
+    WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE, WORKTREE_METHOD_PREFLIGHT_REMOVE,
+    WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE, WORKTREE_METHOD_REVIEW_COMMENTS,
+    WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_REVIEW_COMMENT_STATE, WORKTREE_METHOD_SET,
 };
 use super::daemon_client::DaemonClient;
 use super::{authorization::Capability, entitlement::EntitlementSupervisor};
@@ -116,6 +117,7 @@ fn daemon_worktree_timeout(method: &str) -> Duration {
         | WORKTREE_METHOD_CHECKPOINT
         | WORKTREE_METHOD_CHECKPOINTS
         | WORKTREE_METHOD_REVIEW_COMMENT_PUT
+        | WORKTREE_METHOD_REVIEW_COMMENT_STATE
         | WORKTREE_METHOD_REVIEW_COMMENTS => Duration::from_secs(60),
         _ => Duration::from_secs(10),
     }
@@ -321,6 +323,23 @@ pub fn worktree_review_comment_create(
         &client,
         Uuid::new_v4(),
         WORKTREE_METHOD_REVIEW_COMMENT_PUT,
+        &request,
+    )
+}
+
+#[tauri::command]
+pub fn worktree_review_comment_set_state(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+    request: WorktreeReviewCommentStateRequest,
+) -> Result<Vec<WorktreeReviewComment>, String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    daemon_worktree_request(
+        &client,
+        Uuid::new_v4(),
+        WORKTREE_METHOD_REVIEW_COMMENT_STATE,
         &request,
     )
 }

@@ -2,30 +2,21 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import 'dockview-react/dist/styles/dockview.css'
-import './editor/monaco'
 import './index.css'
-import App from './App.tsx'
-import CaptureOverlay from './components/CaptureOverlay.tsx'
 import { applyCaptureOverlayTransparency, isCaptureOverlayLabel } from './components/captureOverlay.ts'
 
 const isOverlay = isCaptureOverlayLabel(getCurrentWindow().label)
-
-if (isOverlay) {
-  applyCaptureOverlayTransparency()
-}
+if (isOverlay) applyCaptureOverlayTransparency()
 
 if (import.meta.env.DEV) {
   document.title = 'VibeLink Dev'
-  // Live-debug handle for the WebView2 devtools (Ctrl+Shift+I in dev builds):
-  // lets a stuck pane be inspected in place, e.g.
-  //   __vibelinkDebug.TerminalManager.getOrCreate('<pane-id>').term.buffer.active.type
   void import('./terminal/TerminalManager').then(({ TerminalManager }) => {
-    ;(window as unknown as { __vibelinkDebug?: unknown }).__vibelinkDebug = { TerminalManager }
+    Object.assign(window, { __vibelinkDebug: { TerminalManager } })
   })
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    {isOverlay ? <CaptureOverlay /> : <App />}
-  </StrictMode>,
-)
+const root = createRoot(document.getElementById('root')!)
+const loadRoot = isOverlay
+  ? import('./components/CaptureOverlay.tsx').then((module) => module.default)
+  : import('./App.tsx').then((module) => module.default)
+void loadRoot.then((Root) => root.render(<StrictMode><Root /></StrictMode>))

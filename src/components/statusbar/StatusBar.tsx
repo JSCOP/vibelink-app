@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Activity, GitBranch, SquareTerminal } from 'lucide-react'
+import { Activity, Bell, GitBranch, SquareTerminal } from 'lucide-react'
 import { useGitStore } from '../../state/git'
 import { useWorkspaceStore } from '../../state/store'
 import type { ResourceSnapshot } from '../../ipc/types'
 import './statusbar.css'
 
-const RESOURCE_POLL_MS = 5_000
+const RESOURCE_POLL_MS = 15_000
 
 export type StatusBarProps = {
   onOpenResourceMonitor: () => void
+  onOpenCompletionHistory: () => void
 }
 
 const formatMiB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`
@@ -17,10 +18,12 @@ const formatMiB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`
 /** Bottom status strip: workspace + branch on the left, live pane count and a
  *  resource summary on the right. Read-only; the resource poll pauses while
  *  the window is hidden so the bar costs nothing in the background. */
-export function StatusBar({ onOpenResourceMonitor }: StatusBarProps) {
+export function StatusBar({ onOpenResourceMonitor, onOpenCompletionHistory }: StatusBarProps) {
   const session = useWorkspaceStore((state) => state.sessions.find((entry) => entry.id === state.activeSessionId))
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const livePaneCount = useWorkspaceStore((state) => Object.values(state.panes).filter((pane) => pane.alive).length)
+  const completionHistoryCount = useWorkspaceStore((state) => state.completionHistory.length)
+  const unreadCompletionCount = useWorkspaceStore((state) => state.completionHistory.filter((entry) => !entry.read).length)
   const repoInfo = useGitStore((state) => (activeSessionId ? state.sessions[activeSessionId]?.repositories['']?.repoInfo ?? null : null))
   const [resources, setResources] = useState<ResourceSnapshot | null>(null)
 
@@ -38,9 +41,11 @@ export function StatusBar({ onOpenResourceMonitor }: StatusBarProps) {
     }
     void poll()
     timer = window.setInterval(() => void poll(), RESOURCE_POLL_MS)
+    window.addEventListener('focus', poll)
     return () => {
       cancelled = true
       window.clearInterval(timer)
+      window.removeEventListener('focus', poll)
     }
   }, [])
 
@@ -61,6 +66,7 @@ export function StatusBar({ onOpenResourceMonitor }: StatusBarProps) {
         <SquareTerminal size={12} aria-hidden="true" />
         {livePaneCount} {livePaneCount === 1 ? 'pane' : 'panes'}
       </span>
+      {completionHistoryCount > 0 ? <button type="button" className="statusbar-segment" title="Open completion history" onClick={onOpenCompletionHistory}><Bell size={12} aria-hidden="true" />{unreadCompletionCount}</button> : null}
       <button type="button" className="statusbar-segment statusbar-resources" title="Open resource monitor" onClick={onOpenResourceMonitor}>
         <Activity size={12} aria-hidden="true" />
         {resources ? `${formatMiB(resources.totalMemBytes)} · ${processCount} processes` : 'Resources…'}

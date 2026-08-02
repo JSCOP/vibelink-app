@@ -190,7 +190,9 @@ mod tests {
             version: "0.0.1".to_string(),
             release_notes_url: "https://vibelink.moobang.net/releases".to_string(),
             download_url: "https://vibelink.moobang.net/download".to_string(),
-            installer_url: Some("https://vibelink.moobang.net/api/download/windows-exe".to_string()),
+            installer_url: Some(
+                "https://vibelink.moobang.net/api/download/windows-exe".to_string(),
+            ),
         });
         assert!(!status.update_available);
         assert_eq!(

@@ -35,11 +35,12 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 import { defaultSettings, normalizeSettings } from '../state/profiles'
 import { SettingsDialog } from './SettingsDialog'
 import { useWorkspaceStore } from '../state/store'
+const originalSpawnPane = useWorkspaceStore.getState().spawnPane
 
 afterEach(() => {
   cleanup()
   invoke.mockClear()
-  useWorkspaceStore.setState({ sessions: [], activeSessionId: undefined })
+  useWorkspaceStore.setState({ sessions: [], activeSessionId: undefined, agentClis: [], spawnPane: originalSpawnPane })
 })
 
 describe('SettingsDialog preferences', () => {
@@ -199,5 +200,41 @@ describe('SettingsDialog preferences', () => {
     const row = await screen.findByText('Oh My Pi')
     const icon = row.closest('.vl-set-agent')?.querySelector('img')
     expect(icon).toHaveAttribute('src', '/agent-icons/oh-my-pi.svg')
+  })
+
+  test('shows the provider account and runs the provider-owned login command', async () => {
+    const spawnPane = vi.fn(async () => ({ id: 'login-pane' } as never))
+    useWorkspaceStore.setState({
+      sessions: [{ id: 'repo', name: 'Repository', paneCount: 0, createdAt: 1, workspaceFolder: 'E:/repo' }],
+      activeSessionId: 'repo',
+      agentClis: [{
+        id: 'codex',
+        displayName: 'Codex',
+        installed: true,
+        path: 'codex.cmd',
+        version: '1.0',
+        auth: 'loggedIn',
+        accountLabel: 'account@example.com',
+        loginHint: 'codex login',
+      }],
+      spawnPane,
+    })
+    render(
+      <SettingsDialog
+        settings={normalizeSettings(defaultSettings)}
+        onChange={vi.fn()}
+        onClose={vi.fn()}
+        onRunSetupWizard={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
+    expect(await screen.findByText('Installed · account@example.com')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in / switch account' }))
+    await waitFor(() => expect(spawnPane).toHaveBeenCalledWith('repo', expect.objectContaining({
+      shell: 'codex',
+      args: ['login'],
+      title: 'Codex login',
+    })))
   })
 })

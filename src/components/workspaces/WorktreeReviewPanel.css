@@ -32,6 +32,18 @@
 .worktree-review-section[data-stale] { background: color-mix(in srgb, var(--vibelink-warning) 5%, transparent); }
 .worktree-review-checkpoints li { grid-template-columns: auto minmax(0, 1fr) auto; }
 .worktree-review-checkpoints li small { grid-column: 1 / -1; }
+.worktree-review-section > header { align-items: center; display: flex; gap: 8px; justify-content: space-between; margin-bottom: 6px; }
+.worktree-review-section > header h3 { margin: 0; }
+.worktree-review-section button { align-items: center; display: inline-flex; font-size: 10px; gap: 4px; }
+.worktree-review-select { align-items: flex-start; display: flex; gap: 6px; }
+.worktree-review-select span { overflow-wrap: anywhere; }
+.worktree-review-select input { margin-top: 2px; }
+.worktree-review-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.worktree-review-chip { background: color-mix(in srgb, var(--vibelink-accent) 16%, transparent); border-radius: 999px; color: var(--vibelink-accent); display: inline-block; font-size: 9px; margin-right: 5px; padding: 1px 5px; text-transform: capitalize; }
+.worktree-review-section li > div:first-child { min-width: 0; }
+.worktree-review-section li > div:first-child blockquote { display: inline; }
+.worktree-review-closed summary { cursor: pointer; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.worktree-review-closed[open] summary { margin-bottom: 6px; }
 
 @media (max-width: 900px) {
   .worktree-review-sections { grid-template-columns: 1fr; }

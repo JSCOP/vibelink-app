@@ -93,6 +93,7 @@ import { AndroidDeviceLabPanel } from './AndroidDeviceLabPanel'
 import { addCustomCompletionSound, builtInCompletionSounds, defaultCompletionSoundId, listCustomCompletionSounds, playCompletionSound, removeCustomCompletionSound, type CompletionSoundId, type CustomCompletionSound } from '../notifications/completionSounds'
 import { agentHookStatus, setAgentHookEnabled, type AgentHookStatus } from '../ipc/agentHooks'
 import { agentStatusLabel } from '../ipc/agents'
+import { onTerminalExited } from '../ipc/output'
 import {
   SettingsButton,
   SettingsCard,
@@ -161,6 +162,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
   const [worktreeResolution, setWorktreeResolution] = useState<WorktreeStorageResolution | null>(null)
   const [worktreeResolutionError, setWorktreeResolutionError] = useState('')
   const worktreeResolutionRequestRef = useRef(0)
+  const loginPaneIdsRef = useRef(new Set<string>())
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const spawnPane = useWorkspaceStore((state) => state.spawnPane)
@@ -226,6 +228,11 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
       .catch(() => { if (!cancelled) setWorktreeStorageOptions({ drives: [], appDataRoot: '' }) })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => onTerminalExited((paneId) => {
+    if (!loginPaneIdsRef.current.delete(paneId)) return
+    void refreshAgentClis().catch((error) => setAgentHookMessage(String(error)))
+  }), [refreshAgentClis])
 
   useEffect(() => {
     let cancelled = false
@@ -418,19 +425,22 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
       setTerminalMessage(String(error))
     }
   }
-  /** Runs the agent's own login command in a real pane; VibeLink never stores agent credentials. */
+  /** Runs the agent's own login command in a real pane; VibeLink never sees the credential. */
   const openAgentLogin = async (agentId: string, displayName: string, loginHint: string) => {
     if (!activeSessionId) return
+    const [shell, ...args] = loginHint.trim().split(/\s+/)
+    if (!shell) return
     setAgentBusy(true)
     setAgentHookMessage('')
     try {
-      await spawnPane(activeSessionId, {
-        shell: 'pwsh.exe',
-        args: ['-NoLogo', '-NoExit', '-Command', `${loginHint}; Write-Host 'Return to VibeLink and refresh when login is complete.'`],
+      const pane = await spawnPane(activeSessionId, {
+        shell,
+        args,
         cwd: activeSession?.workspaceFolder ?? null,
         title: `${displayName} login`,
         icon: agentIconName(agentId),
       })
+      loginPaneIdsRef.current.add(pane.id)
     } catch (error) {
       setAgentHookMessage(String(error))
     } finally {
@@ -629,10 +639,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                         <SettingsPill icon={Sparkles}>Hook available</SettingsPill>
                       ) : !agent.cli.installed ? (
                         <SettingsPill icon={CircleX}>Not found</SettingsPill>
-                      ) : agent.cli.auth !== 'loggedIn' ? (
-                        <SettingsButton icon={LogIn} label="Log in" title={`Run ${agent.cli.loginHint} in a terminal`} disabled={agentBusy || !activeSessionId} onClick={() => void openAgentLogin(agent.id, agent.displayName, agent.cli?.loginHint ?? agent.id)} />
                       ) : (
-                        <SettingsPill tone="ok" icon={CircleCheck}>Ready</SettingsPill>
+                        <SettingsButton icon={LogIn} label="Sign in / switch account" title={`Run ${agent.cli.loginHint} in a terminal`} disabled={agentBusy || !activeSessionId} onClick={() => void openAgentLogin(agent.id, agent.displayName, agent.cli?.loginHint ?? agent.id)} />
                       )}
                       {agent.hook ? (
                         <SettingsSwitch

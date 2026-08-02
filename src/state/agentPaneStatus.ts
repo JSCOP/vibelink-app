@@ -72,7 +72,7 @@ export type AgentPaneStatusInput = {
   alive: boolean
   title?: string | null
   /** Daemon dispatch projection for this pane, when the snapshot carries one. */
-  attention?: NativeAttentionPane
+  attention?: Pick<NativeAttentionPane, 'state' | 'stateUpdatedAt'>
   /** Local typed-prompt evidence that a turn started. */
   activity?: AgentPaneActivity
   /** Unacknowledged completion alert for this pane. */

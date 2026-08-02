@@ -27,7 +27,8 @@ export function useAgentPaneStatus(paneId: string | null | undefined): AgentPane
   const pane = useWorkspaceStore((state) => paneId ? state.panes[paneId] : undefined)
   const settings = useWorkspaceStore((state) => state.settings)
   const activity = useWorkspaceStore((state) => paneId ? state.paneAgentActivity[paneId] : undefined)
-  const attentionSnapshot = useWorkspaceStore((state) => state.attentionSnapshot)
+  const attentionState = useWorkspaceStore((state) => paneId ? state.attentionSnapshot?.panes.find((entry) => entry.paneId === paneId)?.state : undefined)
+  const attentionUpdatedAt = useWorkspaceStore((state) => paneId ? state.attentionSnapshot?.panes.find((entry) => entry.paneId === paneId)?.stateUpdatedAt ?? 0 : 0)
   const completed = useWorkspaceStore((state) => paneId ? Boolean(state.paneCompletionHighlights[paneId]) : false)
   return useMemo(() => {
     if (!pane || !paneId) return null
@@ -35,10 +36,10 @@ export function useAgentPaneStatus(paneId: string | null | undefined): AgentPane
       isAgentPane: isAgentPane(pane, settings),
       alive: pane.alive,
       title: pane.config.title,
-      attention: attentionSnapshot?.panes.find((entry) => entry.paneId === paneId),
+      attention: attentionState ? { state: attentionState, stateUpdatedAt: attentionUpdatedAt } : undefined,
       activity,
       completed,
     })
     return status.state === 'idle' ? null : status
-  }, [activity, attentionSnapshot, completed, pane, paneId, settings])
+  }, [activity, attentionState, attentionUpdatedAt, completed, pane, paneId, settings])
 }

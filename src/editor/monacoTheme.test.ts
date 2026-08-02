@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import { terminalThemeDefinitionById } from '../state/terminalThemes'
-import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './monacoTheme'
+import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './editorTheme'
 
 describe('VibeLink Monaco themes', () => {
   test('defines synchronized dark and light themes from terminal palettes', () => {

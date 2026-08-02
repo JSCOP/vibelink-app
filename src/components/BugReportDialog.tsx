@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core'
+import { save } from '@tauri-apps/plugin-dialog'
 import { useState } from 'react'
 import { Bug, X } from 'lucide-react'
 import { submitBugReport, type BugReportInput } from '../ipc/bugReports'
@@ -20,6 +22,7 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
   const [stepsToReproduce, setStepsToReproduce] = useState('')
   const [contactAllowed, setContactAllowed] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [exportBusy, setExportBusy] = useState(false)
 
   const submit = () => {
     setBusy(true)
@@ -39,6 +42,23 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
       toast.error(String(error))
       setBusy(false)
     })
+  }
+
+  const exportDiagnostics = async () => {
+    const destination = await save({
+      defaultPath: 'vibelink-diagnostics.zip',
+      filters: [{ name: 'Zip', extensions: ['zip'] }],
+    })
+    if (!destination) return
+    setExportBusy(true)
+    try {
+      const savedPath = await invoke<string>('export_diagnostics', { destination })
+      toast.success(`Diagnostics saved · ${savedPath}`)
+    } catch (error) {
+      toast.error(String(error))
+    } finally {
+      setExportBusy(false)
+    }
   }
 
   return (
@@ -80,6 +100,7 @@ export function BugReportDialog({ onClose }: { onClose: () => void }) {
           <footer className="settings-dialog-footer">
             <span>Do not include passwords, tokens, or private terminal output.</span>
             <div className="vibelink-settings-actions">
+              <button type="button" className="secondary-action" disabled={exportBusy} onClick={() => void exportDiagnostics()}>{exportBusy ? 'Exporting…' : 'Export diagnostics…'}</button>
               <button type="button" className="secondary-action" onClick={onClose}>Cancel</button>
               <button type="submit" className="primary-action" disabled={busy}>{busy ? 'Submitting…' : 'Submit report'}</button>
             </div>

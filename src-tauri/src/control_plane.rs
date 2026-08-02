@@ -11,7 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const CONTROL_SCHEMA_VERSION: i64 = 9;
+const CONTROL_SCHEMA_VERSION: i64 = 10;
 const MAX_BACKUPS: usize = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -884,6 +884,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         // v9 removes every persisted automation/completion alert from the former hookless path.
         connection.execute("DELETE FROM notifications", [])?;
     }
+    migrate_worktree_review_state_v10(connection)?;
     connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
     Ok(())
 }
@@ -1055,7 +1056,8 @@ fn migrate_worktree_schema_v4(connection: &Connection) -> Result<()> {
           hunk_id TEXT,
           body TEXT NOT NULL,
           created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
+          updated_at INTEGER NOT NULL,
+          state TEXT NOT NULL DEFAULT 'open'
         );
         PRAGMA user_version = 4;
         COMMIT;",
@@ -1082,6 +1084,21 @@ fn migrate_worktree_identity_v5(connection: &Connection) -> Result<()> {
     }
     migration.push_str("PRAGMA user_version = 5;\nCOMMIT;");
     connection.execute_batch(&migration)?;
+    Ok(())
+}
+
+fn migrate_worktree_review_state_v10(connection: &Connection) -> Result<()> {
+    if !table_exists(connection, "worktree_review_comments")?
+        || table_has_column(connection, "worktree_review_comments", "state")?
+    {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+        ALTER TABLE worktree_review_comments ADD COLUMN state TEXT NOT NULL DEFAULT 'open';
+        PRAGMA user_version = 10;
+        COMMIT;",
+    )?;
     Ok(())
 }
 

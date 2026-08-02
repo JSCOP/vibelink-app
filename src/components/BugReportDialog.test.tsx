@@ -3,6 +3,10 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const invoke = vi.hoisted(() => vi.fn())
+const save = vi.hoisted(() => vi.fn())
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ save }))
 const submitBugReport = vi.hoisted(() => vi.fn())
 vi.mock('../ipc/bugReports', () => ({ submitBugReport }))
 const toastSuccess = vi.hoisted(() => vi.fn())
@@ -16,6 +20,8 @@ describe('BugReportDialog', () => {
     submitBugReport.mockReset()
     toastSuccess.mockReset()
     toastError.mockReset()
+    invoke.mockReset()
+    save.mockReset()
   })
   afterEach(cleanup)
 
@@ -48,5 +54,22 @@ describe('BugReportDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit report' }))
 
     await waitFor(() => expect(toastError).toHaveBeenCalledWith('Error: Daily report limit reached'))
+  })
+
+  it('exports a diagnostic ZIP without attaching it to the report', async () => {
+    save.mockResolvedValue('C:\\Temp\\vibelink-diagnostics.zip')
+    invoke.mockResolvedValue('C:\\Temp\\vibelink-diagnostics.zip')
+    render(<BugReportDialog onClose={() => undefined} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export diagnostics…' }))
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith({
+      defaultPath: 'vibelink-diagnostics.zip',
+      filters: [{ name: 'Zip', extensions: ['zip'] }],
+    }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('export_diagnostics', {
+      destination: 'C:\\Temp\\vibelink-diagnostics.zip',
+    }))
+    expect(submitBugReport).not.toHaveBeenCalled()
   })
 })

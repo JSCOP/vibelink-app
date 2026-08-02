@@ -25,6 +25,7 @@ export type {
   WorktreeRemovalPreflight,
   WorktreeRemovalResult,
   WorktreeReviewComment,
+  WorktreeReviewCommentState,
   WorktreeSetupPolicy,
 } from '../ipc/worktrees'
 

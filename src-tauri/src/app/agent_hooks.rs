@@ -1922,9 +1922,7 @@ mod tests {
             HookKind::Json(_) | HookKind::KimiToml => {
                 render_managed_script(spec).expect("render managed script")
             }
-            HookKind::DropIn(kind) => {
-                render_drop_in_hook(spec, kind).expect("render drop-in hook")
-            }
+            HookKind::DropIn(kind) => render_drop_in_hook(spec, kind).expect("render drop-in hook"),
             HookKind::HermesPlugin => {
                 let cli = hook_cli_path().expect("resolve hook cli");
                 render_hermes_plugin(&cli)
@@ -1948,7 +1946,6 @@ mod tests {
                 && after.is_none_or(|character| !is_name_character(character))
         })
     }
-
 
     #[test]
     fn supported_hook_agents_match_orca_event_source_parity() {
@@ -2115,7 +2112,6 @@ mod tests {
             });
         }
     }
-
 
     #[test]
     fn antigravity_script_rejects_non_idle_stop() {

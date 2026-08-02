@@ -1,5 +1,7 @@
 import {
   createContext,
+  lazy,
+  Suspense,
   useContext,
   useCallback,
   useEffect,
@@ -27,8 +29,6 @@ import { WorkspaceAddMenu } from '../components/WorkspaceAddMenu'
 import { QuickPick } from '../components/QuickPick'
 import { isAppDialogOpen, promptDialog } from '../components/appDialogStore'
 import type { PickerEntry } from '../components/pickerModel'
-import { KanbanBoard } from '../components/KanbanBoard'
-import { TaskDiffView } from '../components/TaskDiffView'
 import { WorkbenchContentPanel as WorkbenchPanel } from '../components/git/GitWindow'
 import { ExplorerSidebarPanel, WorkspaceFilesSidebarPanel } from '../components/explorer/ExplorerWindow'
 import { PreviewContentPanel } from '../components/explorer/PreviewContentPanel'
@@ -41,16 +41,12 @@ import { WorkspaceSidebarPanelShell } from '../components/WorkspaceSidebarPanelS
 import { SidebarChromeContext } from '../components/sidebar/sidebarChrome'
 import { GitWorkspaceProvider } from '../components/git/GitWorkspaceProvider'
 import { AgentSessionsSidebar } from '../components/agent/AgentSessionsSidebar'
-import { OrchestratorChat } from '../components/OrchestratorChat'
-import { OrchestrationWorkspacePanel } from '../components/OrchestrationWorkspacePanel'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { WorkspaceFolderPrompt } from '../components/WorkspaceFolderPrompt'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { ProLockedPanel } from '../components/ProLockedPanel'
-import { BrowserContentPanel as NativeBrowserContentPanel } from '../browser/BrowserDockPanel'
 import { closeBrowserContent } from '../browser/browserContentLifecycle'
 import type { BrowserPage, BrowserProfile } from '../browser/types'
-import { EditorContentPanel } from '../editor/EditorContentPanel'
 import {
   getEditorDocumentStore,
   requestEditorDocumentClose,
@@ -133,6 +129,13 @@ import {
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { resolvePaneZoomTarget } from './paneZoom'
+const KanbanBoard = lazy(() => import('../components/KanbanBoard').then((module) => ({ default: module.KanbanBoard })))
+const TaskDiffView = lazy(() => import('../components/TaskDiffView').then((module) => ({ default: module.TaskDiffView })))
+const OrchestratorChat = lazy(() => import('../components/OrchestratorChat').then((module) => ({ default: module.OrchestratorChat })))
+const OrchestrationWorkspacePanel = lazy(() => import('../components/OrchestrationWorkspacePanel').then((module) => ({ default: module.OrchestrationWorkspacePanel })))
+const NativeBrowserContentPanel = lazy(() => import('../browser/BrowserDockPanel').then((module) => ({ default: module.BrowserContentPanel })))
+const EditorContentPanel = lazy(() => import('../editor/EditorContentPanel').then((module) => ({ default: module.EditorContentPanel })))
+
 
 type WorkspaceContentPanelProps = IDockviewPanelProps<WorkspaceContentParams>
 type TerminalContentParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
@@ -282,15 +285,15 @@ function AgentSessionsContentPanel(props: WorkspaceContentPanelProps) {
 }
 
 function AgentContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent"><ProPanelBoundary feature="VibeLink Agent"><ErrorBoundary label="VibeLink Agent panel"><OrchestratorChat /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent"><ProPanelBoundary feature="VibeLink Agent"><ErrorBoundary label="VibeLink Agent panel"><Suspense fallback={null}><OrchestratorChat /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function OrchestrationContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-orchestration"><ProPanelBoundary feature="Orchestration"><ErrorBoundary label="Orchestration panel"><OrchestrationWorkspacePanel /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-orchestration"><ProPanelBoundary feature="Orchestration"><ErrorBoundary label="Orchestration panel"><Suspense fallback={null}><OrchestrationWorkspacePanel /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function KanbanContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban"><ProPanelBoundary feature="Kanban"><ErrorBoundary label="Kanban panel"><KanbanBoard /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban"><ProPanelBoundary feature="Kanban"><ErrorBoundary label="Kanban panel"><Suspense fallback={null}><KanbanBoard /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function TodoContentPanel(props: WorkspaceContentPanelProps) {
@@ -298,7 +301,7 @@ function TodoContentPanel(props: WorkspaceContentPanelProps) {
 }
 
 function DiffContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-diff"><ProPanelBoundary feature="Task diff"><ErrorBoundary label="Diff panel"><TaskDiffView /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-diff"><ProPanelBoundary feature="Task diff"><ErrorBoundary label="Diff panel"><Suspense fallback={null}><TaskDiffView /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 type WorkspaceIntegrationContextValue = {
@@ -368,16 +371,18 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
     <WindowPanelShell panelId={props.api.id} className="workspace-window-browser">
       <ProPanelBoundary feature="Browser">
         <ErrorBoundary label="Browser panel">
-          <NativeBrowserContentPanel
-            workspaceId={workspaceId}
-            pageId={params.pageId}
-            profileId={params.profileId}
-            active={panelState.active}
-            focused={panelState.focused}
-            workspaceVisible={panelState.visible && !nativeSurfacesSuspended}
-            nativeSurfacesSuspended={nativeSurfacesSuspended}
-            onTitleChange={handleBrowserTitleChange}
-          />
+          <Suspense fallback={null}>
+            <NativeBrowserContentPanel
+              workspaceId={workspaceId}
+              pageId={params.pageId}
+              profileId={params.profileId}
+              active={panelState.active}
+              focused={panelState.focused}
+              workspaceVisible={panelState.visible && !nativeSurfacesSuspended}
+              nativeSurfacesSuspended={nativeSurfacesSuspended}
+              onTitleChange={handleBrowserTitleChange}
+            />
+          </Suspense>
         </ErrorBoundary>
       </ProPanelBoundary>
     </WindowPanelShell>
@@ -449,7 +454,7 @@ function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   if (!sessionId || !workspaceFolder || params?.kind !== 'editor') {
     return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Editor content metadata is missing.</div></WindowPanelShell>
   }
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-editor"><ProPanelBoundary feature="Editor"><ErrorBoundary label="Editor panel"><EditorContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-editor"><ProPanelBoundary feature="Editor"><ErrorBoundary label="Editor panel"><Suspense fallback={null}><EditorContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPanelComponent> = {

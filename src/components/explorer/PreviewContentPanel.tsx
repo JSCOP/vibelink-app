@@ -1,11 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { DirEntryInfo, TextFile } from '../../ipc/types'
 import { WorkspaceContentActionsContext } from '../../layout/contentActions'
 import { deriveGitDecorations, parentPath } from '../../state/explorer'
 import { emptyGitSessionState, repositoryStateFor, useGitStore } from '../../state/git'
 import { getWorkspaceSessionEpoch, getWorkspaceSessionReadyEpoch, getWorkspaceSessionTargetId, useWorkspaceStore } from '../../state/store'
 import { ExplorerViewerView } from './ExplorerViewerView'
+import { IMAGE_MIME_BY_EXTENSION } from './previewFileTypes'
+
+const MarkdownPreview = lazy(() => import('./MarkdownPreview').then((module) => ({ default: module.MarkdownPreview })))
 
 export type PreviewContentPanelProps = {
   sessionId: string
@@ -25,15 +28,6 @@ type PreviewState = {
 
 type PreviewOwnership = { sessionId: string; sessionEpoch: number; workspaceFolder: string }
 
-const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  svg: 'image/svg+xml',
-  bmp: 'image/bmp',
-}
 
 function loadingPreviewState(relPath: string): PreviewState {
   const name = relPath.split('/').pop() ?? relPath
@@ -126,6 +120,19 @@ export function PreviewContentPanel({ sessionId, workspaceFolder, relPath }: Pre
         setPreview({ requestKey: relPath, entry, textFile: null, imageSrc: `data:${IMAGE_MIME_BY_EXTENSION[extension]};base64,${base64}`, workingTreePresent: true, loading: false, error: null })
         return
       }
+      if (extension === 'pdf') {
+        if (cancelled || !ownershipIsCurrent(ownership)) return
+        setPreview({
+          requestKey: relPath,
+          entry,
+          textFile: { content: '', truncated: false, binary: true },
+          imageSrc: null,
+          workingTreePresent: true,
+          loading: false,
+          error: null,
+        })
+        return
+      }
       const textFile = await invoke<TextFile>('fs_read_text', { workspaceFolder: ownership.workspaceFolder, relPath })
       if (cancelled || !ownershipIsCurrent(ownership)) return
       setPreview({ requestKey: relPath, entry, textFile, imageSrc: null, workingTreePresent: true, loading: false, error: null })
@@ -171,6 +178,9 @@ export function PreviewContentPanel({ sessionId, workspaceFolder, relPath }: Pre
       repositoryLabel={repositoryLabel}
       entry={visiblePreview.entry}
       textFile={visiblePreview.textFile}
+      textPreview={['md', 'markdown'].includes(extensionForPath(relPath)) && visiblePreview.textFile && !visiblePreview.textFile.binary
+        ? <Suspense fallback={null}><MarkdownPreview content={visiblePreview.textFile.content} workspaceFolder={workspaceFolder} relPath={relPath} /></Suspense>
+        : undefined}
       imageSrc={visiblePreview.imageSrc}
       loading={visiblePreview.loading}
       error={visiblePreview.error}

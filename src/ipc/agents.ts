@@ -9,6 +9,7 @@ export type AgentCliStatus = {
   path?: string | null
   version?: string | null
   auth: AgentAuthState
+  accountLabel?: string | null
   loginHint: string
 }
 
@@ -18,6 +19,7 @@ export function getAgentCliStatus(): Promise<AgentCliStatus[]> {
 
 export function agentStatusLabel(status: AgentCliStatus): string {
   if (!status.installed) return 'Not found'
-  if (status.auth === 'loggedIn') return 'Installed · Logged in'
+  if (status.accountLabel) return `Installed · ${status.accountLabel}`
+  if (status.auth === 'loggedIn') return 'Installed · Signed in'
   return 'Installed · Login unknown'
 }

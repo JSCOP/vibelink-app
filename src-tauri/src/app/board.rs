@@ -345,13 +345,7 @@ fn to_string(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use crate::control_plane::ControlPlane;
-    use std::{
-        collections::HashSet,
-        fs,
-        path::PathBuf,
-        sync::Barrier,
-        thread,
-    };
+    use std::{collections::HashSet, fs, path::PathBuf, sync::Barrier, thread};
 
     fn test_data_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("vibelink-board-{label}-{}", Uuid::new_v4()))
@@ -409,9 +403,7 @@ mod tests {
         assert_eq!(board.task_order.len(), 2);
         assert_eq!(board.revision, 2);
 
-        let legacy_path = directory
-            .join("kanban")
-            .join(format!("{session_id}.json"));
+        let legacy_path = directory.join("kanban").join(format!("{session_id}.json"));
         assert!(!legacy_path.exists());
         assert!(!legacy_path.with_extension("json.tmp").exists());
 

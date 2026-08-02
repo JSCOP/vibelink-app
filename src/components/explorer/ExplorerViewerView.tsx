@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { Copy, ExternalLink, FileCode2, FileText, Folder, GitCompare, Image as ImageIcon, LoaderCircle, Maximize2, Minimize2, PanelRightClose, Terminal, TriangleAlert } from 'lucide-react'
 import type { DirEntryInfo, TextFile } from '../../ipc/types'
 import './ExplorerViewerView.css'
@@ -11,6 +11,7 @@ export type ExplorerViewerViewProps = {
   entry: DirEntryInfo | null
   textFile: TextFile | null
   imageSrc: string | null
+  textPreview?: ReactNode
   loading: boolean
   error: string | null
   imageFit: boolean
@@ -30,7 +31,7 @@ export type ExplorerViewerViewProps = {
   onClosePreview?: () => void
 }
 
-export function ExplorerViewerView({ path, workspaceLabel, workspacePath, repositoryLabel, entry, textFile, imageSrc, loading, error, imageFit, canOpenVibeLinkEditor, canOpenExternalEditor, canOpenDiff, canOpenDefault, workingTreePresent, onToggleImageFit, onOpenVibeLinkEditor, onOpenDefault, onOpenExternalEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath, onClosePreview }: ExplorerViewerViewProps) {
+export function ExplorerViewerView({ path, workspaceLabel, workspacePath, repositoryLabel, entry, textFile, textPreview, imageSrc, loading, error, imageFit, canOpenVibeLinkEditor, canOpenExternalEditor, canOpenDiff, canOpenDefault, workingTreePresent, onToggleImageFit, onOpenVibeLinkEditor, onOpenDefault, onOpenExternalEditor, onOpenDiff, onOpenTerminal, onReveal, onCopyPath, onClosePreview }: ExplorerViewerViewProps) {
   const lineCount = useMemo(() => (textFile && !textFile.binary ? countLines(textFile.content) : null), [textFile])
   const [imageProbe, setImageProbe] = useState<{ src: string; width: number; height: number } | null>(null)
   const imageDims = imageSrc && imageProbe && imageProbe.src === imageSrc ? imageProbe : null
@@ -159,7 +160,7 @@ export function ExplorerViewerView({ path, workspaceLabel, workspacePath, reposi
               <span>Preview truncated at 2 MiB.</span>
             </div>
           ) : null}
-          <pre tabIndex={0}><code>{textFile.content}</code></pre>
+          {textPreview ?? <pre tabIndex={0}><code>{textFile.content}</code></pre>}
         </section>
       ) : null}
     </main>

@@ -31,6 +31,7 @@ pub(crate) const WORKTREE_METHOD_SET: &str = "worktree.set";
 pub(crate) const WORKTREE_METHOD_CHECKPOINT: &str = "worktree.checkpoint";
 pub(crate) const WORKTREE_METHOD_CHECKPOINTS: &str = "worktree.checkpoints";
 pub(crate) const WORKTREE_METHOD_REVIEW_COMMENT_PUT: &str = "worktree.review_comment.put";
+pub(crate) const WORKTREE_METHOD_REVIEW_COMMENT_STATE: &str = "worktree.review_comment.state";
 pub(crate) const WORKTREE_METHOD_REVIEW_COMMENTS: &str = "worktree.review_comments";
 pub(crate) const WORKTREE_METHOD_CANCEL: &str = "worktree.cancel";
 
@@ -307,6 +308,15 @@ pub struct WorktreeReviewCommentRequest {
     pub body: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeReviewCommentStateRequest {
+    pub worktree_id: String,
+    pub expected_instance_id: String,
+    pub comment_ids: Vec<String>,
+    pub state: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeCheckpoint {
@@ -335,6 +345,7 @@ pub struct WorktreeReviewComment {
     pub body: String,
     pub created_at: u64,
     pub updated_at: u64,
+    pub state: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1007,10 +1018,11 @@ impl WorktreeRegistry {
                 body,
                 created_at,
                 updated_at: now,
+                state: "open".to_string(),
             };
             if existed {
                 transaction.execute(
-                    "UPDATE worktree_review_comments SET body=?1,updated_at=?2 WHERE id=?3",
+                    "UPDATE worktree_review_comments SET body=?1,updated_at=?2,state='open' WHERE id=?3",
                     params![comment.body, comment.updated_at, comment.id],
                 )?;
                 transaction.execute(
@@ -1019,8 +1031,8 @@ impl WorktreeRegistry {
                 )?;
             } else {
                 transaction.execute(
-                    "INSERT INTO worktree_review_comments(id,worktree_id,instance_id,base_head,head,path,side,line,range_json,hunk_id,body,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                    params![comment.id, comment.worktree_id, comment.instance_id, comment.base_head, comment.head, comment.path, comment.side, comment.line, range_json, comment.hunk_id, comment.body, comment.created_at, comment.updated_at],
+                    "INSERT INTO worktree_review_comments(id,worktree_id,instance_id,base_head,head,path,side,line,range_json,hunk_id,body,created_at,updated_at,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    params![comment.id, comment.worktree_id, comment.instance_id, comment.base_head, comment.head, comment.path, comment.side, comment.line, range_json, comment.hunk_id, comment.body, comment.created_at, comment.updated_at, comment.state],
                 )?;
             }
             transaction.commit()?;
@@ -1030,15 +1042,45 @@ impl WorktreeRegistry {
 
     pub fn list_review_comments(&self, worktree_id: &str) -> Result<Vec<WorktreeReviewComment>> {
         self.control.with_connection(|connection| -> Result<Vec<WorktreeReviewComment>> {
-            let mut statement = connection.prepare("SELECT id,worktree_id,instance_id,base_head,head,path,side,line,range_json,hunk_id,body,created_at,updated_at FROM worktree_review_comments WHERE worktree_id=?1 ORDER BY created_at,id")?;
+            let mut statement = connection.prepare("SELECT id,worktree_id,instance_id,base_head,head,path,side,line,range_json,hunk_id,body,created_at,updated_at,state FROM worktree_review_comments WHERE worktree_id=?1 ORDER BY created_at,id")?;
             let rows = statement.query_map([worktree_id], |row| {
                 let range: Option<String> = row.get(8)?;
                 Ok(WorktreeReviewComment {
-                    id: row.get(0)?, worktree_id: row.get(1)?, instance_id: row.get(2)?, base_head: row.get(3)?, head: row.get(4)?, path: row.get(5)?, side: row.get(6)?, line: row.get::<_, Option<i64>>(7)?.map(nonnegative).map(|value| value as u32), range: range.and_then(|value| serde_json::from_str(&value).ok()), hunk_id: row.get(9)?, body: row.get(10)?, created_at: nonnegative(row.get::<_, i64>(11)?), updated_at: nonnegative(row.get::<_, i64>(12)?),
+                    id: row.get(0)?, worktree_id: row.get(1)?, instance_id: row.get(2)?, base_head: row.get(3)?, head: row.get(4)?, path: row.get(5)?, side: row.get(6)?, line: row.get::<_, Option<i64>>(7)?.map(nonnegative).map(|value| value as u32), range: range.and_then(|value| serde_json::from_str(&value).ok()), hunk_id: row.get(9)?, body: row.get(10)?, created_at: nonnegative(row.get::<_, i64>(11)?), updated_at: nonnegative(row.get::<_, i64>(12)?), state: row.get(13)?,
                 })
             })?.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
+    }
+
+    pub fn set_review_comment_state(
+        &self,
+        request: WorktreeReviewCommentStateRequest,
+    ) -> Result<Vec<WorktreeReviewComment>> {
+        let record = self.read_record(&request.worktree_id)?;
+        require_instance(&record, &request.expected_instance_id)?;
+        if !matches!(
+            request.state.as_str(),
+            "open" | "sent" | "resolved" | "dismissed"
+        ) {
+            bail!("invalid review comment state");
+        }
+        if request.comment_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = now_millis();
+        self.control.with_connection_mut(|connection| -> Result<()> {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for comment_id in &request.comment_ids {
+                transaction.execute(
+                    "UPDATE worktree_review_comments SET state=?1,updated_at=?2 WHERE worktree_id=?3 AND id=?4",
+                    params![request.state, now, record.id, comment_id],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })?;
+        self.list_review_comments(&request.worktree_id)
     }
 
     /// Registers and returns the cancellation flag a running operation polls.
@@ -2794,6 +2836,39 @@ mod tests {
             .expect("list comments");
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].body, "updated");
+        assert_eq!(comments[0].state, "open");
+        let comments = registry
+            .set_review_comment_state(WorktreeReviewCommentStateRequest {
+                worktree_id: record.id.clone(),
+                expected_instance_id: record.instance_id.clone(),
+                comment_ids: vec![second.id.clone()],
+                state: "sent".to_string(),
+            })
+            .expect("mark comment sent");
+        assert_eq!(comments[0].state, "sent");
+        drop(registry);
+        let registry = WorktreeRegistry::new(Arc::new(
+            ControlPlane::open(&data).expect("reopen control plane"),
+        ));
+        assert_eq!(
+            registry
+                .list_review_comments(&record.id)
+                .expect("list persisted comments")[0]
+                .state,
+            "sent"
+        );
+        let reopened = registry
+            .put_review_comment(request("reopened"))
+            .expect("edit comment");
+        assert_eq!(reopened.state, "open");
+        assert!(registry
+            .set_review_comment_state(WorktreeReviewCommentStateRequest {
+                worktree_id: record.id.clone(),
+                expected_instance_id: record.instance_id.clone(),
+                comment_ids: vec![second.id.clone()],
+                state: "invalid".to_string(),
+            })
+            .is_err());
 
         std::fs::write(linked.join("checkpoint.txt"), "checkpoint\n").expect("write checkpoint");
         run_git(&linked, &["add", "checkpoint.txt"]);

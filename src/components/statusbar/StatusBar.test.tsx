@@ -29,13 +29,14 @@ describe('StatusBar', () => {
       sessions: [{ id: 's1', name: 'vibelink', paneCount: 2, createdAt: 0, workspaceFolder: 'C:/repo' }],
       activeSessionId: 's1',
       panes: { p1: { alive: true }, p2: { alive: false }, p3: { alive: true } } as never,
+      completionHistory: [],
     })
   })
 
   afterEach(cleanup)
 
   it('shows the workspace, branch, sync badge, live panes, and resource totals', async () => {
-    render(<StatusBar onOpenResourceMonitor={() => undefined} />)
+    render(<StatusBar onOpenCompletionHistory={() => undefined} onOpenResourceMonitor={() => undefined} />)
     expect(screen.getByText('vibelink')).toBeTruthy()
     expect(screen.getByText('main')).toBeTruthy()
     expect(screen.getByText('↑2↓1')).toBeTruthy()
@@ -45,7 +46,7 @@ describe('StatusBar', () => {
 
   it('opens the resource monitor from the resources segment', async () => {
     const onOpen = vi.fn()
-    render(<StatusBar onOpenResourceMonitor={onOpen} />)
+    render(<StatusBar onOpenCompletionHistory={() => undefined} onOpenResourceMonitor={onOpen} />)
     await waitFor(() => expect(screen.getByTitle('Open resource monitor')).toBeTruthy())
     fireEvent.click(screen.getByTitle('Open resource monitor'))
     expect(onOpen).toHaveBeenCalledOnce()
@@ -54,9 +55,18 @@ describe('StatusBar', () => {
   it('renders without a repo or resources', async () => {
     useGitStore.setState({ sessions: {} })
     invoke.mockRejectedValue(new Error('offline'))
-    render(<StatusBar onOpenResourceMonitor={() => undefined} />)
+    render(<StatusBar onOpenCompletionHistory={() => undefined} onOpenResourceMonitor={() => undefined} />)
     expect(screen.getByText('vibelink')).toBeTruthy()
     expect(screen.queryByText('main')).toBeNull()
     await waitFor(() => expect(screen.getByText('Resources…')).toBeTruthy())
+  })
+
+  it('shows unread hook completions and opens their history', () => {
+    const onOpen = vi.fn()
+    useWorkspaceStore.setState({ completionHistory: [{ id: 'p1:1', paneId: 'p1', sessionId: 's1', paneTitle: 'Codex', agent: 'codex', completedAt: 1, read: false }] })
+    render(<StatusBar onOpenCompletionHistory={onOpen} onOpenResourceMonitor={() => undefined} />)
+    fireEvent.click(screen.getByTitle('Open completion history'))
+    expect(screen.getByText('1')).toBeTruthy()
+    expect(onOpen).toHaveBeenCalledOnce()
   })
 })

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { sendToPane, submitAgentPrompt } from '../ipc/panes'
+import { sendAgentPromptToPane } from '../ipc/panes'
 import { deactivateLicenseDevice, getLicenseStatus, revalidateLicense, signOutAccount as signOutAccountIpc } from '../ipc/license'
 import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
 import { create } from 'zustand'
@@ -30,6 +30,7 @@ import {
 const initialKanban = loadKanban()
 const migratedLegacySessions = new Set<string>()
 const paneCompletionHighlightsStorageKey = 'vibelink:paneCompletionHighlights'
+const completionHistoryStorageKey = 'vibelink:completionHistory'
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 const workspaceGroupRecoveryStorageKey = 'vibelink:workspaceGroupRecovery:v1'
 let workspaceSessionEpoch = 0
@@ -88,6 +89,16 @@ type SpawnPaneOptions = Partial<PaneConfig> & { profileId?: string | null }
 type Status = 'booting' | 'ready' | 'error'
 export type PaneCompletionHighlight = { completedAt: number; source: 'agent-hook'; sessionId: string }
 export type PaneReviewMarker = { reviewedAt: number; sessionId: string }
+export type CompletionHistoryEntry = {
+  id: string
+  paneId: string
+  sessionId: string
+  paneTitle: string
+  agent: string | null
+  completedAt: number
+  read: boolean
+}
+export const completionHistoryLimit = 200
 export type CreateWorkspaceWorktreeInput = {
   parentSessionId: string
   name: string
@@ -142,6 +153,7 @@ type WorkspaceState = {
   selectedTaskId: Record<string, string | null>
   activePaneId?: string
   paneCompletionHighlights: Record<string, PaneCompletionHighlight>
+  completionHistory: CompletionHistoryEntry[]
   paneReviewMarkers: Record<string, PaneReviewMarker>
   /** Panes whose agent turn VibeLink observed starting locally. Cleared when
    *  the turn completes; see `agentPaneStatus.resolveAgentPaneStatus`. */
@@ -151,8 +163,11 @@ type WorkspaceState = {
   setActivePaneId: (paneId?: string) => void
   notePaneAgentTurnStart: (paneId: string) => void
   notePaneAgentTurnEnd: (paneId: string) => void
-  markPaneHookComplete: (paneId: string, sessionId: string) => void
+  markPaneHookComplete: (paneId: string, sessionId: string, agent?: string | null) => void
   clearPaneCompletionHighlight: (paneId: string) => void
+  markCompletionRead: (id: string) => void
+  markCompletionUnread: (id: string) => void
+  clearCompletionHistory: () => void
   togglePaneReviewed: (paneId: string) => void
   recordCapture: (paneId: string | undefined, path: string) => void
   resolveCaptureMarker: (paneId: string, n: number) => string | undefined
@@ -282,6 +297,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   selectedTaskId: {},
   activePaneId: undefined,
   paneCompletionHighlights: loadPaneCompletionHighlights(),
+  completionHistory: loadCompletionHistory(),
   paneReviewMarkers: loadPaneReviewMarkers(),
   paneAgentActivity: {},
   capturesByPane: {},
@@ -867,17 +883,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return { paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId) }
   }),
   // A daemon-validated agent hook is the only completion-alert authority.
-  markPaneHookComplete: (paneId, sessionId) => set((state) => ({
-    paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
-    paneCompletionHighlights: {
-      ...state.paneCompletionHighlights,
-      [paneId]: { completedAt: Date.now(), source: 'agent-hook', sessionId },
-    },
-  })),
+  markPaneHookComplete: (paneId, sessionId, agent = null) => set((state) => {
+    const completedAt = Date.now()
+    return {
+      paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
+      paneCompletionHighlights: {
+        ...state.paneCompletionHighlights,
+        [paneId]: { completedAt, source: 'agent-hook', sessionId },
+      },
+      completionHistory: [{
+        id: `${paneId}:${completedAt}`,
+        paneId,
+        sessionId,
+        paneTitle: state.panes[paneId]?.config.title ?? 'Terminal',
+        agent,
+        completedAt,
+        read: false,
+      }, ...state.completionHistory].slice(0, completionHistoryLimit),
+    }
+  }),
   clearPaneCompletionHighlight: (paneId) => set((state) => {
     if (!state.paneCompletionHighlights[paneId]) return {}
     return { paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId) }
   }),
+  markCompletionRead: (id) => set((state) => ({ completionHistory: setCompletionHistoryRead(state.completionHistory, id, true) })),
+  markCompletionUnread: (id) => set((state) => ({ completionHistory: setCompletionHistoryRead(state.completionHistory, id, false) })),
+  clearCompletionHistory: () => set((state) => state.completionHistory.length > 0 ? { completionHistory: [] } : {}),
   togglePaneReviewed: (paneId) => set((state) => {
     if (state.paneReviewMarkers[paneId]) {
       return { paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId) }
@@ -1174,9 +1205,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
     }
     const latestTask = get().kanban.tasks[taskId] ?? task
-    await sendToPane(task.sessionId, paneId, composeTaskPrompt(latestTask, { role, sessionId: task.sessionId, brief: get().workspaceBriefs[task.sessionId] }), false)
-    await delay(120)
-    await submitAgentPrompt(task.sessionId, paneId)
+    await sendAgentPromptToPane(task.sessionId, paneId, composeTaskPrompt(latestTask, { role, sessionId: task.sessionId, brief: get().workspaceBriefs[task.sessionId] }))
     await get().updateTask(taskId, { status: 'in-progress' })
   },
   markTaskDone: async (taskId: string, result?: { commitMessage?: string; resultSummary?: string }) => {
@@ -1454,6 +1483,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
 useWorkspaceStore.subscribe((state, previousState) => {
   if (state.paneCompletionHighlights !== previousState.paneCompletionHighlights) persistPaneCompletionHighlights(state.paneCompletionHighlights)
+  if (state.completionHistory !== previousState.completionHistory) persistCompletionHistory(state.completionHistory)
   if (state.paneReviewMarkers !== previousState.paneReviewMarkers) persistPaneReviewMarkers(state.paneReviewMarkers)
 })
 
@@ -1610,6 +1640,50 @@ function withoutSessionReviewMarkers(
   const nextEntries = Object.entries(markers).filter(([, marker]) => marker.sessionId !== sessionId)
   if (nextEntries.length === Object.keys(markers).length) return markers
   return Object.fromEntries(nextEntries)
+}
+
+function setCompletionHistoryRead(history: CompletionHistoryEntry[], id: string, read: boolean): CompletionHistoryEntry[] {
+  const index = history.findIndex((entry) => entry.id === id)
+  if (index < 0 || history[index].read === read) return history
+  return history.map((entry, entryIndex) => entryIndex === index ? { ...entry, read } : entry)
+}
+
+export function loadCompletionHistory(storage?: Pick<Storage, 'getItem'> | null): CompletionHistoryEntry[] {
+  const target = storage === undefined ? (typeof window === 'undefined' ? null : window.localStorage) : storage
+  if (!target) return []
+  try {
+    const parsed = JSON.parse(target.getItem(completionHistoryStorageKey) ?? '[]') as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((entry): CompletionHistoryEntry[] => {
+      if (!isRecord(entry)
+        || typeof entry.id !== 'string' || entry.id.length === 0
+        || typeof entry.paneId !== 'string' || entry.paneId.length === 0
+        || typeof entry.sessionId !== 'string' || entry.sessionId.length === 0
+        || typeof entry.completedAt !== 'number' || !Number.isFinite(entry.completedAt) || entry.completedAt <= 0) return []
+      return [{
+        id: entry.id,
+        paneId: entry.paneId,
+        sessionId: entry.sessionId,
+        paneTitle: typeof entry.paneTitle === 'string' && entry.paneTitle.length > 0 ? entry.paneTitle : 'Terminal',
+        agent: typeof entry.agent === 'string' && entry.agent.length > 0 ? entry.agent : null,
+        completedAt: entry.completedAt,
+        read: entry.read === true,
+      }]
+    }).slice(0, completionHistoryLimit)
+  } catch {
+    return []
+  }
+}
+
+export function persistCompletionHistory(history: CompletionHistoryEntry[], storage?: Pick<Storage, 'setItem' | 'removeItem'> | null): void {
+  const target = storage === undefined ? (typeof window === 'undefined' ? null : window.localStorage) : storage
+  if (!target) return
+  try {
+    if (history.length === 0) target.removeItem(completionHistoryStorageKey)
+    else target.setItem(completionHistoryStorageKey, JSON.stringify(history.slice(0, completionHistoryLimit)))
+  } catch {
+    // Completion history is durable convenience state; storage failures must not block terminal interaction.
+  }
 }
 
 export function loadPaneCompletionHighlights(storage?: Pick<Storage, 'getItem'> | null): Record<string, PaneCompletionHighlight> {
@@ -2003,9 +2077,7 @@ async function runWorktreeCreation(
         ? get().activePaneId ?? Object.values(get().panes)[0]?.id
         : attached.panes[0]?.id
       if (!paneId) throw new Error('The initial agent pane was not created.')
-      await sendToPane(result.sessionId, paneId, prompt, false)
-      await delay(120)
-      await submitAgentPrompt(result.sessionId, paneId)
+      await sendAgentPromptToPane(result.sessionId, paneId, prompt)
     }
   }
   return created

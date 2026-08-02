@@ -21,12 +21,13 @@ use crate::app::{
         WorktreeImportRequest, WorktreeListRequest, WorktreeMoveRequest,
         WorktreeOperationIdRequest, WorktreeOrigin, WorktreeProjection, WorktreeReconcileRequest,
         WorktreeRegistry, WorktreeRemovalPreflightRequest, WorktreeRemovalResult,
-        WorktreeRemoveRequest, WorktreeReviewCommentRequest, WorktreeRuntimeBlockers,
-        WorktreeSetRequest, WORKTREE_METHOD_CANCEL, WORKTREE_METHOD_CHECKPOINT,
-        WORKTREE_METHOD_CHECKPOINTS, WORKTREE_METHOD_CREATE, WORKTREE_METHOD_IMPORT,
-        WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE, WORKTREE_METHOD_PREFLIGHT_REMOVE,
-        WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE, WORKTREE_METHOD_REVIEW_COMMENTS,
-        WORKTREE_METHOD_REVIEW_COMMENT_PUT, WORKTREE_METHOD_SET,
+        WorktreeRemoveRequest, WorktreeReviewCommentRequest, WorktreeReviewCommentStateRequest,
+        WorktreeRuntimeBlockers, WorktreeSetRequest, WORKTREE_METHOD_CANCEL,
+        WORKTREE_METHOD_CHECKPOINT, WORKTREE_METHOD_CHECKPOINTS, WORKTREE_METHOD_CREATE,
+        WORKTREE_METHOD_IMPORT, WORKTREE_METHOD_LIST, WORKTREE_METHOD_MOVE,
+        WORKTREE_METHOD_PREFLIGHT_REMOVE, WORKTREE_METHOD_RECONCILE, WORKTREE_METHOD_REMOVE,
+        WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT,
+        WORKTREE_METHOD_REVIEW_COMMENT_STATE, WORKTREE_METHOD_SET,
     },
     license::HeadlessLicenseCache,
     spawn_daemon::load_or_create_ipc_secret,
@@ -795,7 +796,19 @@ impl Drop for PidFileGuard {
     }
 }
 
+const DAEMON_LOG_ROTATE_LIMIT: u64 = 8 * 1024 * 1024;
+
+fn rotate_daemon_log(log_path: &Path) {
+    if fs::metadata(log_path).is_ok_and(|metadata| metadata.len() > DAEMON_LOG_ROTATE_LIMIT) {
+        let rotated = log_path.with_extension("log.1");
+        let _ = fs::remove_file(&rotated);
+        let _ = fs::rename(log_path, rotated);
+    }
+}
+
 fn init_logging(log_path: &Path) {
+    rotate_daemon_log(log_path);
+
     let file = OpenOptions::new().create(true).append(true).open(log_path);
     let Ok(file) = file else {
         return;
@@ -5772,6 +5785,7 @@ fn dispatch_worktree_request(
             | WORKTREE_METHOD_SET
             | WORKTREE_METHOD_CHECKPOINT
             | WORKTREE_METHOD_REVIEW_COMMENT_PUT
+            | WORKTREE_METHOD_REVIEW_COMMENT_STATE
     ) {
         for sender in lock_state(state).all_senders() {
             let _ = sender.send(DaemonToClient::WorktreeChanged {
@@ -5912,6 +5926,12 @@ fn dispatch_worktree_request_inner(
             registry.put_review_comment(
                 serde_json::from_str::<WorktreeReviewCommentRequest>(payload_json)
                     .context("parse worktree review comment request")?,
+            )?,
+        )?),
+        WORKTREE_METHOD_REVIEW_COMMENT_STATE => Ok(serde_json::to_value(
+            registry.set_review_comment_state(
+                serde_json::from_str::<WorktreeReviewCommentStateRequest>(payload_json)
+                    .context("parse worktree review comment state request")?,
             )?,
         )?),
         WORKTREE_METHOD_REVIEW_COMMENTS => {
@@ -6929,6 +6949,29 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn oversized_daemon_log_replaces_the_previous_generation() {
+        let root = std::env::temp_dir().join(format!("vibelink-log-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create log test directory");
+        let log = root.join("daemon.log");
+        std::fs::File::create(&log)
+            .expect("create current log")
+            .set_len(DAEMON_LOG_ROTATE_LIMIT + 1)
+            .expect("grow current log");
+        fs::write(log.with_extension("log.1"), b"old").expect("write old generation");
+
+        rotate_daemon_log(&log);
+
+        assert!(!log.exists());
+        assert_eq!(
+            fs::metadata(log.with_extension("log.1"))
+                .expect("rotated log exists")
+                .len(),
+            DAEMON_LOG_ROTATE_LIMIT + 1,
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     fn authorization_snapshot(

@@ -12,7 +12,7 @@ import {
 } from './documentStore'
 import { languageForPath, languageLabel } from './languageForPath'
 import { monaco } from './monaco'
-import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './monacoTheme'
+import { registerVibeLinkMonacoThemes, vibeLinkMonacoThemeName } from './editorTheme'
 import { registerEditorNavigation, type EditorNavigationTarget } from './editorNavigation'
 import './EditorContentPanel.css'
 import { promptDialog } from '../components/appDialogStore'

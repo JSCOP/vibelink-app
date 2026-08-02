@@ -191,8 +191,9 @@ function OrchestrationRunPanel() {
       void refresh(runId).catch(reportError)
     }, 0)
     const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
       void Promise.all([refresh(runId), refreshRuns()]).catch(reportError)
-    }, 2_000)
+    }, 5_000)
     return () => {
       window.clearTimeout(initialTimer)
       window.clearInterval(timer)

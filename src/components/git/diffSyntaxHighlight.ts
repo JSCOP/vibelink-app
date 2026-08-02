@@ -1,6 +1,6 @@
 import { languageForPath } from '../../editor/languageForPath'
-import { registerVibeLinkMonacoThemes } from '../../editor/monacoTheme'
-import type { MonacoModule } from '../../editor/monacoTheme'
+import { registerVibeLinkMonacoThemes } from '../../editor/editorTheme'
+import type { MonacoModule } from '../../editor/editorTheme'
 
 /**
  * Per-line syntax highlighting for the Git diff view.

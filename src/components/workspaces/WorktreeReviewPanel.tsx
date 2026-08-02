@@ -1,5 +1,6 @@
-import { AlertTriangle, MessageSquareText, RefreshCw } from 'lucide-react'
-import type { WorktreeCheckpoint, WorktreeReviewComment } from '../../state/worktrees'
+import { useState } from 'react'
+import { AlertTriangle, MessageSquareText, RefreshCw, Send } from 'lucide-react'
+import type { WorktreeCheckpoint, WorktreeReviewComment, WorktreeReviewCommentState } from '../../state/worktrees'
 import { partitionReviewComments, type WorktreeReviewIdentity } from './worktreeReview'
 import './WorktreeReviewPanel.css'
 
@@ -11,10 +12,28 @@ export type WorktreeReviewPanelProps = {
   loading: boolean
   error: string | null
   onRefresh: () => void
+  onSendToAgent: (commentIds: string[]) => void
+  onSetState: (commentIds: string[], state: WorktreeReviewCommentState) => void
 }
 
-export function WorktreeReviewPanel({ identity, comments, checkpoints, currentAnchorKeys, loading, error, onRefresh }: WorktreeReviewPanelProps) {
+export function WorktreeReviewPanel({ identity, comments, checkpoints, currentAnchorKeys, loading, error, onRefresh, onSendToAgent, onSetState }: WorktreeReviewPanelProps) {
   const { current, stale } = partitionReviewComments(comments, identity, currentAnchorKeys)
+  const open = current.filter((comment) => comment.state === 'open')
+  const sent = current.filter((comment) => comment.state === 'sent')
+  const closed = current.filter((comment) => comment.state === 'resolved' || comment.state === 'dismissed')
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
+  const selectedOpenIds = open.flatMap((comment) => selectedIds.has(comment.id) ? [comment.id] : [])
+  const toggleSelected = (id: string) => setSelectedIds((selected) => {
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+  const sendSelected = () => {
+    onSendToAgent(selectedOpenIds)
+    setSelectedIds(new Set())
+  }
+
   return (
     <section className="worktree-review-panel" aria-label="Worktree review">
       <header>
@@ -25,7 +44,18 @@ export function WorktreeReviewPanel({ identity, comments, checkpoints, currentAn
       </header>
       {error ? <div className="worktree-review-error" role="alert"><AlertTriangle size={13} aria-hidden="true" />{error}</div> : null}
       <div className="worktree-review-sections">
-        <ReviewCommentSection title="Current comments" comments={current} empty="No comments match the active worktree identity and review snapshot." />
+        <section className="worktree-review-section">
+          <header><h3>Open</h3><button type="button" onClick={sendSelected} disabled={selectedOpenIds.length === 0}><Send size={12} aria-hidden="true" />Send to agent ({selectedOpenIds.length})</button></header>
+          {open.length > 0 ? <ol>{open.map((comment) => <li key={comment.id}><label className="worktree-review-select"><input type="checkbox" checked={selectedIds.has(comment.id)} onChange={() => toggleSelected(comment.id)} /><span>{comment.body}</span></label><small>{anchorLabel(comment)}</small><ReviewActions comment={comment} states={['dismissed']} onSetState={onSetState} /></li>)}</ol> : <p>No open comments.</p>}
+        </section>
+        <section className="worktree-review-section">
+          <h3>Sent</h3>
+          {sent.length > 0 ? <ol>{sent.map((comment) => <li key={comment.id}><div><span className="worktree-review-chip">Sent</span><blockquote>{comment.body}</blockquote></div><small>{anchorLabel(comment)}</small><ReviewActions comment={comment} states={['resolved', 'open', 'dismissed']} onSetState={onSetState} /></li>)}</ol> : <p>No comments sent.</p>}
+        </section>
+        <details className="worktree-review-section worktree-review-closed">
+          <summary>Closed ({closed.length})</summary>
+          {closed.length > 0 ? <ol>{closed.map((comment) => <li key={comment.id}><blockquote>{comment.body}</blockquote><small>{anchorLabel(comment)}</small><span className="worktree-review-chip">{comment.state}</span><ReviewActions comment={comment} states={['open']} onSetState={onSetState} /></li>)}</ol> : <p>No closed comments.</p>}
+        </details>
         <ReviewCommentSection title="Stale comments" comments={stale} empty="No stale comments." stale />
         <section className="worktree-review-section worktree-review-checkpoints">
           <h3>Checkpoints</h3>
@@ -34,6 +64,10 @@ export function WorktreeReviewPanel({ identity, comments, checkpoints, currentAn
       </div>
     </section>
   )
+}
+
+function ReviewActions({ comment, states, onSetState }: { comment: WorktreeReviewComment; states: WorktreeReviewCommentState[]; onSetState: WorktreeReviewPanelProps['onSetState'] }) {
+  return <div className="worktree-review-actions">{states.map((state) => <button key={state} type="button" onClick={() => onSetState([comment.id], state)}>{state === 'open' ? 'Reopen' : state === 'resolved' ? 'Resolve' : 'Dismiss'}</button>)}</div>
 }
 
 function ReviewCommentSection({ title, comments, empty, stale = false }: { title: string; comments: WorktreeReviewComment[]; empty: string; stale?: boolean }) {

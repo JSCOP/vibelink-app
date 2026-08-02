@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { PaneMeta, SessionMeta } from './types'
 import { resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from '../state/store'
 import { agentActivityTracker } from '../terminal/agentActivity'
-import { startTerminalOutputStream } from './output'
+import { onTerminalExited, startTerminalOutputStream } from './output'
 import { TerminalManager } from '../terminal/TerminalManager'
 
 type TestTerminalEvent =
+  | { kind: 'exited'; paneId: string; exitCode?: number | null }
   | { kind: 'sessionChanged'; sessionId: string }
   | {
       kind: 'task'
@@ -129,6 +130,7 @@ describe('terminal session change reloads', () => {
       layoutJson: null,
       license: { ready: false, status: null },
       paneCompletionHighlights: {},
+      completionHistory: [],
       paneReviewMarkers: {},
       error: undefined,
       status: 'ready',
@@ -176,6 +178,7 @@ describe('terminal session change reloads', () => {
       activeSessionId: activeSession.id,
       panes: {},
       paneCompletionHighlights: {},
+      completionHistory: [],
     })
 
     await startTerminalOutputStream({ force: true })
@@ -192,6 +195,8 @@ describe('terminal session change reloads', () => {
     expect(highlights).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: 'agent-hook', sessionId: session.id }),
     ]))
+    expect(useWorkspaceStore.getState().completionHistory).toHaveLength(8)
+    expect(useWorkspaceStore.getState().completionHistory[0]).toMatchObject({ agent: 'omp', sessionId: session.id, read: false })
   })
   test('does not create a completion alert for task done', async () => {
     await startTerminalOutputStream({ force: true })
@@ -203,6 +208,7 @@ describe('terminal session change reloads', () => {
     })
 
     expect(useWorkspaceStore.getState().paneCompletionHighlights).toEqual({})
+    expect(useWorkspaceStore.getState().completionHistory).toEqual([])
   })
   test('cancels the pending terminal fallback after an authoritative agent hook', async () => {
     const fallbackCompletions: string[] = []
@@ -241,4 +247,17 @@ describe('terminal session change reloads', () => {
     const bytes = vi.mocked(TerminalManager.writeSequenced).mock.calls.at(-1)?.[3]
     expect(bytes ? new TextDecoder().decode(bytes) : '').toBe('live output')
   })
+  test('notifies scoped listeners when a pane exits', async () => {
+    const listener = vi.fn()
+    const unsubscribe = onTerminalExited(listener)
+    await startTerminalOutputStream({ force: true })
+
+    emitTerminalEvent?.({ kind: 'exited', paneId: 'login-pane', exitCode: 0 })
+    expect(listener).toHaveBeenCalledWith('login-pane')
+
+    unsubscribe()
+    emitTerminalEvent?.({ kind: 'exited', paneId: 'other-pane', exitCode: 0 })
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
 })

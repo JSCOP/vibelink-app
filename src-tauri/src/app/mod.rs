@@ -12,6 +12,7 @@ pub mod cli_path;
 pub mod commands;
 pub mod computer_use;
 pub mod daemon_client;
+pub mod diagnostics;
 pub mod entitlement;
 pub mod fsops;
 pub mod git;
@@ -321,6 +322,7 @@ pub fn run() {
             license::account_sign_in_poll,
             license::account_sign_out,
             license::bug_report_submit,
+            diagnostics::export_diagnostics,
             fsops::fs_create_dir,
             fsops::fs_create_file,
             fsops::fs_delete,
@@ -410,6 +412,7 @@ pub fn run() {
             git::worktree_checkpoint_create,
             git::worktree_checkpoints_list,
             git::worktree_review_comment_create,
+            git::worktree_review_comment_set_state,
             git::worktree_review_comments_list,
             commands::list_installed_fonts,
             commands::list_sessions,

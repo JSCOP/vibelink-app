@@ -29,6 +29,7 @@ beforeEach(async () => {
   cleanup()
   resetWorkspaceSessionOwnershipForTests()
   invoke.mockReset()
+  vi.mocked(actions.openContent).mockClear()
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === 'attach_session') return {
       layoutJson: null,
@@ -40,11 +41,14 @@ beforeEach(async () => {
         { name: 'large.png', isDir: false, isSymlink: false, size: 21 * 1024 * 1024, modifiedAt: null },
         { name: 'notes.txt', isDir: false, isSymlink: false, size: 3 * 1024 * 1024, modifiedAt: null },
         { name: 'binary.bin', isDir: false, isSymlink: false, size: 1024, modifiedAt: null },
+        { name: 'README.md', isDir: false, isSymlink: false, size: 128, modifiedAt: null },
+        { name: 'manual.pdf', isDir: false, isSymlink: false, size: 4096, modifiedAt: null },
       ]
     }
     if (command === 'fs_read_image') return 'aW1hZ2U='
     if (command === 'fs_read_text' && args?.relPath === 'notes.txt') return { content: 'truncated text', truncated: true, binary: false }
     if (command === 'fs_read_text' && args?.relPath === 'binary.bin') return { content: '', truncated: false, binary: true }
+    if (command === 'fs_read_text' && args?.relPath === 'README.md') return { content: '# Guide\n\n| A | B |\n| - | - |\n| 1 | 2 |', truncated: false, binary: false }
     return null
   })
   useWorkspaceStore.setState({
@@ -100,5 +104,25 @@ describe('PreviewContentPanel', () => {
     )
 
     expect((await screen.findByRole('alert')).textContent).toContain('File does not exist: missing.txt')
+  })
+
+  test('routes Markdown through the lazy rich preview and PDFs to the default-viewer action', async () => {
+    const view = render(
+      <WorkspaceContentActionsContext.Provider value={actions}>
+        <PreviewContentPanel sessionId="session-1" workspaceFolder="C:/repo" relPath="README.md" />
+      </WorkspaceContentActionsContext.Provider>,
+    )
+    expect(await screen.findByRole('heading', { name: 'Guide' })).toBeTruthy()
+    expect(document.querySelector('table')).toBeTruthy()
+
+    view.rerender(
+      <WorkspaceContentActionsContext.Provider value={actions}>
+        <PreviewContentPanel sessionId="session-1" workspaceFolder="C:/repo" relPath="manual.pdf" />
+      </WorkspaceContentActionsContext.Provider>,
+    )
+    expect(await screen.findByText('Binary file')).toBeTruthy()
+    expect(screen.getByTitle('Open with the default application')).toBeTruthy()
+    expect(actions.openContent).not.toHaveBeenCalled()
+    expect(invoke).not.toHaveBeenCalledWith('fs_read_text', expect.objectContaining({ relPath: 'manual.pdf' }))
   })
 })
