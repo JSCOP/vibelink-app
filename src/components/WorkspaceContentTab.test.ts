@@ -126,6 +126,23 @@ describe('WorkspaceContentTab', () => {
     expect(screen.getByRole('tab', { name: 'Source Control' }).classList.contains('workspace-edge-rail-tab')).toBe(true)
   })
 
+  it('switches an inactive edge panel on pointerdown without letting Dockview collapse it on click', () => {
+    const api = panelApi('content:sourceControl:sourceControl', 'Source Control')
+    api.isActive = false
+    api.location = { type: 'edge' }
+    renderWithActions(createElement(WorkspaceContentTab, {
+      api,
+      containerApi,
+      params: createSingletonContentParams('sourceControl'),
+    } as never))
+    const tab = screen.getByRole('tab', { name: 'Source Control' })
+
+    fireEvent.pointerDown(tab)
+    fireEvent.click(tab)
+
+    expect(actions.activateContent).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps central terminal actions targeted at the owning grid group', () => {
     const params = createTerminalContentParams({ id: 'pane-a', config: { paneId: 'pane-a', args: [], env: [], title: 'Shell', icon: 'terminal', cols: 80, rows: 24 } })
     const items = buildWorkspaceContentTabContextMenu({

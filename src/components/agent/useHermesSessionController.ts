@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   hermesNewSession,
   hermesRefreshSessions,
@@ -33,7 +33,7 @@ export type HermesSessionController = {
   resumeSession: (acpSessionId: string) => Promise<boolean>
 }
 
-export function useHermesSessionController(): HermesSessionController {
+export function useHermesSessionController(loadConversationHistory = true): HermesSessionController {
   const workspaceId = useWorkspaceStore((state) => state.activeSessionId ?? null)
   const workspace = useWorkspaceStore((state) => state.sessions.find((item) => item.id === state.activeSessionId))
   const commandOverride = useWorkspaceStore((state) => state.settings.hermesCommand?.trim() || null)
@@ -50,8 +50,10 @@ export function useHermesSessionController(): HermesSessionController {
     return [{ id: currentSessionId, title: null, updatedAt: null, cwd: workspaceFolder }, ...nativeSessions]
   }, [currentSessionId, nativeSessions, workspaceFolder])
 
-  const [conversations, setConversations] = useState<AgentConversationInfo[]>(EMPTY_CONVERSATIONS)
+  const [conversationHistory, setConversationHistory] = useState<{ workspaceFolder: string; conversations: AgentConversationInfo[] } | null>(null)
   const [conversationsLoading, setConversationsLoading] = useState(false)
+  const loadedConversationKeyRef = useRef<string | null>(null)
+  const conversationKey = workspaceFolder ? `${workspaceFolder}\0${currentSessionId ?? ''}` : null
 
   // Load past agent conversations (omp / Codex / Claude on-disk transcripts) for
   // the active workspace so the panel shows a real history of prior sessions by
@@ -59,19 +61,18 @@ export function useHermesSessionController(): HermesSessionController {
   // changes or a new session is started/resumed (currentSessionId shifts).
   useEffect(() => {
     let cancelled = false
-    if (!workspaceFolder) {
-      // Resolve asynchronously so the effect body performs no synchronous state
-      // update (which would trigger a cascading re-render).
-      void Promise.resolve().then(() => { if (!cancelled) setConversations(EMPTY_CONVERSATIONS) })
-      return () => { cancelled = true }
-    }
+    if (!loadConversationHistory || !workspaceFolder || !conversationKey || loadedConversationKeyRef.current === conversationKey) return () => { cancelled = true }
     void Promise.resolve()
       .then(() => { if (!cancelled) setConversationsLoading(true) })
       .then(() => listAgentConversations(workspaceFolder))
-      .then((list) => { if (!cancelled) setConversations(list) })
+      .then((list) => {
+        if (cancelled) return
+        loadedConversationKeyRef.current = conversationKey
+        setConversationHistory({ workspaceFolder, conversations: list })
+      })
       .finally(() => { if (!cancelled) setConversationsLoading(false) })
     return () => { cancelled = true }
-  }, [workspaceFolder, currentSessionId])
+  }, [conversationKey, loadConversationHistory, workspaceFolder])
 
   const startInput = useMemo<StartHermesAgentInput | null>(() => workspaceId ? ({
     sessionId: workspaceId,
@@ -80,14 +81,16 @@ export function useHermesSessionController(): HermesSessionController {
   }) : null, [commandOverride, workspaceFolder, workspaceId])
 
   const reloadConversations = useCallback(async () => {
-    if (!workspaceFolder) return
+    if (!loadConversationHistory || !workspaceFolder) return
     setConversationsLoading(true)
     try {
-      setConversations(await listAgentConversations(workspaceFolder))
+      const list = await listAgentConversations(workspaceFolder)
+      loadedConversationKeyRef.current = conversationKey
+      setConversationHistory({ workspaceFolder, conversations: list })
     } finally {
       setConversationsLoading(false)
     }
-  }, [workspaceFolder])
+  }, [conversationKey, loadConversationHistory, workspaceFolder])
 
   const refreshSessions = useCallback(async () => {
     void reloadConversations()
@@ -123,6 +126,7 @@ export function useHermesSessionController(): HermesSessionController {
       return false
     }
   }, [currentSessionId, setError, startInput, status])
+  const conversationsCurrent = conversationHistory?.workspaceFolder === workspaceFolder
 
   return {
     workspaceId,
@@ -134,8 +138,8 @@ export function useHermesSessionController(): HermesSessionController {
     currentSessionId,
     sessions,
     permissions,
-    conversations,
-    conversationsLoading,
+    conversations: conversationsCurrent ? conversationHistory.conversations : EMPTY_CONVERSATIONS,
+    conversationsLoading: loadConversationHistory && Boolean(workspaceFolder) && (!conversationsCurrent || conversationsLoading),
     actionsDisabled: status === 'busy' || status === 'starting',
     refreshConversations: reloadConversations,
     refreshSessions,

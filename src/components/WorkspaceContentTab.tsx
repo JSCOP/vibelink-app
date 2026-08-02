@@ -141,6 +141,16 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
         aria-selected={isActive}
         aria-label={accessibleTitle}
         onKeyDown={onRootKeyDown}
+        onPointerDownCapture={(event) => {
+          if (api.isActive && !api.group.api.isCollapsed()) api.group.api.collapse()
+          else actions.activateContent(api.id)
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onClickCapture={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+        }}
       >
         <span className="workspace-edge-rail-icon" aria-hidden="true"><ProfileIcon name={content?.icon} size={16} /></span>
         {railBadge ? <span className={`workspace-edge-rail-badge${gitRailState.conflicted > 0 ? ' is-warning' : ''}`} aria-label={`${railBadge} changed paths${gitRailState.conflicted > 0 ? `, ${gitRailState.conflicted} conflicted` : ''}`}>{railBadge > 99 ? '99+' : railBadge}</span> : null}

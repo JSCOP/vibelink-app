@@ -102,6 +102,7 @@ import {
 } from './workspaceContentModel'
 import {
   createDefaultWorkspaceDockviewLayout,
+  completeWorkspaceStructuralLayout,
   createPreviewContentParams,
   createSingletonContentParams,
   createTerminalContentParams,
@@ -219,15 +220,20 @@ function ProPanelBoundary({ feature, children }: { feature: string; children: Re
 function useEdgePanelState(api: WorkspaceContentPanelProps['api']) {
   const [state, setState] = useState(() => ({ active: api.isActive, collapsed: api.group.api.isCollapsed() }))
   useEffect(() => {
-    const syncActive = () => setState((current) => ({ ...current, active: api.isActive }))
-    const syncCollapsed = () => setState((current) => ({ ...current, collapsed: api.group.api.isCollapsed() }))
-    const active = api.onDidActiveChange(syncActive)
-    const collapsed = api.group.api.onDidCollapsedChange(syncCollapsed)
-    syncActive()
-    syncCollapsed()
+    let collapsed: { dispose: () => void } | undefined
+    const syncState = () => setState({ active: api.isActive, collapsed: api.group.api.isCollapsed() })
+    const subscribeCollapsed = () => {
+      collapsed?.dispose()
+      collapsed = api.group.api.onDidCollapsedChange(({ isCollapsed }) => setState((current) => ({ ...current, collapsed: isCollapsed })))
+      syncState()
+    }
+    const active = api.onDidActiveChange(syncState)
+    const group = api.onDidGroupChange(subscribeCollapsed)
+    subscribeCollapsed()
     return () => {
       active.dispose()
-      collapsed.dispose()
+      group.dispose()
+      collapsed?.dispose()
     }
   }, [api])
   return state
@@ -281,7 +287,8 @@ function AutomationContentPanel(props: WorkspaceContentPanelProps) {
 }
 
 function AgentSessionsContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  const state = useEdgePanelState(props.api)
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function AgentContentPanel(props: WorkspaceContentPanelProps) {
@@ -1512,10 +1519,11 @@ export function WorkspaceView({
       const restoreHasEdgeGroups = Boolean(restore?.edgeGroups)
       let applyEdgeDefaults = !restore || !restoreHasEdgeGroups
       await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-        api.clear()
-        const dockview = restore ?? createDefaultWorkspaceDockviewLayout(livePanes, rootWidth)
+        const dockview = restore
+          ? completeWorkspaceStructuralLayout(restore, rootWidth)
+          : createDefaultWorkspaceDockviewLayout(livePanes, rootWidth)
         try {
-          api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0])
+          api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
         } catch {
           api.clear()
           api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes, rootWidth) as Parameters<DockviewApi['fromJSON']>[0])

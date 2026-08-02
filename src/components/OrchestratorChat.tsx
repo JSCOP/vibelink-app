@@ -17,7 +17,7 @@ type AgentSection = 'chat' | 'skills' | 'messaging' | 'artifacts'
 const EMPTY_TRANSCRIPT: HermesTurn[] = []
 
 export function OrchestratorChat() {
-  const controller = useHermesSessionController()
+  const controller = useHermesSessionController(false)
   const sessionId = controller.workspaceId
   const settings = useWorkspaceStore((state) => state.settings)
   const status = controller.status

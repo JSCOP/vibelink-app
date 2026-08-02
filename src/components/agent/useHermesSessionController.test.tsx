@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
-import { cleanup, renderHook } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { cleanup, renderHook, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { normalizeSettings, defaultSettings } from '../../state/profiles'
 import { useWorkspaceStore } from '../../state/store'
 import { useHermesSessionController } from './useHermesSessionController'
 
+const listAgentConversations = vi.hoisted(() => vi.fn(async () => []))
+vi.mock('../../ipc/agentHistory', () => ({ listAgentConversations }))
+
 describe('useHermesSessionController', () => {
   beforeEach(() => {
+    listAgentConversations.mockClear()
     useWorkspaceStore.setState({
       sessions: [{ id: 'workspace-a', name: 'Workspace A', paneCount: 0, createdAt: 1, workspaceFolder: 'E:/repo' }],
       activeSessionId: 'workspace-a',
@@ -47,5 +51,17 @@ describe('useHermesSessionController', () => {
     useWorkspaceStore.setState({ hermesStatus: { 'workspace-a': 'running' } })
     rerender()
     expect(result.current.actionsDisabled).toBe(false)
+  })
+
+  test('discovers conversations only when enabled and does not rescan an unchanged workspace', async () => {
+    const { rerender } = renderHook(({ enabled }) => useHermesSessionController(enabled), { initialProps: { enabled: false } })
+    expect(listAgentConversations).not.toHaveBeenCalled()
+
+    rerender({ enabled: true })
+    await waitFor(() => expect(listAgentConversations).toHaveBeenCalledWith('E:/repo'))
+
+    rerender({ enabled: false })
+    rerender({ enabled: true })
+    expect(listAgentConversations).toHaveBeenCalledTimes(1)
   })
 })

@@ -174,6 +174,47 @@ export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta,
   return createWorkspaceDockview(terminalParams, rootWidth)
 }
 
+/** Every workspace shares the same structural edge panels. Older saved layouts
+ * can omit panels added later; complete those entries before Dockview restores
+ * so `reuseExistingPanels` can retain their mounted React trees. */
+export function completeWorkspaceStructuralLayout(layout: SerializedDockview, rootWidth: number): SerializedDockview {
+  const leftParams = workspaceLeftStructuralKinds.map(createSingletonContentParams)
+  const rightParams = workspaceRightStructuralKinds.map(createSingletonContentParams)
+  const panels = { ...layout.panels }
+  for (const params of [...leftParams, ...rightParams]) panels[workspaceContentPanelId(params)] = createWorkspaceContentPanel(params)
+  const collapsed = workspaceDefaultEdgeCollapse(rootWidth)
+  const completeEdge = (
+    current: NonNullable<SerializedDockview['edgeGroups']>['left'] | undefined,
+    params: WorkspaceContentParams[],
+    options: typeof workspaceEdgeGroupOptions.left | typeof workspaceEdgeGroupOptions.right,
+    defaultCollapsed: boolean,
+  ) => {
+    const views = params.map(workspaceContentPanelId)
+    const currentGroup = current?.group && typeof current.group === 'object' ? current.group as Record<string, unknown> : {}
+    const currentActiveView = typeof currentGroup.activeView === 'string' ? currentGroup.activeView : null
+    return {
+      size: current?.size ?? options.initialSize,
+      visible: current?.visible ?? true,
+      collapsed: (current?.collapsed ?? defaultCollapsed) || undefined,
+      group: {
+        ...currentGroup,
+        id: options.id,
+        views,
+        activeView: currentActiveView && views.includes(currentActiveView) ? currentActiveView : views[0],
+      },
+    }
+  }
+  return {
+    ...layout,
+    panels,
+    edgeGroups: {
+      ...layout.edgeGroups,
+      left: completeEdge(layout.edgeGroups?.left, leftParams, workspaceEdgeGroupOptions.left, collapsed.left),
+      right: completeEdge(layout.edgeGroups?.right, rightParams, workspaceEdgeGroupOptions.right, collapsed.right),
+    },
+  }
+}
+
 export type TerminalArrangementStep = {
   panelId: string
   referencePanelId: string

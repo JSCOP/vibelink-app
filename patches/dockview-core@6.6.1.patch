@@ -1,3 +1,28 @@
+diff --git a/dist/cjs/dockview/dockviewComponent.js b/dist/cjs/dockview/dockviewComponent.js
+index b19f28cebb586304526f108e0c459b7395fe08c1..3ac7bf34dfc244a68101cb34663c3ab3cefc1bfe 100644
+--- a/dist/cjs/dockview/dockviewComponent.js
++++ b/dist/cjs/dockview/dockviewComponent.js
+@@ -1622,8 +1622,18 @@ var DockviewComponent = /** @class */ (function (_super) {
+                                 for (var views_1 = (e_19 = void 0, __values(views)), views_1_1 = views_1.next(); !views_1_1.done; views_1_1 = views_1.next()) {
+                                     var panelId = views_1_1.value;
+                                     if (panels[panelId]) {
+-                                        var panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
+-                                        createdPanels.push(panel);
++                                        var existingPanel = existingPanels.get(panelId);
++                                        if (tempGroup && existingPanel) {
++                                            _this.movingLock(function () {
++                                                tempGroup.model.removePanel(existingPanel);
++                                            });
++                                            createdPanels.push(existingPanel);
++                                            existingPanel.updateFromStateModel(panels[panelId]);
++                                        }
++                                        else {
++                                            var panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
++                                            createdPanels.push(panel);
++                                        }
+                                     }
+                                 }
+                             }
 diff --git a/dist/cjs/splitview/splitview.js b/dist/cjs/splitview/splitview.js
 index 04f3b5db80b870868c9bb0ee1eb0d18900477953..7ec1f000af4a021293a4ad5a80a05d64b029620a 100644
 --- a/dist/cjs/splitview/splitview.js
@@ -42,6 +67,31 @@ index 04f3b5db80b870868c9bb0ee1eb0d18900477953..7ec1f000af4a021293a4ad5a80a05d64
                      try {
                          for (var _b = __values(_this.viewItems), _c = _b.next(); !_c.done; _c = _b.next()) {
                              var item = _c.value;
+diff --git a/dist/esm/dockview/dockviewComponent.js b/dist/esm/dockview/dockviewComponent.js
+index 15062d00545c695b9fed64ce011ab25ae4cb5c3a..3b968996542dc4c37b4e934a8ec7b69b6ac3abce 100644
+--- a/dist/esm/dockview/dockviewComponent.js
++++ b/dist/esm/dockview/dockviewComponent.js
+@@ -1291,8 +1291,18 @@ export class DockviewComponent extends BaseGrid {
+                         const createdPanels = [];
+                         for (const panelId of views) {
+                             if (panels[panelId]) {
+-                                const panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
+-                                createdPanels.push(panel);
++                                const existingPanel = existingPanels.get(panelId);
++                                if (tempGroup && existingPanel) {
++                                    this.movingLock(() => {
++                                        tempGroup.model.removePanel(existingPanel);
++                                    });
++                                    createdPanels.push(existingPanel);
++                                    existingPanel.updateFromStateModel(panels[panelId]);
++                                }
++                                else {
++                                    const panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
++                                    createdPanels.push(panel);
++                                }
+                             }
+                         }
+                         for (let i = 0; i < createdPanels.length; i++) {
 diff --git a/dist/esm/splitview/splitview.js b/dist/esm/splitview/splitview.js
 index 521a9f3bbd6588d2252ba9c18cb6c578ec5fb0ec..3289f6e6009fff1dc28e79d5d01dc0cec888d04b 100644
 --- a/dist/esm/splitview/splitview.js
@@ -86,7 +136,7 @@ index 521a9f3bbd6588d2252ba9c18cb6c578ec5fb0ec..3289f6e6009fff1dc28e79d5d01dc0ce
                          item.enabled = true;
                      }
 diff --git a/dist/package/main.cjs.js b/dist/package/main.cjs.js
-index 9bacff7177b7549a7037592ba8cc83fac1a9e530..bf1b9bb7da85a1239ba08189b4bb753b1b06148e 100644
+index 9bacff7177b7549a7037592ba8cc83fac1a9e530..b629b4f5dfb10732fd91ba7c01f2bf72322dba6f 100644
 --- a/dist/package/main.cjs.js
 +++ b/dist/package/main.cjs.js
 @@ -1284,16 +1284,34 @@ class Splitview {
@@ -128,8 +178,29 @@ index 9bacff7177b7549a7037592ba8cc83fac1a9e530..bf1b9bb7da85a1239ba08189b4bb753b
                      for (const item of this.viewItems) {
                          item.enabled = true;
                      }
+@@ -15413,8 +15431,18 @@ class DockviewComponent extends BaseGrid {
+                         const createdPanels = [];
+                         for (const panelId of views) {
+                             if (panels[panelId]) {
+-                                const panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
+-                                createdPanels.push(panel);
++                                const existingPanel = existingPanels.get(panelId);
++                                if (tempGroup && existingPanel) {
++                                    this.movingLock(() => {
++                                        tempGroup.model.removePanel(existingPanel);
++                                    });
++                                    createdPanels.push(existingPanel);
++                                    existingPanel.updateFromStateModel(panels[panelId]);
++                                }
++                                else {
++                                    const panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
++                                    createdPanels.push(panel);
++                                }
+                             }
+                         }
+                         for (let i = 0; i < createdPanels.length; i++) {
 diff --git a/dist/package/main.esm.mjs b/dist/package/main.esm.mjs
-index ce8f30b35000f5e8162453018cbabc8123227c17..f560ca98a5b7821d00ee3485f4d6eac31a4e3988 100644
+index ce8f30b35000f5e8162453018cbabc8123227c17..4015c6cfde9352fafc9d113b3147352113ac8ba2 100644
 --- a/dist/package/main.esm.mjs
 +++ b/dist/package/main.esm.mjs
 @@ -1282,16 +1282,34 @@ class Splitview {
@@ -171,3 +242,24 @@ index ce8f30b35000f5e8162453018cbabc8123227c17..f560ca98a5b7821d00ee3485f4d6eac3
                      for (const item of this.viewItems) {
                          item.enabled = true;
                      }
+@@ -15411,8 +15429,18 @@ class DockviewComponent extends BaseGrid {
+                         const createdPanels = [];
+                         for (const panelId of views) {
+                             if (panels[panelId]) {
+-                                const panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
+-                                createdPanels.push(panel);
++                                const existingPanel = existingPanels.get(panelId);
++                                if (tempGroup && existingPanel) {
++                                    this.movingLock(() => {
++                                        tempGroup.model.removePanel(existingPanel);
++                                    });
++                                    createdPanels.push(existingPanel);
++                                    existingPanel.updateFromStateModel(panels[panelId]);
++                                }
++                                else {
++                                    const panel = this._deserializer.fromJSON(panels[panelId], edgeGroup);
++                                    createdPanels.push(panel);
++                                }
+                             }
+                         }
+                         for (let i = 0; i < createdPanels.length; i++) {

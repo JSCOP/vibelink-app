@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { PaneMeta } from '../ipc/types'
 import {
   createDefaultWorkspaceDockviewLayout,
+  completeWorkspaceStructuralLayout,
   createPreviewContentParams,
   createSingletonContentParams,
   createTerminalContentParams,
@@ -68,6 +69,30 @@ describe('workspaceLayoutModel v3', () => {
     expect(serializedRoot).not.toContain(leftIds[0])
     expect(serializedRoot).not.toContain(rightIds[0])
     expect(layout.activeGroup).toMatch(/^content-group-/)
+  })
+
+  it('completes older edge layouts before reuse without replacing their active tab', () => {
+    const layout = createDefaultWorkspaceDockviewLayout([], 1600)
+    const explorerId = workspaceContentPanelId(createSingletonContentParams('explorer'))
+    const workspaceFilesId = workspaceContentPanelId(createSingletonContentParams('workspaceFiles'))
+    const sourceControlId = workspaceContentPanelId(createSingletonContentParams('sourceControl'))
+    delete layout.panels[explorerId]
+    delete layout.panels[workspaceFilesId]
+    const leftGroup = layout.edgeGroups?.left?.group as { views: string[]; activeView?: string }
+    const rightGroup = layout.edgeGroups?.right?.group as { views: string[]; activeView?: string }
+    leftGroup.views = leftGroup.views.filter((id) => id !== explorerId)
+    rightGroup.views = rightGroup.views.filter((id) => id !== workspaceFilesId)
+    rightGroup.activeView = sourceControlId
+
+    const completed = completeWorkspaceStructuralLayout(layout, 1600)
+    const completedLeft = completed.edgeGroups?.left?.group as { views: string[] }
+    const completedRight = completed.edgeGroups?.right?.group as { views: string[]; activeView?: string }
+
+    expect(completedLeft.views).toEqual(workspaceLeftStructuralKinds.map((kind) => workspaceContentPanelId(createSingletonContentParams(kind))))
+    expect(completedRight.views).toEqual(workspaceRightStructuralKinds.map((kind) => workspaceContentPanelId(createSingletonContentParams(kind))))
+    expect(completed.panels[explorerId]).toBeDefined()
+    expect(completed.panels[workspaceFilesId]).toBeDefined()
+    expect(completedRight.activeView).toBe(sourceControlId)
   })
 
   it('uses deterministic width-sensitive default collapse without changing expanded sizes', () => {

@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => ({
     newSession: vi.fn(async () => 'new-acp'),
     resumeSession: vi.fn(async () => true),
   },
+  loadConversationHistory: vi.fn(),
   store: {
     setError: vi.fn(),
     activePaneId: undefined as string | undefined,
@@ -47,7 +48,10 @@ vi.mock('../../state/store', () => ({
   useWorkspaceStore: (selector: (state: typeof mocks.store) => unknown) => selector(mocks.store),
 }))
 vi.mock('./useHermesSessionController', () => ({
-  useHermesSessionController: () => mocks.controller,
+  useHermesSessionController: (enabled?: boolean) => {
+    mocks.loadConversationHistory(enabled)
+    return mocks.controller
+  },
 }))
 
 vi.mock('../WorkspaceSidebarPanelShell', () => ({
@@ -122,12 +126,77 @@ describe('AgentSessionsSidebar', () => {
     expect(screen.queryByText('Live sessions')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'New agent session' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('2 shown of 2 conversations')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Agent Session History' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Recent conversations/ })).toHaveTextContent('2')
+    expect(screen.getAllByText('E:/repo')).toHaveLength(2)
 
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search agent sessions' }), { target: { value: 'Automation' } })
     expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear agent session search' }))
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
     fireEvent.click(screen.getByRole('button', { name: 'Refresh agent sessions' }))
     await waitFor(() => expect(mocks.controller.refreshConversations).toHaveBeenCalledTimes(1))
     expect(mocks.controller.refreshSessions).not.toHaveBeenCalled()
+  })
+
+  test('filters sessions by agent and keeps one agent enabled', () => {
+    mocks.controller.conversations = [
+      conversation,
+      { ...conversation, id: 'claude-1', title: 'Claude docs', agent: 'claude', cwd: 'D:/docs', path: 'D:/docs/.claude/projects/claude-1.jsonl' },
+    ]
+    renderSidebar()
+
+    fireEvent.click(screen.getByLabelText('Agent session view options'))
+    const ompFilter = screen.getByRole('checkbox', { name: 'Oh My Pi' })
+    const claudeFilter = screen.getByRole('checkbox', { name: 'Claude Code' })
+    expect(ompFilter).toBeChecked()
+    expect(claudeFilter).toBeChecked()
+
+    fireEvent.click(claudeFilter)
+    expect(screen.queryByText('Claude docs')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('1 shown of 2 conversations')).toBeInTheDocument()
+    expect(ompFilter).toBeDisabled()
+  })
+
+  test('collapses and restores the recent conversation group', () => {
+    renderSidebar()
+    const group = screen.getByRole('button', { name: /Recent conversations/ })
+    const list = screen.getByRole('list', { name: 'Recent agent conversations' })
+
+    expect(group).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(group)
+    expect(group).toHaveAttribute('aria-expanded', 'false')
+    expect(list).toHaveClass('is-collapsed')
+
+    fireEvent.click(group)
+    expect(group).toHaveAttribute('aria-expanded', 'true')
+    expect(list).not.toHaveClass('is-collapsed')
+  })
+
+  test('does not render or load conversation rows while its edge panel is inactive', () => {
+    render(
+      <WorkspaceContentActionsContext.Provider value={actions}>
+        <AgentSessionsSidebar active={false} collapsed={false} />
+      </WorkspaceContentActionsContext.Provider>,
+    )
+
+    expect(mocks.loadConversationHistory).toHaveBeenLastCalledWith(false)
+    expect(screen.queryByRole('listitem')).not.toBeInTheDocument()
+  })
+
+  test('virtualizes a large conversation history', () => {
+    mocks.controller.conversations = Array.from({ length: 200 }, (_, index) => ({
+      ...conversation,
+      id: `omp-${index}`,
+      title: `Conversation ${index}`,
+      path: `E:/repo/.omp/agent/sessions/${index}.jsonl`,
+    }))
+    renderSidebar()
+
+    const renderedRows = screen.getAllByRole('listitem')
+    expect(renderedRows.length).toBeGreaterThan(0)
+    expect(renderedRows.length).toBeLessThan(50)
+    expect(screen.getByLabelText('200 shown of 200 conversations')).toBeInTheDocument()
   })
 
   test('resumes a closed conversation in a fresh terminal beside the active pane', async () => {

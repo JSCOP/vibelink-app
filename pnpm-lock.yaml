@@ -9,7 +9,7 @@ patchedDependencies:
     hash: d4b962b15a879cd90e8b876ff1877871cf61b26dccaa1ff31afdc93e54150baa
     path: patches/@xterm__addon-webgl@0.19.0.patch
   dockview-core@6.6.1:
-    hash: fcbd61b3b661b6fefc943541bdc8fd76285226bd5a19685e937656eb2c190ae9
+    hash: ac4af4774d286e360e2371d3fef5f74900cd08a4db015fa5ae4921541cc81f30
     path: patches/dockview-core@6.6.1.patch
 
 importers:
@@ -57,7 +57,7 @@ importers:
         version: 6.0.0
       dockview-core:
         specifier: 6.6.1
-        version: 6.6.1(patch_hash=fcbd61b3b661b6fefc943541bdc8fd76285226bd5a19685e937656eb2c190ae9)
+        version: 6.6.1(patch_hash=ac4af4774d286e360e2371d3fef5f74900cd08a4db015fa5ae4921541cc81f30)
       dockview-react:
         specifier: 6.6.1
         version: 6.6.1(react@18.3.1)
@@ -2711,7 +2711,7 @@ snapshots:
 
   dijkstrajs@1.0.3: {}
 
-  dockview-core@6.6.1(patch_hash=fcbd61b3b661b6fefc943541bdc8fd76285226bd5a19685e937656eb2c190ae9): {}
+  dockview-core@6.6.1(patch_hash=ac4af4774d286e360e2371d3fef5f74900cd08a4db015fa5ae4921541cc81f30): {}
 
   dockview-react@6.6.1(react@18.3.1):
     dependencies:
@@ -2721,7 +2721,7 @@ snapshots:
 
   dockview@6.6.1(react@18.3.1):
     dependencies:
-      dockview-core: 6.6.1(patch_hash=fcbd61b3b661b6fefc943541bdc8fd76285226bd5a19685e937656eb2c190ae9)
+      dockview-core: 6.6.1(patch_hash=ac4af4774d286e360e2371d3fef5f74900cd08a4db015fa5ae4921541cc81f30)
       react: 18.3.1
 
   dom-accessibility-api@0.5.16: {}
