@@ -29,3 +29,19 @@ export function shouldRevealTabForDrag(
   if (tab.isActive || !dragged) return false
   return dragged.viewId === tab.viewId && dragged.panelId !== tab.panelId
 }
+
+export type WorkspaceWindowDropPosition = 'top' | 'bottom' | 'left' | 'right' | 'center'
+
+export function workspaceWindowDropPosition(
+  rect: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
+  clientX: number,
+  clientY: number,
+): WorkspaceWindowDropPosition {
+  const x = clientX - rect.left
+  const y = clientY - rect.top
+  if (x < rect.width / 4) return 'left'
+  if (x > rect.width * 3 / 4) return 'right'
+  if (y < rect.height / 4) return 'top'
+  if (y > rect.height * 3 / 4) return 'bottom'
+  return 'center'
+}

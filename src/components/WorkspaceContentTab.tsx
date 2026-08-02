@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { getPanelData } from 'dockview-core'
-import { Grid3X3, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
+import { Eraser, Grid3X3, LayoutGrid, PanelTop, PanelTopClose, SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
 import { occupancyFromDockLayout } from './newTerminalGrid'
 import { ProfileIcon } from './ProfileIcon'
@@ -9,12 +9,14 @@ import { useWorkspaceStore } from '../state/store'
 import { useGitStore } from '../state/git'
 import { useWorkspaceContentActions } from '../layout/contentActions'
 import { selectedProfileForWorkspace } from '../state/profiles'
-import { parseWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
-import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceContentTabModel'
+import { parseWorkspaceContentParams, type SerializedDockview, type WorkspaceContentParams } from '../layout/workspaceContentModel'
+import { shouldRevealTabForDrag, workspaceAgentTabStatus, workspaceWindowDropPosition, type WorkspaceWindowDropPosition } from './workspaceContentTabModel'
 import { getTerminalWindow } from '../layout/terminalWindowRegistry'
-import { workspaceWindowGroupCount } from '../layout/workspaceLayoutModel'
+import { getWorkspaceWindow } from '../layout/workspaceWindowRegistry'
+import { workspaceWindowTabGroups, workspaceWindowTitle } from '../layout/workspaceLayoutModel'
 
 type WorkspaceContentTabProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
+const workspaceWindowDragType = 'application/x-vibelink-workspace-window'
 
 
 export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceContentTabProps) {
@@ -46,7 +48,21 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const [isActive, setIsActive] = useState(api.isActive)
   const [location, setLocation] = useState(api.location)
   const [addPanesOpen, setAddPanesOpen] = useState(false)
+  const [, refreshWorkspaceWindow] = useState(0)
+  const workspaceWindowDragPanelIdRef = useRef<string | null>(null)
+  const [workspaceWindowDropTarget, setWorkspaceWindowDropTarget] = useState<{ panelId: string; position: WorkspaceWindowDropPosition } | null>(null)
   const addPanesButtonRef = useRef<HTMLButtonElement | null>(null)
+  const workspaceWindowId = content?.kind === 'workspaceWindow' ? content.instanceId : null
+  const workspaceWindow = workspaceWindowId ? getWorkspaceWindow(workspaceWindowId) : undefined
+  const workspaceWindowApi = workspaceWindow?.getInnerApi()
+  let workspaceWindowLayout: SerializedDockview | null = content?.kind === 'workspaceWindow' ? content.inner : null
+  if (workspaceWindowApi) {
+    try {
+      workspaceWindowLayout = workspaceWindowApi.toJSON()
+    } catch {
+      // Persisted params remain a complete fallback during Dockview restore.
+    }
+  }
   const terminalWindow = content?.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId) : undefined
   const terminalWindowPaneCount = terminalWindow?.paneIds().length ?? 0
   let terminalWindowOccupancy = null
@@ -63,6 +79,14 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
     const disposable = api.onDidTitleChange((event) => setTitle(event.title))
     return () => disposable.dispose()
   }, [api])
+
+  useEffect(() => {
+    if (!workspaceWindowId) return
+    const refresh = () => refreshWorkspaceWindow((revision) => revision + 1)
+    window.addEventListener('vibelink:workspace-window-change', refresh)
+    refresh()
+    return () => window.removeEventListener('vibelink:workspace-window-change', refresh)
+  }, [workspaceWindowId])
 
   useEffect(() => {
     const syncActive = () => setIsActive(api.isActive)
@@ -153,20 +177,105 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
     )
   }
 
+  if (content?.kind === 'workspaceWindow') {
+    const combinedTitle = workspaceWindowTitle(workspaceWindowLayout)
+    const tabGroups = workspaceWindowTabGroups(workspaceWindowLayout)
+    return (
+      <div
+        className="workspace-content-tab-workspaceWindow workspace-window-combined-tab"
+        title={combinedTitle}
+        data-content-panel-id={api.id}
+        data-dockview-dnd-disabled="true"
+        role="tablist"
+        aria-label={combinedTitle}
+      >
+        {tabGroups.map((group) => (
+          <div key={group.id} className="workspace-window-combined-group" data-window-group-id={group.id} role="presentation">
+            {group.panelIds.map((panelId) => {
+              const livePanel = workspaceWindowApi?.getPanel(panelId)
+              const serializedPanel = workspaceWindowLayout?.panels[panelId]
+              const child = parseWorkspaceContentParams(livePanel?.params ?? serializedPanel?.params)
+              if (!child || child.kind === 'workspaceWindow') return null
+              const isVisible = group.activePanelId === panelId
+              return (
+                <div
+                  key={panelId}
+                  className={`workspace-window-combined-segment${isVisible ? ' is-visible' : ''}`}
+                  draggable
+                  data-window-drop-position={workspaceWindowDropTarget?.panelId === panelId ? workspaceWindowDropTarget.position : undefined}
+                  data-content-panel-id={panelId}
+                  data-window-group-id={group.id}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return
+                    actions.activateContent(panelId)
+                    event.stopPropagation()
+                  }}
+                  onDragStart={(event) => {
+                    if ((event.target as HTMLElement).closest('button, input')) {
+                      event.preventDefault()
+                      return
+                    }
+                    workspaceWindowDragPanelIdRef.current = panelId
+                    event.dataTransfer.effectAllowed = 'move'
+                    event.stopPropagation()
+                    event.dataTransfer.setData(workspaceWindowDragType, panelId)
+                  }}
+                  onDragOver={(event) => {
+                    const sourcePanelId = workspaceWindowDragPanelIdRef.current || event.dataTransfer.getData(workspaceWindowDragType)
+                    if (!sourcePanelId || sourcePanelId === panelId) return
+                    event.preventDefault()
+                    event.dataTransfer.dropEffect = 'move'
+                    event.stopPropagation()
+                    const position = workspaceWindowDropPosition(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
+                    setWorkspaceWindowDropTarget((current) => current?.panelId === panelId && current.position === position ? current : { panelId, position })
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    const sourcePanelId = workspaceWindowDragPanelIdRef.current || event.dataTransfer.getData(workspaceWindowDragType)
+                    const sourcePanel = sourcePanelId ? workspaceWindowApi?.getPanel(sourcePanelId) : undefined
+                    const targetPanel = workspaceWindowApi?.getPanel(panelId)
+                    const position = workspaceWindowDropTarget?.panelId === panelId ? workspaceWindowDropTarget.position : workspaceWindowDropPosition(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
+                    if (sourcePanel && targetPanel && sourcePanel.id !== targetPanel.id) sourcePanel.api.moveTo({ group: targetPanel.api.group, position })
+                    workspaceWindowDragPanelIdRef.current = null
+                    setWorkspaceWindowDropTarget(null)
+                  }}
+                  onDragEnd={(event) => {
+                    event.stopPropagation()
+                    workspaceWindowDragPanelIdRef.current = null
+                    setWorkspaceWindowDropTarget(null)
+                  }}
+                >
+                  {livePanel && workspaceWindowApi ? (
+                    <WorkspaceContentTab api={livePanel.api} containerApi={workspaceWindowApi} params={livePanel.params as WorkspaceContentParams} tabLocation="header" />
+                  ) : (
+                    <div className="workspace-content-tab" role="tab" tabIndex={0} aria-selected={isVisible} aria-label={child.title}>
+                      <span aria-hidden="true"><ProfileIcon name={child.icon} size={13} className="terminal-tab-icon" /></span>
+                      <span className="terminal-tab-title">{child.title}</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div
       className={`workspace-content-tab workspace-content-tab-${content?.kind ?? 'unknown'}${hasCompletionHighlight ? ' terminal-tab-response-complete' : ''}${reviewed ? ' terminal-tab-reviewed' : ''}`}
       title={reviewed ? `${title} · reviewed` : hasCompletionHighlight ? `${title} · response complete` : accessibleTitle}
       data-content-panel-id={api.id}
       data-pane-id={paneId ?? undefined}
-      data-dockview-dnd-disabled={content?.kind === 'workspaceWindow' ? 'true' : undefined}
-      data-workspace-window-grouped={content?.kind === 'workspaceWindow' ? String(workspaceWindowGroupCount(content.inner) > 1) : undefined}
+      data-dockview-dnd-disabled={undefined}
       role="tab"
       tabIndex={0}
       aria-selected={isActive}
       aria-label={accessibleTitle}
       onKeyDown={onRootKeyDown}
-      onPointerMove={content?.kind === 'workspaceWindow' ? undefined : revealOnDragOver}
+      onPointerMove={revealOnDragOver}
     >
       {/* No onPointerDown activation here: Dockview owns tab activation via its
           own click handler AND owns pointer-based drag. Activating on pointerdown
@@ -193,7 +302,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       ) : (
         <span
           className="terminal-tab-title"
-          title={paneId ? 'Terminal content. Drag with Dockview to move; double-click to rename.' : content?.kind === 'workspaceWindow' ? 'Grouped workspace windows.' : 'Workspace content. Drag with Dockview to move.'}
+          title={paneId ? 'Terminal content. Drag with Dockview to move; double-click to rename.' : 'Workspace content. Drag with Dockview to move.'}
           onDoubleClick={() => {
             if (!paneId) return
             setDraftTitle(title)
@@ -203,7 +312,6 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           {title}
         </span>
       )}
-      {content?.kind !== 'workspaceWindow' ? (
       <div className="terminal-tab-actions" data-dockview-dnd-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
         {/* Optional quick actions live in the collapsing rail: a resting tab is
             icon + title + close, and the rail expands only on hover or keyboard
@@ -241,6 +349,15 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
                 void actions.openContent({ kind: 'terminal-grid', grid: { cols, rows, occupiedGrid, profileId, windowId: content.instanceId } })
               }}
             />
+            <button type="button" title="Arrange panes" aria-label="Arrange panes" onClick={(event) => { activateAndStop(event); void actions.arrangeTerminals(null, content.instanceId) }}>
+              <LayoutGrid size={12} aria-hidden="true" />
+            </button>
+            <button type="button" title="Close every pane in this window" aria-label="Clear panes" disabled={terminalWindowPaneCount === 0} onClick={(event) => { activateAndStop(event); void actions.clearTerminals(content.instanceId) }}>
+              <Eraser size={12} aria-hidden="true" />
+            </button>
+            <button type="button" title={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} aria-label={content.titlesHidden ? 'Show pane titles' : 'Hide pane titles'} onClick={(event) => { activateAndStop(event); actions.toggleTerminalWindowTitles(content.instanceId) }}>
+              {content.titlesHidden ? <PanelTop size={12} aria-hidden="true" /> : <PanelTopClose size={12} aria-hidden="true" />}
+            </button>
           </>
         ) : null}
         </div></div>
@@ -248,7 +365,6 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           <X size={12} aria-hidden="true" />
         </button>
       </div>
-      ) : null}
-    </div>
+      </div>
   )
 }

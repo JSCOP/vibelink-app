@@ -156,24 +156,47 @@ export function createTerminalWindowParams(
   }
 }
 
-function countWorkspaceWindowGroups(node: unknown): number {
-  if (!node || typeof node !== 'object') return 0
+export type WorkspaceWindowTabGroup = {
+  id: string
+  panelIds: string[]
+  activePanelId: string | null
+}
+
+function collectWorkspaceWindowTabGroups(node: unknown, groups: WorkspaceWindowTabGroup[]) {
+  if (!node || typeof node !== 'object') return
   const { type, data } = node as { type?: unknown; data?: unknown }
-  if (type === 'leaf') return 1
-  if (type === 'branch' && Array.isArray(data)) return data.reduce((count, child) => count + countWorkspaceWindowGroups(child), 0)
-  return 0
+  if (type === 'branch' && Array.isArray(data)) {
+    for (const child of data) collectWorkspaceWindowTabGroups(child, groups)
+    return
+  }
+  if (type !== 'leaf' || !data || typeof data !== 'object') return
+  const leaf = data as { id?: unknown; views?: unknown; activeView?: unknown }
+  const panelIds = Array.isArray(leaf.views) ? leaf.views.filter((value): value is string => typeof value === 'string') : []
+  if (panelIds.length === 0) return
+  const activePanelId = typeof leaf.activeView === 'string' && panelIds.includes(leaf.activeView) ? leaf.activeView : panelIds[0]
+  groups.push({
+    id: typeof leaf.id === 'string' ? leaf.id : `workspace-window-group-${groups.length}`,
+    panelIds,
+    activePanelId,
+  })
+}
+
+export function workspaceWindowTabGroups(inner: SerializedDockview | null): WorkspaceWindowTabGroup[] {
+  const groups: WorkspaceWindowTabGroup[] = []
+  collectWorkspaceWindowTabGroups(inner?.grid.root, groups)
+  return groups
 }
 
 export function workspaceWindowGroupCount(inner: SerializedDockview | null): number {
-  return countWorkspaceWindowGroups(inner?.grid.root)
+  return workspaceWindowTabGroups(inner).length
 }
 
 export function workspaceWindowTitle(inner: SerializedDockview | null): string {
   if (!inner) return 'Window Group'
-  if (workspaceWindowGroupCount(inner) > 1) return 'Group 1'
-  const titles = Object.values(inner.panels).flatMap((panel) => {
-    const params = parseWorkspaceContentParams(panel.params)
-    return params?.kind === 'workspaceWindow' ? [] : [params?.title ?? panel.title ?? 'Window']
+  const titles = workspaceWindowTabGroups(inner).flatMap((group) => group.panelIds).flatMap((panelId) => {
+    const panel = inner.panels[panelId]
+    const params = parseWorkspaceContentParams(panel?.params)
+    return panel ? [params?.title ?? panel.title ?? 'Window'] : []
   })
   if (titles.length === 0) return 'Window Group'
   if (titles.length <= 2) return titles.join(' + ')

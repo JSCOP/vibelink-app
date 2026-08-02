@@ -69,17 +69,13 @@ describe('workspace window chrome', () => {
     expect(panel).toContain("removeAttribute('data-vl-window-drag')")
   })
 
-  it('hides the outer wrapper header until more than one window group exists', () => {
-    const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
-    const rule = css.match(/([^{}]*\.workspace-content-tab-workspaceWindow[^{}]*)\{\s*display:\s*none/)
-    if (!rule) throw new Error('no singleton workspace-window header rule in App.css')
-    const selector = rule[1].trim()
+  it('uses the outer combined tab as the only window-tab row', () => {
+    const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8').replace(/\r\n/g, '\n')
+    const panel = readFileSync(join(process.cwd(), 'src/layout/WorkspaceWindowPanel.tsx'), 'utf8')
 
-    document.body.innerHTML = '<div class="workspace-dock"><div class="dv-groupview"><div class="dv-tabs-and-actions-container"><div class="workspace-content-tab-workspaceWindow" data-workspace-window-grouped="false"></div></div></div></div>'
-    const tab = document.querySelector('.workspace-content-tab-workspaceWindow') as HTMLElement
-    const header = document.querySelector('.dv-tabs-and-actions-container') as HTMLElement
-    expect(header.matches(selector)).toBe(true)
-    tab.setAttribute('data-workspace-window-grouped', 'true')
-    expect(header.matches(selector)).toBe(false)
+    expect(panel).toContain('className="workspace-window-inner-dock"')
+    expect(css).toContain('.workspace-window-inner-dock .dv-tabs-and-actions-container {\n  display: none;')
+    expect(css).toContain('.workspace-window-inner-dock .terminal-window-panel .dv-tabs-and-actions-container {\n  display: flex;')
+    expect(css).not.toContain("[data-workspace-window-grouped='false']")
   })
 })

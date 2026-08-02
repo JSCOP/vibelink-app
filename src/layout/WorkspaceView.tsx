@@ -550,18 +550,21 @@ function WorkspaceGroupActionsWithContext(props: IDockviewHeaderActionsProps & {
   const integration = useContext(WorkspaceIntegrationContext)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const groupId = props.group.id
-  const menuOverlayId = `group-menu:${groupId}`
-  const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
-  const isCurrentMainGroup = workspaceGroupShowsCreationControls(props.group.api.location.type, groupId, integration.currentMainGroupId)
   const isWorkspaceWindowShell = props.group.panels.some((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'workspaceWindow')
+  const targetGroupId = isWorkspaceWindowShell ? integration.currentMainGroupId : groupId
+  const menuOverlayId = `group-menu:${targetGroupId ?? groupId}`
+  const stop = (event: { stopPropagation: () => void }) => event.stopPropagation()
+  const isCurrentMainGroup = isWorkspaceWindowShell
+    ? props.isGroupActive && Boolean(targetGroupId)
+    : workspaceGroupShowsCreationControls(props.group.api.location.type, groupId, integration.currentMainGroupId)
 
-  if (!isCurrentMainGroup || isWorkspaceWindowShell) return null
+  if (!isCurrentMainGroup || !targetGroupId) return null
 
   return (
     <div className="workspace-group-actions" onMouseDown={stop} onPointerDown={stop}>
       <WorkspaceAddMenu
         actions={actions}
-        targetGroupId={groupId}
+        targetGroupId={targetGroupId}
         overlayId={menuOverlayId}
         disabled={!actions || !activeSessionId}
         openFilePicker={integration.openFilePicker}

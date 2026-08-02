@@ -961,7 +961,6 @@ button {
   min-height: 0;
   position: relative;
 }
-
 .workspace-window-container {
   background: var(--vibelink-bg);
   display: grid;
@@ -973,9 +972,26 @@ button {
   position: relative;
 }
 
-.workspace-window-container > .dv-dockview {
+.workspace-window-inner-dock,
+.workspace-window-inner-dock > .dv-dockview {
+  height: 100%;
   min-height: 0;
   min-width: 0;
+  width: 100%;
+}
+
+/* Window tabs are mirrored into the one outer combined tab. Hide only the
+   nested workspace-window rows; terminal pane title rows remain visible. */
+.workspace-window-inner-dock .dv-tabs-and-actions-container {
+  display: none;
+}
+
+.workspace-window-inner-dock .terminal-window-panel .dv-tabs-and-actions-container {
+  display: flex;
+}
+
+.workspace-window-inner-dock .terminal-window-panel.terminal-window-titles-hidden .dv-tabs-and-actions-container {
+  display: none;
 }
 
 .terminal-panel-shell {
@@ -1373,16 +1389,59 @@ button {
   pointer-events: none;
 }
 
-/* The outer Dockview is only a grouping shell. A singleton window uses the
-   inner window tab as its sole chrome; the group rail appears after a split. */
-.workspace-dock .dv-groupview:has(> .dv-tabs-and-actions-container .workspace-content-tab-workspaceWindow[data-workspace-window-grouped='false']) > .dv-tabs-and-actions-container {
-  display: none;
+/* One outer Dockview tab owns the full split. Its child segments mirror every
+   editor/browser/terminal window without adding a separate "Group 1" row. */
+.workspace-content-tab-workspaceWindow {
+  align-items: stretch;
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.workspace-content-tab-workspaceWindow[data-workspace-window-grouped='true'] {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
+.workspace-window-combined-group {
+  display: contents;
+}
+
+.workspace-window-combined-segment {
+  align-items: stretch;
+  background: var(--dv-activegroup-hiddenpanel-tab-background-color);
+  border-right: 1px solid var(--vibelink-border);
+  display: flex;
+  min-width: 0;
+}
+
+.workspace-window-combined-segment[draggable='true'] {
+  cursor: grab;
+}
+
+.workspace-window-combined-segment[data-window-drop-position='center'] {
+  box-shadow: inset 0 0 0 2px var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='left'] {
+  box-shadow: inset 3px 0 var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='right'] {
+  box-shadow: inset -3px 0 var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='top'] {
+  box-shadow: inset 0 3px var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='bottom'] {
+  box-shadow: inset 0 -3px var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment.is-visible {
+  background: var(--dv-activegroup-visiblepanel-tab-background-color);
+}
+
+.workspace-window-combined-segment > .workspace-content-tab {
+  max-width: 280px;
+  min-width: 120px;
 }
 
 /* Tab chrome. The strip reads as a rail of quiet labels with ONE lit tab: the

@@ -150,21 +150,29 @@ export function WorkspaceWindowPanel({
       event.api.onDidActivePanelChange(() => notifyChanged()),
     ]
     onActiveGroupChange(event.api.activeGroup?.id ?? null)
+    persistInner()
     void settleInner()
   // Initial params are restored once. Later writes originate from this inner API.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearDragState, notifyChanged, onActiveGroupChange, persistInner, settleInner])
 
-  useEffect(() => registerWorkspaceWindow({
-    windowId: params.instanceId,
-    outerPanelId: outerApi.id,
-    getInnerApi: () => innerApiRef.current,
-    settle: settleInner,
-    persist: persistInner,
-    panelIds: () => innerApiRef.current?.panels.map((panel) => panel.id) ?? [],
-    activePanelId: () => innerApiRef.current?.activePanel?.id ?? null,
-    focusActive,
-  }), [focusActive, outerApi.id, params.instanceId, persistInner, settleInner])
+  useEffect(() => {
+    const unregister = registerWorkspaceWindow({
+      windowId: params.instanceId,
+      outerPanelId: outerApi.id,
+      getInnerApi: () => innerApiRef.current,
+      settle: settleInner,
+      persist: persistInner,
+      panelIds: () => innerApiRef.current?.panels.map((panel) => panel.id) ?? [],
+      activePanelId: () => innerApiRef.current?.activePanel?.id ?? null,
+      focusActive,
+    })
+    notifyChanged()
+    return () => {
+      unregister()
+      notifyChanged()
+    }
+  }, [focusActive, notifyChanged, outerApi.id, params.instanceId, persistInner, settleInner])
 
   useEffect(() => {
     const dimensions = outerApi.onDidDimensionsChange(() => { if (outerApi.isVisible) void settleInner() })
@@ -202,18 +210,20 @@ export function WorkspaceWindowPanel({
 
   return (
     <div ref={hostRef} className="workspace-window-container" data-content-panel-id={outerApi.id} data-workspace-window-id={params.instanceId}>
-      <DockviewReact
-        components={components}
-        tabComponents={innerTabComponents}
-        defaultTabComponent={WorkspaceContentTab}
-        leftHeaderActionsComponent={leftHeaderActionsComponent}
-        getTabContextMenuItems={getTabContextMenuItems}
-        onReady={handleReady}
-        defaultRenderer="always"
-        disableFloatingGroups
-        dndStrategy="pointer"
-        theme={vibelinkDockviewTheme}
-      />
+      <div className="workspace-window-inner-dock">
+        <DockviewReact
+          components={components}
+          tabComponents={innerTabComponents}
+          defaultTabComponent={WorkspaceContentTab}
+          leftHeaderActionsComponent={leftHeaderActionsComponent}
+          getTabContextMenuItems={getTabContextMenuItems}
+          onReady={handleReady}
+          defaultRenderer="always"
+          disableFloatingGroups
+          dndStrategy="pointer"
+          theme={vibelinkDockviewTheme}
+        />
+      </div>
       <WorkspaceEmptyState api={innerApi} actions={actions} />
     </div>
   )

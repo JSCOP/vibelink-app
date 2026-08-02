@@ -84,7 +84,7 @@ describe('workspaceLayoutModel v3', () => {
     expect(groupedLayout.activeGroup).toMatch(/^content-group-/)
   })
 
-  it('uses a group label only when the workspace contains multiple window groups', () => {
+  it('summarizes every window inside the combined outer tab', () => {
     const layout = createDefaultWorkspaceDockviewLayout([pane('pane-a')], 1600)
     const params = Object.values(layout.panels).flatMap((panel) => {
       const content = parseWorkspaceContentParams(panel.params)
@@ -105,7 +105,7 @@ describe('workspaceLayoutModel v3', () => {
     }
 
     expect(workspaceWindowGroupCount(split)).toBe(2)
-    expect(workspaceWindowTitle(split)).toBe('Group 1')
+    expect(workspaceWindowTitle(split)).toBe('Terminal + README.md')
   })
 
   it('moves a legacy editor and terminal split under one grouped outer tab without changing the split tree', () => {
