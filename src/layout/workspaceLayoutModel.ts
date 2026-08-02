@@ -169,7 +169,7 @@ export function workspaceWindowTitle(inner: SerializedDockview | null): string {
 
 export function createWorkspaceWindowParams(
   inner: SerializedDockview | null,
-  instanceId = crypto.randomUUID(),
+  instanceId: string = crypto.randomUUID(),
 ): Extract<WorkspaceContentParams, { kind: 'workspaceWindow' }> {
   return { schema: 1, kind: 'workspaceWindow', instanceId, title: workspaceWindowTitle(inner), icon: 'layout-grid', inner }
 }
