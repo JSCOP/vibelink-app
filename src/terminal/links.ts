@@ -124,7 +124,43 @@ function wrappedLineGroup(term: Terminal, bufferLineNumber: number): (MappedLine
   for (let index = startIndex; index <= endIndex; index += 1) {
     if (!appendMappedRow(group, term, index, (index - startIndex) * term.cols, cell)) return undefined
   }
-  return group
+  return hardWrappedPathPair(term, startIndex - 1, startIndex)
+    ?? hardWrappedPathPair(term, endIndex, endIndex + 1)
+    ?? group
+}
+
+function hardWrappedPathPair(term: Terminal, firstIndex: number, secondIndex: number): (MappedLineText & { start: number; end: number }) | undefined {
+  const buffer = term.buffer.active
+  const firstLine = buffer.getLine(firstIndex)
+  const secondLine = buffer.getLine(secondIndex)
+  if (!firstLine || !secondLine || secondLine.isWrapped) return undefined
+
+  const first: MappedLineText = { text: '', columns: [], widths: [] }
+  const second: MappedLineText = { text: '', columns: [], widths: [] }
+  const cell = buffer.getNullCell()
+  if (!appendMappedRow(first, term, firstIndex, 0, cell) || !appendMappedRow(second, term, secondIndex, 0, cell)) return undefined
+
+  const firstEnd = first.text.trimEnd().length
+  const secondStart = second.text.search(/\S/)
+  const secondEnd = second.text.trimEnd().length
+  if (firstEnd === 0 || secondStart < 0 || secondStart >= secondEnd) return undefined
+
+  const endingPath = findPathMatches(first.text.slice(0, firstEnd)).find(({ index, text }) => index + text.length === firstEnd)
+  if (!endingPath) return undefined
+  const pathStartColumn = first.columns[endingPath.index]
+  const pathEndIndex = endingPath.index + endingPath.text.length - 1
+  const pathEndColumn = first.columns[pathEndIndex] + first.widths[pathEndIndex] - 1
+  if (pathEndColumn < term.cols - 2 || second.columns[secondStart] !== pathStartColumn) return undefined
+
+  const group: MappedLineText & { start: number; end: number } = {
+    start: firstIndex + 1,
+    end: secondIndex + 1,
+    text: first.text.slice(0, firstEnd) + second.text.slice(secondStart, secondEnd),
+    columns: first.columns.slice(0, firstEnd).concat(second.columns.slice(secondStart, secondEnd).map((column) => term.cols + column)),
+    widths: first.widths.slice(0, firstEnd).concat(second.widths.slice(secondStart, secondEnd)),
+  }
+  const joinedPath = findPathMatches(group.text).find(({ index, text }) => index === endingPath.index && text.length > endingPath.text.length)
+  return joinedPath ? group : undefined
 }
 
 // Appends exactly one terminal-width row so the joined text keeps a precise

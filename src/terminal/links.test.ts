@@ -143,6 +143,31 @@ describe('terminal link matchers', () => {
       expect(continuationLinks).toHaveLength(1)
     })
 
+    it('reconstructs an indented hard-wrapped path on either row', () => {
+      const first = String.raw`   E:\CityAI\IncheonProject\t2in-dev\ImageGallery\twin-map-nat `
+      const second = String.raw`   ural-composite-10\manifest.json`
+      const fullPath = String.raw`E:\CityAI\IncheonProject\t2in-dev\ImageGallery\twin-map-natural-composite-10\manifest.json`
+      const term = stubTerminal(first.length, [
+        { text: first },
+        { text: second },
+      ])
+      let opened: unknown
+      const provider = createPathLinkProvider(term, () => ({
+        onOpenPath: (target) => { opened = target },
+        resolveMarker: () => undefined,
+      }))
+      let firstRowLinks: ILink[] | undefined
+      let continuationLinks: ILink[] | undefined
+
+      provider.provideLinks(1, (links) => { firstRowLinks = links })
+      provider.provideLinks(2, (links) => { continuationLinks = links })
+
+      expect(firstRowLinks?.[0].text).toBe(fullPath)
+      expect(continuationLinks?.[0].text).toBe(fullPath)
+      ;(continuationLinks?.[0].activate as (event: MouseEvent) => void)({ ctrlKey: true, metaKey: false } as MouseEvent)
+      expect(opened).toEqual({ path: fullPath })
+    })
+
     it('returns fresh link objects because xterm mutates link decorations', () => {
       const term = stubTerminal(12, [
         { text: 'run C:\\very\\' },
