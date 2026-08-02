@@ -26,6 +26,7 @@ import {
   unstackSerializedDockview,
 } from './innerPaneLayout'
 import { paneIdsInReadingOrder } from './paneSwap'
+import { activeTerminalPaneId } from './paneActivation'
 import {
   parseWorkspaceContentParams,
   workspaceContentPanelId,
@@ -269,9 +270,16 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     })
   }, [paneIdsFromParams])
 
-  const focusFirst = useCallback(() => {
-    const first = paneIds()[0]
-    if (first) TerminalManager.focus(first)
+  const focusActivePane = useCallback(() => {
+    const api = innerApiRef.current
+    const paneId = activeTerminalPaneId(api, paneIds())
+    if (!paneId) return
+    const panel = api?.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+    if (panel && api?.activePanel !== panel) panel.api.setActive()
+    const state = useWorkspaceStore.getState()
+    state.setActivePaneId(paneId)
+    state.clearPaneCompletionHighlight(paneId)
+    requestAnimationFrame(() => TerminalManager.focus(paneId))
   }, [paneIds])
 
   const scheduleInnerInvariantCheck = useCallback(() => {
@@ -333,10 +341,10 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       settle: settleInner,
       persist: persistInner,
       paneIds,
-      focusFirst,
+      focusFirst: focusActivePane,
     })
     return unregister
-  }, [addPane, focusFirst, paneIds, persistInner, removePane, settleInner, windowId])
+  }, [addPane, focusActivePane, paneIds, persistInner, removePane, settleInner, windowId])
 
   // Fit cascade: the OUTER panel resize / visibility drives the inner Dockview.
   useEffect(() => {

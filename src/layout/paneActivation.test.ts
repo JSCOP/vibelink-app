@@ -1,5 +1,6 @@
+import type { DockviewApi } from 'dockview-react'
 import { describe, expect, it } from 'vitest'
-import { paneIdFromEventTarget } from './paneActivation'
+import { activeTerminalPaneId, paneIdFromEventTarget } from './paneActivation'
 
 describe('pane activation helpers', () => {
   it('finds the nearest pane id from the terminal body', () => {
@@ -16,6 +17,17 @@ describe('pane activation helpers', () => {
     } as unknown as EventTarget
 
     expect(paneIdFromEventTarget(titleTarget)).toBeNull()
+  })
+
+  it('keeps the active pane when a terminal window is selected', () => {
+    const api = {
+      activePanel: {
+        params: { schema: 1, kind: 'terminal', instanceId: 'pane-b', paneId: 'pane-b', title: 'B', icon: 'terminal' },
+      },
+    } as unknown as DockviewApi
+
+    expect(activeTerminalPaneId(api, ['pane-a', 'pane-b'])).toBe('pane-b')
+    expect(activeTerminalPaneId({ activePanel: null } as unknown as DockviewApi, ['pane-a', 'pane-b'])).toBe('pane-a')
   })
 
   it('ignores targets without element traversal', () => {
