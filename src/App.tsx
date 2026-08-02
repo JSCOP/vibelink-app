@@ -785,7 +785,7 @@ function App() {
           const errorKey = `${shortcut.accelerator}:${message}`
           if (!captureShortcutErrorKeysRef.current.has(errorKey)) {
             captureShortcutErrorKeysRef.current.add(errorKey)
-            useWorkspaceStore.getState().setError(`Could not register global ${shortcut.label} shortcut (${shortcut.accelerator}). It may already be used by another app. ${message}`)
+            console.warn(`Global ${shortcut.label} shortcut unavailable (${shortcut.accelerator})`, caught)
           }
         }
       }
