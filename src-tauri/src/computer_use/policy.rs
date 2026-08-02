@@ -21,7 +21,6 @@ const DEFAULT_BLOCKED_TITLES: &[&str] = &[
     "user account control",
     "windows security",
     "windows sign-in",
-    "[release - protected host]",
 ];
 
 const DEFAULT_BLOCKED_EXACT_TITLES: &[&str] = &["vibelink"];

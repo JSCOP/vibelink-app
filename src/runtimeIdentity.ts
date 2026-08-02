@@ -29,7 +29,7 @@ export function runtimeIdentityFor(development: boolean): RuntimeIdentity {
     : {
         kind: 'release',
         protected: true,
-        browserTitle: 'VibeLink [RELEASE - PROTECTED HOST]',
+        browserTitle: 'VibeLink',
         badgeLabel: 'RELEASE HOST',
         badgeDetail: 'PROTECTED',
         description: 'Protected release host. Do not use this window to verify development changes or close it during self-hosted development.',

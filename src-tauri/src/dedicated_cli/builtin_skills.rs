@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_SKILL_VERSION: &str = "1.3.0";
+pub const BUILTIN_SKILL_VERSION: &str = "1.3.1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,7 +76,7 @@ Computer use is performed by the restartable native Windows provider, not by ren
 
 Use `vibelink computer capabilities`, `list-apps`, `list-windows`, and `get-app-state` to select a unique target. Actions are `click`, `perform-secondary-action`, `scroll`, `drag`, `type-text`, `press-key`, `hotkey`, `paste-text`, and `set-value`; inspect prior outcomes with `action-history`.
 
-When developing VibeLink from inside VibeLink, the installed release window is the protected control plane. `VibeLink` and any title containing `[RELEASE - PROTECTED HOST]` are intentionally blocked; use the exact `VibeLink Dev` window for observation and actions.
+When developing VibeLink from inside VibeLink, the installed release window is the protected control plane. The exact `VibeLink` release title is intentionally blocked without modifying the visible window title; use the exact `VibeLink Dev` window for observation and actions.
 
 Prefer semantic UI Automation actions. Coordinate fallback is allowed only for a visible element frame from the same current window generation. High-risk actions use a one-shot lease: call `approval-create` with the exact action and snapshot-scoped target, show the reason, call `approval-resolve --decision approve` only after explicit authorization, then repeat the action with `--approval-id`. Use `--no-screenshot` when pixels are unnecessary. `--restore-window` permits one explicit recovery attempt; never create a silent focus-stealing loop.
 

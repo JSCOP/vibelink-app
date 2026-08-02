@@ -388,10 +388,8 @@ fn release_vibelink_is_marked_and_blocked_while_vibelink_dev_stays_available() {
     dev_provider
         .snapshot(snapshot_request(dev_window))
         .expect("the development build remains controllable for UI verification");
-    assert!(SensitiveAppPolicy::default().is_app_blocked(
-        &window("app.exe", 33).app_identity(),
-        Some("VibeLink [RELEASE - PROTECTED HOST]"),
-    ));
+    assert!(SensitiveAppPolicy::default()
+        .is_app_blocked(&window("app.exe", 33).app_identity(), Some("VibeLink"),));
 }
 
 #[test]

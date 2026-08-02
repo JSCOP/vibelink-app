@@ -23,7 +23,7 @@ describe('runtimeIdentityFor', () => {
     expect(runtimeIdentityFor(false)).toMatchObject({
       kind: 'release',
       protected: true,
-      browserTitle: 'VibeLink [RELEASE - PROTECTED HOST]',
+      browserTitle: 'VibeLink',
       badgeDetail: 'PROTECTED',
     })
   })
