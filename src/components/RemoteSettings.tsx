@@ -236,7 +236,7 @@ export function RemoteSettings() {
                   width={240}
                   height={240}
                   alt="VibeLink Mobile pairing QR"
-                  style={{ background: '#fff', borderRadius: 6, height: 'auto', imageRendering: 'pixelated', maxWidth: '100%' }}
+                  style={{ background: '#fff', borderRadius: 6, flex: '0 1 240px', height: 'auto', imageRendering: 'pixelated', maxWidth: '100%', width: 240 }}
                 />}
               />
             ) : null}

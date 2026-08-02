@@ -44,6 +44,7 @@ describe('RemoteSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'QR 생성' }))
     expect(await screen.findByText('12345678')).toBeInTheDocument()
     expect(screen.getByAltText('VibeLink Mobile pairing QR')).toHaveAttribute('src', 'data:image/png;base64,qr')
+    expect(screen.getByAltText('VibeLink Mobile pairing QR')).toHaveStyle({ flex: '0 1 240px', width: '240px' })
     expect(invoke).toHaveBeenCalledWith('remote_create_pairing_v2')
     // Camera-readable contract: full 4-module quiet zone and a large bitmap.
     expect(QRCode.toDataURL).toHaveBeenCalledWith('{}', { margin: 4, width: 720 })
