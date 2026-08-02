@@ -312,7 +312,9 @@ fn map_daemon_error(message: String) -> CliError {
     } else if folded.contains("denied")
         || folded.contains("not authorized")
         || folded.contains("app_blocked")
+        || folded.contains("appblocked")
         || folded.contains("elevation_required")
+        || folded.contains("elevationrequired")
     {
         ErrorCode::DeniedCapability
     } else if folded.contains("conflict") || folded.contains("revision") {
@@ -361,6 +363,21 @@ mod tests {
         );
         assert_eq!(
             map_daemon_error("capability denied".to_string()).code,
+            ErrorCode::DeniedCapability
+        );
+        assert_eq!(
+            map_daemon_error(
+                "AppBlocked: computer use is blocked for this sensitive application".to_string()
+            )
+            .code,
+            ErrorCode::DeniedCapability
+        );
+        assert_eq!(
+            map_daemon_error(
+                "ElevationRequired: target process has a higher Windows integrity level"
+                    .to_string()
+            )
+            .code,
             ErrorCode::DeniedCapability
         );
         assert_eq!(

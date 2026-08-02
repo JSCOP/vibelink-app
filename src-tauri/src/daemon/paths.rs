@@ -7,8 +7,8 @@ use std::{
     process::Command,
 };
 
-const PROD_APP_NAME: &str = "VibeLink";
-const DEV_APP_NAME: &str = "VibeLink Dev";
+pub(crate) const PROD_APP_NAME: &str = "VibeLink";
+pub(crate) const DEV_APP_NAME: &str = "VibeLink Dev";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonPaths {
@@ -52,12 +52,28 @@ pub fn app_flavor() -> &'static str {
     }
 }
 
-fn project_app_name() -> &'static str {
-    if cfg!(debug_assertions) {
+pub(crate) fn host_runtime_for_flavor(flavor: &str) -> &'static str {
+    if flavor == "dev" {
+        "development"
+    } else {
+        "release"
+    }
+}
+
+pub(crate) fn host_protected_for_flavor(flavor: &str) -> bool {
+    flavor != "dev"
+}
+
+pub(crate) fn app_name_for_flavor(flavor: &str) -> &'static str {
+    if flavor == "dev" {
         DEV_APP_NAME
     } else {
         PROD_APP_NAME
     }
+}
+
+fn project_app_name() -> &'static str {
+    app_name_for_flavor(app_flavor())
 }
 
 fn socket_name_for_identity(identity: &str) -> String {
@@ -195,6 +211,16 @@ mod tests {
         assert_ne!(dev, prod);
         assert!(dev.starts_with("vibelink-dev-daemon-"));
         assert!(prod.starts_with("vibelink-prod-daemon-"));
+    }
+
+    #[test]
+    fn runtime_identity_is_flavor_scoped() {
+        assert_eq!(host_runtime_for_flavor("dev"), "development");
+        assert_eq!(host_runtime_for_flavor("prod"), "release");
+        assert!(!host_protected_for_flavor("dev"));
+        assert!(host_protected_for_flavor("prod"));
+        assert_eq!(app_name_for_flavor("dev"), "VibeLink Dev");
+        assert_eq!(app_name_for_flavor("prod"), "VibeLink");
     }
 
     #[test]

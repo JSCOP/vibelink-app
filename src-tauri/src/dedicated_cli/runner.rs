@@ -1,5 +1,5 @@
 use super::{
-    client::{ControlSocketClient, ControlSocketConfig},
+    client::{ControlSocketClient, ControlSocketConfig, Flavor},
     command::{
         parse_args, ActionCommand, Command, Invocation, OrchestrationAction, TerminalAction,
         WorktreeAction, COMMAND_SCHEMA_VERSION,
@@ -8,6 +8,7 @@ use super::{
     error::CliError,
     output::OutputStreams,
 };
+use crate::daemon::paths;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -88,11 +89,7 @@ impl ControlExecutor for SocketExecutor {
         match invocation.command.clone() {
             Command::Status => {
                 ControlSocketClient::connect(config)?.ping()?;
-                Ok(json!({
-                    "state": "running",
-                    "flavor": flavor,
-                    "socket": socket_name,
-                }))
+                Ok(status_result(flavor, socket_name))
             }
             Command::Terminal(command) if command.action == TerminalAction::Wait => {
                 terminal_wait(config, invocation, command, progress)
@@ -117,6 +114,19 @@ impl ControlExecutor for SocketExecutor {
             }
         }
     }
+}
+
+fn status_result(flavor: Flavor, socket_name: String) -> Value {
+    let flavor_name = flavor.as_str();
+    json!({
+        "state": "running",
+        "flavor": flavor,
+        "socket": socket_name,
+        "hostRuntime": paths::host_runtime_for_flavor(flavor_name),
+        "hostProtected": paths::host_protected_for_flavor(flavor_name),
+        "hostWindowTitle": paths::app_name_for_flavor(flavor_name),
+        "version": env!("CARGO_PKG_VERSION"),
+    })
 }
 
 fn apply_result_contract(command: &Command, mut result: Value) -> Result<Value, CliError> {
@@ -443,6 +453,19 @@ mod tests {
         json.as_object_mut().expect("object").remove("callerCwd");
         let decoded: CliControlRequest = serde_json::from_value(json).expect("deserialize");
         assert_eq!(decoded.caller_cwd, None);
+    }
+
+    #[test]
+    fn status_exposes_release_host_protection_and_dev_target_identity() {
+        let release = status_result(Flavor::Prod, "prod-socket".to_string());
+        assert_eq!(release["hostRuntime"], "release");
+        assert_eq!(release["hostProtected"], true);
+        assert_eq!(release["hostWindowTitle"], "VibeLink");
+
+        let development = status_result(Flavor::Dev, "dev-socket".to_string());
+        assert_eq!(development["hostRuntime"], "development");
+        assert_eq!(development["hostProtected"], false);
+        assert_eq!(development["hostWindowTitle"], "VibeLink Dev");
     }
 
     #[test]

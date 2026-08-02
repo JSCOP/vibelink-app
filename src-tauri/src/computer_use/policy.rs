@@ -21,7 +21,10 @@ const DEFAULT_BLOCKED_TITLES: &[&str] = &[
     "user account control",
     "windows security",
     "windows sign-in",
+    "[release - protected host]",
 ];
+
+const DEFAULT_BLOCKED_EXACT_TITLES: &[&str] = &["vibelink"];
 
 const SECRET_PHRASES: &[&str] = &[
     "one-time code",
@@ -37,6 +40,7 @@ const SECRET_WORDS: &[&str] = &["otp", "pin", "password", "passcode", "secret", 
 #[derive(Clone, Debug)]
 pub struct SensitiveAppPolicy {
     blocked_executables: BTreeSet<String>,
+    blocked_exact_titles: BTreeSet<String>,
     blocked_title_fragments: BTreeSet<String>,
 }
 
@@ -44,6 +48,10 @@ impl Default for SensitiveAppPolicy {
     fn default() -> Self {
         Self {
             blocked_executables: DEFAULT_BLOCKED_EXECUTABLES
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            blocked_exact_titles: DEFAULT_BLOCKED_EXACT_TITLES
                 .iter()
                 .map(|value| value.to_string())
                 .collect(),
@@ -69,6 +77,19 @@ impl SensitiveAppPolicy {
         self
     }
 
+    pub fn with_blocked_exact_titles<I, S>(mut self, titles: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.blocked_exact_titles.extend(
+            titles
+                .into_iter()
+                .map(|title| title.as_ref().trim().to_ascii_lowercase()),
+        );
+        self
+    }
+
     pub fn with_blocked_title_fragments<I, S>(mut self, titles: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -87,10 +108,12 @@ impl SensitiveAppPolicy {
         if self.blocked_executables.contains(&executable) {
             return true;
         }
-        let title = window_title.unwrap_or_default().to_ascii_lowercase();
-        self.blocked_title_fragments
-            .iter()
-            .any(|fragment| !fragment.is_empty() && title.contains(fragment))
+        let title = window_title.unwrap_or_default().trim().to_ascii_lowercase();
+        self.blocked_exact_titles.contains(&title)
+            || self
+                .blocked_title_fragments
+                .iter()
+                .any(|fragment| !fragment.is_empty() && title.contains(fragment))
     }
 
     pub fn require_allowed(

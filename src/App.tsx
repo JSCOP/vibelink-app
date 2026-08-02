@@ -40,6 +40,7 @@ import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/p
 import { desktopSelectionPayload } from './remote/desktopSelection'
 import { playCompletionSound, prepareCompletionSoundPlayback } from './notifications/completionSounds'
 import { newCompletionPaneIds, notifyPaneCompletion } from './notifications/completionNotifications'
+import { appRuntimeIdentity } from './runtimeIdentity'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
@@ -75,6 +76,23 @@ function hermesWarmupStatus(commandOverride: string | null): Promise<HermesRunti
     hermesWarmupRuntime = { commandOverride, promise: getHermesRuntimeStatus(commandOverride) }
   }
   return hermesWarmupRuntime.promise
+}
+
+function RuntimeIdentityBadge({ floating = false }: { floating?: boolean }) {
+  return (
+    <div
+      className={`runtime-identity-badge runtime-identity-${appRuntimeIdentity.kind}${floating ? ' runtime-identity-badge-floating' : ''}`}
+      role="status"
+      aria-label={appRuntimeIdentity.description}
+      title={appRuntimeIdentity.description}
+      data-runtime-kind={appRuntimeIdentity.kind}
+      data-runtime-protected={String(appRuntimeIdentity.protected)}
+    >
+      <span className="runtime-identity-dot" aria-hidden="true" />
+      <strong>{appRuntimeIdentity.badgeLabel}</strong>
+      <span className="runtime-identity-detail">· {appRuntimeIdentity.badgeDetail}</span>
+    </div>
+  )
 }
 
 function App() {
@@ -831,7 +849,8 @@ function App() {
 
   if (appLocked) {
     return (
-      <main className="app-shell app-shell-locked" style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
+      <main className="app-shell app-shell-locked" data-vibelink-runtime={appRuntimeIdentity.kind} data-vibelink-protected={String(appRuntimeIdentity.protected)} style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
+        <RuntimeIdentityBadge floating />
         <AppLockedScreen onReportBug={license.status?.email ? openBugReport : undefined} />
         <Suspense fallback={null}>
           {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
@@ -846,6 +865,8 @@ function App() {
       ref={appShellRef}
       className="app-shell"
       data-active-content={chromeState?.activeContentKind ?? undefined}
+      data-vibelink-runtime={appRuntimeIdentity.kind}
+      data-vibelink-protected={String(appRuntimeIdentity.protected)}
       style={{ '--vibelink-ui-scale': settings.uiScale, '--vibelink-pane-header-height': `${settings.paneHeaderHeight}px` } as CSSProperties}
       aria-hidden={dirtyEditorPrompt ? true : undefined}
     >
@@ -854,6 +875,7 @@ function App() {
           <div className="workspace-crumb-box" data-tauri-drag-region>
             <div className="crumb" data-tauri-drag-region>{activeSession?.name ?? 'Loading'}</div>
           </div>
+          <RuntimeIdentityBadge />
           <div className="topbar-spacer" data-tauri-drag-region />
           <button type="button" className="topbar-icon-button" disabled={!activeSessionId || !contentActions} title="Reset layout" aria-label="Reset workspace layout" onClick={() => {
             void confirmDialog({ title: 'Reset the workspace layout?', message: 'Panes keep running; only the arrangement is rebuilt.', confirmLabel: 'Reset' })

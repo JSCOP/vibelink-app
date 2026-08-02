@@ -407,15 +407,38 @@ fn with_runtime_agent_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
             !key.eq_ignore_ascii_case("VIBELINK_APP_EXE")
                 && !key.eq_ignore_ascii_case("VIBELINK_CLI_EXE")
                 && !key.eq_ignore_ascii_case("VIBELINK_APP_FLAVOR")
+                && !key.eq_ignore_ascii_case("VIBELINK_HOST_RUNTIME")
+                && !key.eq_ignore_ascii_case("VIBELINK_HOST_PROTECTED")
+                && !key.eq_ignore_ascii_case("VIBELINK_HOST_WINDOW_TITLE")
+                && !key.eq_ignore_ascii_case("VIBELINK_HOST_VERSION")
         })
         .collect();
     let cli_executable = env::var_os("VIBELINK_CLI_EXE")
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| "vibelink.exe".to_string());
+    let flavor = paths::app_flavor();
     next.push(("VIBELINK_CLI_EXE".to_string(), cli_executable));
+    next.push(("VIBELINK_APP_FLAVOR".to_string(), flavor.to_string()));
     next.push((
-        "VIBELINK_APP_FLAVOR".to_string(),
-        paths::app_flavor().to_string(),
+        "VIBELINK_HOST_RUNTIME".to_string(),
+        paths::host_runtime_for_flavor(flavor).to_string(),
+    ));
+    next.push((
+        "VIBELINK_HOST_PROTECTED".to_string(),
+        if paths::host_protected_for_flavor(flavor) {
+            "1"
+        } else {
+            "0"
+        }
+        .to_string(),
+    ));
+    next.push((
+        "VIBELINK_HOST_WINDOW_TITLE".to_string(),
+        paths::app_name_for_flavor(flavor).to_string(),
+    ));
+    next.push((
+        "VIBELINK_HOST_VERSION".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
     ));
     next
 }
@@ -765,22 +788,57 @@ mod tests {
     }
 
     #[test]
-    fn runtime_agent_env_records_dedicated_cli_and_flavor() {
+    fn runtime_agent_env_records_protected_host_identity() {
         let entries = with_runtime_agent_env(vec![
             ("VIBELINK_APP_EXE".to_string(), "wrong-app.exe".to_string()),
             ("VIBELINK_CLI_EXE".to_string(), "wrong-cli.exe".to_string()),
+            (
+                "VIBELINK_HOST_RUNTIME".to_string(),
+                "wrong-runtime".to_string(),
+            ),
+            (
+                "VIBELINK_HOST_PROTECTED".to_string(),
+                "wrong-protection".to_string(),
+            ),
+            (
+                "VIBELINK_HOST_WINDOW_TITLE".to_string(),
+                "wrong-title".to_string(),
+            ),
+            (
+                "VIBELINK_HOST_VERSION".to_string(),
+                "wrong-version".to_string(),
+            ),
             ("OTHER".to_string(), "value".to_string()),
         ]);
 
         let expected_cli = env::var_os("VIBELINK_CLI_EXE")
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| "vibelink.exe".to_string());
+        let flavor = paths::app_flavor();
 
         assert!(entries.contains(&("OTHER".to_string(), "value".to_string())));
         assert!(entries.contains(&("VIBELINK_CLI_EXE".to_string(), expected_cli)));
+        assert!(entries.contains(&("VIBELINK_APP_FLAVOR".to_string(), flavor.to_string())));
         assert!(entries.contains(&(
-            "VIBELINK_APP_FLAVOR".to_string(),
-            paths::app_flavor().to_string()
+            "VIBELINK_HOST_RUNTIME".to_string(),
+            paths::host_runtime_for_flavor(flavor).to_string(),
+        )));
+        assert!(entries.contains(&(
+            "VIBELINK_HOST_PROTECTED".to_string(),
+            if paths::host_protected_for_flavor(flavor) {
+                "1"
+            } else {
+                "0"
+            }
+            .to_string(),
+        )));
+        assert!(entries.contains(&(
+            "VIBELINK_HOST_WINDOW_TITLE".to_string(),
+            paths::app_name_for_flavor(flavor).to_string(),
+        )));
+        assert!(entries.contains(&(
+            "VIBELINK_HOST_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
         )));
         assert!(!entries.iter().any(|(key, _)| key == "VIBELINK_APP_EXE"));
         assert!(!entries.contains(&("VIBELINK_CLI_EXE".to_string(), "wrong-cli.exe".to_string())));

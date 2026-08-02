@@ -366,6 +366,35 @@ fn sensitive_apps_are_blocked_before_uia_or_capture() {
 }
 
 #[test]
+fn release_vibelink_is_marked_and_blocked_while_vibelink_dev_stays_available() {
+    let mut release_window = window("app.exe", 31);
+    release_window.title = "VibeLink".to_string();
+    let release_backend = FakeBackend::new(release_window.clone(), vec![]);
+    let mut release_provider =
+        ComputerUseProvider::new(release_backend, SensitiveAppPolicy::default());
+
+    assert!(release_provider.list_apps().expect("list release app")[0].blocked);
+    let release_error = release_provider
+        .snapshot(snapshot_request(release_window))
+        .expect_err("the installed release host must not be a computer-use target");
+    assert_eq!(release_error.code, ProviderErrorCode::AppBlocked);
+
+    let mut dev_window = window("app.exe", 32);
+    dev_window.title = "VibeLink Dev".to_string();
+    let dev_backend = FakeBackend::new(dev_window.clone(), vec![]);
+    let mut dev_provider = ComputerUseProvider::new(dev_backend, SensitiveAppPolicy::default());
+
+    assert!(!dev_provider.list_apps().expect("list dev app")[0].blocked);
+    dev_provider
+        .snapshot(snapshot_request(dev_window))
+        .expect("the development build remains controllable for UI verification");
+    assert!(SensitiveAppPolicy::default().is_app_blocked(
+        &window("app.exe", 33).app_identity(),
+        Some("VibeLink [RELEASE - PROTECTED HOST]"),
+    ));
+}
+
+#[test]
 fn higher_integrity_targets_map_to_elevation_required_without_auto_elevation() {
     let mut target = window("regedit.exe", 11);
     target.integrity = IntegrityLevel::High;

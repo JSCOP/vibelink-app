@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_SKILL_VERSION: &str = "1.2.0";
+pub const BUILTIN_SKILL_VERSION: &str = "1.3.0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +22,7 @@ Use the dedicated `vibelink` console program. Do not invoke GUI executable compa
 ## Contract
 
 - Use `--json` for automation. Stdout is one versioned result or error envelope; diagnostics and 15-second wait keepalives are stderr-only.
+- `status` is the runtime identity gate. During self-hosted VibeLink development, `hostProtected: true` means this pane belongs to the installed release host: never terminate that process or use its UI as evidence for current source changes. The valid current-code window is the exact `hostWindowTitle: "VibeLink Dev"` development target.
 - Worktree selection is deterministic: explicit `--worktree <stable-id-or-exact-selector>`, then explicit `--workspace <unique-bound-session>`, then the CLI process's canonical caller cwd and its deepest containing checkout. `--worktree` and `--workspace` are mutually exclusive. Focus, recent tabs, and fuzzy names are never fallback selectors.
 - Mutations carry an operation UUID automatically. Reuse `--operation-id <uuid>` only to replay the identical request after an unknown outcome; the same UUID with different input is a conflict. Use a new UUID for a new decision.
 - `worktree move|remove|set` require `--expected-instance-id`. Removal additionally requires `--confirm`; `--force` works only for the exact acknowledged soft blockers. Main checkout, Git lock, and identity mismatch are hard blockers and cannot be forced.
@@ -74,6 +75,8 @@ const COMPUTER_CONTENT: &str = r#"# VibeLink Computer Use
 Computer use is performed by the restartable native Windows provider, not by renderer scripts. Observe before acting and retain the app/window generation from the latest snapshot.
 
 Use `vibelink computer capabilities`, `list-apps`, `list-windows`, and `get-app-state` to select a unique target. Actions are `click`, `perform-secondary-action`, `scroll`, `drag`, `type-text`, `press-key`, `hotkey`, `paste-text`, and `set-value`; inspect prior outcomes with `action-history`.
+
+When developing VibeLink from inside VibeLink, the installed release window is the protected control plane. `VibeLink` and any title containing `[RELEASE - PROTECTED HOST]` are intentionally blocked; use the exact `VibeLink Dev` window for observation and actions.
 
 Prefer semantic UI Automation actions. Coordinate fallback is allowed only for a visible element frame from the same current window generation. High-risk actions use a one-shot lease: call `approval-create` with the exact action and snapshot-scoped target, show the reason, call `approval-resolve --decision approve` only after explicit authorization, then repeat the action with `--approval-id`. Use `--no-screenshot` when pixels are unnecessary. `--restore-window` permits one explicit recovery attempt; never create a silent focus-stealing loop.
 
@@ -224,6 +227,10 @@ mod tests {
             .expect("computer skill")
             .content
             .contains("Never elevate automatically"));
+        assert!(builtin_skill("vibelink-computer-use")
+            .expect("computer skill")
+            .content
+            .contains("exact `VibeLink Dev` window"));
         assert!(builtin_skill("vibelink-mobile-remote")
             .expect("remote skill")
             .content

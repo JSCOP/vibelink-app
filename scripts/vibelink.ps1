@@ -359,6 +359,7 @@ function Invoke-DevBuild {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
+  $env:VITE_VIBELINK_APP_FLAVOR = 'dev'
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
   }
@@ -371,6 +372,7 @@ function Invoke-ReleaseBuild {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
+  $env:VITE_VIBELINK_APP_FLAVOR = 'prod'
   Assert-ReleaseLicenseApiUrl
   Reset-ReleaseBuildArtifacts
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--no-bundle')
@@ -382,6 +384,7 @@ function Invoke-DevRun {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
+  $env:VITE_VIBELINK_APP_FLAVOR = 'dev'
   $vitePort = Select-DevPort $DevVitePort $DevVitePortEnd 'Vite' 'Vite'
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
@@ -417,6 +420,7 @@ function Invoke-DevInstaller([switch]$SkipVersionBump) {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
+  $env:VITE_VIBELINK_APP_FLAVOR = 'dev'
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   if (Test-Path -LiteralPath $StopLegacyDevLocks) {
     & $StopLegacyDevLocks
@@ -430,6 +434,7 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
+  $env:VITE_VIBELINK_APP_FLAVOR = 'prod'
   Assert-ReleaseLicenseApiUrl
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   Reset-ReleaseBuildArtifacts
@@ -442,6 +447,7 @@ function Invoke-CiInstaller([switch]$IncrementalLocal) {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
+  $env:VITE_VIBELINK_APP_FLAVOR = 'prod'
   Assert-ReleaseLicenseApiUrl
   $packageVersion = Get-JsonVersion $PackageJson
   $cargoVersion = Get-CargoPackageVersion $CargoToml

@@ -3,7 +3,7 @@ use super::{
     types::*,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -108,12 +108,25 @@ where
 
     pub fn list_apps(&mut self) -> Result<Vec<AppRecord>, ProviderError> {
         self.require_running()?;
+        let windows = self
+            .backend
+            .list_windows(None)
+            .map_err(|error| self.map_backend_error(error, IntegrityLevel::Unknown))?;
+        let blocked_window_processes = windows
+            .iter()
+            .filter(|window| {
+                self.policy
+                    .is_app_blocked(&window.app_identity(), Some(&window.title))
+            })
+            .map(|window| window.process_id)
+            .collect::<HashSet<_>>();
         let mut apps = self
             .backend
             .list_apps()
             .map_err(|error| self.map_backend_error(error, IntegrityLevel::Unknown))?;
         for app in &mut apps {
-            app.blocked = self.policy.is_app_blocked(&app.identity, None);
+            app.blocked = self.policy.is_app_blocked(&app.identity, None)
+                || blocked_window_processes.contains(&app.identity.process_id);
         }
         Ok(apps)
     }

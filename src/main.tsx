@@ -4,12 +4,16 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import 'dockview-react/dist/styles/dockview.css'
 import './index.css'
 import { applyCaptureOverlayTransparency, isCaptureOverlayLabel } from './components/captureOverlay.ts'
+import { appRuntimeIdentity } from './runtimeIdentity'
 
 const isOverlay = isCaptureOverlayLabel(getCurrentWindow().label)
 if (isOverlay) applyCaptureOverlayTransparency()
 
+document.documentElement.dataset.vibelinkRuntime = appRuntimeIdentity.kind
+document.documentElement.dataset.vibelinkProtected = String(appRuntimeIdentity.protected)
+document.title = appRuntimeIdentity.browserTitle
+
 if (import.meta.env.DEV) {
-  document.title = 'VibeLink Dev'
   void import('./terminal/TerminalManager').then(({ TerminalManager }) => {
     Object.assign(window, { __vibelinkDebug: { TerminalManager } })
   })
