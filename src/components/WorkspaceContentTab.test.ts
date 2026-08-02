@@ -6,7 +6,7 @@ import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceCont
 import { WorkspaceContentTab } from './WorkspaceContentTab'
 import { TerminalPaneTitleBar } from './TerminalPaneTitleBar'
 import { buildWorkspaceContentTabContextMenu } from '../layout/workspaceContentTabMenu'
-import { createSingletonContentParams, createTerminalContentParams, createTerminalWindowParams } from '../layout/workspaceLayoutModel'
+import { createSingletonContentParams, createTerminalContentParams, createTerminalWindowParams, createWorkspaceWindowParams } from '../layout/workspaceLayoutModel'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../layout/contentActions'
 import { registerTerminalWindow } from '../layout/terminalWindowRegistry'
 import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../state/git'
@@ -78,6 +78,17 @@ describe('WorkspaceContentTab', () => {
     } as never, actions)
 
     expect(items).toEqual([])
+  })
+
+  it('keeps the outer workspace group tab fixed and action-free', () => {
+    const params = createWorkspaceWindowParams(null, 'window-a')
+    const api = panelApi('content:workspaceWindow:window-a', params.title)
+    renderWithActions(createElement(WorkspaceContentTab, { api, containerApi, params } as never))
+    const tab = screen.getByRole('tab', { name: 'Window Group' })
+
+    expect(tab.getAttribute('data-dockview-dnd-disabled')).toBe('true')
+    expect(within(tab).queryAllByRole('button')).toHaveLength(0)
+    expect(buildWorkspaceContentTabContextMenu({ panel: { id: api.id, params }, group: { id: 'workspace-window-group' } } as never, actions)).toEqual([])
   })
 
   it('aggregates the Source Control badge across repositories in the active workspace group', () => {

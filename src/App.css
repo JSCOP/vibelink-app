@@ -966,6 +966,22 @@ button {
   position: relative;
 }
 
+.workspace-window-container {
+  background: var(--vibelink-bg);
+  display: grid;
+  grid-template-rows: 1fr;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.workspace-window-container > .dv-dockview {
+  min-height: 0;
+  min-width: 0;
+}
+
 .terminal-panel-shell {
   /* Visual inset around the terminal content. Lives here (not on
      .dock-terminal-host) so it is NOT counted by PaneFitAddon's height
@@ -1354,13 +1370,10 @@ button {
   height: var(--dv-tabs-and-actions-container-height);
 }
 
-/* While a workspace WINDOW tab is being dragged, the always-rendered panel
-   overlays must not answer the pointer: Dockview hit-tests topmost-first and
-   would otherwise hand every point over a window's body to that window's own
-   nested Dockview, which cannot accept a foreign panel. Dropping them out of
-   hit-testing exposes each group's `.dv-content-container`, which is what shows
-   the left/right/top/bottom split overlays. */
-[data-vl-window-drag='true'] .workspace-dock .dv-render-overlay {
+/* During an INNER window-tab drag, ignore renderer overlays only inside that
+   grouped workspace window. This exposes its Dockview split targets without
+   making the fixed outer workspace tab draggable or revealing outer targets. */
+.workspace-window-container[data-vl-window-drag='true'] .dv-render-overlay {
   pointer-events: none;
 }
 

@@ -158,12 +158,13 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       title={reviewed ? `${title} · reviewed` : hasCompletionHighlight ? `${title} · response complete` : accessibleTitle}
       data-content-panel-id={api.id}
       data-pane-id={paneId ?? undefined}
+      data-dockview-dnd-disabled={content?.kind === 'workspaceWindow' ? 'true' : undefined}
       role="tab"
       tabIndex={0}
       aria-selected={isActive}
       aria-label={accessibleTitle}
       onKeyDown={onRootKeyDown}
-      onPointerMove={revealOnDragOver}
+      onPointerMove={content?.kind === 'workspaceWindow' ? undefined : revealOnDragOver}
     >
       {/* No onPointerDown activation here: Dockview owns tab activation via its
           own click handler AND owns pointer-based drag. Activating on pointerdown
@@ -190,7 +191,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       ) : (
         <span
           className="terminal-tab-title"
-          title={paneId ? 'Terminal content. Drag with Dockview to move; double-click to rename.' : 'Workspace content. Drag with Dockview to move.'}
+          title={paneId ? 'Terminal content. Drag with Dockview to move; double-click to rename.' : content?.kind === 'workspaceWindow' ? 'Grouped workspace windows.' : 'Workspace content. Drag with Dockview to move.'}
           onDoubleClick={() => {
             if (!paneId) return
             setDraftTitle(title)
@@ -200,6 +201,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           {title}
         </span>
       )}
+      {content?.kind !== 'workspaceWindow' ? (
       <div className="terminal-tab-actions" data-dockview-dnd-disabled="true" onMouseDown={activateAndStop} onPointerDown={activateAndStop}>
         {/* Optional quick actions live in the collapsing rail: a resting tab is
             icon + title + close, and the rail expands only on hover or keyboard
@@ -253,6 +255,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           <X size={12} aria-hidden="true" />
         </button>
       </div>
+      ) : null}
     </div>
   )
 }

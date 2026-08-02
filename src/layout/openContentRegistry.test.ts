@@ -11,6 +11,7 @@ import {
 } from './openContentRegistry'
 import { useWorkspaceStore } from '../state/store'
 import { registerTerminalWindow } from './terminalWindowRegistry'
+import { registerWorkspaceWindow } from './workspaceWindowRegistry'
 import { workspaceContentPanelId } from './workspaceContentModel'
 
 const browserItem: OpenContentItem = {
@@ -105,6 +106,49 @@ describe('openContentRegistry', () => {
         panes: previousState.panes,
         settings: previousState.settings,
       })
+    }
+  })
+
+  test('projects grouped inner windows while keeping the outer workspace tab hidden', () => {
+    const editor = {
+      id: 'content:editor:AGENTS.md',
+      params: { schema: 1, kind: 'editor', instanceId: 'AGENTS.md', title: 'AGENTS.md', icon: 'file-code', relPath: 'AGENTS.md' },
+    } as unknown as IDockviewPanel
+    const browser = {
+      id: 'content:browser:page-grouped',
+      params: { schema: 1, kind: 'browser', instanceId: 'page-grouped', pageId: 'page-grouped', profileId: 'default', title: 'Docs', icon: 'globe' },
+    } as unknown as IDockviewPanel
+    const innerApi = {
+      panels: [editor, browser],
+      activePanel: editor,
+      groups: [
+        { api: { location: { type: 'grid' } }, panels: [editor] },
+        { api: { location: { type: 'grid' } }, panels: [browser] },
+      ],
+    } as unknown as DockviewApi
+    const workspacePanel = {
+      id: 'content:workspaceWindow:window-group',
+      params: { schema: 1, kind: 'workspaceWindow', instanceId: 'window-group', title: 'AGENTS.md + Docs', icon: 'layout-grid', inner: null },
+    } as unknown as IDockviewPanel
+    const unregister = registerWorkspaceWindow({
+      windowId: 'window-group',
+      outerPanelId: workspacePanel.id,
+      getInnerApi: () => innerApi,
+      settle: vi.fn(async () => undefined),
+      persist: vi.fn(),
+      panelIds: () => [editor.id, browser.id],
+      activePanelId: () => editor.id,
+      focusActive: vi.fn(),
+    })
+
+    try {
+      publishOpenContentFromDockview({ panels: [workspacePanel], activePanel: workspacePanel, groups: [] } as unknown as DockviewApi)
+      expect(getOpenContentSnapshot()).toEqual([
+        { panelId: editor.id, kind: 'editor', title: 'AGENTS.md', icon: 'file-code', active: true, parentPanelId: null, split: true },
+        { panelId: browser.id, kind: 'browser', title: 'Docs', icon: 'globe', active: false, parentPanelId: null, split: true },
+      ])
+    } finally {
+      unregister()
     }
   })
 })

@@ -242,7 +242,7 @@ describe('WorkspaceView shell primitives', () => {
     expect(resolveWorkspaceContentGroup(api, 'workspaces', 'grid-a', 'grid-b')?.id).toBe('workspace-left-tools')
   })
 
-  it('keeps terminals and other content in separate central grid groups', () => {
+  it('opens every central window as a tab in the current or requested group', () => {
     const { api, groups, makePanel } = fakeDock(['grid-term', 'grid-content'])
     registerWorkspaceEdgeGroups(api, 1600)
     const termGroup = groups.find((group) => group.id === 'grid-term')!
@@ -250,22 +250,18 @@ describe('WorkspaceView shell primitives', () => {
     makePanel({ schema: 1, kind: 'terminal', instanceId: 'p1', title: 'Shell', icon: 'terminal', paneId: 'p1' }, termGroup)
     makePanel({ schema: 1, kind: 'editor', instanceId: 'e1', title: 'a.ts', icon: 'file', relPath: 'a.ts' }, contentGroup)
 
-    // A terminal routes to the group that already holds terminals.
     expect(resolveWorkspaceContentGroup(api, 'terminal')?.id).toBe('grid-term')
-    // Non-terminal content routes to the group without terminals.
-    expect(resolveWorkspaceContentGroup(api, 'editor')?.id).toBe('grid-content')
-    expect(resolveWorkspaceContentGroup(api, 'browser')?.id).toBe('grid-content')
+    expect(resolveWorkspaceContentGroup(api, 'editor')?.id).toBe('grid-term')
+    expect(resolveWorkspaceContentGroup(api, 'browser', 'grid-content')?.id).toBe('grid-content')
   })
 
-  it('splits a new non-terminal group beside the terminal window when none exists', () => {
+  it('does not invent a split when another central window opens', () => {
     const { api, groups, makePanel } = fakeDock(['grid-term'])
     registerWorkspaceEdgeGroups(api, 1600)
     const termGroup = groups.find((group) => group.id === 'grid-term')!
     makePanel({ schema: 1, kind: 'terminal', instanceId: 'p1', title: 'Shell', icon: 'terminal', paneId: 'p1' }, termGroup)
 
-    const resolved = resolveWorkspaceContentGroup(api, 'editor')
-    expect(resolved?.id).not.toBe('grid-term')
-    expect(resolved?.id).toMatch(/^content-group-main/)
+    expect(resolveWorkspaceContentGroup(api, 'editor')?.id).toBe('grid-term')
   })
 
   it('shows New only on the current grid group while edge activation leaves it attached', () => {

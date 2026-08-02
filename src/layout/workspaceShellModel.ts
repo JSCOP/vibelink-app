@@ -126,15 +126,6 @@ export function workspaceGroupShowsCreationControls(locationType: 'grid' | 'edge
   return locationType === 'grid' && groupId === currentMainGroupId
 }
 
-/** Whether a grid group currently holds at least one terminal panel. */
-function groupContainsTerminals(group: { panels: readonly IDockviewPanel[] }): boolean {
-  return group.panels.some((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')
-}
-
-/** Whether a grid group holds only terminal panels (or is empty). */
-function groupIsTerminalOnly(group: { panels: readonly IDockviewPanel[] }): boolean {
-  return group.panels.every((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')
-}
 
 export function resolveMainContentGroup(api: DockviewApi, preferredGroupId?: string) {
   const preferred = preferredGroupId ? api.groups.find((group) => group.id === preferredGroupId && group.api.location.type === 'grid') : undefined
@@ -149,36 +140,6 @@ export function resolveMainContentGroup(api: DockviewApi, preferredGroupId?: str
   return api.addGroup({ id, direction: 'right' })
 }
 
-/**
- * Keep terminals and other content in distinct central grid groups so a
- * "terminal window" never shares its tab strip with editors/browser/etc.
- * Terminals go to the group that already holds terminals; non-terminals go to a
- * grid group with no terminals — creating a fresh sibling group when the only
- * candidate is the terminal window. Grouping is not part of the persisted
- * pane-identity contract, so this needs no schema change.
- */
-function resolveTypedCentralGroup(api: DockviewApi, wantsTerminal: boolean, preferredGroupId?: string) {
-  const gridGroups = api.groups.filter((group) => group.api.location.type === 'grid')
-  const preferred = preferredGroupId ? gridGroups.find((group) => group.id === preferredGroupId) : undefined
-  if (preferred && groupContainsTerminals(preferred) === wantsTerminal) return preferred
-  const match = gridGroups.find((group) => wantsTerminal ? groupContainsTerminals(group) : (!groupContainsTerminals(group) && group.panels.length > 0))
-  if (match) return match
-  if (!wantsTerminal) {
-    // No non-terminal group exists yet. Reuse an empty group, else split a new
-    // group beside the terminal window rather than dropping content into it.
-    const empty = gridGroups.find((group) => group.panels.length === 0)
-    if (empty) return empty
-    const terminalWindow = gridGroups.find((group) => groupIsTerminalOnly(group) && group.panels.length > 0)
-    if (terminalWindow) {
-      const existingIds = new Set(api.groups.map((group) => group.id))
-      let index = 1
-      let id = 'content-group-main'
-      while (existingIds.has(id)) id = `content-group-main-${++index}`
-      return api.addGroup({ id, direction: 'right', referenceGroup: terminalWindow })
-    }
-  }
-  return resolveMainContentGroup(api, preferredGroupId)
-}
 
 export function resolveWorkspaceContentGroup(api: DockviewApi, kind: WorkspaceContentKind, requestedGroupId?: string, lastMainGroupId?: string | null) {
   if (isStructuralWorkspaceContentKind(kind)) {
@@ -188,7 +149,7 @@ export function resolveWorkspaceContentGroup(api: DockviewApi, kind: WorkspaceCo
   const requestedGridGroup = requestedGroupId
     ? api.groups.find((group) => group.id === requestedGroupId && group.api.location.type === 'grid')
     : undefined
-  return resolveTypedCentralGroup(api, kind === 'terminal', requestedGridGroup?.id ?? lastMainGroupId ?? undefined)
+  return resolveMainContentGroup(api, requestedGridGroup?.id ?? lastMainGroupId ?? undefined)
 }
 
 export function updateOpenPreviewPanel(panel: IDockviewPanel, params: Extract<WorkspaceContentParams, { kind: 'preview' }>, activate = true): string {

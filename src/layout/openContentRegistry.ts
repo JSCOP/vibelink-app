@@ -2,6 +2,7 @@ import type { DockviewApi } from 'dockview-react'
 import { profileById, profileIconForPane } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 import { getTerminalWindow } from './terminalWindowRegistry'
+import { getWorkspaceWindow } from './workspaceWindowRegistry'
 import { workspaceContentDescriptors } from './workspaceLayoutModel'
 import {
   isStructuralWorkspaceContentKind,
@@ -51,24 +52,29 @@ export function clearOpenContentSnapshot(): boolean {
 export function publishOpenContentFromDockview(api: DockviewApi): boolean {
   const state = useWorkspaceStore.getState()
   const activeOuterPanelId = api.activePanel?.id ?? null
-  // The window strip draws its split pill when more than one grid group is on
-  // screen at once; use the same rule here so the two surfaces never disagree.
-  const split = (api.groups ?? []).filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
   const items: OpenContentItem[] = []
+  const visiblePanels: Array<{ panel: typeof api.panels[number]; active: boolean; split: boolean }> = []
 
-  for (const panel of api.panels) {
+  for (const outerPanel of api.panels) {
+    const outerContent = parseWorkspaceContentParams(outerPanel.params)
+    if (outerContent?.kind !== 'workspaceWindow') {
+      const split = (api.groups ?? []).filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
+      visiblePanels.push({ panel: outerPanel, active: outerPanel.id === activeOuterPanelId, split })
+      continue
+    }
+    const innerApi = getWorkspaceWindow(outerContent.instanceId)?.getInnerApi()
+    if (!innerApi) continue
+    const split = innerApi.groups.filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
+    for (const panel of innerApi.panels) {
+      visiblePanels.push({ panel, active: outerPanel.id === activeOuterPanelId && panel.id === innerApi.activePanel?.id, split })
+    }
+  }
+
+  for (const { panel, active, split } of visiblePanels) {
     const content = parseWorkspaceContentParams(panel.params)
-    // Rail panels (Workspaces/Explorer/Source Control/Git History/Branches/
-    // Agent Sessions) are permanent chrome, not things the user "opened", so
-    // they never appear in this list.
-    if (!content || isStructuralWorkspaceContentKind(content.kind)) continue
-
-    const terminalWindow = content.kind === 'terminalWindow'
-      ? getTerminalWindow(content.instanceId)
-      : undefined
+    if (!content || content.kind === 'workspaceWindow' || isStructuralWorkspaceContentKind(content.kind)) continue
+    const terminalWindow = content.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId) : undefined
     const paneIds = terminalWindow?.paneIds() ?? []
-    const outerActive = panel.id === activeOuterPanelId
-
     items.push({
       panelId: panel.id,
       kind: content.kind,
@@ -76,11 +82,10 @@ export function publishOpenContentFromDockview(api: DockviewApi): boolean {
       icon: content.kind === 'terminal' || content.kind === 'terminalWindow' || content.kind === 'agent'
         ? content.icon
         : workspaceContentDescriptors[content.kind].icon,
-      active: outerActive && paneIds.length === 0,
+      active: active && paneIds.length === 0,
       parentPanelId: null,
       split,
     })
-
     if (content.kind !== 'terminalWindow') continue
     const activeInnerPanelId = terminalWindow?.getInnerApi()?.activePanel?.id ?? null
     for (const paneId of paneIds) {
@@ -93,7 +98,7 @@ export function publishOpenContentFromDockview(api: DockviewApi): boolean {
         kind: 'terminal',
         title: pane.config.title?.trim() || profile.name || 'Shell',
         icon: profileIconForPane(profile, pane.config.icon),
-        active: outerActive && (activeInnerPanelId ? activeInnerPanelId === panePanelId : state.activePaneId === paneId),
+        active: active && (activeInnerPanelId ? activeInnerPanelId === panePanelId : state.activePaneId === paneId),
         parentPanelId: panel.id,
       })
     }

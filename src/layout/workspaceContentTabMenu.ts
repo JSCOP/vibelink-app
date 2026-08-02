@@ -10,7 +10,7 @@ export function buildWorkspaceContentTabContextMenu(
   actions: WorkspaceContentActions,
 ): ReactContextMenuItemConfig[] {
   const content = parseWorkspaceContentParams(params.panel.params)
-  if (content && isStructuralWorkspaceContentKind(content.kind)) return []
+  if (content && (content.kind === 'workspaceWindow' || isStructuralWorkspaceContentKind(content.kind))) return []
   const groupId = params.group.id
   const items: ReactContextMenuItemConfig[] = [
     { label: 'New terminal in this group', action: () => { void actions.openContent({ kind: 'terminal', targetGroupId: groupId }) } },
