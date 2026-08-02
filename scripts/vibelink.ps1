@@ -231,12 +231,21 @@ function Show-Bundles([string]$Profile) {
     return
   }
 
-  Write-Host "Bundle output:" -ForegroundColor Green
-  Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
-    Where-Object { $_.Extension -in '.msi', '.exe' } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object FullName, Length, LastWriteTime |
-    Format-Table -AutoSize
+  $version = Get-JsonVersion $PackageJson
+  $bundles = @(
+    Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
+      Where-Object { $_.Extension -in '.msi', '.exe' -and $_.Name -like "VibeLink_${version}_*" } |
+      Sort-Object LastWriteTime -Descending
+  )
+  if ($bundles.Count -eq 0) {
+    Write-Host "No VibeLink $version bundles found: $bundleRoot" -ForegroundColor Yellow
+    return
+  }
+
+  Write-Host 'Bundle output:' -ForegroundColor Green
+  foreach ($bundle in $bundles) {
+    Write-Host $bundle.FullName
+  }
 }
 
 function Open-InstallerOutputs {
