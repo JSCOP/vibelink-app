@@ -84,7 +84,7 @@ export function RemoteSettings() {
     }
     const configured = await invoke<boolean>('remote_setup_firewall', { port: targetPort })
     setFirewall({ port: targetPort, ready: configured })
-    if (!configured) throw new Error(`포트 ${targetPort}의 Private 네트워크 인바운드 규칙이 없어 LAN 접속을 시작하지 않았습니다.`)
+    if (!configured) throw new Error(`포트 ${targetPort}의 인바운드 방화벽 규칙이 없어 LAN 접속을 시작하지 않았습니다.`)
   }
 
   const setupFirewall = () => void run(async () => {
@@ -261,7 +261,7 @@ export function RemoteSettings() {
       <SettingsCard
         icon={ShieldAlert}
         title="보안"
-        hint="Private 네트워크 인바운드 규칙을 만들 때 관리자 승인(UAC)이 한 번 필요합니다."
+        hint="인바운드 방화벽 규칙(로컬 서브넷 + Tailscale)을 만들 때 관리자 승인(UAC)이 한 번 필요합니다."
       >
         <SettingsRow
           icon={ruleReady ? ShieldCheck : ShieldAlert}

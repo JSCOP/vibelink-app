@@ -46,15 +46,20 @@ fn encoded_command(script: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(utf16)
 }
 
+// Windows categorises most wired/home networks as `Public`, so a `Private`-only rule silently
+// blocks phone pairing. Allow every profile but keep the port off the public internet by scoping
+// it to private LAN ranges plus the Tailscale CGNAT range.
+const RULE_SCOPE: &str = "LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10";
+
 fn configured_ports_script(rule_name: &str) -> String {
     format!(
-        "$ErrorActionPreference = 'Stop'; Get-NetFirewallRule -DisplayName '{rule_name}' -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and $_.Profile -eq 'Private' }} | Get-NetFirewallPortFilter | Where-Object {{ $_.Protocol -eq 'TCP' }} | ForEach-Object {{ $_.LocalPort }}"
+        "$ErrorActionPreference = 'Stop'; Get-NetFirewallRule -DisplayName '{rule_name}' -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and $_.Profile -eq 'Any' }} | Get-NetFirewallPortFilter | Where-Object {{ $_.Protocol -eq 'TCP' }} | ForEach-Object {{ $_.LocalPort }}"
     )
 }
 
 fn setup_script(rule_name: &str, port: u16) -> String {
     format!(
-        "$ErrorActionPreference = 'Stop'\ntry {{\n  Remove-NetFirewallRule -DisplayName '{rule_name}' -ErrorAction SilentlyContinue\n  New-NetFirewallRule -DisplayName '{rule_name}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -Profile Private | Out-Null\n  exit 0\n}} catch {{ exit 1 }}"
+        "$ErrorActionPreference = 'Stop'\ntry {{\n  Remove-NetFirewallRule -DisplayName '{rule_name}' -ErrorAction SilentlyContinue\n  New-NetFirewallRule -DisplayName '{rule_name}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -Profile Any -RemoteAddress {RULE_SCOPE} | Out-Null\n  exit 0\n}} catch {{ exit 1 }}"
     )
 }
 
@@ -119,25 +124,29 @@ mod tests {
     }
 
     #[test]
-    fn status_query_requires_private_inbound_tcp_allow_rule() {
+    fn status_query_requires_all_profile_inbound_tcp_allow_rule() {
         let query = configured_ports_script(DEBUG_RULE_NAME);
 
         assert!(query.contains("-DisplayName 'VibeLink Dev Remote Access'"));
         assert!(query.contains("$_.Enabled -eq 'True'"));
         assert!(query.contains("$_.Direction -eq 'Inbound'"));
         assert!(query.contains("$_.Action -eq 'Allow'"));
-        assert!(query.contains("$_.Profile -eq 'Private'"));
+        // A leftover Private-only rule must read as unconfigured so setup replaces it.
+        assert!(query.contains("$_.Profile -eq 'Any'"));
         assert!(query.contains("$_.Protocol -eq 'TCP'"));
     }
 
     #[test]
-    fn setup_replaces_only_the_flavor_rule_with_a_private_port_rule() {
+    fn setup_replaces_only_the_flavor_rule_with_a_scoped_all_profile_port_rule() {
         let script = setup_script(RELEASE_RULE_NAME, 42_811);
 
         assert!(script.contains("Remove-NetFirewallRule -DisplayName 'VibeLink Remote Access'"));
         assert!(script.contains("New-NetFirewallRule -DisplayName 'VibeLink Remote Access'"));
-        assert!(script.contains("-Protocol TCP -LocalPort 42811 -Profile Private"));
-        assert!(!script.contains("-Profile Any"));
+        assert!(script.contains(&format!(
+            "-Protocol TCP -LocalPort 42811 -Profile Any -RemoteAddress {RULE_SCOPE}"
+        )));
+        assert!(RULE_SCOPE.contains("192.168.0.0/16"));
+        assert!(RULE_SCOPE.contains("100.64.0.0/10"));
     }
 
     #[test]

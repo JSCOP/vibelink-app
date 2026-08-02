@@ -52,7 +52,7 @@ impl std::fmt::Display for LanFirewallNotConfirmed {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "LAN/VPN remote access requires Windows Firewall rule '{}' for TCP port {} on the Private profile: {}",
+            "LAN/VPN remote access requires Windows Firewall rule '{}' for TCP port {} on all network profiles: {}",
             firewall::rule_name(),
             self.port,
             self.detail
