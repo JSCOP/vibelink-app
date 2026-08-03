@@ -33,6 +33,9 @@ const cssPixels = (value: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+export type PaneHostSize = { width: number; height: number }
+export type PaneGrid = { cols: number; rows: number }
+
 export class PaneFitAddon implements ITerminalAddon {
   private terminal?: Terminal
 
@@ -44,32 +47,44 @@ export class PaneFitAddon implements ITerminalAddon {
     this.terminal = undefined
   }
 
-  proposeDimensions(): { cols: number; rows: number } | undefined {
+  /** `hostSize` is the host's CONTENT box, the same box `getComputedStyle`
+   *  reports and the same one the pane's ResizeObserver already delivers. Pass
+   *  it whenever the caller holds a fresh measurement: reading it here forces a
+   *  style+layout flush, and during a divider drag every pane re-measures after
+   *  the previous pane's `resize()` already dirtied layout. */
+  proposeDimensions(hostSize?: PaneHostSize): PaneGrid | undefined {
     const terminal = this.terminal
     const parent = terminal?.element?.parentElement
     const dimensions = (terminal as (Terminal & TerminalInternals) | undefined)?._core?._renderService?.dimensions
     if (!terminal?.element || !parent || !dimensions || dimensions.css.cell.width === 0 || dimensions.css.cell.height === 0) return undefined
 
-    const parentStyle = window.getComputedStyle(parent)
     const elementStyle = window.getComputedStyle(terminal.element)
-    const parentWidth = Math.max(0, cssPixels(parentStyle.width, parent.clientWidth))
-    const parentHeight = Math.max(0, cssPixels(parentStyle.height, parent.clientHeight))
+    const measured = hostSize ?? measureHost(parent)
     const horizontalPadding = cssPixels(elementStyle.paddingLeft, 0) + cssPixels(elementStyle.paddingRight, 0)
     const verticalPadding = cssPixels(elementStyle.paddingTop, 0) + cssPixels(elementStyle.paddingBottom, 0)
 
     return {
-      cols: Math.max(MINIMUM_COLS, Math.floor((parentWidth - horizontalPadding) / dimensions.css.cell.width)),
-      rows: Math.max(MINIMUM_ROWS, Math.floor((parentHeight - verticalPadding) / dimensions.css.cell.height)),
+      cols: Math.max(MINIMUM_COLS, Math.floor((measured.width - horizontalPadding) / dimensions.css.cell.width)),
+      rows: Math.max(MINIMUM_ROWS, Math.floor((measured.height - verticalPadding) / dimensions.css.cell.height)),
     }
   }
 
-  fit(): void {
+  /** Callers that already proposed a grid MUST pass it back; recomputing here
+   *  doubles the forced style reads of every fit. */
+  fit(proposed = this.proposeDimensions()): void {
     const terminal = this.terminal
-    const proposed = this.proposeDimensions()
     if (!terminal || !proposed || Number.isNaN(proposed.cols) || Number.isNaN(proposed.rows)) return
     if (terminal.cols === proposed.cols && terminal.rows === proposed.rows) return
     ;(terminal as Terminal & TerminalInternals)._core?._renderService?.clear()
     terminal.resize(proposed.cols, proposed.rows)
+  }
+}
+
+function measureHost(parent: HTMLElement): PaneHostSize {
+  const parentStyle = window.getComputedStyle(parent)
+  return {
+    width: Math.max(0, cssPixels(parentStyle.width, parent.clientWidth)),
+    height: Math.max(0, cssPixels(parentStyle.height, parent.clientHeight)),
   }
 }
 

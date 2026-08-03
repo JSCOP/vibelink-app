@@ -921,9 +921,13 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
           author: debouncedHistoryAuthor || null,
         },
       })
+      // Unpack inside the try: a React updater runs during the NEXT render, so
+      // a malformed page read in there throws past this catch as an uncaught
+      // exception instead of becoming the panel's error state.
+      const { commits, hasMore } = page
       if (historyRequestGeneration.current !== generation) return
-      setHistoryCommits((current) => reset ? page.commits : [...current, ...page.commits])
-      setHistoryHasMore(page.hasMore)
+      setHistoryCommits((current) => reset ? commits : [...current, ...commits])
+      setHistoryHasMore(hasMore)
       if (reset) {
         setHistorySelectedSha(null)
         setHistoryDetail(null)
@@ -1082,6 +1086,13 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
         invoke<StashInfo[]>('git_stash_list', { workspaceFolder: activeWorkspaceFolder }),
         invoke<TagInfo[]>('git_tag_list', { workspaceFolder: activeWorkspaceFolder }),
       ])
+      // This provider wraps the whole workspace, so a non-array listing stored
+      // here does not fail the Branches panel — it throws out of the render's
+      // `useMemo` and takes the workspace down. Reject it while the catch below
+      // can still turn it into the panel's error state.
+      if (!Array.isArray(nextBranches) || !Array.isArray(nextStashes) || !Array.isArray(nextTags)) {
+        throw new Error('Git returned an unexpected branch, stash, or tag listing.')
+      }
       setBranches(nextBranches)
       setStashes(nextStashes)
       setTags(nextTags)
@@ -1102,6 +1113,27 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     setHeadRef(repoInfo?.branch ?? 'HEAD')
     if (branchesActivated) void loadBranches()
   }, [activeRepoRoot, branchesActivated, loadBranches, repoInfo?.branch, repoInfo?.headSha, repoInfo?.upstream])
+
+  // History and Branches used to run their first `git_log` / `git_branches`
+  // only when the user first opened those panels, so the first switch to either
+  // one showed an empty panel until the backend answered. Nothing forces that
+  // wait: once activated, both reload on every HEAD change and on the
+  // repository poll, and neither view blanks while revalidating. Warm them once
+  // the repository is known, on idle so the workspace load keeps the main
+  // thread, with a timeout so a busy workspace cannot starve the warm-up.
+  useEffect(() => {
+    if (!entitled || !repoInfo?.isRepo) return
+    const warm = () => {
+      setHistoryActivated(true)
+      setBranchesActivated(true)
+    }
+    if (typeof requestIdleCallback !== 'function') {
+      const timer = window.setTimeout(warm, 500)
+      return () => window.clearTimeout(timer)
+    }
+    const handle = requestIdleCallback(warm, { timeout: 3_000 })
+    return () => cancelIdleCallback(handle)
+  }, [activeRepoRoot, entitled, repoInfo?.isRepo])
 
   const mutateBranch = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     void runMutation(operation)

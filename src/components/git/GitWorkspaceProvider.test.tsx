@@ -34,6 +34,10 @@ function ReviewSendProbe() {
   const git = useGitWorkspace()
   return <button type="button" disabled={git.reviewComments.length === 0} onClick={() => { void git.sendReviewCommentsToAgent(['comment-1']) }}>Send review</button>
 }
+function BranchesErrorProbe() {
+  const git = useGitWorkspace()
+  return <span data-testid="branches-error">{git.branches.error ?? ''}</span>
+}
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
   let reject!: (reason?: unknown) => void
@@ -195,4 +199,40 @@ test('sends only native hunk identity and action, never a frontend patch body', 
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_apply_hunk', { workspaceFolder: 'C:/repo', path: 'file.ts', area: 'unstaged', hunkId: 'native-hunk-id', action: 'stage' }))
   const request = invoke.mock.calls.find(([command]) => command === 'git_apply_hunk')?.[1]
   expect(request).not.toHaveProperty('patch')
+})
+
+/** Opening a Git panel used to be what triggered its first backend call, so the
+ *  first switch to History or Branches showed an empty panel until git answered. */
+test('warms history and branches before either panel is ever opened', async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_log') return { commits: [], hasMore: false }
+    if (command === 'git_branches' || command === 'git_stash_list' || command === 'git_tag_list') return []
+    return null
+  })
+
+  render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider><Probe /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
+
+  await waitFor(() => {
+    expect(invoke.mock.calls.some(([command]) => command === 'git_log')).toBe(true)
+    expect(invoke).toHaveBeenCalledWith('git_branches', { workspaceFolder: 'C:/repo' })
+  }, { timeout: 4000 })
+})
+
+/** The provider wraps the entire workspace, so a listing it cannot use has to
+ *  become the Branches panel's error rather than a throw out of render. */
+test('a malformed branch listing fails the panel, not the workspace', async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'git_repo_info') return repoInfo
+    if (command === 'git_working_status') return status
+    if (command === 'hosting_detect') return { provider: null, host: null, owner: null, repo: null, webUrl: null, tokenPresent: false }
+    if (command === 'git_log') return { commits: [], hasMore: false }
+    return null
+  })
+
+  render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider><BranchesErrorProbe /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
+
+  await waitFor(() => expect(screen.getByTestId('branches-error').textContent).toContain('unexpected branch'), { timeout: 4000 })
 })

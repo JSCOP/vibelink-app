@@ -80,4 +80,43 @@ describe('pane terminal fit', () => {
     fit.dispose()
     parent.remove()
   })
+
+  /** A divider drag fits every pane per frame, and each pane's `resize()`
+   *  dirties layout for the next one, so a fit that re-measures the host pays a
+   *  full style+layout flush per pane per frame. The manager already holds the
+   *  ResizeObserver's size and the proposal, so neither may be recomputed. */
+  it('uses the caller-supplied host size and proposal instead of re-measuring', () => {
+    const parent = document.createElement('div')
+    parent.style.width = '100px'
+    parent.style.height = '80px'
+    const element = document.createElement('div')
+    parent.appendChild(element)
+    document.body.appendChild(parent)
+
+    const resize = vi.fn()
+    const terminal = {
+      element,
+      cols: 2,
+      rows: 1,
+      resize,
+      _core: { _renderService: { clear: vi.fn(), dimensions: { css: { cell: { width: 10, height: 10 } } } } },
+    } as unknown as Terminal
+    const fit = new PaneFitAddon()
+    fit.activate(terminal)
+
+    const computedStyle = vi.spyOn(window, 'getComputedStyle')
+    const proposed = fit.proposeDimensions({ width: 300, height: 200 })
+    expect(proposed).toEqual({ cols: 30, rows: 20 })
+    expect(computedStyle).toHaveBeenCalledTimes(1)
+    expect(computedStyle).not.toHaveBeenCalledWith(parent)
+
+    computedStyle.mockClear()
+    fit.fit(proposed)
+    expect(resize).toHaveBeenCalledWith(30, 20)
+    expect(computedStyle).not.toHaveBeenCalled()
+
+    computedStyle.mockRestore()
+    fit.dispose()
+    parent.remove()
+  })
 })
