@@ -5696,32 +5696,42 @@ button.git-window-primary-action,
   border-color: var(--vibelink-border-soft);
 }
 
-.workspace-dock .dv-edge-group .dv-tabs-and-actions-container.dv-groupview-header-vertical {
+/* Activity rail sizing is anchored on Dockview's own `dv-groupview-header-vertical`
+   (set from headerPosition) instead of `dv-edge-group`, which is stamped on the
+   group element only by the shell's EdgeGroupView. Whenever that shell class was
+   missing for a beat — a re-created edge group, a relayout after the window came
+   back from the background — the rail fell back to the horizontal pane-header
+   height, the strip collapsed to a few pixels, and Dockview measured EVERY tab as
+   clipped: the whole rail emptied into the "hidden tabs" dropdown and stayed there
+   until the strip happened to resize again. */
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical {
   height: auto;
   width: 38px;
 }
 
-.workspace-dock .dv-edge-group .dv-tabs-container-vertical {
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical .dv-tabs-container-vertical {
   /* Stack every activity-bar tab (Workspaces, Explorer, Source Control,
-     Git History, Branches) vertically. Clamping this container to a single 38px tab
-     clips the rest and leaves only the active tab clickable. */
+     Git History, Branches) vertically. No clamp and no clipping: with
+     `overflow: visible` the strip's scrollHeight always equals its clientHeight,
+     so Dockview's overflow observer stays silent and can never hide a tab. */
   height: auto;
-  max-height: 100%;
+  max-height: none;
   min-height: 0;
+  overflow: visible;
   width: 38px;
 }
 
-.workspace-dock .dv-edge-group .dv-scrollable {
-  /* The activity bar is a fixed, non-scrolling rail. Dockview sizes this
-     scroll wrapper to the active tab only, which clips the stacked rail
-     when the edge group is collapsed. Let it grow to hold every tab. */
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical > .dv-scrollable {
+  /* The activity bar is a fixed, non-scrolling rail: it keeps the full stacked
+     height of its tabs instead of being flex-shrunk down by a short header. */
+  flex: 0 0 auto;
   height: auto;
   min-height: 0;
   overflow: visible;
 }
 
-.workspace-dock .dv-edge-group .dv-tab,
-.workspace-dock .dv-edge-group .dv-react-part {
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical .dv-tab,
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical .dv-react-part {
   height: 38px;
   min-height: 38px;
   padding: 0;
