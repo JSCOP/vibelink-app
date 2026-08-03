@@ -7,6 +7,7 @@ import type { Profile } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 import { ProfileIcon } from './ProfileIcon'
 import { steppedPickerId, type PickerEntry } from './pickerModel'
+import { workspaceAddMenuPlacement } from './workspaceContentTabModel'
 
 type WorkspaceWindowKind = 'browser' | 'agent' | 'orchestration' | 'workbench' | 'kanban' | 'todo' | 'diff'
 /** Singleton structural sidebar panels: revealed on their edge, never opened as a central tab. */
@@ -57,7 +58,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
   const [open, setOpen] = useState(false)
-  const [anchor, setAnchor] = useState<{ right: number; bottom: number } | null>(null)
+  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null)
   const [filter, setFilter] = useState('')
   const menuId = useId()
   const statusById = useMemo(
@@ -209,7 +210,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
             return
           }
           const rect = event.currentTarget.getBoundingClientRect()
-          setAnchor({ right: rect.right, bottom: rect.bottom })
+          setAnchor({ left: rect.left, bottom: rect.bottom })
           setFilter('')
           setActiveId(steppedPickerId(selectableEntries(items), null, 1))
           setOpen(true)
@@ -226,7 +227,7 @@ export function WorkspaceAddMenu({ actions, targetGroupId, disabled, overlayId, 
             role="dialog"
             aria-label="Add terminal or window"
             aria-activedescendant={activeId ? `${menuId}-${activeId}` : undefined}
-            style={{ right: Math.max(8, window.innerWidth - anchor.right), top: anchor.bottom + 2 }}
+            style={{ ...workspaceAddMenuPlacement(anchor.left, window.innerWidth), top: anchor.bottom + 2 }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={onKeyDown}

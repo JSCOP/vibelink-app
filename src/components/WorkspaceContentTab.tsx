@@ -226,6 +226,11 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
                     event.preventDefault()
                     event.dataTransfer.dropEffect = 'move'
                     event.stopPropagation()
+                    // Bring the hovered window forward so the user can see what
+                    // they are about to split against. `setActive` only switches
+                    // the inner group's active tab — it never rebuilds the tab
+                    // strip, so the in-flight drag survives.
+                    if (!isVisible) workspaceWindowApi?.getPanel(panelId)?.api.setActive()
                     const position = workspaceWindowDropPosition(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
                     setWorkspaceWindowDropTarget((current) => current?.panelId === panelId && current.position === position ? current : { panelId, position })
                   }}

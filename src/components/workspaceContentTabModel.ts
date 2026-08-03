@@ -45,3 +45,14 @@ export function workspaceWindowDropPosition(
   if (y > rect.height * 3 / 4) return 'bottom'
   return 'center'
 }
+
+/**
+ * Placement for the tab strip's `+` palette. It opens rightward from the
+ * trigger and slides back left only when the right edge has no room, so a
+ * collapsed side panel can no longer push it off-screen. Width lives here
+ * rather than only in CSS so the box and the measured placement cannot drift.
+ */
+export function workspaceAddMenuPlacement(anchorLeft: number, viewportWidth: number): { left: number; width: number } {
+  const width = Math.min(380, viewportWidth - 16)
+  return { width, left: Math.max(8, Math.min(anchorLeft, viewportWidth - width - 8)) }
+}

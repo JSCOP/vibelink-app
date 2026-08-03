@@ -5,6 +5,7 @@ import type { WorkspaceContentActions } from '../layout/contentActions'
 import { defaultSettings } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 import { WorkspaceAddMenu } from './WorkspaceAddMenu'
+import { workspaceAddMenuPlacement } from './workspaceContentTabModel'
 
 const openContent = vi.fn(async () => '')
 const actions: WorkspaceContentActions = {
@@ -78,5 +79,15 @@ describe('WorkspaceAddMenu', () => {
     const codex = screen.getByRole('button', { name: 'New Terminal: Codex' })
     expect(codex.hasAttribute('disabled')).toBe(true)
     expect(codex.getAttribute('title')).toBe('Install Codex or pick another profile')
+  })
+
+  it('opens rightward from the trigger and only slides left when the right edge runs out', () => {
+    // Left rail collapsed: the `+` sits near the left edge and the palette used
+    // to be right-aligned to it, i.e. drawn off-screen.
+    expect(workspaceAddMenuPlacement(40, 1400)).toEqual({ left: 40, width: 380 })
+    // No room on the right: clamp back instead of overflowing.
+    expect(workspaceAddMenuPlacement(1200, 1400)).toEqual({ left: 1012, width: 380 })
+    // Never off-screen left, even in a viewport narrower than the palette.
+    expect(workspaceAddMenuPlacement(4, 300)).toEqual({ left: 8, width: 284 })
   })
 })

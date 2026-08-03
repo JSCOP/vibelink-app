@@ -165,6 +165,66 @@ describe('WorkspaceContentTab', () => {
     }
   })
 
+  it('reveals the hovered window while another window tab is dragged over it', () => {
+    const terminal = createTerminalWindowParams('terminal-b', [], { cols: 1, rows: 1 })
+    const browser = { schema: 1 as const, kind: 'browser' as const, instanceId: 'page-b', title: 'Browser', icon: 'globe', pageId: 'page-b', profileId: 'default' }
+    const terminalId = workspaceContentPanelId(terminal)
+    const browserId = workspaceContentPanelId(browser)
+    // Both windows stacked in ONE inner group, so the browser is hidden behind
+    // the terminal — the state where the split target was invisible mid-drag.
+    const inner = {
+      activeGroup: 'stacked-group',
+      panels: {
+        [terminalId]: createWorkspaceContentPanel(terminal),
+        [browserId]: createWorkspaceContentPanel(browser),
+      },
+      grid: {
+        width: 1000,
+        height: 640,
+        orientation: Orientation.HORIZONTAL,
+        root: {
+          type: 'branch' as const,
+          size: 1000,
+          data: [{ type: 'leaf' as const, size: 1000, data: { views: [terminalId, browserId], activeView: terminalId, id: 'stacked-group' } }],
+        },
+      },
+    }
+    const childApis = {
+      [terminalId]: panelApi(terminalId, 'Terminal'),
+      [browserId]: panelApi(browserId, 'Browser'),
+    }
+    const childPanels = {
+      [terminalId]: { id: terminalId, params: terminal, api: childApis[terminalId] },
+      [browserId]: { id: browserId, params: browser, api: childApis[browserId] },
+    }
+    const unregister = registerWorkspaceWindow({
+      windowId: 'window-b',
+      outerPanelId: 'content:workspaceWindow:window-b',
+      getInnerApi: () => ({ id: 'workspace-window-b', getPanel: (id: string) => childPanels[id], toJSON: () => inner } as never),
+      settle: async () => undefined,
+      persist: () => undefined,
+      panelIds: () => [terminalId, browserId],
+      activePanelId: () => terminalId,
+      focusActive: () => undefined,
+    })
+    try {
+      const params = createWorkspaceWindowParams(inner, 'window-b')
+      const api = panelApi('content:workspaceWindow:window-b', params.title)
+      renderWithActions(createElement(WorkspaceContentTab, { api, containerApi, params } as never))
+
+      const browserSegment = screen.getByRole('tab', { name: 'Browser' }).closest<HTMLElement>('.workspace-window-combined-segment')
+      Object.defineProperty(browserSegment, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, right: 100, bottom: 20, width: 100, height: 20 }) })
+      const dataTransfer = { effectAllowed: 'none', dropEffect: 'none', setData: vi.fn(), getData: vi.fn(() => terminalId) }
+      fireEvent.dragStart(screen.getByRole('tab', { name: 'Terminal' }), { dataTransfer })
+      fireEvent.dragOver(browserSegment as HTMLElement, { dataTransfer, clientX: 50, clientY: 10 })
+
+      expect(childApis[browserId].setActive).toHaveBeenCalled()
+      expect(childApis[terminalId].setActive).not.toHaveBeenCalled()
+    } finally {
+      unregister()
+    }
+  })
+
   it('aggregates the Source Control badge across repositories in the active workspace group', () => {
     const changedEntry = { path: 'src/app.ts', oldPath: null, changeType: 'modified' as const }
     useWorkspaceStore.setState({ activeSessionId: 'group-root' })
