@@ -9,6 +9,7 @@ import { terminalSearchForgetPane } from '../terminal/search'
 import { pathFromTerminalSelection } from '../terminal/selectionPath'
 import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
+import { readClipboardText } from '../ipc/clipboard'
 import type { WorkspaceContentParams } from './workspaceContentModel'
 import { reclaimAllRemotePaneLeases, reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { findTerminalWindowForPane } from './terminalWindowRegistry'
@@ -152,12 +153,13 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const pasteClipboard = () => {
     closeContextMenu()
     if (!paneId) return
-    void navigator.clipboard?.readText?.()
+    void readClipboardText()
       .then((text) => {
+        if (!text) return
         TerminalManager.paste(paneId, text)
         TerminalManager.focus(paneId)
       })
-      .catch(() => undefined)
+      .catch((error) => toast.error(`Could not paste from the clipboard: ${String(error)}`))
   }
 
   const selectAll = () => {
@@ -370,8 +372,18 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             <button type="button" role="menuitem" disabled={!contextMenu.hasSelection} onClick={copySelection}>
               <Copy size={13} /> Copy
             </button>
+            <button type="button" role="menuitem" onClick={pasteClipboard}>
+              <ClipboardPaste size={13} /> Paste
+            </button>
+            <button type="button" role="menuitem" onClick={selectAll}>
+              <TextSelect size={13} /> Select all
+            </button>
+            <button type="button" role="menuitem" onClick={copyAll}>
+              <ClipboardCopy size={13} /> Copy all output
+            </button>
             {contextMenu.selectedPath ? (
               <>
+                <div className="terminal-context-separator" role="separator" />
                 <button type="button" role="menuitem" onClick={() => runSelectedPathAction('reveal_path', 'Could not show the selected path')}>
                   <FolderOpen size={13} /> Show in File Explorer
                 </button>
@@ -380,6 +392,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
                 </button>
               </>
             ) : null}
+            <div className="terminal-context-separator" role="separator" />
             <button type="button" role="menuitem" disabled={!hermesDetected} title={hermesDetected ? 'Ask VibeLink Agent about this pane' : 'Install Hermes Agent to use this'} onClick={() => void askVibeLinkAgent()}>
               <Sparkles size={13} /> Ask VibeLink Agent
             </button>
@@ -395,15 +408,6 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             </button>
             <button type="button" role="menuitem" onClick={arrangeTerminals}>
               <LayoutGrid size={13} /> Arrange panes in this window
-            </button>
-            <button type="button" role="menuitem" onClick={pasteClipboard}>
-              <ClipboardPaste size={13} /> Paste
-            </button>
-            <button type="button" role="menuitem" onClick={selectAll}>
-              <TextSelect size={13} /> Select all
-            </button>
-            <button type="button" role="menuitem" onClick={copyAll}>
-              <ClipboardCopy size={13} /> Copy all output
             </button>
             <div className="terminal-context-separator" role="separator" />
             <button type="button" role="menuitem" onClick={closeTerminal}>

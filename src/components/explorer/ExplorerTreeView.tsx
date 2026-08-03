@@ -8,7 +8,9 @@ import { gitChangeMeta } from '../../state/gitChangeMeta'
 import type { GitStatusPresentation } from '../../state/profiles'
 import './ExplorerTreeView.css'
 
-export type ExplorerContextAction = { id: string; label: string; disabled?: boolean; danger?: boolean; onClick: () => void }
+export type ExplorerContextAction =
+  | { id: string; label: string; disabled?: boolean; danger?: boolean; onClick: () => void }
+  | { id: string; separator: true }
 export type ExplorerContextMenu = { x: number; y: number; path: string; actions: ExplorerContextAction[] } | null
 
 export type ExplorerTreeViewProps = {
@@ -166,7 +168,9 @@ export function ExplorerTreeView({ nodes, selectedPath, loading, error, statusSu
         <>
           <div className="terminal-context-backdrop" onMouseDown={onCloseContextMenu} onContextMenu={(event) => { event.preventDefault(); onCloseContextMenu() }} />
           <div className="terminal-context-menu explorer-context-menu" role="menu" aria-label={`Actions for ${contextMenu.path}`} style={{ left: contextPosition.x, top: contextPosition.y }}>
-            {contextMenu.actions.map((action) => <button key={action.id} type="button" role="menuitem" disabled={action.disabled} data-danger={action.danger || undefined} onClick={action.onClick}>{action.label}</button>)}
+            {contextMenu.actions.map((action) => 'separator' in action
+              ? <div key={action.id} className="terminal-context-separator" role="separator" />
+              : <button key={action.id} type="button" role="menuitem" disabled={action.disabled} data-danger={action.danger || undefined} onClick={action.onClick}>{action.label}</button>)}
           </div>
         </>,
         document.body,

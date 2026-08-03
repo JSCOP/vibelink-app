@@ -638,13 +638,18 @@ pub async fn reveal_path(
         .map_err(to_string)?;
     let target = normalize_local_target(&path)?;
 
+    // `explorer.exe` parses its own command line and only understands backslash
+    // separators. Workspace folders are stored with forward slashes on the JS
+    // side, so `C:/repo\docs\file.md` makes explorer give up on the path and
+    // silently open the Desktop instead of revealing the file.
     #[cfg(windows)]
     let mut command = {
         let mut command = Command::new("explorer.exe");
+        let native = target.to_string_lossy().replace('/', "\\");
         if target.is_file() {
-            command.arg("/select,").arg(&target);
+            command.arg("/select,").arg(native);
         } else {
-            command.arg(&target);
+            command.arg(native);
         }
         command
     };
@@ -942,6 +947,20 @@ pub async fn clipboard_write_text(
     // Native clipboard access remains focus-independent for embedded WebView2 pages.
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn clipboard_read_text(
+    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
+) -> Result<String, String> {
+    supervisor
+        .authorize(Capability::WorkspaceRead)
+        .map_err(to_string)?;
+    // `navigator.clipboard.readText()` needs both a secure context and Win32
+    // focus; neither holds for the terminal paste menu item.
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
         .map_err(to_string)
 }
 

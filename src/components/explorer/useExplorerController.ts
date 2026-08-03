@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { writeClipboardText } from '../../ipc/clipboard'
 import type { TextFile } from '../../ipc/types'
 import { WorkspaceContentActionsContext } from '../../layout/contentActions'
 import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
@@ -479,7 +480,9 @@ export function useExplorerController({ sessionId, workspaceFolder }: ExplorerCo
     }
   }, [captureWorkspaceOwnership, loadChildren, parentRepositoryRoot, refreshRepository, runGitMutation, sessionId, setExplorerError, targetForPath, workspaceOwnershipIsCurrent])
 
-  const absolutePath = useCallback((path: string) => `${workspaceFolder.replace(/[\\/]+$/, '')}\\${path.replace(/\//g, '\\')}`, [workspaceFolder])
+  // Workspace folders are stored with forward slashes; Windows tools (explorer,
+  // shells, editors) expect a single native separator style.
+  const absolutePath = useCallback((path: string) => `${workspaceFolder.replace(/[\\/]+$/, '')}/${path}`.replace(/\//g, '\\'), [workspaceFolder])
   const openTerminal = useCallback(async (node: ExplorerNode) => {
     const ownership = captureWorkspaceOwnership()
     if (!ownership || !contentActions) return
@@ -569,49 +572,53 @@ export function useExplorerController({ sessionId, workspaceFolder }: ExplorerCo
         if (captureWorkspaceOwnership()) setExplorerError(sessionId, String(reason))
       })
     }
-    const actions: ExplorerContextAction[] = []
+    const fileGroup: ExplorerContextAction[] = []
+    const repositoryGroup: ExplorerContextAction[] = []
+    const pathGroup: ExplorerContextAction[] = []
+    const gitGroup: ExplorerContextAction[] = []
     if (!node.entry.isDir) {
-      actions.push(
-        { id: 'open', label: 'Open', disabled: !present, onClick: wrap(() => openSelectedNode(node)) },
-        { id: 'preview', label: 'Open Preview', disabled: !present || !contentActions, onClick: wrap(() => openPreview(node, true)) },
-        { id: 'vibelink-editor', label: 'Open in VibeLink Editor', disabled: !present || !isVibeLinkEditorCandidate(node) || !contentActions, onClick: wrap(() => openVibeLinkEditor(node)) },
-        { id: 'external-editor', label: 'Open in External Editor', disabled: !present || !editorCommand, onClick: wrap(() => openExternalEditor(node)) },
-      )
+      fileGroup.push({ id: 'open', label: 'Open', disabled: !present, onClick: wrap(() => openSelectedNode(node)) })
+      if (contentActions) fileGroup.push({ id: 'preview', label: 'Open Preview', disabled: !present, onClick: wrap(() => openPreview(node, true)) })
+      if (editorCommand) fileGroup.push({ id: 'external-editor', label: 'Open in External Editor', disabled: !present, onClick: wrap(() => openExternalEditor(node)) })
     }
     if (isRepository) {
-      actions.push(
+      repositoryGroup.push(
         { id: 'repo-changes', label: 'Open Repository Changes', disabled: !initialized, onClick: wrap(() => openRepository(node, 'changes')) },
         { id: 'repo-history', label: 'Open Repository History', disabled: !initialized, onClick: wrap(() => openRepository(node, 'history')) },
       )
       if (isSubmodule) {
-        actions.push(
+        repositoryGroup.push(
           { id: 'pointer-history', label: 'Pointer History in Parent', onClick: wrap(() => openPointerHistory(node)) },
           { id: 'submodule-update', label: initialized ? 'Update to Recorded Commit' : 'Initialize Submodule', onClick: wrap(() => mutateSubmodule('git_submodule_update', node)) },
           { id: 'submodule-sync', label: 'Sync Submodule URL', onClick: wrap(() => mutateSubmodule('git_submodule_sync', node)) },
         )
       }
     }
-    actions.push(
+    const editGroup: ExplorerContextAction[] = [
       { id: 'new-file', label: 'New File', disabled: !present, onClick: wrap(() => createEntry(node, false)) },
       { id: 'new-folder', label: 'New Folder', disabled: !present, onClick: wrap(() => createEntry(node, true)) },
       { id: 'rename', label: 'Rename', disabled: !present || isRepository, onClick: wrap(() => beginRename(node)) },
       { id: 'delete', label: 'Delete', disabled: !present || isRepository, danger: true, onClick: wrap(() => deleteNode(node)) },
+    ]
+    pathGroup.push(
       { id: 'terminal', label: 'Open in Terminal', disabled: !present, onClick: wrap(() => openTerminal(node)) },
       { id: 'reveal', label: 'Reveal in File Explorer', disabled: !present, onClick: wrap(() => revealSystemPath(node)) },
-      { id: 'copy-rel', label: 'Copy Relative Path', onClick: wrap(() => navigator.clipboard.writeText(node.path)) },
-      { id: 'copy-abs', label: 'Copy Absolute Path', onClick: wrap(() => navigator.clipboard.writeText(absolutePath(node.path))) },
+      { id: 'copy-abs', label: 'Copy Path', onClick: wrap(() => writeClipboardText(absolutePath(node.path))) },
+      { id: 'copy-rel', label: 'Copy Relative Path', onClick: wrap(() => writeClipboardText(node.path)) },
     )
-    if (canStage) actions.push({ id: 'stage', label: node.entry.isDir ? 'Stage Folder Changes' : 'Stage Changes', onClick: wrap(() => mutateGit('git_stage', node)) })
-    if (staged) actions.push({ id: 'unstage', label: node.entry.isDir ? 'Unstage Folder Changes' : 'Unstage Changes', onClick: wrap(() => mutateGit('git_unstage', node)) })
-    if (unstaged && !isRepository) actions.push({ id: 'discard', label: node.entry.isDir ? 'Discard Folder Changes' : 'Discard Changes', danger: true, onClick: wrap(() => discardGit(node)) })
+    if (canStage) gitGroup.push({ id: 'stage', label: node.entry.isDir ? 'Stage Folder Changes' : 'Stage Changes', onClick: wrap(() => mutateGit('git_stage', node)) })
+    if (staged) gitGroup.push({ id: 'unstage', label: node.entry.isDir ? 'Unstage Folder Changes' : 'Unstage Changes', onClick: wrap(() => mutateGit('git_unstage', node)) })
+    if (unstaged && !isRepository) gitGroup.push({ id: 'discard', label: node.entry.isDir ? 'Discard Folder Changes' : 'Discard Changes', danger: true, onClick: wrap(() => discardGit(node)) })
     if (node.decoration?.conflicted && !node.entry.isDir) {
-      actions.push({ id: 'ours', label: 'Accept Ours', onClick: wrap(() => mutateGit('git_conflict_take', node, { side: 'ours' })) })
-      actions.push({ id: 'theirs', label: 'Accept Theirs', onClick: wrap(() => mutateGit('git_conflict_take', node, { side: 'theirs' })) })
+      gitGroup.push({ id: 'ours', label: 'Accept Ours', onClick: wrap(() => mutateGit('git_conflict_take', node, { side: 'ours' })) })
+      gitGroup.push({ id: 'theirs', label: 'Accept Theirs', onClick: wrap(() => mutateGit('git_conflict_take', node, { side: 'theirs' })) })
     }
-    if (!node.entry.isDir && changed) actions.push({ id: 'diff', label: 'Diff vs HEAD', onClick: wrap(() => openGit(node, false)) })
-    if (!isRepository) actions.push({ id: 'history', label: node.entry.isDir ? 'Folder History' : 'File History', onClick: wrap(() => openGit(node, true)) })
-    return actions
-  }, [absolutePath, beginRename, captureWorkspaceOwnership, contentActions, createEntry, deleteNode, discardGit, editorCommand, mutateGit, mutateSubmodule, openExternalEditor, openGit, openPointerHistory, openPreview, openRepository, openSelectedNode, openTerminal, openVibeLinkEditor, revealSystemPath, sessionId, setExplorerError])
+    if (!node.entry.isDir && changed) gitGroup.push({ id: 'diff', label: 'Diff vs HEAD', onClick: wrap(() => openGit(node, false)) })
+    if (!isRepository) gitGroup.push({ id: 'history', label: node.entry.isDir ? 'Folder History' : 'File History', onClick: wrap(() => openGit(node, true)) })
+    return [fileGroup, repositoryGroup, editGroup, pathGroup, gitGroup]
+      .filter((group) => group.length > 0)
+      .flatMap((group, index) => index === 0 ? group : [{ id: `separator-${index}`, separator: true as const }, ...group])
+  }, [absolutePath, beginRename, captureWorkspaceOwnership, contentActions, createEntry, deleteNode, discardGit, editorCommand, mutateGit, mutateSubmodule, openExternalEditor, openGit, openPointerHistory, openPreview, openRepository, openSelectedNode, openTerminal, revealSystemPath, sessionId, setExplorerError])
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (nodes.length === 0 || event.altKey || event.ctrlKey || event.metaKey) return

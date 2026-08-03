@@ -32,6 +32,8 @@
 .markdown-preview th { background: var(--vibelink-panel-2); }
 .markdown-preview img { height: auto; max-width: 100%; }
 .markdown-preview hr { border: 0; border-top: 1px solid var(--vibelink-border); }
+.markdown-preview .markdown-mermaid { margin: 0.75em 0; overflow: auto; text-align: center; }
+.markdown-preview .markdown-mermaid svg { height: auto; max-width: 100%; }
 
 .markdown-preview::-webkit-scrollbar { height: 12px; width: 12px; }
 .markdown-preview::-webkit-scrollbar-track { background: var(--vibelink-scrollbar-track, var(--vibelink-panel-3)); }

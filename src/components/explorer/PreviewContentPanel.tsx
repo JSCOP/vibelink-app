@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { lazy, Suspense, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { DirEntryInfo, TextFile } from '../../ipc/types'
+import { writeClipboardText } from '../../ipc/clipboard'
 import { WorkspaceContentActionsContext } from '../../layout/contentActions'
 import { deriveGitDecorations, parentPath } from '../../state/explorer'
 import { emptyGitSessionState, repositoryStateFor, useGitStore } from '../../state/git'
@@ -89,7 +90,7 @@ export function PreviewContentPanel({ sessionId, workspaceFolder, relPath }: Pre
   const repositoryRoot = decoration?.repoRoot ?? knownRepositoryRoots.find((root) => relPath === root || relPath.startsWith(`${root}/`)) ?? ''
   const repositoryLabel = repositoryRoot || 'Workspace root'
   const workspaceLabel = workspaceFolder.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || workspaceFolder
-  const absolutePath = `${workspaceFolder.replace(/[\\/]+$/, '')}\\${relPath.replace(/\//g, '\\')}`
+  const absolutePath = `${workspaceFolder.replace(/[\\/]+$/, '')}/${relPath}`.replace(/\//g, '\\')
 
   useEffect(() => {
     const ownership = captureOwnership()
@@ -197,7 +198,7 @@ export function PreviewContentPanel({ sessionId, workspaceFolder, relPath }: Pre
       onOpenDiff={() => { void openChanges() }}
       onOpenTerminal={() => { void openTerminal() }}
       onReveal={() => { void invoke('reveal_path', { path: absolutePath }) }}
-      onCopyPath={() => { void navigator.clipboard.writeText(absolutePath) }}
+      onCopyPath={() => { void writeClipboardText(absolutePath) }}
     />
   )
 }

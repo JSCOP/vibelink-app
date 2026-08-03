@@ -1330,12 +1330,44 @@ fn open_in_editor_native(root: &str, rel_path: &str, editor_command: &str) -> Re
     let Some(program) = parts.next() else {
         bail!("no external editor configured");
     };
-    Command::new(program)
+    #[cfg(windows)]
+    let program = resolve_windows_launcher(program);
+    Command::new(&program)
         .args(parts)
         .arg(&path)
         .spawn()
-        .with_context(|| format!("launch external editor {program}"))?;
+        .with_context(|| format!("launch external editor {}", Path::new(&program).display()))?;
     Ok(())
+}
+
+/// Editors ship shell launchers, not executables: VS Code's `code` is
+/// `code.cmd`. `CreateProcessW` only appends `.exe`, so an unqualified command
+/// never launches until it is resolved against `PATH` × `PATHEXT` first.
+#[cfg(windows)]
+fn resolve_windows_launcher(program: &str) -> std::ffi::OsString {
+    let candidate = Path::new(program);
+    if candidate.is_file() {
+        return candidate.into();
+    }
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let directories: Vec<PathBuf> = if candidate.parent().is_some_and(|parent| !parent.as_os_str().is_empty()) {
+        vec![PathBuf::new()]
+    } else {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect())
+            .unwrap_or_default()
+    };
+    for directory in directories {
+        let base = directory.join(candidate);
+        for extension in extensions.split(';').filter(|extension| !extension.is_empty()) {
+            let mut name = base.clone().into_os_string();
+            name.push(extension);
+            if Path::new(&name).is_file() {
+                return name;
+            }
+        }
+    }
+    program.into()
 }
 
 async fn authorized_spawn<T, F>(

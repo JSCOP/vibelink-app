@@ -1,6 +1,6 @@
 import MonacoEditorComponent from '@monaco-editor/react'
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType } from 'react'
-import { AlertTriangle, Check, ChevronRight, Columns2, CopyPlus, FileCode2, FolderOpen, GitCompareArrows, History, Map, MoreHorizontal, RefreshCw, RotateCcw, Save, SaveAll, WrapText } from 'lucide-react'
+import { AlertTriangle, Check, ChevronRight, Columns2, CopyPlus, Eye, FileCode2, FolderOpen, GitCompareArrows, History, Map, MoreHorizontal, RefreshCw, RotateCcw, Save, SaveAll, WrapText } from 'lucide-react'
 import { WorkspaceContentActionsContext } from '../layout/contentActions'
 import { deriveGitDecorations, parentPath, useExplorerStore } from '../state/explorer'
 import { emptyGitSessionState, repositoryStateFor, useGitStore } from '../state/git'
@@ -262,6 +262,12 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
     await contentActions.openContent({ kind: 'workbench', ...ownership })
   }, [captureOwnership, contentActions, decoration, relPath, repositoryRoot, sessionId, setActiveRepository, setGitActiveTab, setGitSelectedPath])
 
+  const openMarkdownPreview = useCallback(async () => {
+    const ownership = captureOwnership()
+    if (!contentActions || !ownership) return
+    await contentActions.openContent({ kind: 'preview', relPath, activate: true, ...ownership })
+  }, [captureOwnership, contentActions, relPath])
+
   const handleMount = useCallback((editor: MonacoEditorHandle) => {
     for (const listener of editorListenersRef.current) listener.dispose()
     editorListenersRef.current = []
@@ -294,7 +300,16 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
       data-dirty={document.dirty || undefined}
       data-conflict={Boolean(document.conflict) || undefined}
       onKeyDownCapture={(event) => {
-        if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') return
+        if (!(event.ctrlKey || event.metaKey)) return
+        const key = event.key.toLowerCase()
+        // VS Code parity: Ctrl+Shift+V renders the Markdown document instead of
+        // leaving the reader with raw syntax.
+        if (key === 'v' && event.shiftKey && languageId === 'markdown') {
+          event.preventDefault()
+          void openMarkdownPreview()
+          return
+        }
+        if (key !== 's') return
         event.preventDefault()
         if (event.shiftKey) void saveAs()
         else void save()
@@ -322,6 +337,7 @@ export function EditorContentPanel({ sessionId, workspaceFolder, relPath, Monaco
             {overflowOpen ? (
               <div className="editor-overflow-menu" role="menu" onPointerDown={(event) => event.stopPropagation()}>
                 <button type="button" role="menuitem" onClick={() => { setOverflowOpen(false); void revealInExplorer() }}><FolderOpen size={13} />Reveal in Explorer</button>
+                {languageId === 'markdown' ? <button type="button" role="menuitem" onClick={() => { setOverflowOpen(false); void openMarkdownPreview() }}><Eye size={13} />Open Preview (Ctrl+Shift+V)</button> : null}
                 <button type="button" role="menuitem" onClick={() => { setOverflowOpen(false); void openFileHistory() }}><History size={13} />File History</button>
                 <button type="button" role="menuitem" disabled={!decoration} onClick={() => { setOverflowOpen(false); void openChanges() }}><GitCompareArrows size={13} />Open Changes</button>
               </div>
