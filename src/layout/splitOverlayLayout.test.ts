@@ -40,19 +40,33 @@ describe('waitForDockviewOverlayLayout', () => {
       isSettled: () => {
         order.push('check')
         checks += 1
-        return checks === 2
+        return checks === 3
       },
       complete: () => order.push('complete'),
     }, scheduleFrame)
 
-    expect(order).toEqual(['layout', 'refresh'])
+    expect(order).toEqual(['check', 'layout', 'refresh'])
     frames.shift()?.(1)
     await Promise.resolve()
     await Promise.resolve()
-    expect(order).toEqual(['layout', 'refresh', 'check', 'layout', 'refresh'])
+    expect(order).toEqual(['check', 'layout', 'refresh', 'check', 'layout', 'refresh'])
     frames.shift()?.(2)
     await pending
-    expect(order).toEqual(['layout', 'refresh', 'check', 'layout', 'refresh', 'check', 'complete'])
+    expect(order).toEqual(['check', 'layout', 'refresh', 'check', 'layout', 'refresh', 'check', 'complete'])
+  })
+
+  it('skips the layout rounds and the fit pass when the overlays already match', async () => {
+    const scheduleFrame = vi.fn()
+    const layout = vi.fn()
+    const refresh = vi.fn()
+    const complete = vi.fn()
+
+    await settleDockviewOverlayLayout({ layout, refresh, isSettled: () => true, complete }, scheduleFrame)
+
+    expect(scheduleFrame).not.toHaveBeenCalled()
+    expect(layout).not.toHaveBeenCalled()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
   })
 
   it('bounds unsettled overlay polling to twelve animation frames', async () => {
@@ -70,7 +84,7 @@ describe('waitForDockviewOverlayLayout', () => {
     expect(scheduleFrame).toHaveBeenCalledTimes(12)
     expect(layout).toHaveBeenCalledTimes(12)
     expect(refresh).toHaveBeenCalledTimes(12)
-    expect(isSettled).toHaveBeenCalledTimes(12)
+    expect(isSettled).toHaveBeenCalledTimes(13)
     expect(complete).toHaveBeenCalledTimes(1)
   })
 
@@ -80,14 +94,26 @@ describe('waitForDockviewOverlayLayout', () => {
       return scheduleFrame.mock.calls.length
     })
     const refresh = vi.fn()
-    const isSettled = vi.fn(() => isSettled.mock.calls.length === 2)
+    const isSettled = vi.fn(() => isSettled.mock.calls.length === 3)
     const complete = vi.fn()
 
     await settleDockviewOverlayReposition({ refresh, isSettled, complete }, scheduleFrame)
 
     expect(scheduleFrame).toHaveBeenCalledTimes(2)
     expect(refresh).toHaveBeenCalledTimes(2)
-    expect(isSettled).toHaveBeenCalledTimes(2)
+    expect(isSettled).toHaveBeenCalledTimes(3)
     expect(complete).toHaveBeenCalledOnce()
+  })
+
+  it('skips edge overlay repair when the overlays already match', async () => {
+    const scheduleFrame = vi.fn()
+    const refresh = vi.fn()
+    const complete = vi.fn()
+
+    await settleDockviewOverlayReposition({ refresh, isSettled: () => true, complete }, scheduleFrame)
+
+    expect(scheduleFrame).not.toHaveBeenCalled()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(complete).not.toHaveBeenCalled()
   })
 })

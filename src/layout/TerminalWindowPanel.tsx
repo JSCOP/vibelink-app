@@ -61,6 +61,11 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
   const innerDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
   const repairingInnerLayoutRef = useRef(false)
   const invariantCheckPendingRef = useRef(false)
+  // Reading order is measured from live group rects, and the open-content
+  // registry rebuilds it on every Dockview event — including edge-tab
+  // activations that cannot move a pane. Measuring N groups per event was the
+  // largest forced-layout cost left after the settle loops were bounded.
+  const readingOrderRef = useRef<{ key: string; order: string[] } | null>(null)
   // Set when a persist was requested while a drag was still running.
   const persistDeferredRef = useRef(false)
   const titlesHidden = Boolean(props.params.titlesHidden)
@@ -260,14 +265,19 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     const api = innerApiRef.current
     if (!api) return paneIdsFromParams
     const panels = api.panels.filter((panel) => parseWorkspaceContentParams(panel.params)?.kind === 'terminal')
+    const key = panels.map((panel) => panel.id).join('\u0000')
+    const cached = readingOrderRef.current
+    if (cached?.key === key) return cached.order
     const panelById = new Map(panels.map((panel) => [panel.id, panel] as const))
-    return paneIdsInReadingOrder(panels.map((panel) => panel.id), (panelId) => {
+    const order = paneIdsInReadingOrder(panels.map((panel) => panel.id), (panelId) => {
       const rect = panelById.get(panelId)?.group.element.getBoundingClientRect()
       return rect ? { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height } : null
     }).flatMap((panelId) => {
       const content = parseWorkspaceContentParams(panelById.get(panelId)?.params)
       return content?.kind === 'terminal' ? [content.paneId] : []
     })
+    readingOrderRef.current = { key, order }
+    return order
   }, [paneIdsFromParams])
 
   const focusActivePane = useCallback(() => {
@@ -315,9 +325,9 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       event.api.onWillShowOverlay((event) => {
         if (preventTerminalPaneStackDrop(event.kind, event.position)) event.preventDefault()
       }),
-      event.api.onDidLayoutChange(() => persistInner()),
-      event.api.onDidMovePanel(() => scheduleInnerInvariantCheck()),
-      event.api.onDidDrop(() => scheduleInnerInvariantCheck()),
+      event.api.onDidLayoutChange(() => { readingOrderRef.current = null; persistInner() }),
+      event.api.onDidMovePanel(() => { readingOrderRef.current = null; scheduleInnerInvariantCheck() }),
+      event.api.onDidDrop(() => { readingOrderRef.current = null; scheduleInnerInvariantCheck() }),
       event.api.onDidRemovePanel(() => persistInner()),
       event.api.onDidActivePanelChange((panel) => {
         const content = parseWorkspaceContentParams(panel?.params)

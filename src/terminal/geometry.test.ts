@@ -1,5 +1,7 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { isTerminalHostMeasurable, terminalHostBecameMeasurable, terminalHostMeasureState, waitForStableTerminalGrid } from './geometry'
+import { Terminal } from '@xterm/xterm'
+import { isTerminalHostMeasurable, restoreTerminalScrollAnchor, terminalHostBecameMeasurable, terminalHostMeasureState, terminalScrollAnchor, waitForStableTerminalGrid } from './geometry'
 
 describe('terminal host geometry', () => {
   it('does not treat zero-sized dockview hosts as ready for fitting', () => {
@@ -34,5 +36,55 @@ describe('terminal host geometry', () => {
       () => measured.shift() ?? null,
       () => Promise.resolve(),
     )).resolves.toEqual({ cols: 272, rows: 77 })
+  })
+})
+
+describe('terminal scroll anchor', () => {
+  /** Narrowing a pane rewraps scrollback: `baseY` grows while xterm keeps the
+   *  absolute viewport row, so the reader silently drifts backwards. */
+  const scrolledTerminal = async () => {
+    const term = new Terminal({ cols: 20, rows: 4, scrollback: 500 })
+    const body = Array.from({ length: 40 }, (_, index) => `row${String(index).padStart(2, '0')}-abcdefghi`).join('\r\n')
+    await new Promise<void>((resolve) => term.write(`${body}\r\n`, resolve))
+    term.scrollToLine(term.buffer.active.baseY - 12)
+    return term
+  }
+
+  it('keeps the reader the same distance from the bottom when columns rewrap', async () => {
+    const term = await scrolledTerminal()
+    const anchor = terminalScrollAnchor(term)
+    expect(anchor).toBe(12)
+
+    term.resize(10, 4)
+    expect(terminalScrollAnchor(term)).not.toBe(anchor)
+
+    restoreTerminalScrollAnchor(term, anchor)
+    expect(terminalScrollAnchor(term)).toBe(anchor)
+    term.dispose()
+  })
+
+  it('pins a viewport that already sat at the bottom so new output stays visible', async () => {
+    const term = await scrolledTerminal()
+    term.scrollToBottom()
+    const anchor = terminalScrollAnchor(term)
+    expect(anchor).toBe(0)
+
+    term.resize(10, 4)
+    restoreTerminalScrollAnchor(term, anchor)
+    expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY)
+    term.dispose()
+  })
+
+  it('clamps to the top instead of scrolling past the start of a trimmed buffer', () => {
+    const scrolls: number[] = []
+    const term = {
+      buffer: { active: { baseY: 4, viewportY: 4 } },
+      scrollToBottom: () => scrolls.push(-1),
+      scrollToLine: (line: number) => scrolls.push(line),
+    }
+
+    restoreTerminalScrollAnchor(term, 900)
+
+    expect(scrolls).toEqual([0])
   })
 })

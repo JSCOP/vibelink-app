@@ -10,7 +10,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { terminalThemeById } from '../state/terminalThemes'
 import { terminalFontStack } from '../state/fonts'
 import { createTerminalOptions, defaultTerminalSettings, terminalLetterSpacing, terminalLineHeight, type TerminalVisualSettings } from './options'
-import { terminalHostBecameMeasurable, terminalHostMeasureState, type TerminalHostMeasureState } from './geometry'
+import { restoreTerminalScrollAnchor, terminalHostBecameMeasurable, terminalHostMeasureState, terminalScrollAnchor, type TerminalHostMeasureState } from './geometry'
 import { INTERACTIVE_FIT_FRAME_BUDGET_MS, interactivePassDelay, isViewportViable, shouldSyncPtyNow } from './layoutPassPolicy'
 import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
@@ -1644,12 +1644,12 @@ class TerminalManagerImpl {
       if (entry.rendererResetPending) {
         if (!this.forceFitAndRepaint(entry)) continue
       } else {
-        const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
+        const anchor = terminalScrollAnchor(entry.term)
         if (!this.safeFit(entry, pass.force || measurement.forceFitForMeasure)) {
           entry.forceFitOnNextMeasure = true
           continue
         }
-        if (wasAtBottom) entry.term.scrollToBottom()
+        restoreTerminalScrollAnchor(entry.term, anchor)
         entry.forceFitOnNextMeasure = false
         // A grid change does NOT need a repaint from us, though it reads like
         // it should: xterm's `resize()` fires `onResize`, wired straight to
@@ -1920,7 +1920,7 @@ class TerminalManagerImpl {
   }
 
   private forceFitAndRepaint(entry: Entry, attempt = 0): boolean {
-    const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
+    const anchor = terminalScrollAnchor(entry.term)
     // safeFit skips a degenerate proposal (container mid-layout). If it could not
     // fit, retry on a bounded delay once the real geometry settles rather than
     // fitting to 2x1 and corrupting the buffer.
@@ -1933,7 +1933,7 @@ class TerminalManagerImpl {
       }
       return false
     }
-    if (wasAtBottom) entry.term.scrollToBottom()
+    restoreTerminalScrollAnchor(entry.term, anchor)
     this.redraw(entry, { clearWebglTextureAtlas: entry.webgl !== undefined })
     if (entry.rendererResetPending) this.forceGlyphRepaint(entry)
     else if (entry.webgl) this.clearWebglTextureAtlas(entry)
@@ -2370,7 +2370,7 @@ class TerminalManagerImpl {
         return
       }
       try {
-        const wasAtBottom = entry.term.buffer.active.viewportY >= entry.term.buffer.active.baseY
+        const anchor = terminalScrollAnchor(entry.term)
         // safeFit no-ops on a degenerate proposal; retry once geometry settles so
         // we never resize to 2x1 and corrupt the buffer.
         if (!this.safeFit(entry, forceFit)) {
@@ -2381,7 +2381,7 @@ class TerminalManagerImpl {
         // Pin to bottom ONLY when the viewport already sat at bottom. A forced
         // fit re-measures geometry; it must never yank the viewport away from a
         // user who scrolled up (click-to-select, split, tab toggle, resize).
-        if (wasAtBottom) entry.term.scrollToBottom()
+        restoreTerminalScrollAnchor(entry.term, anchor)
         this.redrawAfterNextFrame(entry, { clearWebglTextureAtlas: entry.webgl !== undefined })
         entry.forceFitOnNextMeasure = false
       } catch {
@@ -2390,7 +2390,6 @@ class TerminalManagerImpl {
     })
   }
 }
-
 function decodeBase64Bytes(value: string): Uint8Array {
   const binary = atob(value)
   const bytes = new Uint8Array(binary.length)

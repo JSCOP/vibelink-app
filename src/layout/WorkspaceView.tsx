@@ -538,6 +538,12 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   agentSessions: AgentSessionsContentPanel,
 }
 
+/** dockview-react re-runs `updateOptions` — a full `_layoutFromShell` plus a
+ *  floating-overlay-host measurement — whenever this object's identity changes.
+ *  Inline, that fired on every WorkspaceView render and taxed unrelated state
+ *  updates with a forced dock relayout. */
+const workspaceTabComponents = { workspaceContentTab: WorkspaceContentTab }
+
 /** Group-local creation controls. The group is the placement authority, while
  * Dockview remains the only drag/drop and split-movement authority. */
 export function WorkspaceGroupActions(props: IDockviewHeaderActionsProps) {
@@ -2147,7 +2153,7 @@ export function WorkspaceView({
           <WorkspaceEmptyState api={dockApi} actions={actions} />
           <DockviewReact
           components={components}
-          tabComponents={{ workspaceContentTab: WorkspaceContentTab }}
+          tabComponents={workspaceTabComponents}
           defaultTabComponent={WorkspaceContentTab}
           leftHeaderActionsComponent={leftHeaderActionsComponent}
           getTabContextMenuItems={getTabContextMenuItems}
