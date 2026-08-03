@@ -12,11 +12,10 @@ import { selectedProfileForWorkspace } from '../state/profiles'
 import { parseWorkspaceContentParams, type SerializedDockview, type WorkspaceContentParams } from '../layout/workspaceContentModel'
 import { shouldRevealTabForDrag, workspaceAgentTabStatus, workspaceWindowDropPosition, type WorkspaceWindowDropPosition } from './workspaceContentTabModel'
 import { getTerminalWindow } from '../layout/terminalWindowRegistry'
-import { getWorkspaceWindow } from '../layout/workspaceWindowRegistry'
+import { beginWorkspaceWindowDrag, endWorkspaceWindowDrag, getWorkspaceWindow, workspaceWindowDragType } from '../layout/workspaceWindowRegistry'
 import { workspaceWindowTabGroups, workspaceWindowTitle } from '../layout/workspaceLayoutModel'
 
 type WorkspaceContentTabProps = IDockviewPanelHeaderProps<WorkspaceContentParams>
-const workspaceWindowDragType = 'application/x-vibelink-workspace-window'
 
 
 export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceContentTabProps) {
@@ -205,8 +204,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
                   data-window-drop-position={workspaceWindowDropTarget?.panelId === panelId ? workspaceWindowDropTarget.position : undefined}
                   data-content-panel-id={panelId}
                   data-window-group-id={group.id}
-                  onPointerDown={(event) => {
-                    if (event.button !== 0) return
+                  onClick={(event) => {
                     actions.activateContent(panelId)
                     event.stopPropagation()
                   }}
@@ -216,6 +214,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
                       return
                     }
                     workspaceWindowDragPanelIdRef.current = panelId
+                    beginWorkspaceWindowDrag(panelId)
                     event.dataTransfer.effectAllowed = 'move'
                     event.stopPropagation()
                     event.dataTransfer.setData(workspaceWindowDragType, panelId)
@@ -243,11 +242,13 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
                     const position = workspaceWindowDropTarget?.panelId === panelId ? workspaceWindowDropTarget.position : workspaceWindowDropPosition(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY)
                     if (sourcePanel && targetPanel && sourcePanel.id !== targetPanel.id) sourcePanel.api.moveTo({ group: targetPanel.api.group, position })
                     workspaceWindowDragPanelIdRef.current = null
+                    endWorkspaceWindowDrag()
                     setWorkspaceWindowDropTarget(null)
                   }}
                   onDragEnd={(event) => {
                     event.stopPropagation()
                     workspaceWindowDragPanelIdRef.current = null
+                    endWorkspaceWindowDrag()
                     setWorkspaceWindowDropTarget(null)
                   }}
                 >

@@ -11,7 +11,7 @@ import { createSingletonContentParams, createTerminalContentParams, createTermin
 import { workspaceContentPanelId } from '../layout/workspaceContentModel'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../layout/contentActions'
 import { registerTerminalWindow } from '../layout/terminalWindowRegistry'
-import { registerWorkspaceWindow } from '../layout/workspaceWindowRegistry'
+import { beginWorkspaceWindowDrag, endWorkspaceWindowDrag, moveWorkspaceWindowPanelFromContentDrop, registerWorkspaceWindow, workspaceWindowDragPanelId } from '../layout/workspaceWindowRegistry'
 import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../state/git'
 import { useWorkspaceStore } from '../state/store'
 
@@ -144,8 +144,11 @@ describe('WorkspaceContentTab', () => {
       ])
       const terminalTab = screen.getByRole('tab', { name: 'Terminal' })
       const browserTab = screen.getByRole('tab', { name: 'Browser' })
-      fireEvent.pointerDown(browserTab, { button: 0 })
+      fireEvent.click(browserTab)
       expect(actions.activateContent).toHaveBeenCalledWith(browserId)
+      actions.activateContent.mockClear()
+      fireEvent.pointerDown(terminalTab, { button: 0 })
+      expect(actions.activateContent).not.toHaveBeenCalled()
 
       const browserSegment = browserTab.closest<HTMLElement>('.workspace-window-combined-segment')
       expect(browserSegment?.draggable).toBe(true)
@@ -162,6 +165,33 @@ describe('WorkspaceContentTab', () => {
       expect(menu.map((item) => item.label)).toEqual(['Reset workspace layout'])
     } finally {
       unregister()
+    }
+  })
+
+  it('splits a stacked browser when it is dropped over terminal content', () => {
+    const terminal = createTerminalWindowParams('terminal-drop', [], { cols: 1, rows: 1 })
+    const browser = { schema: 1 as const, kind: 'browser' as const, instanceId: 'page-drop', title: 'Browser', icon: 'globe', pageId: 'page-drop', profileId: 'default' }
+    const terminalId = workspaceContentPanelId(terminal)
+    const browserId = workspaceContentPanelId(browser)
+    const terminalPanel = { id: terminalId, api: panelApi(terminalId, 'Terminal') }
+    const browserPanel = { id: browserId, api: panelApi(browserId, 'Browser') }
+    const group = {
+      id: 'stacked-group',
+      panels: [terminalPanel, browserPanel],
+      element: { getBoundingClientRect: () => ({ left: 0, right: 1000, top: 0, bottom: 640, width: 1000, height: 640 }) },
+    }
+    const innerApi = {
+      groups: [group],
+      getPanel: (id: string) => id === browserId ? browserPanel : id === terminalId ? terminalPanel : undefined,
+    }
+
+    beginWorkspaceWindowDrag(browserId)
+    try {
+      expect(workspaceWindowDragPanelId()).toBe(browserId)
+      expect(moveWorkspaceWindowPanelFromContentDrop(innerApi as never, browserId, 800, 320)).toEqual({ groupId: 'stacked-group', position: 'right' })
+      expect(browserPanel.api.moveTo).toHaveBeenCalledWith({ group, position: 'right' })
+    } finally {
+      endWorkspaceWindowDrag()
     }
   })
 

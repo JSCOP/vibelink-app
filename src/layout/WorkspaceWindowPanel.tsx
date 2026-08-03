@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FunctionComponent } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent as ReactDragEvent, type FunctionComponent } from 'react'
 import {
   DockviewReact,
   type DockviewApi,
@@ -22,7 +22,7 @@ import {
 import { workspaceWindowTitle } from './workspaceLayoutModel'
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
 import { WorkspaceEmptyState } from './WorkspaceEmptyState'
-import { registerWorkspaceWindow } from './workspaceWindowRegistry'
+import { endWorkspaceWindowDrag, moveWorkspaceWindowPanelFromContentDrop, registerWorkspaceWindow, workspaceWindowContentDropTarget, workspaceWindowDragPanelId, workspaceWindowDragType } from './workspaceWindowRegistry'
 
 type WorkspaceWindowParams = Extract<WorkspaceContentParams, { kind: 'workspaceWindow' }>
 type WorkspaceContentPanel = FunctionComponent<IDockviewPanelProps<WorkspaceContentParams>>
@@ -107,9 +107,50 @@ export function WorkspaceWindowPanel({
     }, 120)
   }, [captureInnerLayout, notifyChanged, outerApi])
 
-  const clearDragState = useCallback(() => {
-    hostRef.current?.removeAttribute('data-vl-window-drag')
+  const clearContentDropTarget = useCallback(() => {
+    for (const group of innerApiRef.current?.groups ?? []) group.element.removeAttribute('data-vl-window-drop-position')
   }, [])
+
+  const clearPointerDragState = useCallback(() => {
+    hostRef.current?.removeAttribute('data-vl-window-drag')
+    clearContentDropTarget()
+  }, [clearContentDropTarget])
+
+  const clearDragState = useCallback(() => {
+    clearPointerDragState()
+    endWorkspaceWindowDrag()
+  }, [clearPointerDragState])
+
+  const handleContentDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const api = innerApiRef.current
+    const sourcePanelId = workspaceWindowDragPanelId() || event.dataTransfer.getData(workspaceWindowDragType)
+    if (!api || !sourcePanelId) return
+    const target = workspaceWindowContentDropTarget(api, sourcePanelId, event.clientX, event.clientY)
+    clearContentDropTarget()
+    if (!target) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+    target.group.element.dataset.vlWindowDropPosition = target.position
+  }, [clearContentDropTarget])
+
+  const handleContentDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const api = innerApiRef.current
+    const sourcePanelId = workspaceWindowDragPanelId() || event.dataTransfer.getData(workspaceWindowDragType)
+    if (!api || !sourcePanelId || !workspaceWindowContentDropTarget(api, sourcePanelId, event.clientX, event.clientY)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const moved = moveWorkspaceWindowPanelFromContentDrop(api, sourcePanelId, event.clientX, event.clientY)
+    clearDragState()
+    if (!moved) return
+    persistInner()
+    void settleInner()
+  }, [clearDragState, persistInner, settleInner])
+
+  const handleContentDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+    clearContentDropTarget()
+  }, [clearContentDropTarget])
 
   const focusActive = useCallback(() => {
     const panel = innerApiRef.current?.activePanel
@@ -182,16 +223,19 @@ export function WorkspaceWindowPanel({
 
   useEffect(() => {
     const persistTerminalLayout = () => persistInner()
-    const clear = () => clearDragState()
+    const clearPointer = () => clearPointerDragState()
+    const clearDrag = () => clearDragState()
     window.addEventListener('vibelink:terminal-window-persist', persistTerminalLayout)
-    window.addEventListener('pointerup', clear)
-    window.addEventListener('pointercancel', clear)
+    window.addEventListener('pointerup', clearPointer)
+    window.addEventListener('dragend', clearDrag)
+    window.addEventListener('pointercancel', clearPointer)
     return () => {
       window.removeEventListener('vibelink:terminal-window-persist', persistTerminalLayout)
-      window.removeEventListener('pointerup', clear)
-      window.removeEventListener('pointercancel', clear)
+      window.removeEventListener('pointerup', clearPointer)
+      window.removeEventListener('pointercancel', clearPointer)
+      window.removeEventListener('dragend', clearDrag)
     }
-  }, [clearDragState, persistInner])
+  }, [clearDragState, clearPointerDragState, persistInner])
 
   useEffect(() => onInteractiveResizeEnd(() => {
     if (!innerApiRef.current) return
@@ -209,7 +253,15 @@ export function WorkspaceWindowPanel({
   }, [])
 
   return (
-    <div ref={hostRef} className="workspace-window-container" data-content-panel-id={outerApi.id} data-workspace-window-id={params.instanceId}>
+    <div
+      ref={hostRef}
+      className="workspace-window-container"
+      data-content-panel-id={outerApi.id}
+      data-workspace-window-id={params.instanceId}
+      onDragOverCapture={handleContentDragOver}
+      onDropCapture={handleContentDrop}
+      onDragLeaveCapture={handleContentDragLeave}
+    >
       <div className="workspace-window-inner-dock">
         <DockviewReact
           components={components}
