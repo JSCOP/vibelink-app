@@ -270,13 +270,9 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     const visibilityDisposable = panelApi.onDidVisibilityChange(({ isVisible }) => {
       TerminalManager.setPaneVisible(paneId, isVisible)
     })
-    const dimensionsDisposable = panelApi.onDidDimensionsChange(() => {
-      if (panelApi.isVisible) TerminalManager.reflow(paneId)
-    })
     return () => {
       TerminalManager.setPaneVisible(paneId, false)
       visibilityDisposable.dispose()
-      dimensionsDisposable.dispose()
     }
   }, [panelApi, paneId])
 
