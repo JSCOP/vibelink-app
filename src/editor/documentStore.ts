@@ -600,7 +600,7 @@ export function getEditorDocumentStore(sessionId: string, workspaceFolder: strin
   return store
 }
 
-export function disposeEditorDocumentStore(sessionId: string, _workspaceFolder: string): void {
+export function disposeEditorDocumentStore(sessionId: string): void {
   for (const [key, store] of workspaceStores) {
     if (store.sessionId !== sessionId) continue
     store.dispose()

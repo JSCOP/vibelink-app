@@ -38,18 +38,10 @@ struct RemoteConfigDocument {
     config: RemoteConfig,
 }
 
+#[derive(Default)]
 struct LoadedConfig {
     config: RemoteConfig,
     legacy: bool,
-}
-
-impl Default for LoadedConfig {
-    fn default() -> Self {
-        Self {
-            config: RemoteConfig::default(),
-            legacy: false,
-        }
-    }
 }
 
 impl RemoteConfig {

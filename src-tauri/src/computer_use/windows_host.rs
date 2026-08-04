@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use crate::computer_use::{
     frame::{read_frame, write_frame, BootToken, RequestEnvelope, ResponseEnvelope},
     host::{
@@ -287,7 +285,7 @@ impl SecureNamedPipe {
             )
         }
         .map_err(|error| host_error(HostIoErrorKind::Other, error.to_string()))?;
-        let mut attributes = SECURITY_ATTRIBUTES {
+        let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.0,
             bInheritHandle: false.into(),
@@ -302,7 +300,7 @@ impl SecureNamedPipe {
                 PIPE_BUFFER_LEN,
                 PIPE_BUFFER_LEN,
                 0,
-                Some(&mut attributes),
+                Some(&attributes),
             )
         };
         unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };

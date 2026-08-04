@@ -89,7 +89,7 @@ where
     R: FnMut() -> Result<T>,
 {
     match direct() {
-        Ok(connection) => return Ok((connection, ConnectionPath::Direct)),
+        Ok(connection) => Ok((connection, ConnectionPath::Direct)),
         Err(direct_error) if !breaker.can_attempt(now) => {
             bail!("relay_unavailable: relay circuit is open after direct failure: {direct_error}")
         }
@@ -142,7 +142,7 @@ impl RelayClient {
         let local = relay_origin
             .host_str()
             .is_some_and(|host| matches!(host, "127.0.0.1" | "localhost" | "::1"));
-        if !secure && !(allow_insecure_local && local) {
+        if !(secure || allow_insecure_local && local) {
             bail!("remote-v2 relay requires HTTPS/WSS");
         }
         if relay_origin.host_str().is_none()

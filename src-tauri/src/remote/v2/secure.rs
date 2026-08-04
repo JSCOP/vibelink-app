@@ -82,7 +82,7 @@ impl DeviceIdentity {
             bail!("invalid remote-v2 private key length");
         }
         let params: NoiseParams = NOISE_PATTERN.parse().expect("valid Noise pattern");
-        let resolver = DefaultResolver::default();
+        let resolver = DefaultResolver;
         let mut keypair = resolver
             .resolve_dh(&params.dh)
             .context("resolve Noise DH")?;

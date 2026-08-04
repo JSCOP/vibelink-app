@@ -1897,7 +1897,7 @@ function assertRemovalAcknowledged(
 // externally-removed-session path both funnel through here so no caller can
 // forget one of the maps.
 async function releaseSessionResources(sessionId: string, workspaceFolder: string | null | undefined): Promise<void> {
-  if (workspaceFolder) disposeEditorDocumentStore(sessionId, workspaceFolder)
+  if (workspaceFolder) disposeEditorDocumentStore(sessionId)
   useGitStore.getState().clearSession(sessionId)
   await invoke('browser_cleanup_workspace', { workspaceId: sessionId })
   await invoke('agent_workspace_cleanup', { sessionId })

@@ -218,6 +218,7 @@ impl LatestFrameQueue {
     }
 }
 
+#[derive(Default)]
 struct ManagerState {
     profiles: HashMap<String, ProfileState>,
     pages: HashMap<String, PageState>,
@@ -227,21 +228,6 @@ struct ManagerState {
     downloads: VecDeque<BrowserDownloadRecord>,
     events: VecDeque<BrowserLifecycleEvent>,
     event_sequence: u64,
-}
-
-impl Default for ManagerState {
-    fn default() -> Self {
-        Self {
-            profiles: HashMap::new(),
-            pages: HashMap::new(),
-            permissions: VecDeque::new(),
-            certificates: VecDeque::new(),
-            dialogs: VecDeque::new(),
-            downloads: VecDeque::new(),
-            events: VecDeque::new(),
-            event_sequence: 0,
-        }
-    }
 }
 
 pub struct BrowserManager<P: BrowserProvider> {
@@ -2773,6 +2759,7 @@ fn write_restore_bytes_atomically(path: &Path, bytes: &[u8]) -> BrowserResult<()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .share_mode(0)
             .open(&lock_path)
     })

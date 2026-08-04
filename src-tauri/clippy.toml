@@ -1,0 +1,2 @@
+# Existing IPC dispatch boundaries peak at 16 arguments; lower this as they are split.
+too-many-arguments-threshold = 16

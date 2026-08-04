@@ -148,10 +148,10 @@ pub fn redact_element(element: &mut ElementRecord) {
 }
 
 pub fn redact_selected_text(selected_text: &mut Option<String>, focused: Option<&ElementRecord>) {
-    if focused.is_some_and(|element| element.password || element.redacted) {
-        if selected_text.is_some() {
-            *selected_text = Some(REDACTED_VALUE.to_string());
-        }
+    if focused.is_some_and(|element| element.password || element.redacted)
+        && selected_text.is_some()
+    {
+        *selected_text = Some(REDACTED_VALUE.to_string());
     }
 }
 

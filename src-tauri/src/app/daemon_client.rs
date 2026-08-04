@@ -1039,7 +1039,7 @@ mod tests {
             assert!(client.deliver_output(frame));
         }
 
-        assert!(rx.len() >= 1);
+        assert!(!rx.is_empty());
         assert!(rx.len() < 10);
     }
 

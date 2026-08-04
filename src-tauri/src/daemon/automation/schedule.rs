@@ -92,6 +92,8 @@ struct ParsedSchedule {
 }
 
 #[derive(Clone)]
+// ponytail: keep the parsed schedule representation flat; box it if it becomes long-lived.
+#[allow(clippy::large_enum_variant)]
 enum ScheduleKind {
     Once(u64),
     Interval { period_ms: u64, anchor_ms: u64 },

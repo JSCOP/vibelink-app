@@ -92,8 +92,7 @@ pub fn load_pane_history(sessions_path: &Path, session_id: Uuid, pane_id: Uuid) 
     if file_len > retained {
         file.seek(SeekFrom::Start(file_len - retained))?;
     }
-    let mut bytes =
-        Vec::with_capacity(usize::try_from(retained).unwrap_or(DEFAULT_SCROLLBACK_CAP));
+    let mut bytes = Vec::with_capacity(usize::try_from(retained).unwrap_or(DEFAULT_SCROLLBACK_CAP));
     file.read_to_end(&mut bytes)?;
     let mut ring = ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP);
     ring.push(&bytes);

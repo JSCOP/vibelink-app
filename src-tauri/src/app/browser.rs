@@ -489,7 +489,7 @@ fn discover_project_targets(root: &Path) -> Result<Vec<BrowserProjectTarget>, St
                         )
                         .map(|(name, _)| name.as_str())
                         .collect::<Vec<_>>();
-                    if dependencies.iter().any(|name| *name == "next") {
+                    if dependencies.contains(&"next") {
                         candidates
                             .entry(3000)
                             .or_insert_with(|| ("Next.js".into(), "package.json".into()));
@@ -502,12 +502,12 @@ fn discover_project_targets(root: &Path) -> Result<Vec<BrowserProjectTarget>, St
                             .entry(5173)
                             .or_insert_with(|| ("Vite".into(), "package.json".into()));
                     }
-                    if dependencies.iter().any(|name| *name == "@angular/core") {
+                    if dependencies.contains(&"@angular/core") {
                         candidates
                             .entry(4200)
                             .or_insert_with(|| ("Angular".into(), "package.json".into()));
                     }
-                    if dependencies.iter().any(|name| *name == "astro") {
+                    if dependencies.contains(&"astro") {
                         candidates
                             .entry(4321)
                             .or_insert_with(|| ("Astro".into(), "package.json".into()));
@@ -1175,7 +1175,7 @@ pub(crate) fn schedule_browser_event_pump(app: AppHandle<Wry>) {
     {
         return;
     }
-    let _ = tauri::async_runtime::spawn_blocking(move || {
+    drop(tauri::async_runtime::spawn_blocking(move || {
         std::thread::sleep(Duration::from_millis(16));
         if let Some(manager) = app.try_state::<ManagedBrowser>() {
             loop {
@@ -1191,7 +1191,7 @@ pub(crate) fn schedule_browser_event_pump(app: AppHandle<Wry>) {
         if let Some(manager) = app.try_state::<ManagedBrowser>() {
             let _ = manager.sync_provider_events();
         }
-    });
+    }));
 }
 
 #[cfg(test)]

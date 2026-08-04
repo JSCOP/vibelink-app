@@ -608,7 +608,7 @@ pub async fn open_path(
                 "open failed (ShellExecute code {result}): {target}"
             ));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]

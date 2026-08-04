@@ -193,6 +193,6 @@ describe('EditorDocumentStore', () => {
     expect(oldStore.listDocuments()).toEqual([])
     expect(model.dispose).toHaveBeenCalledOnce()
     expect(model.disposeSubscription).toHaveBeenCalledOnce()
-    disposeEditorDocumentStore('moved-session', 'D:/new-repo')
+    disposeEditorDocumentStore('moved-session')
   })
 })

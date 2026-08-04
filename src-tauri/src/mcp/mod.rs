@@ -1332,7 +1332,7 @@ fn dockview_grid_layout(
     } else {
         let column_sizes = distribute_size(width, cols);
         let mut columns = Vec::new();
-        for col in 0..cols {
+        for (col, column_size) in column_sizes.iter().copied().enumerate() {
             let column_panes = (0..rows)
                 .filter_map(|row| grid_panes.get(row * cols + col))
                 .collect::<Vec<_>>();
@@ -1342,7 +1342,7 @@ fn dockview_grid_layout(
             if rows == 1 {
                 columns.push(make_grid_leaf(
                     column_panes[0],
-                    column_sizes[col],
+                    column_size,
                     &overflow_ids,
                     last_grid_pane_id,
                     active_pane_id,
@@ -1368,7 +1368,7 @@ fn dockview_grid_layout(
                     )
                 })
                 .collect::<Vec<_>>();
-            columns.push(json!({ "type": "branch", "data": leaves, "size": column_sizes[col] }));
+            columns.push(json!({ "type": "branch", "data": leaves, "size": column_size }));
         }
         json!({ "type": "branch", "data": columns, "size": width })
     };

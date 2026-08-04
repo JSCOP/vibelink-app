@@ -176,6 +176,8 @@ impl Drop for ActiveClientPermit {
 }
 
 #[derive(Clone, Debug)]
+// ponytail: avoid channel API churn; box appearance events if their payload grows again.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum RemotePush {
     WebSocket(Message),
     AppearanceChanged(AppearanceChangedEvent),

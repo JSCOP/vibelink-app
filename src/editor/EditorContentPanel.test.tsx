@@ -78,7 +78,7 @@ const actions: WorkspaceContentActions = {
 
 beforeEach(async () => {
   cleanup()
-  disposeEditorDocumentStore('editor-session', 'C:/repo')
+  disposeEditorDocumentStore('editor-session')
   resetWorkspaceSessionOwnershipForTests()
   latestSurfaceProps = null
   mountCount = 0

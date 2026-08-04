@@ -886,7 +886,10 @@ mod tests {
             panic!("expected automation")
         };
         assert_eq!(cancel_cmd.action, AutomationAction::Cancel);
-        assert_eq!(cancel_cmd.arguments.positionals, [run_id.clone()]);
+        assert_eq!(
+            cancel_cmd.arguments.positionals.as_slice(),
+            std::slice::from_ref(&run_id)
+        );
 
         let cancel_opt_inv =
             parse_args(["automation", "cancel", "--id", &run_id]).expect("parse cancel --id");

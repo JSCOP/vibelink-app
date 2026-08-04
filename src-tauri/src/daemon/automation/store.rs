@@ -499,14 +499,14 @@ impl AutomationStore {
     }
 }
 
-fn source_columns(
-    record: &AutomationRecord,
-) -> Result<(
+type AutomationSourceColumns = (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
-)> {
+);
+
+fn source_columns(record: &AutomationRecord) -> Result<AutomationSourceColumns> {
     let Some(source) = record.source.as_ref() else {
         return Ok((None, None, None, None));
     };

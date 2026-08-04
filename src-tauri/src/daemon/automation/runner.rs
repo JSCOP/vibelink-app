@@ -186,6 +186,8 @@ impl AutomationRunner {
         )
     }
 
+    // ponytail: retain the recovery payload; box errors when the runner boundary is split.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn prepare_terminal(
         &self,
         run_id: &str,
@@ -252,7 +254,8 @@ impl AutomationRunner {
                 .collect(),
             env_remove: command
                 .get_envs()
-                .filter_map(|(key, value)| value.is_none().then(|| key.to_owned()))
+                .filter(|&(_key, value)| value.is_none())
+                .map(|(key, _value)| key.to_owned())
                 .collect(),
             stdin_prompt,
             label: spec.display_name,

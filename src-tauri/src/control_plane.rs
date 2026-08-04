@@ -675,7 +675,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
         version = 3;
     }
-    if matches!(version, 3 | 4 | 5) {
+    if matches!(version, 3..=5) {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
             CREATE TABLE automations_v6 (

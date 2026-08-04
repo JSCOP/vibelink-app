@@ -105,7 +105,7 @@ fn walk_repositories(
                 directory.display()
             )
         })?;
-    entries.sort_unstable_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_unstable_by_key(|left| left.file_name());
     for entry in entries {
         if repositories.len() >= DISCOVERED_REPO_LIMIT {
             break;

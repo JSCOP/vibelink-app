@@ -17,15 +17,11 @@ const DEFAULT_CATEGORY: &str = "Custom";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SkillScope {
+    #[default]
     Global,
     Workspace,
-}
-
-impl Default for SkillScope {
-    fn default() -> Self {
-        Self::Global
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

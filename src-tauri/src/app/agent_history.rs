@@ -290,7 +290,7 @@ fn scan_agent(
         };
         let path = candidate.path.to_string_lossy().into_owned();
         let mtime = candidate.mtime.map(system_time_to_rfc3339);
-        let lines = BufReader::new(file).lines().filter_map(Result::ok);
+        let lines = BufReader::new(file).lines().map_while(Result::ok);
         let Some(mut info) = parse_conversation(lines, agent, &path, mtime) else {
             continue;
         };

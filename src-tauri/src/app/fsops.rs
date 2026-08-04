@@ -1350,7 +1350,10 @@ fn resolve_windows_launcher(program: &str) -> std::ffi::OsString {
         return candidate.into();
     }
     let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    let directories: Vec<PathBuf> = if candidate.parent().is_some_and(|parent| !parent.as_os_str().is_empty()) {
+    let directories: Vec<PathBuf> = if candidate
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+    {
         vec![PathBuf::new()]
     } else {
         std::env::var_os("PATH")
@@ -1359,7 +1362,10 @@ fn resolve_windows_launcher(program: &str) -> std::ffi::OsString {
     };
     for directory in directories {
         let base = directory.join(candidate);
-        for extension in extensions.split(';').filter(|extension| !extension.is_empty()) {
+        for extension in extensions
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+        {
             let mut name = base.clone().into_os_string();
             name.push(extension);
             if Path::new(&name).is_file() {

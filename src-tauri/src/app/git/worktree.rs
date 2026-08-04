@@ -533,7 +533,7 @@ pub fn move_to(repo: &str, worktree_path: &str, destination: &str) -> Result<Wor
     )?;
     let branch = git_read_allow_fail(
         &destination_string,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "HEAD"],
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "HEAD"],
     )?
     .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
     .filter(|branch| !branch.is_empty() && branch != "HEAD")

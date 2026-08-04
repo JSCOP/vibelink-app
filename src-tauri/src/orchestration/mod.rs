@@ -1495,8 +1495,7 @@ impl CoordinatorService {
                     "SELECT id FROM orchestration_runs WHERE status IN ('planning','running','waiting','paused') ORDER BY created_at,id",
                 )?;
                 let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-                let collected = rows.collect::<Result<Vec<_>, _>>()?;
-                collected
+                rows.collect::<Result<Vec<_>, _>>()?
             };
             let mut reconciled = Vec::new();
             for run_id in run_ids {

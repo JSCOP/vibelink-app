@@ -455,6 +455,8 @@ impl DaemonState {
             .map_err(|(err, _pane)| err)
     }
 
+    // ponytail: retain the failed pane for recovery; box it when session insertion is redesigned.
+    #[allow(clippy::result_large_err)]
     pub fn insert_pane_or_recover(
         &mut self,
         session_id: Uuid,

@@ -204,10 +204,10 @@ fn resolve_browser_host_response(
 ) -> Result<()> {
     let sender = {
         let mut router = lock_mutex(&BROWSER_HOST_ROUTER);
-        if !router
+        if router
             .host
             .as_ref()
-            .is_some_and(|(host_id, _)| *host_id == client_id)
+            .is_none_or(|(host_id, _)| *host_id != client_id)
         {
             anyhow::bail!("capability_denied: client is not the registered browser host");
         }
@@ -351,6 +351,7 @@ pub fn run() {
     }
 }
 
+#[allow(clippy::incompatible_msrv)]
 fn run_inner() -> Result<()> {
     let paths = paths::daemon_paths()?;
     let app_flavor = paths::app_flavor();
@@ -864,26 +865,24 @@ fn processes_for_pane_identity(pane_id: Uuid) -> Vec<(u32, u64)> {
     let matches = system
         .processes()
         .iter()
-        .filter_map(|(pid, process)| {
+        .filter(|&(_pid, process)| {
             process
                 .environ()
                 .iter()
                 .any(|entry| entry.to_string_lossy() == expected)
-                .then(|| {
-                    (
-                        pid.as_u32(),
-                        process.start_time(),
-                        process.parent().map(|parent| parent.as_u32()),
-                    )
-                })
+        })
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                process.start_time(),
+                process.parent().map(|parent| parent.as_u32()),
+            )
         })
         .collect::<Vec<_>>();
     matches
         .iter()
         .filter(|(_, _, parent)| {
-            parent.map_or(true, |parent| {
-                !matches.iter().any(|(pid, _, _)| *pid == parent)
-            })
+            parent.is_none_or(|parent| !matches.iter().any(|(pid, _, _)| *pid == parent))
         })
         .map(|(pid, started_at, _)| (*pid, *started_at))
         .collect()
@@ -7983,7 +7982,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
         let lease_id = Uuid::new_v4();
-        let messages = vec![
+        let messages = [
             ClientToDaemon::RemotePaneLeaseClaim {
                 req: 1,
                 request: crate::protocol::RemotePaneLeaseClaimRequest {

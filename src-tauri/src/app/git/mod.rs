@@ -431,7 +431,7 @@ fn snapshot_baseline_native(repo: &str) -> Result<String> {
     if !stash.is_empty() {
         return Ok(stash);
     }
-    let head = git_output(repo, &["rev-parse", "HEAD"])?;
+    let head = git_output(repo, ["rev-parse", "HEAD"])?;
     let head = String::from_utf8_lossy(&head).trim().to_string();
     if head.is_empty() {
         Err(anyhow!("git rev-parse HEAD returned an empty ref"))
@@ -449,7 +449,7 @@ fn changed_files_native(repo: &str, base_ref: &str) -> Result<Vec<ChangedFile>> 
     let stats = git_output(repo, ["diff", "-M", "--numstat", "-z", base_ref, "--"])?;
     merge_numstat(&mut files, &stats);
 
-    let untracked = git_output(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = git_output(repo, ["ls-files", "--others", "--exclude-standard", "-z"])?;
     for path in split_nul(&untracked) {
         if path.is_empty() {
             continue;
@@ -470,7 +470,7 @@ fn file_contents_native(repo: &str, base_ref: &str, path: &str) -> Result<FileCo
     validate_base_ref(base_ref)?;
     let new_path = resolve_repo_file_path(repo, path)?;
     let old_bytes =
-        git_output_allow_fail(repo, &["show", &format!("{base_ref}:{path}")])?.unwrap_or_default();
+        git_output_allow_fail(repo, ["show", &format!("{base_ref}:{path}")])?.unwrap_or_default();
     let new_bytes = match std::fs::read(&new_path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),

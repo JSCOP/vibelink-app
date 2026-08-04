@@ -1479,6 +1479,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn identical_conpty_bundle_files_are_left_untouched() {
         let source = tempdir().expect("create source dir");
         let destination = tempdir().expect("create destination dir");

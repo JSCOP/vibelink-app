@@ -1355,7 +1355,7 @@ fn page_originated_navigation_invalidates_exact_persisted_annotations() {
         .as_millis() as u64;
     assert!(screenshot.expires_at_ms > checked_at_ms);
     assert!(screenshot.expires_at_ms.saturating_sub(checked_at_ms) <= 24 * 60 * 60 * 1_000);
-    assert!(screenshot.expires_at_ms <= (1_u64 << 53) - 1);
+    assert!(screenshot.expires_at_ms < (1_u64 << 53));
 
     provider.events.lock().unwrap().push(BrowserLifecycleEvent {
         sequence: 1,

@@ -222,6 +222,12 @@ struct HermesInstance {
     cwd: String,
 }
 
+impl Default for HermesManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HermesManager {
     pub fn new() -> Self {
         Self {
@@ -1512,7 +1518,7 @@ fn acp_model_id_from_configured_model(model: &HermesConfiguredModel) -> String {
     // Reduce to the bare model id, dropping a leading "<provider>/" or
     // "<provider>:" that only repeats the configured provider.
     let bare = raw
-        .split_once(|c| c == '/' || c == ':')
+        .split_once(['/', ':'])
         .filter(|(prefix, rest)| {
             prefix.trim().eq_ignore_ascii_case(provider) && !rest.trim().is_empty()
         })

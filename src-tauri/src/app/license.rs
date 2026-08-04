@@ -70,6 +70,8 @@ pub struct AccountSignInStartDto {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
+// ponytail: preserve the command result type; box variants when this entitlement boundary changes.
+#[allow(clippy::large_enum_variant)]
 pub enum AccountSignInPollResult {
     Pending(String),
     Status(LicenseStatusDto),

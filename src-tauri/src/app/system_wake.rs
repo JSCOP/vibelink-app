@@ -114,13 +114,13 @@ fn run_relay_thread(app: AppHandle, startup_tx: mpsc::SyncSender<Result<isize, S
     drop(state);
 }
 
-unsafe fn create_relay_window(
-    app: AppHandle,
-) -> Result<(
+type RelayWindow = (
     HWND,
     Arc<Mutex<RelayWindowState>>,
     *const Mutex<RelayWindowState>,
-)> {
+);
+
+unsafe fn create_relay_window(app: AppHandle) -> Result<RelayWindow> {
     let instance = GetModuleHandleW(null());
     if instance.is_null() {
         return Err(anyhow!(

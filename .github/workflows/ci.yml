@@ -23,6 +23,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Quality ratchet self-test
+        run: node scripts/check-quality-ratchets.mjs self-test
+      - name: Source line ratchet
+        run: node scripts/check-quality-ratchets.mjs source
       - name: Release contract tests
         run: pnpm test:release-contract
       - name: Frontend tests
@@ -30,7 +34,15 @@ jobs:
       - name: Lint
         run: pnpm lint
       - name: Frontend build
-        run: pnpm build
+        run: pnpm exec tsc -b && pnpm exec vite build --manifest
+      - name: Bundle ratchet
+        run: node scripts/check-quality-ratchets.mjs bundle
+      - name: Rust format
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+      - name: Rust Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test

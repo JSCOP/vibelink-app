@@ -272,10 +272,12 @@ mod tests {
             }
             if Instant::now() >= deadline {
                 let _ = root.kill();
+                let _ = root.wait();
                 panic!("process tree still alive after kill_process_tree: {targets:?}");
             }
             thread::sleep(Duration::from_millis(100));
         }
+        let _ = root.wait();
     }
 
     #[cfg(windows)]

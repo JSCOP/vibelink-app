@@ -1893,9 +1893,9 @@ fn validate_removal_acknowledgements(
         .blockers
         .iter()
         .filter(|blocker| {
-            !blocker.hard
-                && !matches!(blocker.kind, WorktreeBlockerKind::MissingRegistration)
-                && !(blocker.kind == WorktreeBlockerKind::Unpushed && provider_merge_proven)
+            !(blocker.hard
+                || matches!(blocker.kind, WorktreeBlockerKind::MissingRegistration)
+                || (blocker.kind == WorktreeBlockerKind::Unpushed && provider_merge_proven))
         })
         .map(|blocker| blocker.kind)
         .collect::<HashSet<_>>();

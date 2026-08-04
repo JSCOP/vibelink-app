@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use crate::computer_use::{
     ActionMethod, AppRecord, BackendError, BackendErrorKind, ComputerAction, ComputerBackend,
     ElementRecord, IntegrityLevel, Point, ProviderCapability, RawSnapshot, Rect,

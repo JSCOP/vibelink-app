@@ -1643,9 +1643,8 @@ fn pump_v2_terminal_output(
             advance_binary_sequence(sequences, BinaryChannel::TerminalOutput, stream_id, skipped)?;
             continue;
         }
-        if !pump.buffers.contains_key(&stream_id) {
-            pump.buffers
-                .insert(stream_id, Vec::with_capacity(MAX_TERMINAL_COALESCE_BYTES));
+        if let std::collections::hash_map::Entry::Vacant(e) = pump.buffers.entry(stream_id) {
+            e.insert(Vec::with_capacity(MAX_TERMINAL_COALESCE_BYTES));
             pump.order.push_back(stream_id);
         }
         let budget = MAX_OUTPUT_BYTES_PER_LOOP.saturating_sub(consumed_bytes);

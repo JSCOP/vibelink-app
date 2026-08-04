@@ -581,6 +581,10 @@ impl OperationReplayWindow {
     pub fn len(&self) -> usize {
         self.order.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -650,6 +654,10 @@ impl<T: Clone> ReplayBuffer<T> {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 }
 
