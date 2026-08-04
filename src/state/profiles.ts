@@ -278,7 +278,7 @@ export const defaultSettings: Settings = {
   completionSoundId: defaultCompletionSoundId,
   completionSoundVolume: 0.55,
   completionNotificationEnabled: true,
-  completionNotificationWhileFocused: false,
+  completionNotificationWhileFocused: true,
   cursorStyle: 'bar',
   cursorWidth: 1,
   sessionRestore: 'resume',

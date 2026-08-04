@@ -2,8 +2,8 @@ import { isPermissionGranted, requestPermission, sendNotification } from '@tauri
 
 export type CompletionNotificationSettings = {
   completionNotificationEnabled: boolean
-  /** When false (the default), a finished pane the user is already looking at
-   *  raises no toast — the on-screen highlight is the whole message there. */
+  /** When false, a finished pane the user is already looking at raises no
+   *  toast — the on-screen highlight is the whole message there. */
   completionNotificationWhileFocused: boolean
 }
 

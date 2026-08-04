@@ -103,6 +103,8 @@ describe('SettingsDialog preferences', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Notifications' }))
     expect(screen.getByRole('switch', { name: 'Play completion sound' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Show desktop notification' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Notify while the pane is focused' })).toBeChecked()
     const sound = screen.getByRole('combobox', { name: 'Completion sound' })
     expect(screen.getByRole('option', { name: 'Clear chime' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Soft bell' })).toBeInTheDocument()

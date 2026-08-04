@@ -361,15 +361,21 @@ describe('terminal profiles', () => {
       completionSoundEnabled: true,
       completionSoundId: 'builtin:clear-chime',
       completionSoundVolume: 0.55,
+      completionNotificationEnabled: true,
+      completionNotificationWhileFocused: true,
     })
     expect(normalizeSettings({
       completionSoundEnabled: false,
       completionSoundId: 'custom:12345678-abcd',
       completionSoundVolume: 0.25,
+      completionNotificationEnabled: false,
+      completionNotificationWhileFocused: false,
     })).toMatchObject({
       completionSoundEnabled: false,
       completionSoundId: 'custom:12345678-abcd',
       completionSoundVolume: 0.25,
+      completionNotificationEnabled: false,
+      completionNotificationWhileFocused: false,
     })
     expect(normalizeSettings({ completionSoundId: 'missing', completionSoundVolume: 4 })).toMatchObject({
       completionSoundId: defaultSettings.completionSoundId,

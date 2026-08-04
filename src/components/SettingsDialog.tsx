@@ -941,7 +941,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   <SettingsRow
                     icon={Info}
                     label="Notify even for the pane you are watching"
-                    hint="Off by default: a finished pane already on screen shows its highlight, so a toast would only repeat it."
+                    hint="On by default so every finished pane raises a toast, including the one already on screen."
                     control={<SettingsSwitch label="Notify while the pane is focused" checked={draft.completionNotificationWhileFocused} disabled={!draft.completionNotificationEnabled} onChange={(checked) => patchDraft({ completionNotificationWhileFocused: checked })} />}
                   />
                 </SettingsCard>
