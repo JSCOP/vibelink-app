@@ -33,6 +33,7 @@ const paneCompletionHighlightsStorageKey = 'vibelink:paneCompletionHighlights'
 const completionHistoryStorageKey = 'vibelink:completionHistory'
 const paneReviewMarkersStorageKey = 'vibelink:paneReviewMarkers'
 const workspaceGroupRecoveryStorageKey = 'vibelink:workspaceGroupRecovery:v1'
+const MAX_HERMES_TURNS = 400
 let workspaceSessionEpoch = 0
 let workspaceSessionReadyEpoch = 0
 let workspaceSessionTargetId: string | null = null
@@ -159,6 +160,7 @@ type WorkspaceState = {
    *  the turn completes; see `agentPaneStatus.resolveAgentPaneStatus`. */
   paneAgentActivity: Record<string, AgentPaneActivity>
   capturesByPane: Record<string, string[]>
+  captureSessionByPane: Record<string, string>
   recentCaptures: string[]
   setActivePaneId: (paneId?: string) => void
   notePaneAgentTurnStart: (paneId: string) => void
@@ -301,6 +303,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   paneReviewMarkers: loadPaneReviewMarkers(),
   paneAgentActivity: {},
   capturesByPane: {},
+  captureSessionByPane: {},
   recentCaptures: [],
 
   bootstrap: async () => {
@@ -802,7 +805,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       throw error
     }
     set((state) => {
-      if (state.activeSessionId !== sessionId) return {}
+      const capturesByPane = withoutPaneKey(state.capturesByPane, paneId)
+      const captureSessionByPane = withoutPaneKey(state.captureSessionByPane, paneId)
+      if (state.activeSessionId !== sessionId) return { capturesByPane, captureSessionByPane }
       const panes = { ...state.panes }
       delete panes[paneId]
       return {
@@ -812,21 +817,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
         paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
         paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
+        capturesByPane,
+        captureSessionByPane,
       }
     })
     await get().refreshSessions()
-  },
-
-  clearSession: async (sessionId: string) => {
-    await invoke('clear_session', { sessionId })
-    set((state) => ({
-      panes: state.activeSessionId === sessionId ? {} : state.panes,
-      paneLifecycle: state.activeSessionId === sessionId ? {} : state.paneLifecycle,
-      activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
-      paneAgentActivity: state.activeSessionId === sessionId ? {} : state.paneAgentActivity,
-      paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
-      paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
-    }))
   },
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
     const normalized = normalizePaneTitle(title)
@@ -931,6 +926,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return {
       recentCaptures,
       capturesByPane: { ...state.capturesByPane, [paneId]: paneCaptures },
+      captureSessionByPane: state.activeSessionId
+        ? { ...state.captureSessionByPane, [paneId]: state.activeSessionId }
+        : state.captureSessionByPane,
     }
   }),
   resolveCaptureMarker: (paneId, n) => {
@@ -1276,7 +1274,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({
       hermesTranscript: {
         ...state.hermesTranscript,
-        [sessionId]: [...(state.hermesTranscript[sessionId] ?? []), { role: 'user', text, thoughts: '', toolCalls: [] }],
+        [sessionId]: capHermesTurns([...(state.hermesTranscript[sessionId] ?? []), { role: 'user', text, thoughts: '', toolCalls: [] }]),
       },
     }))
   },
@@ -1359,7 +1357,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({ hermesSessions: { ...state.hermesSessions, [sessionId]: sessions } }))
   },
   setHermesTranscript: (sessionId: string, turns: HermesTurn[]) => {
-    set((state) => ({ hermesTranscript: { ...state.hermesTranscript, [sessionId]: turns } }))
+    set((state) => ({ hermesTranscript: { ...state.hermesTranscript, [sessionId]: capHermesTurns(turns) } }))
   },
   enqueueHermesPrompt: (sessionId, text) => {
     const prompt: HermesPendingPrompt = { id: crypto.randomUUID(), text, status: 'queued' }
@@ -1565,6 +1563,8 @@ function reconcilePaneReviewMarkers(
 
 function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions: SessionMeta[]): Partial<WorkspaceState> {
   const deletedPaneIds = state.activeSessionId === sessionId ? Object.keys(state.panes) : []
+  const capturedPaneIds = Object.keys(state.captureSessionByPane).filter((paneId) => state.captureSessionByPane[paneId] === sessionId)
+  const deletedCapturePaneIds = [...deletedPaneIds, ...capturedPaneIds]
   const taskIds = new Set(state.kanban.taskOrder[sessionId] ?? [])
   const tasks = { ...state.kanban.tasks }
   for (const taskId of taskIds) delete tasks[taskId]
@@ -1619,7 +1619,8 @@ function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions:
     hermesCurrentSession,
     hermesSessions,
     manualPaneTitles: withoutPaneKeys(state.manualPaneTitles, deletedPaneIds),
-    capturesByPane: withoutPaneKeys(state.capturesByPane, deletedPaneIds),
+    capturesByPane: withoutPaneKeys(state.capturesByPane, deletedCapturePaneIds),
+    captureSessionByPane: withoutPaneKeys(state.captureSessionByPane, deletedCapturePaneIds),
     paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
     paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
     settings: {
@@ -2280,12 +2281,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => globalThis.setTimeout(resolve, ms))
 }
 
+function capHermesTurns(turns: HermesTurn[]): HermesTurn[] {
+  return turns.length > MAX_HERMES_TURNS ? turns.slice(-MAX_HERMES_TURNS) : turns
+}
+
 function updateLastAssistantTurn(turns: HermesTurn[], update: (turn: HermesTurn) => HermesTurn): HermesTurn[] {
   const last = turns[turns.length - 1]
   if (!last || last.role !== 'assistant') {
-    return [...turns, update(createAssistantTurn())]
+    return capHermesTurns([...turns, update(createAssistantTurn())])
   }
-  return [...turns.slice(0, -1), update(last)]
+  return capHermesTurns([...turns.slice(0, -1), update(last)])
 }
 
 function createAssistantTurn(): HermesTurn {

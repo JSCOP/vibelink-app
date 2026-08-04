@@ -36,11 +36,16 @@ export function ResourceMonitorDialog({ onClose, onStopWorkspaceTerminals, onAft
   }, [])
 
   useEffect(() => {
-    const initialId = window.setTimeout(() => { void loadSnapshot() }, 0)
-    const intervalId = window.setInterval(() => { void loadSnapshot() }, 2000)
+    const poll = () => {
+      if (document.visibilityState !== 'visible') return
+      void loadSnapshot()
+    }
+    void poll()
+    const intervalId = window.setInterval(poll, 2000)
+    window.addEventListener('focus', poll)
     return () => {
-      window.clearTimeout(initialId)
       window.clearInterval(intervalId)
+      window.removeEventListener('focus', poll)
     }
   }, [loadSnapshot])
 

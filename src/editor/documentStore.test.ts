@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 
-import { EditorDocumentStore, type NativeTextDocument, type TextDocumentRevision } from './documentStore'
+import { disposeEditorDocumentStore, EditorDocumentStore, getEditorDocumentStore, type EditorTextModel, type NativeTextDocument, type TextDocumentRevision } from './documentStore'
 
 const revision = (sha256: string): TextDocumentRevision => ({ sha256, size: 4, modifiedAtNs: sha256 })
 const opened = (content: string, sha256 = content): NativeTextDocument => ({
@@ -13,6 +13,24 @@ const opened = (content: string, sha256 = content): NativeTextDocument => ({
   encoding: 'utf8',
   lineEnding: 'lf',
 })
+
+type ModelFixture = { model: EditorTextModel; dispose: Mock; disposeSubscription: Mock }
+
+function createModel(): ModelFixture {
+  let value = ''
+  const dispose = vi.fn()
+  const disposeSubscription = vi.fn()
+  return {
+    dispose,
+    disposeSubscription,
+    model: {
+      getValue: () => value,
+      setValue: (next) => { value = next },
+      onDidChangeContent: () => ({ dispose: disposeSubscription }),
+      dispose,
+    },
+  }
+}
 
 beforeEach(() => {
   // mockReset returns the mock; returning it makes Vitest run it as a no-arg cleanup.
@@ -98,5 +116,83 @@ describe('EditorDocumentStore', () => {
       encoding: 'utf8',
       lineEnding: 'lf',
     })
+  })
+
+  it('evicts the least-recently-used clean closed document above the retained limit', async () => {
+    invokeMock.mockImplementation(async (_command: string, args: { relPath: string }) => opened(args.relPath))
+    const store = new EditorDocumentStore('lru-session', 'C:/repo')
+    const models: ModelFixture[] = []
+
+    for (let index = 0; index < 24; index += 1) {
+      const path = `file-${index}.ts`
+      store.retain(path)
+      await store.load(path)
+      const model = createModel()
+      models.push(model)
+      store.attachModel(path, model.model)
+      store.release(path)
+    }
+    expect(store.getDocument('file-0.ts')).not.toBeNull()
+
+    store.retain('file-24.ts')
+    await store.load('file-24.ts')
+    store.attachModel('file-24.ts', createModel().model)
+    store.release('file-24.ts')
+
+    expect(store.listDocuments()).toHaveLength(24)
+    expect(store.getDocument('file-0.ts')).not.toBeNull()
+    expect(store.getDocument('file-1.ts')).toBeNull()
+    expect(models[0].dispose).not.toHaveBeenCalled()
+    expect(models[1].dispose).toHaveBeenCalledOnce()
+    expect(models[1].disposeSubscription).toHaveBeenCalledOnce()
+  })
+
+  it('never evicts dirty documents or documents with a live view', async () => {
+    invokeMock.mockImplementation(async (_command: string, args: { relPath: string }) => opened(args.relPath))
+    const store = new EditorDocumentStore('protected-session', 'C:/repo')
+    const models: ModelFixture[] = []
+
+    for (let index = 0; index < 24; index += 1) {
+      const path = `file-${index}.ts`
+      store.retain(path)
+      await store.load(path)
+      const model = createModel()
+      models.push(model)
+      store.attachModel(path, model.model)
+      store.release(path)
+    }
+    store.updateCurrent('file-0.ts', 'unsaved')
+    store.retain('file-1.ts')
+
+    for (let index = 24; index < 26; index += 1) {
+      const path = `file-${index}.ts`
+      store.retain(path)
+      await store.load(path)
+      store.attachModel(path, createModel().model)
+      store.release(path)
+    }
+
+    expect(store.listDocuments()).toHaveLength(24)
+    expect(store.getDocument('file-0.ts')).toMatchObject({ dirty: true, viewCount: 0 })
+    expect(store.getDocument('file-1.ts')).toMatchObject({ dirty: false, viewCount: 1 })
+    expect(models[0].dispose).not.toHaveBeenCalled()
+    expect(models[1].dispose).not.toHaveBeenCalled()
+  })
+
+  it('disposes a stale workspace store when the same session moves folders', async () => {
+    invokeMock.mockResolvedValue(opened('base'))
+    const oldStore = getEditorDocumentStore('moved-session', 'C:/old-repo')
+    const model = createModel()
+    oldStore.retain('file.ts')
+    await oldStore.load('file.ts')
+    oldStore.attachModel('file.ts', model.model)
+
+    const currentStore = getEditorDocumentStore('moved-session', 'D:/new-repo')
+
+    expect(currentStore).not.toBe(oldStore)
+    expect(oldStore.listDocuments()).toEqual([])
+    expect(model.dispose).toHaveBeenCalledOnce()
+    expect(model.disposeSubscription).toHaveBeenCalledOnce()
+    disposeEditorDocumentStore('moved-session', 'D:/new-repo')
   })
 })

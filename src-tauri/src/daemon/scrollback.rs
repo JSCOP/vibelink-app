@@ -243,6 +243,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn large_ring_keeps_small_initial_reserve() {
+        let ring = ScrollbackRing::new(usize::MAX);
+
+        assert_eq!(ring.buf.capacity(), 8192);
+    }
+
+    #[test]
     fn ring_drops_oldest_bytes_on_overflow() {
         let mut ring = ScrollbackRing::new(5);
 

@@ -69,6 +69,7 @@ export type Settings = {
   fontFamily: string
   fontSize: number
   scrollback: number
+  inactiveTerminalUpdatesPerSecond: number
   terminalFontWeight: number
   uiScale: number
   terminalThemeId: TerminalThemeId
@@ -250,7 +251,8 @@ const defaultProfile = defaultProfiles[0]
 export const defaultSettings: Settings = {
   fontFamily: preferredFontFamily,
   fontSize: 11,
-  scrollback: 5000,
+  scrollback: 50000,
+  inactiveTerminalUpdatesPerSecond: 3,
   terminalFontWeight: 400,
   uiScale: 1,
   terminalThemeId: defaultTerminalThemeId,
@@ -324,7 +326,8 @@ export function normalizeSettings(value: unknown): Settings {
   return {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
     fontSize: readNumber(record?.fontSize, defaultSettings.fontSize),
-    scrollback: readNumber(record?.scrollback, defaultSettings.scrollback),
+    scrollback: readNumberInRange(record?.scrollback, defaultSettings.scrollback, 100, 200000),
+    inactiveTerminalUpdatesPerSecond: readNumberInRange(record?.inactiveTerminalUpdatesPerSecond, defaultSettings.inactiveTerminalUpdatesPerSecond, 1, 60),
     terminalFontWeight: readNumberInRange(record?.terminalFontWeight, defaultSettings.terminalFontWeight, 100, 900),
     uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
     terminalThemeId: readTerminalThemeId(record?.terminalThemeId),

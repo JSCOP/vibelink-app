@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const { closePane, confirmDialog, invoke } = vi.hoisted(() => ({ closePane: vi.fn(), confirmDialog: vi.fn(), invoke: vi.fn() }))
@@ -25,8 +25,13 @@ const snapshot = {
   totalMemBytes: 552.9 * 1024 * 1024,
 }
 
+function setDocumentVisibility(visibilityState: DocumentVisibilityState): void {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: visibilityState })
+}
+
 describe('ResourceMonitorDialog', () => {
   beforeEach(() => {
+    setDocumentVisibility('visible')
     invoke.mockReset()
     invoke.mockImplementation(async (command: string) => command === 'resource_snapshot' ? snapshot : undefined)
     confirmDialog.mockReset()
@@ -47,7 +52,11 @@ describe('ResourceMonitorDialog', () => {
     })
   })
 
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    setDocumentVisibility('visible')
+  })
 
   test('shows CPU, working set, terminals, and each process grouped by workspace', async () => {
     render(<ResourceMonitorDialog onClose={() => undefined} onStopWorkspaceTerminals={() => undefined} onAfterRestart={() => undefined} />)
@@ -68,5 +77,28 @@ describe('ResourceMonitorDialog', () => {
 
     await waitFor(() => expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({ title: 'Stop Terminal 2?', danger: true })))
     await waitFor(() => expect(closePane).toHaveBeenCalledWith('pane-1', 'session-1'))
+  })
+
+  test('pauses automatic polling while hidden, then refreshes on focus when visible', async () => {
+    vi.useFakeTimers()
+    setDocumentVisibility('hidden')
+    render(<ResourceMonitorDialog onClose={() => undefined} onStopWorkspaceTerminals={() => undefined} onAfterRestart={() => undefined} />)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
+    expect(invoke.mock.calls.filter(([command]) => command === 'resource_snapshot')).toHaveLength(0)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh resource snapshot' }))
+      await Promise.resolve()
+    })
+    expect(invoke.mock.calls.filter(([command]) => command === 'resource_snapshot')).toHaveLength(1)
+
+    invoke.mockClear()
+    setDocumentVisibility('visible')
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+      await Promise.resolve()
+    })
+    expect(invoke.mock.calls.filter(([command]) => command === 'resource_snapshot')).toHaveLength(1)
   })
 })

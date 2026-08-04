@@ -14,46 +14,31 @@ use crate::dedicated_cli::browser_cdp::{
 use crate::runtime_ports::browser_profile_port_candidates;
 
 #[cfg(windows)]
-fn append_resolved_renderer_argument(arguments: &str) -> String {
-    append_software_renderer_argument(
-        arguments,
-        std::env::var("VIBELINK_WEBVIEW_RENDERER_RESOLVED").as_deref() == Ok("software"),
-    )
-}
-
-#[cfg(windows)]
-fn append_software_renderer_argument(arguments: &str, software: bool) -> String {
-    let trimmed = arguments.trim();
-    if !software
-        || trimmed
-            .split_whitespace()
-            .any(|item| item == "--disable-gpu")
-    {
-        return trimmed.to_string();
-    }
-    if trimmed.is_empty() {
-        "--disable-gpu".to_string()
-    } else {
-        format!("{trimmed} --disable-gpu")
-    }
+fn strip_software_renderer_argument(arguments: &str) -> String {
+    arguments
+        .split_whitespace()
+        .filter(|argument| *argument != "--disable-gpu")
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(all(test, windows))]
 mod renderer_argument_tests {
-    use super::append_software_renderer_argument;
+    use super::strip_software_renderer_argument;
 
     #[test]
-    fn child_webview_inherits_software_renderer_without_losing_existing_flags() {
+    fn child_webview_never_inherits_software_renderer() {
+        assert_eq!(strip_software_renderer_argument(""), "");
         assert_eq!(
-            append_software_renderer_argument("--remote-debugging-port=9333", true),
-            "--remote-debugging-port=9333 --disable-gpu"
+            strip_software_renderer_argument("--remote-debugging-port=9333"),
+            "--remote-debugging-port=9333"
         );
         assert_eq!(
-            append_software_renderer_argument("--remote-debugging-port=9333 --disable-gpu", true,),
-            "--remote-debugging-port=9333 --disable-gpu"
+            strip_software_renderer_argument("--disable-gpu --remote-debugging-port=9333"),
+            "--remote-debugging-port=9333"
         );
         assert_eq!(
-            append_software_renderer_argument("--remote-debugging-port=9333", false),
+            strip_software_renderer_argument("--remote-debugging-port=9333 --disable-gpu"),
             "--remote-debugging-port=9333"
         );
     }
@@ -608,11 +593,9 @@ impl BrowserProvider for NativeBrowserProvider {
                 )
             })?;
         let cdp_port = self.profile_port(&request.profile_id)?;
-        let browser_arguments = append_resolved_renderer_argument(
-            &format!(
-                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --remote-debugging-port={cdp_port}"
-            ),
-        );
+        let browser_arguments = strip_software_renderer_argument(&format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --remote-debugging-port={cdp_port}"
+        ));
         let page_name = serde_json::to_string(&format!("vibelink-page:{}", request.page_id))
             .map_err(registry_error)?;
         let design_app = self.app.clone();

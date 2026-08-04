@@ -13,7 +13,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const DEFAULT_SCROLLBACK_CAP: usize = 1024 * 1024;
+pub const DEFAULT_SCROLLBACK_CAP: usize = 8 * 1024 * 1024;
 const TERMINAL_CAPABILITY_ENV: [(&str, &str); 5] = [
     ("TERM", "xterm-256color"),
     ("COLORTERM", "truecolor"),

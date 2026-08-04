@@ -71,6 +71,7 @@ type DocumentRecord = EditorDocument & {
 }
 
 const workspaceStores = new Map<string, EditorDocumentStore>()
+const MAX_RETAINED_DOCUMENTS = 24
 
 export class EditorDocumentStore {
   readonly sessionId: string
@@ -79,6 +80,8 @@ export class EditorDocumentStore {
   private documents = new Map<string, DocumentRecord>()
   private listeners = new Set<() => void>()
   private loads = new Map<string, Promise<EditorDocument>>()
+  private lastAccessed = new Map<string, number>()
+  private lastAccessTime = 0
   private refreshHooks: EditorDocumentRefreshHooks = {}
 
   constructor(sessionId: string, workspaceFolder: string) {
@@ -97,7 +100,9 @@ export class EditorDocumentStore {
 
   getDocument(relPath: string): EditorDocument | null {
     const normalized = requireNormalizedPath(relPath)
-    return this.documents.get(normalized) ?? null
+    const document = this.documents.get(normalized) ?? null
+    if (document) this.touch(normalized)
+    return document
   }
 
   listDocuments(): EditorDocument[] {
@@ -114,6 +119,8 @@ export class EditorDocumentStore {
     const current = this.documents.get(normalized) ?? emptyDocument(normalized)
     const next = { ...current, viewCount: current.viewCount + 1 }
     this.documents.set(normalized, next)
+    this.touch(normalized)
+    this.evictRetainedDocuments()
     this.emit()
     return next
   }
@@ -123,17 +130,25 @@ export class EditorDocumentStore {
     const current = this.documents.get(normalized)
     if (!current) return
     this.documents.set(normalized, { ...current, viewCount: Math.max(0, current.viewCount - 1) })
-    // Documents and Monaco models intentionally outlive view unmounts. In particular, dirty
-    // documents must survive layout replacement and a later editor reopen.
+    this.touch(normalized)
+    // Dirty documents and live views intentionally survive panel unmounts. Clean,
+    // closed documents remain cached only while they fit within the LRU bound.
+    this.evictRetainedDocuments()
     this.emit()
   }
 
   async load(relPath: string): Promise<EditorDocument> {
     const normalized = requireNormalizedPath(relPath)
     const existing = this.documents.get(normalized)
-    if (existing && !existing.loading && existing.revision) return existing
+    if (existing && !existing.loading && existing.revision) {
+      this.touch(normalized)
+      return existing
+    }
     const pending = this.loads.get(normalized)
-    if (pending) return pending
+    if (pending) {
+      this.touch(normalized)
+      return pending
+    }
 
     this.update(normalized, (document) => ({ ...document, loading: true, errors: [] }))
     const request = invoke<NativeTextDocument>('fs_open_text_document', {
@@ -154,12 +169,15 @@ export class EditorDocumentStore {
         errors: [],
       })
       this.documents.set(normalized, next)
+      this.touch(normalized)
       this.syncModelValue(next)
+      this.evictRetainedDocuments()
       this.emit()
       return next
     }).catch((reason) => {
       const message = errorMessage(reason)
       const next = this.update(normalized, (document) => ({ ...document, loading: false, errors: [message] }))
+      this.evictRetainedDocuments()
       throw new Error(next.errors[0])
     }).finally(() => this.loads.delete(normalized))
     this.loads.set(normalized, request)
@@ -174,11 +192,13 @@ export class EditorDocumentStore {
       dirty: current !== document.original,
       errors: [],
     }))
+    this.evictRetainedDocuments()
   }
 
   attachModel(relPath: string, model: EditorTextModel): EditorTextModel {
     const normalized = requireNormalizedPath(relPath)
     const current = this.documents.get(normalized) ?? emptyDocument(normalized)
+    this.touch(normalized)
     if (current.model && current.model !== model) {
       model.dispose()
       return current.model
@@ -192,6 +212,7 @@ export class EditorDocumentStore {
       this.updateCurrent(normalized, model.getValue())
     })
     this.documents.set(normalized, next)
+    this.evictRetainedDocuments()
     this.emit()
     return model
   }
@@ -245,6 +266,7 @@ export class EditorDocumentStore {
       })
       this.syncModelValue(next)
       await this.runAfterSave(normalized)
+      this.evictRetainedDocuments()
       return result
     } catch (reason) {
       const message = errorMessage(reason)
@@ -305,6 +327,7 @@ export class EditorDocumentStore {
       errors: [],
     }))
     this.syncModelValue(next)
+    this.evictRetainedDocuments()
   }
 
   async saveAs(relPath: string, targetRelPath: string): Promise<NativeSaveTextDocumentResult> {
@@ -344,9 +367,11 @@ export class EditorDocumentStore {
         errors: [],
       })
       this.documents.set(target, saved)
+      this.touch(target)
       this.syncModelValue(saved)
-      this.emit()
       await this.runAfterSave(target)
+      this.evictRetainedDocuments()
+      this.emit()
       return result
     } catch (reason) {
       const message = errorMessage(reason)
@@ -401,6 +426,7 @@ export class EditorDocumentStore {
       errors: [],
     }))
     this.syncModelValue(next)
+    this.evictRetainedDocuments()
   }
 
   async requestClose(relPath: string, decide: EditorCloseDecider = browserEditorCloseDecision): Promise<EditorCloseResult> {
@@ -421,6 +447,7 @@ export class EditorDocumentStore {
       this.update(normalized, (latest) => ({ ...latest, current: latest.original, dirty: false, conflict: null, errors: [] }))
       const latest = this.documents.get(normalized)
       if (latest) this.syncModelValue(latest)
+      this.evictRetainedDocuments()
       return 'closed'
     }
     try {
@@ -460,12 +487,17 @@ export class EditorDocumentStore {
     for (const target of targets) {
       if (this.documents.has(target) && !moving.some(([path]) => path === target)) throw new Error(`An editor document already exists for ${target}.`)
     }
-    for (const [path] of moving) this.documents.delete(path)
+    for (const [path] of moving) {
+      this.documents.delete(path)
+      this.lastAccessed.delete(path)
+    }
     moving.forEach(([, document], index) => {
       document.modelSubscription?.dispose()
       document.model?.dispose()
       this.documents.set(targets[index], this.record({ ...document, relPath: targets[index], viewCount: 0, model: null }))
+      this.touch(targets[index])
     })
+    this.evictRetainedDocuments()
     this.emit()
   }
 
@@ -476,6 +508,7 @@ export class EditorDocumentStore {
       document.modelSubscription?.dispose()
       document.model?.dispose()
       this.documents.delete(path)
+      this.lastAccessed.delete(path)
     }
     this.emit()
   }
@@ -486,6 +519,7 @@ export class EditorDocumentStore {
       document.model?.dispose()
     }
     this.documents.clear()
+    this.lastAccessed.clear()
     this.loads.clear()
     this.listeners.clear()
   }
@@ -502,6 +536,7 @@ export class EditorDocumentStore {
     const current = this.documents.get(relPath) ?? emptyDocument(relPath)
     const next = this.record(updater(current))
     this.documents.set(relPath, next)
+    this.touch(relPath)
     this.emit()
     return next
   }
@@ -524,6 +559,25 @@ export class EditorDocumentStore {
     }
   }
 
+  private touch(relPath: string): void {
+    this.lastAccessTime = Math.max(Date.now(), this.lastAccessTime + 1)
+    this.lastAccessed.set(relPath, this.lastAccessTime)
+  }
+
+  private evictRetainedDocuments(): void {
+    if (this.documents.size <= MAX_RETAINED_DOCUMENTS) return
+    const candidates = [...this.documents.entries()]
+      .filter(([, document]) => !document.dirty && document.viewCount === 0 && !document.loading && !document.saving)
+      .sort(([left], [right]) => (this.lastAccessed.get(left) ?? 0) - (this.lastAccessed.get(right) ?? 0))
+    for (const [relPath, document] of candidates) {
+      if (this.documents.size <= MAX_RETAINED_DOCUMENTS) break
+      document.modelSubscription?.dispose()
+      document.model?.dispose()
+      this.documents.delete(relPath)
+      this.lastAccessed.delete(relPath)
+    }
+  }
+
   private emit(): void {
     for (const listener of this.listeners) listener()
   }
@@ -531,6 +585,13 @@ export class EditorDocumentStore {
 
 export function getEditorDocumentStore(sessionId: string, workspaceFolder: string): EditorDocumentStore {
   const key = workspaceStoreKey(sessionId, workspaceFolder)
+  // ponytail: a moved session cleans on next editor access; if never reopened,
+  // its one stale store remains only until session-wide release.
+  for (const [staleKey, staleStore] of workspaceStores) {
+    if (staleStore.sessionId !== sessionId || staleKey === key) continue
+    staleStore.dispose()
+    workspaceStores.delete(staleKey)
+  }
   let store = workspaceStores.get(key)
   if (!store) {
     store = new EditorDocumentStore(sessionId, workspaceFolder)
@@ -539,10 +600,12 @@ export function getEditorDocumentStore(sessionId: string, workspaceFolder: strin
   return store
 }
 
-export function disposeEditorDocumentStore(sessionId: string, workspaceFolder: string): void {
-  const key = workspaceStoreKey(sessionId, workspaceFolder)
-  workspaceStores.get(key)?.dispose()
-  workspaceStores.delete(key)
+export function disposeEditorDocumentStore(sessionId: string, _workspaceFolder: string): void {
+  for (const [key, store] of workspaceStores) {
+    if (store.sessionId !== sessionId) continue
+    store.dispose()
+    workspaceStores.delete(key)
+  }
 }
 
 export async function requestEditorDocumentClose(

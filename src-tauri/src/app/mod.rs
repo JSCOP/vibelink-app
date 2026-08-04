@@ -516,6 +516,9 @@ fn fixed_remote_debugging_arguments(existing: &str, port: u16) -> String {
             skip_port_value = true;
             continue;
         }
+        if argument == "--disable-gpu" {
+            continue;
+        }
         if argument.starts_with("--remote-debugging-port=") {
             continue;
         }
@@ -543,7 +546,7 @@ mod tests {
                 "--disable-gpu --remote-debugging-port 9333",
                 runtime_ports::DEV_MAIN_WEBVIEW_CDP_PORT,
             ),
-            "--disable-gpu --remote-debugging-port=19333"
+            "--remote-debugging-port=19333"
         );
     }
 

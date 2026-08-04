@@ -74,6 +74,10 @@ impl TerminalHistoryWriter {
     }
 }
 
+fn restore_read_window(file_len: u64) -> u64 {
+    file_len.min(u64::try_from(DEFAULT_SCROLLBACK_CAP).unwrap_or(u64::MAX))
+}
+
 pub fn load_pane_history(sessions_path: &Path, session_id: Uuid, pane_id: Uuid) -> Result<Vec<u8>> {
     let path = pane_history_path(sessions_path, session_id, pane_id)?;
     let mut file = match File::open(&path) {
@@ -84,13 +88,12 @@ pub fn load_pane_history(sessions_path: &Path, session_id: Uuid, pane_id: Uuid) 
         }
     };
     let file_len = file.metadata()?.len();
-    let retained = u64::try_from(DEFAULT_SCROLLBACK_CAP).unwrap_or(u64::MAX);
+    let retained = restore_read_window(file_len);
     if file_len > retained {
         file.seek(SeekFrom::Start(file_len - retained))?;
     }
-    let mut bytes = Vec::with_capacity(
-        usize::try_from(file_len.min(retained)).unwrap_or(DEFAULT_SCROLLBACK_CAP),
-    );
+    let mut bytes =
+        Vec::with_capacity(usize::try_from(retained).unwrap_or(DEFAULT_SCROLLBACK_CAP));
     file.read_to_end(&mut bytes)?;
     let mut ring = ScrollbackRing::new(DEFAULT_SCROLLBACK_CAP);
     ring.push(&bytes);
@@ -246,6 +249,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn history_caps_match_daemon_contract() {
+        assert_eq!(DEFAULT_SCROLLBACK_CAP, 8 * 1024 * 1024);
+        assert_eq!(MAX_HISTORY_FILE_BYTES, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn restore_read_window_matches_scrollback_ring_cap() {
+        let oversized = u64::try_from(DEFAULT_SCROLLBACK_CAP + 128).expect("scrollback cap fits");
+
+        assert_eq!(
+            restore_read_window(oversized),
+            u64::try_from(DEFAULT_SCROLLBACK_CAP).expect("scrollback cap fits")
+        );
+    }
+
+    #[test]
     fn history_appends_compacts_and_removes() {
         let root = std::env::temp_dir().join(format!("vibelink-history-{}", Uuid::new_v4()));
         let sessions_path = root.join("sessions.json");
@@ -276,19 +295,20 @@ mod tests {
     }
 
     #[test]
-    fn history_load_is_bounded_to_scrollback_capacity() {
+    fn history_restore_reads_exactly_one_scrollback_ring() {
         let root = std::env::temp_dir().join(format!("vibelink-history-cap-{}", Uuid::new_v4()));
         let sessions_path = root.join("sessions.json");
         let session_id = Uuid::new_v4();
         let pane_id = Uuid::new_v4();
-        let bytes = vec![b'x'; DEFAULT_SCROLLBACK_CAP + 128];
+        let mut bytes = vec![b'o'; 128];
+        bytes.resize(DEFAULT_SCROLLBACK_CAP + 128, b'n');
         let path = pane_history_path(&sessions_path, session_id, pane_id).expect("history path");
         write_bytes_atomic(&path, &bytes).expect("seed oversized history");
 
         let loaded =
             load_pane_history(&sessions_path, session_id, pane_id).expect("load bounded history");
         assert_eq!(loaded.len(), DEFAULT_SCROLLBACK_CAP);
-        assert!(loaded.iter().all(|byte| *byte == b'x'));
+        assert!(loaded.iter().all(|byte| *byte == b'n'));
         let _ = fs::remove_dir_all(root);
     }
 

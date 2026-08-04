@@ -21,7 +21,7 @@ export const defaultTerminalSettings: TerminalVisualSettings = {
   fontFamily: preferredFontFamily,
   fontSize: 11,
   terminalFontWeight: 400,
-  scrollback: 5000,
+  scrollback: 50000,
   terminalThemeId: defaultTerminalThemeId,
   cursorStyle: 'bar',
   cursorWidth: 1,

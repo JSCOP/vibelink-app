@@ -153,6 +153,7 @@ describe('workspace store profiles', () => {
       completionHistory: [],
       paneReviewMarkers: {},
       capturesByPane: {},
+      captureSessionByPane: {},
       recentCaptures: [],
       hermesSessions: {},
       settings: normalizeSettings({
@@ -990,6 +991,32 @@ describe('workspace store profiles', () => {
     ])
   })
 
+  test('keeps only the newest 400 Hermes turns while streaming the last assistant turn', () => {
+    const store = useWorkspaceStore.getState()
+    store.setHermesTranscript('session-1', Array.from({ length: 400 }, (_, index) => ({
+      role: 'user' as const,
+      text: `turn-${index}`,
+      thoughts: '',
+      toolCalls: [],
+    })))
+
+    store.addHermesUserMessage('session-1', 'latest-user')
+    expect(useWorkspaceStore.getState().hermesTranscript['session-1']).toHaveLength(400)
+    expect(useWorkspaceStore.getState().hermesTranscript['session-1'][0].text).toBe('turn-1')
+
+    store.appendHermesText('session-1', 'message', 'stream-1')
+    const streaming = useWorkspaceStore.getState().hermesTranscript['session-1']
+    expect(streaming).toHaveLength(400)
+    expect(streaming.at(-1)).toMatchObject({ role: 'assistant', text: 'stream-1' })
+    const oldestWhileStreaming = streaming[0]
+
+    store.appendHermesText('session-1', 'message', 'stream-2')
+    const updated = useWorkspaceStore.getState().hermesTranscript['session-1']
+    expect(updated).toHaveLength(400)
+    expect(updated[0]).toBe(oldestWhileStreaming)
+    expect(updated.at(-1)).toMatchObject({ role: 'assistant', text: 'stream-1stream-2' })
+  })
+
   test('hook completion survives active-state changes until explicitly acknowledged', () => {
     vi.stubGlobal('document', { hasFocus: () => true })
     useWorkspaceStore.setState({
@@ -1253,6 +1280,40 @@ describe('workspace store profiles', () => {
     expect(deleteCall).toBeGreaterThan(cleanupCall)
     expect(useWorkspaceStore.getState().capturesByPane).toEqual({ [survivorPane.id]: ['keep.png'] })
     expect(useWorkspaceStore.getState().settings.paneRoles).toEqual({ [survivorPane.id]: 'Keep' })
+  })
+
+  test('deleteSession removes captures owned by an inactive session', async () => {
+    const survivorPane: PaneMeta = {
+      ...spawnedPane,
+      id: 'pane-survivor',
+      config: { ...spawnedPane.config, paneId: 'pane-survivor' },
+    }
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'list_sessions') return [secondSession]
+      return null
+    })
+    useWorkspaceStore.setState({ sessions: [createdSession, secondSession], activeSessionId: createdSession.id, panes: { [spawnedPane.id]: spawnedPane } })
+    useWorkspaceStore.getState().recordCapture(spawnedPane.id, 'deleted.png')
+    useWorkspaceStore.setState({ activeSessionId: secondSession.id, panes: { [survivorPane.id]: survivorPane } })
+    useWorkspaceStore.getState().recordCapture(survivorPane.id, 'keep.png')
+
+    await useWorkspaceStore.getState().deleteSession(createdSession.id)
+
+    expect(useWorkspaceStore.getState().capturesByPane).toEqual({ [survivorPane.id]: ['keep.png'] })
+  })
+
+  test('closePane removes its capture history', async () => {
+    useWorkspaceStore.setState({
+      sessions: [createdSession],
+      activeSessionId: createdSession.id,
+      panes: { [spawnedPane.id]: spawnedPane },
+      paneLifecycle: { [spawnedPane.id]: 'live' },
+    })
+    useWorkspaceStore.getState().recordCapture(spawnedPane.id, 'closed.png')
+
+    await useWorkspaceStore.getState().closePane(spawnedPane.id)
+
+    expect(useWorkspaceStore.getState().capturesByPane[spawnedPane.id]).toBeUndefined()
   })
 
   test('cancels a pane closed before its spawn reply arrives', async () => {

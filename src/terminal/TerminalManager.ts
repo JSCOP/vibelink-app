@@ -39,7 +39,13 @@ const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
 const MAX_REPLAY_BYTES_PER_FRAME = 64 * 1024
-const MAX_CACHED_BACKGROUND_TERMINALS = 16
+// Each retained xterm holds its own scrollback buffer, and xterm allocates a
+// fixed-width Uint32Array per row (~12 B/cell), so at the 50k-row default one
+// fully-scrolled 200-column pane costs ~115 MiB. Sixteen cached background
+// terminals were affordable at 5k rows and are not at 50k; the daemon still
+// owns the PTY and its history, so a pruned pane only pays re-hydration on the
+// next workspace switch.
+const MAX_CACHED_BACKGROUND_TERMINALS = 6
 // Chromium keeps a fixed budget of live WebGL contexts per renderer process.
 // The retained-instance cache above plus a full visible grid can ask for far
 // more than that, and the moment a layout change reallocates the atlases the
