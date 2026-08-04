@@ -1830,7 +1830,9 @@ export function WorkspaceView({
       }),
       event.api.onDidActivePanelChange((panel) => {
         const content = parseWorkspaceContentParams(panel?.params)
-        if (content?.kind === 'workspaceWindow') getWorkspaceWindow(content.instanceId)?.focusActive()
+        // Defer outer-window refocus so an explicit nested pane selection can
+        // finish before the previously focused terminal tries to reactivate.
+        if (content?.kind === 'workspaceWindow') focusActiveContentAfterLayout(event.api, () => !workspaceInteractionSuspendedRef.current)
         syncChromeState()
       }),
       event.api.onDidRemovePanel((removedPanel) => {
