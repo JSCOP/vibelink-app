@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 import type { Profile } from '../state/profiles'
 import { NewTerminalLauncher } from './NewTerminalLauncher'
@@ -156,5 +156,32 @@ describe('NewTerminalLauncher', () => {
     expect(html).toContain('value="2"')
     expect(html).not.toContain('value="6"')
     expect(html).not.toContain('value="4"')
+  })
+
+  // The popover portals to <body> but still bubbles React events to the window
+  // tab that renders it, and that tab's click handler refocuses the terminal —
+  // the focus steal closed the native <select> popup on mouseup, so no profile
+  // could ever be picked.
+  it('does not bubble popover clicks to the tab that renders it', () => {
+    const tabClick = vi.fn()
+    render(
+      <div onClick={tabClick}>
+        <NewTerminalLauncher
+          isOpen
+          anchorRef={anchorRef}
+          existingPaneCount={0}
+          profiles={[profile]}
+          activeProfileId="powershell"
+          onClose={() => undefined}
+          onLaunch={() => undefined}
+        />
+      </div>,
+    )
+    const select = document.querySelector('#new-terminal-popover select')
+
+    fireEvent.mouseDown(select!)
+    fireEvent.click(select!)
+
+    expect(tabClick).not.toHaveBeenCalled()
   })
 })

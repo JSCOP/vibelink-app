@@ -179,7 +179,11 @@ export function NewTerminalLauncher({ isOpen, anchorRef, existingPaneCount, pref
   }
 
   return isOpen && typeof document !== 'undefined' ? createPortal(
-    <section ref={popoverRef} id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+    // The portal is detached in the DOM but still bubbles React events to its
+    // tree parent — the window tab — whose click handler activates the content
+    // and refocuses the terminal. That focus steal closed the native <select>
+    // popup on mouseup, so click is stopped here alongside mouse/pointer down.
+    <section ref={popoverRef} id="new-terminal-popover" className="new-terminal-popover" style={popoverPosition} role="dialog" aria-modal="false" aria-label="Add terminal panes" onClick={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
       <header className="new-terminal-popover-header">
         <Grid3X3 size={14} />
         <span>Add panes</span>
