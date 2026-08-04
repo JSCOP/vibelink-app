@@ -856,7 +856,10 @@ export function WorkspaceView({
     handle.getInnerApi()?.getPanel(panelId)?.api.setActive()
     useWorkspaceStore.getState().setActivePaneId(paneId)
     useWorkspaceStore.getState().clearPaneCompletionHighlight(paneId)
-    if (!workspaceInteractionSuspendedRef.current) TerminalManager.focus(paneId)
+    // Dockview reveals a nested pane on the next frame; focusing it while hidden is ignored.
+    requestAnimationFrame(() => {
+      if (!workspaceInteractionSuspendedRef.current && handle.getInnerApi()?.activePanel?.id === panelId) TerminalManager.focus(paneId)
+    })
   }, [])
 
   const addContentPanel = useCallback((params: WorkspaceContentParams, options: AddContentOptions = {}, targetApi?: DockviewApi): IDockviewPanel | null => {
