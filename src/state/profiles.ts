@@ -119,8 +119,23 @@ export type Settings = {
 const legacyTerminalModeResetSequence = '`e[?1049l`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
 const terminalModeResetSequence = '`e[?1049l`e[2J`e[3J`e[H`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m'
 
+export function codexLaunchArgv(extraArgs: readonly string[] = []): string[] {
+  return [
+    'codex',
+    '-c', 'mcp_servers.vibelink.command="pwsh.exe"',
+    '-c', 'mcp_servers.vibelink.args=["-NoLogo","-NoProfile","-Command","& $env:VIBELINK_CLI_EXE mcp serve"]',
+    '-c', 'mcp_servers.vibelink.env_vars=["VIBELINK_CLI_EXE","VIBELINK_SESSION_ID","VIBELINK_APP_FLAVOR"]',
+    ...extraArgs,
+  ]
+}
+
+export function powerShellCommand(argv: readonly string[]): string {
+  return argv.map((part) => (/^[\w./:@-]+$/.test(part) ? part : `'${part.replaceAll("'", "''")}'`)).join(' ')
+}
+
 function agentProfileArgs(command: string): string[] {
-  return ['-NoLogo', '-NoExit', '-Command', agentProfileCommand(command, terminalModeResetSequence)]
+  const argv = command === 'codex' ? codexLaunchArgv() : [command]
+  return ['-NoLogo', '-NoExit', '-Command', agentProfileCommand(powerShellCommand(argv), terminalModeResetSequence)]
 }
 
 const defaultProfiles: Profile[] = [
@@ -773,7 +788,11 @@ function defaultAgentCommand(id: string): string | null {
 
 function isManagedAgentProfileArgs(args: string[], command: string): boolean {
   if (args.length !== 4 || args[0] !== '-NoLogo' || args[1] !== '-NoExit' || args[2] !== '-Command') return false
-  return args[3] === command || args[3] === agentProfileCommand(command, legacyTerminalModeResetSequence) || args[3] === agentProfileCommand(command, terminalModeResetSequence)
+  const managedCommand = powerShellCommand(command === 'codex' ? codexLaunchArgv() : [command])
+  return args[3] === command
+    || args[3] === agentProfileCommand(command, legacyTerminalModeResetSequence)
+    || args[3] === agentProfileCommand(command, terminalModeResetSequence)
+    || args[3] === agentProfileCommand(managedCommand, terminalModeResetSequence)
 }
 
 function agentProfileCommand(command: string, resetSequence: string): string {

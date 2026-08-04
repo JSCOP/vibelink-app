@@ -17,6 +17,13 @@ const ompConversation: AgentConversationInfo = {
   path: 'E:/repo/.omp/agent/sessions/omp-1.jsonl',
 }
 
+const codexConversation: AgentConversationInfo = {
+  ...ompConversation,
+  id: 'codex-1',
+  title: 'Inspect browser',
+  agent: 'codex',
+}
+
 function pane(id: string, args: string[], alive = true): PaneMeta {
   return {
     id,
@@ -60,5 +67,19 @@ describe('Agent session model', () => {
       pane('dead', launch?.args ?? [], false),
       pane('other', ['-NoLogo', '-NoExit', '-Command', 'omp -r other']),
     ])).toEqual(['matching'])
+  })
+
+  test('resumes Codex with the session-scoped VibeLink MCP server', () => {
+    const launch = agentResumeLaunch(codexConversation)
+    const command = launch?.args[3] ?? ''
+
+    expect(command).toContain("codex -c 'mcp_servers.vibelink.command=\"pwsh.exe\"'")
+    expect(command).toContain('& $env:VIBELINK_CLI_EXE mcp serve')
+    expect(command).toContain('VIBELINK_SESSION_ID')
+    expect(command).toContain('resume codex-1')
+    expect(agentConversationPaneIds(codexConversation, [
+      pane('current', launch?.args ?? []),
+      pane('pre-upgrade', ['-NoLogo', '-NoExit', '-Command', 'codex resume codex-1']),
+    ])).toEqual(['current', 'pre-upgrade'])
   })
 })

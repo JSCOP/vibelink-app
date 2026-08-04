@@ -1,5 +1,6 @@
 import type { AgentConversationInfo } from '../../ipc/agentHistory'
 import type { PaneMeta } from '../../ipc/types'
+import { codexLaunchArgv, powerShellCommand } from '../../state/profiles'
 
 const AGENT_LABEL_BY_ID: Record<string, string> = {
   omp: 'Oh My Pi',
@@ -84,10 +85,14 @@ export function visibleAgentConversations(conversations: AgentConversationInfo[]
 export function agentConversationPaneIds(conversation: AgentConversationInfo, panes: readonly PaneMeta[]): string[] {
   const launch = agentResumeLaunch(conversation)
   if (!launch) return []
+  const legacyCodexArgs = conversation.agent === 'codex'
+    ? ['-NoLogo', '-NoExit', '-Command', powerShellCommand(['codex', 'resume', conversation.id])]
+    : null
   return panes
     .filter((pane) => pane.alive
-      && pane.config.args.length === launch.args.length
-      && pane.config.args.every((value, index) => value === launch.args[index]))
+      && [launch.args, legacyCodexArgs].some((args) => args
+        && pane.config.args.length === args.length
+        && pane.config.args.every((value, index) => value === args[index])))
     .map((pane) => pane.id)
 }
 
@@ -95,16 +100,15 @@ export function agentConversationPaneIds(conversation: AgentConversationInfo, pa
 export function agentResumeLaunch(conversation: AgentConversationInfo): { shell: string; args: string[]; title: string } | null {
   const RESUME_ARGV_BY_AGENT: Record<string, (id: string) => string[]> = {
     omp: (id) => ['omp', '-r', id],
-    codex: (id) => ['codex', 'resume', id],
+    codex: (id) => codexLaunchArgv(['resume', id]),
     claude: (id) => ['claude', '-r', id],
   }
   const build = RESUME_ARGV_BY_AGENT[conversation.agent]
   if (!build || !conversation.id) return null
   const argv = build(conversation.id)
-  const command = argv.map((part) => (/^[\w./:@-]+$/.test(part) ? part : `'${part.replaceAll("'", "''")}'`)).join(' ')
   return {
     shell: 'pwsh.exe',
-    args: ['-NoLogo', '-NoExit', '-Command', command],
+    args: ['-NoLogo', '-NoExit', '-Command', powerShellCommand(argv)],
     title: `${agentConversationLabel(conversation.agent)}: ${conversation.title}`,
   }
 }

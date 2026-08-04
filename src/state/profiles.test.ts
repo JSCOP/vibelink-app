@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, profileIconForPane, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
+import { codexLaunchArgv, defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, profileIconForPane, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
 
 describe('orderSessions', () => {
   const sessions = [
@@ -176,11 +176,24 @@ describe('terminal profiles', () => {
     expect(codex.shell).toBe('pwsh.exe')
     expect(codex.args.slice(0, 3)).toEqual(['-NoLogo', '-NoExit', '-Command'])
     expect(codex.args[3]).toContain('& codex')
+    expect(codex.args[3]).toContain('mcp_servers.vibelink.command="pwsh.exe"')
+    expect(codex.args[3]).toContain('& $env:VIBELINK_CLI_EXE mcp serve')
+    expect(codex.args[3]).toContain('VIBELINK_SESSION_ID')
     expect(codex.args[3]).toContain('finally')
     expect(codex.args[3]).toContain('`e[?1049l')
     expect(codex.args[3]).toContain('`e[2J')
     expect(codex.args[3]).toContain('`e[H')
     expect(codex.title).toBe('Codex')
+  })
+
+  test('puts session-scoped VibeLink MCP configuration before Codex subcommands', () => {
+    expect(codexLaunchArgv(['resume', 'session-1'])).toEqual([
+      'codex',
+      '-c', 'mcp_servers.vibelink.command="pwsh.exe"',
+      '-c', 'mcp_servers.vibelink.args=["-NoLogo","-NoProfile","-Command","& $env:VIBELINK_CLI_EXE mcp serve"]',
+      '-c', 'mcp_servers.vibelink.env_vars=["VIBELINK_CLI_EXE","VIBELINK_SESSION_ID","VIBELINK_APP_FLAVOR"]',
+      'resume', 'session-1',
+    ])
   })
 
   test('upgrades stored default agent profiles to reset terminal modes', () => {
@@ -192,6 +205,7 @@ describe('terminal profiles', () => {
     const codex = paneOverridesFromProfile(selectedProfile(settings))
     expect(codex.args.slice(0, 3)).toEqual(['-NoLogo', '-NoExit', '-Command'])
     expect(codex.args[3]).toContain('& codex')
+    expect(codex.args[3]).toContain('mcp_servers.vibelink.command')
     expect(codex.args[3]).toContain('`e[?1049l')
     expect(codex.args[3]).toContain('`e[2J')
   })
@@ -211,6 +225,21 @@ describe('terminal profiles', () => {
     expect(codex.args[3]).toContain('`e[?1049l')
     expect(codex.args[3]).toContain('`e[2J')
     expect(codex.args[3]).toContain('`e[H')
+    expect(codex.args[3]).toContain('mcp_servers.vibelink.command')
+  })
+
+  test('upgrades the previous managed Codex profile to the scoped MCP launch', () => {
+    const settings = normalizeSettings({
+      defaultProfileId: 'codex',
+      profiles: [{
+        id: 'codex',
+        name: 'Codex',
+        shell: 'pwsh.exe',
+        args: ['-NoLogo', '-NoExit', '-Command', 'try { & codex } finally { [Console]::Out.Write("`e[?1049l`e[2J`e[3J`e[H`e[?25h`e[?1000l`e[?1002l`e[?1003l`e[?1006l`e[?2004l`e[0m") }'],
+      }],
+    })
+
+    expect(paneOverridesFromProfile(selectedProfile(settings)).args[3]).toContain('mcp_servers.vibelink.command')
   })
 
   test('keeps customized agent profile commands unchanged', () => {
