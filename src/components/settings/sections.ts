@@ -169,6 +169,7 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'workspace', label: 'Close button minimizes to tray', keywords: 'tray minimize quit 닫기 트레이' },
   { section: 'workspace', label: 'Confirm when agents are still working', keywords: 'confirm exit busy 종료 확인' },
   { section: 'workspace', label: 'Scrollback / word wrap', keywords: 'scrollback lines wrap 스크롤백 줄바꿈' },
+  { section: 'workspace', label: 'Inactive terminal updates', keywords: 'terminal background render fps refresh performance 비활성 렌더링 속도' },
   { section: 'workspace', label: 'Pane roles & resize snap', keywords: 'role snap resize 역할 스냅' },
   { section: 'terminals', label: 'Profiles', keywords: 'profile shell powershell wsl ssh 프로필 셸' },
   { section: 'terminals', label: 'Default profile', keywords: 'default startup 기본 프로필' },

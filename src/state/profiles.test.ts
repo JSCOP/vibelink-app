@@ -441,6 +441,13 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ uiScale: 3 }).uiScale).toBe(defaultSettings.uiScale)
   })
 
+  test('normalizes inactive terminal update rate', () => {
+    expect(defaultSettings.inactiveTerminalUpdatesPerSecond).toBe(3)
+    expect(normalizeSettings({ inactiveTerminalUpdatesPerSecond: 30 }).inactiveTerminalUpdatesPerSecond).toBe(30)
+    expect(normalizeSettings({ inactiveTerminalUpdatesPerSecond: 0 }).inactiveTerminalUpdatesPerSecond).toBe(3)
+    expect(normalizeSettings({ inactiveTerminalUpdatesPerSecond: 61 }).inactiveTerminalUpdatesPerSecond).toBe(3)
+  })
+
   test('normalizes chat UI preferences', () => {
     const settings = normalizeSettings({
       chatPersonality: 'concise',

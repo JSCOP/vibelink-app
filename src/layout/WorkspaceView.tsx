@@ -80,6 +80,7 @@ import { TerminalWindowPanel } from './TerminalWindowPanel'
 import { WorkspaceWindowPanel } from './WorkspaceWindowPanel'
 import { getTerminalWindow, listTerminalWindows, allWindowedPaneIds, findTerminalWindowForPane, type TerminalWindowHandle } from './terminalWindowRegistry'
 import { findWorkspaceWindowForGroup, findWorkspaceWindowForPanel, getWorkspaceWindow, listWorkspaceWindows, type WorkspaceWindowHandle } from './workspaceWindowRegistry'
+import { activeWorkspacePanel, focusActiveContentAfterLayout, registerActiveContentFocusOnWindowActivation } from './activeContentFocus'
 import { WindowPanelShell } from './WindowPanelShell'
 import { vibelinkDockviewTheme } from './dockviewTheme'
 import { nearestPaneIdInDirection, paneIdsInReadingOrder, swapPanelsInDockviewApi, type PaneDirection } from './paneSwap'
@@ -215,13 +216,6 @@ function workspaceContentPanels(api: DockviewApi): IDockviewPanel[] {
   })
 }
 
-function activeWorkspacePanel(api: DockviewApi): IDockviewPanel | null {
-  const outerPanel = api.activePanel
-  const content = parseWorkspaceContentParams(outerPanel?.params)
-  return content?.kind === 'workspaceWindow'
-    ? getWorkspaceWindow(content.instanceId)?.getInnerApi()?.activePanel ?? null
-    : outerPanel ?? null
-}
 
 
 function TerminalContentPanel(props: WorkspaceContentPanelProps) {
@@ -677,6 +671,10 @@ export function WorkspaceView({
     onWorkspaceInteractionSuspendedChange?.(workspaceLocalOverlaySuspended)
     return () => onWorkspaceInteractionSuspendedChange?.(false)
   }, [onWorkspaceInteractionSuspendedChange, workspaceLocalOverlaySuspended])
+  useEffect(() => registerActiveContentFocusOnWindowActivation(
+    () => apiRef.current,
+    () => document.hasFocus() && !workspaceInteractionSuspendedRef.current,
+  ), [])
   const components = useMemo(() => {
     const merged = { ...builtInContentComponents }
     for (const [kind, component] of Object.entries(contentComponents ?? {})) {
@@ -2547,14 +2545,7 @@ function dockviewOverlaysSettled(api: DockviewApi): boolean {
   return true
 }
 
-function focusActiveContentAfterLayout(api: DockviewApi, canFocus: () => boolean): void {
-  requestAnimationFrame(() => {
-    if (!canFocus()) return
-    const content = parseWorkspaceContentParams(activeWorkspacePanel(api)?.params)
-    if (content?.kind === 'terminal') TerminalManager.focus(content.paneId)
-    else if (content?.kind === 'terminalWindow') getTerminalWindow(content.instanceId)?.focusFirst()
-  })
-}
+
 
 function rectsMatch(left: DOMRect, right: DOMRect, tolerance = 1): boolean {
   return Math.abs(left.left - right.left) <= tolerance

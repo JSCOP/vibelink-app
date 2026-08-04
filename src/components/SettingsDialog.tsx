@@ -966,6 +966,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   <SettingsRow icon={PanelTop} label="Pane header height" control={<SettingsNumber label="Pane header height" value={draft.paneHeaderHeight} min={24} max={56} onChange={(value) => patchDraft({ paneHeaderHeight: value })} />} />
                   <SettingsRow icon={Scaling} label="Resize snap" hint="Pixel tolerance for snapping a divider to a neighbouring edge." control={<SettingsNumber label="Resize snap" value={draft.resizeSnapTolerance} min={0} max={128} onChange={(value) => patchDraft({ resizeSnapTolerance: value })} />} />
                   <SettingsRow icon={Rows3} label="Scrollback" hint="Lines of terminal history kept per pane." control={<SettingsNumber label="Scrollback" value={draft.scrollback} min={100} max={200000} step={100} onChange={(value) => patchDraft({ scrollback: value })} />} />
+                  <SettingsRow icon={Cpu} label="Inactive terminal updates" hint="Visible inactive panes parse and paint output at this rate. The selected pane always stays immediate." control={<SettingsNumber label="Inactive terminal updates per second" value={draft.inactiveTerminalUpdatesPerSecond} min={1} max={60} step={1} onChange={(value) => patchDraft({ inactiveTerminalUpdatesPerSecond: value })} />} />
                 </SettingsCard>
                 <SettingsCard icon={MonitorCog} title="Startup and exit" hint="Closing VibeLink is a real quit. Terminals only survive when you ask them to.">
                   <SettingsRow

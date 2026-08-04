@@ -637,6 +637,10 @@ function App() {
   }, [settings.fontFamily, settings.fontSize, settings.terminalFontWeight, settings.scrollback, settings.terminalThemeId, settings.cursorStyle, settings.cursorWidth])
 
   useEffect(() => {
+    TerminalManager.setInactiveTerminalUpdatesPerSecond(settings.inactiveTerminalUpdatesPerSecond)
+  }, [settings.inactiveTerminalUpdatesPerSecond])
+
+  useEffect(() => {
     if (!activeSessionId || !license.ready || !license.status?.entitled) return
     const sessionId = activeSessionId
     const workspaceFolder = activeSession?.workspaceFolder ?? null

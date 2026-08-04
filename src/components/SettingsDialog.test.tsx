@@ -69,6 +69,27 @@ describe('SettingsDialog preferences', () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ editorWordWrap: false, editorMinimap: true }))
   })
 
+  test('stages inactive terminal update rate until Apply', () => {
+    const onChange = vi.fn()
+    render(
+      <SettingsDialog
+        settings={normalizeSettings(defaultSettings)}
+        onChange={onChange}
+        onClose={vi.fn()}
+        onRunSetupWizard={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Workspaces' }))
+    const updateRate = screen.getByRole('spinbutton', { name: 'Inactive terminal updates per second' })
+    expect(updateRate).toHaveValue(3)
+    fireEvent.change(updateRate, { target: { value: '60' } })
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ inactiveTerminalUpdatesPerSecond: 60 }))
+  })
+
   test('stages built-in completion sound and volume changes until Apply', () => {
     const onChange = vi.fn()
     render(

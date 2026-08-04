@@ -42,6 +42,7 @@ vi.mock('@xterm/xterm', () => {
     modes = { mouseTrackingMode: 'none' }
     buffer = { active: { type: 'normal', viewportY: 0, baseY: 0, length: 0, cursorX: 0, cursorY: 0 } }
     dataHandler: ((data: string) => void) | undefined
+    customKeyEventHandler: ((event: KeyboardEvent) => boolean) | undefined
     resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined
     focusCalls = 0
     writes: unknown[] = []
@@ -56,7 +57,7 @@ vi.mock('@xterm/xterm', () => {
       },
     }
     loadAddon(addon: { activate?: (terminal: MockTerminal) => void }): void { addon.activate?.(this) }
-    attachCustomKeyEventHandler(): void {}
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void { this.customKeyEventHandler = handler }
     attachCustomWheelEventHandler(): void {}
     registerLinkProvider(): { dispose(): void } {
       return { dispose() {} }
@@ -247,6 +248,7 @@ function terminalSnapshot(
     dataBase64: btoa(text),
   }
 }
+
 
 describe('TerminalManager pre-session input buffering', () => {
   it('holds emulator input while the pane has no session and flushes it on the session-bound attach', async () => {
@@ -1135,7 +1137,7 @@ describe('TerminalManager output scheduling', () => {
     }
   })
 
-  it('limits sustained inactive pane parsing to three updates per second', () => {
+  it('uses the configured inactive pane update rate', () => {
     vi.useFakeTimers()
     const paneId = 'pane-resume-output'
     const frames = new Map<number, FrameRequestCallback>()
@@ -1177,8 +1179,16 @@ describe('TerminalManager output scheduling', () => {
       runNextFrame()
       expect(entry.term.writes).toHaveLength(2)
       expect((entry.term.writes[1] as Uint8Array).byteLength).toBe(16 * 1024)
+
+      TerminalManager.setInactiveTerminalUpdatesPerSecond(10)
+      vi.advanceTimersByTime(99)
+      expect(frames.size).toBe(0)
+      vi.advanceTimersByTime(1)
+      runNextFrame()
+      expect(entry.term.writes).toHaveLength(3)
     } finally {
       TerminalManager.dispose(paneId)
+      TerminalManager.setInactiveTerminalUpdatesPerSecond(3)
       requestFrame.mockRestore()
       cancelFrame.mockRestore()
       vi.useRealTimers()
@@ -1692,7 +1702,7 @@ describe('TerminalManager output scheduling', () => {
 })
 
 describe('TerminalManager divider resize scheduling', () => {
-  it('fits stable pane grids during the drag and flushes the PTY size on release', () => {
+  it('holds pane reflows until divider release and flushes the landed PTY size', () => {
     const manager = TerminalManager as unknown as {
       entries: Map<string, {
         fit: { fit(): void; proposeDimensions(): { cols: number; rows: number } }
@@ -1767,14 +1777,16 @@ describe('TerminalManager divider resize scheduling', () => {
       flushFrames()
 
       expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(true)
-      expect(fitSpy).toHaveBeenCalledTimes(1)
-      expect(entry.term.cols).toBe(100)
-      expect(container.classList.contains('terminal-resize-preview')).toBe(false)
-      expect(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x')).toBe('')
+      expect(fitSpy).not.toHaveBeenCalled()
       expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([])
 
       release()
       flushFrames()
+
+      expect(fitSpy).toHaveBeenCalledTimes(1)
+      expect(entry.term.cols).toBe(100)
+      expect(container.classList.contains('terminal-resize-preview')).toBe(false)
+      expect(container.style.getPropertyValue('--vibelink-terminal-resize-scale-x')).toBe('')
 
       expect(document.documentElement.classList.contains('vibelink-interacting')).toBe(false)
       expect(invokeMock.mock.calls.filter(([command]) => command === 'resize_pane')).toEqual([
@@ -1784,6 +1796,102 @@ describe('TerminalManager divider resize scheduling', () => {
       if (document.documentElement.classList.contains('vibelink-interacting')) release()
       sash.remove()
       TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+    }
+  })
+
+  it('spreads a multi-pane settle across animation frames', () => {
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, {
+        fit: { fit(proposed?: { cols: number; rows: number }): void; proposeDimensions(): { cols: number; rows: number } }
+        term: { resize(cols: number, rows: number): void }
+        observedSize?: { width: number; height: number }
+        lastFitRect?: { width: number; height: number }
+      }>
+      pendingPass: Map<string, unknown>
+      passFrame?: number
+      passTimer?: number
+      lastPassAt?: number
+    }
+    if (manager.passFrame !== undefined) window.cancelAnimationFrame(manager.passFrame)
+    if (manager.passTimer !== undefined) window.clearTimeout(manager.passTimer)
+    manager.passFrame = undefined
+    manager.passTimer = undefined
+    manager.pendingPass.clear()
+
+    let nextFrame = 1
+    const frames = new Map<number, FrameRequestCallback>()
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = nextFrame
+      nextFrame += 1
+      frames.set(id, callback)
+      return id
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const runNextFrame = () => {
+      const next = frames.entries().next().value as [number, FrameRequestCallback] | undefined
+      if (!next) throw new Error('missing scheduled layout frame')
+      frames.delete(next[0])
+      next[1](performance.now())
+    }
+    let restoreNow: () => void = () => undefined
+    const flushFrames = () => {
+      for (let pass = 0; pass < 20 && frames.size > 0; pass += 1) runNextFrame()
+      expect(frames.size).toBe(0)
+    }
+    const paneIds = ['pane-fit-budget-a', 'pane-fit-budget-b']
+
+    try {
+      for (const paneId of paneIds) {
+        const container = makeContainer()
+        vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({
+          x: 0,
+          y: 0,
+          width: 500,
+          height: 300,
+          top: 0,
+          right: 500,
+          bottom: 300,
+          left: 0,
+          toJSON: () => ({}),
+        })
+        TerminalManager.attach(paneId, container)
+      }
+      flushFrames()
+      manager.pendingPass.clear()
+      manager.lastPassAt = undefined
+
+      let now = 0
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => now)
+      restoreNow = () => nowSpy.mockRestore()
+      const fits = paneIds.map((paneId, index) => {
+        const entry = manager.entries.get(paneId)
+        if (!entry) throw new Error(`missing fit entry ${paneId}`)
+        entry.observedSize = { width: 650, height: 300 }
+        entry.lastFitRect = { width: 500, height: 300 }
+        vi.spyOn(entry.fit, 'proposeDimensions').mockReturnValue({ cols: 100, rows: 24 })
+        return vi.spyOn(entry.fit, 'fit').mockImplementation(() => {
+          entry.term.resize(100, 24)
+          if (index === 0) now = 9
+        })
+      })
+
+      TerminalManager.scheduleLayoutPass({ paneIds, force: true })
+      runNextFrame()
+      expect(fits[0]).toHaveBeenCalledOnce()
+      expect(fits[1]).not.toHaveBeenCalled()
+      expect(frames.size).toBe(1)
+
+      now = 20
+      runNextFrame()
+      expect(fits[1]).toHaveBeenCalledOnce()
+      expect(frames.size).toBe(0)
+    } finally {
+      restoreNow()
+      paneIds.forEach((paneId) => TerminalManager.dispose(paneId))
       requestFrame.mockRestore()
       cancelFrame.mockRestore()
     }

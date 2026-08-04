@@ -1,13 +1,12 @@
 import type { TerminalHostSize } from './geometry'
 
-/** Floor for live terminal fits during an interactive resize.
+/** Floor for live terminal fits during a native window resize.
  *
- * Divider panes enter this cadence only after their Orca-style stable-grid
- * probe; native window resizing enters directly because the whole viewport is
- * changing. Both paths retain the adaptive duty-cycle budget. */
+ * Divider panes hold every real fit until pointerup. Non-interactive batches
+ * share the frame budget below but do not need this adaptive cooldown. */
 export const INTERACTIVE_FIT_INTERVAL_MS = 16
 
-/** Share of wall-clock time an interactive fit pass may occupy.
+/** Share of wall-clock time a native-window fit pass may occupy.
  *
  * Fit cost scales with visible scrollback: `term.resize()` reflows the whole
  * buffer when the column count changes. The adaptive interval leaves half of
@@ -25,9 +24,9 @@ export function interactiveFitInterval(lastPassDurationMs: number | undefined): 
   return Math.min(INTERACTIVE_FIT_MAX_INTERVAL_MS, Math.max(INTERACTIVE_FIT_INTERVAL_MS, budgeted))
 }
 
-/** Wall-clock a single interactive fit pass may spend before deferring panes
- *  to the next pass. A fit cannot be preempted once it starts, but this budget
- *  prevents several loaded panes from reflowing back to back in one frame. */
+/** Wall-clock a queued multi-pane fit pass may spend before deferring panes to
+ *  the next frame. A fit cannot be preempted once it starts, but this budget
+ *  prevents several loaded panes from reflowing back to back. */
 export const INTERACTIVE_FIT_FRAME_BUDGET_MS = 8
 
 /** Minimum gap between PTY resizes for interactive paths that forward live.

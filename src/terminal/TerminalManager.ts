@@ -30,9 +30,9 @@ const SOFTWARE_WEBGL_BACKPRESSURE_DOM_THRESHOLD_BYTES = 2 * 1024
 const HIGH_VOLUME_OUTPUT_DOM_THRESHOLD_BYTES = 64 * 1024
 const WEBGL_REPROMOTION_QUIET_MS = 2_000
 const BACKGROUND_OUTPUT_COALESCE_MS = 50
-// Visible inactive panes update at most three times per second. xterm is
+// Visible inactive panes default to three updates per second. xterm is
 // output-driven, so throttling parser writes is the effective paint limit.
-const INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS = 333
+const DEFAULT_INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS = 333
 const HIDDEN_OUTPUT_INTERVAL_MS = 1_000
 const HIDDEN_OUTPUT_PARK_DELAY_MS = 30_000
 const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
@@ -99,7 +99,6 @@ const WINDOW_RESIZE_SETTLE_MS = 160
 // document-level pointermove, so a capture-phase pointerdown is the only place
 // the drag can be observed before the layout storm starts.
 const SASH_SELECTOR = '.dv-sash'
-const MAX_DIVIDER_STABILITY_FRAMES = 8
 
 
 
@@ -263,9 +262,6 @@ type Entry = {
   /** Last size reported by this pane's ResizeObserver, so the layout pass does
    *  not have to force a synchronous layout to re-measure it. */
   observedSize?: { width: number; height: number }
-  /** One pending Orca-style stability probe before fitting this pane's real
-   *  xterm grid during a divider drag. */
-  dividerFitFrame?: number
   lastSentPtyCols?: number
   lastSentPtyRows?: number
   /** When this pane last sent `resize_pane`; rate-limits PTY resizes during a drag. */
@@ -327,6 +323,7 @@ class TerminalManagerImpl {
   private outputDelayDueAt: number | undefined
   private outputFallbackTimer: number | undefined
   private titleCoalescer = new PaneTitleCoalescer()
+  private inactiveVisibleOutputIntervalMs = DEFAULT_INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS
   private replayTail: Promise<void> = Promise.resolve()
   private wakeRecoveryFrame: number | undefined
   private wakeAtlasRecoveryFrame: number | undefined
@@ -494,15 +491,7 @@ class TerminalManagerImpl {
     endInteractiveResize(kind)
     if (this.interactionDepth > 0) return
     const dividerPaneIds = kind === 'divider' ? [...this.dividerResizePaneIds] : undefined
-    if (kind === 'divider') {
-      for (const paneId of dividerPaneIds ?? []) {
-        const entry = this.entries.get(paneId)
-        if (entry?.dividerFitFrame === undefined) continue
-        cancelAnimationFrame(entry.dividerFitFrame)
-        entry.dividerFitFrame = undefined
-      }
-      this.dividerResizePaneIds.clear()
-    }
+    if (kind === 'divider') this.dividerResizePaneIds.clear()
     this.markInteracting(false)
     this.settleLayout({ paneIds: dividerPaneIds?.length ? dividerPaneIds : undefined })
   }
@@ -517,36 +506,12 @@ class TerminalManagerImpl {
     document.documentElement.classList.toggle('vibelink-interacting', active)
   }
 
-  /** Match Orca's resize contract: Dockview owns live geometry while each pane
-   *  waits for a stable grid proposal before doing a real local xterm fit.
-   *  Continuous motion is bounded, so a pane cannot remain visually stale for
-   *  more than a handful of frames. PTY synchronization stays held separately. */
-  private requestStableDividerFit(entry: Entry): void {
+  /** A column change reflows the entire xterm scrollback buffer. Dockview owns
+   *  live geometry during a divider drag, so defer every real fit until the
+   *  pointer lands instead of repeatedly rebuilding inactive panes mid-gesture. */
+  private deferDividerFit(entry: Entry): void {
     if (!isDividerResizeActive() || !entry.opened || entry.remoteLease) return
     this.dividerResizePaneIds.add(entry.paneId)
-    if (entry.dividerFitFrame !== undefined) return
-    let previous = entry.fit.proposeDimensions(entry.observedSize)
-    let frames = 0
-    const waitForStableGrid = () => {
-      entry.dividerFitFrame = requestAnimationFrame(() => {
-        entry.dividerFitFrame = undefined
-        if (!isDividerResizeActive() || this.entries.get(entry.paneId) !== entry || !entry.opened) return
-        const next = entry.fit.proposeDimensions(entry.observedSize)
-        frames += 1
-        const stable =
-          !next ||
-          (entry.term.cols === next.cols && entry.term.rows === next.rows) ||
-          (previous?.cols === next.cols && previous.rows === next.rows) ||
-          frames >= MAX_DIVIDER_STABILITY_FRAMES
-        if (!stable) {
-          previous = next
-          waitForStableGrid()
-          return
-        }
-        this.scheduleLayoutPass({ paneIds: [entry.paneId] })
-      })
-    }
-    waitForStableGrid()
   }
 
   private get interactive(): boolean {
@@ -597,6 +562,18 @@ class TerminalManagerImpl {
       if (fontChanged) this.fitAfterFontsLoad(entry)
       if (fontChanged || themeChanged || cursorChanged) this.redrawAfterNextFrame(entry)
       this.fit(entry, 0, true)
+    }
+  }
+
+  setInactiveTerminalUpdatesPerSecond(updatesPerSecond: number): void {
+    const safeRate = Number.isFinite(updatesPerSecond) ? Math.min(60, Math.max(1, updatesPerSecond)) : 3
+    const nextInterval = Math.max(1, Math.round(1_000 / safeRate))
+    if (nextInterval === this.inactiveVisibleOutputIntervalMs) return
+    this.inactiveVisibleOutputIntervalMs = nextInterval
+    for (const entry of this.entries.values()) {
+      if (!entry.pendingOutput?.length) continue
+      entry.outputNextDrainAt = undefined
+      this.enqueueOutput(entry, this.isForegroundOutput(entry))
     }
   }
   getOrCreate(paneId: string): Entry {
@@ -665,8 +642,6 @@ class TerminalManagerImpl {
     // Dockview re-parents panes on maximize/restore and pane swaps; a size
     // observed against the old container must not survive into the new one.
     if (entry.container !== container) {
-      if (entry.dividerFitFrame !== undefined) cancelAnimationFrame(entry.dividerFitFrame)
-      entry.dividerFitFrame = undefined
       entry.observedSize = undefined
     }
     if (previousSessionId && previousSessionId !== options.sessionId) {
@@ -747,20 +722,13 @@ class TerminalManagerImpl {
       const box = observed[observed.length - 1]?.contentRect
       if (box) entry.observedSize = { width: box.width, height: box.height }
       if (isDividerResizeActive()) {
-        this.requestStableDividerFit(entry)
+        this.deferDividerFit(entry)
         return
       }
-      // Fit inside the observer callback: it runs after layout and before paint,
-      // so the pane's new rect and its new grid reach the screen in the SAME
-      // frame. Deferring to an animation frame paints a correctly-placed pane
-      // holding a wrongly-sized terminal first, which is what reads as the
-      // layout re-aligning itself a moment after it already moved. Interactive
-      // gestures keep the throttled, frame-budgeted path.
-      if (this.interactive) {
-        this.scheduleLayoutPass({ paneIds: [paneId] })
-        return
-      }
-      this.fitNow({ paneIds: [paneId], remeasure: false })
+      // A column change reflows the pane's whole scrollback buffer. Queue every
+      // observer-driven fit so a sidebar toggle or layout settle cannot rebuild
+      // several loaded terminals back to back in one renderer task.
+      this.scheduleLayoutPass({ paneIds: [paneId] })
     })
     entry.observer.observe(container)
     // Output held while the terminal was unopened parses now, after the
@@ -1525,12 +1493,9 @@ class TerminalManagerImpl {
     this.requestPassFlush()
   }
 
-  /** Fit in the CURRENT task instead of the next animation frame, so a pane's
-   *  grid reaches the screen in the same frame as its new rect. Callers that
-   *  already hold a fresh measurement (the ResizeObserver) pass
-   *  `remeasure: false`; callers reacting to a structural change that Dockview
-   *  applied synchronously let the pass measure the live rect. Interactive
-   *  gestures keep their own throttled, frame-budgeted path. */
+  /** Fit in the CURRENT task for callers that explicitly require synchronous
+   *  geometry. ResizeObserver-driven layout changes use the queued path above
+   *  so multiple terminal reflows stay frame-budgeted. */
   fitNow(options: { paneIds?: string[]; syncPty?: boolean; remeasure?: boolean } = {}): void {
     if (options.remeasure !== false) {
       for (const paneId of options.paneIds ?? this.entries.keys()) {
@@ -1549,13 +1514,12 @@ class TerminalManagerImpl {
       this.passTimer = undefined
     }
     this.lastPassAt = Date.now()
-    this.flushLayoutPass()
+    this.flushLayoutPass(false)
     if (this.pendingPass.size > 0) this.requestPassFlush()
   }
 
-  /** Queue one animation-frame flush. Divider panes arrive here only after an
-   *  Orca-style stable-grid probe; native window resizing uses the same
-   *  adaptive frame budget without the stability gate. */
+  /** Queue one animation-frame flush. Divider fits arrive only after pointerup;
+   *  every multi-pane batch shares the same per-frame reflow budget. */
   private requestPassFlush(): void {
     if (this.passFrame !== undefined || this.passTimer !== undefined || this.pendingPass.size === 0) return
     // A topology command re-arms the flush itself once the grid is final.
@@ -1578,42 +1542,30 @@ class TerminalManagerImpl {
     }
     this.passFrame = requestAnimationFrame(() => {
       this.passFrame = undefined
-      // Only an interactive pass needs the cost sample, and `performance.now()`
-      // is the clock that can resolve a sub-millisecond pass. Outside a gesture
-      // the throttle is inactive, so skip the measurement entirely.
-      if (!this.interactive) {
-        this.lastPassAt = Date.now()
-        this.flushLayoutPass()
-        return
-      }
-      const started = performance.now()
+      const started = this.interactive ? performance.now() : undefined
       this.flushLayoutPass()
-      this.lastPassDurationMs = performance.now() - started
+      if (started !== undefined) this.lastPassDurationMs = performance.now() - started
       // Measure the cooldown from the END of the pass: an expensive pass that
       // overran its own interval must not re-arm the instant it returns.
       this.lastPassAt = Date.now()
-      // Panes the frame budget deferred are still queued, and the callers that
-      // normally re-arm the flush are pointermove events that may already have
-      // stopped. Re-arm here — AFTER the bookkeeping above, so the deferred
-      // work is throttled like any other pass instead of running back to back.
+      // A multi-pane batch can outlive one frame even outside an active gesture.
       if (this.pendingPass.size > 0) this.requestPassFlush()
     })
   }
 
-  private flushLayoutPass(): void {
+  private flushLayoutPass(frameBudgeted = true): void {
     // Keep every request queued while a topology command owns the layout, so no
     // pane is ever fitted to geometry the command is about to discard.
     if (this.topologyDepth > 0) return
     const pending = this.pendingPass
     this.pendingPass = new Map()
     const interactive = this.interactive
-    // A pass over N panes does N scrollback reflows back to back, and the frame
-    // it runs in cannot paint until the last one finishes. Divider drags never
-    // enter this path; their fits are held until pointerup. During a native
-    // window resize, stop once the frame budget is spent and put the remaining
-    // panes back on the queue. They are deferred, never dropped, and the final
-    // settle re-fits every pane unconditionally.
-    const deadline = interactive ? performance.now() + INTERACTIVE_FIT_FRAME_BUDGET_MS : undefined
+    // One xterm resize can reflow its full scrollback. Process at least one pane,
+    // then defer the remainder once this frame's budget is spent. Explicit
+    // `fitNow()` calls opt out because their contract is synchronous.
+    const deadline = frameBudgeted && pending.size > 1
+      ? performance.now() + INTERACTIVE_FIT_FRAME_BUDGET_MS
+      : undefined
     for (const [paneId, pass] of pending) {
       if (deadline !== undefined && performance.now() >= deadline) {
         // Re-queue verbatim; merge with anything scheduled since this pass began.
@@ -1697,7 +1649,6 @@ class TerminalManagerImpl {
     if (!entry) return
     agentActivityTracker.clear(paneId)
     this.dividerResizePaneIds.delete(paneId)
-    if (entry.dividerFitFrame !== undefined) cancelAnimationFrame(entry.dividerFitFrame)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
     this.pendingPass.delete(paneId)
@@ -2071,7 +2022,7 @@ class TerminalManagerImpl {
 
   private backgroundOutputDelay(entry: Entry, now: number): number {
     if (entry.lastBackgroundOutputAt === undefined) return BACKGROUND_OUTPUT_COALESCE_MS
-    const interval = entry.visible ? INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS : HIDDEN_OUTPUT_INTERVAL_MS
+    const interval = entry.visible ? this.inactiveVisibleOutputIntervalMs : HIDDEN_OUTPUT_INTERVAL_MS
     return Math.max(0, entry.lastBackgroundOutputAt + interval - now)
   }
 
@@ -2182,7 +2133,7 @@ class TerminalManagerImpl {
         entry.outputHighPriority = this.isForegroundOutput(entry)
         if (!entry.outputHighPriority) {
           entry.outputNextDrainAt = completedAt + (entry.visible
-            ? INACTIVE_VISIBLE_OUTPUT_INTERVAL_MS
+            ? this.inactiveVisibleOutputIntervalMs
             : HIDDEN_OUTPUT_INTERVAL_MS)
         }
         this.queuedOutputPaneIds.add(entry.paneId)
@@ -2353,7 +2304,7 @@ class TerminalManagerImpl {
 
   private fit(entry: Entry, attempt: number, force = false): void {
     if (isDividerResizeActive()) {
-      this.requestStableDividerFit(entry)
+      this.deferDividerFit(entry)
       return
     }
     // Font-load and settings fits must not slip inside a topology command
