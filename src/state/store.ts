@@ -5,7 +5,7 @@ import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
 import { create } from 'zustand'
 import type { AttachedSession, HermesModelInfo, HermesRuntimeStatus, LicenseStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief } from '../ipc/types'
 import { defaultSettings, isAgentPane, normalizeLegacyWorkspaceWorktrees, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
-import { normalizePaneTitle, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
+import { loadManualPaneTitles, normalizePaneTitle, persistManualPaneTitles, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import { authorizationErrorMessage } from './licenseGate'
 import type { Settings } from './profiles'
 import type { AttentionSnapshot } from './worktreeAttention'
@@ -275,7 +275,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaceReadyEpoch: 0,
   panes: {},
   paneLifecycle: {},
-  manualPaneTitles: {},
+  manualPaneTitles: loadManualPaneTitles(),
   status: 'booting',
   settings: loadSettings(),
   license: { ready: false, status: null },
@@ -817,6 +817,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
         paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
         paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
+        manualPaneTitles: withoutPaneKey(state.manualPaneTitles, paneId),
         capturesByPane,
         captureSessionByPane,
       }
@@ -826,25 +827,28 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   renamePaneTitle: async (paneId: string, title: string, source: 'manual' | 'auto') => {
     const normalized = normalizePaneTitle(title)
     if (!normalized) return
-    if (get().panes[paneId]?.config.title === normalized) return
     const sessionId = get().activeSessionId
-    if (!sessionId) return
+    const pane = get().panes[paneId]
+    if (!sessionId || !pane) return
+    // Lock user intent before the daemon round-trip: animated OSC titles can
+    // arrive while the manual rename is still awaiting persistence.
+    if (source === 'manual' && get().manualPaneTitles[paneId] !== true) {
+      set((state) => ({ manualPaneTitles: { ...state.manualPaneTitles, [paneId]: true } }))
+    }
+    if (pane.config.title === normalized) return
     await invoke('set_pane_title', { sessionId, paneId, title: normalized })
     set((state) => {
       if (state.activeSessionId !== sessionId) return {}
-      const pane = state.panes[paneId]
-      if (!pane) return {}
+      const currentPane = state.panes[paneId]
+      if (!currentPane) return {}
       return {
         panes: {
           ...state.panes,
           [paneId]: {
-            ...pane,
-            config: { ...pane.config, title: normalized },
+            ...currentPane,
+            config: { ...currentPane.config, title: normalized },
           },
         },
-        manualPaneTitles: source === 'manual'
-          ? { ...state.manualPaneTitles, [paneId]: true }
-          : state.manualPaneTitles,
       }
     })
   },
@@ -1483,6 +1487,7 @@ useWorkspaceStore.subscribe((state, previousState) => {
   if (state.paneCompletionHighlights !== previousState.paneCompletionHighlights) persistPaneCompletionHighlights(state.paneCompletionHighlights)
   if (state.completionHistory !== previousState.completionHistory) persistCompletionHistory(state.completionHistory)
   if (state.paneReviewMarkers !== previousState.paneReviewMarkers) persistPaneReviewMarkers(state.paneReviewMarkers)
+  if (state.manualPaneTitles !== previousState.manualPaneTitles) persistManualPaneTitles(state.manualPaneTitles)
 })
 
 function withoutPaneKey<T>(record: Record<string, T>, paneId: string): Record<string, T> {

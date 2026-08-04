@@ -1082,6 +1082,79 @@ button {
   cursor: grab;
 }
 
+.terminal-window-panel .dv-groupview[data-vl-terminal-pane-drop-guide='true'] {
+  position: relative;
+}
+
+.terminal-window-panel[data-vl-terminal-pane-drop-guide='true'] > .dv-dockview > .dv-drop-target-container {
+  opacity: 0;
+}
+
+.terminal-pane-drop-guide {
+  display: grid;
+  filter: drop-shadow(0 10px 22px rgb(0 0 0 / 45%));
+  gap: 5px;
+  grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+}
+
+.terminal-pane-drop-guide > span {
+  background: color-mix(in srgb, var(--vibelink-dialog) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-border) 80%, white 20%);
+  border-radius: 4px;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.terminal-pane-drop-guide [data-direction='top'] { grid-area: 1 / 2; }
+.terminal-pane-drop-guide [data-direction='left'] { grid-area: 2 / 1; }
+.terminal-pane-drop-guide [data-direction='center'] { grid-area: 2 / 2; }
+.terminal-pane-drop-guide [data-direction='right'] { grid-area: 2 / 3; }
+.terminal-pane-drop-guide [data-direction='bottom'] { grid-area: 3 / 2; }
+
+.terminal-pane-drop-guide > span::before {
+  background: color-mix(in srgb, var(--vibelink-text-muted) 55%, transparent);
+  border-radius: 999px;
+  content: '';
+  height: 2px;
+  left: 14%;
+  position: absolute;
+  right: 14%;
+  top: 12%;
+}
+
+.terminal-pane-drop-guide-option::after {
+  content: '';
+  position: absolute;
+}
+
+.terminal-pane-drop-guide-option[data-direction='top']::after,
+.terminal-pane-drop-guide-option[data-direction='bottom']::after {
+  border-top: 1px dashed var(--vibelink-text-muted);
+  left: 14%;
+  right: 14%;
+  top: 50%;
+}
+
+.terminal-pane-drop-guide-option[data-direction='left']::after,
+.terminal-pane-drop-guide-option[data-direction='right']::after {
+  border-left: 1px dashed var(--vibelink-text-muted);
+  bottom: 14%;
+  left: 50%;
+  top: 14%;
+}
+
+.terminal-pane-drop-guide[data-active-direction='top'] [data-direction='top'],
+.terminal-pane-drop-guide[data-active-direction='left'] [data-direction='left'],
+.terminal-pane-drop-guide[data-active-direction='right'] [data-direction='right'],
+.terminal-pane-drop-guide[data-active-direction='bottom'] [data-direction='bottom'] {
+  background: color-mix(in srgb, var(--vibelink-accent) 24%, var(--vibelink-dialog));
+  border-color: var(--vibelink-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vibelink-accent) 38%, transparent);
+}
+
 /* Globally hide every pane title bar in this window. Collapse the inner tab
  * strip so panes use the full height. */
 .terminal-window-titles-hidden .dv-tabs-and-actions-container {

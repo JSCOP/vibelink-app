@@ -926,7 +926,7 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
   })
 
-  test('renamePaneTitle skips unchanged titles', async () => {
+  test('renamePaneTitle locks unchanged manual titles without native work', async () => {
     useWorkspaceStore.setState({
       activeSessionId: createdSession.id,
       panes: { 'pane-test': { ...spawnedPane, config: { ...spawnedPane.config, title: 'Manual Codex' } } },
@@ -934,6 +934,7 @@ describe('workspace store profiles', () => {
 
     await useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
 
+    expect(useWorkspaceStore.getState().manualPaneTitles['pane-test']).toBe(true)
     expect(invoke).not.toHaveBeenCalledWith('set_pane_title', expect.anything())
   })
 
@@ -946,6 +947,21 @@ describe('workspace store profiles', () => {
     useWorkspaceStore.getState().applyPaneConfiguration('pane-test', { title: 'Same' })
 
     expect(useWorkspaceStore.getState().manualPaneTitles['pane-test']).toBeUndefined()
+  })
+
+  test('manual title intent blocks OSC updates before native persistence returns', async () => {
+    const renameGate = Promise.withResolvers<unknown>()
+    vi.mocked(invoke).mockImplementationOnce(() => renameGate.promise)
+    useWorkspaceStore.setState({ activeSessionId: createdSession.id, panes: { 'pane-test': spawnedPane } })
+
+    const rename = useWorkspaceStore.getState().renamePaneTitle('pane-test', 'Manual Codex', 'manual')
+    expect(useWorkspaceStore.getState().manualPaneTitles['pane-test']).toBe(true)
+    await useWorkspaceStore.getState().applyTerminalTitle('pane-test', 'Codex: auto task')
+    expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Codex')
+
+    renameGate.resolve(null)
+    await rename
+    expect(useWorkspaceStore.getState().panes['pane-test'].config.title).toBe('Manual Codex')
   })
 
   test('applyTerminalTitle does not overwrite manual pane titles', async () => {

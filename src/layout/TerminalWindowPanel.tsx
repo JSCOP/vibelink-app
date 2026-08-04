@@ -21,9 +21,11 @@ import { removePanelPreservingLayout } from './paneCloseLayout'
 import { applySerializedGridSizes, serializedActiveViewId } from './liveGridSizes'
 import {
   activateOrphanedPaneGroups,
+  clearTerminalPaneDropGuide,
   defaultTerminalPaneSplitDirection,
   preventTerminalPaneStackDrop,
   unstackSerializedDockview,
+  updateTerminalPaneDropGuide,
 } from './innerPaneLayout'
 import { paneIdsInReadingOrder } from './paneSwap'
 import { activeTerminalPaneId } from './paneActivation'
@@ -322,8 +324,33 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     }
     if (!restored) event.api.clear()
     innerDisposablesRef.current = [
-      event.api.onWillShowOverlay((event) => {
-        if (preventTerminalPaneStackDrop(event.kind, event.position)) event.preventDefault()
+      event.api.onWillDrop((dropEvent) => {
+        const data = dropEvent.getData()
+        const sourcePanelId = data?.viewId === dropEvent.api.id && typeof data.panelId === 'string' ? data.panelId : null
+        if (!sourcePanelId) return
+        const targetGroup = dropEvent.group
+        const direction = targetGroup
+          ? updateTerminalPaneDropGuide(targetGroup, sourcePanelId, dropEvent.nativeEvent.clientX, dropEvent.nativeEvent.clientY)
+          : null
+        if (direction && targetGroup) {
+          const sourcePanel = dropEvent.api.getPanel(sourcePanelId)
+          dropEvent.preventDefault()
+          clearTerminalPaneDropGuide()
+          sourcePanel?.api.moveTo({ group: targetGroup, position: direction })
+          return
+        }
+        clearTerminalPaneDropGuide()
+        if (preventTerminalPaneStackDrop(dropEvent.kind, dropEvent.position)) dropEvent.preventDefault()
+      }),
+      event.api.onWillShowOverlay((overlayEvent) => {
+        const data = overlayEvent.getData()
+        const sourcePanelId = data?.viewId === overlayEvent.api.id && typeof data.panelId === 'string' ? data.panelId : null
+        if (sourcePanelId && overlayEvent.group && data?.groupId !== overlayEvent.group.id) {
+          updateTerminalPaneDropGuide(overlayEvent.group, sourcePanelId, overlayEvent.nativeEvent.clientX, overlayEvent.nativeEvent.clientY)
+          return
+        }
+        clearTerminalPaneDropGuide()
+        if (preventTerminalPaneStackDrop(overlayEvent.kind, overlayEvent.position)) overlayEvent.preventDefault()
       }),
       event.api.onDidLayoutChange(() => { readingOrderRef.current = null; persistInner() }),
       event.api.onDidMovePanel(() => { readingOrderRef.current = null; scheduleInnerInvariantCheck() }),
@@ -374,6 +401,17 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     persistInner()
   }), [persistInner, settleInner])
 
+  useEffect(() => {
+    const clearAfterPointer = () => queueMicrotask(clearTerminalPaneDropGuide)
+    document.addEventListener('pointerup', clearAfterPointer)
+    document.addEventListener('pointercancel', clearAfterPointer)
+    return () => {
+      document.removeEventListener('pointerup', clearAfterPointer)
+      document.removeEventListener('pointercancel', clearAfterPointer)
+      clearTerminalPaneDropGuide()
+    }
+  }, [])
+
   // Hiding/showing pane title bars collapses the inner tab strip via CSS, which
   // does NOT emit a Dockview layout event, so the pane's absolutely-positioned
   // render overlay stays one toggle behind and the terminal fits to the stale
@@ -386,6 +424,7 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
     innerApiRef.current = null
     invariantCheckPendingRef.current = false
     for (const disposable of innerDisposablesRef.current) disposable.dispose()
+    clearTerminalPaneDropGuide()
     innerDisposablesRef.current = []
     if (persistTimerRef.current !== undefined) window.clearTimeout(persistTimerRef.current)
   }, [])

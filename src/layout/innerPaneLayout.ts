@@ -5,6 +5,18 @@ import { planTerminalArrangement } from './workspaceLayoutModel'
 export type TerminalPaneSplitDirection = 'right' | 'below'
 export type TerminalPaneDropKind = 'tab' | 'header_space' | 'content' | 'edge'
 export type TerminalPaneDropPosition = 'top' | 'bottom' | 'left' | 'right' | 'center'
+export type TerminalPaneDropDirection = Exclude<TerminalPaneDropPosition, 'center'>
+
+type TerminalPaneDropGuideTarget = { id: string; element: HTMLElement }
+type TerminalPaneDropGuideState = {
+  target: TerminalPaneDropGuideTarget
+  container: HTMLElement | null
+  sourcePanelId: string
+  element: HTMLElement
+  rect: { left: number; top: number; right: number; bottom: number; width: number; height: number }
+}
+
+let paneDropGuide: TerminalPaneDropGuideState | null = null
 
 type MutableGroupState = Record<string, unknown> & {
   id?: unknown
@@ -104,6 +116,75 @@ export function defaultTerminalPaneSplitDirection(layout: SerializedDockview): T
  * Terminal-window DnD exposes edge targets only. */
 export function preventTerminalPaneStackDrop(kind: TerminalPaneDropKind, position: TerminalPaneDropPosition): boolean {
   return kind === 'tab' || kind === 'header_space' || (kind === 'content' && position === 'center')
+}
+export function terminalPaneDropDirection(
+  rect: Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom' | 'width' | 'height'>,
+  clientX: number,
+  clientY: number,
+): TerminalPaneDropDirection | null {
+  if (rect.width <= 0 || rect.height <= 0 || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) return null
+  const column = Math.floor((clientX - rect.left) / (rect.width / 3))
+  const row = Math.floor((clientY - rect.top) / (rect.height / 3))
+  if (row === 0 && column === 1) return 'top'
+  if (row === 1 && column === 0) return 'left'
+  if (row === 1 && column === 2) return 'right'
+  if (row === 2 && column === 1) return 'bottom'
+  return null
+}
+
+export function updateTerminalPaneDropGuide(
+  target: TerminalPaneDropGuideTarget,
+  sourcePanelId: string,
+  clientX: number,
+  clientY: number,
+): TerminalPaneDropDirection | null {
+  if (paneDropGuide?.target.id !== target.id || paneDropGuide.sourcePanelId !== sourcePanelId) {
+    clearTerminalPaneDropGuide()
+    const targetRect = target.element.getBoundingClientRect()
+    const size = Math.min(216, targetRect.width * 0.72, targetRect.height * 0.72)
+    if (size < 54) return null
+    const left = targetRect.left + (targetRect.width - size) / 2
+    const top = targetRect.top + (targetRect.height - size) / 2
+    const element = createTerminalPaneDropGuideElement(size, left - targetRect.left, top - targetRect.top)
+    const container = target.element.closest<HTMLElement>('.terminal-window-panel')
+    target.element.dataset.vlTerminalPaneDropGuide = 'true'
+    if (container) container.dataset.vlTerminalPaneDropGuide = 'true'
+    target.element.appendChild(element)
+    paneDropGuide = {
+      target,
+      container,
+      sourcePanelId,
+      element,
+      rect: { left, top, right: left + size, bottom: top + size, width: size, height: size },
+    }
+  }
+  const direction = terminalPaneDropDirection(paneDropGuide.rect, clientX, clientY)
+  if (direction) paneDropGuide.element.dataset.activeDirection = direction
+  else delete paneDropGuide.element.dataset.activeDirection
+  return direction
+}
+
+
+export function clearTerminalPaneDropGuide(): void {
+  if (!paneDropGuide) return
+  delete paneDropGuide.target.element.dataset.vlTerminalPaneDropGuide
+  if (paneDropGuide.container) delete paneDropGuide.container.dataset.vlTerminalPaneDropGuide
+  paneDropGuide.element.remove()
+  paneDropGuide = null
+}
+
+function createTerminalPaneDropGuideElement(size: number, left: number, top: number): HTMLElement {
+  const guide = document.createElement('div')
+  guide.className = 'terminal-pane-drop-guide'
+  guide.setAttribute('aria-hidden', 'true')
+  guide.style.cssText = `left:${left}px;top:${top}px;width:${size}px;height:${size}px`
+  for (const direction of ['top', 'left', 'center', 'right', 'bottom'] as const) {
+    const preview = document.createElement('span')
+    preview.className = direction === 'center' ? 'terminal-pane-drop-guide-center' : 'terminal-pane-drop-guide-option'
+    preview.dataset.direction = direction
+    guide.appendChild(preview)
+  }
+  return guide
 }
 
 /** Apply the shared row-major arrangement plan to a live inner Dockview. The

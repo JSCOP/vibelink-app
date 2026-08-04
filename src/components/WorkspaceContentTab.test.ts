@@ -445,6 +445,20 @@ describe('WorkspaceContentTab', () => {
     expect(screen.queryByRole('button', { name: /Arrange/ })).toBeNull()
   })
 
+  it('starts pane renaming from any non-action title bar area', () => {
+    const api = panelApi('content:terminal:pane-a', 'Shell')
+    const params = createTerminalContentParams({ id: 'pane-a', config: { paneId: 'pane-a', args: [], env: [], title: 'Shell', icon: 'terminal', cols: 80, rows: 24 } })
+    const view = renderWithActions(createElement(TerminalPaneTitleBar, { api, params } as never))
+
+    fireEvent.doubleClick(view.container.querySelector('.terminal-pane-title-bar') as HTMLElement)
+    const input = screen.getByRole('textbox', { name: 'Terminal pane title' })
+    fireEvent.change(input, { target: { value: 'Build logs' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(api.setActive).toHaveBeenCalled()
+    expect(actions.renameTerminal).toHaveBeenCalledWith('pane-a', 'Build logs')
+  })
+
   it('reveals a hovered tab only for a same-instance drag onto a different inactive tab', () => {
     const tab = { viewId: 'dock-1', panelId: 'content:terminalWindow:b', isActive: false }
     // Live drag of another window in this instance → reveal.

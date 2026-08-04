@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useEffect, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelHeaderProps } from 'dockview-react'
 import { SplitSquareHorizontal, SplitSquareVertical, X } from 'lucide-react'
 import { ProfileIcon } from './ProfileIcon'
@@ -52,6 +52,16 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
     if (paneId && next && next !== title) void actions.renameTerminal(paneId, next)
   }
 
+  const startEditing = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target
+    if (!paneId || (target instanceof Element && target.closest('.terminal-tab-actions, input'))) return
+    event.preventDefault()
+    event.stopPropagation()
+    api.setActive()
+    setDraftTitle(title)
+    setIsEditing(true)
+  }
+
   const onTitleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') { event.preventDefault(); commitTitle() }
     else if (event.key === 'Escape') { event.preventDefault(); setDraftTitle(title); setIsEditing(false) }
@@ -69,6 +79,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
       tabIndex={0}
       aria-selected={isActive}
       aria-label={accessibleTitle}
+      onDoubleClick={startEditing}
     >
       <span aria-hidden="true"><ProfileIcon name={content?.icon} size={13} className="terminal-tab-icon" /></span>
       {agentStatus ? <span className={agentPaneStatusClassName(agentStatus)} title={agentStatus.label} aria-label={agentStatus.label} /> : null}
@@ -78,6 +89,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
       {isEditing && paneId ? (
         <input
           className="terminal-tab-title-input"
+          aria-label="Terminal pane title"
           value={draftTitle}
           autoFocus
           onBlur={commitTitle}
@@ -90,7 +102,6 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
         <span
           className="terminal-tab-title"
           title="Terminal pane. Drag with Dockview to move; double-click to rename."
-          onDoubleClick={() => { if (!paneId) return; setDraftTitle(title); setIsEditing(true) }}
         >
           {title}
         </span>
