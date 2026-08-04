@@ -10,6 +10,19 @@
 4. 용어를 새로 만들거나 바꾸면 **이 파일을 먼저 고치고** 코드 식별자를 맞춘다. 이 파일에 없는 새 이름을 코드에만 도입하지 않는다.
 5. 코드 식별자(`identifier`)가 진실이다. 문서와 코드가 어긋나면 코드를 확인하고 이 문서를 갱신한다.
 
+## 사용자 표현 → 표준 용어 (자주 쓰는 말)
+
+| 사용자가 말하는 것 | 표준 용어 | 실제 대상 |
+| --- | --- | --- |
+| "창", "window" | **content window** (콘텐츠 윈도우) | 터미널 윈도우 · 에디터 · 브라우저 · 프리뷰 · 칸반 등 중앙에 뜨는 것들의 총칭. 전부 앱 내부 컨테이너 |
+| "터미널 창" | terminal window | 터미널 페인들을 담는 콘텐츠 윈도우 1개 |
+| "터미널", "페인" | terminal pane | PTY 1개 = 터미널 1개 |
+| "터미널 탭", "페인 탭" | pane title bar | 터미널 페인 위의 제목/탭 줄 (`TerminalPaneTitleBar`) |
+| "탭" (중앙 상단) | content tab | 콘텐츠 윈도우의 탭 헤더 (`WorkspaceContentTab`) |
+| "워크스페이스", "작업공간" | workspace | 백엔드 이름은 `Session`/`sessionId` |
+| "사이드 패널", "사이드바" | side panel | 좌/우 가장자리 도구 패널 |
+| "왼쪽 아이콘 줄" | edge rail | 접힌 사이드 패널의 세로 38px 띠 |
+
 ## 계층 구조
 
 ```
@@ -21,18 +34,21 @@ OS 창 (native window)                       getCurrentWindow() — Tauri 창. �
    │     │   └─ 엣지 레일 탭  .workspace-edge-rail-tab (세로 38px 아이콘 띠)
    │     │      kinds: workspaces | explorer | automation
    │     ├─ 중앙 영역
-   │     │  └─ 워크스페이스 윈도우  kind `workspaceWindow` (내부 Dockview)
-   │     │     └─ 콘텐츠 탭  WorkspaceContentTab × N
+   │     │  └─ 워크스페이스 윈도우  kind `workspaceWindow` (내부 Dockview)   ← 창들을 담는 그릇
+   │     │     └─ 콘텐츠 윈도우 = 콘텐츠 탭 1개  WorkspaceContentTab × N     ← 사용자가 말하는 "창"
    │     │        ├─ 터미널 윈도우  kind `terminalWindow` (내부 Dockview)
    │     │        │  └─ 터미널 페인  kind `terminal`, paneId
    │     │        │     └─ 페인 타이틀바  TerminalPaneTitleBar
-   │     │        └─ 에디터 / 브라우저 / 프리뷰 / 칸반 / 진단 등
+   │     │        ├─ 에디터        kind `editor`
+   │     │        ├─ 브라우저      kind `browser`
+   │     │        └─ 프리뷰 / 칸반 / Diff / Workbench / Orchestration …
    │     └─ 오른쪽 사이드 패널 edge group `workspace-right-tools`
    │         kinds: workspaceFiles | sourceControl | gitHistory | gitBranches | agentSessions
    └─ 상태 표시줄            StatusBar (App.tsx 최하단)
 ```
 
-핵심: **컨테이너 3단계는 `워크스페이스 윈도우 > 터미널 윈도우 > 터미널 페인`이고, 셋 다 OS 창이 아니다.**
+핵심: **컨테이너 3단계는 `워크스페이스 윈도우 > 콘텐츠 윈도우(터미널 윈도우 등) > 터미널 페인`이고, 셋 다 OS 창이 아니다.**
+현재 콘텐츠 윈도우를 실제 OS 창으로 분리(detach)하는 기능은 없다. Tauri 창은 `tauri.conf.json`의 `VibeLink` 1개와 동적 `capture-overlay`뿐이다.
 
 ## 1. 앱 셸 / 사이드 영역
 
@@ -56,6 +72,7 @@ OS 창 (native window)                       getCurrentWindow() — Tauri 창. �
 
 | 표준 용어 | 한국어 | 코드 식별자 | 정의 |
 | --- | --- | --- | --- |
+| content window | 콘텐츠 윈도우 | `WorkspaceContentKind` 중 중앙 배치 종류(terminalWindow / editor / browser / preview / kanban / diff …) | 사용자가 "창"이라 부르는 것의 총칭. 워크스페이스 윈도우 안에 들어가는 개별 창 하나. 코드에 전용 타입은 없고 **콘텐츠 탭 1개 = 콘텐츠 윈도우 1개**로 표현된다 |
 | workspace window | 워크스페이스 윈도우 | kind `workspaceWindow`, `WorkspaceWindowPanel`, `workspaceWindowRegistry` | 중앙에 놓이는 **앱 내부 컨테이너**. 내부에 자체 Dockview를 갖고 콘텐츠 탭들을 담는다. 디스크립터 제목은 `Window Group` |
 | terminal window | 터미널 윈도우 | kind `terminalWindow`, `TerminalWindowPanel`, `terminalWindowRegistry` | 터미널 페인들만 담는 **앱 내부 컨테이너**. 페인 그리드/분할/맞춤을 소유 |
 | content tab | 콘텐츠 탭 | `WorkspaceContentTab`, `WorkspaceContentParams`, `workspaceContentPanelId` | 워크스페이스 윈도우 내부 패널 1개의 탭 헤더 |
@@ -140,7 +157,7 @@ PTY 환경변수: VIBELINK_SESSION_ID = workspace id, VIBELINK_PANE_ID = pane id
 
 | 모호어 | 가능한 의미 | 규칙 |
 | --- | --- | --- |
-| window | OS 창 / `workspaceWindow` / `terminalWindow` | 단독 사용 금지. `OS 창`, `워크스페이스 윈도우`, `터미널 윈도우` 중 하나로 명시 |
+| window | OS 창 / `workspaceWindow` / 콘텐츠 윈도우(`terminalWindow`·에디터·브라우저…) | 단독 사용 금지. `OS 창`, `워크스페이스 윈도우`, `콘텐츠 윈도우`, `터미널 윈도우` 중 하나로 명시. 사용자가 그냥 "창"이라고 하면 기본값은 **콘텐츠 윈도우** |
 | session | 워크스페이스(`SessionMeta`) / 에이전트 ACP 세션 / 데몬 접속 | `워크스페이스` 또는 `에이전트 세션`으로 명시. `sessionId`는 항상 워크스페이스 id |
 | tab | 콘텐츠 탭(`WorkspaceContentTab`) / 페인 타이틀바(`TerminalPaneTitleBar`) / 엣지 레일 탭 | 세 가지를 구분해서 말한다 |
 | group | Dockview 탭 그룹 / 워크스페이스 그룹 / 사이드바 터미널 윈도우 그룹 행 | `탭 그룹` vs `워크스페이스 그룹`으로 구분 |
