@@ -334,18 +334,36 @@
   border-bottom: 1px solid var(--vibelink-border);
 }
 
-.automation-dialog-header > div { min-width: 0; }
+.automation-dialog-heading { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 6px; }
 .automation-dialog-header span { color: var(--vibelink-accent); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
-.automation-dialog-header h2 { margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 18px; }
-.automation-dialog-header > button { width: 30px; padding: 0; }
+.automation-dialog-header > button { width: 30px; flex: 0 0 auto; padding: 0; }
 
+/* The header stays pinned, the prompt body scrolls, and the footer holds the
+ * run configuration plus actions, so the dialog never scrolls as a whole. */
 .automation-editor-form {
   display: flex;
   min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.automation-editor-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
   flex-direction: column;
   gap: 10px;
   overflow: auto;
   padding: 14px 16px 16px;
+}
+
+.automation-editor-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--vibelink-border);
+  padding: 12px 16px 14px;
 }
 
 .automation-editor-section {
@@ -358,11 +376,14 @@
   background: var(--vibelink-panel-2);
 }
 
-.automation-name-field input { font-size: 13px; }
-.automation-prompt-field textarea { min-height: 120px; }
+.automation-editor-form .automation-name-input { max-width: 460px; padding: 8px 10px; font: 600 15px var(--vibelink-sans); }
+.automation-editor-form .automation-mono-input { font-family: var(--vibelink-mono); }
+.automation-prompt-field textarea { min-height: 200px; }
+.automation-field-hint { margin: -4px 0 0; color: var(--vibelink-muted); font-size: 10px; }
+.automation-precheck-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 8px; }
 
-/* Three equal columns keep Agent, Schedule, and Run-in on one scannable row. */
-.automation-primary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+/* One compact configuration band: agent, schedule, workspace, and grace. */
+.automation-primary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 
 /* Pickers are buttons, so their caption is a sibling span, not a wrapping label. */
 .automation-labeled-control { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
@@ -570,12 +591,19 @@
 .spin { animation: automation-spin .8s linear infinite; }
 @keyframes automation-spin { to { transform: rotate(360deg); } }
 
+/* The configuration band drops to two columns before the dialog itself has to
+ * shrink; a picker trigger below ~180px ellipsizes its whole summary. */
+@media (max-width: 980px) {
+  .automation-primary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 680px) {
   .automation-dialog-backdrop { padding: 12px; }
   .automation-editor-dialog,
   .automation-import-dialog { width: calc(100vw - 24px); max-height: calc(100vh - 24px); }
   .automation-field-grid,
   .automation-field-grid.three,
+  .automation-precheck-row,
   .automation-primary-grid,
   .automation-occurrences { grid-template-columns: 1fr; }
 }

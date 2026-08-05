@@ -194,6 +194,20 @@ describe('AutomationPanel', () => {
     })
   })
 
+  it('keeps typing focus while the panel refreshes behind the open editor', async () => {
+    const view = render(<AutomationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: 'New' }))
+    const nameField = await screen.findByLabelText('Name')
+    nameField.focus()
+    fireEvent.change(nameField, { target: { value: 'Weekday repo audit' } })
+
+    // The panel polls automations every 8s; each refresh re-renders it and
+    // hands the dialog fresh inline callbacks.
+    view.rerender(<AutomationPanel />)
+
+    expect(document.activeElement).toBe(nameField)
+  })
+
   it('closes only the open picker on the first Escape, then the dialog', async () => {
     render(<AutomationPanel />)
     fireEvent.click(await screen.findByRole('button', { name: 'New' }))
@@ -202,11 +216,11 @@ describe('AutomationPanel', () => {
 
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('listbox', { name: 'Automation agent' })).not.toBeInTheDocument()
-    expect(screen.getByRole('dialog', { name: /Schedule agent work/ })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: /New automation/ })).toBeInTheDocument()
 
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: /Schedule agent work/ })).not.toBeInTheDocument()
+      expect(screen.queryByRole('dialog', { name: /New automation/ })).not.toBeInTheDocument()
     })
   })
 })

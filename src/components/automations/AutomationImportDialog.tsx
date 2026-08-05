@@ -44,6 +44,13 @@ export function AutomationImportDialog({ sessionId, onClose, onImported }: Autom
     void refresh()
   }, [refresh])
 
+  // Claim focus exactly once. `onClose` is an inline prop and `AutomationPanel`
+  // re-renders on its 8 s refresh poll, so focusing from the keydown effect
+  // below pulled focus off the candidate list every few seconds.
+  useEffect(() => {
+    dialogRef.current?.focus()
+  }, [])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       event.stopImmediatePropagation()
@@ -53,7 +60,6 @@ export function AutomationImportDialog({ sessionId, onClose, onImported }: Autom
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
-    dialogRef.current?.focus()
     return () => window.removeEventListener('keydown', onKeyDown, true)
   }, [onClose])
 
