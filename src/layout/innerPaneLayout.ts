@@ -5,7 +5,7 @@ import { planTerminalArrangement } from './workspaceLayoutModel'
 export type TerminalPaneSplitDirection = 'right' | 'below'
 export type TerminalPaneDropKind = 'tab' | 'header_space' | 'content' | 'edge'
 export type TerminalPaneDropPosition = 'top' | 'bottom' | 'left' | 'right' | 'center'
-export type TerminalPaneDropDirection = Exclude<TerminalPaneDropPosition, 'center'>
+export type TerminalPaneDropTarget = TerminalPaneDropPosition
 
 type TerminalPaneDropGuideTarget = { id: string; element: HTMLElement }
 type TerminalPaneDropGuideState = {
@@ -112,8 +112,8 @@ export function defaultTerminalPaneSplitDirection(layout: SerializedDockview): T
   return 'right'
 }
 
-/** Tab/header and center-content targets merge panes into one Dockview group.
- * Terminal-window DnD exposes edge targets only. */
+/** Raw tab/header/center targets would stack panes. The custom chooser handles
+ * center as a swap; this guard blocks any unhandled stack drop. */
 export function preventTerminalPaneStackDrop(kind: TerminalPaneDropKind, position: TerminalPaneDropPosition): boolean {
   return kind === 'tab' || kind === 'header_space' || (kind === 'content' && position === 'center')
 }
@@ -121,7 +121,7 @@ export function terminalPaneDropDirection(
   rect: Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom' | 'width' | 'height'>,
   clientX: number,
   clientY: number,
-): TerminalPaneDropDirection | null {
+): TerminalPaneDropTarget | null {
   if (rect.width <= 0 || rect.height <= 0 || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) return null
   const column = Math.floor((clientX - rect.left) / (rect.width / 3))
   const row = Math.floor((clientY - rect.top) / (rect.height / 3))
@@ -129,7 +129,7 @@ export function terminalPaneDropDirection(
   if (row === 1 && column === 0) return 'left'
   if (row === 1 && column === 2) return 'right'
   if (row === 2 && column === 1) return 'bottom'
-  return null
+  return row === 1 && column === 1 ? 'center' : null
 }
 
 export function updateTerminalPaneDropGuide(
@@ -137,7 +137,7 @@ export function updateTerminalPaneDropGuide(
   sourcePanelId: string,
   clientX: number,
   clientY: number,
-): TerminalPaneDropDirection | null {
+): TerminalPaneDropTarget | null {
   if (paneDropGuide?.target.id !== target.id || paneDropGuide.sourcePanelId !== sourcePanelId) {
     clearTerminalPaneDropGuide()
     const targetRect = target.element.getBoundingClientRect()
@@ -158,10 +158,10 @@ export function updateTerminalPaneDropGuide(
       rect: { left, top, right: left + size, bottom: top + size, width: size, height: size },
     }
   }
-  const direction = terminalPaneDropDirection(paneDropGuide.rect, clientX, clientY)
-  if (direction) paneDropGuide.element.dataset.activeDirection = direction
+  const dropTarget = terminalPaneDropDirection(paneDropGuide.rect, clientX, clientY)
+  if (dropTarget) paneDropGuide.element.dataset.activeDirection = dropTarget
   else delete paneDropGuide.element.dataset.activeDirection
-  return direction
+  return dropTarget
 }
 
 

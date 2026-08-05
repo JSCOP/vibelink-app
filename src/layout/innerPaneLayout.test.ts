@@ -174,22 +174,26 @@ describe('inner terminal pane layout', () => {
       host.remove()
     }
   })
-  it('maps the centered pane chooser to the four split directions', () => {
+  it('maps the centered pane chooser to four split directions and a swap center', () => {
     const rect = { left: 0, top: 0, right: 300, bottom: 300, width: 300, height: 300 }
     expect(terminalPaneDropDirection(rect, 150, 50)).toBe('top')
     expect(terminalPaneDropDirection(rect, 50, 150)).toBe('left')
     expect(terminalPaneDropDirection(rect, 250, 150)).toBe('right')
     expect(terminalPaneDropDirection(rect, 150, 250)).toBe('bottom')
-    expect(terminalPaneDropDirection(rect, 150, 150)).toBeNull()
+    expect(terminalPaneDropDirection(rect, 150, 150)).toBe('center')
+    expect(terminalPaneDropDirection(rect, 50, 50)).toBeNull()
   })
 
-  it('shows and clears one directional chooser on the hovered group', () => {
+  it('shows and clears one pane drop chooser on the hovered group', () => {
     const group = document.createElement('div')
     group.getBoundingClientRect = () => ({ left: 10, top: 20, right: 310, bottom: 320, width: 300, height: 300 } as DOMRect)
     document.body.appendChild(group)
 
     expect(updateTerminalPaneDropGuide({ id: 'target', element: group }, 'source', 160, 90)).toBe('top')
     expect(group.querySelector('.terminal-pane-drop-guide')?.getAttribute('data-active-direction')).toBe('top')
+
+    expect(updateTerminalPaneDropGuide({ id: 'target', element: group }, 'source', 160, 170)).toBe('center')
+    expect(group.querySelector('.terminal-pane-drop-guide')?.getAttribute('data-active-direction')).toBe('center')
 
     clearTerminalPaneDropGuide()
     expect(group.querySelector('.terminal-pane-drop-guide')).toBeNull()

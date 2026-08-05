@@ -1087,7 +1087,7 @@ button {
   position: relative;
 }
 
-.terminal-window-panel[data-vl-terminal-pane-drop-guide='true'] > .dv-dockview > .dv-drop-target-container {
+.terminal-window-panel[data-vl-terminal-pane-drop-guide='true'] .dv-drop-target-container {
   opacity: 0;
 }
 
@@ -1149,6 +1149,7 @@ button {
 
 .terminal-pane-drop-guide[data-active-direction='top'] [data-direction='top'],
 .terminal-pane-drop-guide[data-active-direction='left'] [data-direction='left'],
+.terminal-pane-drop-guide[data-active-direction='center'] [data-direction='center'],
 .terminal-pane-drop-guide[data-active-direction='right'] [data-direction='right'],
 .terminal-pane-drop-guide[data-active-direction='bottom'] [data-direction='bottom'] {
   background: color-mix(in srgb, var(--vibelink-accent) 24%, var(--vibelink-dialog));
