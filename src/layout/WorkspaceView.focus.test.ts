@@ -17,6 +17,22 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }))
 
+const activationFallback = vi.hoisted(() => ({
+  listener: undefined as ((event: { payload: undefined }) => void) | undefined,
+  unlisten: vi.fn(),
+}))
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (_event: string, listener: (event: { payload: undefined }) => void) => {
+    activationFallback.listener = listener
+    return Promise.resolve(activationFallback.unlisten)
+  },
+}))
+
+const focusWebview = vi.hoisted(() => vi.fn(() => Promise.resolve()))
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({ setFocus: focusWebview }),
+}))
+
 import type { DockviewApi } from 'dockview-react'
 import { registerActiveContentFocusOnWindowActivation } from './activeContentFocus'
 
@@ -37,6 +53,9 @@ afterEach(() => {
   focus.mockReset()
   nativeFocus.listener = undefined
   nativeFocus.unlisten.mockReset()
+  activationFallback.listener = undefined
+  activationFallback.unlisten.mockReset()
+  focusWebview.mockClear()
   vi.unstubAllGlobals()
 })
 
@@ -64,5 +83,25 @@ describe('window activation terminal focus', () => {
     }
 
     expect(nativeFocus.unlisten).toHaveBeenCalledOnce()
+  })
+
+  it('recovers the active terminal from the native Windows activation event', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0)
+      return 1
+    })
+    const dispose = registerActiveContentFocusOnWindowActivation(() => terminalApi, () => true)
+    await Promise.resolve()
+
+    activationFallback.listener?.({ payload: undefined })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(focusWebview).toHaveBeenCalledOnce()
+    expect(focus).toHaveBeenCalledOnce()
+    expect(focus).toHaveBeenCalledWith('pane-active')
+
+    dispose()
+    expect(activationFallback.unlisten).toHaveBeenCalledOnce()
   })
 })

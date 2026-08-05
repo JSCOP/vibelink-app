@@ -100,6 +100,9 @@ pub fn run() {
                 if let Err(error) = window_chrome::disable_system_menu(&main_window) {
                     eprintln!("disable system menu: {error}");
                 }
+                if let Err(error) = window_chrome::install_activation_focus_recovery(&main_window) {
+                    eprintln!("install activation focus recovery: {error}");
+                }
                 // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS MUST stay set for the
                 // whole process lifetime. WebView2 keeps one browser
                 // environment per (user data dir, options) pair, and creating a
