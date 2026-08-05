@@ -2129,6 +2129,9 @@ export function WorkspaceView({
           // Dockview's click handler runs, which then toggles the now-active
           // group straight back to collapsed, so the sidebar never opens.
           if (target?.closest('.workspace-edge-rail-tab')) return
+          // Open-content rows activate their target on click. Activating the
+          // owning sidebar panel first makes the terminal group flash inactive.
+          if (target?.closest('[data-open-content-panel-id]')) return
           const terminalBodyPaneId = paneIdFromEventTarget(event.target)
           if (terminalBodyPaneId) {
             // Renderer overlays sit outside Dockview's ordinary group content
