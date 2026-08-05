@@ -1462,6 +1462,19 @@ impl<P: BrowserProvider> BrowserManager<P> {
         self.push_frame(frame)
     }
 
+    /// Full-viewport PNG bytes for the page, with no managed artifact written.
+    /// The caller decides where the image lands; the browser markup flow stores
+    /// it in the user's capture folder so the existing annotator can read it.
+    pub fn capture_page_png(&self, page_id: &str) -> BrowserResult<Vec<u8>> {
+        let generation = self.page(page_id)?.navigation_generation;
+        Ok(self.provider.capture_frame(page_id, 0, generation)?.bytes)
+    }
+
+    pub fn open_dev_tools(&self, page_id: &str) -> BrowserResult<()> {
+        self.page(page_id)?;
+        self.provider.open_dev_tools(page_id)
+    }
+
     pub fn capture_crop(
         &self,
         page_id: &str,
@@ -1490,15 +1503,22 @@ impl<P: BrowserProvider> BrowserManager<P> {
                 "browser annotation is stale after navigation; pick the element again",
             ));
         }
-        let screenshot = self.capture_crop_for_generation(
-            &input.page_id,
-            input.navigation_generation,
-            input.bounds,
-            true,
-        )?;
+        // The element context IS the deliverable; the crop is a bonus. A cold
+        // or unreachable CDP target must not swallow the grab the user asked
+        // for, so capture failures degrade to `screenshot: None`.
+        let screenshot = self
+            .capture_crop_for_generation(
+                &input.page_id,
+                input.navigation_generation,
+                input.bounds,
+                true,
+            )
+            .ok();
         let current = self.page(&input.page_id)?;
         if current.navigation_generation != input.navigation_generation || current.url != page.url {
-            let _ = self.remove_managed_artifact(&screenshot.path);
+            if let Some(stale) = &screenshot {
+                let _ = self.remove_managed_artifact(&stale.path);
+            }
             return Err(BrowserError::stale_ref(
                 "browser annotation became stale while capturing; pick the element again",
             ));
@@ -1510,15 +1530,22 @@ impl<P: BrowserProvider> BrowserManager<P> {
             navigation_generation: input.navigation_generation,
             url: current.url,
             browser_ref: input.browser_ref,
+            tag_name: input.tag_name,
+            selector: input.selector,
+            full_path: input.full_path,
+            role: input.role,
+            react_components: input.react_components,
+            html_snippet: input.html_snippet,
             accessible_name: input.accessible_name,
-            dom_ancestry: input.dom_ancestry,
+            nearby_text: input.nearby_text,
+            ancestor_path: input.ancestor_path,
             bounds: input.bounds,
             text: input.text,
             attributes: input.attributes,
             computed_styles: input.computed_styles,
             source_hints: input.source_hints,
             comment: input.comment,
-            screenshot: Some(screenshot),
+            screenshot,
         })
     }
 
@@ -2975,9 +3002,18 @@ fn validate_annotation_input(input: &BrowserAnnotationInput) -> BrowserResult<()
         || input.browser_ref.is_empty()
         || input.browser_ref.len() > 4_096
         || input.accessible_name.len() > 16_384
+        || input.tag_name.len() > 128
+        || input.selector.len() > 4_096
+        || input.full_path.len() > 4_096
+        || input.role.len() > 256
+        || input.react_components.len() > 2_048
+        // Orca clamps the HTML snippet to 4 KiB in the guest; allow headroom for
+        // multi-byte markup without letting a hostile page stream unbounded DOM.
+        || input.html_snippet.len() > 32 * 1024
         || input.text.len() > 64 * 1024
         || input.comment.len() > 16 * 1024
-        || input.dom_ancestry.len() > 128
+        || input.nearby_text.len() > 32
+        || input.ancestor_path.len() > 128
         || input.attributes.len() > 256
         || input.computed_styles.len() > 256
         || input.source_hints.len() > 128
@@ -2987,8 +3023,9 @@ fn validate_annotation_input(input: &BrowserAnnotationInput) -> BrowserResult<()
         ));
     }
     let strings = input
-        .dom_ancestry
+        .ancestor_path
         .iter()
+        .chain(input.nearby_text.iter())
         .chain(input.source_hints.iter())
         .chain(
             input

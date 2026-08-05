@@ -62,9 +62,21 @@ export type BrowserAnnotation = {
   pageId: string
   navigationGeneration: number
   url: string
+  /** Short human identity, e.g. `span#shortcutArea`. */
   browserRef: string
+  tagName: string
+  /** Unique CSS selector: resolves to exactly one node via `querySelector`. */
+  selector: string
+  /** Root-down path including the element itself. */
+  fullPath: string
+  role: string
+  /** React component chain, outermost first, e.g. `<App> <Button>`. */
+  reactComponents: string
+  htmlSnippet: string
   accessibleName: string
-  domAncestry: string[]
+  nearbyText: string[]
+  /** Bottom-up from the element's PARENT, role-annotated. */
+  ancestorPath: string[]
   bounds: PhysicalBounds
   text: string
   attributes: Array<[string, string]>
@@ -186,6 +198,11 @@ export type BrowserContentController = {
   setSurfaceState(pageId: string, state: { bounds: PhysicalBounds | null; visible: boolean; focused: boolean }): Promise<void>
   setDesignMode(pageId: string, enabled: boolean): Promise<void>
   setDeviceMetrics(pageId: string, metrics: BrowserDeviceMetrics | null): Promise<BrowserPage>
+  capturePageImage?(pageId: string, dir: string): Promise<string>
+  /** Opens the WebView2 inspector for the page. */
+  openDevTools?(pageId: string): Promise<void>
+  /** Hands an http(s) URL to the OS default browser. */
+  openExternal?(url: string): Promise<void>
   resolvePermission(requestId: string, decision: 'allow_once' | 'allow_for_origin' | 'deny'): Promise<void>
   resolveCertificate(requestId: string, decision: 'allow_for_origin' | 'deny'): Promise<void>
   resolveDialog(requestId: string, accept: boolean): Promise<void>

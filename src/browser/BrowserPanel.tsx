@@ -1,9 +1,15 @@
 import './BrowserPanel.css'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
-import type { ChangeEvent, FocusEvent, FormEvent } from 'react'
+import type { ChangeEvent, FocusEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { ArrowLeft, ArrowRight, Crosshair, Ellipsis, ExternalLink, Import, Loader2, MessageSquarePlus, PenTool, RotateCw, SquareCode } from 'lucide-react'
+// Explicit extension: `captureAnnotator.ts` (the stroke model) sits beside this
+// component, and a bare specifier resolves to it on case-insensitive Windows.
+import { CaptureAnnotator } from '../components/CaptureAnnotator.tsx'
+import { BrowserAddressBar } from './BrowserAddressBar'
 import { formatBrowserAnnotation } from './agentContext'
-import { activeSurfaceVisible, browserPanelReducer, createBrowserPanelState } from './state'
+import { activeSurfaceVisible, browserPanelReducer, createBrowserPanelState, type BrowserGrabIntent } from './state'
+import { recordBrowserVisit, recordBrowserVisitTitle } from './browserUrlHistory'
 import type {
   BrowserAnnotation,
   BrowserCertificatePrompt,
@@ -21,6 +27,7 @@ import type {
 type BrowserPanelProps = {
   controller: BrowserContentController
   initialState: BrowserContentState
+  captureDir?: string
   active: boolean
   focused: boolean
   workspaceVisible: boolean
@@ -43,6 +50,41 @@ const POST_ACTIVATION_MEASURE_FRAMES = 8
 // (~2s at 60fps). Bounded so a panel that never becomes measurable — collapsed
 // group, zero-size grid — cannot leave a permanent rAF loop running.
 const POST_ACTIVATION_MEASURE_ATTEMPTS = 120
+const IMPORT_HINT_HIDDEN_KEY = 'vibelink.browser.importHintHidden'
+
+function importHintHidden(profileId: string): boolean {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(IMPORT_HINT_HIDDEN_KEY) ?? '[]')
+    return Array.isArray(value) && value.includes(profileId)
+  } catch {
+    return false
+  }
+}
+
+function hideImportHint(profileId: string): void {
+  let hidden: string[] = []
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(IMPORT_HINT_HIDDEN_KEY) ?? '[]')
+    if (Array.isArray(value)) hidden = value.filter((item): item is string => typeof item === 'string')
+  } catch {
+    // Replace malformed persisted state below.
+  }
+  if (hidden.includes(profileId)) return
+  try {
+    window.localStorage.setItem(IMPORT_HINT_HIDDEN_KEY, JSON.stringify([...hidden, profileId]))
+  } catch {
+    // The hint still hides for this session when storage is unavailable.
+  }
+}
+
+function externalBrowserUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? url : null
+  } catch {
+    return null
+  }
+}
 
 function scheduleFrame(callback: FrameRequestCallback): number {
   if (typeof window.requestAnimationFrame === 'function') return window.requestAnimationFrame(callback)
@@ -139,6 +181,7 @@ const permissionLabels: Record<string, string> = {
 export function BrowserPanel({
   controller,
   initialState,
+  captureDir = '',
   active,
   focused,
   workspaceVisible,
@@ -149,6 +192,7 @@ export function BrowserPanel({
 }: BrowserPanelProps) {
   const [state, dispatch] = useReducer(browserPanelReducer, initialState, createBrowserPanelState)
   const [overflowOpen, setOverflowOpen] = useState(false)
+  const [addressSuggestionsOpen, setAddressSuggestionsOpen] = useState(false)
   const [cookieImportOpen, setCookieImportOpen] = useState(false)
   const [cookieEndpoint, setCookieEndpoint] = useState('http://127.0.0.1:9222')
   const [cookieSource, setCookieSource] = useState<BrowserCookieImportSource | null>(null)
@@ -158,6 +202,9 @@ export function BrowserPanel({
   const [operationError, setOperationError] = useState<string | null>(null)
   const [navigationActionPending, setNavigationActionPending] = useState(false)
   const [copyNotice, setCopyNotice] = useState<string | null>(null)
+  const [importHintVisible, setImportHintVisible] = useState(() => !importHintHidden(initialState.profile.id))
+  const [annotatingCapturePath, setAnnotatingCapturePath] = useState<string | null>(null)
+  const [capturePending, setCapturePending] = useState(false)
   const addressInput = useRef<HTMLInputElement>(null)
   const surfaceHost = useRef<HTMLDivElement>(null)
   const surfaceEpoch = useRef(0)
@@ -169,12 +216,18 @@ export function BrowserPanel({
   const latestBounds = useRef<PhysicalBounds | null>(state.surfaceBounds)
   const lastPublishedSurface = useRef<{ bounds: PhysicalBounds | null; visible: boolean; focused: boolean } | null>(null)
   const page = state.page
+  const externalUrl = useMemo(() => externalBrowserUrl(page.url), [page.url])
+  const pageTitleRef = useRef(page.title)
+  pageTitleRef.current = page.title
+  useEffect(() => {
+    recordBrowserVisitTitle(page.url, page.title)
+  }, [page.url, page.title])
   const pendingPromptCount: number = state.permissionQueue.length + state.certificateQueue.length + state.dialogQueue.length
   const permissionGroups = useMemo(() => groupPermissionPrompts(state.permissionQueue), [state.permissionQueue])
   const navigationBlocked = navigationActionPending || page.loadState === 'loading'
   // Annotation no longer hides the native page: the annotation UI is an in-page
   // popover injected into the WebView itself, so the page must stay visible.
-  const domSurfaceBlocker = overflowOpen || cookieImportOpen || pendingPromptCount > 0
+  const domSurfaceBlocker = addressSuggestionsOpen || overflowOpen || cookieImportOpen || annotatingCapturePath !== null || pendingPromptCount > 0
   const panelVisible = active
     && workspaceVisible
     && !nativeSurfacesSuspended
@@ -406,6 +459,26 @@ export function BrowserPanel({
   }, [])
 
   useEffect(() => {
+    if (!state.designMode) return
+    const disarm = () => {
+      void controller.setDesignMode(page.id, false)
+        .then(() => dispatch({ type: 'designModeChanged', enabled: false }))
+        .catch(reportError)
+    }
+    if (!active || !focused || !workspaceVisible) {
+      disarm()
+      return
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      disarm()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [active, controller, focused, page.id, reportError, state.designMode, workspaceVisible])
+
+  useEffect(() => {
     if (!copyNotice) return
     const timer = window.setTimeout(() => setCopyNotice(null), 2200)
     return () => window.clearTimeout(timer)
@@ -462,6 +535,9 @@ export function BrowserPanel({
       if (event.pageId !== page.id || event.navigationGeneration < authoritativeGeneration.current) return
       authoritativeGeneration.current = Math.max(authoritativeGeneration.current, event.navigationGeneration)
       dispatch({ type: 'lifecycleReceived', event })
+      // Commit carries the authoritative URL; `pageTitleRef` still holds the
+      // page the user just left, so the title is corrected by the effect below.
+      if (event.kind === 'navigation_committed' && event.url) recordBrowserVisit(event.url, '')
       const permission = permissionPrompt(event)
       if (permission) dispatch({ type: 'permissionQueued', request: permission })
       const certificate = certificatePrompt(event)
@@ -491,17 +567,22 @@ export function BrowserPanel({
     let unsubscribe: (() => void) | undefined
     void controller.subscribeDesignGrabs((grab) => {
       if (grab.pageId !== page.id || grab.navigationGeneration !== page.navigationGeneration) return
-      // The in-page popover already collected the note and the user clicked
-      // "Copy". Create the annotation for its screenshot crop/metadata, then
-      // put the formatted text on the OS clipboard so the user can paste it
-      // wherever they want. Nothing is pushed at an agent panel.
       const comment = grab.comment ?? ''
       void controller.createAnnotation(page.id, grab, comment)
         .then((annotation) => {
           if (cancelled) return
+          if (state.grabIntent === 'annotate') {
+            dispatch({ type: 'annotationCreated', annotation })
+            return
+          }
           return copyAnnotation(annotation)
         })
         .catch(reportError)
+        .finally(() => {
+          if (cancelled) return
+          dispatch({ type: 'designModeChanged', enabled: false })
+          void controller.setDesignMode(page.id, false).catch(reportError)
+        })
     }).then((stop) => {
       if (cancelled) stop()
       else unsubscribe = stop
@@ -510,7 +591,7 @@ export function BrowserPanel({
       cancelled = true
       unsubscribe?.()
     }
-  }, [controller, copyAnnotation, page.id, page.navigationGeneration, reportError])
+  }, [controller, copyAnnotation, page.id, page.navigationGeneration, reportError, state.grabIntent])
 
   const profileLabel = useMemo(() => {
     if (state.profile.kind === 'workspace') return 'Workspace'
@@ -540,16 +621,36 @@ export function BrowserPanel({
       })
   }
 
-  const navigate = (event: FormEvent) => {
-    event.preventDefault()
-    navigateTo(state.addressDraft)
+  const startGrabIntent = (intent: BrowserGrabIntent) => {
+    const enabled = !state.designMode || state.grabIntent !== intent
+    void controller.setDesignMode(page.id, enabled)
+      .then(() => {
+        dispatch({ type: 'grabIntentChanged', intent })
+        dispatch({ type: 'designModeChanged', enabled })
+        if (enabled) dispatch({ type: 'annotationCleared' })
+      })
+      .catch(reportError)
   }
 
-  const setDesignMode = () => {
-    const enabled = !state.designMode
-    void controller.setDesignMode(page.id, enabled)
-      .then(() => dispatch({ type: 'designModeChanged', enabled }))
+  const reloadPage = () => {
+    if (page.loadState === 'loading') {
+      void controller.reload(page.id).catch(reportError)
+      return
+    }
+    runPageNavigation(() => controller.reload(page.id))
+  }
+
+  const openMarkup = () => {
+    if (page.url === 'about:blank' || capturePending || typeof controller.capturePageImage !== 'function') return
+    setCapturePending(true)
+    void controller.capturePageImage(page.id, captureDir)
+      .then((path) => {
+        if (mounted.current) setAnnotatingCapturePath(path)
+      })
       .catch(reportError)
+      .finally(() => {
+        if (mounted.current) setCapturePending(false)
+      })
   }
 
   const runPageNavigation = (action: () => Promise<BrowserPage | void>) => {
@@ -628,6 +729,10 @@ export function BrowserPanel({
       consent: cookieConsent,
     }).then((result) => {
       if (result.quarantined) dispatch({ type: 'profileCookieImportQuarantined' })
+      if (result.verified && !result.rolledBack && !result.quarantined) {
+        hideImportHint(state.profile.id)
+        setImportHintVisible(false)
+      }
       setCookieImportStatus(result.quarantined
         ? 'Import failed and this profile is quarantined because rollback could not be proven.'
         : result.rolledBack
@@ -661,20 +766,52 @@ export function BrowserPanel({
         onBlurCapture={handleChromeBlur}
         onPointerDownCapture={handleChromeFocus}
       >
-        <button type="button" aria-label="Back" disabled={navigationBlocked || !page.canGoBack} onClick={() => runPageNavigation(() => controller.goBack(page.id))}>←</button>
-        <button type="button" aria-label="Forward" disabled={navigationBlocked || !page.canGoForward} onClick={() => runPageNavigation(() => controller.goForward(page.id))}>→</button>
-        <button type="button" aria-label="Reload" disabled={navigationBlocked} onClick={() => runPageNavigation(() => controller.reload(page.id))}>↻</button>
-        <form onSubmit={navigate}>
-          <label className="browser-address-label">
-            <span>Address or search</span>
-            <input ref={addressInput} aria-label="Address or search" value={state.addressDraft} onChange={(event) => dispatch({ type: 'addressChanged', value: event.target.value })} />
-          </label>
-        </form>
-        <button type="button" aria-pressed={state.designMode} onClick={setDesignMode}>{state.designMode ? 'Picking…' : 'Pick'}</button>
-        {page.loadState === 'loading' ? <span className="browser-load-indicator" aria-label="Page loading" /> : null}
-        <span className={`browser-profile-badge profile-${state.profile.kind}`} title={`Isolated ${profileLabel.toLowerCase()} browser profile`}>{profileLabel}</span>
+        <button className="browser-toolbar-icon" type="button" aria-label="Back" disabled={navigationBlocked || !page.canGoBack} onClick={() => runPageNavigation(() => controller.goBack(page.id))}>
+          <ArrowLeft size={16} />
+        </button>
+        <button className="browser-toolbar-icon" type="button" aria-label="Forward" disabled={navigationBlocked || !page.canGoForward} onClick={() => runPageNavigation(() => controller.goForward(page.id))}>
+          <ArrowRight size={16} />
+        </button>
+        <button className="browser-toolbar-icon" type="button" aria-label={page.loadState === 'loading' ? 'Stop loading' : 'Reload'} disabled={navigationActionPending && page.loadState !== 'loading'} onClick={reloadPage}>
+          {page.loadState === 'loading' ? <Loader2 className="browser-toolbar-spinner" size={16} /> : <RotateCw size={16} />}
+        </button>
+        <BrowserAddressBar
+          value={state.addressDraft}
+          pageUrl={page.url}
+          inputRef={addressInput}
+          onChange={(value) => dispatch({ type: 'addressChanged', value })}
+          onSubmit={navigateTo}
+          onDropdownVisibilityChange={setAddressSuggestionsOpen}
+        />
+        {importHintVisible ? (
+          <button className="browser-import-hint" type="button" aria-label="Import browser data" disabled={state.profile.cookieImportQuarantined} onClick={() => setCookieImportOpen(true)}>
+            <Import size={14} />
+            가져오기
+          </button>
+        ) : null}
+        <button className={`browser-toolbar-icon browser-toolbar-action${state.designMode && state.grabIntent === 'copy' ? ' is-active' : ''}`} type="button" aria-label="Grab page element" title="페이지 요소 가져오기" aria-pressed={state.designMode && state.grabIntent === 'copy'} disabled={page.url === 'about:blank'} onClick={() => startGrabIntent('copy')}>
+          <Crosshair size={16} />
+        </button>
+        <button className={`browser-toolbar-icon browser-toolbar-action${state.designMode && state.grabIntent === 'annotate' ? ' is-active' : ''}`} type="button" aria-label="Annotate page element" title="페이지 요소에 주석 달기" aria-pressed={state.designMode && state.grabIntent === 'annotate'} disabled={page.url === 'about:blank'} onClick={() => startGrabIntent('annotate')}>
+          <MessageSquarePlus size={16} />
+        </button>
+        <button className={`browser-toolbar-icon browser-toolbar-action${capturePending ? ' is-active' : ''}`} type="button" aria-label="Draw on screenshot" title="스크린샷에 그리기" disabled={page.url === 'about:blank' || capturePending || typeof controller.capturePageImage !== 'function'} onClick={openMarkup}>
+          <PenTool size={16} />
+        </button>
+        <button className="browser-toolbar-icon" type="button" aria-label="Open browser devtools" title="브라우저 개발자 도구 열기" onClick={() => {
+          if (typeof controller.openDevTools === 'function') void controller.openDevTools(page.id).catch(reportError)
+        }}>
+          <SquareCode size={16} />
+        </button>
+        <button className="browser-toolbar-icon" type="button" aria-label="Open in default browser" title="기본 브라우저에서 열기" disabled={!externalUrl} onClick={() => {
+          if (externalUrl && typeof controller.openExternal === 'function') void controller.openExternal(externalUrl).catch(reportError)
+        }}>
+          <ExternalLink size={16} />
+        </button>
         <div className="browser-overflow">
-          <button type="button" aria-label="Browser page options" aria-expanded={overflowOpen} onClick={toggleOverflow}>⋯</button>
+          <button className="browser-toolbar-icon browser-toolbar-action" type="button" aria-label="Browser page options" aria-expanded={overflowOpen} onClick={toggleOverflow}>
+            <Ellipsis size={18} />
+          </button>
           {overflowOpen ? (
             <div className="browser-overflow-menu" role="menu">
               <label>
@@ -686,13 +823,17 @@ export function BrowserPanel({
                 </select>
               </label>
               {state.profile.kind === 'imported' ? (
-                <button type="button" role="menuitem" disabled={state.profile.cookieImportQuarantined} onClick={() => { setCookieImportOpen(true); setOverflowOpen(false) }}>
-                  Import Chrome cookies…
-                </button>
+                <>
+                  <div className="browser-overflow-separator" role="separator" />
+                  <button type="button" role="menuitem" disabled={state.profile.cookieImportQuarantined} onClick={() => { setCookieImportOpen(true); setOverflowOpen(false) }}>
+                    Import Chrome cookies…
+                  </button>
+                </>
               ) : null}
             </div>
           ) : null}
         </div>
+        <span className={`browser-profile-badge profile-${state.profile.kind}`} title={`Isolated ${profileLabel.toLowerCase()} browser profile`}>{profileLabel}</span>
         {pendingPromptCount > 0 ? <span className="browser-prompt-count" aria-label="Pending browser prompts">{pendingPromptCount}</span> : null}
         {copyNotice ? <span role="status" className="browser-toolbar-notice">{copyNotice}</span> : null}
         {operationError || page.error ? <span role="alert" className="browser-toolbar-error" title={operationError ?? page.error ?? undefined}>{operationError ?? page.error}</span> : null}
@@ -707,8 +848,8 @@ export function BrowserPanel({
           onPointerDownCapture={handleChromeFocus}
         >
           <div>
-            <strong>{state.annotation.accessibleName || state.annotation.browserRef}</strong>
-            <span>{state.annotation.domAncestry.join(' › ')}</span>
+            <strong>{state.annotation.selector || state.annotation.browserRef}</strong>
+            <span>{state.annotation.ancestorPath.join(' › ')}</span>
           </div>
           <input
             aria-label="Annotation comment"
@@ -767,6 +908,10 @@ export function BrowserPanel({
           {cookieImportStatus ? <p role="status">{cookieImportStatus}</p> : null}
           <button type="button" disabled={!cookieSource || cookieOrigins.length === 0 || !cookieConsent || state.profile.cookieImportQuarantined} onClick={importCookies}>Import and verify</button>
         </section>
+      ) : null}
+
+      {annotatingCapturePath ? (
+        <CaptureAnnotator key={annotatingCapturePath} captureDir={captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} />
       ) : null}
 
       <div

@@ -318,6 +318,33 @@ pub async fn browser_capture_crop(
 }
 
 #[tauri::command]
+pub async fn browser_open_dev_tools(
+    manager: State<'_, ManagedBrowser>,
+    page_id: String,
+) -> Result<(), String> {
+    let manager = manager.inner().clone();
+    off_main(move || manager.open_dev_tools(&page_id).map_err(to_string)).await
+}
+
+/// Capture the page and store it as an ordinary screenshot so the existing
+/// capture annotator can open it. Writing anywhere else would require widening
+/// `read_capture_file`, which is deliberately locked to `<dir>/Images`.
+#[tauri::command]
+pub async fn browser_capture_page_image(
+    manager: State<'_, ManagedBrowser>,
+    page_id: String,
+    dir: String,
+) -> Result<String, String> {
+    let manager = manager.inner().clone();
+    off_main(move || {
+        let bytes = manager.capture_page_png(&page_id).map_err(to_string)?;
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        crate::app::capture::store_capture_image(&dir, &format!("vibelink-browser-{stamp}"), &bytes)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn browser_create_annotation(
     manager: State<'_, ManagedBrowser>,
     input: BrowserAnnotationInput,

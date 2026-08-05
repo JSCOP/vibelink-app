@@ -12,18 +12,79 @@
 }
 
 .browser-toolbar {
-  z-index: 4;
+  position: relative;
+  z-index: 10;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   min-width: 0;
-  min-height: 38px;
-  padding: 5px 8px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--vibelink-border);
   background: var(--vibelink-panel);
 }
 
-.browser-toolbar button,
+.browser-toolbar-icon,
+.browser-import-hint {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 28px;
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-muted);
+  cursor: pointer;
+}
+
+.browser-toolbar-icon {
+  width: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.browser-toolbar-icon.browser-toolbar-action {
+  width: 32px;
+  height: 32px;
+}
+
+.browser-toolbar-icon:hover:not(:disabled) {
+  color: var(--vibelink-text);
+  background: var(--vibelink-hover);
+}
+
+.browser-toolbar-icon.is-active {
+  color: var(--vibelink-bg);
+  background: var(--vibelink-accent);
+}
+
+.browser-toolbar-icon.is-active:hover:not(:disabled) {
+  color: var(--vibelink-bg);
+  background: var(--vibelink-accent);
+}
+
+.browser-toolbar-icon:disabled,
+.browser-import-hint:disabled,
+.browser-cookie-import button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.browser-import-hint {
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: 999px;
+  color: var(--vibelink-text);
+  background: var(--vibelink-panel-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.browser-import-hint:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+}
+
 .browser-annotation button,
 .browser-prompts button,
 .browser-cookie-import button,
@@ -36,30 +97,102 @@
   cursor: pointer;
 }
 
-.browser-toolbar button:disabled,
-.browser-cookie-import button:disabled {
-  opacity: 0.45;
-  cursor: default;
+.browser-address-shell {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
 }
 
-.browser-toolbar form {
-  flex: 1 1 auto;
-  min-width: 90px;
+.browser-address-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-lg);
+  padding: 4px 12px;
+  background: var(--vibelink-input);
+  box-shadow: var(--vibelink-shadow-soft);
 }
 
-.browser-address-label {
-  display: block;
+.browser-address-icon,
+.browser-address-suggestion-icon {
+  flex: 0 0 auto;
+  color: var(--vibelink-muted);
 }
 
-.browser-address-label > span {
+.browser-address-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  padding: 0;
+  color: var(--vibelink-text);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+}
+
+.browser-address-suggestions {
   position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: var(--z-popover);
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-lg);
+  background: var(--vibelink-dialog);
+  box-shadow: var(--vibelink-shadow);
 }
 
-.browser-address-label input,
+.browser-toolbar .browser-address-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: var(--vibelink-radius-sm);
+  padding: 8px 12px;
+  color: var(--vibelink-text);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+.browser-toolbar .browser-address-suggestion:hover,
+.browser-toolbar .browser-address-suggestion.is-highlighted {
+  background: var(--vibelink-accent-soft);
+}
+
+.browser-address-suggestion-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.browser-address-suggestion-title,
+.browser-address-suggestion-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-address-suggestion-title {
+  color: var(--vibelink-text);
+  font-size: 13px;
+}
+
+.browser-address-suggestion-subtitle {
+  color: var(--vibelink-muted);
+  font-size: 11px;
+}
+
 .browser-annotation input,
 .browser-cookie-import input[type='text'],
 .browser-cookie-endpoint input {
@@ -87,16 +220,10 @@
   font-size: 11px;
 }
 
-.browser-profile-badge.profile-incognito { color: #b66dff; border-color: color-mix(in srgb, #b66dff 50%, transparent); }
+.browser-profile-badge.profile-incognito { color: var(--vibelink-accent); border-color: var(--vibelink-accent-border); }
 .browser-profile-badge.profile-imported { color: var(--vibelink-warning); border-color: var(--vibelink-warning-soft); }
 
-.browser-load-indicator {
-  width: 10px;
-  height: 10px;
-  flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--vibelink-accent) 28%, transparent);
-  border-top-color: var(--vibelink-accent);
-  border-radius: 50%;
+.browser-toolbar-spinner {
   animation: browser-load-spin 700ms linear infinite;
 }
 
@@ -106,35 +233,63 @@
 
 .browser-overflow {
   position: relative;
+  flex: 0 0 auto;
 }
 
 .browser-overflow-menu {
   position: absolute;
-  top: calc(100% + 5px);
+  top: calc(100% + 6px);
   right: 0;
   z-index: 20;
   display: grid;
-  gap: 7px;
-  width: 190px;
-  padding: 8px;
+  gap: 2px;
+  min-width: 224px;
+  padding: 6px;
   border: 1px solid var(--vibelink-border);
-  border-radius: var(--vibelink-radius-sm);
-  background: var(--vibelink-panel);
+  border-radius: var(--vibelink-radius-lg);
+  background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow);
 }
 
-.browser-overflow-menu label {
+.browser-overflow-menu label,
+.browser-overflow-menu button {
   display: flex;
   align-items: center;
+  min-height: 28px;
+  box-sizing: border-box;
+  border-color: transparent;
+  background: transparent;
+  font-size: 12px;
+}
+
+.browser-overflow-menu label {
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  padding: 0 6px;
+}
+
+.browser-overflow-menu button {
+  width: 100%;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.browser-overflow-menu button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
 }
 
 .browser-overflow-menu select {
   min-width: 100px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
   color: inherit;
   background: var(--vibelink-bg);
+}
+
+.browser-overflow-separator {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--vibelink-border);
 }
 
 .browser-prompt-count {

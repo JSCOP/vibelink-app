@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { BrowserPanel } from './BrowserPanel'
+import { useWorkspaceStore } from '../state/store'
 import type { BrowserContentPanelProps } from './browserContentLifecycle'
 import type {
   BrowserAnnotation,
@@ -58,6 +59,7 @@ export function BrowserContentPanel({
   const [initialState, setInitialState] = useState<BrowserContentState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [surfaceOwnerGeneration] = useState(nextSurfaceOwnerGeneration)
+  const captureDir = useWorkspaceStore((state) => state.settings.captureDir)
   const surfaceUpdateTail = useRef<Promise<void>>(Promise.resolve())
   const latestSurfaceUpdateGeneration = useRef(0)
   const lifecycleSubscribers = useRef(new Set<(event: BrowserLifecycleEvent) => void>())
@@ -101,6 +103,15 @@ export function BrowserContentPanel({
     async setDeviceMetrics(targetPageId, metrics) {
       return toPage(await invoke<BackendPage>('browser_set_device_metrics', { pageId: targetPageId, metrics }))
     },
+    async capturePageImage(targetPageId, dir) {
+      return invoke<string>('browser_capture_page_image', { pageId: targetPageId, dir })
+    },
+    async openDevTools(targetPageId) {
+      await invoke('browser_open_dev_tools', { pageId: targetPageId })
+    },
+    async openExternal(url) {
+      await invoke('open_path', { path: url })
+    },
     async resolvePermission(requestId, decision) {
       await invoke('browser_resolve_permission', { requestId, decision })
     },
@@ -117,8 +128,15 @@ export function BrowserContentPanel({
           pageId: targetPageId,
           navigationGeneration: grab.navigationGeneration,
           browserRef: grab.browserRef,
+          tagName: grab.tagName,
+          selector: grab.selector,
+          fullPath: grab.fullPath,
+          role: grab.role,
+          reactComponents: grab.reactComponents,
+          htmlSnippet: grab.htmlSnippet,
           accessibleName: grab.accessibleName,
-          domAncestry: grab.domAncestry,
+          nearbyText: grab.nearbyText,
+          ancestorPath: grab.ancestorPath,
           bounds: grab.bounds,
           text: grab.text,
           attributes: grab.attributes,
@@ -203,6 +221,7 @@ export function BrowserContentPanel({
       key={`${workspaceId}:${pageId}:${profileId}`}
       controller={controller}
       initialState={initialState}
+      captureDir={captureDir}
       active={active}
       focused={focused}
       workspaceVisible={workspaceVisible}

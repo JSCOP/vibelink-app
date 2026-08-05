@@ -130,6 +130,9 @@ pub trait BrowserProvider: Send + Sync + 'static {
     fn capture_crop(&self, _page_id: &str, _bounds: PhysicalBounds) -> BrowserResult<Vec<u8>> {
         Err(BrowserError::unsupported("capture_crop"))
     }
+    fn open_dev_tools(&self, _page_id: &str) -> BrowserResult<()> {
+        Err(BrowserError::unsupported("open_dev_tools"))
+    }
     fn detect_cookie_import_source(
         &self,
         _endpoint: &str,
@@ -1188,9 +1191,9 @@ impl BrowserProvider for NativeBrowserProvider {
             .get(page_id)
             .ok_or_else(|| BrowserError::not_found(page_id))?;
         let script = if enabled {
-            r#"(()=>{if(window.__vibelinkDesignGrab)return;const HL='3px solid #ff2d55';let active=null;const clearHL=()=>{if(active){active.style.outline=active.dataset.vibelinkOutline||'';delete active.dataset.vibelinkOutline;active=null}};const hover=(event)=>{if(window.__vibelinkDesignPopover)return;clearHL();active=event.target;active.dataset.vibelinkOutline=active.style.outline||'';active.style.outline=HL};const removePopover=()=>{const p=window.__vibelinkDesignPopover;if(p){p.remove();window.__vibelinkDesignPopover=null}};const buildSelection=(e,comment)=>{const r=e.getBoundingClientRect();const ancestry=[];for(let n=e;n&&n.nodeType===1;n=n.parentElement)ancestry.unshift(n.tagName.toLowerCase()+(n.id?'#'+n.id:''));const styles=getComputedStyle(e);return{browserRef:e.tagName.toLowerCase()+(e.id?'#'+e.id:''),domAncestry:ancestry,accessibleName:e.getAttribute('aria-label')||e.innerText||e.value||'',bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height),scaleFactorMilli:Math.round(devicePixelRatio*1000)},computedStyles:['display','position','color','background-color','font-family','font-size'].map(k=>[k,styles.getPropertyValue(k)]),attributes:Array.from(e.attributes).map(a=>[a.name,a.value]),text:e.innerText||e.value||'',comment:comment||'',sourceHints:[]}};const toast=(msg)=>{const t=document.createElement('div');t.setAttribute('data-vibelink-annot','1');t.textContent=msg;t.style.cssText='position:fixed;z-index:2147483647;left:50%;top:16px;transform:translateX(-50%);background:#14171c;color:#e6e6e6;border:1px solid #2d333b;border-radius:8px;padding:8px 14px;font:13px system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5)';document.documentElement.appendChild(t);setTimeout(()=>t.remove(),1800)};const submit=(e,comment)=>{removePopover();clearHL();toast('Copied to clipboard');location.href='vibelink-design://grab?payload='+encodeURIComponent(JSON.stringify(buildSelection(e,comment)))};const showPopover=(e)=>{removePopover();const r=e.getBoundingClientRect();const box=document.createElement('div');box.setAttribute('data-vibelink-annot','1');const top=r.top>150;box.style.cssText='position:fixed;z-index:2147483647;left:'+Math.max(8,Math.min(r.left,innerWidth-320))+'px;'+(top?('top:'+(r.top-8)+'px;transform:translateY(-100%);'):('top:'+(r.bottom+8)+'px;'))+'width:300px;background:#14171c;color:#e6e6e6;border:1px solid #2d333b;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);font:13px system-ui,sans-serif;padding:10px;box-sizing:border-box';const crumb=e.tagName.toLowerCase()+(e.id?'#'+e.id:'');box.innerHTML='<div style=\"font-weight:600;color:#ff6b8a;margin-bottom:6px;word-break:break-all\">'+crumb+'</div>';const ta=document.createElement('textarea');ta.placeholder='Add a note (optional)';ta.style.cssText='width:100%;min-height:56px;resize:vertical;background:#0d0f12;color:#e6e6e6;border:1px solid #2d333b;border-radius:6px;padding:6px;font:13px system-ui,sans-serif;box-sizing:border-box';const row=document.createElement('div');row.style.cssText='display:flex;gap:6px;justify-content:flex-end;margin-top:8px';const mk=(label,primary)=>{const b=document.createElement('button');b.textContent=label;b.style.cssText='padding:5px 12px;border-radius:6px;border:1px solid '+(primary?'#3b82f6':'#2d333b')+';background:'+(primary?'#2563eb':'transparent')+';color:#e6e6e6;cursor:pointer;font:13px system-ui,sans-serif';return b};const cancel=mk('Cancel',false);const send=mk('Copy',true);cancel.onclick=(ev)=>{ev.stopPropagation();removePopover();clearHL()};send.onclick=(ev)=>{ev.stopPropagation();submit(e,ta.value)};ta.onkeydown=(ev)=>{ev.stopPropagation();if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter')submit(e,ta.value);if(ev.key==='Escape'){removePopover();clearHL()}};row.appendChild(cancel);row.appendChild(send);box.appendChild(ta);box.appendChild(row);document.documentElement.appendChild(box);window.__vibelinkDesignPopover=box;setTimeout(()=>ta.focus(),0)};const click=(event)=>{if(event.target.closest&&event.target.closest('[data-vibelink-annot]'))return;event.preventDefault();event.stopImmediatePropagation();showPopover(event.target)};document.addEventListener('mouseover',hover,true);document.addEventListener('click',click,true);window.__vibelinkDesignGrab={hover,click,clear:()=>{removePopover();clearHL()}}})()"#
+            super::grab_script::ARM_SCRIPT
         } else {
-            r#"(()=>{const d=window.__vibelinkDesignGrab;if(!d)return;document.removeEventListener('mouseover',d.hover,true);document.removeEventListener('click',d.click,true);d.clear();delete window.__vibelinkDesignGrab})()"#
+            super::grab_script::TEARDOWN_SCRIPT
         };
         page.webview.eval(script).map_err(native_error)
     }
@@ -1313,6 +1316,40 @@ impl BrowserProvider for NativeBrowserProvider {
             bounds,
         )
         .map_err(|error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()))
+    }
+
+    /// WebView2 owns its own inspector window; there is no CDP method for it and
+    /// Tauri's `open_devtools` is compiled out of release builds, so call the
+    /// native interface directly on the UI thread that owns the controller.
+    #[cfg(all(windows, not(test)))]
+    fn open_dev_tools(&self, page_id: &str) -> BrowserResult<()> {
+        let webview = self
+            .pages()?
+            .get(page_id)
+            .map(|page| page.webview.clone())
+            .ok_or_else(|| BrowserError::not_found(page_id))?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        webview
+            .with_webview(move |platform| {
+                let opened = unsafe {
+                    platform
+                        .controller()
+                        .CoreWebView2()
+                        .and_then(|core| core.OpenDevToolsWindow())
+                };
+                let _ = sender.send(opened.map_err(|error| {
+                    BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string())
+                }));
+            })
+            .map_err(native_error)?;
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| {
+                BrowserError::new(
+                    BrowserErrorCode::Timeout,
+                    format!("opening browser devtools timed out: {error}"),
+                )
+            })?
     }
 
     fn detect_cookie_import_source(

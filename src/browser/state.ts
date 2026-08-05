@@ -10,6 +10,9 @@ import type {
   PhysicalBounds,
 } from './types'
 
+export type BrowserGrabIntent = 'copy' | 'annotate'
+export type BrowserPanelState = BrowserContentState & { grabIntent: BrowserGrabIntent }
+
 export type BrowserPanelAction =
   | { type: 'addressChanged'; value: string }
   | { type: 'navigationStarted'; input: string; generation: number }
@@ -18,6 +21,7 @@ export type BrowserPanelAction =
   | { type: 'surfaceBoundsChanged'; bounds: PhysicalBounds | null }
   | { type: 'surfaceVisibilityChanged'; visible: boolean }
   | { type: 'designModeChanged'; enabled: boolean }
+  | { type: 'grabIntentChanged'; intent: BrowserGrabIntent }
   | { type: 'annotationCreated'; annotation: BrowserAnnotation }
   | { type: 'annotationCommentChanged'; comment: string }
   | { type: 'annotationCleared' }
@@ -33,11 +37,12 @@ export type BrowserPanelAction =
   | { type: 'profileCookieImportQuarantined' }
   | { type: 'lifecycleReceived'; event: BrowserLifecycleEvent }
 
-export function createBrowserPanelState(input: BrowserContentState): BrowserContentState {
+export function createBrowserPanelState(input: BrowserContentState): BrowserPanelState {
   return {
     ...input,
     addressDraft: input.addressDraft ?? input.page.url,
     designMode: input.designMode ?? false,
+    grabIntent: 'copy',
     annotation: input.annotation ?? null,
     annotationComment: input.annotationComment ?? '',
     modalDepth: input.modalDepth ?? 0,
@@ -54,7 +59,7 @@ export function activeSurfaceVisible(state: BrowserContentState): boolean {
   return state.modalDepth === 0
 }
 
-export function browserPanelReducer(state: BrowserContentState, action: BrowserPanelAction): BrowserContentState {
+export function browserPanelReducer(state: BrowserPanelState, action: BrowserPanelAction): BrowserPanelState {
   switch (action.type) {
     case 'addressChanged':
       return { ...state, addressDraft: action.value }
@@ -79,7 +84,9 @@ export function browserPanelReducer(state: BrowserContentState, action: BrowserP
     case 'surfaceVisibilityChanged':
       return { ...state, page: { ...state.page, effectiveVisible: action.visible } }
     case 'designModeChanged':
-      return { ...state, designMode: action.enabled, annotation: action.enabled ? state.annotation : null }
+      return { ...state, designMode: action.enabled }
+    case 'grabIntentChanged':
+      return { ...state, grabIntent: action.intent }
     case 'annotationCreated':
       if (action.annotation.pageId !== state.page.id || action.annotation.navigationGeneration !== state.page.navigationGeneration) return state
       return { ...state, annotation: action.annotation, annotationComment: action.annotation.comment }
@@ -118,7 +125,7 @@ export function browserPanelReducer(state: BrowserContentState, action: BrowserP
   }
 }
 
-function reduceLifecycle(state: BrowserContentState, event: BrowserLifecycleEvent): BrowserContentState {
+function reduceLifecycle(state: BrowserPanelState, event: BrowserLifecycleEvent): BrowserPanelState {
   if (event.pageId !== state.page.id || event.navigationGeneration < state.page.navigationGeneration) return state
   let page = state.page
   let addressDraft = state.addressDraft

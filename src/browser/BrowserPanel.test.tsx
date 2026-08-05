@@ -33,8 +33,15 @@ const annotation: BrowserAnnotation = {
   navigationGeneration: page.navigationGeneration,
   url: page.url,
   browserRef: 'button#save',
+  tagName: 'button',
+  selector: '#save',
+  fullPath: 'html > body > button#save',
+  role: 'button',
+  reactComponents: '<App> <SaveButton>',
+  htmlSnippet: '<button id="save">Save</button>',
   accessibleName: 'Save',
-  domAncestry: ['html', 'body', 'button#save'],
+  nearbyText: ['Edit', 'Cancel'],
+  ancestorPath: ['body', 'html'],
   bounds: { x: 1, y: 2, width: 100, height: 30, scaleFactorMilli: 1000 },
   text: 'Save',
   attributes: [['id', 'save']],
@@ -42,6 +49,26 @@ const annotation: BrowserAnnotation = {
   sourceHints: ['src/App.tsx'],
   comment: '',
   screenshot: null,
+}
+
+const designGrab: BrowserDesignGrab = {
+  pageId: page.id,
+  navigationGeneration: page.navigationGeneration,
+  browserRef: annotation.browserRef,
+  tagName: annotation.tagName,
+  selector: annotation.selector,
+  fullPath: annotation.fullPath,
+  role: annotation.role,
+  reactComponents: annotation.reactComponents,
+  htmlSnippet: annotation.htmlSnippet,
+  accessibleName: annotation.accessibleName,
+  nearbyText: annotation.nearbyText,
+  ancestorPath: annotation.ancestorPath,
+  bounds: annotation.bounds,
+  text: annotation.text,
+  attributes: annotation.attributes,
+  computedStyles: annotation.computedStyles,
+  sourceHints: annotation.sourceHints,
 }
 
 function state(): BrowserContentState {
@@ -67,13 +94,20 @@ class RecordingController implements BrowserContentController {
   designHandler: ((grab: BrowserDesignGrab) => void) | null = null
   lifecycleHandler: ((event: BrowserLifecycleEvent) => void) | null = null
   navigations: string[] = []
+  designModes: boolean[] = []
+  captureCalls: Array<{ pageId: string; dir: string }> = []
+  devToolsPages: string[] = []
+  externalUrls: string[] = []
   async navigate(_pageId: string, input: string) { this.navigations.push(input); return { url: input, navigationGeneration: 3 } }
   async goBack() {}
   async goForward() {}
   async reload() {}
   async setSurfaceState(pageId: string, value: { bounds: PhysicalBounds | null; visible: boolean; focused: boolean }) { this.surfaces.push({ pageId, ...value }) }
-  async setDesignMode() {}
+  async setDesignMode(_pageId: string, enabled: boolean) { this.designModes.push(enabled) }
   async setDeviceMetrics() { return page }
+  async capturePageImage(pageId: string, dir: string) { this.captureCalls.push({ pageId, dir }); return 'C:/captures/Images/browser.png' }
+  async openDevTools(pageId: string) { this.devToolsPages.push(pageId) }
+  async openExternal(url: string) { this.externalUrls.push(url) }
   async resolvePermission() {}
   async resolveCertificate() {}
   async resolveDialog() {}
@@ -84,7 +118,10 @@ class RecordingController implements BrowserContentController {
   async subscribeLifecycle(handler: (event: BrowserLifecycleEvent) => void) { this.lifecycleHandler = handler; return () => { this.lifecycleHandler = null } }
 }
 
-beforeEach(() => vi.mocked(invoke).mockClear())
+beforeEach(() => {
+  vi.mocked(invoke).mockClear()
+  window.localStorage.removeItem('vibelink.browser.importHintHidden')
+})
 afterEach(() => cleanup())
 
 describe('browser content state', () => {
@@ -95,6 +132,13 @@ describe('browser content state', () => {
     expect(current.page.navigationGeneration).toBe(3)
     current = browserPanelReducer(current, { type: 'annotationCreated', annotation })
     expect(current.annotation).toBeNull()
+  })
+
+  it('defaults element grabs to copy intent and switches intent explicitly', () => {
+    let current = createBrowserPanelState(state())
+    expect(current.grabIntent).toBe('copy')
+    current = browserPanelReducer(current, { type: 'grabIntentChanged', intent: 'annotate' })
+    expect(current.grabIntent).toBe('annotate')
   })
 
   it('uses modal depth only for the content-local native surface gate', () => {
@@ -112,6 +156,99 @@ describe('BrowserPanel', () => {
     expect(screen.queryByLabelText('Browser capture state')).toBeNull()
     expect(screen.getByText('Workspace')).toBeInTheDocument()
     await waitFor(() => expect(controller.surfaces.some((surface) => surface.pageId === page.id)).toBe(true))
+  })
+
+  it('renders Orca toolbar controls in the required order', () => {
+    const controller = new RecordingController()
+    const { container } = render(<BrowserPanel controller={controller} initialState={state()} active focused workspaceVisible />)
+    const toolbar = container.querySelector('.browser-toolbar')
+    const controls = [...(toolbar?.children ?? [])]
+      .filter((element) => element.matches('button, .browser-address-shell, .browser-overflow'))
+      .map((element) => element.getAttribute('aria-label') ?? (element.classList.contains('browser-address-shell') ? 'Address' : element.querySelector('button')?.getAttribute('aria-label')))
+    expect(controls).toEqual([
+      'Back',
+      'Forward',
+      'Reload',
+      'Address',
+      'Import browser data',
+      'Grab page element',
+      'Annotate page element',
+      'Draw on screenshot',
+      'Open browser devtools',
+      'Open in default browser',
+      'Browser page options',
+    ])
+  })
+
+  it('copies grab intent immediately but leaves annotate intent editable', async () => {
+    const controller = new RecordingController()
+    render(<BrowserPanel controller={controller} initialState={state()} active focused workspaceVisible />)
+    await waitFor(() => expect(controller.designHandler).not.toBeNull())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grab page element' }))
+    await waitFor(() => expect(controller.designModes).toContain(true))
+    controller.designHandler?.(designGrab)
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('clipboard_write_text', { text: formatBrowserAnnotation(annotation) }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Grab page element' })).toHaveAttribute('aria-pressed', 'false'))
+
+    // Annotate intent must NOT copy on its own: the page emits no comment, so
+    // the aside is where the user writes one before it reaches the clipboard.
+    fireEvent.click(screen.getByRole('button', { name: 'Annotate page element' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Annotate page element' })).toHaveAttribute('aria-pressed', 'true'))
+    await waitFor(() => expect(controller.designHandler).not.toBeNull())
+    vi.mocked(invoke).mockClear()
+    controller.designHandler?.(designGrab)
+
+    const comment = await screen.findByLabelText('Annotation comment')
+    expect(comment).toHaveValue('')
+    expect(invoke).not.toHaveBeenCalledWith('clipboard_write_text', expect.anything())
+
+    fireEvent.change(comment, { target: { value: 'Needs spacing' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('clipboard_write_text', {
+      text: formatBrowserAnnotation({ ...annotation, comment: 'Needs spacing' }),
+    }))
+  })
+
+  it('disarms design mode on Escape and when the pane loses focus', async () => {
+    const controller = new RecordingController()
+    const props = { controller, initialState: state(), active: true, workspaceVisible: true }
+    const { rerender } = render(<BrowserPanel {...props} focused />)
+    const grabButton = screen.getByRole('button', { name: 'Grab page element' })
+    fireEvent.click(grabButton)
+    await waitFor(() => expect(grabButton).toHaveAttribute('aria-pressed', 'true'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(grabButton).toHaveAttribute('aria-pressed', 'false'))
+
+    fireEvent.click(grabButton)
+    await waitFor(() => expect(grabButton).toHaveAttribute('aria-pressed', 'true'))
+    rerender(<BrowserPanel {...props} focused={false} />)
+    await waitFor(() => expect(grabButton).toHaveAttribute('aria-pressed', 'false'))
+  })
+
+  it('opens native toolbar actions and the existing screenshot annotator', async () => {
+    const controller = new RecordingController()
+    render(<BrowserPanel controller={controller} initialState={state()} captureDir="C:/captures" active focused workspaceVisible />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open browser devtools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open in default browser' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Draw on screenshot' }))
+    await waitFor(() => expect(controller.devToolsPages).toEqual([page.id]))
+    expect(controller.externalUrls).toEqual([page.url])
+    expect(controller.captureCalls).toEqual([{ pageId: page.id, dir: 'C:/captures' }])
+    expect(await screen.findByRole('dialog', { name: 'Mark up capture' })).toBeInTheDocument()
+  })
+
+  it('hides and persists the import hint after a verified import', async () => {
+    const controller = new RecordingController()
+    render(<BrowserPanel controller={controller} initialState={state()} active focused workspaceVisible />)
+    fireEvent.click(screen.getByRole('button', { name: 'Import browser data' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }))
+    const origin = await screen.findByLabelText('https://example.com')
+    fireEvent.click(origin)
+    fireEvent.click(screen.getByLabelText(/I consent to importing cookies/))
+    fireEvent.click(screen.getByRole('button', { name: 'Import and verify' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Import browser data' })).toBeNull())
+    expect(JSON.parse(window.localStorage.getItem('vibelink.browser.importHintHidden') ?? '[]')).toContain('profile-a')
   })
 
   it('copies an annotation to the OS clipboard instead of pushing it at an agent', async () => {

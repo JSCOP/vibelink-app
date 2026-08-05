@@ -976,6 +976,23 @@ pub fn read_capture_file(
     read_capture_file_native(&dir, &path)
 }
 
+/// Store PNG bytes in the user's capture folder and return the absolute path.
+/// Callers outside this module (the browser markup flow) need their image to
+/// land where `read_capture_file` will serve it, which is `<dir>/Images` only.
+pub(crate) fn store_capture_image(
+    dir: &str,
+    file_stem: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("capture image is empty".to_string());
+    }
+    let images = resolve_dir(dir, "Images").map_err(to_string)?;
+    let path = unique_path(&images, &format!("{file_stem}.png"));
+    std::fs::write(&path, bytes).map_err(to_string)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub async fn start_video_capture(
     supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,

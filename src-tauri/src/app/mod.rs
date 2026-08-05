@@ -245,6 +245,8 @@ pub fn run() {
             browser::browser_set_device_metrics,
             browser::browser_capture_state,
             browser::browser_capture_crop,
+            browser::browser_open_dev_tools,
+            browser::browser_capture_page_image,
             browser::browser_create_annotation,
             browser::browser_detect_cookie_import_source,
             browser::browser_import_cookies,

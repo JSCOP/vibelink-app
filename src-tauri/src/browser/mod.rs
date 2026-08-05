@@ -1,4 +1,5 @@
 mod error;
+mod grab_script;
 mod manager;
 mod policy;
 mod provider;
