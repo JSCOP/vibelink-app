@@ -13,6 +13,7 @@ import { vibelinkDockviewTheme } from './dockviewTheme'
 import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverlay'
 import { isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
 import { settleDockviewOverlayLayout, waitForDockviewOverlayLayout } from './splitOverlayLayout'
+import { withLayoutParamsPersist } from './suppression'
 import { getTerminalWindow } from './terminalWindowRegistry'
 import {
   parseWorkspaceContentParams,
@@ -101,8 +102,10 @@ export function WorkspaceWindowPanel({
       const current = outerApi.getParameters<WorkspaceWindowParams>()
       const title = workspaceWindowTitle(inner)
       if (JSON.stringify(current.inner) === JSON.stringify(inner) && current.title === title) return
-      outerApi.updateParameters({ ...current, title, inner })
-      outerApi.setTitle(title)
+      withLayoutParamsPersist(() => {
+        outerApi.updateParameters({ ...current, title, inner })
+        outerApi.setTitle(title)
+      })
       notifyChanged()
     }, 120)
   }, [captureInnerLayout, notifyChanged, outerApi])

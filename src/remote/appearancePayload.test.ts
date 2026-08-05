@@ -15,7 +15,7 @@ describe('buildRemoteAppearance', () => {
     expect(payload.fontFamily).toBe(defaultSettings.fontFamily)
     expect(payload.fontWeight).toBe(String(defaultSettings.terminalFontWeight))
     expect(payload.fontWeightBold).toBe('700')
-    expect(payload.selectedPaneHighlightColor).toBe('#737373')
+    expect(payload.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(payload.alarmHighlightColor).toBe('#86efac')
     expect(payload.reviewedPaneHighlightColor).toBe('#3794ff')
     expect(payload).not.toHaveProperty('workspaceAlerts')

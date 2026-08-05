@@ -32,14 +32,25 @@ const CONTEXT_MENU_HEIGHT = 416
 
 type DeferredTerminalMount = { cancelled: boolean; mount: () => void }
 
+// One mount per frame was N frames of dead time for an N-pane workspace: at 12
+// panes the last terminal only started attaching ~200 ms after the switch. The
+// point was never one-per-frame, it was "do not open every xterm in the same
+// frame" — so spend a frame budget instead and let a slow mount end the batch.
+const TERMINAL_MOUNT_FRAME_BUDGET_MS = 8
+
 const deferredTerminalMounts: DeferredTerminalMount[] = []
 let deferredTerminalMountFrame: number | undefined
 
 function flushDeferredTerminalMount(): void {
   deferredTerminalMountFrame = undefined
-  let next = deferredTerminalMounts.shift()
-  while (next?.cancelled) next = deferredTerminalMounts.shift()
-  next?.mount()
+  const deadline = performance.now() + TERMINAL_MOUNT_FRAME_BUDGET_MS
+  for (;;) {
+    let next = deferredTerminalMounts.shift()
+    while (next?.cancelled) next = deferredTerminalMounts.shift()
+    if (!next) break
+    next.mount()
+    if (performance.now() >= deadline) break
+  }
   if (deferredTerminalMounts.length > 0) deferredTerminalMountFrame = requestAnimationFrame(flushDeferredTerminalMount)
 }
 

@@ -91,7 +91,7 @@ import { WorkspaceEmptyState } from './WorkspaceEmptyState'
 import { balancedGridForPaneCount, type GridSize } from './templatePlan'
 import { settleDockviewOverlayLayout, settleDockviewOverlayReposition } from './splitOverlayLayout'
 import { isDividerResizeActive, isInteractiveResizeActive, onInteractiveResizeEnd } from './interactiveResize'
-import { withSuppressedPanelRemoval } from './suppression'
+import { isLayoutParamsPersistActive, withSuppressedPanelRemoval } from './suppression'
 import {
   AUTOMATION_PANE_ROLE,
   isStructuralWorkspaceContentKind,
@@ -1809,6 +1809,11 @@ export function WorkspaceView({
       event.api.onDidLayoutChange(() => {
         if (suppressPanelRemovalRef.current || resizeSettlingRef.current) return
         syncChromeState()
+        // A nested window persisting its serialized layout into this panel's
+        // params fires the same event as a real grid change. Reacting would arm
+        // the 140 ms quiet timer and re-settle every window and terminal for a
+        // write that moved nothing.
+        if (isLayoutParamsPersistActive()) return
         requestLiveWorkspaceResize(false)
       }),
       event.api.onDidMovePanel(() => {

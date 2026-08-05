@@ -1510,34 +1510,48 @@ describe('TerminalManager output scheduling', () => {
     }
   })
 
-  it('hands the WebGL context back while a pane is hidden', () => {
-    const paneId = 'pane-webgl-hidden-release'
-    const container = makeContainer()
-    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+  it('keeps a hidden pane on WebGL and reclaims the least recently used context under the cap', () => {
     webglMock.fail = false
-    TerminalManager.attach(paneId, container)
-    TerminalManager.setPaneVisible(paneId, true)
-    const manager = TerminalManager as unknown as {
-      entries: Map<string, { webgl?: unknown; webglReleasedWhileHidden?: boolean }>
+    const containers: HTMLElement[] = []
+    const paneIds = Array.from({ length: 12 }, (_, index) => `pane-webgl-lru-${index}`)
+    const arriving = 'pane-webgl-lru-arriving'
+    const open = (paneId: string) => {
+      const container = makeContainer()
+      vi.spyOn(container, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600 } as DOMRect)
+      containers.push(container)
+      TerminalManager.attach(paneId, container)
+      TerminalManager.setPaneVisible(paneId, true)
     }
-    const entry = manager.entries.get(paneId)
-    if (!entry) throw new Error('missing hidden-release entry')
-    const attached = webglMock.instances[0]
-    if (!attached) throw new Error('missing initial WebGL renderer')
 
     try {
-      TerminalManager.setPaneVisible(paneId, false)
-      expect(entry.webgl).toBeUndefined()
-      expect(entry.webglReleasedWhileHidden).toBe(true)
-      expect(attached.lostContextCalls).toBe(1)
+      for (const paneId of paneIds) open(paneId)
+      const manager = TerminalManager as unknown as {
+        entries: Map<string, { webgl?: unknown; webglReleasedWhileHidden?: boolean }>
+      }
+      const zoomedOut = manager.entries.get(paneIds[0])
+      if (!zoomedOut) throw new Error('missing hidden-release entry')
+      const renderer = zoomedOut.webgl
 
-      TerminalManager.setPaneVisible(paneId, true)
-      expect(webglMock.instances).toHaveLength(2)
-      expect(entry.webgl).toBe(webglMock.instances[1])
-      expect(entry.webglReleasedWhileHidden).toBe(false)
+      // An Alt+Z zoom hides every sibling for a moment. Rebuilding their
+      // contexts on the way back is what made the toggle expensive.
+      TerminalManager.setPaneVisible(paneIds[0], false)
+      expect(zoomedOut.webgl).toBe(renderer)
+      expect(webglMock.instances).toHaveLength(12)
+
+      // A pane the user can actually see wins the last slot instead.
+      open(arriving)
+      expect(zoomedOut.webgl).toBeUndefined()
+      expect(zoomedOut.webglReleasedWhileHidden).toBe(true)
+      expect(manager.entries.get(arriving)?.webgl).toBe(webglMock.instances[12])
+
+      // Coming back into view re-acquires a context once a slot is free.
+      TerminalManager.dispose(arriving)
+      TerminalManager.setPaneVisible(paneIds[0], true)
+      expect(zoomedOut.webgl).toBe(webglMock.instances[13])
+      expect(zoomedOut.webglReleasedWhileHidden).toBe(false)
     } finally {
-      TerminalManager.dispose(paneId)
-      container.remove()
+      for (const paneId of [...paneIds, arriving]) TerminalManager.dispose(paneId)
+      for (const container of containers) container.remove()
     }
   })
 

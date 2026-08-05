@@ -267,8 +267,11 @@ const defaultProfiles: Profile[] = [
 
 const defaultProfile = defaultProfiles[0]
 
-/** 1 = Orca chrome is the product default. Bump alongside a new default theme. */
-const currentThemeRevision = 1
+/** Bumped when a product default changes. Each migration below compares the
+ *  STORED revision against the revision that introduced it, so a later bump
+ *  never re-applies an earlier cutover to a value the user has since chosen.
+ *  1 = Orca chrome. 2 = orange focused-pane ring. */
+const currentThemeRevision = 2
 
 export const defaultSettings: Settings = {
   fontFamily: preferredFontFamily,
@@ -279,9 +282,10 @@ export const defaultSettings: Settings = {
   uiScale: 1,
   terminalThemeId: defaultTerminalThemeId,
   themeRevision: currentThemeRevision,
-  // Orca reserves color for state: the focused-pane ring is chrome, so it uses
-  // the neutral `--ring` gray, while alarm/reviewed stay chromatic signals.
-  selectedPaneHighlightColor: '#737373',
+  // The focused-pane ring is the one piece of chrome that must be findable at a
+  // glance in a 12-pane grid, so it keeps VibeLink's orange instead of the Orca
+  // neutral gray; alarm/reviewed stay chromatic signals.
+  selectedPaneHighlightColor: '#ff9f1a',
   alarmHighlightColor: '#86efac',
   reviewedPaneHighlightColor: '#3794ff',
   completionSoundEnabled: true,
@@ -347,8 +351,7 @@ export function normalizeSettings(value: unknown): Settings {
   const worktreeRegistryMigrationVersion = record?.worktreeRegistryMigrationVersion === 1 ? 1 : 0
   const rolePresets = normalizeRolePresets(record?.rolePresets)
   const setupWizard = normalizeSetupWizard(record?.setupWizard)
-  // Revision 0 predates the Orca chrome; its retired defaults are replaced once.
-  const themeRevisionStale = (typeof record?.themeRevision === 'number' ? record.themeRevision : 0) < currentThemeRevision
+  const storedThemeRevision = typeof record?.themeRevision === 'number' ? record.themeRevision : 0
 
   return {
     fontFamily: readNonEmptyString(record?.fontFamily, defaultSettings.fontFamily),
@@ -357,11 +360,14 @@ export function normalizeSettings(value: unknown): Settings {
     inactiveTerminalUpdatesPerSecond: readNumberInRange(record?.inactiveTerminalUpdatesPerSecond, defaultSettings.inactiveTerminalUpdatesPerSecond, 1, 60),
     terminalFontWeight: readNumberInRange(record?.terminalFontWeight, defaultSettings.terminalFontWeight, 100, 900),
     uiScale: readNumberInRange(record?.uiScale, defaultSettings.uiScale, 0.85, 1.2),
-    terminalThemeId: readTerminalThemeId(record?.terminalThemeId, themeRevisionStale),
+    // Revision 0 predates the Orca chrome: its retired house theme and highlight
+    // defaults are replaced once. Revision 1 shipped the neutral gray ring,
+    // which revision 2 replaces with orange.
+    terminalThemeId: readTerminalThemeId(record?.terminalThemeId, storedThemeRevision < 1),
     themeRevision: currentThemeRevision,
-    selectedPaneHighlightColor: readMigratedHexColor(record?.selectedPaneHighlightColor, defaultSettings.selectedPaneHighlightColor, '#ff9f1a', themeRevisionStale),
-    alarmHighlightColor: readMigratedHexColor(record?.alarmHighlightColor, defaultSettings.alarmHighlightColor, '#7ee787', themeRevisionStale),
-    reviewedPaneHighlightColor: readMigratedHexColor(record?.reviewedPaneHighlightColor, defaultSettings.reviewedPaneHighlightColor, '#58a6ff', themeRevisionStale),
+    selectedPaneHighlightColor: readMigratedHexColor(record?.selectedPaneHighlightColor, defaultSettings.selectedPaneHighlightColor, '#737373', storedThemeRevision < 2),
+    alarmHighlightColor: readMigratedHexColor(record?.alarmHighlightColor, defaultSettings.alarmHighlightColor, '#7ee787', storedThemeRevision < 1),
+    reviewedPaneHighlightColor: readMigratedHexColor(record?.reviewedPaneHighlightColor, defaultSettings.reviewedPaneHighlightColor, '#58a6ff', storedThemeRevision < 1),
     completionSoundEnabled: readBoolean(record?.completionSoundEnabled, defaultSettings.completionSoundEnabled),
     completionSoundId: isCompletionSoundId(record?.completionSoundId) ? record.completionSoundId : defaultCompletionSoundId,
     completionSoundVolume: readNumberInRange(record?.completionSoundVolume, defaultSettings.completionSoundVolume, 0, 1),
@@ -944,8 +950,8 @@ function readTerminalThemeId(value: unknown, revisionStale: boolean): TerminalTh
 }
 
 /** Reads a highlight color, retiring a superseded default once. A stored value
- *  still equal to `retired` was never picked by the user, so the Orca cutover
- *  replaces it; any other color is preserved. */
+ *  still equal to `retired` was never picked by the user, so that revision's
+ *  cutover replaces it; any other color is preserved. */
 function readMigratedHexColor(value: unknown, fallback: string, retired: string, revisionStale: boolean): string {
   const color = readHexColor(value, fallback)
   return revisionStale && color === retired ? fallback : color

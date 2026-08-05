@@ -39,6 +39,9 @@ const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
 const MAX_REPLAY_BYTES_PER_FRAME = 64 * 1024
+// Parse budget before a replay hands the frame back. Matches xterm's own
+// WriteBuffer timeout, so a pane yields at the same cadence it would anyway.
+const REPLAY_FRAME_BUDGET_MS = 12
 // Each retained xterm holds its own scrollback buffer, and xterm allocates a
 // fixed-width Uint32Array per row (~12 B/cell), so at the 50k-row default one
 // fully-scrolled 200-column pane costs ~115 MiB. Sixteen cached background
@@ -935,9 +938,17 @@ class TerminalManagerImpl {
     entry.replayPending = true
     entry.replayAgain = false
     const revision = entry.replayRevision ?? 0
+    // Start the IPC NOW. The tail exists to keep xterm PARSING serialized so a
+    // restored workspace cannot paint every pane in one frame; queueing the
+    // round trip behind it as well made a switch cost N sequential daemon
+    // latencies before the first pane could paint.
+    const snapshot = invoke<TerminalSnapshotResult>('subscribe_pane', { sessionId, paneId: entry.paneId })
+    // `replayPane` owns the failure; this only keeps a rejection that lands
+    // while the pane still waits its turn from surfacing as unhandled.
+    snapshot.catch(() => undefined)
     const run = this.replayTail
       .catch(() => undefined)
-      .then(() => this.replayPane(entry, sessionId, revision))
+      .then(() => this.replayPane(entry, sessionId, revision, snapshot))
     const tracked = run.finally(() => {
       if (entry.replayPromise !== tracked) return
       entry.replayPromise = undefined
@@ -952,12 +963,9 @@ class TerminalManagerImpl {
     this.replayTail = tracked.catch(() => undefined)
   }
 
-  private async replayPane(entry: Entry, sessionId: string, revision: number): Promise<void> {
+  private async replayPane(entry: Entry, sessionId: string, revision: number, request: Promise<TerminalSnapshotResult>): Promise<void> {
     try {
-      const snapshot = await invoke<TerminalSnapshotResult>('subscribe_pane', {
-        sessionId,
-        paneId: entry.paneId,
-      })
+      const snapshot = await request
       if (this.entries.get(entry.paneId) !== entry
         || entry.sessionId !== sessionId
         || (entry.replayRevision ?? 0) !== revision) return
@@ -1060,6 +1068,12 @@ class TerminalManagerImpl {
     const generatedInput: string[] = []
     entry.replayInputCapture = generatedInput
     try {
+      // Yield on a TIME budget, not on every chunk. A frame per 64 KiB meant a
+      // 1 MiB agent scrollback spent ~250 ms of a workspace switch waiting for
+      // rAF rather than parsing, and the replay tail multiplied that by the
+      // pane count. xterm's own write buffer already breaks up long parses, so
+      // the budget only has to keep one pane from monopolising a frame.
+      let budgetStartedAt = performance.now()
       for (let offset = 0; offset < replayBytes.byteLength; offset += MAX_REPLAY_BYTES_PER_FRAME) {
         if (this.entries.get(entry.paneId) !== entry) return
         const chunk = replayBytes.subarray(offset, Math.min(offset + MAX_REPLAY_BYTES_PER_FRAME, replayBytes.byteLength))
@@ -1069,7 +1083,10 @@ class TerminalManagerImpl {
           resolve()
         })
         await promise
-        if (offset + chunk.byteLength < replayBytes.byteLength) await this.yieldReplayFrame()
+        if (offset + chunk.byteLength >= replayBytes.byteLength) break
+        if (performance.now() - budgetStartedAt < REPLAY_FRAME_BUDGET_MS) continue
+        await this.yieldReplayFrame()
+        budgetStartedAt = performance.now()
       }
     } finally {
       entry.replayInputCapture = undefined
@@ -1345,15 +1362,13 @@ class TerminalManagerImpl {
     entry.visible = visible
     if (!visible) {
       this.scheduleHiddenOutputParking(entry)
-      // A retained hidden xterm keeps its WebGL context alive even though it
-      // paints nothing. Sixteen cached panes behind a full visible grid is
-      // exactly what pushes the process past Chromium's context budget, so the
-      // next resize evicts the contexts of panes the user is looking at. Give
-      // this one back and re-attach when the pane returns.
-      if (entry.webgl) {
-        this.dropToDomRenderer(entry)
-        entry.webglReleasedWhileHidden = true
-      }
+      // The context deliberately stays. Releasing it the moment a pane is
+      // hidden made every Alt+Z zoom destroy and rebuild one WebGL context per
+      // sibling pane — measured at 27 canvases torn down and re-created for a
+      // single toggle of a 10-pane grid — and each rebuild re-uploads a texture
+      // atlas and repaints the whole buffer. `promoteToWebglRenderer` reclaims
+      // the least recently used hidden context instead, and only when a pane
+      // the user can actually see needs one.
       return
     }
 
@@ -1686,7 +1701,7 @@ class TerminalManagerImpl {
     if (entry.webgl || entry.webglPromotionPending || entry.webglAttachFailed) return false
     if (entry.webglSwapsLatched) return false
     if (!entry.opened || !entry.container || entry.remoteLease || entry.attachFailureNoticeWritten) return false
-    if (this.attachedWebglPaneCount() >= MAX_WEBGL_PANES) return false
+    if (this.attachedWebglPaneCount() >= MAX_WEBGL_PANES && !this.releaseHiddenWebglContext()) return false
     const rect = entry.observedSize ?? entry.container.getBoundingClientRect()
     if (!options.allowUnmeasured && (entry.visible !== true || rect.width < 1 || rect.height < 1)) {
       entry.forceFitOnNextMeasure = true
@@ -1768,6 +1783,21 @@ class TerminalManagerImpl {
       if (entry.webgl !== undefined) attached += 1
     }
     return attached
+  }
+
+  /** Give Chromium back the least recently used HIDDEN pane's context so a
+   *  visible pane can have one. Returns false when every context is in use by a
+   *  pane on screen, which is the point at which the cap is real. */
+  private releaseHiddenWebglContext(): boolean {
+    let victim: Entry | undefined
+    for (const entry of this.entries.values()) {
+      if (entry.webgl === undefined || entry.visible === true) continue
+      if (victim === undefined || entry.lastUsedAt < victim.lastUsedAt) victim = entry
+    }
+    if (!victim) return false
+    this.dropToDomRenderer(victim)
+    victim.webglReleasedWhileHidden = true
+    return true
   }
 
   /** Each renderer swap costs a forced re-fit and a full repaint, so a pane that

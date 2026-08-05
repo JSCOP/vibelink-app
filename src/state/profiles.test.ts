@@ -6,7 +6,7 @@ describe('theme revision migration', () => {
     for (const retired of ['abyss', 'carbon', 'aurora']) {
       expect(normalizeSettings({ terminalThemeId: retired }).terminalThemeId, retired).toBe('orcaDark')
     }
-    expect(normalizeSettings({ terminalThemeId: 'abyss' }).themeRevision).toBe(1)
+    expect(normalizeSettings({ terminalThemeId: 'abyss' }).themeRevision).toBe(2)
   })
 
   test('keeps a third-party palette the user picked', () => {
@@ -14,17 +14,22 @@ describe('theme revision migration', () => {
     expect(normalizeSettings({ terminalThemeId: 'gruvboxLight' }).terminalThemeId).toBe('gruvboxLight')
   })
 
-  test('does not re-migrate once the revision is current, so Carbon can be chosen again', () => {
-    expect(normalizeSettings({ terminalThemeId: 'carbon', themeRevision: 1 }).terminalThemeId).toBe('carbon')
-  })
-
   test('retires the pre-Orca highlight defaults but keeps a color the user set', () => {
     expect(normalizeSettings({ selectedPaneHighlightColor: '#ff9f1a', alarmHighlightColor: '#7ee787' })).toMatchObject({
-      selectedPaneHighlightColor: '#737373',
+      selectedPaneHighlightColor: '#ff9f1a',
       alarmHighlightColor: '#86efac',
     })
     expect(normalizeSettings({ selectedPaneHighlightColor: '#ff00ff' }).selectedPaneHighlightColor).toBe('#ff00ff')
-    expect(normalizeSettings({ selectedPaneHighlightColor: '#ff9f1a', themeRevision: 1 }).selectedPaneHighlightColor).toBe('#ff9f1a')
+    expect(normalizeSettings({ alarmHighlightColor: '#7ee787', themeRevision: 1 }).alarmHighlightColor).toBe('#7ee787')
+  })
+
+  test('replaces the revision 1 neutral ring with orange exactly once', () => {
+    expect(normalizeSettings({ selectedPaneHighlightColor: '#737373', themeRevision: 1 }).selectedPaneHighlightColor).toBe('#ff9f1a')
+    expect(normalizeSettings({ selectedPaneHighlightColor: '#737373', themeRevision: 2 }).selectedPaneHighlightColor).toBe('#737373')
+  })
+
+  test('a later revision bump does not re-run the revision 1 theme cutover', () => {
+    expect(normalizeSettings({ terminalThemeId: 'carbon', themeRevision: 1 }).terminalThemeId).toBe('carbon')
   })
 
   test('falls back to the default for an unknown theme id', () => {
@@ -359,11 +364,11 @@ describe('terminal profiles', () => {
   })
 
   test('normalizes configurable pane highlight colors', () => {
-    expect(defaultSettings.selectedPaneHighlightColor).toBe('#737373')
+    expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
     expect(defaultSettings.alarmHighlightColor).toBe('#86efac')
     expect(defaultSettings.reviewedPaneHighlightColor).toBe('#3794ff')
     expect(normalizeSettings({})).toMatchObject({
-      selectedPaneHighlightColor: '#737373',
+      selectedPaneHighlightColor: '#ff9f1a',
       alarmHighlightColor: '#86efac',
       reviewedPaneHighlightColor: '#3794ff',
     })

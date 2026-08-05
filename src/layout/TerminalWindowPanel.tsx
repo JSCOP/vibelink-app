@@ -19,6 +19,7 @@ import { isInteractiveResizeActive, onInteractiveResizeEnd } from './interactive
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { removePanelPreservingLayout } from './paneCloseLayout'
 import { applySerializedGridSizes, serializedActiveViewId } from './liveGridSizes'
+import { withLayoutParamsPersist } from './suppression'
 import {
   activateOrphanedPaneGroups,
   clearTerminalPaneDropGuide,
@@ -114,11 +115,19 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       refresh: () => forceOverlayReposition(api),
       isSettled: () => dockviewOverlaysSettled(api),
       complete: () => {
-        for (const panel of api.panels) {
-          const content = parseWorkspaceContentParams(panel.params)
-          if (content?.kind === 'terminal') TerminalManager.reflow(content.paneId)
-        }
-        TerminalManager.scheduleLayoutPass({ force: true, syncPty: true })
+        // Scope the forced pass to THIS window's panes. The default pane set is
+        // every entry the manager holds — other windows, other workspaces, and
+        // the background cache — and `force` bypasses the unchanged-rect skip,
+        // so an unscoped pass re-measured and PTY-resized panes no settle here
+        // could have moved. Each window settles its own panes.
+        TerminalManager.scheduleLayoutPass({
+          paneIds: api.panels.flatMap((panel) => {
+            const content = parseWorkspaceContentParams(panel.params)
+            return content?.kind === 'terminal' ? [content.paneId] : []
+          }),
+          force: true,
+          syncPty: true,
+        })
       },
     })
   }, [layoutInner])
@@ -150,7 +159,7 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
       // Writing an unchanged inner layout feeds the save/restore cycle for
       // free, so only write a real change.
       if (JSON.stringify(current.inner) === JSON.stringify(inner)) return
-      outerApi.updateParameters({ ...current, inner })
+      withLayoutParamsPersist(() => outerApi.updateParameters({ ...current, inner }))
       window.dispatchEvent(new CustomEvent('vibelink:terminal-window-persist'))
     }, 120)
   }, [captureInnerLayout, outerApi])
