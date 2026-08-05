@@ -332,6 +332,7 @@ pub fn run() {
             fsops::fs_list_dir,
             fsops::fs_read_image,
             fsops::fs_read_text,
+            fsops::fs_path_kind,
             fsops::fs_open_text_document,
             fsops::fs_text_document_revision,
             fsops::fs_save_text_document,

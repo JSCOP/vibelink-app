@@ -189,22 +189,28 @@ describe('terminal link matchers', () => {
       expect(continuationLinks?.[0].decorations).toEqual({ pointerCursor: true, underline: true })
     })
 
-    it('routes a modified click to the first requested Read selector line', () => {
+    it('routes Ctrl clicks internally and Ctrl+Shift clicks through the system', () => {
       const term = stubTerminal(80, [{ text: 'Read E:/repo/src/App.tsx:120-230,410-450' }])
-      let opened: unknown
+      const opened: unknown[] = []
       const provider = createPathLinkProvider(term, () => ({
-        onOpenPath: (target) => { opened = target },
+        onOpenPath: (target, mode) => { opened.push({ target, mode }) },
         resolveMarker: () => undefined,
       }))
       let links: ILink[] | undefined
       provider.provideLinks(1, (found) => { links = found })
 
-      ;(links?.[0].activate as (event: MouseEvent) => void)({ ctrlKey: true, metaKey: false } as MouseEvent)
+      ;(links?.[0].activate as (event: MouseEvent) => void)({ ctrlKey: false, metaKey: false, shiftKey: false } as MouseEvent)
+      ;(links?.[0].activate as (event: MouseEvent) => void)({ ctrlKey: true, metaKey: false, shiftKey: false } as MouseEvent)
+      ;(links?.[0].activate as (event: MouseEvent) => void)({ ctrlKey: true, metaKey: false, shiftKey: true } as MouseEvent)
 
-      expect(opened).toEqual({
+      const target = {
         path: 'E:/repo/src/App.tsx',
         location: { lineNumber: 120, column: 1 },
-      })
+      }
+      expect(opened).toEqual([
+        { target, mode: 'internal' },
+        { target, mode: 'system' },
+      ])
     })
 
     it('underlines the exact URL cells after wide CJK glyphs', () => {

@@ -1,8 +1,8 @@
 import type { IBufferCell, ILink, ILinkProvider, Terminal } from '@xterm/xterm'
-import { parseTerminalOpenTarget, type TerminalOpenTarget } from './fileLinkNavigation'
+import { parseTerminalOpenTarget, type TerminalLinkOpenMode, type TerminalOpenTarget } from './fileLinkNavigation'
 
 export type CaptureLinkActions = {
-  onOpenPath(target: TerminalOpenTarget): void
+  onOpenPath(target: TerminalOpenTarget, mode: TerminalLinkOpenMode): void
   resolveMarker(paneId: string, n: number): string | undefined
 }
 
@@ -76,8 +76,9 @@ export function createPathLinkProvider(term: Terminal, getActions: () => Capture
       }
 
       callback(cachedGroup.links?.map(({ range, text, target }) => createLink(range, text, (event) => {
-        if (!isModifiedClick(event)) return
-        getActions().onOpenPath(target)
+        const mode = openModeForClick(event)
+        if (!mode) return
+        getActions().onOpenPath(target, mode)
       })))
     },
   }
@@ -94,9 +95,10 @@ export function createImageMarkerLinkProvider(term: Terminal, paneId: string, ge
       const links = findImageMarkerMatches(row.text).flatMap(({ index, text, n }) => {
         if (!getActions().resolveMarker(paneId, n)) return []
         return createLink(rangeForMappedSpan(row, bufferLineNumber, term.cols, index, text.length), text, (event) => {
-          if (!isModifiedClick(event)) return
+          const mode = openModeForClick(event)
+          if (!mode) return
           const path = getActions().resolveMarker(paneId, n)
-          if (path) getActions().onOpenPath({ path })
+          if (path) getActions().onOpenPath({ path }, mode)
         })
       })
       callback(links.length > 0 ? links : undefined)
@@ -210,8 +212,9 @@ function createLink(range: ILink['range'], text: string, activate: (event: Mouse
   }
 }
 
-function isModifiedClick(event: MouseEvent): boolean {
-  return event.ctrlKey || event.metaKey
+function openModeForClick(event: MouseEvent): TerminalLinkOpenMode | null {
+  if (!event.ctrlKey && !event.metaKey) return null
+  return event.shiftKey ? 'system' : 'internal'
 }
 
 function trimTrailingLinkPunctuation(text: string): string {

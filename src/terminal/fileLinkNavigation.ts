@@ -1,12 +1,18 @@
+import { invoke } from '@tauri-apps/api/core'
 import type { WorkspaceContentActions } from '../layout/contentActions'
 import { normalizeWorkspaceRelativePath } from '../layout/workspaceContentModel'
 import { requestEditorNavigation, type EditorNavigationTarget } from '../editor/editorNavigation'
 import { toast } from '../components/toast/toastStore'
+import { useExplorerStore } from '../state/explorer'
 
 export type TerminalOpenTarget = {
   path: string
   location?: EditorNavigationTarget
 }
+
+export type TerminalLinkOpenMode = 'internal' | 'system'
+
+type WorkspacePathKind = 'directory' | 'textFile' | 'other'
 
 type OpenTerminalLinkOptions = {
   activeSessionId?: string
@@ -54,28 +60,46 @@ export function workspaceRelativePathForTerminalTarget(path: string, workspaceFo
   const caseInsensitive = /^[A-Za-z]:\//.test(root) || root.startsWith('//')
   const targetKey = caseInsensitive ? target.toLowerCase() : target
   const rootKey = caseInsensitive ? root.toLowerCase() : root
+  if (targetKey === rootKey) return ''
   const relative = root === '/'
-    ? targetKey.startsWith('/') && target !== '/' ? target.slice(1) : null
+    ? targetKey.startsWith('/') ? target.slice(1) : null
     : targetKey.startsWith(`${rootKey}/`) ? target.slice(root.length + 1) : null
   return relative ? normalizeWorkspaceRelativePath(relative) : null
 }
 
-export async function openTerminalLinkTarget(target: TerminalOpenTarget, options: OpenTerminalLinkOptions): Promise<void> {
+export async function openTerminalLinkTarget(target: TerminalOpenTarget, mode: TerminalLinkOpenMode, options: OpenTerminalLinkOptions): Promise<void> {
   const { activeSessionId, workspaceFolder, contentActions } = options
-  const relPath = target.location && workspaceFolder
+  const relPath = mode === 'internal' && workspaceFolder
     ? workspaceRelativePathForTerminalTarget(target.path, workspaceFolder)
     : null
 
-  if (target.location && activeSessionId && relPath && contentActions) {
-    const panelId = await contentActions.openContent({
-      kind: 'editor',
-      relPath,
-      workspaceId: activeSessionId,
-      workspaceEpoch: options.workspaceEpoch,
-    })
-    if (!panelId || options.isOwnershipCurrent?.() === false) return
-    requestEditorNavigation(activeSessionId, relPath, target.location)
-    return
+  if (activeSessionId && relPath !== null && workspaceFolder && contentActions) {
+    let kind: WorkspacePathKind | null = null
+    try {
+      kind = await invoke<WorkspacePathKind>('fs_path_kind', { workspaceFolder, relPath })
+    } catch {
+      // A stale or missing target falls through to the OS, which reports the real open error.
+    }
+    if (options.isOwnershipCurrent?.() === false) return
+
+    if (kind === 'textFile') {
+      const panelId = await contentActions.openContent({
+        kind: 'editor',
+        relPath,
+        workspaceId: activeSessionId,
+        workspaceEpoch: options.workspaceEpoch,
+      })
+      if (!panelId || options.isOwnershipCurrent?.() === false) return
+      if (target.location) requestEditorNavigation(activeSessionId, relPath, target.location)
+      return
+    }
+
+    if (kind === 'directory' || kind === 'other') {
+      await contentActions.openContent({ kind: 'explorer', workspaceId: activeSessionId, workspaceEpoch: options.workspaceEpoch })
+      if (options.isOwnershipCurrent?.() === false) return
+      if (relPath) await useExplorerStore.getState().revealPath(activeSessionId, workspaceFolder, relPath)
+      return
+    }
   }
 
   try {

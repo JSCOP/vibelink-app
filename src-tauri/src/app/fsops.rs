@@ -16,6 +16,7 @@ use uuid::Uuid;
 const TEXT_LIMIT: usize = 2 * 1024 * 1024;
 const TEXT_DOCUMENT_LIMIT: usize = 8 * 1024 * 1024;
 const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
+const PATH_KIND_SNIFF_LIMIT: usize = 8 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +34,14 @@ pub struct TextFile {
     pub content: String,
     pub truncated: bool,
     pub binary: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FsPathKind {
+    Directory,
+    TextFile,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,6 +117,18 @@ pub async fn fs_read_text(
 ) -> Result<TextFile, String> {
     authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         read_text_native(&workspace_folder, &rel_path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fs_path_kind(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    workspace_folder: String,
+    rel_path: String,
+) -> Result<FsPathKind, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+        path_kind_native(&workspace_folder, &rel_path)
     })
     .await
 }
@@ -301,6 +322,34 @@ fn read_text_native(root: &str, rel_path: &str) -> Result<TextFile> {
         truncated,
         binary,
     })
+}
+
+fn path_kind_native(root: &str, rel_path: &str) -> Result<FsPathKind> {
+    let path = contain_path(Path::new(root), rel_path)?;
+    let metadata = std::fs::metadata(&path)?;
+    if metadata.is_dir() {
+        return Ok(FsPathKind::Directory);
+    }
+    if !metadata.is_file() || metadata.len() > TEXT_DOCUMENT_LIMIT as u64 {
+        return Ok(FsPathKind::Other);
+    }
+
+    let mut file = std::fs::File::open(&path)?;
+    let mut prefix = [0_u8; PATH_KIND_SNIFF_LIMIT];
+    let length = metadata.len().min(PATH_KIND_SNIFF_LIMIT as u64) as usize;
+    file.read_exact(&mut prefix[..length])?;
+    let bytes = &prefix[..length];
+    if bytes.contains(&0) {
+        return Ok(FsPathKind::Other);
+    }
+    if let Err(error) = std::str::from_utf8(bytes) {
+        let ended_at_buffer_boundary =
+            error.error_len().is_none() && metadata.len() > length as u64;
+        if !ended_at_buffer_boundary {
+            return Ok(FsPathKind::Other);
+        }
+    }
+    Ok(FsPathKind::TextFile)
 }
 
 fn open_text_document_native(root: &str, rel_path: &str) -> Result<TextDocument> {
@@ -1460,6 +1509,42 @@ mod tests {
         let text = read_text_native(root.to_str().expect("utf8 root"), "binary.bin").expect("read");
         assert!(text.binary);
         assert!(text.content.is_empty());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn classifies_internal_open_targets_without_loading_whole_files() {
+        let root = temp_root();
+        let root_str = root.to_str().expect("utf8 root");
+        std::fs::create_dir(root.join("folder")).expect("create folder");
+        std::fs::write(root.join("notes.txt"), "hello").expect("write text");
+        std::fs::write(root.join("binary.bin"), b"abc\0def").expect("write binary");
+        std::fs::write(root.join("invalid.bin"), [0xff, 0xfe, 0xfd]).expect("write invalid utf8");
+        std::fs::File::create(root.join("large.txt"))
+            .expect("create large file")
+            .set_len((TEXT_DOCUMENT_LIMIT + 1) as u64)
+            .expect("size large file");
+
+        assert_eq!(
+            path_kind_native(root_str, "folder").unwrap(),
+            FsPathKind::Directory
+        );
+        assert_eq!(
+            path_kind_native(root_str, "notes.txt").unwrap(),
+            FsPathKind::TextFile
+        );
+        assert_eq!(
+            path_kind_native(root_str, "binary.bin").unwrap(),
+            FsPathKind::Other
+        );
+        assert_eq!(
+            path_kind_native(root_str, "invalid.bin").unwrap(),
+            FsPathKind::Other
+        );
+        assert_eq!(
+            path_kind_native(root_str, "large.txt").unwrap(),
+            FsPathKind::Other
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

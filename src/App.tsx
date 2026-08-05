@@ -325,12 +325,12 @@ function App() {
 
   useEffect(() => {
     TerminalManager.setLinkActions({
-      onOpenPath: (target) => {
+      onOpenPath: (target, mode) => {
         const state = useWorkspaceStore.getState()
         const sessionId = state.activeSessionId
         const workspaceFolder = state.sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
         const workspaceEpoch = getWorkspaceSessionEpoch()
-        void openTerminalLinkTarget(target, {
+        void openTerminalLinkTarget(target, mode, {
           activeSessionId: sessionId,
           workspaceFolder,
           workspaceEpoch,
