@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
 import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, SquareTerminal, TextSelect, X } from 'lucide-react'
@@ -7,6 +8,7 @@ import { TerminalManager } from '../terminal/TerminalManager'
 import { TerminalSearchBar } from '../components/TerminalSearchBar'
 import { terminalSearchForgetPane } from '../terminal/search'
 import { pathFromTerminalSelection } from '../terminal/selectionPath'
+import { terminalImageDropText } from '../terminal/imageDrop'
 import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
 import { readClipboardText } from '../ipc/clipboard'
@@ -72,6 +74,8 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const actions = useWorkspaceContentActions()
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [agentSessionDropActive, setAgentSessionDropActive] = useState(false)
+  const [nativeImageDropActive, setNativeImageDropActive] = useState(false)
+  const nativeImageDragValidRef = useRef(false)
   const [hermesDetected, setHermesDetected] = useState(false)
   const [reclaimingLease, setReclaimingLease] = useState(false)
   const [reclaimError, setReclaimError] = useState<string | null>(null)
@@ -90,6 +94,42 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
       .catch(() => { if (!cancelled) setHermesDetected(false) })
     return () => { cancelled = true }
   }, [hermesCommand])
+
+  useEffect(() => {
+    if (!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type === 'leave') {
+        nativeImageDragValidRef.current = false
+        setNativeImageDropActive(false)
+        return
+      }
+      const logical = payload.position.toLogical(window.devicePixelRatio || 1)
+      const targetPaneId = document
+        .elementFromPoint(logical.x, logical.y)
+        ?.closest<HTMLElement>('[data-terminal-pane-id]')
+        ?.dataset.terminalPaneId
+      if (payload.type === 'enter') nativeImageDragValidRef.current = terminalImageDropText(payload.paths) !== null
+      const matches = targetPaneId === paneId && nativeImageDragValidRef.current && !remoteLease
+      setNativeImageDropActive(matches)
+      if (payload.type !== 'drop') return
+      nativeImageDragValidRef.current = false
+      setNativeImageDropActive(false)
+      const text = terminalImageDropText(payload.paths)
+      if (!matches || !paneId || !text) return
+      panelApi.setActive()
+      TerminalManager.paste(paneId, text)
+      TerminalManager.focus(paneId)
+    }).then((dispose) => {
+      if (disposed) dispose()
+      else unlisten = dispose
+    }).catch((error) => console.warn('Could not register terminal image drop listener', error))
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [paneId, panelApi, remoteLease])
 
   const onContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!paneId) return
@@ -314,9 +354,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   }
 
   return (
-    <div className="terminal-panel-shell" data-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} data-agent-session-drop-target={agentSessionDropActive ? 'true' : undefined} onContextMenu={onContextMenu} onDragEnter={onAgentSessionDragOver} onDragOver={onAgentSessionDragOver} onDragLeave={onAgentSessionDragLeave} onDrop={onAgentSessionDrop}>
+    <div className="terminal-panel-shell" data-pane-id={paneId} data-terminal-pane-id={paneId} data-content-panel-id={props.api.id} data-active={activePaneId === paneId ? 'true' : undefined} data-pane-reviewed={reviewed ? 'true' : undefined} data-pane-response-complete={completionHighlight ? 'true' : undefined} data-agent-session-drop-target={agentSessionDropActive ? 'true' : undefined} onContextMenu={onContextMenu} onDragEnter={onAgentSessionDragOver} onDragOver={onAgentSessionDragOver} onDragLeave={onAgentSessionDragLeave} onDrop={onAgentSessionDrop}>
       <div ref={hostRef} className="dock-terminal-host" />
       <TerminalSearchBar paneId={paneId} />
+      {nativeImageDropActive ? <div className="agent-session-terminal-drop"><FolderOpen size={24} aria-hidden="true" /><strong>Paste image path</strong><span>Drop to insert this desktop image into the terminal.</span></div> : null}
       {agentSessionDropActive ? <div className="agent-session-terminal-drop"><SquareTerminal size={24} aria-hidden="true" /><strong>Resume in this terminal</strong><span>The current process in this pane will stop.</span></div> : null}
       {remoteLease ? (
         <div

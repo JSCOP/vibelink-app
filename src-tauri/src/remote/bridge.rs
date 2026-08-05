@@ -50,7 +50,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
-    fs, io,
+    fs,
+    io::{self, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -90,6 +91,168 @@ const MAX_BROWSER_SCREENCASTS_PER_CONNECTION: usize = 2;
 const MAX_BROWSER_SCREENCAST_FPS: u16 = 30;
 const DEFAULT_BROWSER_SCREENCAST_FPS: u16 = 12;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+const MAX_ATTACHMENT_UPLOADS_PER_CONNECTION: usize = 2;
+const MAX_ATTACHMENT_BASE64_CHARS: usize = 24 * 1024 * 1024;
+const MAX_ATTACHMENT_CHUNK_BASE64_CHARS: usize = 512 * 1024;
+
+struct V2AttachmentUpload {
+    workspace_id: Uuid,
+    path: PathBuf,
+    file: fs::File,
+    expected_base64_length: usize,
+    next_offset: usize,
+}
+
+#[derive(Default)]
+struct V2AttachmentUploads {
+    entries: HashMap<Uuid, V2AttachmentUpload>,
+}
+
+impl Drop for V2AttachmentUploads {
+    fn drop(&mut self) {
+        for (_, upload) in self.entries.drain() {
+            let path = upload.path;
+            drop(upload.file);
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+impl V2AttachmentUploads {
+    fn start(
+        &mut self,
+        workspace_id: Uuid,
+        expected_base64_length: usize,
+        mime_type: &str,
+    ) -> Result<Uuid> {
+        if expected_base64_length < 4 || expected_base64_length % 4 != 0 {
+            bail!("invalid_argument: attachment size is invalid");
+        }
+        if expected_base64_length > MAX_ATTACHMENT_BASE64_CHARS {
+            bail!("attachment is too large");
+        }
+        if self.entries.len() >= MAX_ATTACHMENT_UPLOADS_PER_CONNECTION {
+            bail!("rate_limited: too many active attachment uploads");
+        }
+        let extension = attachment_extension(mime_type)?;
+        let directory = std::env::temp_dir().join("vibelink-remote-attachments");
+        fs::create_dir_all(&directory).context("create attachment directory")?;
+        let upload_id = Uuid::new_v4();
+        let path = directory.join(format!("{upload_id}.{extension}"));
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .context("create attachment file")?;
+        self.entries.insert(
+            upload_id,
+            V2AttachmentUpload {
+                workspace_id,
+                path,
+                file,
+                expected_base64_length,
+                next_offset: 0,
+            },
+        );
+        Ok(upload_id)
+    }
+
+    fn append(
+        &mut self,
+        workspace_id: Uuid,
+        upload_id: Uuid,
+        offset: usize,
+        data_base64: &str,
+    ) -> Result<usize> {
+        if data_base64.is_empty()
+            || data_base64.len() > MAX_ATTACHMENT_CHUNK_BASE64_CHARS
+            || data_base64.len() % 4 != 0
+        {
+            bail!("invalid_argument: attachment chunk is invalid");
+        }
+        let upload = self
+            .entries
+            .get_mut(&upload_id)
+            .context("not_found: attachment upload not found")?;
+        if upload.workspace_id != workspace_id {
+            bail!("stale_target: attachment belongs to a different workspace");
+        }
+        if upload.next_offset != offset {
+            bail!("conflict: attachment chunk offset is out of order");
+        }
+        let next_offset = offset
+            .checked_add(data_base64.len())
+            .context("invalid_argument: attachment offset overflow")?;
+        if next_offset > upload.expected_base64_length {
+            bail!("invalid_argument: attachment exceeds its declared size");
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_base64)
+            .context("invalid_argument: decode attachment chunk")?;
+        upload
+            .file
+            .write_all(&bytes)
+            .context("write attachment chunk")?;
+        upload.next_offset = next_offset;
+        Ok(next_offset)
+    }
+
+    fn commit(&mut self, workspace_id: Uuid, upload_id: Uuid) -> Result<PathBuf> {
+        let upload = self
+            .entries
+            .get(&upload_id)
+            .context("not_found: attachment upload not found")?;
+        if upload.workspace_id != workspace_id {
+            bail!("stale_target: attachment belongs to a different workspace");
+        }
+        if upload.next_offset != upload.expected_base64_length {
+            bail!("conflict: attachment upload is incomplete");
+        }
+        let mut upload = self
+            .entries
+            .remove(&upload_id)
+            .expect("validated attachment upload");
+        let result = upload.file.flush().and_then(|_| upload.file.sync_all());
+        let path = upload.path;
+        drop(upload.file);
+        if let Err(error) = result {
+            let _ = fs::remove_file(&path);
+            return Err(error).context("flush attachment upload");
+        }
+        Ok(path)
+    }
+
+    fn abort(&mut self, workspace_id: Uuid, upload_id: Uuid) -> Result<()> {
+        let upload = self
+            .entries
+            .get(&upload_id)
+            .context("not_found: attachment upload not found")?;
+        if upload.workspace_id != workspace_id {
+            bail!("stale_target: attachment belongs to a different workspace");
+        }
+        let upload = self
+            .entries
+            .remove(&upload_id)
+            .expect("validated attachment upload");
+        let path = upload.path;
+        drop(upload.file);
+        fs::remove_file(path).context("remove attachment upload")
+    }
+}
+
+fn attachment_extension(mime_type: &str) -> Result<&'static str> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Ok("png"),
+        "image/jpeg" | "image/jpg" => Ok("jpg"),
+        "image/gif" => Ok("gif"),
+        "image/webp" => Ok("webp"),
+        "image/bmp" => Ok("bmp"),
+        "image/heic" => Ok("heic"),
+        "image/heif" => Ok("heif"),
+        "image/avif" => Ok("avif"),
+        _ => bail!("invalid_argument: unsupported attachment image type"),
+    }
+}
 #[derive(Clone, Debug)]
 struct V2Subscription {
     workspace_id: Uuid,
@@ -924,6 +1087,7 @@ fn run_v2_authenticated(
     let mut next_browser_stream_id = 1_u64;
     let mut output_pump = V2OutputPump::default();
     let mut projection = V2WorkspaceProjectionState::default();
+    let mut attachment_uploads = V2AttachmentUploads::default();
     let mut last_ping = Instant::now();
     let mut last_peer_activity = Instant::now();
     loop {
@@ -1159,6 +1323,7 @@ fn run_v2_authenticated(
                                     &mut acknowledgements,
                                     &mut output_pump,
                                     &mut binary_sequences,
+                                    &mut attachment_uploads,
                                 )
                             };
                             match result {
@@ -2227,6 +2392,7 @@ fn handle_v2_request(
     acknowledgements: &mut TerminalAckWindow,
     output_pump: &mut V2OutputPump,
     binary_sequences: &mut HashMap<(BinaryChannel, u64), u64>,
+    attachment_uploads: &mut V2AttachmentUploads,
 ) -> Result<Value> {
     match (request.domain.as_str(), request.method.as_str()) {
         ("system", "status") => Ok(json!({
@@ -2494,13 +2660,23 @@ fn handle_v2_request(
         ("files", method) => {
             require_grant(
                 grants,
-                if method == "write" {
+                if matches!(method, "write" | "attachment.upload") {
                     "admin"
                 } else {
                     "files.view"
                 },
             )?;
-            handle_v2_files(request, method, daemon_writer, daemon_inbox, next_req)
+            if method == "attachment.upload" {
+                handle_v2_attachment_upload(
+                    &request.payload,
+                    attachment_uploads,
+                    daemon_writer,
+                    daemon_inbox,
+                    next_req,
+                )
+            } else {
+                handle_v2_files(request, method, daemon_writer, daemon_inbox, next_req)
+            }
         }
         ("git", method) => {
             require_grant(
@@ -3095,6 +3271,69 @@ fn dispatch_v2_cli(
     }
 }
 
+fn handle_v2_attachment_upload(
+    payload: &Value,
+    uploads: &mut V2AttachmentUploads,
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+) -> Result<Value> {
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .context("action is required")?;
+    let workspace_id = v2_uuid(payload, "workspaceId")?;
+    match action {
+        "start" => {
+            let _ = v2_workspace_root(payload, daemon_writer, daemon_inbox, next_req)?;
+            let expected_base64_length = usize::try_from(
+                payload
+                    .get("expectedBase64Length")
+                    .and_then(Value::as_u64)
+                    .context("expectedBase64Length is required")?,
+            )
+            .context("expectedBase64Length is too large")?;
+            let mime_type = payload
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .context("mimeType is required")?;
+            let upload_id = uploads.start(workspace_id, expected_base64_length, mime_type)?;
+            Ok(json!({
+                "uploadId": upload_id,
+                "maxChunkBase64Length": MAX_ATTACHMENT_CHUNK_BASE64_CHARS,
+            }))
+        }
+        "append" => {
+            let upload_id = v2_uuid(payload, "uploadId")?;
+            let offset = usize::try_from(
+                payload
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .context("offset is required")?,
+            )
+            .context("offset is too large")?;
+            let data_base64 = payload
+                .get("dataBase64")
+                .and_then(Value::as_str)
+                .context("dataBase64 is required")?;
+            let received_base64_length =
+                uploads.append(workspace_id, upload_id, offset, data_base64)?;
+            Ok(json!({ "receivedBase64Length": received_base64_length }))
+        }
+        "commit" => {
+            let upload_id = v2_uuid(payload, "uploadId")?;
+            let path = uploads.commit(workspace_id, upload_id)?;
+            Ok(json!({ "path": path.to_string_lossy() }))
+        }
+        "abort" => {
+            let upload_id = v2_uuid(payload, "uploadId")?;
+            uploads.abort(workspace_id, upload_id)?;
+            Ok(json!({ "aborted": true }))
+        }
+        _ => bail!("unsupported attachment upload action"),
+    }
+}
+
 fn handle_v2_files(
     request: &V2Envelope,
     method: &str,
@@ -3295,6 +3534,8 @@ fn v2_error_code(error: &anyhow::Error) -> &'static str {
         "unsupported"
     } else if message.contains("not found") || message.contains("not_found") {
         "not_found"
+    } else if message.contains("rate_limited") {
+        "rate_limited"
     } else if message.contains("too large") || message.contains("exceeds") {
         "frame_too_large"
     } else if message.contains("timeout") || message.contains("timed out") {
@@ -4209,6 +4450,35 @@ mod tests {
                 workspace_id: workspace_id.to_string(),
             }],
         }
+    }
+
+    #[test]
+    fn attachment_upload_assembles_ordered_chunks_and_cleans_incomplete_files() {
+        let workspace_id = Uuid::new_v4();
+        let bytes = b"\x89PNG\r\n\x1a\nvibelink";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mut uploads = V2AttachmentUploads::default();
+        let upload_id = uploads
+            .start(workspace_id, encoded.len(), "image/png")
+            .expect("start attachment upload");
+        uploads
+            .append(workspace_id, upload_id, 0, &encoded[..8])
+            .expect("append first chunk");
+        uploads
+            .append(workspace_id, upload_id, 8, &encoded[8..])
+            .expect("append final chunk");
+        let path = uploads
+            .commit(workspace_id, upload_id)
+            .expect("commit attachment upload");
+        assert_eq!(fs::read(&path).expect("read committed attachment"), bytes);
+        fs::remove_file(path).expect("remove committed attachment");
+
+        let incomplete_id = uploads
+            .start(workspace_id, encoded.len(), "image/png")
+            .expect("start incomplete attachment");
+        let incomplete_path = uploads.entries[&incomplete_id].path.clone();
+        drop(uploads);
+        assert!(!incomplete_path.exists());
     }
 
     fn secure_transport_pair() -> (SecureTransport, SecureTransport) {
