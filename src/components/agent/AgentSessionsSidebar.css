@@ -67,7 +67,7 @@
 .agent-sessions-view-popover {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   color: var(--vibelink-text);
   display: grid;
@@ -331,7 +331,7 @@
 .agent-session-group-count {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 600 10px/1 var(--vibelink-mono);
   margin-left: auto;

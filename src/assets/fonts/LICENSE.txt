@@ -1,0 +1,11 @@
+Geist-Variable.woff2
+====================
+
+Geist is designed by Vercel and licensed under the SIL Open Font License 1.1.
+
+Upstream: https://github.com/vercel/geist-font
+License:  https://github.com/vercel/geist-font/blob/main/LICENSE.TXT
+
+The SIL Open Font License permits bundling and redistribution of the font
+inside an application as long as this notice travels with it and the font is
+not sold on its own.

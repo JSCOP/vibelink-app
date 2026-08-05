@@ -41,7 +41,7 @@
   justify-content: center;
   gap: 5px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   padding: 5px 8px;
   color: var(--vibelink-muted);
   background: var(--vibelink-panel);
@@ -105,7 +105,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   padding: 10px;
   background: var(--vibelink-panel);
 }
@@ -168,7 +168,7 @@
 .assigned-empty {
   margin: 10px 0 0;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   padding: 8px;
   color: var(--vibelink-muted);
   background: var(--vibelink-panel);
@@ -186,7 +186,7 @@
   height: 560px;
   margin-top: 8px;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   overflow: hidden;
 }
 

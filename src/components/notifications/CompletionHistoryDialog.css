@@ -4,7 +4,7 @@
 .completion-history-header-actions > button:not(.settings-close) { align-items: center; display: inline-flex; gap: 5px; }
 .completion-history-body { display: block; }
 .completion-history-body ol { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
-.completion-history-body li { align-items: center; border: 1px solid var(--vibelink-border-soft); border-radius: 6px; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 5px; }
+.completion-history-body li { align-items: center; border: 1px solid var(--vibelink-border-soft); border-radius: var(--vibelink-radius-sm); display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 5px; }
 .completion-history-body li[data-unread] { border-color: var(--vibelink-accent); background: color-mix(in srgb, var(--vibelink-accent) 8%, transparent); }
 .completion-history-entry { align-items: flex-start; background: transparent; border: 0; display: grid; gap: 3px; min-width: 0; padding: 6px; text-align: left; }
 .completion-history-entry strong, .completion-history-entry span { overflow-wrap: anywhere; }

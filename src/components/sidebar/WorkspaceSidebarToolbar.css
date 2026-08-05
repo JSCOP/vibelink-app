@@ -37,7 +37,7 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   cursor: pointer;
   display: inline-flex;
@@ -59,7 +59,7 @@
 .vl-sidebar-menu {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: grid;
   gap: 2px;
@@ -73,7 +73,7 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   cursor: pointer;
   display: flex;

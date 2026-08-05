@@ -1,48 +1,70 @@
+/* Geist is the Orca-benchmark UI face. It ships as one variable woff2 so the
+ * whole 100–900 weight range costs a single request and never synthesizes. */
+@font-face {
+  font-family: 'Geist';
+  src: url('../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --vibelink-bg: #0d0f12;
-  --vibelink-sidebar: #090c10;
-  --vibelink-panel: #11161c;
-  --vibelink-panel-2: #151b22;
-  --vibelink-panel-3: #0f151d;
-  --vibelink-input: #10161d;
-  --vibelink-input-strong: #05080e;
-  --vibelink-border: #26303a;
-  --vibelink-border-soft: #1c242d;
-  --vibelink-text: #d6deeb;
-  --vibelink-muted: #8b97a5;
-  --vibelink-accent: #7ee787;
-  --vibelink-accent-soft: rgba(126, 231, 135, 0.12);
-  --vibelink-accent-muted: rgba(126, 231, 135, 0.08);
-  --vibelink-accent-border: rgba(126, 231, 135, 0.42);
-  --vibelink-danger: #ff6b6b;
-  --vibelink-danger-soft: rgba(255, 107, 107, 0.12);
-  --vibelink-danger-border: rgba(255, 107, 107, 0.28);
-  --vibelink-danger-text: #ffd6d6;
-  --vibelink-hover: rgba(121, 192, 255, 0.12);
-  --vibelink-active: rgba(126, 231, 135, 0.12);
+  /* First-paint fallbacks. `applyThemeToDocument` overwrites every one of these
+   * from the selected theme, so they MUST mirror the default theme (Orca Dark)
+   * or the window flashes a foreign palette before the store hydrates. */
+  --vibelink-bg: #0a0a0a;
+  --vibelink-sidebar: #171717;
+  --vibelink-panel: #171717;
+  --vibelink-panel-2: #1e1e1e;
+  --vibelink-panel-3: #262626;
+  --vibelink-input: #1c1c1c;
+  --vibelink-input-strong: #111111;
+  --vibelink-border: rgba(255, 255, 255, 0.07);
+  --vibelink-border-soft: rgba(255, 255, 255, 0.045);
+  --vibelink-text: #fafafa;
+  --vibelink-muted: #a1a1a1;
+  --vibelink-accent: #e5e5e5;
+  --vibelink-accent-soft: #404040;
+  --vibelink-accent-muted: #262626;
+  --vibelink-accent-border: #525252;
+  --vibelink-danger: #ff6568;
+  --vibelink-danger-soft: rgba(255, 101, 104, 0.12);
+  --vibelink-danger-border: rgba(255, 101, 104, 0.28);
+  --vibelink-danger-text: #ffd4d5;
+  --vibelink-success: #86efac;
+  --vibelink-hover: rgba(255, 255, 255, 0.06);
+  --vibelink-active: rgba(255, 255, 255, 0.1);
   --vibelink-selection: #264f78;
-  --vibelink-overlay: rgba(2, 6, 12, 0.72);
-  --vibelink-dialog: #11161c;
-  --vibelink-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
-  --vibelink-shadow-soft: 10px 0 28px rgba(0, 0, 0, 0.28);
-  --vibelink-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
-  --vibelink-scrollbar-track: #070b12;
-  --vibelink-scrollbar-thumb: rgba(126, 231, 135, 0.75);
-  --vibelink-blue: #79c0ff;
-  --vibelink-blue-soft: rgba(121, 192, 255, 0.12);
-  --vibelink-cyan: #76e3ea;
-  --vibelink-cyan-soft: rgba(118, 227, 234, 0.12);
-  --vibelink-warning: #f2cc60;
-  --vibelink-warning-soft: rgba(242, 204, 96, 0.16);
-  --vibelink-focus: #7ee787;
+  --vibelink-overlay: rgba(0, 0, 0, 0.6);
+  --vibelink-dialog: #171717;
+  --vibelink-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  --vibelink-shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.16);
+  --vibelink-inset: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --vibelink-scrollbar-track: transparent;
+  --vibelink-scrollbar-thumb: rgba(161, 161, 161, 0.35);
+  --vibelink-blue: #3794ff;
+  --vibelink-blue-soft: rgba(55, 148, 255, 0.12);
+  --vibelink-cyan: #40b0a6;
+  --vibelink-cyan-soft: rgba(64, 176, 166, 0.12);
+  --vibelink-warning: #e2c08d;
+  --vibelink-warning-soft: rgba(226, 192, 141, 0.14);
+  --vibelink-focus: #737373;
   --z-popover: 100;
   --z-resize-layer: 110;
   --z-overlay: 120;
   --z-modal: 200;
-  --vibelink-terminal-bg: #0b0f14;
-  --vibelink-terminal-fg: #d6deeb;
+  --vibelink-terminal-bg: #0a0a0a;
+  --vibelink-terminal-fg: #fafafa;
   --vibelink-mono: "Cascadia Code", "JetBrains Mono", Menlo, Consolas, "Malgun Gothic", "Apple SD Gothic Neo", monospace;
-  --vibelink-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  --vibelink-sans: Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+
+  /* Orca's radius scale: one base, the rest computed. Chrome controls use
+   * `md`, framed cards use `xl`, pills stay 999px. */
+  --vibelink-radius: 0.625rem;
+  --vibelink-radius-sm: calc(var(--vibelink-radius) * 0.6);
+  --vibelink-radius-md: calc(var(--vibelink-radius) * 0.8);
+  --vibelink-radius-lg: var(--vibelink-radius);
+  --vibelink-radius-xl: calc(var(--vibelink-radius) * 1.4);
 }
 
 .dockview-theme-vibelink {
@@ -75,17 +97,20 @@
   --dv-floating-group-border: none;
   --dv-drag-over-border: none;
   --dv-floating-group-dragging-opacity: 0.5;
+  /* User-picked tab-group chips name a literal hue, so they must resolve to
+   * that hue. They intentionally do NOT follow `--vibelink-accent`, which is a
+   * neutral in the Orca palette and would render "green" and "pink" as gray. */
   --dv-tab-group-color-grey: var(--vibelink-muted);
-  --dv-tab-group-color-blue: var(--vibelink-blue);
-  --dv-tab-group-color-red: var(--vibelink-danger);
-  --dv-tab-group-color-yellow: var(--vibelink-warning);
-  --dv-tab-group-color-green: var(--vibelink-accent);
-  --dv-tab-group-color-pink: var(--vibelink-accent);
-  --dv-tab-group-color-purple: var(--vibelink-blue);
-  --dv-tab-group-color-cyan: var(--vibelink-cyan);
-  --dv-tab-group-color-orange: var(--vibelink-warning);
+  --dv-tab-group-color-blue: #3794ff;
+  --dv-tab-group-color-red: #ff6568;
+  --dv-tab-group-color-yellow: #e2c08d;
+  --dv-tab-group-color-green: #4ade80;
+  --dv-tab-group-color-pink: #f472b6;
+  --dv-tab-group-color-purple: #b66dff;
+  --dv-tab-group-color-cyan: #40b0a6;
+  --dv-tab-group-color-orange: #ea5c00;
   --dv-tab-group-chip-padding: 4px 8px;
-  --dv-tab-group-chip-border-radius: 6px;
+  --dv-tab-group-chip-border-radius: var(--vibelink-radius-sm);
   --dv-tab-group-chip-font-size: 11px;
   --dv-tab-group-line-height: 2px;
   --dv-tab-group-line-opacity: 0.6;

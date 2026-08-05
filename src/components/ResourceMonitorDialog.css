@@ -8,7 +8,7 @@
 .resource-manager {
   background: color-mix(in srgb, var(--vibelink-dialog) 97%, black);
   border: 1px solid var(--vibelink-border);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   bottom: 32px;
   box-shadow: 0 18px 48px rgb(0 0 0 / 48%);
   color: var(--vibelink-text);
@@ -61,7 +61,7 @@
 .resource-manager-header-actions button,
 .resource-manager-kill,
 .resource-manager-toggle {
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 24px;
   padding: 0;
@@ -269,7 +269,7 @@
 
 .resource-manager-footer button {
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   gap: 6px;
   justify-content: center;
   min-height: 29px;

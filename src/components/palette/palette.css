@@ -12,7 +12,7 @@
   width: min(560px, calc(100vw - 48px));
   background: var(--vibelink-panel);
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
@@ -52,7 +52,7 @@
   padding: 7px 10px;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: inherit;
   font-size: 12.5px;

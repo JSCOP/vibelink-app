@@ -24,7 +24,7 @@
 .markdown-preview a { color: var(--vibelink-accent); }
 .markdown-preview blockquote { border-left: 3px solid var(--vibelink-border); color: var(--vibelink-muted); padding-left: 12px; }
 .markdown-preview code { background: var(--vibelink-panel-2); border-radius: 3px; font-family: var(--vibelink-mono); padding: 0.15em 0.35em; }
-.markdown-preview pre { background: var(--vibelink-panel-2); border: 1px solid var(--vibelink-border-soft); border-radius: 5px; overflow: auto; padding: 10px 12px; }
+.markdown-preview pre { background: var(--vibelink-panel-2); border: 1px solid var(--vibelink-border-soft); border-radius: var(--vibelink-radius-sm); overflow: auto; padding: 10px 12px; }
 .markdown-preview pre code { background: transparent; display: block; padding: 0; white-space: pre; }
 .markdown-preview table { border-collapse: collapse; display: block; max-width: 100%; overflow: auto; }
 .markdown-preview th,
@@ -37,4 +37,12 @@
 
 .markdown-preview::-webkit-scrollbar { height: 12px; width: 12px; }
 .markdown-preview::-webkit-scrollbar-track { background: var(--vibelink-scrollbar-track, var(--vibelink-panel-3)); }
-.markdown-preview::-webkit-scrollbar-thumb { background: var(--vibelink-scrollbar-thumb, var(--vibelink-muted)); border: 3px solid var(--vibelink-scrollbar-track, var(--vibelink-panel-3)); border-radius: 999px; }
+.markdown-preview::-webkit-scrollbar-thumb {
+  background: var(--vibelink-scrollbar-thumb, var(--vibelink-muted));
+  /* Orca's sleek thumb: the 3px transparent border is the gutter and
+     `padding-box` keeps the paint off it, so a 12px track shows a 6px pill. */
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 0;
+  min-height: 28px;
+}

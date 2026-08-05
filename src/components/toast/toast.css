@@ -18,7 +18,7 @@
   min-height: 46px;
   padding: 8px 8px 8px 11px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 9px;
+  border-radius: var(--vibelink-radius-md);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   color: var(--vibelink-text);
@@ -60,7 +60,7 @@
 .vibelink-toast-action,
 .vibelink-toast-dismiss {
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   background: transparent;
   color: var(--vibelink-muted);
   cursor: pointer;

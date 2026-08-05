@@ -93,7 +93,7 @@
   align-items: center;
   background: transparent;
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   cursor: pointer;
   display: inline-flex;
@@ -128,7 +128,7 @@
 .editor-overflow-menu {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: flex;
   flex-direction: column;

@@ -29,7 +29,7 @@
 .git-pr-primary,
 .git-pr-secondary {
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   cursor: pointer;
   display: inline-flex;
   flex: 0 0 auto;
@@ -99,7 +99,7 @@
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   cursor: pointer;
   display: inline-flex;
@@ -129,7 +129,7 @@
 .git-pr-field textarea {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1.4 var(--vibelink-sans);
   min-height: 26px;
@@ -180,7 +180,7 @@
   align-items: center;
   background: var(--vibelink-panel-2, var(--vibelink-input));
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   color: var(--vibelink-muted);
   display: inline-flex;
   height: 40px;
@@ -211,7 +211,7 @@
 .git-pr-card {
   background: color-mix(in srgb, var(--vibelink-panel) 70%, var(--vibelink-bg));
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   display: grid;
   gap: 10px;
   justify-items: start;
@@ -244,7 +244,7 @@
 .git-pr-device-code {
   background: var(--vibelink-input-strong);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: grid;
   font: 11px/1.4 var(--vibelink-sans);
@@ -269,7 +269,7 @@
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   cursor: pointer;
   display: inline-flex;
@@ -289,7 +289,7 @@
   align-items: center;
   background: var(--vibelink-danger-soft);
   border: 1px solid var(--vibelink-danger-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-danger-text, var(--vibelink-danger));
   display: flex;
   font: 11.5px/1.4 var(--vibelink-sans);
@@ -320,7 +320,7 @@
 .git-pr-error-banner button {
   background: transparent;
   border: 1px solid var(--vibelink-danger-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-danger-text, var(--vibelink-danger));
   cursor: pointer;
   flex: 0 0 auto;
@@ -480,8 +480,12 @@
 
 .git-pr-list::-webkit-scrollbar-thumb {
   background: var(--vibelink-scrollbar-thumb, var(--vibelink-muted));
-  border: 3px solid var(--vibelink-scrollbar-track, var(--vibelink-panel-3));
-  border-radius: 6px;
+  /* Orca's sleek thumb: the 3px transparent border is the gutter and
+     `padding-box` keeps the paint off it, so a 12px track shows a 6px pill. */
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 0;
+  min-height: 28px;
 }
 
 .git-pr-loading {

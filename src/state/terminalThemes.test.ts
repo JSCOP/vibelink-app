@@ -85,7 +85,7 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 
 describe('terminalThemes', () => {
   test('provides the expected curated theme count with unique ids', () => {
-    expect(terminalThemes).toHaveLength(26)
+    expect(terminalThemes).toHaveLength(28)
     expect(new Set(terminalThemes.map((theme) => theme.id)).size).toBe(terminalThemes.length)
     expect(terminalThemes.some((theme) => theme.id === defaultTerminalThemeId)).toBe(true)
   })
@@ -146,11 +146,24 @@ describe('terminalThemes', () => {
 
   test('pins terminal panes to the agent-friendly palette', () => {
     expect(agentTerminalTheme).toBe(terminalThemeById(defaultTerminalThemeId))
-    expect(agentTerminalTheme.background).toBe('#0b0f14')
-    expect(agentTerminalTheme.foreground).toBe('#d6deeb')
-    expect(agentTerminalTheme.yellow).toBe('#f2cc60')
-    expect(agentTerminalTheme.green).toBe('#7ee787')
-    expect(agentTerminalTheme.blue).toBe('#79c0ff')
-    expect(agentTerminalTheme.cyan).toBe('#76e3ea')
+    expect(agentTerminalTheme.background).toBe('#0a0a0a')
+    expect(agentTerminalTheme.foreground).toBe('#fafafa')
+    expect(agentTerminalTheme.yellow).toBe('#e2c08d')
+    expect(agentTerminalTheme.green).toBe('#23d18b')
+    expect(agentTerminalTheme.blue).toBe('#3794ff')
+    expect(agentTerminalTheme.cyan).toBe('#29b8db')
+  })
+
+  test('keeps Orca chrome monochrome so color only signals state', () => {
+    const orca = terminalThemeDefinitionById('orcaDark').ui
+    // Chrome surfaces and the accent are neutral grays: R === G === B.
+    for (const token of [orca.background, orca.sidebar, orca.panel, orca.accent, orca.accentSoft, orca.focus]) {
+      const { r, g, b } = hexToRgb(token)
+      expect(r, token).toBe(g)
+      expect(g, token).toBe(b)
+    }
+    // State colors stay chromatic.
+    expect(orca.danger).not.toBe(orca.accent)
+    expect(hexToRgb(orca.success).g).toBeGreaterThan(hexToRgb(orca.success).r)
   })
 })

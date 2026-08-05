@@ -25,7 +25,7 @@ button {
 .pane-actions button,
 .template-buttons button {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 26px;
   min-width: 26px;
@@ -50,7 +50,7 @@ button {
 .session-row {
   align-items: center;
   border-left: 2px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   grid-template-columns: 1fr 26px 26px;
 }
@@ -226,8 +226,9 @@ button {
 }
 
 .crumb {
-  font: 700 12px/1.2 var(--vibelink-sans);
-  letter-spacing: 0.08em;
+  /* Orca's titlebar app name: 12px/600 on the body's tracking. The old
+     700 + 0.08em shouted over the quiet chrome around it. */
+  font: 600 12px/1.2 var(--vibelink-sans);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -317,7 +318,7 @@ button {
 .setting-inline select {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   height: 28px;
   padding: 0 8px;
@@ -356,7 +357,7 @@ button {
 .terminal-context-menu {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: grid;
   gap: 2px;
@@ -417,7 +418,7 @@ button {
 .vibelink-quick-pick {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: flex;
   flex-direction: column;
@@ -466,7 +467,7 @@ button {
 
 .vibelink-quick-pick-list button {
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   display: flex;
   gap: 10px;
@@ -526,7 +527,7 @@ button {
   gap: 10px;
   padding: 10px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow);
 }
@@ -689,7 +690,7 @@ button {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: inherit;
   cursor: pointer;
   display: inline-flex;
@@ -1103,7 +1104,7 @@ button {
 .terminal-pane-drop-guide > span {
   background: color-mix(in srgb, var(--vibelink-dialog) 92%, transparent);
   border: 1px solid color-mix(in srgb, var(--vibelink-border) 80%, white 20%);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   box-sizing: border-box;
   position: relative;
 }
@@ -1115,7 +1116,7 @@ button {
 .terminal-pane-drop-guide [data-direction='bottom'] { grid-area: 3 / 2; }
 
 .terminal-pane-drop-guide > span::before {
-  background: color-mix(in srgb, var(--vibelink-text-muted) 55%, transparent);
+  background: color-mix(in srgb, var(--vibelink-muted) 55%, transparent);
   border-radius: 999px;
   content: '';
   height: 2px;
@@ -1132,7 +1133,7 @@ button {
 
 .terminal-pane-drop-guide-option[data-direction='top']::after,
 .terminal-pane-drop-guide-option[data-direction='bottom']::after {
-  border-top: 1px dashed var(--vibelink-text-muted);
+  border-top: 1px dashed var(--vibelink-muted);
   left: 14%;
   right: 14%;
   top: 50%;
@@ -1140,7 +1141,7 @@ button {
 
 .terminal-pane-drop-guide-option[data-direction='left']::after,
 .terminal-pane-drop-guide-option[data-direction='right']::after {
-  border-left: 1px dashed var(--vibelink-text-muted);
+  border-left: 1px dashed var(--vibelink-muted);
   bottom: 14%;
   left: 50%;
   top: 14%;
@@ -1188,7 +1189,7 @@ button {
   background: color-mix(in srgb, var(--vibelink-dialog) 92%, transparent);
   border: 1px solid var(--vibelink-border);
   border-radius: 999px;
-  color: var(--vibelink-text-muted);
+  color: var(--vibelink-muted);
   cursor: pointer;
   display: inline-flex;
   font: inherit;
@@ -1208,7 +1209,7 @@ button {
 }
 
 .remote-pane-lease-body {
-  color: var(--vibelink-text-muted);
+  color: var(--vibelink-muted);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -1230,8 +1231,8 @@ button {
   align-items: center;
   background: color-mix(in srgb, var(--vibelink-dialog) 94%, transparent);
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
-  box-shadow: 0 16px 42px color-mix(in srgb, #000 48%, transparent);
+  border-radius: var(--vibelink-radius-lg);
+  box-shadow: var(--vibelink-shadow);
   color: var(--vibelink-text);
   display: flex;
   flex-direction: column;
@@ -1249,7 +1250,7 @@ button {
 
 .remote-pane-lease-state {
   align-items: center;
-  color: var(--vibelink-text-muted);
+  color: var(--vibelink-muted);
   display: inline-flex;
   font-size: 12px;
   gap: 7px;
@@ -1264,14 +1265,14 @@ button {
 }
 
 .remote-pane-lease-geometry {
-  color: var(--vibelink-text-muted);
+  color: var(--vibelink-muted);
   font-size: 12px;
 }
 
 .remote-pane-lease-card button {
   background: var(--vibelink-accent);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: white;
   cursor: pointer;
   font: inherit;
@@ -1317,7 +1318,7 @@ button {
 .terminal-panel-shell::after,
 .workspace-window-panel::after {
   border: 2px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   content: '';
   inset: 6px;
   pointer-events: none;
@@ -1393,7 +1394,7 @@ button {
   min-width: 0;
   height: 20px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   background: var(--vibelink-input-strong);
   color: var(--vibelink-text);
   font: 700 12px/1 var(--vibelink-sans);
@@ -1410,7 +1411,7 @@ button {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: flex;
   height: 20px;
@@ -1560,8 +1561,11 @@ button {
   background: var(--vibelink-hover);
 }
 
+/* Orca reads the active tab from its surface lift, not a bright rule. Keep a
+   marker for dense multi-pane grids, but at muted weight so it frames instead
+   of shouting — `--vibelink-accent` is near-white in the Orca palette. */
 .workspace-dock .dv-tab.dv-active-tab::after {
-  background: var(--vibelink-accent);
+  background: var(--vibelink-muted);
   border-radius: 2px;
   content: '';
   height: 2px;
@@ -1623,7 +1627,7 @@ button {
 .workspace-group-menu {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: grid;
   gap: 2px;
@@ -1746,7 +1750,7 @@ button {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow);
   overflow: hidden;
@@ -1770,7 +1774,7 @@ button {
   display: grid;
   place-items: center;
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-accent);
   background: var(--vibelink-accent-muted);
 }
@@ -1842,7 +1846,7 @@ button {
 .workspace-create-dialog {
   width: min(640px, 100%);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 18px;
+  border-radius: var(--vibelink-radius-xl);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   overflow: hidden;
@@ -1881,7 +1885,7 @@ button {
 .workspace-create-name select {
   height: 34px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-input);
   color: var(--vibelink-text);
   padding: 0 10px;
@@ -1895,7 +1899,7 @@ button {
 
 .workspace-folder-row button {
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-blue-soft);
   color: var(--vibelink-text);
   min-height: 34px;
@@ -1914,7 +1918,7 @@ button {
   gap: 5px;
   justify-items: start;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 12px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-panel-3);
   color: var(--vibelink-text);
   padding: 12px;
@@ -1931,7 +1935,7 @@ button {
 
 .primary-action {
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-accent-soft);
   color: var(--vibelink-text);
   min-height: 28px;
@@ -1954,7 +1958,7 @@ button {
   max-height: min(840px, calc(100vh - 48px));
   overflow: hidden;
   border: 1px solid var(--vibelink-border);
-  border-radius: 18px;
+  border-radius: var(--vibelink-radius-xl);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   display: grid;
@@ -2045,8 +2049,12 @@ button {
 .git-window-changes-list::-webkit-scrollbar-thumb,
 .task-diff-content::-webkit-scrollbar-thumb {
   background: var(--vibelink-scrollbar-thumb, var(--vibelink-muted));
-  border: 3px solid var(--vibelink-scrollbar-track, var(--vibelink-panel-3));
-  border-radius: 999px;
+  /* Orca's sleek thumb: the 3px transparent border is the gutter and
+     `padding-box` keeps the paint off it, so a 12px track shows a 6px pill. */
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 0;
+  min-height: 28px;
 }
 
 .settings-card {
@@ -2054,7 +2062,7 @@ button {
   gap: 10px;
   padding: 12px;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 14px;
+  border-radius: var(--vibelink-radius-xl);
   background: var(--vibelink-panel);
 }
 
@@ -2066,7 +2074,7 @@ button {
 
 .hermes-advanced-provider {
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   padding: 8px;
 }
 
@@ -2089,7 +2097,7 @@ button {
 .settings-card select,
 .settings-card textarea {
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-input);
   color: var(--vibelink-text);
 }
@@ -2175,7 +2183,7 @@ button {
   width: 34px;
   height: 34px;
   border: 2px solid;
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   font-family: var(--vibelink-mono);
   font-weight: 800;
 }
@@ -2252,7 +2260,7 @@ button {
 
 .secondary-action {
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-panel-3);
   color: var(--vibelink-text);
   min-height: 28px;
@@ -2336,7 +2344,7 @@ button {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid var(--vibelink-border);
-  border-radius: 18px;
+  border-radius: var(--vibelink-radius-xl);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
 }
@@ -2395,7 +2403,7 @@ button {
   min-height: 28px;
   padding: 0 10px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-panel-3);
   color: var(--vibelink-text);
 }
@@ -2447,16 +2455,20 @@ button {
 }
 
 .capture-annotator-canvas-shell::-webkit-scrollbar-thumb {
-  border: 3px solid var(--vibelink-scrollbar-track);
-  border-radius: 999px;
-  background: var(--vibelink-scrollbar-thumb);
+  background: var(--vibelink-scrollbar-thumb, var(--vibelink-muted));
+  /* Orca's sleek thumb: the 3px transparent border is the gutter and
+     `padding-box` keeps the paint off it, so a 12px track shows a 6px pill. */
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 0;
+  min-height: 28px;
 }
 
 .capture-annotator-canvas {
   display: block;
   box-sizing: content-box;
   outline: 1px solid var(--vibelink-border);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   background: var(--vibelink-bg);
   box-shadow: var(--vibelink-shadow);
   cursor: crosshair;
@@ -2470,7 +2482,7 @@ button {
   min-height: 240px;
   padding: 24px;
   border: 1px dashed var(--vibelink-border);
-  border-radius: 14px;
+  border-radius: var(--vibelink-radius-xl);
   background: var(--vibelink-panel);
   color: var(--vibelink-muted);
 }
@@ -2556,7 +2568,7 @@ button {
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 9px;
+  border-radius: var(--vibelink-radius-md);
   display: inline-flex;
   gap: 2px;
   padding: 2px;
@@ -2566,7 +2578,7 @@ button {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: inline-flex;
   font: 12px/1 var(--vibelink-sans);
@@ -2638,7 +2650,9 @@ button {
   color: var(--vibelink-muted);
   display: inline-flex;
   justify-content: center;
-  width: 40px;
+  /* Orca/Fluent caption-button metrics: 46x36. Anything narrower misses the
+     Windows 11 snap-layouts hover target on the maximize button. */
+  width: 46px;
 }
 
 .window-control-button:hover {
@@ -2646,8 +2660,10 @@ button {
   color: var(--vibelink-text);
 }
 
+/* Windows' own close-affordance red, not the theme's danger token: users read
+   this exact swatch as "close" and it must stay stable across every theme. */
 .window-control-close:hover {
-  background: var(--vibelink-danger);
+  background: #c42b1c;
   color: #fff;
 }
 
@@ -2668,7 +2684,7 @@ button {
 .workspace-create-dialog {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   font-size: calc(12px * var(--vibelink-ui-scale));
 }
@@ -3156,7 +3172,7 @@ button {
 .workspace-todo-item-main input {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   color: var(--vibelink-text);
   font: 12px/1.4 var(--vibelink-sans);
 }
@@ -3189,7 +3205,7 @@ button {
 .workspace-todo-toolbar button,
 .workspace-todo-delete {
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   color: var(--vibelink-muted);
   gap: 5px;
   min-height: 28px;
@@ -3220,7 +3236,7 @@ button {
   align-items: center;
   background: var(--vibelink-panel);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   display: grid;
   gap: 8px;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -3304,7 +3320,7 @@ button {
   width: 30px;
   height: 30px;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   background: var(--vibelink-panel-3);
   color: var(--vibelink-muted);
 }
@@ -3326,19 +3342,19 @@ button {
 
 .account-sign-in { display: grid; gap: 10px; align-items: start; }
 .account-sign-in > .primary-action { justify-self: start; }
-.account-sign-in-request { display: grid; justify-items: start; gap: 10px; border: 1px solid var(--vibelink-border); border-radius: 8px; padding: 14px; }
+.account-sign-in-request { display: grid; justify-items: start; gap: 10px; border: 1px solid var(--vibelink-border); border-radius: var(--vibelink-radius-md); padding: 14px; }
 .account-sign-in-request > span { color: var(--vibelink-muted); font-size: 12px; }
 .account-sign-in-code { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 24px; letter-spacing: 0.14em; user-select: text; }
 .account-sign-in [role='status'] { margin: 0; color: var(--vibelink-muted); }
 .license-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.settings-error { color: #ff6b6b; }
+.settings-error { color: var(--vibelink-danger); }
 .pro-locked-panel { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 12px; padding: 32px; text-align: center; color: var(--vibelink-muted); background: var(--vibelink-panel); }
 .pro-locked-panel h2 { margin: 0; color: var(--vibelink-text); }
 .pro-locked-panel p { max-width: 420px; margin: 0; }
 .pro-upsell-dialog { max-width: 480px; }
 .app-shell-locked { display: grid; place-items: center; width: 100vw; height: 100vh; background: var(--vibelink-bg); }
 .app-locked-screen { display: grid; place-items: center; width: 100%; height: 100%; padding: 32px; }
-.app-locked-card { display: grid; justify-items: center; gap: 14px; max-width: 460px; text-align: center; color: var(--vibelink-muted); border: 1px solid var(--vibelink-border); border-radius: 16px; padding: 40px 32px; background: var(--vibelink-panel); }
+.app-locked-card { display: grid; justify-items: center; gap: 14px; max-width: 460px; text-align: center; color: var(--vibelink-muted); border: 1px solid var(--vibelink-border); border-radius: var(--vibelink-radius-xl); padding: 40px 32px; background: var(--vibelink-panel); }
 .app-locked-card h1 { margin: 0; color: var(--vibelink-text); font-size: 24px; }
 .app-locked-card p { margin: 0; max-width: 400px; }
 .app-locked-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
@@ -3366,7 +3382,7 @@ button {
   grid-template-columns: 220px minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--vibelink-border);
-  border-radius: 14px;
+  border-radius: var(--vibelink-radius-xl);
   background: var(--vibelink-panel);
   box-shadow: 0 24px 80px rgb(0 0 0 / 45%);
 }
@@ -3383,7 +3399,7 @@ button {
   gap: 9px;
   padding: 9px 10px;
   color: var(--vibelink-muted);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
 }
 
 .setup-wizard-steps > div.active {
@@ -3446,7 +3462,7 @@ button {
   align-items: start;
   padding: 16px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 9px;
+  border-radius: var(--vibelink-radius-md);
   background: color-mix(in srgb, var(--vibelink-panel-2) 84%, var(--vibelink-panel));
 }
 
@@ -3586,7 +3602,7 @@ button {
 .git-clone-dialog label > div button {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1 var(--vibelink-sans);
   gap: 6px;
@@ -3763,7 +3779,7 @@ button.git-window-primary-action,
 
 .git-window-statusbar > button {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 26px;
   min-width: 26px;
@@ -3801,7 +3817,7 @@ button.git-window-primary-action,
 .git-window-repo-state button {
   background: transparent;
   border: 1px solid color-mix(in srgb, var(--vibelink-warning) 45%, transparent);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-warning);
   font: 600 11px/1 var(--vibelink-sans);
   gap: 4px;
@@ -3826,7 +3842,7 @@ button.git-window-primary-action,
 
 .git-window-empty .git-window-error {
   border: 1px solid var(--vibelink-danger-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   max-width: 420px;
 }
 
@@ -3966,7 +3982,7 @@ button.git-window-primary-action,
 .git-window-remote-compare > button {
   align-items: center;
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   display: inline-flex;
   flex: 0 0 auto;
@@ -4017,7 +4033,7 @@ button.git-window-primary-action,
 .git-window-commit-box textarea {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1.4 var(--vibelink-sans);
   min-height: 52px;
@@ -4047,7 +4063,7 @@ button.git-window-primary-action,
 .git-window-commit-button {
   background: var(--vibelink-accent-soft);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-accent);
   font: 600 12px/1 var(--vibelink-sans);
   gap: 6px;
@@ -4117,7 +4133,7 @@ button.git-window-primary-action,
 
 .git-window-group-actions button {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   font: 11px/1 var(--vibelink-sans);
   height: 22px;
@@ -4208,7 +4224,7 @@ button.git-window-primary-action,
 .git-diff-empty button {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1 var(--vibelink-sans);
   min-height: 28px;
@@ -4238,7 +4254,7 @@ button.git-window-primary-action,
 .git-clone-dialog {
   background: var(--vibelink-panel);
   border: 1px solid var(--vibelink-border);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   box-shadow: var(--vibelink-shadow);
   display: flex;
   flex-direction: column;
@@ -4263,7 +4279,7 @@ button.git-window-primary-action,
 
 .git-clone-dialog > header button {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 26px;
   min-width: 26px;
@@ -4289,7 +4305,7 @@ button.git-window-primary-action,
 .git-clone-dialog input {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   flex: 1;
   font: 12px/1.3 var(--vibelink-sans);
@@ -4305,7 +4321,7 @@ button.git-window-primary-action,
 .git-clone-dialog pre {
   background: var(--vibelink-input-strong);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   font: 11px/1.5 var(--vibelink-mono);
   margin: 0;
@@ -4370,7 +4386,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: inline-flex;
   gap: 5px;
@@ -4826,7 +4842,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   display: inline-flex;
   font: 11px/1 var(--vibelink-sans);
@@ -4911,7 +4927,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-accent-soft);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-accent);
   display: inline-flex;
   font: 600 12px/1 var(--vibelink-sans);
@@ -4944,8 +4960,12 @@ button.git-window-primary-action,
 
 .git-branches-scroll::-webkit-scrollbar-thumb {
   background: var(--vibelink-scrollbar-thumb, var(--vibelink-muted));
-  border: 3px solid var(--vibelink-scrollbar-track, var(--vibelink-panel-3));
-  border-radius: 6px;
+  /* Orca's sleek thumb: the 3px transparent border is the gutter and
+     `padding-box` keeps the paint off it, so a 12px track shows a 6px pill. */
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 0;
+  min-height: 28px;
 }
 
 .git-branch-section {
@@ -4968,7 +4988,7 @@ button.git-window-primary-action,
 .git-branch-section-header > button {
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: inline-flex;
   height: 20px;
@@ -5114,7 +5134,7 @@ button.git-window-primary-action,
 .git-branch-row-actions button {
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: inline-flex;
   height: 24px;
@@ -5211,7 +5231,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-accent-soft);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-accent);
   display: inline-flex;
   font: 600 12px/1 var(--vibelink-sans);
@@ -5276,7 +5296,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   display: inline-flex;
   font: 12px/1 var(--vibelink-sans);
@@ -5349,7 +5369,7 @@ button.git-window-primary-action,
 .git-stash-row-actions button {
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: inline-flex;
   font: 11px/1 var(--vibelink-sans);
@@ -5374,7 +5394,7 @@ button.git-window-primary-action,
 .git-stash-dialog {
   background: var(--vibelink-panel);
   border: 1px solid var(--vibelink-border);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   box-shadow: var(--vibelink-shadow);
   display: flex;
   flex-direction: column;
@@ -5403,7 +5423,7 @@ button.git-window-primary-action,
 
 .git-stash-dialog > header button {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 26px;
   min-width: 26px;
@@ -5424,7 +5444,7 @@ button.git-window-primary-action,
 .git-stash-dialog-field input {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1.3 var(--vibelink-sans);
   height: 28px;
@@ -5454,7 +5474,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   display: inline-flex;
   font: 12px/1 var(--vibelink-sans);
@@ -5493,7 +5513,7 @@ button.git-window-primary-action,
   overflow: auto;
   padding: 20px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-panel);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
 }
@@ -5547,7 +5567,7 @@ button.git-window-primary-action,
   gap: 12px;
   padding: 18px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   color: var(--vibelink-text);
@@ -5590,7 +5610,7 @@ button.git-window-primary-action,
 .app-dialog-field input {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   min-height: 28px;
   padding: 0 8px;
@@ -5610,7 +5630,7 @@ button.git-window-primary-action,
 .app-dialog-actions button {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   color: var(--vibelink-text);
   min-height: 28px;
   padding: 0 12px;
@@ -5883,7 +5903,7 @@ button.git-window-primary-action,
 .workspace-edge-rail-badge {
   align-items: center;
   background: var(--vibelink-accent);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   color: var(--vibelink-panel);
   display: inline-flex;
   font: 700 9px/1 var(--vibelink-sans);
@@ -5898,7 +5918,7 @@ button.git-window-primary-action,
 
 .workspace-edge-rail-badge.is-warning {
   background: var(--vibelink-warning);
-  color: #111;
+  color: var(--vibelink-bg);
 }
 
 .workspace-agent-status-dot {
@@ -5933,7 +5953,7 @@ button.git-window-primary-action,
 }
 
 .workspace-agent-status-dot.is-done {
-  background: var(--vibelink-success, #3fb950);
+  background: var(--vibelink-success);
 }
 
 .workspace-agent-status-dot.is-pulsing {
@@ -5978,7 +5998,7 @@ button.git-window-primary-action,
 .import-repos-dialog {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: grid;
   font-size: calc(12px * var(--vibelink-ui-scale));
@@ -6235,7 +6255,7 @@ button.git-window-primary-action,
 
 .workspaces-group-row {
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   cursor: pointer;
   display: grid;
@@ -6305,7 +6325,7 @@ button.git-window-primary-action,
 }
 
 .workspaces-ungrouped-region {
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   gap: 2px;
   min-height: 8px;
@@ -6363,8 +6383,8 @@ button.git-window-primary-action,
 }
 
 .workspaces-session-status.is-active {
-  background: var(--vibelink-success, #3fb950);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--vibelink-success, #3fb950) 18%, transparent);
+  background: var(--vibelink-success);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--vibelink-success) 18%, transparent);
   opacity: 1;
 }
 
@@ -6404,7 +6424,7 @@ button.git-window-primary-action,
 .workspaces-row-actions {
   align-items: center;
   background: color-mix(in srgb, var(--vibelink-panel) 92%, transparent);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: flex;
   gap: 1px;
   opacity: 0;
@@ -6554,8 +6574,8 @@ button.git-window-primary-action,
 }
 
 .workspace-open-content-status.is-agent-done {
-  background: var(--vibelink-success, #3fb950);
-  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success, #3fb950) 55%, transparent);
+  background: var(--vibelink-success);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success) 55%, transparent);
   opacity: 1;
 }
 
@@ -6667,8 +6687,14 @@ button.git-window-primary-action,
 
 .workspace-open-content-group-chevron {
   align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  cursor: pointer;
   display: inline-flex;
   justify-content: center;
+  padding: 0;
 }
 
 .workspace-open-content-group-members {
@@ -6694,7 +6720,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: inline-flex;
   height: 20px;
@@ -6761,8 +6787,8 @@ button.git-window-primary-action,
 }
 
 .workspace-open-content-icon-button-status.is-agent-done {
-  background: var(--vibelink-success, #3fb950);
-  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success, #3fb950) 55%, transparent);
+  background: var(--vibelink-success);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success) 55%, transparent);
 }
 
 .workspace-open-content-icon-button-status.is-pulsing {
@@ -6786,7 +6812,7 @@ button.git-window-primary-action,
 .workspace-context-menu {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: grid;
   gap: 2px;
@@ -6840,7 +6866,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-accent-muted);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-accent);
   display: inline-flex;
   height: 34px;
@@ -6890,7 +6916,7 @@ button.git-window-primary-action,
 .worktree-create-fields select {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   height: 34px;
   min-width: 0;
@@ -6918,7 +6944,7 @@ button.git-window-primary-action,
 .worktree-profile-select {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   gap: 9px;
   padding-left: 10px;
 }
@@ -6940,7 +6966,7 @@ button.git-window-primary-action,
 .worktree-create-summary {
   background: var(--vibelink-panel-3);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   gap: 6px;
   padding: 9px 10px;
@@ -6981,7 +7007,7 @@ button.git-window-primary-action,
   align-items: flex-start;
   background: var(--vibelink-warning-soft);
   border: 1px solid color-mix(in srgb, var(--vibelink-warning) 32%, transparent);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-warning);
   display: flex;
   font: 11px/1.4 var(--vibelink-sans);
@@ -7032,7 +7058,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-panel-3);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -7375,7 +7401,7 @@ button.git-window-primary-action,
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   color: var(--vibelink-text);
   display: inline-flex;
   font: 12px/1 var(--vibelink-sans);
@@ -7419,7 +7445,7 @@ button.git-window-primary-action,
 .workspace-empty-state-shortcuts kbd {
   background: var(--vibelink-panel-3);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   font: 10px/1 var(--vibelink-mono, var(--vibelink-sans));
   padding: 4px 6px;

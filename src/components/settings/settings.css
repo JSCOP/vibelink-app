@@ -6,7 +6,7 @@
   align-self: center;
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   display: grid;
   font-size: calc(12px * var(--vibelink-ui-scale));
@@ -36,7 +36,7 @@
   align-items: center;
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: grid;
   gap: 6px;
@@ -82,7 +82,7 @@
 .vl-set-nav-item {
   align-items: center;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   box-sizing: border-box;
   color: var(--vibelink-muted);
   display: grid;
@@ -186,7 +186,7 @@
 
 .vl-set-icon-button {
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 28px;
   min-width: 28px;
@@ -231,7 +231,7 @@
 
 .vl-set-footer button {
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   gap: 6px;
   min-height: 30px;
   padding: 0 14px;
@@ -262,7 +262,7 @@
 .vl-set-card {
   background: var(--vibelink-panel);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 8px;
+  border-radius: var(--vibelink-radius-md);
   display: grid;
   grid-auto-rows: max-content;
   overflow: hidden;
@@ -414,7 +414,7 @@
 .vl-set-select {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1 var(--vibelink-sans);
   min-height: 28px;
@@ -451,7 +451,7 @@
 .vl-set-textarea {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1.45 var(--vibelink-sans);
   min-height: 76px;
@@ -463,7 +463,7 @@
 .vl-set-color {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   cursor: pointer;
   height: 26px;
   padding: 2px;
@@ -562,7 +562,7 @@
 .vl-set-seg {
   background: var(--vibelink-input-strong);
   border: 1px solid var(--vibelink-border);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   display: inline-flex;
   gap: 2px;
   padding: 2px;
@@ -570,7 +570,7 @@
 
 .vl-set-seg button {
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   font: 11.5px/1 var(--vibelink-sans);
   gap: 5px;
@@ -642,7 +642,7 @@
 .vl-set-button {
   background: var(--vibelink-panel-3);
   border: 1px solid var(--vibelink-border);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 12px/1 var(--vibelink-sans);
   gap: 6px;
@@ -707,7 +707,7 @@
   align-items: center;
   background: var(--vibelink-input-strong);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: grid;
   font: 11.5px/1.4 var(--vibelink-sans);
@@ -736,7 +736,7 @@
 .vl-set-pre {
   background: var(--vibelink-input-strong);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 11px/1.5 var(--vibelink-mono);
   margin: 6px 0 0;
@@ -749,7 +749,7 @@
 .vl-set-preview {
   background: var(--vibelink-input-strong);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   margin-top: 6px;
   overflow: hidden;
@@ -760,7 +760,7 @@
 
 .vl-set-theme-preview {
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   gap: 3px;
   margin-top: 6px;
@@ -830,7 +830,7 @@
 
 .vl-set-profile {
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   margin-top: 6px;
   overflow: hidden;

@@ -45,6 +45,7 @@ export type AppThemeTokens = {
   accentMuted: string
   accentBorder: string
   danger: string
+  success: string
   dangerSoft: string
   dangerBorder: string
   dangerText: string
@@ -96,6 +97,115 @@ function defineTheme<const TId extends string>(input: ThemeInput<TId>): Terminal
 }
 
 export const terminalThemes = [
+  // Orca-benchmark palettes. Values are the literal tokens from the Orca
+  // reference `src/renderer/src/assets/main.css` (`:root` / `.dark`), mapped
+  // onto our token names so every `var(--vibelink-*)` consumer inherits Orca's
+  // quiet monochrome chrome: neutral grays carry the UI, color is reserved for
+  // state (danger, git decorations, status). Every field is overridden because
+  // `createAppTheme` derives an accent-tinted palette from the ANSI colors,
+  // which is exactly the tinting Orca avoids.
+  defineTheme({
+    id: 'orcaDark',
+    name: 'Orca Dark',
+    category: 'Orca',
+    colorScheme: 'dark',
+    description: 'Quiet monochrome chrome that recedes behind terminals, editors and diffs.',
+    terminal: {
+      background: '#0a0a0a', foreground: '#fafafa', cursor: '#fafafa', cursorAccent: '#0a0a0a', selectionBackground: '#264f78',
+      black: '#0a0a0a', red: '#f14c4c', green: '#23d18b', yellow: '#e2c08d', blue: '#3794ff', magenta: '#d670d6', cyan: '#29b8db', white: '#e5e5e5',
+      brightBlack: '#737373', brightRed: '#ff6568', brightGreen: '#4ade80', brightYellow: '#fbbf24', brightBlue: '#6cb6ff', brightMagenta: '#e0a3e0', brightCyan: '#63d4ee', brightWhite: '#fafafa',
+    },
+    ui: {
+      background: '#0a0a0a',
+      sidebar: '#171717',
+      panel: '#171717',
+      panel2: '#1e1e1e',
+      panel3: '#262626',
+      input: '#1c1c1c',
+      inputStrong: '#111111',
+      border: 'rgba(255, 255, 255, 0.07)',
+      borderSoft: 'rgba(255, 255, 255, 0.045)',
+      text: '#fafafa',
+      muted: '#a1a1a1',
+      accent: '#e5e5e5',
+      accentSoft: '#404040',
+      accentMuted: '#262626',
+      accentBorder: '#525252',
+      danger: '#ff6568',
+      success: '#86efac',
+      dangerSoft: 'rgba(255, 101, 104, 0.12)',
+      dangerBorder: 'rgba(255, 101, 104, 0.28)',
+      dangerText: '#ffd4d5',
+      hover: 'rgba(255, 255, 255, 0.06)',
+      active: 'rgba(255, 255, 255, 0.1)',
+      selection: '#264f78',
+      overlay: 'rgba(0, 0, 0, 0.6)',
+      dialog: '#171717',
+      shadow: '0 10px 24px rgba(0, 0, 0, 0.18)',
+      shadowSoft: '0 1px 2px rgba(0, 0, 0, 0.16)',
+      inset: 'inset 0 0 0 1px rgba(255, 255, 255, 0.04)',
+      scrollbarTrack: 'transparent',
+      scrollbarThumb: 'rgba(161, 161, 161, 0.35)',
+      blue: '#3794ff',
+      blueSoft: 'rgba(55, 148, 255, 0.12)',
+      cyan: '#40b0a6',
+      cyanSoft: 'rgba(64, 176, 166, 0.12)',
+      warning: '#e2c08d',
+      warningSoft: 'rgba(226, 192, 141, 0.14)',
+      focus: '#737373',
+    },
+  }),
+  defineTheme({
+    id: 'orcaLight',
+    name: 'Orca Light',
+    category: 'Orca',
+    colorScheme: 'light',
+    description: 'Orca chrome on a white canvas for bright rooms and screenshots.',
+    terminal: {
+      background: '#ffffff', foreground: '#0a0a0a', cursor: '#0a0a0a', cursorAccent: '#ffffff', selectionBackground: '#add6ff',
+      black: '#0a0a0a', red: '#cd3131', green: '#00a300', yellow: '#895503', blue: '#0451a5', magenta: '#bc05bc', cyan: '#0598bc', white: '#555555',
+      brightBlack: '#737373', brightRed: '#e40014', brightGreen: '#14ce14', brightYellow: '#b57614', brightBlue: '#0f6cd6', brightMagenta: '#d33bd3', brightCyan: '#0aa6cf', brightWhite: '#0a0a0a',
+    },
+    ui: {
+      background: '#ffffff',
+      sidebar: '#fafafa',
+      panel: '#ffffff',
+      panel2: '#f5f5f5',
+      panel3: '#ededed',
+      input: '#ffffff',
+      inputStrong: '#f5f5f5',
+      border: '#e5e5e5',
+      borderSoft: '#efefef',
+      text: '#0a0a0a',
+      muted: '#737373',
+      accent: '#171717',
+      accentSoft: '#f5f5f5',
+      accentMuted: '#fafafa',
+      accentBorder: '#d4d4d4',
+      danger: '#e40014',
+      success: '#15803d',
+      dangerSoft: 'rgba(228, 0, 20, 0.08)',
+      dangerBorder: 'rgba(228, 0, 20, 0.24)',
+      dangerText: '#7f0009',
+      hover: 'rgba(10, 10, 10, 0.05)',
+      active: 'rgba(10, 10, 10, 0.08)',
+      selection: '#add6ff',
+      overlay: 'rgba(10, 10, 10, 0.32)',
+      dialog: '#ffffff',
+      shadow: '0 10px 24px rgba(0, 0, 0, 0.18)',
+      shadowSoft: '0 1px 2px rgba(0, 0, 0, 0.06)',
+      inset: 'inset 0 0 0 1px rgba(10, 10, 10, 0.03)',
+      scrollbarTrack: 'transparent',
+      scrollbarThumb: 'rgba(115, 115, 115, 0.35)',
+      blue: '#007acc',
+      blueSoft: 'rgba(0, 122, 204, 0.1)',
+      cyan: '#40b0a6',
+      cyanSoft: 'rgba(64, 176, 166, 0.14)',
+      warning: '#895503',
+      warningSoft: 'rgba(137, 85, 3, 0.14)',
+      focus: '#a1a1a1',
+    },
+  }),
   defineTheme({
     id: 'abyss',
     name: 'Abyss',
@@ -456,7 +566,15 @@ export const terminalThemes = [
 
 export type TerminalThemeId = (typeof terminalThemes)[number]['id']
 
-export const defaultTerminalThemeId: TerminalThemeId = 'abyss'
+export const defaultTerminalThemeId: TerminalThemeId = 'orcaDark'
+
+/** The pre-Orca in-house palettes. They were VibeLink's old chrome identity, so
+ *  the Orca cutover replaces them once (see `themeRevision` in `profiles.ts`).
+ *  Third-party palettes (Gruvbox, Tokyo Night, …) are a deliberate user choice
+ *  and are never rewritten. */
+export const supersededHouseThemeIds: Record<string, true> = Object.fromEntries(
+  terminalThemes.filter((theme) => theme.category === 'VibeLink').map((theme) => [theme.id, true]),
+)
 
 export const terminalThemeGroups = groupThemesByCategory(terminalThemes)
 export const agentTerminalTheme = terminalThemeById(defaultTerminalThemeId)
@@ -498,6 +616,7 @@ export function themeCssVariables(id: string): Record<`--vibelink-${string}`, st
     '--vibelink-accent-muted': theme.accentMuted,
     '--vibelink-accent-border': theme.accentBorder,
     '--vibelink-danger': theme.danger,
+    '--vibelink-success': theme.success,
     '--vibelink-danger-soft': theme.dangerSoft,
     '--vibelink-danger-border': theme.dangerBorder,
     '--vibelink-danger-text': theme.dangerText,
@@ -556,6 +675,7 @@ function createAppTheme(colorScheme: TerminalColorScheme, terminal: RequiredTerm
     accentMuted: rgbaFromHex(accent, isDark ? 0.08 : 0.1),
     accentBorder: rgbaFromHex(accent, isDark ? 0.42 : 0.5),
     danger: terminal.red,
+    success: terminal.green,
     dangerSoft: rgbaFromHex(terminal.red, isDark ? 0.12 : 0.14),
     dangerBorder: rgbaFromHex(terminal.red, isDark ? 0.28 : 0.36),
     dangerText: isDark ? mixHex(terminal.red, '#ffffff', 0.62) : mixHex(terminal.red, '#000000', 0.1),

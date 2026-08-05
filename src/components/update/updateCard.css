@@ -10,7 +10,7 @@
   gap: 10px;
   padding: 14px;
   border: 1px solid var(--vibelink-border);
-  border-radius: 11px;
+  border-radius: var(--vibelink-radius-lg);
   background: var(--vibelink-dialog);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   color: var(--vibelink-text);
@@ -51,7 +51,7 @@
   margin: -4px -4px 0 0;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--vibelink-radius-sm);
   background: transparent;
   color: var(--vibelink-muted);
   cursor: pointer;

@@ -1,6 +1,37 @@
 import { describe, expect, test } from 'vitest'
 import { codexLaunchArgv, defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, profileIconForPane, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
 
+describe('theme revision migration', () => {
+  test('moves every retired in-house palette onto the Orca default', () => {
+    for (const retired of ['abyss', 'carbon', 'aurora']) {
+      expect(normalizeSettings({ terminalThemeId: retired }).terminalThemeId, retired).toBe('orcaDark')
+    }
+    expect(normalizeSettings({ terminalThemeId: 'abyss' }).themeRevision).toBe(1)
+  })
+
+  test('keeps a third-party palette the user picked', () => {
+    expect(normalizeSettings({ terminalThemeId: 'tokyoNight' }).terminalThemeId).toBe('tokyoNight')
+    expect(normalizeSettings({ terminalThemeId: 'gruvboxLight' }).terminalThemeId).toBe('gruvboxLight')
+  })
+
+  test('does not re-migrate once the revision is current, so Carbon can be chosen again', () => {
+    expect(normalizeSettings({ terminalThemeId: 'carbon', themeRevision: 1 }).terminalThemeId).toBe('carbon')
+  })
+
+  test('retires the pre-Orca highlight defaults but keeps a color the user set', () => {
+    expect(normalizeSettings({ selectedPaneHighlightColor: '#ff9f1a', alarmHighlightColor: '#7ee787' })).toMatchObject({
+      selectedPaneHighlightColor: '#737373',
+      alarmHighlightColor: '#86efac',
+    })
+    expect(normalizeSettings({ selectedPaneHighlightColor: '#ff00ff' }).selectedPaneHighlightColor).toBe('#ff00ff')
+    expect(normalizeSettings({ selectedPaneHighlightColor: '#ff9f1a', themeRevision: 1 }).selectedPaneHighlightColor).toBe('#ff9f1a')
+  })
+
+  test('falls back to the default for an unknown theme id', () => {
+    expect(normalizeSettings({ terminalThemeId: 'nope' }).terminalThemeId).toBe(defaultSettings.terminalThemeId)
+  })
+})
+
 describe('orderSessions', () => {
   const sessions = [
     { id: 'a', name: 'Alpha' },
@@ -328,13 +359,13 @@ describe('terminal profiles', () => {
   })
 
   test('normalizes configurable pane highlight colors', () => {
-    expect(defaultSettings.selectedPaneHighlightColor).toBe('#ff9f1a')
-    expect(defaultSettings.alarmHighlightColor).toBe('#7ee787')
-    expect(defaultSettings.reviewedPaneHighlightColor).toBe('#58a6ff')
+    expect(defaultSettings.selectedPaneHighlightColor).toBe('#737373')
+    expect(defaultSettings.alarmHighlightColor).toBe('#86efac')
+    expect(defaultSettings.reviewedPaneHighlightColor).toBe('#3794ff')
     expect(normalizeSettings({})).toMatchObject({
-      selectedPaneHighlightColor: '#ff9f1a',
-      alarmHighlightColor: '#7ee787',
-      reviewedPaneHighlightColor: '#58a6ff',
+      selectedPaneHighlightColor: '#737373',
+      alarmHighlightColor: '#86efac',
+      reviewedPaneHighlightColor: '#3794ff',
     })
     expect(normalizeSettings({
       selectedPaneHighlightColor: '  #123ABC  ',

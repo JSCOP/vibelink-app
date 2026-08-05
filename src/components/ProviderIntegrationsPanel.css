@@ -9,7 +9,7 @@
 .provider-discovery-results article {
   align-items: center;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 7px;
+  border-radius: var(--vibelink-radius-sm);
   display: grid;
   gap: 7px;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -46,12 +46,12 @@
 
 .provider-item-main span,
 .provider-discovery-empty {
-  color: var(--vibelink-text-muted);
+  color: var(--vibelink-muted);
   font: 11px/1.35 var(--vibelink-sans);
 }
 
 .provider-discovery-results a {
-  color: var(--vibelink-text-muted);
+  color: var(--vibelink-muted);
   display: grid;
   place-items: center;
 }

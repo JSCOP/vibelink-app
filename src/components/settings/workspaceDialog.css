@@ -1,7 +1,7 @@
 .vl-ws-dialog {
   background: var(--vibelink-dialog);
   border: 1px solid var(--vibelink-border);
-  border-radius: 10px;
+  border-radius: var(--vibelink-radius-lg);
   box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;

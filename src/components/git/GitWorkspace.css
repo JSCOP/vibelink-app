@@ -20,7 +20,7 @@
 .git-sidebar-overflow > summary,
 .git-sidebar-change-row > details > summary {
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   cursor: pointer;
   display: flex;
@@ -47,7 +47,7 @@
 .git-sidebar-change-row > details > div {
   background: var(--vibelink-panel);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   box-shadow: var(--vibelink-shadow);
   display: grid;
   min-width: 150px;
@@ -55,7 +55,7 @@
   position: absolute;
   right: 0;
   top: calc(100% + 3px);
-  z-index: var(--z-menu);
+  z-index: var(--z-popover);
 }
 
 .git-sidebar-overflow > div button,
@@ -125,7 +125,7 @@
 .git-sidebar-repository-list > button {
   align-items: center;
   border-left: 2px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   display: grid;
   gap: 5px;
@@ -262,7 +262,7 @@
 
 .git-sidebar-branch-row > button:first-child {
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: flex;
   gap: 5px;
   min-width: 0;
@@ -294,7 +294,7 @@
 }
 
 .git-sidebar-branch-row > button:last-child {
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-muted);
   height: 24px;
 }
@@ -315,7 +315,7 @@
 
 .git-sidebar-operation button {
   border: 1px solid color-mix(in srgb, var(--vibelink-warning) 45%, transparent);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   min-height: 22px;
   padding: 0 6px;
 }
@@ -330,7 +330,7 @@
 .git-sidebar-commit-box textarea {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   font: 11px/1.35 var(--vibelink-sans);
   min-height: 42px;
@@ -356,7 +356,7 @@
 .git-sidebar-empty-actions button {
   align-items: center;
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   display: inline-flex;
   gap: 4px;
   min-height: 24px;
@@ -539,7 +539,7 @@
 .git-sidebar-primary-action {
   background: var(--vibelink-accent-soft);
   border: 1px solid var(--vibelink-accent-border);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-accent);
   font-weight: 600;
   min-height: 28px;
@@ -622,7 +622,7 @@
 .git-sidebar-ref-picker button {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border-soft);
-  border-radius: 4px;
+  border-radius: var(--vibelink-radius-sm);
   min-width: 0;
   overflow: hidden;
   padding: 4px 5px;
@@ -686,7 +686,7 @@
 .git-hunk-review-actions { margin-left: auto; }
 .git-hunk-review-toolbar button {
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   padding: 4px 7px;
   color: var(--vibelink-text);
   background: var(--vibelink-input);
@@ -696,7 +696,7 @@
 .git-hunk-review-toolbar select {
   background: var(--vibelink-input);
   border: 1px solid var(--vibelink-border);
-  border-radius: 5px;
+  border-radius: var(--vibelink-radius-sm);
   color: var(--vibelink-text);
   padding: 4px 7px;
 }
