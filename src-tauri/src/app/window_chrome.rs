@@ -62,7 +62,8 @@ unsafe extern "system" fn activation_focus_subclass_proc(
     } else if message == CHECK_ACTIVATION_FOCUS_MESSAGE {
         if GetForegroundWindow() == hwnd && ref_data != 0 {
             let state = &*(ref_data as *const ActivationFocusHook);
-            let _ = state.window.as_ref().set_focus();
+            // Re-entering WebView focus from this HWND subclass callback can deadlock
+            // the Tauri UI thread. Let the frontend restore terminal focus after the event.
             let _ = state.window.emit(MAIN_WINDOW_ACTIVATED_EVENT, ());
         }
         return 0;
