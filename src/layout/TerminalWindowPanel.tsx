@@ -27,7 +27,7 @@ import {
   unstackSerializedDockview,
   updateTerminalPaneDropGuide,
 } from './innerPaneLayout'
-import { paneIdsInReadingOrder } from './paneSwap'
+import { paneIdsInReadingOrder, swapPanelsInDockviewApi } from './paneSwap'
 import { activeTerminalPaneId } from './paneActivation'
 import {
   parseWorkspaceContentParams,
@@ -329,14 +329,23 @@ export function TerminalWindowPanel(props: TerminalWindowPanelProps) {
         const sourcePanelId = data?.viewId === dropEvent.api.id && typeof data.panelId === 'string' ? data.panelId : null
         if (!sourcePanelId) return
         const targetGroup = dropEvent.group
-        const direction = targetGroup
+        const target = targetGroup
           ? updateTerminalPaneDropGuide(targetGroup, sourcePanelId, dropEvent.nativeEvent.clientX, dropEvent.nativeEvent.clientY)
           : null
-        if (direction && targetGroup) {
-          const sourcePanel = dropEvent.api.getPanel(sourcePanelId)
+        if (target && targetGroup) {
           dropEvent.preventDefault()
           clearTerminalPaneDropGuide()
-          sourcePanel?.api.moveTo({ group: targetGroup, position: direction })
+          if (target === 'center') {
+            const targetPanelId = targetGroup.activePanel?.id ?? targetGroup.panels[0]?.id
+            if (targetPanelId && swapPanelsInDockviewApi(dropEvent.api, sourcePanelId, targetPanelId)) {
+              readingOrderRef.current = null
+              dropEvent.api.getPanel(sourcePanelId)?.api.setActive()
+              void settleInner()
+              persistInner()
+            }
+          } else {
+            dropEvent.api.getPanel(sourcePanelId)?.api.moveTo({ group: targetGroup, position: target })
+          }
           return
         }
         clearTerminalPaneDropGuide()
