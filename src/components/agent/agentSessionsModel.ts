@@ -9,53 +9,6 @@ const AGENT_LABEL_BY_ID: Record<string, string> = {
   opencode: 'OpenCode',
 }
 
-export const agentSessionDragMime = 'application/x-vibelink-agent-session'
-export const agentSessionDragEndEvent = 'vibelink-agent-session-drag-end'
-
-export type AgentSessionDragPayload = {
-  shell: string
-  args: string[]
-  title: string
-  cwd: string | null
-}
-
-let activeAgentSessionDragPayload: AgentSessionDragPayload | null = null
-
-export function writeAgentSessionDragPayload(dataTransfer: DataTransfer, payload: AgentSessionDragPayload): void {
-  const serialized = JSON.stringify({ kind: 'agent-session', version: 1, ...payload })
-  activeAgentSessionDragPayload = { ...payload, args: [...payload.args] }
-  dataTransfer.effectAllowed = 'copy'
-  dataTransfer.setData(agentSessionDragMime, serialized)
-}
-
-export function hasAgentSessionDragPayload(dataTransfer: DataTransfer): boolean {
-  return Array.from(dataTransfer.types).includes(agentSessionDragMime)
-}
-
-export function readAgentSessionDragPayload(dataTransfer: DataTransfer): AgentSessionDragPayload | null {
-  const raw = dataTransfer.getData(agentSessionDragMime)
-  if (!raw) return hasAgentSessionDragPayload(dataTransfer) && activeAgentSessionDragPayload
-    ? { ...activeAgentSessionDragPayload, args: [...activeAgentSessionDragPayload.args] }
-    : null
-  if (raw.length > 16 * 1024) return null
-  try {
-    const parsed = JSON.parse(raw) as Partial<AgentSessionDragPayload> & { kind?: unknown; version?: unknown }
-    if (parsed.kind !== 'agent-session' || parsed.version !== 1) return null
-    if (typeof parsed.shell !== 'string' || !parsed.shell.trim()) return null
-    if (typeof parsed.title !== 'string' || !parsed.title.trim()) return null
-    if (!(parsed.cwd === null || typeof parsed.cwd === 'string')) return null
-    if (!Array.isArray(parsed.args) || parsed.args.length > 32 || parsed.args.some((arg) => typeof arg !== 'string' || arg.length > 4096)) return null
-    return { shell: parsed.shell, args: [...parsed.args], title: parsed.title, cwd: parsed.cwd }
-  } catch {
-    return null
-  }
-}
-
-export function clearAgentSessionDragPayload(): void {
-  activeAgentSessionDragPayload = null
-}
-
-
 export function formatAgentSessionUpdatedAt(value: string | null, now = Date.now()): string {
   if (!value) return 'Time unavailable'
   const timestamp = Date.parse(value)

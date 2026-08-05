@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { WorkspaceContentActionsContext, type OpenContentRequest, type WorkspaceContentActions } from '../../layout/contentActions'
 import { clearOpenContentSnapshot, publishOpenContentSnapshot } from '../../layout/openContentRegistry'
 import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
 import type { PaneMeta } from '../../ipc/types'
-import { agentResumeLaunch, readAgentSessionDragPayload } from './agentSessionsModel'
+import { agentResumeLaunch } from './agentSessionsModel'
 import { AgentSessionsSidebar } from './AgentSessionsSidebar'
 
 const conversation = {
@@ -199,38 +199,57 @@ describe('AgentSessionsSidebar', () => {
     expect(screen.getByLabelText('200 shown of 200 conversations')).toBeInTheDocument()
   })
 
-  test('resumes a closed conversation in a fresh terminal beside the active pane', async () => {
+  test('resumes a closed conversation in the highlighted terminal pane', async () => {
     mocks.store.activePaneId = 'pane-selected'
     mocks.store.panes = { 'pane-selected': pane('pane-selected', ['pwsh']) }
-    openContent.mockResolvedValueOnce(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-resumed' }))
+    openContent.mockResolvedValueOnce(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-selected' }))
     renderSidebar()
 
     fireEvent.click(screen.getByText('Resumable omp').closest('button') as HTMLButtonElement)
 
     await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'terminal', referencePaneId: 'pane-selected', shell: 'pwsh.exe',
+      kind: 'terminal', replacePaneId: 'pane-selected', shell: 'pwsh.exe',
     })))
     expect(openContent.mock.calls.at(-1)?.[0]).not.toHaveProperty('newWindow')
-    expect(openContent.mock.calls.at(-1)?.[0]).not.toHaveProperty('replacePaneId')
-    expect(activateContent).toHaveBeenCalledWith(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-resumed' }))
-    expect(mocks.store.panes['pane-selected']?.alive).toBe(true)
+    expect(activateContent).toHaveBeenCalledWith(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-selected' }))
   })
 
-  test('drags a closed conversation with its agent icon and resume launch data', () => {
+  test('drags a closed conversation onto another pane to resume it there', async () => {
+    mocks.store.activePaneId = 'pane-selected'
+    mocks.store.panes = { 'pane-selected': pane('pane-selected', ['pwsh']) }
+    openContent.mockResolvedValueOnce(workspaceContentPanelId({ kind: 'terminal', instanceId: 'pane-drop' }))
+    const target = document.createElement('div')
+    target.dataset.terminalPaneId = 'pane-drop'
+    document.body.append(target)
+    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => target })
     renderSidebar()
     const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
-    const dataTransfer = dragDataTransfer()
 
-    fireEvent.dragStart(row, { dataTransfer })
+    fireEvent.pointerDown(row, { pointerId: 1, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 200, clientY: 400 })
+    expect(document.querySelector('.agent-session-drag-ghost')).toHaveTextContent('Resumable omp')
 
-    expect(row).toHaveAttribute('draggable', 'true')
-    expect(dataTransfer.setDragImage).toHaveBeenCalledWith(row.querySelector('.agent-conversation-brand'), 7, 7)
-    expect(readAgentSessionDragPayload(dataTransfer)).toEqual({
-      cwd: 'E:/repo',
-      shell: 'pwsh.exe',
-      args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
-      title: 'Oh My Pi: Resumable omp',
-    })
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 200, clientY: 400 })
+
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'terminal', replacePaneId: 'pane-drop', args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
+    })))
+    expect(document.querySelector('.agent-session-drag-ghost')).toBeNull()
+    target.remove()
+  })
+
+  test('keeps a plain click on a draggable row a resume, not a drag', async () => {
+    mocks.store.activePaneId = 'pane-selected'
+    mocks.store.panes = { 'pane-selected': pane('pane-selected', ['pwsh']) }
+    renderSidebar()
+    const row = screen.getByText('Resumable omp').closest('button') as HTMLButtonElement
+
+    fireEvent.pointerDown(row, { pointerId: 1, button: 0, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 11, clientY: 10 })
+    fireEvent.click(row)
+
+    await waitFor(() => expect(openContent).toHaveBeenCalledWith(expect.objectContaining({ replacePaneId: 'pane-selected' })))
+    expect(document.querySelector('.agent-session-drag-ghost')).toBeNull()
   })
 
   test('marks an open conversation with its pane number and reveals the active pane without resuming', () => {
@@ -263,19 +282,3 @@ describe('AgentSessionsSidebar', () => {
     shell.remove()
   })
 })
-
-function dragDataTransfer(): DataTransfer & { setDragImage: Mock } {
-  const values = new Map<string, string>()
-  const types: string[] = []
-  return {
-    types,
-    effectAllowed: 'none',
-    dropEffect: 'none',
-    files: {} as FileList,
-    items: {} as DataTransferItemList,
-    setData: (type: string, value: string) => { values.set(type, value); if (!types.includes(type)) types.push(type) },
-    getData: (type: string) => values.get(type) ?? '',
-    clearData: (type?: string) => { if (type) values.delete(type); else values.clear() },
-    setDragImage: vi.fn(),
-  }
-}

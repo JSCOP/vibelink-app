@@ -227,6 +227,25 @@
   cursor: grabbing;
 }
 
+/* Follows the cursor during a pointer drag, mirroring the pane title bar ghost. */
+.agent-session-drag-ghost {
+  background: var(--vibelink-surface);
+  border: 1px solid var(--vibelink-selected-pane-highlight);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  color: var(--vibelink-text);
+  font: 500 12px/1.2 var(--vibelink-sans);
+  left: 0;
+  max-width: 280px;
+  overflow: hidden;
+  padding: 6px 10px;
+  pointer-events: none;
+  position: fixed;
+  text-overflow: ellipsis;
+  top: 0;
+  white-space: nowrap;
+  z-index: 2000;
+}
 
 .agent-conversation-row.is-open {
   border-color: color-mix(in srgb, var(--vibelink-selected-pane-highlight) 42%, var(--vibelink-border));

@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { IDockviewPanelProps } from 'dockview-react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from './contentActions'
 import { TerminalPanePanel } from './TerminalPanePanel'
-import { writeAgentSessionDragPayload } from '../components/agent/agentSessionsModel'
+import { startAgentSessionDrag } from '../components/agent/agentSessionDrag'
 
 const mockStore = vi.hoisted(() => ({
   activePaneId: undefined as string | undefined,
@@ -186,16 +186,8 @@ describe('TerminalPanePanel', () => {
     expect(reviewedPane).not.toContain('data-active=')
   })
 
-  test('drops an agent session onto a pane by replacing that pane process', async () => {
+  test('marks itself as the drop target while an agent session is dragged over it', () => {
     mockStore.panes = { 'pane-target': { config: { title: 'Target' } } }
-    openContentMock.mockResolvedValueOnce('content:terminal:pane-target')
-    const dataTransfer = dragDataTransfer()
-    writeAgentSessionDragPayload(dataTransfer, {
-      cwd: 'E:/repo',
-      shell: 'pwsh.exe',
-      args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
-      title: 'Oh My Pi: Resumable omp',
-    })
     render(
       <WorkspaceContentActionsContext.Provider value={actions}>
         <TerminalPanePanel {...terminalPaneProps('pane-target')} />
@@ -203,22 +195,21 @@ describe('TerminalPanePanel', () => {
     )
     const shell = document.querySelector<HTMLElement>('.terminal-panel-shell[data-pane-id="pane-target"]')
     expect(shell).not.toBeNull()
+    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => shell })
+    const onDrop = vi.fn()
+    startAgentSessionDrag(new PointerEvent('pointerdown', { pointerId: 1, button: 0, clientX: 0, clientY: 0 }), {
+      label: 'Resumable omp',
+      canDrag: true,
+      onDrop,
+      onTap: vi.fn(),
+    })
 
-    fireEvent.dragOver(shell as HTMLElement, { dataTransfer })
+    act(() => { window.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 90, clientY: 90 })) })
     expect(screen.getByText('Resume in this terminal')).toBeInTheDocument()
     expect(screen.getByText('The current process in this pane will stop.')).toBeInTheDocument()
 
-    fireEvent.drop(shell as HTMLElement, { dataTransfer })
-
-    await waitFor(() => expect(openContentMock).toHaveBeenCalledWith({
-      kind: 'terminal',
-      replacePaneId: 'pane-target',
-      cwd: 'E:/repo',
-      shell: 'pwsh.exe',
-      args: ['-NoLogo', '-NoExit', '-Command', 'omp -r omp-1'],
-      title: 'Oh My Pi: Resumable omp',
-    }))
-    expect(activateContentMock).toHaveBeenCalledWith('content:terminal:pane-target')
+    act(() => { window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, clientX: 90, clientY: 90 })) })
+    expect(onDrop).toHaveBeenCalledWith('pane-target')
     expect(screen.queryByText('Resume in this terminal')).not.toBeInTheDocument()
   })
 
@@ -244,19 +235,3 @@ describe('TerminalPanePanel', () => {
     expect(leasedPane).toContain('Collapse')
   })
 })
-
-function dragDataTransfer(): DataTransfer {
-  const values = new Map<string, string>()
-  const types: string[] = []
-  return {
-    types,
-    effectAllowed: 'none',
-    dropEffect: 'none',
-    files: {} as FileList,
-    items: {} as DataTransferItemList,
-    setData: (type: string, value: string) => { values.set(type, value); if (!types.includes(type)) types.push(type) },
-    getData: (type: string) => values.get(type) ?? '',
-    clearData: (type?: string) => { if (type) values.delete(type); else values.clear() },
-    setDragImage: () => undefined,
-  }
-}

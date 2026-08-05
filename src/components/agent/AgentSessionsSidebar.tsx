@@ -9,15 +9,13 @@ import { useWorkspaceStore } from '../../state/store'
 import type { AgentConversationInfo } from '../../ipc/agentHistory'
 import { ProfileIcon } from '../ProfileIcon'
 import { agentIconName } from '../settings/agentBrand'
+import { startAgentSessionDrag } from './agentSessionDrag'
 import {
   agentConversationLabel,
   agentConversationPaneIds,
   agentResumeLaunch,
-  agentSessionDragEndEvent,
-  clearAgentSessionDragPayload,
   formatAgentSessionUpdatedAt,
   visibleAgentConversations,
-  writeAgentSessionDragPayload,
 } from './agentSessionsModel'
 import { useHermesSessionController } from './useHermesSessionController'
 import './AgentSessionsSidebar.css'
@@ -86,12 +84,9 @@ export function AgentSessionsSidebar({ active = true, collapsed = false, onColla
     flashAgentSessionPane(paneId)
   }, [contentActions])
 
-  const resumeConversation = useCallback(async (conversation: AgentConversationInfo) => {
-    const openPaneIds = conversationPaneIds(conversation)
-    if (openPaneIds.length > 0) {
-      revealPane(activePaneId && openPaneIds.includes(activePaneId) ? activePaneId : openPaneIds[0])
-      return
-    }
+  /** Resume the conversation inside `paneId`, replacing whatever that pane is
+   *  running. Without a pane the workspace opens a fresh terminal. */
+  const resumeInPane = useCallback(async (conversation: AgentConversationInfo, paneId: string | undefined) => {
     const launch = agentResumeLaunch(conversation)
     if (!launch) {
       setError(`Resuming ${agentConversationLabel(conversation.agent)} conversations is not supported.`)
@@ -104,7 +99,7 @@ export function AgentSessionsSidebar({ active = true, collapsed = false, onColla
         shell: launch.shell,
         args: launch.args,
         title: launch.title,
-        referencePaneId: activePaneId && panes[activePaneId]?.alive ? activePaneId : undefined,
+        replacePaneId: paneId,
       })
       if (!panelId) return
       contentActions.activateContent(panelId)
@@ -112,7 +107,16 @@ export function AgentSessionsSidebar({ active = true, collapsed = false, onColla
     } catch (reason) {
       setError(String(reason))
     }
-  }, [activePaneId, contentActions, conversationPaneIds, panes, revealPane, setError])
+  }, [contentActions, setError])
+
+  const resumeConversation = useCallback(async (conversation: AgentConversationInfo) => {
+    const openPaneIds = conversationPaneIds(conversation)
+    if (openPaneIds.length > 0) {
+      revealPane(activePaneId && openPaneIds.includes(activePaneId) ? activePaneId : openPaneIds[0])
+      return
+    }
+    await resumeInPane(conversation, activePaneId && panes[activePaneId]?.alive ? activePaneId : undefined)
+  }, [activePaneId, conversationPaneIds, panes, resumeInPane, revealPane])
 
   const refresh = async () => {
     setRefreshing(true)
@@ -232,7 +236,7 @@ export function AgentSessionsSidebar({ active = true, collapsed = false, onColla
                 const paneLabel = paneNumbers.length === 1 ? `Pane ${paneNumbers[0]}` : paneNumbers.length > 1 ? `Panes ${paneNumbers.join(', ')}` : null
                 const actionTitle = paneLabel
                   ? `${activeConversation ? 'Active in' : 'Open in'} terminal ${paneLabel.toLocaleLowerCase()}. Click to reveal · ${conversation.path}`
-                  : `Click to resume beside the active terminal, or drag onto a terminal pane to replace it · ${conversation.path}`
+                  : `Click to resume in the highlighted terminal pane, or drag onto any pane to resume there · ${conversation.path}`
                 return (
                   <div key={`${conversation.agent}:${conversation.path}`} className="agent-session-list-slot" style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}>
                     <button
@@ -243,19 +247,13 @@ export function AgentSessionsSidebar({ active = true, collapsed = false, onColla
                       aria-posinset={virtualRow.index + 1}
                       aria-setsize={shownConversations.length}
                       title={actionTitle}
-                      draggable={draggable}
-                      onDragStart={(event) => {
-                        if (!launch || !draggable) {
-                          event.preventDefault()
-                          return
-                        }
-                        writeAgentSessionDragPayload(event.dataTransfer, { ...launch, cwd: conversation.cwd })
-                        const dragIcon = event.currentTarget.querySelector('.agent-conversation-brand')
-                        if (dragIcon) event.dataTransfer.setDragImage(dragIcon, 7, 7)
-                      }}
-                      onDragEnd={() => {
-                        clearAgentSessionDragPayload()
-                        window.dispatchEvent(new Event(agentSessionDragEndEvent))
+                      onPointerDown={(event) => {
+                        startAgentSessionDrag(event.nativeEvent, {
+                          label: conversation.title,
+                          canDrag: draggable,
+                          onDrop: (paneId) => { void resumeInPane(conversation, paneId) },
+                          onTap: () => { void resumeConversation(conversation) },
+                        })
                       }}
                       onClick={() => { void resumeConversation(conversation) }}
                     >
