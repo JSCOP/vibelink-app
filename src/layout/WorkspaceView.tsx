@@ -133,6 +133,8 @@ import {
 import { buildWorkspaceContentTabContextMenu } from './workspaceContentTabMenu'
 import { finalizeLocalSplitLayout, finalizeLocalSplitSize, localSplitInitialSize } from './localSplitSizing'
 import { resolvePaneZoomTarget } from './paneZoom'
+import { dockviewOverlaysSettled, forceOverlayReposition } from './dockviewOverlay'
+import { getContentRect, isDockElementMeasurable, nextContentAfterClose, reflowTerminalsAfterLayout, workspaceAspectRatio } from './workspaceDockGeometry'
 const KanbanBoard = lazy(() => import('../components/KanbanBoard').then((module) => ({ default: module.KanbanBoard })))
 const TaskDiffView = lazy(() => import('../components/TaskDiffView').then((module) => ({ default: module.TaskDiffView })))
 const OrchestratorChat = lazy(() => import('../components/OrchestratorChat').then((module) => ({ default: module.OrchestratorChat })))
@@ -2499,87 +2501,4 @@ async function measuredSpawnSize(paneId: string, attempts = 30): Promise<{ cols:
     () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
     attempts,
   )
-}
-
-function reflowTerminalsAfterLayout(options: { syncPty?: boolean; paneIds?: string[] } = {}): void {
-  requestAnimationFrame(() => TerminalManager.scheduleLayoutPass({ paneIds: options.paneIds, syncPty: options.syncPty, force: true }))
-}
-
-function getContentRect(panelId: string): DOMRect | null {
-  const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(panelId) : panelId.replaceAll('"', '\\"')
-  const element = document.querySelector<HTMLElement>(`.terminal-panel-shell[data-content-panel-id="${escaped}"], .workspace-window-panel[data-content-panel-id="${escaped}"]`)
-  return element?.getBoundingClientRect() ?? null
-}
-
-function nextContentAfterClose(api: DockviewApi, panelId: string): string | null {
-  const closing = api.getPanel(panelId)
-  if (!closing) return null
-  const groupPanels = closing.group.panels.filter((panel) => panel.id !== panelId)
-  if (groupPanels.length > 0) return groupPanels[0].id
-  const candidates = api.panels.filter((panel) => panel.id !== panelId)
-  if (candidates.length === 0) return null
-  const closingRect = getContentRect(panelId)
-  if (!closingRect) return candidates[0].id
-  let best: { id: string; distance: number } | null = null
-  for (const panel of candidates) {
-    const rect = getContentRect(panel.id)
-    if (!rect) continue
-    const distance = Math.hypot((rect.left + rect.width / 2) - (closingRect.left + closingRect.width / 2), (rect.top + rect.height / 2) - (closingRect.top + closingRect.height / 2))
-    if (!best || distance < best.distance) best = { id: panel.id, distance }
-  }
-  return best?.id ?? candidates[0].id
-}
-
-function workspaceAspectRatio(element: HTMLElement | null): number {
-  const rect = element?.getBoundingClientRect()
-  return rect && rect.height > 0 ? rect.width / rect.height : 16 / 9
-}
-
-function isDockElementMeasurable(element: HTMLElement | null): element is HTMLElement {
-  if (!element?.isConnected || element.offsetParent === null) return false
-  const rect = element.getBoundingClientRect()
-  return rect.width > 0 && rect.height > 0
-}
-
-type DockviewOverlayRenderContainer = {
-  map?: Record<string, { element?: HTMLElement }>
-  updateAllPositions: () => void
-}
-
-function dockviewOverlayRenderContainer(api: DockviewApi): DockviewOverlayRenderContainer | null {
-  const holder: unknown = api
-  if (!holder || typeof holder !== 'object' || !('component' in holder)) return null
-  const component = holder.component
-  if (!component || typeof component !== 'object' || !('overlayRenderContainer' in component)) return null
-  const container = component.overlayRenderContainer
-  if (!container || typeof container !== 'object' || !('updateAllPositions' in container) || typeof container.updateAllPositions !== 'function') return null
-  return container as DockviewOverlayRenderContainer
-}
-
-function forceOverlayReposition(api: DockviewApi): void {
-  dockviewOverlayRenderContainer(api)?.updateAllPositions()
-}
-
-function dockviewOverlaysSettled(api: DockviewApi): boolean {
-  const container = dockviewOverlayRenderContainer(api)
-  if (!container?.map) return false
-  for (const panel of api.panels) {
-    if (!panel.api.isVisible || panel.api.renderer !== 'always') continue
-    const overlay = container.map[panel.id]?.element
-    const owner = panel.group.element.querySelector<HTMLElement>('.dv-content-container')
-    if (!overlay || !owner || overlay.style.visibility === 'hidden') return false
-    const overlayRect = overlay.getBoundingClientRect()
-    const ownerRect = owner.getBoundingClientRect()
-    if (ownerRect.width <= 0 || ownerRect.height <= 0 || !rectsMatch(overlayRect, ownerRect)) return false
-  }
-  return true
-}
-
-
-
-function rectsMatch(left: DOMRect, right: DOMRect, tolerance = 1): boolean {
-  return Math.abs(left.left - right.left) <= tolerance
-    && Math.abs(left.top - right.top) <= tolerance
-    && Math.abs(left.width - right.width) <= tolerance
-    && Math.abs(left.height - right.height) <= tolerance
 }

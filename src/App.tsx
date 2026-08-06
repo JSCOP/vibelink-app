@@ -44,6 +44,7 @@ import { appRuntimeIdentity } from './runtimeIdentity'
 import './styles/theme.css'
 import './styles/kanban.css'
 import './App.css'
+import './styles/gitHistory.css'
 const SettingsDialog = lazy(() => import('./components/SettingsDialog').then((module) => ({ default: module.SettingsDialog })))
 const StartupWorkspaceDialog = lazy(() => import('./components/StartupWorkspaceDialog').then((module) => ({ default: module.StartupWorkspaceDialog })))
 const WorkspaceCreateDialog = lazy(() => import('./components/WorkspaceCreateDialog').then((module) => ({ default: module.WorkspaceCreateDialog })))
