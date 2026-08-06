@@ -97,6 +97,7 @@ import {
   isStructuralWorkspaceContentKind,
   normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
+  salvageWorkspaceContentParams,
   serializeWorkspaceLayoutEnvelope,
   workspaceContentPanelId,
   workspaceContentResourceKey,
@@ -1581,6 +1582,12 @@ export function WorkspaceView({
       const sessionEpoch = getWorkspaceSessionEpoch()
       const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
       const envelope = normalizeWorkspaceLayoutState(raw)
+      // `freshWorkspaceLayoutEnvelope()` is `{ version: 3, dockview: null }`, so a
+      // null dockview against a non-empty save is exactly "validation rejected
+      // it". The arrangement is unrecoverable, but the content is not.
+      const salvaged = envelope.dockview === null && typeof raw === 'string' && raw.length > 0
+        ? salvageWorkspaceContentParams(raw)
+        : []
       const requiresFirstTerminalLayout = livePanes.length > 0 && centralGridIsEmpty(api)
       // A layout this view authored is already on screen — the store only echoed
       // our own save back (possibly an older in-flight one). Adopt the string and
@@ -1662,6 +1669,15 @@ export function WorkspaceView({
           ?? workspaceWindow?.getInnerApi()?.groups.find((group) => group.api.location.type === 'grid' && group.api.isVisible)
         lastMainGroupIdRef.current = mainGroup?.id ?? null
         setCurrentMainGroupId(mainGroup?.id ?? null)
+        // Runs here, not inside the fromJSON block: `addContentPanel` routes
+        // central content through the workspace window's inner api, which only
+        // exists once `waitForWorkspaceWindowPanels` above has resolved. Ahead of
+        // the reconcilers so a salvaged browser still gets its live page state.
+        if (salvaged.length > 0) {
+          await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+            for (const params of salvaged) addContentPanel(params, { inactive: true }, api)
+          })
+        }
         await reconcileTerminalPanels(api, suppressPanelRemovalRef, addContentPanel, () => undefined)
         if (!ownsLayout(owner)) return
         await reconcileRestoredBrowserPanels(api, sessionId, suppressPanelRemovalRef, addContentPanel, () => ownsLayout(owner))

@@ -12,6 +12,7 @@ import {
   normalizeWorkspaceLayoutEnvelope,
   normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
+  salvageWorkspaceContentParams,
   workspaceContentPanelId,
   workspaceContentResourceKey,
 } from './workspaceContentModel'
@@ -51,6 +52,35 @@ describe('workspace content model', () => {
       'content:editor:src/App.tsx',
       'content:workbench:workbench',
     ])
+  })
+
+  it('salvages open content from an envelope one bad panel made unrestorable', () => {
+    const editor: WorkspaceContentParams = { schema: 1, kind: 'editor', instanceId: 'src/App.tsx', title: 'App.tsx', icon: 'file-code', relPath: 'src/App.tsx' }
+    const todo: WorkspaceContentParams = { schema: 1, kind: 'todo', instanceId: 'todo', title: 'Todo', icon: 'list-todo' }
+    const sidebar: WorkspaceContentParams = { schema: 1, kind: 'workspaces', instanceId: 'workspaces', title: 'Workspaces', icon: 'layout-grid' }
+    const terminalWindow: WorkspaceContentParams = { schema: 1, kind: 'terminalWindow', instanceId: 'win-1', title: 'Terminals', icon: 'terminal', inner: null, titlesHidden: false }
+    // A future release adding one field to a panel's params is enough: the
+    // exact-key check rejects it, and the whole arrangement goes with it.
+    const future = { ...panel(todo), params: { ...todo, collapsed: false } }
+    const panels = {
+      ...Object.fromEntries([editor, sidebar, terminalWindow].map((params) => [workspaceContentPanelId(params), panel(params)])),
+      [workspaceContentPanelId(todo)]: future,
+    }
+    const raw = JSON.stringify({ version: 3, dockview: dockview(panels) })
+
+    // Unchanged: the envelope is still rejected whole, which is what keeps
+    // Dockview's fromJSON from being handed an inconsistent tree.
+    expect(normalizeWorkspaceLayoutEnvelope(raw)).toEqual(freshWorkspaceLayoutEnvelope())
+
+    // Structural sidebars and terminal windows are rebuilt by the default
+    // layout, so only the user's own content is salvaged.
+    expect(salvageWorkspaceContentParams(raw)).toEqual([editor])
+  })
+
+  it('salvages nothing from a layout that is absent, unparseable, or already empty', () => {
+    expect(salvageWorkspaceContentParams(null)).toEqual([])
+    expect(salvageWorkspaceContentParams('{')).toEqual([])
+    expect(salvageWorkspaceContentParams(JSON.stringify({ version: 3, dockview: null }))).toEqual([])
   })
 
   it.each([

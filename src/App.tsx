@@ -553,6 +553,15 @@ function App() {
 
   const deleteWorkspace = useCallback(async (sessionId: string) => {
     if (!await prepareDirtySessions([sessionId], 'Delete workspace?')) return
+    // Asked after the dirty-editor step so a user who already cancelled there
+    // is not prompted twice.
+    const confirmed = await confirmDialog({
+      title: 'Delete workspace?',
+      message: 'Every terminal in this workspace is stopped and its history is removed. This cannot be undone.',
+      confirmLabel: 'Delete',
+      danger: true,
+    })
+    if (!confirmed) return
     await deleteSession(sessionId)
   }, [deleteSession, prepareDirtySessions])
 

@@ -252,6 +252,40 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
   return { version: 3, dockview: parsed.dockview as unknown as SerializedDockview }
 }
 
+/** Kinds the restore path rebuilds itself, so salvaging them would duplicate or
+ *  fight that work: outer `terminal` panels are closed as strays by
+ *  `closeStrayTerminalPanels`, and the two window kinds are recreated by
+ *  `createDefaultWorkspaceDockviewLayout` plus `reconcileTerminalPanels`. */
+const layoutOwnedKinds: Partial<Record<WorkspaceContentKind, true>> = {
+  terminal: true,
+  terminalWindow: true,
+  workspaceWindow: true,
+}
+
+/** Content panels still recoverable from a layout `normalizeWorkspaceLayoutEnvelope`
+ *  rejected. That function fails the WHOLE envelope on one bad panel — which is
+ *  right, because Dockview's `fromJSON` needs a fully consistent tree — but the
+ *  fallback default layout then also drops every open editor, preview, browser,
+ *  and board tab. Those are the user's content rather than geometry, so they are
+ *  re-added individually. Structural sidebars are skipped; the default layout
+ *  recreates them. Order follows `panels` insertion order. */
+export function salvageWorkspaceContentParams(raw: string | null | undefined): WorkspaceContentParams[] {
+  const parsed = parseJson(raw)
+  if (!isRecord(parsed) || !isRecord(parsed.dockview) || !isRecord(parsed.dockview.panels)) return []
+  const salvaged: WorkspaceContentParams[] = []
+  const resources = new Set<string>()
+  for (const panel of Object.values(parsed.dockview.panels)) {
+    if (!isRecord(panel)) continue
+    const params = parseWorkspaceContentParams(panel.params)
+    if (!params || isStructuralWorkspaceContentKind(params.kind) || layoutOwnedKinds[params.kind]) continue
+    const resourceKey = workspaceContentResourceKey(params)
+    if (resources.has(resourceKey)) continue
+    resources.add(resourceKey)
+    salvaged.push(params)
+  }
+  return salvaged
+}
+
 export function serializeWorkspaceLayoutEnvelope(envelope: WorkspaceLayoutEnvelope): string {
   return JSON.stringify(normalizeWorkspaceLayoutEnvelope(JSON.stringify(envelope)))
 }

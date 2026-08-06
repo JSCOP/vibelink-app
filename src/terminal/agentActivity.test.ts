@@ -187,4 +187,50 @@ describe('AgentActivityTracker', () => {
 
     expect(completed).toEqual([])
   })
+
+  test('a codepoint split across two PTY reads is not seen as replacement-char content', () => {
+    const korean = encoder.encode('안녕')
+    expect(korean.byteLength).toBe(6)
+
+    tracker.notePromptSubmitted('agent-pane')
+    // Byte 2 lands inside the first codepoint. A partial sequence is not
+    // content, so nothing may be scheduled yet; a per-chunk decoder would
+    // instead emit U+FFFD here and arm the quiet timer.
+    tracker.noteOutput('agent-pane', korean.slice(0, 2))
+    vi.advanceTimersByTime(40)
+    expect(completed).toEqual([])
+
+    tracker.noteOutput('agent-pane', korean.slice(2))
+    vi.advanceTimersByTime(20)
+    expect(completed).toEqual(['agent-pane'])
+  })
+
+  test('an OSC opened by an ESC at a chunk boundary is still recognised as chrome', () => {
+    tracker.notePromptSubmitted('agent-pane')
+    tracker.noteOutput('agent-pane', encoder.encode('\u001b'))
+    tracker.noteOutput('agent-pane', encoder.encode(']0;title\u0007'))
+
+    // The window-title sequence is terminal chrome. Losing the split ESC made
+    // its body read as agent text and its BEL end the turn immediately.
+    vi.advanceTimersByTime(40)
+    expect(completed).toEqual([])
+
+    tracker.noteOutput('agent-pane', encoder.encode('Answer text'))
+    vi.advanceTimersByTime(20)
+    expect(completed).toEqual(['agent-pane'])
+  })
+
+  test('an OSC terminator split across chunks does not swallow the rest of the turn', () => {
+    tracker.notePromptSubmitted('agent-pane')
+    tracker.noteOutput('agent-pane', encoder.encode('Working'))
+    // Ends mid-`ESC \`, so the string terminator completes in the next chunk.
+    tracker.noteOutput('agent-pane', encoder.encode('\u001b]0;title\u001b'))
+    tracker.noteOutput('agent-pane', encoder.encode('\\'))
+    expect(completed).toEqual([])
+
+    // With `inOsc` stuck true this BEL was eaten as an OSC terminator and the
+    // finished turn only completed on the quiet timeout.
+    tracker.noteOutput('agent-pane', encoder.encode('Done.\u0007'))
+    expect(completed).toEqual(['agent-pane'])
+  })
 })

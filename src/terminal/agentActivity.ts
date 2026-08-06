@@ -9,6 +9,9 @@ export type AgentActivityActions = {
 type OutputParseState = {
   inOsc: boolean
   inCsi: boolean
+  /** The previous chunk ended on a lone ESC. Its introducer is the first
+   *  character of the next chunk, so the sequence must not be resolved yet. */
+  pendingEsc: boolean
 }
 
 type TimerHandle = number | NodeJS.Timeout
@@ -16,6 +19,10 @@ type PendingAgentResponse = {
   sawOutput: boolean
   timer: TimerHandle | undefined
   parse: OutputParseState
+  /** Per-response, and fed every chunk in order, so a multibyte codepoint split
+   *  across two PTY reads decodes as itself instead of U+FFFD. Released with
+   *  the map entry in `clear`/`complete`. */
+  decoder: TextDecoder
 }
 
 type PaneInputState = {
@@ -25,8 +32,6 @@ type PaneInputState = {
 
 export const defaultAgentResponseQuietMs = 8_000
 const maxDraftChars = 4096
-
-const textDecoder = new TextDecoder()
 
 export class AgentActivityTracker {
   private actions: AgentActivityActions = {
@@ -64,14 +69,21 @@ export class AgentActivityTracker {
     const pending = this.pending.get(paneId)
     if (!pending) return
 
-    if (pending.sawOutput && bytes.indexOf(0x07) < 0) {
-      updateControlParseState(bytes, pending.parse)
+    // Decode before any early return: the streaming decoder only reassembles a
+    // split codepoint if every chunk reaches it, in order. A chunk ending on a
+    // partial sequence legitimately yields ''.
+    const text = pending.decoder.decode(bytes, { stream: true })
+
+    if (pending.sawOutput && !text.includes('\u0007')) {
+      // Still advance the control-sequence state, or an OSC opened here would
+      // never be seen as closed. Same parser as below, just not collecting.
+      stripTerminalControls(text, pending.parse, false)
       this.scheduleCompletion(paneId, pending)
       return
     }
 
-    const { text, bell } = stripTerminalControls(textDecoder.decode(bytes), pending.parse)
-    if (hasAgentResponseContent(text)) pending.sawOutput = true
+    const { text: stripped, bell } = stripTerminalControls(text, pending.parse)
+    if (hasAgentResponseContent(stripped)) pending.sawOutput = true
     if (pending.sawOutput && bell) {
       this.complete(paneId, pending)
       return
@@ -101,7 +113,12 @@ export class AgentActivityTracker {
   private startPendingResponse(paneId: string): void {
     if (!this.actions.isAgentPane(paneId)) return
     this.clear(paneId)
-    this.pending.set(paneId, { sawOutput: false, timer: undefined, parse: { inOsc: false, inCsi: false } })
+    this.pending.set(paneId, {
+      sawOutput: false,
+      timer: undefined,
+      parse: { inOsc: false, inCsi: false, pendingEsc: false },
+      decoder: new TextDecoder(),
+    })
     this.actions.onResponseStart(paneId)
   }
 
@@ -173,18 +190,50 @@ type StrippedOutput = {
   bell: boolean
 }
 
-function stripTerminalControls(text: string, state: OutputParseState): StrippedOutput {
+/** The single control-sequence parser. `collect: false` advances `state` without
+ *  building the stripped text, for the hot path that only needs the sequence
+ *  state kept current. A second byte-level state machine used to exist for that
+ *  path; the two drifted apart, which is how the split-ESC bug survived. */
+function stripTerminalControls(text: string, state: OutputParseState, collect = true): StrippedOutput {
   let out = ''
   let bell = false
   let index = 0
+  if (state.pendingEsc && text.length > 0) {
+    // The previous chunk ended on ESC; this chunk opens with its introducer.
+    state.pendingEsc = false
+    const introducer = text.charCodeAt(0)
+    if (state.inOsc) {
+      // Only `ESC \` terminates the string. Any other byte leaves the ESC
+      // consumed and re-examines this character inside the OSC below.
+      if (introducer === 0x5c) {
+        state.inOsc = false
+        index = 1
+      }
+    } else if (introducer === 0x5d) {
+      state.inOsc = true
+      index = 1
+    } else if (introducer === 0x5b) {
+      state.inCsi = true
+      index = 1
+    } else {
+      if (collect) out += ' '
+      index = 1
+    }
+  }
   while (index < text.length) {
     if (state.inOsc) {
       const current = text.charCodeAt(index)
       if (current === 0x07) {
         state.inOsc = false
-      } else if (current === 0x1b && text.charCodeAt(index + 1) === 0x5c) {
-        state.inOsc = false
-        index += 1
+      } else if (current === 0x1b) {
+        if (index + 1 >= text.length) {
+          state.pendingEsc = true
+          break
+        }
+        if (text.charCodeAt(index + 1) === 0x5c) {
+          state.inOsc = false
+          index += 1
+        }
       }
       index += 1
       continue
@@ -194,18 +243,22 @@ function stripTerminalControls(text: string, state: OutputParseState): StrippedO
       index += 1
       if (current >= 0x40 && current <= 0x7e) {
         state.inCsi = false
-        out += ' '
+        if (collect) out += ' '
       }
       continue
     }
     const code = text.charCodeAt(index)
     if (code === 0x1b) {
+      if (index + 1 >= text.length) {
+        state.pendingEsc = true
+        break
+      }
       const next = text.charCodeAt(index + 1)
       if (next === 0x5d) {
         state.inOsc = true
       } else if (next === 0x5b) {
         state.inCsi = true
-      } else {
+      } else if (collect) {
         out += ' '
       }
       index += 2
@@ -213,50 +266,15 @@ function stripTerminalControls(text: string, state: OutputParseState): StrippedO
     }
     if (code === 0x07) {
       bell = true
-      out += ' '
+      if (collect) out += ' '
     } else if (code <= 0x08 || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || code === 0x7f) {
-      out += ' '
-    } else {
+      if (collect) out += ' '
+    } else if (collect) {
       out += text[index]
     }
     index += 1
   }
   return { text: out, bell }
-}
-
-function updateControlParseState(bytes: Uint8Array, state: OutputParseState): void {
-  let index = 0
-  while (index < bytes.byteLength) {
-    if (state.inOsc) {
-      if (bytes[index] === 0x1b && bytes[index + 1] === 0x5c) {
-        state.inOsc = false
-        index += 2
-      } else {
-        index += 1
-      }
-      continue
-    }
-
-    if (state.inCsi) {
-      const current = bytes[index]
-      index += 1
-      if (current >= 0x40 && current <= 0x7e) state.inCsi = false
-      continue
-    }
-
-    if (bytes[index] === 0x1b) {
-      const next = bytes[index + 1]
-      if (next === 0x5d) {
-        state.inOsc = true
-      } else if (next === 0x5b) {
-        state.inCsi = true
-      }
-      index += 2
-      continue
-    }
-
-    index += 1
-  }
 }
 
 function hasAgentResponseContent(text: string): boolean {
