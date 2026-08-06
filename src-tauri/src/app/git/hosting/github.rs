@@ -247,15 +247,30 @@ pub(crate) fn http_status_error(
     body: &str,
     token: &str,
 ) -> anyhow::Error {
-    if status == 401 || status == 403 {
+    let rate_limited = match status {
+        403 => {
+            let body = body.to_ascii_lowercase();
+            body.contains("rate limit") || body.contains("secondary rate")
+        }
+        429 => true,
+        _ => false,
+    };
+    if status == 401 || (status == 403 && !rate_limited) {
         return anyhow!("AUTH:{provider} authentication failed (HTTP {status})");
     }
 
     let message = api_error_message(body).unwrap_or_else(|| format!("HTTP {status}"));
-    anyhow!(
-        "{provider} API request failed (HTTP {status}): {}",
-        redact_secret(&message, token)
-    )
+    if rate_limited {
+        anyhow!(
+            "{provider} API rate limit exceeded (HTTP {status}): {}",
+            redact_secret(&message, token)
+        )
+    } else {
+        anyhow!(
+            "{provider} API request failed (HTTP {status}): {}",
+            redact_secret(&message, token)
+        )
+    }
 }
 
 fn api_error_message(body: &str) -> Option<String> {
@@ -586,6 +601,31 @@ mod tests {
         );
         assert!(!error.to_string().contains("secret"));
         assert!(error.to_string().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn rate_limit_status_errors_are_not_auth_failures() {
+        let rate_limited = http_status_error(
+            "GitHub",
+            403,
+            r#"{"message":"API rate limit exceeded"}"#,
+            "",
+        )
+        .to_string();
+        assert!(!rate_limited.starts_with("AUTH:"));
+        assert!(rate_limited.contains("rate limit"));
+
+        let unauthorized = http_status_error("GitHub", 401, "{}", "").to_string();
+        assert!(unauthorized.starts_with("AUTH:"));
+
+        let forbidden = http_status_error(
+            "GitHub",
+            403,
+            r#"{"message":"Resource not accessible"}"#,
+            "",
+        )
+        .to_string();
+        assert!(forbidden.starts_with("AUTH:"));
     }
 
     #[test]

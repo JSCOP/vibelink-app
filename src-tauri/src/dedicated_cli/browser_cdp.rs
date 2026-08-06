@@ -391,6 +391,12 @@ impl CdpConnection {
             bail!("browser target exposed an unsafe CDP websocket URL");
         }
         let (socket, _) = connect(raw).context("connect to embedded browser CDP")?;
+        match socket.get_ref() {
+            MaybeTlsStream::Plain(stream) => {
+                stream.set_read_timeout(Some(Duration::from_secs(30)))?
+            }
+            _ => bail!("browser target exposed a non-plain CDP websocket transport"),
+        }
         Ok(Self { socket, next_id: 1 })
     }
 
