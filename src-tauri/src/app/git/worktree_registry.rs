@@ -797,11 +797,17 @@ impl WorktreeRegistry {
                 .blockers
                 .iter()
                 .any(|blocker| blocker.kind == WorktreeBlockerKind::Unpushed);
-            let provider_merge_proven =
-                request.provider_merged_head.as_deref() == Some(preflight.head.as_str());
-            if unpushed && !provider_merge_proven {
-                branch_preserved_reason =
-                    Some("branch contains unpushed commits and was preserved".to_string());
+            // Same proof the acknowledgement gate uses, so the two can never
+            // disagree about whether this delete is allowed.
+            if unpushed && !provider_merge_proven(request, preflight)? {
+                branch_preserved_reason = Some(
+                    if request.provider_merged_head.is_some() {
+                        "branch contains unpushed commits and remote merge state could not be verified"
+                    } else {
+                        "branch contains unpushed commits and was preserved"
+                    }
+                    .to_string(),
+                );
             } else if preflight.head.is_empty() {
                 branch_preserved_reason = Some("branch head identity is unavailable".to_string());
             } else {
@@ -1967,7 +1973,14 @@ fn provider_merge_proven(
     if String::from_utf8(actual)?.trim() != expected {
         bail!("provider merge proof does not match the local branch head");
     }
-    Ok(true)
+    // Matching the local head proves nothing on its own: that value is what the
+    // preflight handed the client, so any caller can echo it back and unlock the
+    // `update-ref -d` below. The merge is proven only when the branch's own
+    // remote already carries the commit, which the caller cannot fabricate.
+    Ok(
+        remote_branch_tip(&preflight.repository_path, &preflight.branch).as_deref()
+            == Some(expected),
+    )
 }
 
 fn blocker(kind: WorktreeBlockerKind, hard: bool, message: impl Into<String>) -> WorktreeBlocker {
@@ -2113,6 +2126,34 @@ fn required_text(value: &str, field: &str) -> Result<String> {
 fn nonempty(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Commit the branch's configured remote currently reports for it, or `None`
+/// when there is no upstream, the remote is unreachable, or it does not know the
+/// branch. Every one of those is "not proven", which keeps the branch.
+fn remote_branch_tip(repository_path: &str, branch: &str) -> Option<String> {
+    let remote_key = format!("branch.{branch}.remote");
+    let configured =
+        git_read_allow_fail(repository_path, ["config", "--get", remote_key.as_str()]).ok()??;
+    let remote = String::from_utf8_lossy(&configured).trim().to_string();
+    if remote.is_empty() {
+        return None;
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    let listing = git_read_allow_fail(
+        repository_path,
+        ["ls-remote", "--heads", remote.as_str(), branch_ref.as_str()],
+    )
+    .ok()??;
+    let listing = String::from_utf8_lossy(&listing);
+    nonempty(
+        listing
+            .lines()
+            .next()?
+            .split_whitespace()
+            .next()?
+            .to_string(),
+    )
 }
 
 fn bounded_error(value: &str) -> String {
@@ -2423,7 +2464,7 @@ mod tests {
     }
 
     #[test]
-    fn removal_preflight_detects_only_real_unpushed_commits_and_accepts_exact_provider_proof() {
+    fn removal_preflight_detects_only_real_unpushed_commits_and_requires_remote_merge_proof() {
         let repo = committed_repo();
         let linked = unique_path("registry-removal-linked");
         let linked_text = linked.to_str().expect("utf8 linked");
@@ -2577,7 +2618,10 @@ mod tests {
             .iter()
             .any(|blocker| blocker.kind == WorktreeBlockerKind::Unpushed));
 
-        let request = WorktreeRemoveRequest {
+        // Echoing the preflight's own head back is no longer proof of anything:
+        // this fixture has no remote, so the merge cannot be verified and the
+        // Unpushed blocker still has to be forced and acknowledged.
+        let echoed_head = WorktreeRemoveRequest {
             operation_id: Uuid::new_v4(),
             worktree_id: record.id.clone(),
             expected_instance_id: record.instance_id.clone(),
@@ -2586,9 +2630,19 @@ mod tests {
             provider_merged_head: Some(head.clone()),
             acknowledged_blockers: Vec::new(),
         };
+        assert!(registry
+            .validate_removal_request(&echoed_head, &unpushed)
+            .expect_err("unverifiable provider proof must not waive the blocker")
+            .to_string()
+            .contains("force is required"));
+        let request = WorktreeRemoveRequest {
+            force: true,
+            acknowledged_blockers: vec![WorktreeBlockerKind::Unpushed],
+            ..echoed_head.clone()
+        };
         registry
             .validate_removal_request(&request, &unpushed)
-            .expect("exact provider proof");
+            .expect("acknowledged unpushed removal");
         let mismatch = WorktreeRemoveRequest {
             provider_merged_head: Some("0".repeat(40)),
             ..request.clone()
@@ -2626,13 +2680,16 @@ mod tests {
             })
             .expect("restore fixture lifecycle");
 
+        // The exact input the old code deleted the branch for: an Unpushed
+        // blocker plus `provider_merged_head` echoing `preflight.head`. With no
+        // remote able to confirm the merge, the branch must survive.
         let preserve_request = WorktreeRemoveRequest {
             operation_id: Uuid::new_v4(),
             worktree_id: record.id.clone(),
             expected_instance_id: record.instance_id.clone(),
             force: true,
             delete_branch: true,
-            provider_merged_head: None,
+            provider_merged_head: Some(head.clone()),
             acknowledged_blockers: vec![WorktreeBlockerKind::Unpushed],
         };
         registry
@@ -2646,7 +2703,7 @@ mod tests {
         assert!(preserved
             .branch_preserved_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("unpushed")));
+            .is_some_and(|reason| reason.contains("could not be verified")));
         registry
             .finalize_removal(&record.id, &record.instance_id)
             .expect("finalize preserved removal");
