@@ -1604,66 +1604,78 @@ export function WorkspaceView({
         const previous = serializeCurrentLayout()
         if (previous) void saveLayout(loadedSessionRef.current, previous).catch(() => undefined)
       }
-      // A valid v3 layout can be restored even when the daemon's live terminal
-      // set changed while the app was closed. Resource reconciliation below
-      // removes stale UI owners and adds only resources proven live.
-      const restore = envelope.dockview
-      const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
-      const restoreHasEdgeGroups = Boolean(restore?.edgeGroups)
-      let applyEdgeDefaults = !restore || !restoreHasEdgeGroups
-      await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
-        const dockview = restore
-          ? completeWorkspaceStructuralLayout(restore, rootWidth)
-          : createDefaultWorkspaceDockviewLayout(livePanes, rootWidth)
-        try {
-          api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
-        } catch {
-          api.clear()
-          api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes, rootWidth) as Parameters<DockviewApi['fromJSON']>[0])
-          applyEdgeDefaults = true
+      // Rebuilding the dock walks every pane through geometry it never lands
+      // on. Dockview mounts a panel before the grid sizes it, and the mount's
+      // own fit measured the container at 1014x62 — a 3-ROW fit, forwarded to
+      // the PTY as a real SIGWINCH — before the pane landed back on 62 rows.
+      // A normal-buffer agent TUI repaints for the 3-row grid, so the pane came
+      // back with its prompt stranded at the top and dozens of blank rows under
+      // it. The intermediate COLUMN steps are just as destructive: a narrow fit
+      // rewraps the whole buffer and xterm never pulls those lines back out of
+      // scrollback. Hold every fit until the final geometry, exactly as Arrange
+      // and grid creation already do.
+      return await TerminalManager.runLayoutTransaction(async () => {
+        // A valid v3 layout can be restored even when the daemon's live terminal
+        // set changed while the app was closed. Resource reconciliation below
+        // removes stale UI owners and adds only resources proven live.
+        const restore = envelope.dockview
+        const rootWidth = dockRef.current?.getBoundingClientRect().width ?? 1280
+        const restoreHasEdgeGroups = Boolean(restore?.edgeGroups)
+        let applyEdgeDefaults = !restore || !restoreHasEdgeGroups
+        await withSuppressedPanelRemoval(suppressPanelRemovalRef, async () => {
+          const dockview = restore
+            ? completeWorkspaceStructuralLayout(restore, rootWidth)
+            : createDefaultWorkspaceDockviewLayout(livePanes, rootWidth)
+          try {
+            api.fromJSON(dockview as Parameters<DockviewApi['fromJSON']>[0], { reuseExistingPanels: true })
+          } catch {
+            api.clear()
+            api.fromJSON(createDefaultWorkspaceDockviewLayout(livePanes, rootWidth) as Parameters<DockviewApi['fromJSON']>[0])
+            applyEdgeDefaults = true
+          }
+          ensureWorkspaceEdgeShell(api)
+          // Legacy layouts (panes as outer panels) upgrade in place: the seeded
+          // window below adopts every LIVE pane, so any top-level terminal panel
+          // left here is unreachable chrome. Drop it before the dock is handed to
+          // the user; the healed layout is persisted by the tail of this run.
+          closeStrayTerminalPanels(api)
+          if (applyEdgeDefaults) resetWorkspaceEdgeDefaults(api, rootWidth)
+          else collapseWorkspaceEdgesForCenterWidth(api, rootWidth)
+        })
+        if (!transactionIsCurrent()) return
+        if (!await waitForWorkspaceWindowPanels(api, sessionId, sessionEpoch)) throw new Error('Workspace window did not mount after layout restore.')
+        loadedSessionRef.current = sessionId
+        loadedLayoutJsonRef.current = raw ?? null
+        loadedApiRef.current = api
+        loadedSessionEpochRef.current = owner.sessionEpoch
+        layoutOwnerRef.current = owner
+        setLoadedLayoutOwner({ sessionId: owner.sessionId, sessionEpoch: owner.sessionEpoch })
+        const workspaceWindow = listWorkspaceWindows().find((handle) => Boolean(api.getPanel(handle.outerPanelId)))
+        const mainGroup = workspaceWindow?.getInnerApi()?.activeGroup
+          ?? workspaceWindow?.getInnerApi()?.groups.find((group) => group.api.location.type === 'grid' && group.api.isVisible)
+        lastMainGroupIdRef.current = mainGroup?.id ?? null
+        setCurrentMainGroupId(mainGroup?.id ?? null)
+        await reconcileTerminalPanels(api, suppressPanelRemovalRef, addContentPanel, () => undefined)
+        if (!ownsLayout(owner)) return
+        await reconcileRestoredBrowserPanels(api, sessionId, suppressPanelRemovalRef, addContentPanel, () => ownsLayout(owner))
+        if (!ownsLayout(owner)) return
+        if (livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) {
+          await spawnTerminal(owner)
+          return
         }
-        ensureWorkspaceEdgeShell(api)
-        // Legacy layouts (panes as outer panels) upgrade in place: the seeded
-        // window below adopts every LIVE pane, so any top-level terminal panel
-        // left here is unreachable chrome. Drop it before the dock is handed to
-        // the user; the healed layout is persisted by the tail of this run.
-        closeStrayTerminalPanels(api)
-        if (applyEdgeDefaults) resetWorkspaceEdgeDefaults(api, rootWidth)
-        else collapseWorkspaceEdgesForCenterWidth(api, rootWidth)
+        TerminalManager.pruneWorkspaceCache(sessionId, new Set(livePanes.map((pane) => pane.id)))
+        await settleLayout({ syncPty: true }, owner)
+        if (!ownsLayout(owner)) return
+        const paneIds = livePanes.map((pane) => pane.id)
+        TerminalManager.reattachToDaemon(sessionId, paneIds, { force: false })
+        await TerminalManager.waitForReplay(sessionId, paneIds)
+        if (!ownsLayout(owner)) return
+        await settleLayout({ syncPty: true, paneIds }, owner)
+        if (!ownsLayout(owner)) return
+        TerminalManager.recoverAllVisiblePanes(paneIds)
+        setApiVersion((value) => value + 1)
+        if (!restore || serializeCurrentLayout() !== raw) persistLayoutSoon()
       })
-      if (!transactionIsCurrent()) return
-      if (!await waitForWorkspaceWindowPanels(api, sessionId, sessionEpoch)) throw new Error('Workspace window did not mount after layout restore.')
-      loadedSessionRef.current = sessionId
-      loadedLayoutJsonRef.current = raw ?? null
-      loadedApiRef.current = api
-      loadedSessionEpochRef.current = owner.sessionEpoch
-      layoutOwnerRef.current = owner
-      setLoadedLayoutOwner({ sessionId: owner.sessionId, sessionEpoch: owner.sessionEpoch })
-      const workspaceWindow = listWorkspaceWindows().find((handle) => Boolean(api.getPanel(handle.outerPanelId)))
-      const mainGroup = workspaceWindow?.getInnerApi()?.activeGroup
-        ?? workspaceWindow?.getInnerApi()?.groups.find((group) => group.api.location.type === 'grid' && group.api.isVisible)
-      lastMainGroupIdRef.current = mainGroup?.id ?? null
-      setCurrentMainGroupId(mainGroup?.id ?? null)
-      await reconcileTerminalPanels(api, suppressPanelRemovalRef, addContentPanel, () => undefined)
-      if (!ownsLayout(owner)) return
-      await reconcileRestoredBrowserPanels(api, sessionId, suppressPanelRemovalRef, addContentPanel, () => ownsLayout(owner))
-      if (!ownsLayout(owner)) return
-      if (livePanes.length === 0 && isWorkspaceInitialPanePending(sessionId, sessionEpoch)) {
-        await spawnTerminal(owner)
-        return
-      }
-      TerminalManager.pruneWorkspaceCache(sessionId, new Set(livePanes.map((pane) => pane.id)))
-      await settleLayout({ syncPty: true }, owner)
-      if (!ownsLayout(owner)) return
-      const paneIds = livePanes.map((pane) => pane.id)
-      TerminalManager.reattachToDaemon(sessionId, paneIds, { force: false })
-      await TerminalManager.waitForReplay(sessionId, paneIds)
-      if (!ownsLayout(owner)) return
-      await settleLayout({ syncPty: true, paneIds }, owner)
-      if (!ownsLayout(owner)) return
-      TerminalManager.recoverAllVisiblePanes(paneIds)
-      setApiVersion((value) => value + 1)
-      if (!restore || serializeCurrentLayout() !== raw) persistLayoutSoon()
     }
     const result = layoutLoadQueueRef.current.then(run, run)
     layoutLoadQueueRef.current = result.catch((error) => { useWorkspaceStore.getState().setError(String(error)) })

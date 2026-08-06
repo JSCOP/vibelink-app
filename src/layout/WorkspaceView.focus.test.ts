@@ -56,8 +56,29 @@ afterEach(() => {
   activationFallback.listener = undefined
   activationFallback.unlisten.mockReset()
   focusWebview.mockClear()
+  document.body.innerHTML = ''
   vi.unstubAllGlobals()
 })
+
+async function activateWindowWithFocusOn(markup: string): Promise<void> {
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    callback(0)
+    return 1
+  })
+  document.body.innerHTML = markup
+  document.querySelector<HTMLElement>('[data-focus]')?.focus()
+  const dispose = registerActiveContentFocusOnWindowActivation(() => terminalApi, () => true)
+  nativeFocus.listener?.({ payload: true })
+  await settleActivation()
+  dispose()
+}
+
+/** The WebView focus call is awaited before the terminal is focused. */
+async function settleActivation(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
 
 describe('window activation terminal focus', () => {
   it('restores the active terminal after native window activation unless interaction is suspended', async () => {
@@ -72,10 +93,12 @@ describe('window activation terminal focus', () => {
     try {
       nativeFocus.listener?.({ payload: false })
       nativeFocus.listener?.({ payload: true })
+      await settleActivation()
       expect(focus).not.toHaveBeenCalled()
 
       allowed = true
       nativeFocus.listener?.({ payload: true })
+      await settleActivation()
       expect(focus).toHaveBeenCalledOnce()
       expect(focus).toHaveBeenCalledWith('pane-active')
     } finally {
@@ -103,5 +126,45 @@ describe('window activation terminal focus', () => {
 
     dispose()
     expect(activationFallback.unlisten).toHaveBeenCalledOnce()
+  })
+
+  // Opening a native <select> popup on Windows bounces OS activation off the
+  // Tauri window and back, so an unguarded refocus blurred the <select> and
+  // dismissed the list before the user could pick a profile.
+  it('leaves focus alone while a keyboard control outside the terminal owns it', async () => {
+    await activateWindowWithFocusOn('<select data-focus><option>OMP</option></select>')
+    expect(focus).not.toHaveBeenCalled()
+  })
+
+  it('still restores the terminal when xterm itself holds focus', async () => {
+    await activateWindowWithFocusOn('<div class="xterm"><textarea data-focus class="xterm-helper-textarea"></textarea></div>')
+    expect(focus).toHaveBeenCalledWith('pane-active')
+  })
+
+  // One Alt+Tab raises BOTH activation signals. Focusing xterm's textarea alone
+  // does not restore OS keyboard routing — the frameless window's WebView2 child
+  // HWND has to be focused too — so when the two paths shared a pending-focus
+  // guard and only the native event carried the WebView call, whichever event
+  // arrived first silently dropped it: the pane looked highlighted but swallowed
+  // every keystroke until the user clicked it again.
+  it('focuses the WebView even when the Tauri focus event wins the activation race', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
+    const dispose = registerActiveContentFocusOnWindowActivation(() => terminalApi, () => true)
+    await Promise.resolve()
+
+    try {
+      nativeFocus.listener?.({ payload: true })
+      activationFallback.listener?.({ payload: undefined })
+      expect(frames).toHaveLength(1)
+      frames[0]?.(0)
+      await settleActivation()
+
+      expect(focusWebview).toHaveBeenCalledOnce()
+      expect(focus).toHaveBeenCalledOnce()
+      expect(focus).toHaveBeenCalledWith('pane-active')
+    } finally {
+      dispose()
+    }
   })
 })

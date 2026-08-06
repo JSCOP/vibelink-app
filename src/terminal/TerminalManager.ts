@@ -592,6 +592,9 @@ class TerminalManagerImpl {
     term.loadAddon(new ClipboardAddon())
     term.unicode.activeVersion = '11'
     term.attachCustomKeyEventHandler((event) => {
+      // Let WebView2 emit its native `paste` event so xterm receives clipboard text.
+      // Otherwise xterm turns Ctrl+V into ^V and full-screen TUIs treat it as their own shortcut.
+      if (event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'v') return false
       if (event.type !== 'keydown' || !event.altKey || event.ctrlKey || event.metaKey) return true
       if (event.key === 'ArrowLeft') {
         term.input(event.shiftKey ? '\x1b[1;6D' : '\x1b[1;5D', true)
@@ -985,13 +988,16 @@ class TerminalManagerImpl {
       entry.outputTrimNoticeWritten = false
       entry.lastSentPtyCols = snapshot.cols
       entry.lastSentPtyRows = snapshot.rows
-      if (entry.term.cols !== snapshot.cols || entry.term.rows !== snapshot.rows) {
-        entry.term.resize(snapshot.cols, snapshot.rows)
-      }
       entry.paneGeneration = paneGeneration
       entry.outputSequence = outputSequence
       entry.daemonAttached = true
       if (!retainedSnapshotCurrent) {
+        // Parse the replay at the PTY's grid. A RETAINED buffer must not be
+        // resized here: nothing is rewritten, so this only reflows live
+        // scrollback to the daemon's geometry and back on the settling fit.
+        if (entry.term.cols !== snapshot.cols || entry.term.rows !== snapshot.rows) {
+          entry.term.resize(snapshot.cols, snapshot.rows)
+        }
         entry.term.reset()
         await this.writeReplayBytes(entry, decodeBase64Bytes(snapshot.dataBase64))
       }
