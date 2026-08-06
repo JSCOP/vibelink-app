@@ -60,7 +60,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tungstenite::{
     handshake::server::{Request, Response},
@@ -94,6 +94,13 @@ const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 const MAX_ATTACHMENT_UPLOADS_PER_CONNECTION: usize = 2;
 const MAX_ATTACHMENT_BASE64_CHARS: usize = 24 * 1024 * 1024;
 const MAX_ATTACHMENT_CHUNK_BASE64_CHARS: usize = 512 * 1024;
+/// A committed attachment only has to outlive the paste that hands its path to the agent -
+/// the agent copies the bytes into its own store immediately. Nothing else ever removed
+/// these files, so the temp directory grew without bound.
+const ATTACHMENT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const ATTACHMENT_EXTENSIONS: [&str; 8] = [
+    "png", "jpg", "gif", "webp", "bmp", "heic", "heif", "avif",
+];
 
 struct V2AttachmentUpload {
     workspace_id: Uuid,
@@ -139,6 +146,7 @@ impl V2AttachmentUploads {
         fs::create_dir_all(&directory).context("create attachment directory")?;
         let upload_id = Uuid::new_v4();
         let path = directory.join(format!("{upload_id}.{extension}"));
+        prune_attachment_directory(&directory, SystemTime::now(), ATTACHMENT_RETENTION);
         let file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -251,6 +259,44 @@ fn attachment_extension(mime_type: &str) -> Result<&'static str> {
         "image/heif" => Ok("heif"),
         "image/avif" => Ok("avif"),
         _ => bail!("invalid_argument: unsupported attachment image type"),
+    }
+}
+
+fn attachment_expired(modified: SystemTime, now: SystemTime, retention: Duration) -> bool {
+    now.duration_since(modified)
+        .map(|age| age > retention)
+        .unwrap_or(false)
+}
+
+/// Best effort: a file the OS still has open, or a directory someone else owns, is skipped
+/// rather than reported. An upload in flight is younger than the retention window.
+fn prune_attachment_directory(directory: &Path, now: SystemTime, retention: Duration) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let matches_extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ATTACHMENT_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+            });
+        if !matches_extension {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if attachment_expired(modified, now, retention) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -4410,6 +4456,51 @@ mod tests {
             9_007_199_254_740_991
         );
         assert_eq!(v2_stream_id(Uuid::nil()), 1);
+    }
+
+    #[test]
+    fn attachment_retention_expires_only_files_past_the_window() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let retention = Duration::from_secs(3_600);
+        assert!(attachment_expired(
+            now - Duration::from_secs(3_601),
+            now,
+            retention
+        ));
+        assert!(!attachment_expired(
+            now - Duration::from_secs(3_600),
+            now,
+            retention
+        ));
+        assert!(!attachment_expired(
+            now + Duration::from_secs(60),
+            now,
+            retention
+        ));
+    }
+
+    #[test]
+    fn pruning_removes_aged_attachments_and_nothing_else() {
+        let directory = std::env::temp_dir().join(format!("vibelink-prune-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let image = directory.join("a.PNG");
+        let foreign = directory.join("notes.txt");
+        fs::write(&image, b"x").expect("write attachment");
+        fs::write(&foreign, b"x").expect("write foreign file");
+        let retention = Duration::from_secs(3_600);
+
+        prune_attachment_directory(&directory, SystemTime::now(), retention);
+        assert!(image.exists(), "a fresh attachment survives");
+
+        prune_attachment_directory(
+            &directory,
+            SystemTime::now() + Duration::from_secs(7_200),
+            retention,
+        );
+        assert!(!image.exists(), "an aged attachment is removed");
+        assert!(foreign.exists(), "a file we never wrote is left alone");
+
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]
