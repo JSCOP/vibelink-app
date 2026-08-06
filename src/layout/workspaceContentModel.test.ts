@@ -77,6 +77,30 @@ describe('workspace content model', () => {
     expect(salvageWorkspaceContentParams(raw)).toEqual([editor])
   })
 
+  it('salvages content out of the nested window layout a real save actually uses', () => {
+    // Shape taken from a real persisted workspace: the outer tree carries only
+    // the sidebars plus one workspaceWindow, and every tab the user opened sits
+    // inside that window's own serialized Dockview. Salvaging only the outer
+    // panels would find nothing here.
+    const preview: WorkspaceContentParams = { schema: 1, kind: 'preview', instanceId: 'preview', title: 'preview-smoke.md', icon: 'file-search', relPath: 'preview-smoke.md' }
+    const editor: WorkspaceContentParams = { schema: 1, kind: 'editor', instanceId: 'notes.md', title: 'notes.md', icon: 'file-code', relPath: 'notes.md' }
+    const innerTerminals: WorkspaceContentParams = { schema: 1, kind: 'terminalWindow', instanceId: 'win-1', title: 'Terminals', icon: 'terminal', inner: null, titlesHidden: false }
+    const sidebar: WorkspaceContentParams = { schema: 1, kind: 'workspaces', instanceId: 'workspaces', title: 'Workspaces', icon: 'layout-grid' }
+    const inner = dockview(Object.fromEntries([innerTerminals, preview, editor].map((params) => [workspaceContentPanelId(params), panel(params)])))
+    const workspaceWindow: WorkspaceContentParams = { schema: 1, kind: 'workspaceWindow', instanceId: 'ws-1', title: 'Workspace', icon: 'layout-grid', inner: inner as never }
+    // The corruption is on the window itself, so its own params no longer parse
+    // — its contents must still come back.
+    const brokenWindow = { ...panel(workspaceWindow), params: { ...workspaceWindow, collapsed: false } }
+    const panels = {
+      [workspaceContentPanelId(sidebar)]: panel(sidebar),
+      [workspaceContentPanelId(workspaceWindow)]: brokenWindow,
+    }
+    const raw = JSON.stringify({ version: 3, dockview: dockview(panels) })
+
+    expect(normalizeWorkspaceLayoutEnvelope(raw)).toEqual(freshWorkspaceLayoutEnvelope())
+    expect(salvageWorkspaceContentParams(raw)).toEqual([preview, editor])
+  })
+
   it('salvages nothing from a layout that is absent, unparseable, or already empty', () => {
     expect(salvageWorkspaceContentParams(null)).toEqual([])
     expect(salvageWorkspaceContentParams('{')).toEqual([])

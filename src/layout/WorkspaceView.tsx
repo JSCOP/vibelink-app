@@ -97,7 +97,6 @@ import {
   isStructuralWorkspaceContentKind,
   normalizeWorkspaceRelativePath,
   parseWorkspaceContentParams,
-  salvageWorkspaceContentParams,
   serializeWorkspaceLayoutEnvelope,
   workspaceContentPanelId,
   workspaceContentResourceKey,
@@ -1582,12 +1581,11 @@ export function WorkspaceView({
       const sessionEpoch = getWorkspaceSessionEpoch()
       const livePanes = Object.values(useWorkspaceStore.getState().panes).filter((pane) => pane.alive)
       const envelope = normalizeWorkspaceLayoutState(raw)
-      // `freshWorkspaceLayoutEnvelope()` is `{ version: 3, dockview: null }`, so a
-      // null dockview against a non-empty save is exactly "validation rejected
-      // it". The arrangement is unrecoverable, but the content is not.
-      const salvaged = envelope.dockview === null && typeof raw === 'string' && raw.length > 0
-        ? salvageWorkspaceContentParams(raw)
-        : []
+      // Captured by `attachSession` from the daemon's raw string: `raw` here is
+      // the already-normalized envelope, so a rejected layout reaches this point
+      // as `dockview: null` with its panels gone. The arrangement is
+      // unrecoverable, but the content is not.
+      const salvaged = envelope.dockview === null ? useWorkspaceStore.getState().layoutSalvage : []
       const requiresFirstTerminalLayout = livePanes.length > 0 && centralGridIsEmpty(api)
       // A layout this view authored is already on screen — the store only echoed
       // our own save back (possibly an older in-flight one). Adopt the string and

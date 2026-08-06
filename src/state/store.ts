@@ -27,6 +27,7 @@ import {
   normalizeWorkspaceLayoutState,
   serializeWorkspaceLayoutState,
 } from '../layout/workspaceLayoutModel'
+import { salvageWorkspaceContentParams, type WorkspaceContentParams } from '../layout/workspaceContentModel'
 
 const initialKanban = loadKanban()
 const migratedLegacySessions = new Set<string>()
@@ -129,6 +130,10 @@ type WorkspaceState = {
   panes: Record<string, PaneMeta>
   paneLifecycle: Record<string, PaneLifecycleState>
   layoutJson?: string | null
+  /** Content parsed out of the persisted layout when validation rejected it.
+   *  Captured here because `layoutJson` below already holds the NORMALIZED
+   *  envelope — by the time the view reads it the rejected panels are gone. */
+  layoutSalvage: WorkspaceContentParams[]
   manualPaneTitles: ManualPaneTitleMap
   status: Status
   error?: string
@@ -275,6 +280,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaceReadyEpoch: 0,
   panes: {},
   paneLifecycle: {},
+  layoutSalvage: [],
   manualPaneTitles: loadManualPaneTitles(),
   status: 'booting',
   settings: loadSettings(),
@@ -343,6 +349,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         panes: {},
         paneLifecycle: {},
         layoutJson: null,
+        layoutSalvage: [],
         status: 'ready',
       })
       if (licenseStatus.email) void get().revalidateLicense()
@@ -533,6 +540,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       paneCompletionHighlights: reconcilePaneCompletionHighlights(state.paneCompletionHighlights, sessionId, panes),
       paneReviewMarkers: reconcilePaneReviewMarkers(state.paneReviewMarkers, sessionId, panes),
       layoutJson: serializeWorkspaceLayoutState(workspaceLayout),
+      layoutSalvage: workspaceLayout.dockview === null ? salvageWorkspaceContentParams(attached.layoutJson) : [],
     }))
     if (previousSessionId && previousSessionId !== sessionId) {
       void invoke('detach_session', { sessionId: previousSessionId }).catch(() => {})
@@ -863,7 +871,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const serialized = serializeWorkspaceLayoutState(normalizeWorkspaceLayoutState(layoutJson))
     await invoke('save_layout', { sessionId, layoutJson: serialized })
     if (workspaceSessionEpoch === sessionEpoch && workspaceSessionReadyEpoch === sessionEpoch && workspaceSessionTargetId === sessionId && get().activeSessionId === sessionId) {
-      set({ layoutJson: serialized })
+      set({ layoutJson: serialized, layoutSalvage: [] })
     }
   },
 

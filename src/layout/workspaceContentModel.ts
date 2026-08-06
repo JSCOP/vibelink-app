@@ -268,21 +268,34 @@ const layoutOwnedKinds: Partial<Record<WorkspaceContentKind, true>> = {
  *  fallback default layout then also drops every open editor, preview, browser,
  *  and board tab. Those are the user's content rather than geometry, so they are
  *  re-added individually. Structural sidebars are skipped; the default layout
- *  recreates them. Order follows `panels` insertion order. */
+ *  recreates them.
+ *
+ *  Walks nested `params.inner` layouts too: in a real save the outer tree holds
+ *  only the sidebars plus one `workspaceWindow`, and every tab the user actually
+ *  opened lives inside that window's own serialized Dockview. Recursion is done
+ *  on the RAW params so a window whose own params fail to parse still yields its
+ *  contents. */
 export function salvageWorkspaceContentParams(raw: string | null | undefined): WorkspaceContentParams[] {
   const parsed = parseJson(raw)
-  if (!isRecord(parsed) || !isRecord(parsed.dockview) || !isRecord(parsed.dockview.panels)) return []
+  if (!isRecord(parsed) || !isRecord(parsed.dockview)) return []
   const salvaged: WorkspaceContentParams[] = []
   const resources = new Set<string>()
-  for (const panel of Object.values(parsed.dockview.panels)) {
-    if (!isRecord(panel)) continue
-    const params = parseWorkspaceContentParams(panel.params)
-    if (!params || isStructuralWorkspaceContentKind(params.kind) || layoutOwnedKinds[params.kind]) continue
-    const resourceKey = workspaceContentResourceKey(params)
-    if (resources.has(resourceKey)) continue
-    resources.add(resourceKey)
-    salvaged.push(params)
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 4 || !isRecord(node) || !isRecord(node.panels)) return
+    for (const panel of Object.values(node.panels)) {
+      if (!isRecord(panel)) continue
+      const params = parseWorkspaceContentParams(panel.params)
+      if (params && !isStructuralWorkspaceContentKind(params.kind) && !layoutOwnedKinds[params.kind]) {
+        const resourceKey = workspaceContentResourceKey(params)
+        if (!resources.has(resourceKey)) {
+          resources.add(resourceKey)
+          salvaged.push(params)
+        }
+      }
+      if (isRecord(panel.params)) walk(panel.params.inner, depth + 1)
+    }
   }
+  walk(parsed.dockview, 0)
   return salvaged
 }
 
