@@ -671,9 +671,14 @@ export function WorkspaceView({
     onWorkspaceInteractionSuspendedChange?.(workspaceLocalOverlaySuspended)
     return () => onWorkspaceInteractionSuspendedChange?.(false)
   }, [onWorkspaceInteractionSuspendedChange, workspaceLocalOverlaySuspended])
+  // The second predicate answers ONLY "may focus move into workspace content".
+  // It MUST NOT consult `document.hasFocus()`: after Alt+Tab the frameless
+  // window's WebView2 child HWND is exactly what has NOT been focused yet, so
+  // that check is false in the one case this recovery exists for and the pane
+  // would stay keyboard-dead until clicked.
   useEffect(() => registerActiveContentFocusOnWindowActivation(
     () => apiRef.current,
-    () => document.hasFocus() && !workspaceInteractionSuspendedRef.current,
+    () => !workspaceInteractionSuspendedRef.current,
   ), [])
   const components = useMemo(() => {
     const merged = { ...builtInContentComponents }

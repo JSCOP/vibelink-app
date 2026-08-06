@@ -167,4 +167,31 @@ describe('window activation terminal focus', () => {
       dispose()
     }
   })
+
+  // The recovery must not require the document to already hold focus. Windows
+  // hands the frameless window activation WITHOUT moving focus into the
+  // WebView2 child HWND, so `document.hasFocus()` is false at exactly this
+  // moment; gating on it made the recovery refuse to run and the highlighted
+  // pane stayed keyboard-dead until it was clicked. `WorkspaceView` therefore
+  // passes only its interaction-suspended predicate.
+  it('recovers keyboard control while the document reports no focus', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0)
+      return 1
+    })
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+    const dispose = registerActiveContentFocusOnWindowActivation(() => terminalApi, () => true)
+    await Promise.resolve()
+
+    try {
+      activationFallback.listener?.({ payload: undefined })
+      await settleActivation()
+
+      expect(focusWebview).toHaveBeenCalledOnce()
+      expect(focus).toHaveBeenCalledWith('pane-active')
+    } finally {
+      dispose()
+      hasFocus.mockRestore()
+    }
+  })
 })

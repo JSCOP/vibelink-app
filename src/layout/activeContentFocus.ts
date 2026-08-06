@@ -49,9 +49,16 @@ export function focusActiveContentAfterLayout(api: DockviewApi, canFocus: () => 
   requestAnimationFrame(() => focusActiveContent(api, canFocus))
 }
 
+/** Restores keyboard control after the OS activates the main window.
+ *
+ *  `workspaceInteractive` answers ONLY whether focus may move into workspace
+ *  content (no modal/overlay owns the app). It MUST NEVER be a document-focus
+ *  check: Windows activation is the authority here — the native half only
+ *  emits after `GetForegroundWindow()` matches our HWND — and `document
+ *  .hasFocus()` is false in precisely the case this recovery exists for. */
 export function registerActiveContentFocusOnWindowActivation(
   getApi: () => DockviewApi | null,
-  canFocus: () => boolean,
+  workspaceInteractive: () => boolean,
 ): () => void {
   let disposed = false
   let focusPending = false
@@ -62,7 +69,7 @@ export function registerActiveContentFocusOnWindowActivation(
   const scheduleFocus = () => {
     if (disposed || focusPending) return
     const api = getApi()
-    if (!api || !canFocus() || keyboardControlFocused() || !activeTerminalContent(api)) return
+    if (!api || !workspaceInteractive() || keyboardControlFocused() || !activeTerminalContent(api)) return
 
     focusPending = true
     focusFrame = requestAnimationFrame(() => {
@@ -77,7 +84,7 @@ export function registerActiveContentFocusOnWindowActivation(
         focusPending = false
         if (disposed) return
         const current = getApi()
-        if (current) focusActiveContent(current, canFocus)
+        if (current) focusActiveContent(current, workspaceInteractive)
       })
     })
   }
