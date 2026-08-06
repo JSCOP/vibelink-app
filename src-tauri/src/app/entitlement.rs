@@ -165,10 +165,18 @@ impl EntitlementSupervisor {
         let Ok(now) = self.effective_now() else {
             return jittered;
         };
-        let Ok(until_lease) = (snapshot.lease_until - now).to_std() else {
-            return MINIMUM_WAKE_DELAY;
-        };
-        jittered.min(until_lease.max(MINIMUM_WAKE_DELAY))
+        wake_delay_for(jittered, (snapshot.lease_until - now).to_std().ok())
+    }
+}
+
+/// `until_lease` is `None` once the lease is already expired. Polling again after
+/// `MINIMUM_WAKE_DELAY` in that state busy-loops the revalidation HTTP call, the
+/// Credential Manager write, and the authorization event about 100 times a second,
+/// so an expired lease has to fall back to the normal jittered interval.
+fn wake_delay_for(jittered: Duration, until_lease: Option<Duration>) -> Duration {
+    match until_lease {
+        Some(until_lease) => jittered.min(until_lease.max(MINIMUM_WAKE_DELAY)),
+        None => jittered,
     }
 }
 
@@ -183,5 +191,28 @@ mod tests {
             assert!(delay >= Duration::from_secs(50));
             assert!(delay <= Duration::from_secs(70));
         }
+    }
+
+    #[test]
+    fn expired_lease_backs_off_instead_of_spinning() {
+        let jittered = Duration::from_secs(55);
+        assert_eq!(wake_delay_for(jittered, None), jittered);
+    }
+
+    #[test]
+    fn live_lease_wakes_at_expiry_without_dropping_below_the_minimum() {
+        let jittered = Duration::from_secs(55);
+        assert_eq!(
+            wake_delay_for(jittered, Some(Duration::from_secs(12))),
+            Duration::from_secs(12)
+        );
+        assert_eq!(
+            wake_delay_for(jittered, Some(Duration::from_micros(5))),
+            MINIMUM_WAKE_DELAY
+        );
+        assert_eq!(
+            wake_delay_for(jittered, Some(Duration::from_secs(600))),
+            jittered
+        );
     }
 }

@@ -44,6 +44,29 @@ describe('OrchestrationWorkspacePanel', () => {
     await waitFor(() => expect(orchestrationRequest).toHaveBeenCalledWith('events.acknowledge', { consumerId: 'desktop:session-1', runId: 'run-1', sequence: 12 }))
   })
 
+  it('acknowledges only the delivered page tail when more events remain', async () => {
+    orchestrationRequest.mockImplementation(async (method: string) => {
+      if (method === 'runs.list') return [run]
+      if (method === 'run.get') return run
+      if (method === 'tasks.list') return [task]
+      if (method === 'dispatches.list') return []
+      if (method === 'agents.list') return []
+      if (method === 'messages.list') return []
+      if (method === 'gates.list') return []
+      if (method === 'events.catchup') return {
+        events: [{ sequence: 11, eventType: 'agents.reconciled', payload: {} }, { sequence: 12, eventType: 'agents.reconciled', payload: {} }],
+        acknowledgedSequence: 0,
+        latestSequence: 940,
+        hasMore: true,
+      }
+      if (method === 'events.acknowledge') return { acknowledgedSequence: 12 }
+      return null
+    })
+    render(<OrchestrationWorkspacePanel />)
+    await waitFor(() => expect(orchestrationRequest).toHaveBeenCalledWith('events.acknowledge', { consumerId: 'desktop:session-1', runId: 'run-1', sequence: 12 }))
+    expect(orchestrationRequest).not.toHaveBeenCalledWith('events.acknowledge', expect.objectContaining({ sequence: 940 }))
+  })
+
   it('retries a failed orchestration task with both revisions', async () => {
     render(<OrchestrationWorkspacePanel />)
     const retry = await screen.findByRole('button', { name: /Retry/ })

@@ -146,8 +146,12 @@ function OrchestrationRunPanel() {
     setMessages(nextMessages)
     setGates(nextGates)
     setEvents(catchup.events)
-    if (catchup.latestSequence > catchup.acknowledgedSequence) {
-      await orchestrationRequest('events.acknowledge', { consumerId, runId, sequence: catchup.latestSequence })
+    // `latestSequence` is the newest sequence in the whole run, not the tail of this
+    // page. Acknowledging it while `hasMore` is set would skip every event the page
+    // did not carry, so only the last delivered event may be acknowledged.
+    const deliveredSequence = catchup.events.at(-1)?.sequence
+    if (deliveredSequence !== undefined && deliveredSequence > catchup.acknowledgedSequence) {
+      await orchestrationRequest('events.acknowledge', { consumerId, runId, sequence: deliveredSequence })
     }
   }, [sessionId])
 

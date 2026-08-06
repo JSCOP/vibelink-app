@@ -316,6 +316,9 @@ export function WorkspacesSidebar({ active = true, collapsed = false, onCollapse
 
   const onRowPointerDown = (event: ReactPointerEvent<HTMLDivElement>, sessionId: string) => {
     if (sortMode !== 'manual' || event.button !== 0) return
+    // Pointer capture retargets the following click to the capturing row, which would
+    // swallow the row's own action buttons and switch workspace instead.
+    if ((event.target as Element | null)?.closest('button')) return
     dragRef.current = {
       id: sessionId,
       pointerId: event.pointerId,

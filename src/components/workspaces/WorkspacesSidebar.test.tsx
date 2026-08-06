@@ -600,4 +600,22 @@ describe('WorkspacesSidebar', () => {
 
     expect(integration.onEditWorkspaceRequested).toHaveBeenCalledExactlyOnceWith('alpha')
   })
+
+  test('never captures the pointer from a row action button in manual sort', () => {
+    renderSidebar()
+
+    const editButton = screen.getByRole('button', { name: 'Edit Alpha' })
+    const row = editButton.closest('[data-session-id]') as HTMLElement
+    const setPointerCapture = vi.fn()
+    Object.defineProperties(row, {
+      setPointerCapture: { configurable: true, value: setPointerCapture },
+      hasPointerCapture: { configurable: true, value: vi.fn(() => false) },
+    })
+
+    fireEvent.pointerDown(editButton, { button: 0, pointerId: 11, clientY: 40 })
+    expect(setPointerCapture).not.toHaveBeenCalled()
+
+    fireEvent.pointerDown(row, { button: 0, pointerId: 12, clientY: 40 })
+    expect(setPointerCapture).toHaveBeenCalledWith(12)
+  })
 })

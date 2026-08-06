@@ -3,7 +3,7 @@ use crate::storage::{
     load_with_recovery, parse_json, require_supported_schema, write_json, DocumentError,
 };
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{ipc::Channel, State};
 use tracing::{debug, warn};
 
@@ -34,6 +34,10 @@ const HERMES_BIN: &str = if cfg!(windows) {
     "hermes"
 };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a cooperative `session/cancel` gets to land before the prompt wait is
+/// resolved locally. A wedged agent must never leave the chat stuck in `busy`.
+const PROMPT_CANCEL_GRACE: Duration = Duration::from_secs(5);
+const PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LAST_ACP_SESSION_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,6 +223,7 @@ struct HermesInstance {
     pending: Mutex<HashMap<u64, Sender<Value>>>,
     acp_session_id: Mutex<Option<String>>,
     sessions_list_supported: AtomicBool,
+    prompt_cancel_requested: AtomicBool,
     cwd: String,
 }
 
@@ -333,6 +338,7 @@ impl HermesManager {
                 pending: Mutex::new(HashMap::new()),
                 acp_session_id: Mutex::new(None),
                 sessions_list_supported: AtomicBool::new(false),
+                prompt_cancel_requested: AtomicBool::new(false),
                 cwd: acp_cwd.clone(),
             });
 
@@ -531,6 +537,9 @@ impl HermesManager {
         let skill_prompt =
             crate::app::skills::augment_prompt_with_enabled_skills(&session_id, &text)?;
         let prompt_text = Self::augment_prompt_with_workspace_brief(&session_id, skill_prompt)?;
+        instance
+            .prompt_cancel_requested
+            .store(false, Ordering::SeqCst);
         let pending = instance.begin_request(
             "session/prompt",
             json!({
@@ -546,7 +555,7 @@ impl HermesManager {
         let spawn = thread::Builder::new()
             .name(format!("vibelink-hermes-prompt-{session_id}"))
             .spawn(move || {
-                let result = response_instance.finish_request(pending, None);
+                let result = response_instance.finish_prompt_request(pending);
                 manager.set_prompt_active(&response_session_id, generation, false);
                 match result {
                     Ok(value) => {
@@ -620,6 +629,12 @@ impl HermesManager {
             return Ok(());
         }
         let instance = self.instance(session_id, generation)?;
+        // Arm the local fallback before asking Hermes to stop. A hung agent never
+        // answers `session/cancel`, and without this the prompt thread waits forever
+        // and the chat stays `busy` with no way out from the UI.
+        instance
+            .prompt_cancel_requested
+            .store(true, Ordering::SeqCst);
         let acp_session_id = instance.acp_session_id()?;
         instance.notification("session/cancel", json!({ "sessionId": acp_session_id }))
     }
@@ -886,6 +901,50 @@ impl HermesInstance {
                     .lock()
                     .expect("hermes pending poisoned")
                     .remove(&pending.id);
+                return Err(error);
+            }
+        };
+        if let Some(error) = response.get("error") {
+            bail!("Hermes request {} failed: {error}", pending.method);
+        }
+        Ok(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// Waits for a `session/prompt` reply without a turn deadline — a coding turn may
+    /// legitimately run for a long time — but resolves locally when the user asked to
+    /// cancel and Hermes did not answer within [`PROMPT_CANCEL_GRACE`].
+    fn finish_prompt_request(&self, pending: PendingHermesRequest) -> Result<Value> {
+        self.finish_prompt_request_with(pending, PROMPT_CANCEL_GRACE, PROMPT_POLL_INTERVAL)
+    }
+
+    fn finish_prompt_request_with(
+        &self,
+        pending: PendingHermesRequest,
+        cancel_grace: Duration,
+        poll_interval: Duration,
+    ) -> Result<Value> {
+        let mut cancel_deadline: Option<Instant> = None;
+        let response = loop {
+            match pending.receiver.recv_timeout(poll_interval) {
+                Ok(response) => break Ok(response),
+                Err(RecvTimeoutError::Disconnected) => {
+                    break Err(anyhow!("Hermes request {} failed", pending.method))
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if !self.prompt_cancel_requested.load(Ordering::SeqCst) {
+                cancel_deadline = None;
+                continue;
+            }
+            let deadline = *cancel_deadline.get_or_insert_with(|| Instant::now() + cancel_grace);
+            if Instant::now() >= deadline {
+                break Err(anyhow!("HERMES_PROMPT_CANCELLED"));
+            }
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                self.cancel_pending(pending.id);
                 return Err(error);
             }
         };
@@ -2085,6 +2144,7 @@ mod tests {
             pending: Mutex::new(HashMap::new()),
             acp_session_id: Mutex::new(None),
             sessions_list_supported: AtomicBool::new(false),
+            prompt_cancel_requested: AtomicBool::new(false),
             cwd: String::new(),
         }
     }
@@ -2107,6 +2167,70 @@ mod tests {
         assert_eq!(response["error"]["code"], -32000);
         assert_eq!(response["error"]["message"], "Hermes stopped");
         assert!(instance.pending.lock().expect("pending mutex").is_empty());
+        let mut child = instance.child.lock().expect("child mutex");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn prompt_wait_resolves_locally_when_cancel_is_not_answered() {
+        let instance = test_instance();
+        let (tx, receiver) = bounded(1);
+        instance
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .insert(9, tx);
+        instance
+            .prompt_cancel_requested
+            .store(true, Ordering::SeqCst);
+
+        let error = instance
+            .finish_prompt_request_with(
+                PendingHermesRequest {
+                    id: 9,
+                    method: "session/prompt".to_string(),
+                    receiver,
+                },
+                Duration::from_millis(30),
+                Duration::from_millis(5),
+            )
+            .expect_err("cancelled prompt resolves");
+
+        assert!(error.to_string().contains("HERMES_PROMPT_CANCELLED"));
+        assert!(instance.pending.lock().expect("pending mutex").is_empty());
+        let mut child = instance.child.lock().expect("child mutex");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn prompt_wait_has_no_turn_deadline_without_a_cancel() {
+        let instance = test_instance();
+        let (tx, receiver) = bounded(1);
+        instance
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .insert(11, tx.clone());
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            let _ = tx.send(json!({ "result": { "stopReason": "end_turn" } }));
+        });
+
+        let value = instance
+            .finish_prompt_request_with(
+                PendingHermesRequest {
+                    id: 11,
+                    method: "session/prompt".to_string(),
+                    receiver,
+                },
+                Duration::from_millis(10),
+                Duration::from_millis(5),
+            )
+            .expect("long turn still completes");
+
+        assert_eq!(value["stopReason"], "end_turn");
         let mut child = instance.child.lock().expect("child mutex");
         let _ = child.kill();
         let _ = child.wait();
