@@ -29,12 +29,18 @@ export function BrowserAddressBar({ value, pageUrl, inputRef, onChange, onSubmit
   const blurTimer = useRef<number | null>(null)
   const suggestions = useMemo(() => buildBrowserAddressBarSuggestions(history, query), [history, query])
 
-  useEffect(() => {
-    if (focused) return
-    const next = displayUrl(pageUrl)
-    setInputValue(next)
-    setQuery(next)
-  }, [focused, pageUrl])
+  // Adjusted during render rather than in an effect: an effect would paint the
+  // stale URL for one frame first. Tracks `focused` too, so blurring still
+  // discards a half-typed address exactly as before.
+  const [syncedFrom, setSyncedFrom] = useState({ focused, pageUrl })
+  if (syncedFrom.focused !== focused || syncedFrom.pageUrl !== pageUrl) {
+    setSyncedFrom({ focused, pageUrl })
+    if (!focused) {
+      const next = displayUrl(pageUrl)
+      setInputValue(next)
+      setQuery(next)
+    }
+  }
 
   useEffect(() => () => {
     if (blurTimer.current !== null) window.clearTimeout(blurTimer.current)

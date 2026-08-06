@@ -217,8 +217,6 @@ export function BrowserPanel({
   const lastPublishedSurface = useRef<{ bounds: PhysicalBounds | null; visible: boolean; focused: boolean } | null>(null)
   const page = state.page
   const externalUrl = useMemo(() => externalBrowserUrl(page.url), [page.url])
-  const pageTitleRef = useRef(page.title)
-  pageTitleRef.current = page.title
   useEffect(() => {
     recordBrowserVisitTitle(page.url, page.title)
   }, [page.url, page.title])
@@ -535,8 +533,9 @@ export function BrowserPanel({
       if (event.pageId !== page.id || event.navigationGeneration < authoritativeGeneration.current) return
       authoritativeGeneration.current = Math.max(authoritativeGeneration.current, event.navigationGeneration)
       dispatch({ type: 'lifecycleReceived', event })
-      // Commit carries the authoritative URL; `pageTitleRef` still holds the
-      // page the user just left, so the title is corrected by the effect below.
+      // Commit carries the authoritative URL but not the new title yet, so this
+      // records an empty one; the `recordBrowserVisitTitle` effect above fills it
+      // in as soon as `page.title` catches up.
       if (event.kind === 'navigation_committed' && event.url) recordBrowserVisit(event.url, '')
       const permission = permissionPrompt(event)
       if (permission) dispatch({ type: 'permissionQueued', request: permission })

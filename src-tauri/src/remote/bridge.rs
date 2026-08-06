@@ -98,9 +98,8 @@ const MAX_ATTACHMENT_CHUNK_BASE64_CHARS: usize = 512 * 1024;
 /// the agent copies the bytes into its own store immediately. Nothing else ever removed
 /// these files, so the temp directory grew without bound.
 const ATTACHMENT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
-const ATTACHMENT_EXTENSIONS: [&str; 8] = [
-    "png", "jpg", "gif", "webp", "bmp", "heic", "heif", "avif",
-];
+const ATTACHMENT_EXTENSIONS: [&str; 8] =
+    ["png", "jpg", "gif", "webp", "bmp", "heic", "heif", "avif"];
 
 struct V2AttachmentUpload {
     workspace_id: Uuid,
@@ -2421,6 +2420,7 @@ fn request_v2_workspace_projection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_v2_request(
     request: &V2Envelope,
     grants: &[String],
