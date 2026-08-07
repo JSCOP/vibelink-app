@@ -28,6 +28,10 @@ const MAX_SCALE = 4
 /** Below this weight a node only gets a label while selected or hovered —
  *  otherwise a full snapshot paints 1,500 `<text>` elements nobody can read. */
 const LABEL_WEIGHT = 3
+/** Above this many nodes in view, only heavy nodes keep a label — beyond it the
+ *  text overlaps into an unreadable smear. Zooming in drops under the budget. */
+const LABEL_BUDGET = 80
+const LABEL_MAX_CHARS = 34
 const SEARCH_DEBOUNCE_MS = 200
 const ADD_COMMAND = 'vibelink memory add --title "<fact>" --body "<detail>" [--tag <tag>] [--ref <path>]'
 
@@ -344,6 +348,17 @@ export function MemoryGraphPanel() {
   const positioned = layout.nodes.map((node) => ({ node, ...positionOf(node) }))
   const positionById = new Map(positioned.map((item) => [item.node.id, item]))
 
+  /** Labels are the only way to read the graph, but 1,500 of them is noise that
+   *  paints nothing legible. Budget them by what is actually on screen: zoom in
+   *  until few enough nodes remain and every one of them gets its name; zoomed
+   *  out, fall back to the heavy nodes plus whatever is selected or hovered. */
+  const onScreen = positioned.filter(({ x, y }) => x >= view.x && x <= view.x + view.w && y >= view.y && y <= view.y + view.h)
+  const labeled =
+    onScreen.length <= LABEL_BUDGET
+      ? onScreen
+      : positioned.filter(({ node }) => node.weight >= LABEL_WEIGHT || node.id === selectedId || node.id === hoveredId)
+  const labelFontSize = Math.max(4, Math.min(11, (view.w / LAYOUT_WIDTH) * 10))
+
   // Render ------------------------------------------------------------------
 
   return (
@@ -481,18 +496,17 @@ export function MemoryGraphPanel() {
                   </circle>
                 )
               })}
-              {positioned
-                .filter(({ node }) => node.weight >= LABEL_WEIGHT || node.id === selectedId || node.id === hoveredId)
-                .map(({ node, x, y }) => (
-                  <text
-                    key={node.id}
-                    className={`memory-node-label${node.id === activeNodeId ? ' is-active' : ''}`}
-                    x={x + nodeRadius(node.weight) + 5}
-                    y={y + 3.5}
-                  >
-                    {node.label}
-                  </text>
-                ))}
+              {labeled.map(({ node, x, y }) => (
+                <text
+                  key={node.id}
+                  className={`memory-node-label${node.id === activeNodeId ? ' is-active' : ''}`}
+                  x={x + nodeRadius(node.weight) + 5}
+                  y={y + 3.5}
+                  fontSize={labelFontSize}
+                >
+                  {node.label.length > LABEL_MAX_CHARS ? `${node.label.slice(0, LABEL_MAX_CHARS - 1)}…` : node.label}
+                </text>
+              ))}
             </svg>
           </div>
 
