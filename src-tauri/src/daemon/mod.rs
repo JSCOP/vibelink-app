@@ -1,13 +1,13 @@
 pub mod automation;
 mod browser_cdp;
-pub mod conpty;
+pub(crate) mod conpty;
 mod lifecycle;
 pub mod paths;
-pub mod persistence;
+pub(crate) mod persistence;
 pub mod proc;
 pub mod pty;
-pub mod query_filter;
-pub mod scrollback;
+pub(crate) mod query_filter;
+pub(crate) mod scrollback;
 pub mod session;
 mod terminal_history;
 
