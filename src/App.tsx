@@ -22,7 +22,7 @@ import type { WorkspaceContentActions, WorkspaceContentChromeState } from './lay
 import { isControlCharacterCode, workspaceContentPanelId } from './layout/workspaceContentModel'
 import { getEditorDocumentStore, type EditorDocumentStore } from './editor/documentStore'
 import { startTerminalOutputStream } from './ipc/output'
-import { syncAgentSkill } from './ipc/agentSkills'
+import { refreshAgentSkill } from './ipc/agentSkills'
 import { getHermesRuntimeStatus, startHermesAgent, startHermesOutputStream } from './ipc/hermes'
 import type { CloneProgress, HermesRuntimeStatus } from './ipc/types'
 import type { WorkspaceCreationInput } from './ipc/providerIntegrations'
@@ -288,10 +288,11 @@ function App() {
 
   useEffect(() => {
     void Promise.all([startTerminalOutputStream(), startHermesOutputStream()]).then(() => bootstrap()).then(() => {
-      // Keeping the agent memory skill current is a side effect of launching,
-      // not boot state, so a failed disk write must never surface as a boot
-      // error — the Settings card is where a broken install is diagnosed.
-      if (useWorkspaceStore.getState().settings.autoInstallAgentSkill) void syncAgentSkill().catch(() => {})
+      // Only refreshes copies the user already installed — it never creates a
+      // new one, so a first launch writes nothing. Maintenance is a side effect
+      // of launching, not boot state, so a failed disk write must never surface
+      // as a boot error; the Settings card is where a broken install is fixed.
+      if (useWorkspaceStore.getState().settings.autoUpdateAgentSkill) void refreshAgentSkill().catch(() => {})
     }).catch((caught) => {
       useWorkspaceStore.getState().setError(String(caught))
     })

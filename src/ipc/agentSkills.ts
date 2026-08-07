@@ -44,11 +44,20 @@ export async function uninstallAgentSkill(targetIds: string[]): Promise<AgentSki
 }
 
 /**
- * Installs or refreshes the skill for every target whose agent home already
- * exists, and leaves the rest alone. Called once per launch when
- * `settings.autoInstallAgentSkill` is on, so a bare host never collects config
- * folders for agents the user never installed.
+ * Refreshes the copies that are already on disk and installs nowhere new.
+ * Called once per launch when `settings.autoUpdateAgentSkill` is on, so a host
+ * that never opted in stays untouched — a first run writes nothing at all.
  */
-export async function syncAgentSkill(): Promise<AgentSkillStatus> {
-  return invoke<AgentSkillStatus>('agent_skill_sync')
+export async function refreshAgentSkill(): Promise<AgentSkillStatus> {
+  return invoke<AgentSkillStatus>('agent_skill_refresh')
+}
+
+/**
+ * Builds the `npx skills add …` command for agents VibeLink cannot write to
+ * directly. The backend owns the string — including validating every key —
+ * because a command missing `--agent` makes the CLI scatter config folders
+ * across the user's home for agents they never installed.
+ */
+export async function agentSkillCliCommand(agentKeys: string[]): Promise<string> {
+  return invoke<string>('agent_skill_cli_command', { agentKeys })
 }

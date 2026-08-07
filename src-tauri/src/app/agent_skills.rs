@@ -8,14 +8,95 @@ use std::{
 };
 
 pub const VIBELINK_MEMORY_SKILL_NAME: &str = "vibelink-memory";
+pub const VIBELINK_SKILLS_REPOSITORY: &str = "JSCOP/vibelink-skills";
 // Bump whenever SKILL.md changes: an installed copy whose SHA-256 differs from
-// the built-in one reads as `Stale`, and auto-sync then rewrites it.
+// the built-in one reads as `Stale`, and refresh then rewrites it.
 pub const VIBELINK_MEMORY_SKILL_REVISION: u32 = 2;
 pub const VIBELINK_MEMORY_SKILL_MARKDOWN: &str =
     include_str!("../../resources/skills/vibelink-memory/SKILL.md");
 
 const SKILL_FILE: &str = "SKILL.md";
 const REVISION_FILE: &str = ".vibelink-revision";
+
+// Source: the list printed by `skills add --agent <invalid>` in skills v1.5.20.
+// Keep every spelling exact: one typo makes the entire CLI installation fail.
+const SKILLS_CLI_AGENT_KEYS: [&str; 75] = [
+    "aider-desk",
+    "amp",
+    "antigravity",
+    "antigravity-cli",
+    "astrbot",
+    "autohand-code",
+    "augment",
+    "bob",
+    "claude-code",
+    "openclaw",
+    "cline",
+    "codearts-agent",
+    "codebuddy",
+    "codemaker",
+    "codestudio",
+    "codex",
+    "command-code",
+    "continue",
+    "cortex",
+    "crush",
+    "cursor",
+    "deepagents",
+    "devin",
+    "dexto",
+    "droid",
+    "eve",
+    "firebender",
+    "forgecode",
+    "gemini-cli",
+    "github-copilot",
+    "goose",
+    "grok",
+    "hermes-agent",
+    "inference-sh",
+    "jazz",
+    "junie",
+    "iflow-cli",
+    "kilo",
+    "kimchi",
+    "kimi-code-cli",
+    "kiro-cli",
+    "kode",
+    "lingma",
+    "loaf",
+    "mcpjam",
+    "mistral-vibe",
+    "moxby",
+    "mux",
+    "opencode",
+    "openhands",
+    "ona",
+    "pi",
+    "qoder",
+    "qoder-cn",
+    "qwen-code",
+    "replit",
+    "reasonix",
+    "rovodev",
+    "roo",
+    "tabnine-cli",
+    "terramind",
+    "tinycloud",
+    "trae",
+    "trae-cn",
+    "warp",
+    "windsurf",
+    "zed",
+    "zcode",
+    "zencoder",
+    "zenflow",
+    "neovate",
+    "pochi",
+    "promptscript",
+    "adal",
+    "universal",
+];
 
 #[derive(Clone, Copy, Debug)]
 struct InstallTarget {
@@ -144,18 +225,15 @@ pub fn install_skill(target_ids: &[String]) -> Result<AgentSkillStatus> {
     install_skill_at(&user_home()?, target_ids)
 }
 
-fn sync_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
+fn refresh_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
     let status = skill_status_at(home)?;
     for (target, target_status) in INSTALL_TARGETS.iter().zip(&status.targets) {
-        if matches!(
-            target_status.state,
-            AgentSkillState::Missing | AgentSkillState::Stale
-        ) {
+        if target_status.state == AgentSkillState::Stale {
             if let Err(error) = install_target_at(home, target) {
                 tracing::warn!(
                     ?error,
                     target_id = target.id,
-                    "failed to sync agent skill; continuing"
+                    "failed to refresh agent skill; continuing"
                 );
             }
         }
@@ -163,8 +241,33 @@ fn sync_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
     skill_status_at(home)
 }
 
-pub fn sync_installed_skills() -> Result<AgentSkillStatus> {
-    sync_installed_skills_at(&user_home()?)
+pub fn refresh_installed_skills() -> Result<AgentSkillStatus> {
+    refresh_installed_skills_at(&user_home()?)
+}
+
+pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
+    if agent_keys.is_empty() {
+        return Err(anyhow!("at least one agent key is required"));
+    }
+
+    let mut unique_keys = Vec::new();
+    for key in agent_keys {
+        if !SKILLS_CLI_AGENT_KEYS.contains(&key.as_str()) {
+            return Err(anyhow!("unknown skills CLI agent key: {key}"));
+        }
+        if !unique_keys.contains(&key.as_str()) {
+            unique_keys.push(key.as_str());
+        }
+    }
+
+    let mut command = format!(
+        "npx skills add {VIBELINK_SKILLS_REPOSITORY} --skill {VIBELINK_MEMORY_SKILL_NAME} --global"
+    );
+    for key in unique_keys {
+        command.push_str(" --agent ");
+        command.push_str(key);
+    }
+    Ok(command)
 }
 
 pub fn uninstall_skill_at(home: &Path, target_ids: &[String]) -> Result<AgentSkillStatus> {
@@ -192,11 +295,16 @@ pub async fn agent_skill_status() -> Result<AgentSkillStatus, String> {
 }
 
 #[tauri::command]
-pub async fn agent_skill_sync() -> Result<AgentSkillStatus, String> {
-    tauri::async_runtime::spawn_blocking(sync_installed_skills)
+pub async fn agent_skill_refresh() -> Result<AgentSkillStatus, String> {
+    tauri::async_runtime::spawn_blocking(refresh_installed_skills)
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_skill_cli_command(agent_keys: Vec<String>) -> Result<String, String> {
+    skills_cli_install_command(&agent_keys).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -313,9 +421,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_on_empty_home_does_not_create_agent_directories() {
-        let root = temp_root("agent-skills-sync-empty");
-        let status = sync_installed_skills_at(&root).expect("sync empty home");
+    fn refresh_on_empty_home_does_not_create_agent_directories() {
+        let root = temp_root("agent-skills-refresh-empty");
+        let status = refresh_installed_skills_at(&root).expect("refresh empty home");
 
         assert!(status
             .targets
@@ -326,24 +434,23 @@ mod tests {
     }
 
     #[test]
-    fn sync_installs_only_for_existing_agent_homes() {
-        let root = temp_root("agent-skills-sync-present");
+    fn refresh_does_not_install_missing_skill() {
+        let root = temp_root("agent-skills-refresh-missing");
         fs::create_dir_all(root.join(".claude")).expect("create Claude home");
 
-        let status = sync_installed_skills_at(&root).expect("sync present agents");
+        let status = refresh_installed_skills_at(&root).expect("refresh missing skill");
 
-        assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
-        assert!(status
-            .targets
-            .iter()
-            .filter(|target| target.id != "claude")
-            .all(|target| target.state == AgentSkillState::AgentAbsent));
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Missing);
+        assert!(!root
+            .join(".claude/skills")
+            .join(VIBELINK_MEMORY_SKILL_NAME)
+            .exists());
         cleanup_root(root);
     }
 
     #[test]
-    fn sync_replaces_stale_content() {
-        let root = temp_root("agent-skills-sync-stale");
+    fn refresh_replaces_stale_content() {
+        let root = temp_root("agent-skills-refresh-stale");
         fs::create_dir_all(root.join(".claude")).expect("create Claude home");
         install_skill_at(&root, &["claude".to_string()]).expect("install skill");
         let skill_path = root
@@ -352,19 +459,19 @@ mod tests {
             .join(SKILL_FILE);
         fs::write(&skill_path, "old bundled skill\n").expect("write stale skill");
 
-        let status = sync_installed_skills_at(&root).expect("sync stale skill");
+        let status = refresh_installed_skills_at(&root).expect("refresh stale skill");
 
         assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
         assert_eq!(
-            fs::read_to_string(skill_path).expect("read synced skill"),
+            fs::read_to_string(skill_path).expect("read refreshed skill"),
             VIBELINK_MEMORY_SKILL_MARKDOWN
         );
         cleanup_root(root);
     }
 
     #[test]
-    fn sync_leaves_current_install_untouched() {
-        let root = temp_root("agent-skills-sync-current");
+    fn refresh_leaves_current_install_untouched() {
+        let root = temp_root("agent-skills-refresh-current");
         fs::create_dir_all(root.join(".claude")).expect("create Claude home");
         install_skill_at(&root, &["claude".to_string()]).expect("install skill");
         let skill_path = root
@@ -378,7 +485,7 @@ mod tests {
             .expect("read installed mtime");
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        let status = sync_installed_skills_at(&root).expect("sync current skill");
+        let status = refresh_installed_skills_at(&root).expect("refresh current skill");
 
         assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
         assert_eq!(
@@ -396,18 +503,64 @@ mod tests {
     }
 
     #[test]
-    fn sync_continues_after_one_target_fails() {
-        let root = temp_root("agent-skills-sync-partial");
-        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
-        fs::write(root.join(".claude/skills"), "blocks skill directory\n")
-            .expect("block Claude skills directory");
-        fs::create_dir_all(root.join(".codex")).expect("create Codex home");
+    fn refresh_continues_after_one_stale_target_fails() {
+        let root = temp_root("agent-skills-refresh-partial");
+        let claude_skill = installed_skill_path(&root, "claude", ".claude");
+        let codex_skill = installed_skill_path(&root, "codex", ".codex");
+        fs::write(&claude_skill, "old bundled skill\n").expect("stale Claude skill");
+        fs::write(&codex_skill, "old bundled skill\n").expect("stale Codex skill");
+        let mut permissions = fs::metadata(&claude_skill)
+            .expect("read Claude permissions")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&claude_skill, permissions).expect("lock Claude skill");
 
-        let status = sync_installed_skills_at(&root).expect("sync around failed target");
+        let status = refresh_installed_skills_at(&root).expect("refresh around failed target");
 
-        assert_eq!(target(&status, "claude").state, AgentSkillState::Missing);
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Stale);
         assert_eq!(target(&status, "codex").state, AgentSkillState::Installed);
+        // Unlock so `cleanup_root` can delete it on Windows, where a read-only
+        // file blocks `remove_dir_all`. The world-writable concern the lint
+        // raises does not apply to a temp file that is removed on the next line.
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            let mut permissions = fs::metadata(&claude_skill)
+                .expect("reread Claude permissions")
+                .permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&claude_skill, permissions).expect("unlock Claude skill");
+        }
         cleanup_root(root);
+    }
+
+    #[test]
+    fn skills_cli_agent_key_count_is_stable() {
+        assert_eq!(SKILLS_CLI_AGENT_KEYS.len(), 75);
+    }
+
+    #[test]
+    fn skills_cli_command_requires_known_agent_keys() {
+        let empty = skills_cli_install_command(&[]).expect_err("empty keys should fail");
+        assert!(empty.to_string().contains("at least one agent key"));
+
+        let unknown = skills_cli_install_command(&["unknown-agent".to_string()])
+            .expect_err("unknown key should fail");
+        assert!(unknown.to_string().contains("unknown-agent"));
+    }
+
+    #[test]
+    fn skills_cli_command_preserves_order_and_removes_duplicates() {
+        let command = skills_cli_install_command(&[
+            "amp".to_string(),
+            "claude-code".to_string(),
+            "amp".to_string(),
+        ])
+        .expect("build skills CLI command");
+
+        assert_eq!(
+            command,
+            "npx skills add JSCOP/vibelink-skills --skill vibelink-memory --global --agent amp --agent claude-code"
+        );
     }
 
     #[test]
@@ -512,6 +665,15 @@ mod tests {
             .iter()
             .find(|target| target.id == id)
             .expect("target exists")
+    }
+
+    fn installed_skill_path(root: &Path, target_id: &str, agent_home: &str) -> PathBuf {
+        fs::create_dir_all(root.join(agent_home)).expect("create agent home");
+        install_skill_at(root, &[target_id.to_string()]).expect("install skill");
+        root.join(agent_home)
+            .join("skills")
+            .join(VIBELINK_MEMORY_SKILL_NAME)
+            .join(SKILL_FILE)
     }
 
     fn temp_root(prefix: &str) -> PathBuf {
