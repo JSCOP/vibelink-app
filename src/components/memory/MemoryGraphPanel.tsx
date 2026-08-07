@@ -47,6 +47,10 @@ const LABEL_WEIGHT = 3
  *  text overlaps into an unreadable smear. Zooming in drops under the budget. */
 const LABEL_BUDGET = 80
 const LABEL_MAX_CHARS = 34
+/** Shared by the drawn label and the overlap box so the two never disagree. */
+function labelText(label: string): string {
+  return label.length > LABEL_MAX_CHARS ? `${label.slice(0, LABEL_MAX_CHARS - 1)}…` : label
+}
 /** Icons are drawn at 1.6x the circle's radius, so the glyph's half-diagonal
  *  still lands inside the disc. Below this ON-SCREEN radius the strokes collapse
  *  into a smudge and the plain circle reads better; zooming in earns the rest. */
@@ -339,11 +343,36 @@ export function MemoryGraphPanel() {
    *  until few enough nodes remain and every one of them gets its name; zoomed
    *  out, fall back to the heavy nodes plus whatever is selected or hovered. */
   const onScreen = positioned.filter(({ x, y }) => x >= view.x && x <= view.x + view.w && y >= view.y && y <= view.y + view.h)
-  const labeled =
+  const labelFontSize = Math.max(4, Math.min(11, (view.w / LAYOUT_WIDTH) * 10))
+  const candidates =
     onScreen.length <= LABEL_BUDGET
       ? onScreen
       : positioned.filter(({ node }) => node.weight >= LABEL_WEIGHT || node.id === selectedId || node.id === hoveredId)
-  const labelFontSize = Math.max(4, Math.min(11, (view.w / LAYOUT_WIDTH) * 10))
+  /** Greedy overlap rejection. Labels are drawn beside their node with no layout
+   *  engine behind them, so a cluster of nodes at similar y produced one smeared
+   *  line of text. Place the important ones first — selected, hovered, then
+   *  heaviest — and drop any label whose box hits one already placed. */
+  const labeled: typeof candidates = []
+  const placed: Array<{ x: number; y: number; w: number; h: number }> = []
+  const ranked = [...candidates].sort((left, right) => {
+    const rank = (item: (typeof candidates)[number]) =>
+      item.node.id === selectedId ? 2 : item.node.id === hoveredId ? 1 : 0
+    return rank(right) - rank(left) || right.node.weight - left.node.weight || left.node.id.localeCompare(right.node.id)
+  })
+  for (const item of ranked) {
+    const text = labelText(item.node.label)
+    // 0.55em is a workable average advance width for this UI font; the box only
+    // has to be close enough to keep two labels from sharing a line.
+    const box = {
+      x: item.x + nodeRadius(item.node.weight) + 5,
+      y: item.y - labelFontSize * 0.6,
+      w: text.length * labelFontSize * 0.55,
+      h: labelFontSize * 1.2,
+    }
+    if (placed.some((other) => box.x < other.x + other.w && other.x < box.x + box.w && box.y < other.y + other.h && other.y < box.y + box.h)) continue
+    placed.push(box)
+    labeled.push(item)
+  }
   const zoom = LAYOUT_WIDTH / view.w
   /** Scoped to `onScreen` so a 1,500-node snapshot never pays for glyphs the
    *  camera cannot see, and thresholded so it never paints unreadable ones. */
@@ -500,7 +529,7 @@ export function MemoryGraphPanel() {
                   y={y + 3.5}
                   fontSize={labelFontSize}
                 >
-                  {node.label.length > LABEL_MAX_CHARS ? `${node.label.slice(0, LABEL_MAX_CHARS - 1)}…` : node.label}
+                  {labelText(node.label)}
                 </text>
               ))}
             </svg>
