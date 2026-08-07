@@ -214,7 +214,7 @@ function createLink(range: ILink['range'], text: string, activate: (event: Mouse
 
 function openModeForClick(event: MouseEvent): TerminalLinkOpenMode | null {
   if (!event.ctrlKey && !event.metaKey) return null
-  return event.shiftKey ? 'system' : 'internal'
+  return event.shiftKey ? 'internal' : 'system'
 }
 
 function trimTrailingLinkPunctuation(text: string): string {

@@ -117,9 +117,11 @@ describe('terminal file link navigation', () => {
     expect(openSystemPath).not.toHaveBeenCalled()
   })
 
-  it('uses the Windows default association for Ctrl+Shift clicks inside the workspace', async () => {
-    const openContent = vi.fn()
+  it('opens a workspace text file in the VibeLink editor for Ctrl clicks too', async () => {
+    const openContent = vi.fn(async () => 'content:editor:src/App.tsx')
     const openSystemPath = vi.fn()
+    const reveal = vi.fn()
+    const unregister = registerEditorNavigation('session-1', 'src/App.tsx', reveal)
 
     await openTerminalLinkTarget(parseTerminalOpenTarget('E:/repo/src/App.tsx:42'), 'system', {
       activeSessionId: 'session-1',
@@ -129,9 +131,28 @@ describe('terminal file link navigation', () => {
       openSystemPath,
     })
 
-    expect(invokeMock).not.toHaveBeenCalled()
+    expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'src/App.tsx', workspaceId: 'session-1', workspaceEpoch: 5 })
+    expect(reveal).toHaveBeenCalledWith({ lineNumber: 42, column: 1 })
+    expect(openSystemPath).not.toHaveBeenCalled()
+    unregister()
+  })
+
+  it('hands workspace folders and binaries to the OS for Ctrl clicks', async () => {
+    invokeMock.mockResolvedValueOnce('directory')
+    const openContent = vi.fn()
+    const openSystemPath = vi.fn()
+
+    await openTerminalLinkTarget(parseTerminalOpenTarget('E:/repo/src'), 'system', {
+      activeSessionId: 'session-1',
+      workspaceFolder: 'E:/repo',
+      workspaceEpoch: 5,
+      contentActions: { openContent } as unknown as WorkspaceContentActions,
+      openSystemPath,
+    })
+
     expect(openContent).not.toHaveBeenCalled()
-    expect(openSystemPath).toHaveBeenCalledWith('E:/repo/src/App.tsx')
+    expect(revealPath).not.toHaveBeenCalled()
+    expect(openSystemPath).toHaveBeenCalledWith('E:/repo/src')
   })
 
   it('strips the selector before using the system fallback outside the workspace', async () => {

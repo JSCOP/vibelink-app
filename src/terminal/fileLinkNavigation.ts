@@ -69,9 +69,7 @@ export function workspaceRelativePathForTerminalTarget(path: string, workspaceFo
 
 export async function openTerminalLinkTarget(target: TerminalOpenTarget, mode: TerminalLinkOpenMode, options: OpenTerminalLinkOptions): Promise<void> {
   const { activeSessionId, workspaceFolder, contentActions } = options
-  const relPath = mode === 'internal' && workspaceFolder
-    ? workspaceRelativePathForTerminalTarget(target.path, workspaceFolder)
-    : null
+  const relPath = workspaceFolder ? workspaceRelativePathForTerminalTarget(target.path, workspaceFolder) : null
 
   if (activeSessionId && relPath !== null && workspaceFolder && contentActions) {
     let kind: WorkspacePathKind | null = null
@@ -82,6 +80,8 @@ export async function openTerminalLinkTarget(target: TerminalOpenTarget, mode: T
     }
     if (options.isOwnershipCurrent?.() === false) return
 
+    // A workspace text file belongs in the VibeLink editor whichever modifier opened
+    // the link; the OS default association would only hand it to Notepad.
     if (kind === 'textFile') {
       const panelId = await contentActions.openContent({
         kind: 'editor',
@@ -94,7 +94,7 @@ export async function openTerminalLinkTarget(target: TerminalOpenTarget, mode: T
       return
     }
 
-    if (kind === 'directory' || kind === 'other') {
+    if (mode === 'internal' && (kind === 'directory' || kind === 'other')) {
       await contentActions.openContent({ kind: 'explorer', workspaceId: activeSessionId, workspaceEpoch: options.workspaceEpoch })
       if (options.isOwnershipCurrent?.() === false) return
       if (relPath) await useExplorerStore.getState().revealPath(activeSessionId, workspaceFolder, relPath)

@@ -189,7 +189,7 @@ describe('terminal link matchers', () => {
       expect(continuationLinks?.[0].decorations).toEqual({ pointerCursor: true, underline: true })
     })
 
-    it('routes Ctrl clicks internally and Ctrl+Shift clicks through the system', () => {
+    it('routes Ctrl clicks through the system and Ctrl+Shift clicks internally', () => {
       const term = stubTerminal(80, [{ text: 'Read E:/repo/src/App.tsx:120-230,410-450' }])
       const opened: unknown[] = []
       const provider = createPathLinkProvider(term, () => ({
@@ -208,8 +208,8 @@ describe('terminal link matchers', () => {
         location: { lineNumber: 120, column: 1 },
       }
       expect(opened).toEqual([
-        { target, mode: 'internal' },
         { target, mode: 'system' },
+        { target, mode: 'internal' },
       ])
     })
 
