@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { WorkspaceContentActionsContext, type OpenContentRequest, type WorkspaceContentActions } from '../../layout/contentActions'
 import { buildMemoryGraph } from '../../memory/memoryGraph'
-import type { MemoryEntry, MemoryProjectionStatus, MemorySnapshot } from '../../ipc/memory'
+import type { MemoryEntry, MemorySnapshot } from '../../ipc/memory'
 import type { SessionMeta } from '../../ipc/types'
 import { MemoryGraphPanel } from './MemoryGraphPanel'
 
@@ -46,23 +46,23 @@ const snapshot: MemorySnapshot = {
   truncated: false,
 }
 
-const offStatus: MemoryProjectionStatus = {
-  digestPath: 'E:/repo/.vibelink/MEMORY.md',
-  entryCount: 1,
-  targets: [
-    { id: 'digest', relativePath: '.vibelink/MEMORY.md', exists: false, enabled: false },
-    { id: 'agents', relativePath: 'AGENTS.md', exists: true, enabled: false },
-    { id: 'claude', relativePath: 'CLAUDE.md', exists: false, enabled: false },
-  ],
-}
+/** Word and one-line hint for every node kind, in legend order. The panel is
+ *  the only place a first-time reader learns what a dot is, so the wording is
+ *  part of the contract. */
+const LEGEND: [label: string, hint: string][] = [
+  ['Workspace', 'A workspace'],
+  ['Document', 'File or store it came from'],
+  ['Entry', 'One recorded fact'],
+  ['Tag', 'Shared label'],
+  ['Agent', 'Agent that reads this document'],
+  ['File', 'Path an entry references'],
+]
 
-const agentsOnStatus: MemoryProjectionStatus = {
-  ...offStatus,
-  targets: [
-    { id: 'digest', relativePath: '.vibelink/MEMORY.md', exists: true, enabled: true },
-    { id: 'agents', relativePath: 'AGENTS.md', exists: true, enabled: true },
-    { id: 'claude', relativePath: 'CLAUDE.md', exists: false, enabled: false },
-  ],
+/** lucide renders its icon name as a `lucide-*` class; which name maps to which
+ *  kind is lucide's business, so the assertions only compare node glyph against
+ *  legend glyph rather than hard-coding the six names. */
+function lucideClass(element: Element): string {
+  return [...element.classList].find((name) => name.startsWith('lucide-')) ?? ''
 }
 
 const mocks = vi.hoisted(() => ({
@@ -74,8 +74,6 @@ const mocks = vi.hoisted(() => ({
   addMemory: vi.fn(),
   removeMemory: vi.fn(),
   setMemoryPinned: vi.fn(),
-  fetchProjectionStatus: vi.fn(),
-  setMemoryLink: vi.fn(),
 }))
 
 vi.mock('../../state/store', () => ({
@@ -87,8 +85,6 @@ vi.mock('../../ipc/memory', () => ({
   addMemory: mocks.addMemory,
   removeMemory: mocks.removeMemory,
   setMemoryPinned: mocks.setMemoryPinned,
-  fetchProjectionStatus: mocks.fetchProjectionStatus,
-  setMemoryLink: mocks.setMemoryLink,
 }))
 
 const openContent = vi.fn<(request: OpenContentRequest) => Promise<string>>(async () => 'panel-editor')
@@ -137,8 +133,6 @@ describe('MemoryGraphPanel', () => {
     mocks.store.sessions = [session]
     mocks.store.activeSessionId = 'ws-1'
     mocks.fetchMemorySnapshot.mockResolvedValue(snapshot)
-    mocks.fetchProjectionStatus.mockResolvedValue(offStatus)
-    mocks.setMemoryLink.mockResolvedValue(agentsOnStatus)
     mocks.removeMemory.mockResolvedValue(undefined)
   })
 
@@ -172,7 +166,7 @@ describe('MemoryGraphPanel', () => {
     selectNode('PTY decoder is one state machine')
     fireEvent.click(screen.getByLabelText('Delete PTY decoder is one state machine'))
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }))
-    await waitFor(() => expect(mocks.removeMemory).toHaveBeenCalledWith('e-stored', 'ws-1', 'workspace', 'E:/repo'))
+    await waitFor(() => expect(mocks.removeMemory).toHaveBeenCalledWith('e-stored', 'ws-1', 'workspace'))
   })
 
   test('a harvested entry is read-only: no delete, opens its source file instead', async () => {
@@ -201,27 +195,40 @@ describe('MemoryGraphPanel', () => {
     expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'src/terminal/TerminalManager.ts' })
   })
 
-  test('the sync popover renders one switch per target and disables missing files', async () => {
+  test('the legend names every node kind with its one-line meaning', async () => {
     await renderWithGraph()
-    fireEvent.click(screen.getByRole('button', { name: 'Sync' }))
-    const popover = within(screen.getByRole('dialog', { name: 'Memory sync targets' }))
-    await waitFor(() => expect(popover.getAllByRole('switch')).toHaveLength(3))
-    expect(mocks.fetchProjectionStatus).toHaveBeenCalledWith('ws-1', 'E:/repo')
-    expect(popover.getByLabelText('CLAUDE.md')).toBeDisabled()
-    expect(popover.getByLabelText('AGENTS.md')).toBeEnabled()
+    const legend = within(screen.getByRole('group', { name: 'Node kinds' }))
+    for (const [label, hint] of LEGEND) {
+      expect(legend.getByTitle(hint)).toHaveTextContent(label)
+    }
+    const glyphs = LEGEND.map(([, hint]) => lucideClass(legend.getByTitle(hint).querySelector('svg')!))
+    expect(glyphs.every((name) => name !== '')).toBe(true)
+    expect(new Set(glyphs).size).toBe(LEGEND.length)
   })
 
-  test('toggling AGENTS.md links the target and re-renders from the returned status', async () => {
-    await renderWithGraph()
-    fireEvent.click(screen.getByRole('button', { name: 'Sync' }))
-    const popover = within(screen.getByRole('dialog', { name: 'Memory sync targets' }))
-    await waitFor(() => expect(popover.getByLabelText('AGENTS.md')).not.toBeChecked())
-    fireEvent.click(popover.getByLabelText('AGENTS.md'))
-    await waitFor(() => expect(mocks.setMemoryLink).toHaveBeenCalledWith('ws-1', 'E:/repo', 'agents', true))
-    // The invariant "enabling a target enables the digest" is server-owned; the
-    // panel must show it purely by adopting the returned status.
-    await waitFor(() => expect(popover.getByLabelText('AGENTS.md')).toBeChecked())
-    expect(popover.getByLabelText('.vibelink/MEMORY.md')).toBeChecked()
+  test('hiding a kind removes its nodes but keeps its legend entry', async () => {
+    const { container } = await renderWithGraph()
+    expect(container.querySelectorAll('circle.memory-node-tag').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Tag' }))
+    await waitFor(() => expect(container.querySelectorAll('circle.memory-node-tag')).toHaveLength(0))
+    expect(screen.getByTitle('Shared label')).toHaveTextContent('Tag')
+    expect(screen.getByRole('button', { name: 'Tag' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  test('a node big enough to hold one is drawn with its kind icon, matching the legend', async () => {
+    const { container } = await renderWithGraph()
+    const legend = within(screen.getByRole('group', { name: 'Node kinds' }))
+    const icons = [...container.querySelectorAll('svg.memory-node-icon')]
+    expect(icons.length).toBeGreaterThan(0)
+    for (const icon of icons) {
+      const kind = icon.getAttribute('data-kind')!
+      const label = LEGEND.find(([word]) => word.toLowerCase() === kind)![0]
+      expect(lucideClass(icon)).toBe(lucideClass(legend.getByText(label).closest('.memory-chip')!.querySelector('svg')!))
+      // Sized off the circle it sits in, so it can never swamp its own node.
+      expect(Number(icon.getAttribute('width'))).toBeLessThan(2 * Number(icon.getAttribute('height')))
+    }
+    // The busiest node in the fixture is a document, so the graph must show one.
+    expect(container.querySelector('svg.memory-node-icon[data-kind="document"]')).not.toBeNull()
   })
 
   test('a snapshot failure shows the error with a retry that refetches', async () => {
@@ -252,11 +259,5 @@ describe('MemoryGraphPanel', () => {
       { sessionId: 'ws-1', name: 'VibeLink', workspaceFolder: 'E:/repo' },
       { sessionId: 'ws-2', name: 'Other', workspaceFolder: null },
     ]))
-  })
-
-  test('the sync button is hidden for a workspace without a folder', async () => {
-    mocks.store.sessions = [{ ...session, workspaceFolder: null }]
-    await renderWithGraph()
-    expect(screen.queryByRole('button', { name: 'Sync' })).toBeNull()
   })
 })

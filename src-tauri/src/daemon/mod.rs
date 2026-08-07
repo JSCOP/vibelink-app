@@ -4272,34 +4272,6 @@ fn automation_workspace(state: &SharedState, session_id: &str) -> Result<PathBuf
         .context("automation workspace folder is unavailable")
 }
 
-fn memory_workspace_folder(state: &SharedState, session_id: Uuid) -> Option<PathBuf> {
-    lock_state(state)
-        .list_sessions()
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .and_then(|session| session.workspace_folder)
-        .map(PathBuf::from)
-}
-
-fn project_memory_best_effort(state: &SharedState, session_id: Option<Uuid>) {
-    let Some(session_id) = session_id else {
-        return;
-    };
-    let Some(workspace_folder) = memory_workspace_folder(state, session_id) else {
-        return;
-    };
-    if let Err(error) =
-        crate::app::memory::project_workspace_memory(&session_id.to_string(), &workspace_folder)
-    {
-        warn!(
-            ?error,
-            %session_id,
-            workspace_folder = %workspace_folder.display(),
-            "failed to project workspace memory"
-        );
-    }
-}
-
 fn run_automation_in_visible_terminal(
     automation_service: &AutomationService,
     runner: &AutomationRunner,
@@ -4657,9 +4629,8 @@ fn dispatch_memory_cli(
     command: crate::dedicated_cli::ActionCommand<MemoryAction>,
 ) -> Result<Value> {
     use crate::app::memory::{
-        add_memory, list_memory, memory_projection_status_at, remove_memory, search_memory,
-        set_memory_link, MemoryAddInput, MemoryOrigin, MemoryOriginKind, MemoryQueryScope,
-        MemoryScope,
+        add_memory, list_memory, remove_memory, search_memory, MemoryAddInput, MemoryOrigin,
+        MemoryOriginKind, MemoryQueryScope, MemoryScope,
     };
 
     let session_id = command
@@ -4760,7 +4731,6 @@ fn dispatch_memory_cli(
                 },
                 pinned: command.arguments.switches.contains("pin"),
             })?;
-            project_memory_best_effort(state, session_id);
             Ok(serde_json::to_value(record)?)
         }
         MemoryAction::Remove => {
@@ -4774,37 +4744,7 @@ fn dispatch_memory_cli(
                 scoped_session_id,
                 scope,
             )?;
-            project_memory_best_effort(state, session_id);
             Ok(json!({ "ok": true }))
-        }
-        MemoryAction::Link => {
-            let session_id = session_id.context("--workspace is required for memory link")?;
-            let workspace_folder = memory_workspace_folder(state, session_id)
-                .context("memory link requires a workspace folder")?;
-            let session_id = session_id.to_string();
-            match (
-                cli_option(&command.arguments, "target")?,
-                cli_option(&command.arguments, "state")?,
-            ) {
-                (None, None) => Ok(serde_json::to_value(memory_projection_status_at(
-                    &session_id,
-                    &workspace_folder,
-                )?)?),
-                (Some(target), Some(state)) => {
-                    let enabled = match state {
-                        "on" => true,
-                        "off" => false,
-                        _ => anyhow::bail!("--state must be on or off"),
-                    };
-                    Ok(serde_json::to_value(set_memory_link(
-                        &session_id,
-                        &workspace_folder,
-                        target,
-                        enabled,
-                    )?)?)
-                }
-                _ => anyhow::bail!("--target and --state must be supplied together"),
-            }
         }
     }
 }

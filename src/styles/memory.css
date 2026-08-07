@@ -12,6 +12,10 @@
 
   --vibelink-memory-canvas: var(--vibelink-bg);
   --vibelink-memory-node-stroke: var(--vibelink-bg);
+  /* Glyph drawn inside a node disc. Every kind hue above is a light or
+   * saturated tint, so the page background is the one colour that stays
+   * readable on all six. */
+  --vibelink-memory-icon: var(--vibelink-bg);
   --vibelink-memory-ring: var(--vibelink-focus);
   --vibelink-memory-label: var(--vibelink-muted);
   --vibelink-memory-label-strong: var(--vibelink-text);
@@ -101,7 +105,11 @@
   color: var(--vibelink-muted);
 }
 
-.memory-kind-filters {
+/* Legend and kind filter in one row: the chip names the kind, shows its icon
+ * and hue, and — for the five filterable kinds — toggles it. A hidden kind
+ * stays listed, so the key never disappears with the nodes. */
+.memory-legend {
+  align-items: center;
   display: inline-flex;
   gap: 4px;
 }
@@ -121,27 +129,30 @@
   transition: border-color 120ms ease, color 120ms ease;
 }
 
-.memory-chip:hover {
+.memory-chip:not(.is-static):hover {
   border-color: var(--vibelink-accent-border);
 }
 
-.memory-chip::before {
-  background: var(--vibelink-memory-chip, var(--vibelink-muted));
-  border-radius: 50%;
-  content: "";
-  height: 7px;
-  opacity: 0.35;
-  width: 7px;
+.memory-chip > svg {
+  color: var(--vibelink-memory-chip, var(--vibelink-muted));
+  flex: 0 0 auto;
+}
+
+.memory-chip.is-static {
+  cursor: default;
 }
 
 .memory-chip[data-active="true"] {
   color: var(--vibelink-text);
 }
 
-.memory-chip[data-active="true"]::before {
-  opacity: 1;
+/* Hidden kinds keep their icon and hue at full strength — only the word is
+ * struck through, so the chip still reads as a legend entry. */
+.memory-chip[data-active="false"] .memory-chip-label {
+  text-decoration: line-through;
 }
 
+.memory-chip[data-kind="workspace"] { --vibelink-memory-chip: var(--vibelink-memory-workspace); }
 .memory-chip[data-kind="document"] { --vibelink-memory-chip: var(--vibelink-memory-document); }
 .memory-chip[data-kind="entry"] { --vibelink-memory-chip: var(--vibelink-memory-entry); }
 .memory-chip[data-kind="tag"] { --vibelink-memory-chip: var(--vibelink-memory-tag); }
@@ -204,68 +215,6 @@
   padding: 6px 10px;
 }
 
-/* Sync popover */
-
-.memory-sync-anchor {
-  position: relative;
-}
-
-.memory-sync-popover {
-  background: var(--vibelink-panel);
-  border: 1px solid var(--vibelink-border);
-  border-radius: var(--vibelink-radius-md);
-  box-shadow: var(--vibelink-shadow);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  position: absolute;
-  right: 0;
-  top: 30px;
-  width: 300px;
-  z-index: var(--z-popover);
-}
-
-.memory-sync-popover > p {
-  color: var(--vibelink-muted);
-  font: 11px/1.45 var(--vibelink-sans);
-  margin: 0;
-}
-
-.memory-sync-row {
-  align-items: center;
-  display: grid;
-  gap: 4px 8px;
-  grid-template-columns: auto 1fr;
-}
-
-.memory-sync-row input[type="checkbox"] {
-  accent-color: var(--vibelink-accent-border);
-  height: 15px;
-  margin: 0;
-  width: 15px;
-}
-
-.memory-sync-row input[type="checkbox"]:disabled {
-  cursor: default;
-}
-
-.memory-sync-row code {
-  color: var(--vibelink-text);
-  font: 11px/1.3 var(--vibelink-mono);
-}
-
-.memory-sync-row small {
-  color: var(--vibelink-muted);
-  font: 10px/1.3 var(--vibelink-sans);
-  grid-column: 2;
-}
-
-.memory-sync-error {
-  color: var(--vibelink-danger-text);
-  font: 11px/1.4 var(--vibelink-sans);
-}
-
 /* Body split */
 
 .memory-body {
@@ -324,6 +273,14 @@
 .memory-node.is-selected {
   stroke: var(--vibelink-memory-ring);
   stroke-width: 2.5;
+}
+
+/* Nested `<svg>` glyph centred on the disc. `pointer-events: none` keeps hover,
+ * drag, and double-click on the circle underneath; `stroke: currentColor` comes
+ * from lucide, so `color` is what tints it. */
+.memory-node-icon {
+  color: var(--vibelink-memory-icon);
+  pointer-events: none;
 }
 
 .memory-node-label {

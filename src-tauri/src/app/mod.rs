@@ -1,5 +1,6 @@
 pub mod agent_history;
 pub mod agent_hooks;
+pub mod agent_skills;
 pub mod agents;
 pub mod android_device_lab;
 pub mod app_update;
@@ -221,6 +222,9 @@ pub fn run() {
             agents::agent_cli_status,
             app_update::app_update_check,
             agent_history::agent_conversations_list,
+            agent_skills::agent_skill_status,
+            agent_skills::agent_skill_install,
+            agent_skills::agent_skill_uninstall,
             board::board_read,
             board::board_write,
             board::board_task_create,
@@ -329,9 +333,7 @@ pub fn run() {
             license::account_sign_out,
             license::bug_report_submit,
             memory::memory_add,
-            memory::memory_projection_status,
             memory::memory_remove,
-            memory::memory_set_link,
             memory::memory_set_pinned,
             memory::memory_snapshot,
             diagnostics::export_diagnostics,

@@ -1231,21 +1231,6 @@ pub fn command_contracts() -> Vec<CommandContract> {
             Mutating
         ),
         contract!(
-            "memory",
-            "link",
-            "Show or change which agent files this workspace's memory is projected into.",
-            WORKSPACE,
-            &[
-                O::enum_string("target", &["digest", "agents", "claude"]),
-                O::enum_string("state", &["on", "off"])
-            ],
-            NONE,
-            Some(0),
-            None,
-            false,
-            Mutating
-        ),
-        contract!(
             "remote",
             "status",
             "Read remote server and protocol status.",

@@ -164,6 +164,7 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'chat', label: 'Image attachments', keywords: 'images paste 이미지 첨부' },
   { section: 'mcp', label: 'MCP server & self-check', keywords: 'server bridge tools self check 서버 점검' },
   { section: 'memory', label: 'Persistent memory', keywords: 'memory context compression 메모리 압축' },
+  { section: 'memory', label: 'Agent memory skill', keywords: 'skill install claude codex omp agents share 스킬 설치 에이전트 메모리' },
   { section: 'workspace', label: 'Workspace ordering', keywords: 'sort mode smart manual 정렬 순서' },
   { section: 'workspace', label: 'When reopening (session restore)', keywords: 'resume clean restart exit restore 재시작 복원 종료' },
   { section: 'workspace', label: 'Close button minimizes to tray', keywords: 'tray minimize quit 닫기 트레이' },

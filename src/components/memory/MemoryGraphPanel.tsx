@@ -1,14 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ExternalLink, Link2, PanelRightClose, PanelRightOpen, Pin, PinOff, Plus, RotateCw, Search, Trash2, X } from 'lucide-react'
+import {
+  Bot,
+  ExternalLink,
+  FileCode2,
+  FileText,
+  Folder,
+  NotebookPen,
+  PanelRightClose,
+  PanelRightOpen,
+  Pin,
+  PinOff,
+  Plus,
+  RotateCw,
+  Search,
+  Tag,
+  Trash2,
+  X,
+  type LucideIcon,
+} from 'lucide-react'
 import {
   addMemory,
   fetchMemorySnapshot,
-  fetchProjectionStatus,
   removeMemory,
-  setMemoryLink,
   setMemoryPinned,
   type MemoryEntry,
-  type MemoryProjectionStatus,
   type MemoryScope,
   type MemorySnapshot,
   type MemoryWorkspaceRef,
@@ -32,10 +47,28 @@ const LABEL_WEIGHT = 3
  *  text overlaps into an unreadable smear. Zooming in drops under the budget. */
 const LABEL_BUDGET = 80
 const LABEL_MAX_CHARS = 34
+/** Icons are drawn at 1.6x the circle's radius, so the glyph's half-diagonal
+ *  still lands inside the disc. Below this ON-SCREEN radius the strokes collapse
+ *  into a smudge and the plain circle reads better; zooming in earns the rest. */
+const ICON_MIN_RADIUS = 7
+const ICON_BOX_RATIO = 1.6
 const SEARCH_DEBOUNCE_MS = 200
 const ADD_COMMAND = 'vibelink memory add --title "<fact>" --body "<detail>" [--tag <tag>] [--ref <path>]'
 
+/** `workspace` is never filtered — one node, hiding it would only orphan the
+ *  graph — but it still needs a legend entry, so the two lists differ. */
 const FILTER_KINDS: MemoryNodeKind[] = ['document', 'entry', 'tag', 'agent', 'file']
+const LEGEND_KINDS: MemoryNodeKind[] = ['workspace', 'document', 'entry', 'tag', 'agent', 'file']
+/** One word and one line per kind, shared by the legend chip and the node glyph
+ *  so the graph and its key can never drift apart. */
+const KIND_META: Record<MemoryNodeKind, { label: string; hint: string; Icon: LucideIcon }> = {
+  workspace: { label: 'Workspace', hint: 'A workspace', Icon: Folder },
+  document: { label: 'Document', hint: 'File or store it came from', Icon: FileText },
+  entry: { label: 'Entry', hint: 'One recorded fact', Icon: NotebookPen },
+  tag: { label: 'Tag', hint: 'Shared label', Icon: Tag },
+  agent: { label: 'Agent', hint: 'Agent that reads this document', Icon: Bot },
+  file: { label: 'File', hint: 'Path an entry references', Icon: FileCode2 },
+}
 const GLOBAL_SESSION = '__global__'
 /** `document:<session>:<rest>` uses this sentinel for the store itself, which is
  *  the one document with no file behind it. Must match `memoryGraph.ts`. */
@@ -95,23 +128,11 @@ export function MemoryGraphPanel() {
   const [pinned, setPinned] = useState<{ signature: string; positions: Record<string, { x: number; y: number }> }>({ signature: '', positions: {} })
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
-  const [syncOpen, setSyncOpen] = useState(false)
-  const [syncStatus, setSyncStatus] = useState<MemoryProjectionStatus | null>(null)
-  const [syncError, setSyncError] = useState<string | null>(null)
-  const [syncBusy, setSyncBusy] = useState(false)
-
   const [addOpen, setAddOpen] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   const dragRef = useRef<Drag | null>(null)
   const draggedRef = useRef(false)
-
-  const activeSession = useMemo(() => sessions.find((session) => session.id === activeSessionId) ?? null, [sessions, activeSessionId])
-  const activeFolder = activeSession?.workspaceFolder ?? null
-  const folderOf = useCallback(
-    (sessionId: string | null) => (sessionId ? sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null : null),
-    [sessions],
-  )
 
   const workspaceRefs = useMemo<MemoryWorkspaceRef[]>(() => {
     const selected = scope === 'all' ? sessions : sessions.filter((session) => session.id === activeSessionId)
@@ -212,47 +233,12 @@ export function MemoryGraphPanel() {
   const activeNodeId = hoveredId ?? selectedId
   const selectedOpenPath = selectedNode ? openablePaths.get(selectedNode.id) ?? null : null
 
-  // Sync popover ------------------------------------------------------------
-
-  useEffect(() => {
-    if (!syncOpen || !activeSessionId || !activeFolder) return
-    let cancelled = false
-    fetchProjectionStatus(activeSessionId, activeFolder)
-      .then((status) => {
-        if (cancelled) return
-        setSyncStatus(status)
-        setSyncError(null)
-      })
-      .catch((caught) => {
-        if (!cancelled) setSyncError(String(caught))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [syncOpen, activeSessionId, activeFolder])
-
-  const toggleLink = useCallback(
-    async (target: string, enabled: boolean) => {
-      if (!activeSessionId || !activeFolder) return
-      setSyncBusy(true)
-      try {
-        setSyncStatus(await setMemoryLink(activeSessionId, activeFolder, target, enabled))
-        setSyncError(null)
-      } catch (caught) {
-        setSyncError(String(caught))
-      } finally {
-        setSyncBusy(false)
-      }
-    },
-    [activeSessionId, activeFolder],
-  )
-
   // Entry mutations ---------------------------------------------------------
 
   const togglePinned = useCallback(
     async (entry: MemoryEntry) => {
       try {
-        const updated = await setMemoryPinned(entry.id, entry.sessionId, entry.scope, !entry.pinned, folderOf(entry.sessionId))
+        const updated = await setMemoryPinned(entry.id, entry.sessionId, entry.scope, !entry.pinned)
         setSnapshot((current) => (current
           ? { ...current, entries: current.entries.map((candidate) => (candidate.id === entry.id && candidate.sessionId === entry.sessionId ? updated : candidate)) }
           : current))
@@ -260,20 +246,20 @@ export function MemoryGraphPanel() {
         setError(String(caught))
       }
     },
-    [folderOf],
+    [],
   )
 
   const deleteEntry = useCallback(
     async (entry: MemoryEntry) => {
       setConfirmDeleteId(null)
       try {
-        await removeMemory(entry.id, entry.sessionId, entry.scope, folderOf(entry.sessionId))
+        await removeMemory(entry.id, entry.sessionId, entry.scope)
         await load()
       } catch (caught) {
         setError(String(caught))
       }
     },
-    [folderOf, load],
+    [load],
   )
 
   // Graph interaction -------------------------------------------------------
@@ -358,6 +344,10 @@ export function MemoryGraphPanel() {
       ? onScreen
       : positioned.filter(({ node }) => node.weight >= LABEL_WEIGHT || node.id === selectedId || node.id === hoveredId)
   const labelFontSize = Math.max(4, Math.min(11, (view.w / LAYOUT_WIDTH) * 10))
+  const zoom = LAYOUT_WIDTH / view.w
+  /** Scoped to `onScreen` so a 1,500-node snapshot never pays for glyphs the
+   *  camera cannot see, and thresholded so it never paints unreadable ones. */
+  const iconed = onScreen.filter(({ node }) => nodeRadius(node.weight) * zoom >= ICON_MIN_RADIUS)
 
   // Render ------------------------------------------------------------------
 
@@ -373,10 +363,19 @@ export function MemoryGraphPanel() {
           <input aria-label="Search memory" placeholder="Search memory" spellCheck={false} value={search} onChange={(event) => setSearch(event.target.value)} />
           {search !== '' ? <button type="button" className="memory-search-clear" aria-label="Clear search" onClick={() => setSearch('')}><X size={11} /></button> : null}
         </label>
-        <div className="memory-kind-filters">
-          {FILTER_KINDS.map((kind) => {
+        <div className="memory-legend" role="group" aria-label="Node kinds">
+          {LEGEND_KINDS.map((kind) => {
+            const { label, hint, Icon } = KIND_META[kind]
             const shown = !hiddenKinds.includes(kind)
-            return (
+            const glyph = (
+              <>
+                <Icon size={12} aria-hidden="true" />
+                <span className="memory-chip-label">{label}</span>
+              </>
+            )
+            // The legend is the filter: every kind stays listed and readable
+            // whether or not it is currently drawn, so the key never vanishes.
+            return FILTER_KINDS.includes(kind) ? (
               <button
                 key={kind}
                 type="button"
@@ -384,44 +383,21 @@ export function MemoryGraphPanel() {
                 data-kind={kind}
                 data-active={shown}
                 aria-pressed={shown}
+                title={hint}
                 onClick={() => setHiddenKinds((current) => (current.includes(kind) ? current.filter((value) => value !== kind) : [...current, kind]))}
               >
-                {kind}
+                {glyph}
               </button>
+            ) : (
+              <span key={kind} className="memory-chip is-static" data-kind={kind} data-active="true" title={hint}>
+                {glyph}
+              </span>
             )
           })}
         </div>
         <span className="memory-toolbar-spacer" />
         <button type="button" disabled={loading} onClick={() => void load()}><RotateCw size={13} aria-hidden="true" /> Refresh</button>
         <button type="button" onClick={() => setAddOpen(true)}><Plus size={13} aria-hidden="true" /> Add memory</button>
-        {activeSessionId && activeFolder ? (
-          <span className="memory-sync-anchor">
-            <button type="button" aria-expanded={syncOpen} onClick={() => setSyncOpen((current) => !current)}><Link2 size={13} aria-hidden="true" /> Sync</button>
-            {syncOpen ? (
-              <section className="memory-sync-popover" role="dialog" aria-label="Memory sync targets">
-                <p>Let every agent read this workspace&apos;s memory automatically.</p>
-                {syncError ? <p className="memory-sync-error">{syncError}</p> : null}
-                {syncStatus?.targets.map((target) => {
-                  const missing = !target.exists && target.id !== 'digest'
-                  return (
-                    <label key={target.id} className="memory-sync-row">
-                      <input
-                        type="checkbox"
-                        role="switch"
-                        aria-label={target.relativePath}
-                        checked={target.enabled}
-                        disabled={missing || syncBusy}
-                        onChange={(event) => void toggleLink(target.id, event.target.checked)}
-                      />
-                      <code>{target.relativePath}</code>
-                      {missing ? <small>Not in this workspace</small> : null}
-                    </label>
-                  )
-                })}
-              </section>
-            ) : null}
-          </span>
-        ) : null}
         <button type="button" aria-label={sidebarOpen ? 'Hide details' : 'Show details'} onClick={() => setSidebarOpen((current) => !current)}>
           {sidebarOpen ? <PanelRightClose size={13} aria-hidden="true" /> : <PanelRightOpen size={13} aria-hidden="true" />}
         </button>
@@ -494,6 +470,26 @@ export function MemoryGraphPanel() {
                         the only way to identify one without selecting it. */}
                     <title>{openPath ? `${node.label}\nDouble-click to open ${openPath}` : node.label}</title>
                   </circle>
+                )
+              })}
+              {/* A nested `<svg>` scales the icon's own 24-unit viewBox into graph
+                  units without a transform stack, and `pointer-events: none`
+                  keeps every hit test on the circle underneath. */}
+              {iconed.map(({ node, x, y }) => {
+                const box = nodeRadius(node.weight) * ICON_BOX_RATIO
+                const { Icon } = KIND_META[node.kind]
+                return (
+                  <Icon
+                    key={node.id}
+                    className="memory-node-icon"
+                    data-kind={node.kind}
+                    aria-hidden="true"
+                    x={x - box / 2}
+                    y={y - box / 2}
+                    width={box}
+                    height={box}
+                    strokeWidth={2.5}
+                  />
                 )
               })}
               {labeled.map(({ node, x, y }) => (
@@ -587,7 +583,6 @@ export function MemoryGraphPanel() {
       {addOpen ? (
         <AddMemoryDialog
           defaultSessionId={activeSessionId ?? null}
-          workspaceFolder={activeFolder}
           onClose={() => setAddOpen(false)}
           onAdded={() => {
             setAddOpen(false)
@@ -601,12 +596,11 @@ export function MemoryGraphPanel() {
 
 type AddMemoryDialogProps = {
   defaultSessionId: string | null
-  workspaceFolder: string | null
   onClose: () => void
   onAdded: () => void
 }
 
-function AddMemoryDialog({ defaultSessionId, workspaceFolder, onClose, onAdded }: AddMemoryDialogProps) {
+function AddMemoryDialog({ defaultSessionId, onClose, onAdded }: AddMemoryDialogProps) {
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   const [tags, setTags] = useState('')
@@ -617,17 +611,14 @@ function AddMemoryDialog({ defaultSessionId, workspaceFolder, onClose, onAdded }
   const submit = async () => {
     setBusy(true)
     try {
-      await addMemory(
-        {
-          title: title.trim(),
-          body: body.trim(),
-          tags: tags.split(',').map((tag) => tag.trim().toLowerCase()).filter((tag) => tag !== ''),
-          scope,
-          sessionId: scope === 'workspace' ? defaultSessionId : null,
-          origin: { kind: 'user' },
-        },
-        workspaceFolder,
-      )
+      await addMemory({
+        title: title.trim(),
+        body: body.trim(),
+        tags: tags.split(',').map((tag) => tag.trim().toLowerCase()).filter((tag) => tag !== ''),
+        scope,
+        sessionId: scope === 'workspace' ? defaultSessionId : null,
+        origin: { kind: 'user' },
+      })
       onAdded()
     } catch (caught) {
       setError(String(caught))

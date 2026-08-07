@@ -697,9 +697,8 @@ fn cli_contract_tool_name(contract: &CommandContract) -> String {
 }
 
 fn mcp_exposes_contract(contract: &CommandContract) -> bool {
-    match contract.domain {
-        "memory" => true,
-        "worktree" => matches!(
+    contract.domain == "worktree"
+        && matches!(
             contract.action,
             "list"
                 | "show"
@@ -710,9 +709,7 @@ fn mcp_exposes_contract(contract: &CommandContract) -> bool {
                 | "set"
                 | "checkpoint"
                 | "comment"
-        ),
-        _ => false,
-    }
+        )
 }
 
 fn mcp_cli_contract(name: &str) -> Option<CommandContract> {
@@ -1616,16 +1613,13 @@ mod tests {
         assert!(names.contains(&"vibelink_skill_get"));
         assert!(names.contains(&"vibelink_skill_apply"));
         assert!(names.contains(&"vibelink_skill_delete"));
-        for name in [
-            "vibelink_memory_list",
-            "vibelink_memory_search",
-            "vibelink_memory_add",
-            "vibelink_memory_remove",
-            "vibelink_memory_link",
-        ] {
-            assert!(names.contains(&name), "missing generated MCP tool {name}");
-        }
-        assert!(mcp_cli_contract("vibelink_memory_add").is_some());
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.starts_with("vibelink_memory_")),
+            "memory domain must remain CLI-only"
+        );
+        assert!(mcp_cli_contract("vibelink_memory_add").is_none());
         for name in [
             "vibelink_workspace_list",
             "vibelink_terminal_wait",

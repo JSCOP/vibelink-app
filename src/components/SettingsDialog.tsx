@@ -88,6 +88,7 @@ import type { HermesRuntimeStatus, HermesWorkspaceState, WorktreeStorage, Worktr
 import { runMcpSelfCheck, type McpCheckReport } from '../ipc/mcp'
 import { HermesInstallGuidance } from './HermesInstallGuidance'
 import { GitHostingSettings } from './GitHostingSettings'
+import { AgentSkillSettings } from './AgentSkillSettings'
 import { ProviderIntegrationsPanel } from './ProviderIntegrationsPanel'
 import { AndroidDeviceLabPanel } from './AndroidDeviceLabPanel'
 import { addCustomCompletionSound, builtInCompletionSounds, defaultCompletionSoundId, listCustomCompletionSounds, playCompletionSound, removeCustomCompletionSound, type CompletionSoundId, type CustomCompletionSound } from '../notifications/completionSounds'
@@ -1130,11 +1131,14 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
             ) : null}
 
             {activeSection === 'memory' ? (
-              <SettingsCard icon={Blocks} title="Memory & context" hint="Native Hermes manages durable memory and compression.">
-                <SettingsRow icon={Database} label="Persistent memory" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
-                <SettingsRow icon={Layers} label="Auto-compression" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
-                <SettingsRow icon={Cpu} label="Context engine" control={<SettingsValue value="Native Hermes" />} />
-              </SettingsCard>
+              <>
+                <AgentSkillSettings />
+                <SettingsCard icon={Blocks} title="Memory & context" hint="Native Hermes manages durable memory and compression.">
+                  <SettingsRow icon={Database} label="Persistent memory" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
+                  <SettingsRow icon={Layers} label="Auto-compression" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
+                  <SettingsRow icon={Cpu} label="Context engine" control={<SettingsValue value="Native Hermes" />} />
+                </SettingsCard>
+              </>
             ) : null}
 
             {activeSection === 'voice' ? (

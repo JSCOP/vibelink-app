@@ -33,17 +33,6 @@ export type MemorySnapshot = {
   entries: MemoryEntry[]
   truncated: boolean
 }
-export type MemoryLinkTarget = {
-  id: string
-  relativePath: string
-  exists: boolean
-  enabled: boolean
-}
-export type MemoryProjectionStatus = {
-  digestPath: string
-  entryCount: number
-  targets: MemoryLinkTarget[]
-}
 export type MemoryAddInput = {
   title: string
   body: string
@@ -64,17 +53,12 @@ export async function fetchMemorySnapshot(workspaces: MemoryWorkspaceRef[]): Pro
   return invoke<MemorySnapshot>('memory_snapshot', { workspaces })
 }
 
-export function addMemory(input: MemoryAddInput, workspaceFolder: string | null): Promise<MemoryEntry> {
-  return invoke<MemoryEntry>('memory_add', { input, workspaceFolder })
+export function addMemory(input: MemoryAddInput): Promise<MemoryEntry> {
+  return invoke<MemoryEntry>('memory_add', { input })
 }
 
-export function removeMemory(
-  id: string,
-  sessionId: string | null,
-  scope: MemoryScope,
-  workspaceFolder: string | null,
-): Promise<void> {
-  return invoke<void>('memory_remove', { id, sessionId, scope, workspaceFolder })
+export function removeMemory(id: string, sessionId: string | null, scope: MemoryScope): Promise<void> {
+  return invoke<void>('memory_remove', { id, sessionId, scope })
 }
 
 export function setMemoryPinned(
@@ -82,23 +66,6 @@ export function setMemoryPinned(
   sessionId: string | null,
   scope: MemoryScope,
   pinned: boolean,
-  workspaceFolder: string | null,
 ): Promise<MemoryEntry> {
-  return invoke<MemoryEntry>('memory_set_pinned', { id, sessionId, scope, pinned, workspaceFolder })
-}
-
-export function fetchProjectionStatus(
-  sessionId: string,
-  workspaceFolder: string,
-): Promise<MemoryProjectionStatus> {
-  return invoke<MemoryProjectionStatus>('memory_projection_status', { sessionId, workspaceFolder })
-}
-
-export function setMemoryLink(
-  sessionId: string,
-  workspaceFolder: string,
-  target: string,
-  enabled: boolean,
-): Promise<MemoryProjectionStatus> {
-  return invoke<MemoryProjectionStatus>('memory_set_link', { sessionId, workspaceFolder, target, enabled })
+  return invoke<MemoryEntry>('memory_set_pinned', { id, sessionId, scope, pinned })
 }

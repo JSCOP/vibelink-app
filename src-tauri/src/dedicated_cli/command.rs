@@ -174,7 +174,6 @@ action_enum!(MemoryAction {
     Search => "search",
     Add => "add",
     Remove => "remove",
-    Link => "link",
 });
 
 action_enum!(RemoteAction {
@@ -785,7 +784,7 @@ mod tests {
                 ],
             ),
             ("skill", &["list", "show", "apply", "delete", "doctor"]),
-            ("memory", &["list", "search", "add", "remove", "link"]),
+            ("memory", &["list", "search", "add", "remove"]),
             ("remote", &["status", "pair", "devices", "revoke"]),
         ];
         for (domain, actions) in command_tree {
@@ -850,6 +849,7 @@ mod tests {
     #[test]
     fn rejects_unknown_memory_action() {
         assert!(parse_args(["memory", "guess"]).is_err());
+        assert!(parse_args(["memory", "link"]).is_err());
     }
 
     #[test]

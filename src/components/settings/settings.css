@@ -305,6 +305,14 @@
   padding: 4px 11px 8px;
 }
 
+/* One-line intro above a card's rows; longer copy still belongs in the title hint. */
+.vl-set-card-note {
+  color: var(--vibelink-muted);
+  font: 11.5px/1.45 var(--vibelink-sans);
+  margin: 0;
+  padding: 3px 0 5px;
+}
+
 .vl-set-hint {
   align-items: center;
   color: var(--vibelink-muted);
@@ -728,6 +736,11 @@
   color: var(--vibelink-danger-text);
 }
 
+/* Message that carries its own action button on the same line. */
+.vl-set-message.vl-set-message-action {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .vl-set-message > svg {
   align-self: start;
   margin-top: 1px;
@@ -824,6 +837,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.vl-set-agent-name > span.mono {
+  font-family: var(--vibelink-mono);
+}
+
+.vl-set-agent-check {
+  accent-color: var(--vibelink-accent);
+  height: 15px;
+  justify-self: center;
+  margin: 0;
+  width: 15px;
+}
+
+.vl-set-agent-check:disabled {
+  cursor: not-allowed;
 }
 
 /* ── Profile list ────────────────────────────────────────────────── */
