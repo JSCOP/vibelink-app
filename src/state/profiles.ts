@@ -117,6 +117,9 @@ export type Settings = {
   chatImageAttachments: ChatImageAttachmentMode
   captureDir: string
   captureFfmpegPath: string
+  /** Keep `<agent home>/skills/vibelink-memory/SKILL.md` in sync on every
+   *  launch, for the agents that already exist on this machine. */
+  autoInstallAgentSkill: boolean
   setupWizard: SetupWizardSettings
 }
 
@@ -330,6 +333,7 @@ export const defaultSettings: Settings = {
   chatImageAttachments: 'auto',
   captureDir: '',
   captureFfmpegPath: '',
+  autoInstallAgentSkill: true,
   keybindings: { ...defaultKeybindings },
   setupWizard: { completedAt: null, skippedSteps: [] },
 }
@@ -405,6 +409,7 @@ export function normalizeSettings(value: unknown): Settings {
     chatImageAttachments: readChatImageAttachmentMode(record?.chatImageAttachments),
     captureDir: readString(record?.captureDir, defaultSettings.captureDir),
     captureFfmpegPath: readString(record?.captureFfmpegPath, defaultSettings.captureFfmpegPath),
+    autoInstallAgentSkill: readBoolean(record?.autoInstallAgentSkill, defaultSettings.autoInstallAgentSkill),
     setupWizard,
   }
 }

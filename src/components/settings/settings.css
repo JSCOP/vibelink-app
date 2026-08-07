@@ -843,16 +843,30 @@
   font-family: var(--vibelink-mono);
 }
 
-.vl-set-agent-check {
-  accent-color: var(--vibelink-accent);
-  height: 15px;
-  justify-self: center;
-  margin: 0;
-  width: 15px;
+/* Reveals a card's optional per-target list. Shares the profile row's chevron
+   so every disclosure in Settings opens the same way. */
+.vl-set-disclosure {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: grid;
+  font: 11.5px/1.2 var(--vibelink-sans);
+  gap: 7px;
+  grid-template-columns: 13px auto;
+  justify-content: start;
+  min-height: 30px;
+  padding: 0;
 }
 
-.vl-set-agent-check:disabled {
-  cursor: not-allowed;
+.vl-set-disclosure:hover {
+  color: var(--vibelink-text);
+}
+
+.vl-set-disclosure > svg {
+  transition: transform 120ms ease;
+}
+
+.vl-set-disclosure[aria-expanded='true'] > svg {
+  transform: rotate(90deg);
 }
 
 /* ── Profile list ────────────────────────────────────────────────── */

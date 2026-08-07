@@ -8,7 +8,9 @@ use std::{
 };
 
 pub const VIBELINK_MEMORY_SKILL_NAME: &str = "vibelink-memory";
-pub const VIBELINK_MEMORY_SKILL_REVISION: u32 = 1;
+// Bump whenever SKILL.md changes: an installed copy whose SHA-256 differs from
+// the built-in one reads as `Stale`, and auto-sync then rewrites it.
+pub const VIBELINK_MEMORY_SKILL_REVISION: u32 = 2;
 pub const VIBELINK_MEMORY_SKILL_MARKDOWN: &str =
     include_str!("../../resources/skills/vibelink-memory/SKILL.md");
 
@@ -133,22 +135,36 @@ pub fn skill_status() -> Result<AgentSkillStatus> {
 pub fn install_skill_at(home: &Path, target_ids: &[String]) -> Result<AgentSkillStatus> {
     let targets = resolve_targets(target_ids)?;
     for target in targets {
-        let skill_dir = skill_dir(home, target);
-        fs::create_dir_all(&skill_dir)
-            .with_context(|| format!("create agent skill directory {}", skill_dir.display()))?;
-        fs::write(skill_dir.join(SKILL_FILE), VIBELINK_MEMORY_SKILL_MARKDOWN)
-            .with_context(|| format!("write agent skill for {}", target.id))?;
-        fs::write(
-            skill_dir.join(REVISION_FILE),
-            format!("{VIBELINK_MEMORY_SKILL_REVISION}\n"),
-        )
-        .with_context(|| format!("write agent skill revision for {}", target.id))?;
+        install_target_at(home, target)?;
     }
     skill_status_at(home)
 }
 
 pub fn install_skill(target_ids: &[String]) -> Result<AgentSkillStatus> {
     install_skill_at(&user_home()?, target_ids)
+}
+
+fn sync_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
+    let status = skill_status_at(home)?;
+    for (target, target_status) in INSTALL_TARGETS.iter().zip(&status.targets) {
+        if matches!(
+            target_status.state,
+            AgentSkillState::Missing | AgentSkillState::Stale
+        ) {
+            if let Err(error) = install_target_at(home, target) {
+                tracing::warn!(
+                    ?error,
+                    target_id = target.id,
+                    "failed to sync agent skill; continuing"
+                );
+            }
+        }
+    }
+    skill_status_at(home)
+}
+
+pub fn sync_installed_skills() -> Result<AgentSkillStatus> {
+    sync_installed_skills_at(&user_home()?)
 }
 
 pub fn uninstall_skill_at(home: &Path, target_ids: &[String]) -> Result<AgentSkillStatus> {
@@ -170,6 +186,14 @@ pub fn uninstall_skill(target_ids: &[String]) -> Result<AgentSkillStatus> {
 #[tauri::command]
 pub async fn agent_skill_status() -> Result<AgentSkillStatus, String> {
     tauri::async_runtime::spawn_blocking(skill_status)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn agent_skill_sync() -> Result<AgentSkillStatus, String> {
+    tauri::async_runtime::spawn_blocking(sync_installed_skills)
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
@@ -222,6 +246,20 @@ fn target_status(home: &Path, target: &InstallTarget) -> Result<AgentSkillTarget
     })
 }
 
+fn install_target_at(home: &Path, target: &InstallTarget) -> Result<()> {
+    let skill_dir = skill_dir(home, target);
+    fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("create agent skill directory {}", skill_dir.display()))?;
+    fs::write(skill_dir.join(SKILL_FILE), VIBELINK_MEMORY_SKILL_MARKDOWN)
+        .with_context(|| format!("write agent skill for {}", target.id))?;
+    fs::write(
+        skill_dir.join(REVISION_FILE),
+        format!("{VIBELINK_MEMORY_SKILL_REVISION}\n"),
+    )
+    .with_context(|| format!("write agent skill revision for {}", target.id))?;
+    Ok(())
+}
+
 fn resolve_targets(target_ids: &[String]) -> Result<Vec<&'static InstallTarget>> {
     target_ids
         .iter()
@@ -271,6 +309,104 @@ mod tests {
 
         let status = skill_status_at(&root).expect("read missing status");
         assert_eq!(target(&status, "claude").state, AgentSkillState::Missing);
+        cleanup_root(root);
+    }
+
+    #[test]
+    fn sync_on_empty_home_does_not_create_agent_directories() {
+        let root = temp_root("agent-skills-sync-empty");
+        let status = sync_installed_skills_at(&root).expect("sync empty home");
+
+        assert!(status
+            .targets
+            .iter()
+            .all(|target| target.state == AgentSkillState::AgentAbsent));
+        assert_eq!(fs::read_dir(&root).expect("read root").count(), 0);
+        cleanup_root(root);
+    }
+
+    #[test]
+    fn sync_installs_only_for_existing_agent_homes() {
+        let root = temp_root("agent-skills-sync-present");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+
+        let status = sync_installed_skills_at(&root).expect("sync present agents");
+
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
+        assert!(status
+            .targets
+            .iter()
+            .filter(|target| target.id != "claude")
+            .all(|target| target.state == AgentSkillState::AgentAbsent));
+        cleanup_root(root);
+    }
+
+    #[test]
+    fn sync_replaces_stale_content() {
+        let root = temp_root("agent-skills-sync-stale");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+        install_skill_at(&root, &["claude".to_string()]).expect("install skill");
+        let skill_path = root
+            .join(".claude/skills")
+            .join(VIBELINK_MEMORY_SKILL_NAME)
+            .join(SKILL_FILE);
+        fs::write(&skill_path, "old bundled skill\n").expect("write stale skill");
+
+        let status = sync_installed_skills_at(&root).expect("sync stale skill");
+
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
+        assert_eq!(
+            fs::read_to_string(skill_path).expect("read synced skill"),
+            VIBELINK_MEMORY_SKILL_MARKDOWN
+        );
+        cleanup_root(root);
+    }
+
+    #[test]
+    fn sync_leaves_current_install_untouched() {
+        let root = temp_root("agent-skills-sync-current");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+        install_skill_at(&root, &["claude".to_string()]).expect("install skill");
+        let skill_path = root
+            .join(".claude/skills")
+            .join(VIBELINK_MEMORY_SKILL_NAME)
+            .join(SKILL_FILE);
+        let before_content = fs::read(&skill_path).expect("read installed skill");
+        let before_modified = fs::metadata(&skill_path)
+            .expect("read installed metadata")
+            .modified()
+            .expect("read installed mtime");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let status = sync_installed_skills_at(&root).expect("sync current skill");
+
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
+        assert_eq!(
+            fs::read(&skill_path).expect("reread installed skill"),
+            before_content
+        );
+        assert_eq!(
+            fs::metadata(&skill_path)
+                .expect("reread installed metadata")
+                .modified()
+                .expect("reread installed mtime"),
+            before_modified
+        );
+        cleanup_root(root);
+    }
+
+    #[test]
+    fn sync_continues_after_one_target_fails() {
+        let root = temp_root("agent-skills-sync-partial");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+        fs::write(root.join(".claude/skills"), "blocks skill directory\n")
+            .expect("block Claude skills directory");
+        fs::create_dir_all(root.join(".codex")).expect("create Codex home");
+
+        let status = sync_installed_skills_at(&root).expect("sync around failed target");
+
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Missing);
+        assert_eq!(target(&status, "codex").state, AgentSkillState::Installed);
         cleanup_root(root);
     }
 

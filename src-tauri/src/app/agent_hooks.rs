@@ -18,6 +18,9 @@ const HOOK_TIMEOUT_SECONDS: u64 = 5;
 const GEMINI_TIMEOUT_MILLISECONDS: u64 = 10_000;
 
 const STOP_EVENT: &[&str] = &["Stop"];
+const CLAUDE_EVENTS: &[&str] = &["Stop", "SessionStart"];
+const CLAUDE_SESSION_START_EVENT: &[&str] = &["SessionStart"];
+const CLAUDE_MEMORY_SCRIPT_STEM: &str = "claude-memory";
 const GEMINI_EVENTS: &[&str] = &["AfterAgent"];
 const CURSOR_EVENTS: &[&str] = &["stop"];
 
@@ -101,7 +104,7 @@ const AGENT_HOOK_SPECS: &[AgentHookSpec] = &[
         location: ConfigLocation::Home(".claude/settings.json"),
         kind: HookKind::Json(JsonHookSpec {
             schema: JsonSchema::Nested,
-            events: STOP_EVENT,
+            events: CLAUDE_EVENTS,
             command_style: WindowsCommandStyle::GitBash,
             allow_jsonc: false,
         }),
@@ -450,6 +453,14 @@ fn script_path(spec: &AgentHookSpec, app_data_dir: &Path) -> PathBuf {
         .join(format!("{}-complete.{extension}", spec.id))
 }
 
+fn claude_memory_script_path(app_data_dir: &Path) -> PathBuf {
+    let extension = if cfg!(windows) { "ps1" } else { "sh" };
+    app_data_dir
+        .join("data")
+        .join("agent-hooks")
+        .join(format!("{CLAUDE_MEMORY_SCRIPT_STEM}.{extension}"))
+}
+
 fn inspect_json_hook(
     spec: &AgentHookSpec,
     json_spec: JsonHookSpec,
@@ -457,6 +468,7 @@ fn inspect_json_hook(
     config_path: &Path,
 ) -> Result<HookInspection> {
     let config = read_json_config(config_path, json_spec.allow_jsonc)?;
+    let completion_events = completion_json_events(spec, json_spec);
     let managed_events = managed_json_event_count(&config, spec, json_spec)?;
     let script = script_path(spec, app_data_dir);
     let script_state = generated_file_state(&script)?;
@@ -464,11 +476,33 @@ fn inspect_json_hook(
         bail!("{} exists but is not owned by VibeLink", script.display());
     }
 
-    if managed_events == json_spec.events.len() && script_state == GeneratedFileState::Managed {
+    if managed_events == completion_events.len() && script_state == GeneratedFileState::Managed {
         rewrite_managed_file_if_stale(&script, &render_managed_script(spec)?, true)?;
     }
     let mut installed =
-        managed_events == json_spec.events.len() && script_state == GeneratedFileState::Managed;
+        managed_events == completion_events.len() && script_state == GeneratedFileState::Managed;
+    if spec.id == "claude" {
+        let memory_script = claude_memory_script_path(app_data_dir);
+        let memory_script_state = generated_file_state(&memory_script)?;
+        if memory_script_state == GeneratedFileState::Conflict {
+            bail!(
+                "{} exists but is not owned by VibeLink",
+                memory_script.display()
+            );
+        }
+        let memory_events = managed_nested_event_count(
+            &config,
+            CLAUDE_SESSION_START_EVENT,
+            CLAUDE_MEMORY_SCRIPT_STEM,
+        )?;
+        if memory_events == CLAUDE_SESSION_START_EVENT.len()
+            && memory_script_state == GeneratedFileState::Managed
+        {
+            rewrite_managed_file_if_stale(&memory_script, &render_claude_memory_script()?, true)?;
+        }
+        installed &= memory_events == CLAUDE_SESSION_START_EVENT.len()
+            && memory_script_state == GeneratedFileState::Managed;
+    }
     if installed && spec.id == "codex" {
         let group_index = managed_nested_group_index(&config, spec, "Stop")
             .ok_or_else(|| anyhow!("Codex managed Stop hook is missing"))?;
@@ -495,7 +529,14 @@ fn install_json_hook(
     };
     let script = script_path(spec, app_data_dir);
     ensure_generated_file_writable(&script)?;
+    let memory_script = (spec.id == "claude").then(|| claude_memory_script_path(app_data_dir));
+    if let Some(memory_script) = &memory_script {
+        ensure_generated_file_writable(memory_script)?;
+    }
     write_managed_script(spec, &script)?;
+    if let Some(memory_script) = &memory_script {
+        write_claude_memory_script(memory_script)?;
+    }
     apply_json_hook_config(
         &mut config,
         spec,
@@ -503,6 +544,16 @@ fn install_json_hook(
         &managed_command(spec, json_spec, &script),
         true,
     )?;
+    if let Some(memory_script) = &memory_script {
+        apply_nested_json_for_script(
+            &mut config,
+            spec,
+            CLAUDE_SESSION_START_EVENT,
+            &claude_memory_command(memory_script),
+            true,
+            CLAUDE_MEMORY_SCRIPT_STEM,
+        )?;
+    }
     write_json_config(config_path, &config)?;
 
     if spec.id == "codex" {
@@ -540,6 +591,17 @@ fn uninstall_json_hook(
         &managed_command(spec, json_spec, &script),
         false,
     )?;
+    let memory_script = (spec.id == "claude").then(|| claude_memory_script_path(app_data_dir));
+    if let Some(memory_script) = &memory_script {
+        apply_nested_json_for_script(
+            &mut config,
+            spec,
+            CLAUDE_SESSION_START_EVENT,
+            &claude_memory_command(memory_script),
+            false,
+            CLAUDE_MEMORY_SCRIPT_STEM,
+        )?;
+    }
     if config != before {
         write_json_config(config_path, &config)?;
     }
@@ -547,6 +609,9 @@ fn uninstall_json_hook(
         update_codex_trust(config_path, old_codex_index, None, spec, app_data_dir)?;
     }
     remove_generated_file_if_managed(&script)?;
+    if let Some(memory_script) = &memory_script {
+        remove_generated_file_if_managed(memory_script)?;
+    }
     Ok(())
 }
 
@@ -580,13 +645,23 @@ fn apply_json_hook_config(
     command: &str,
     install: bool,
 ) -> Result<()> {
+    let events = completion_json_events(spec, json_spec);
     match json_spec.schema {
-        JsonSchema::Nested => apply_nested_json(config, spec, json_spec.events, command, install),
-        JsonSchema::Cursor => apply_cursor_json(config, spec, json_spec.events, command, install),
-        JsonSchema::Antigravity => {
-            apply_antigravity_json(config, spec, json_spec.events, command, install)
-        }
-        JsonSchema::Copilot => apply_copilot_json(config, spec, json_spec.events, command, install),
+        JsonSchema::Nested => apply_nested_json(config, spec, events, command, install),
+        JsonSchema::Cursor => apply_cursor_json(config, spec, events, command, install),
+        JsonSchema::Antigravity => apply_antigravity_json(config, spec, events, command, install),
+        JsonSchema::Copilot => apply_copilot_json(config, spec, events, command, install),
+    }
+}
+
+fn completion_json_events(
+    spec: &AgentHookSpec,
+    json_spec: JsonHookSpec,
+) -> &'static [&'static str] {
+    if spec.id == "claude" {
+        STOP_EVENT
+    } else {
+        json_spec.events
     }
 }
 
@@ -596,6 +671,24 @@ fn apply_nested_json(
     events: &[&str],
     command: &str,
     install: bool,
+) -> Result<()> {
+    apply_nested_json_for_script(
+        config,
+        spec,
+        events,
+        command,
+        install,
+        &format!("{}-complete", spec.id),
+    )
+}
+
+fn apply_nested_json_for_script(
+    config: &mut JsonValue,
+    spec: &AgentHookSpec,
+    events: &[&str],
+    command: &str,
+    install: bool,
+    script_stem: &str,
 ) -> Result<()> {
     let root = config
         .as_object_mut()
@@ -618,7 +711,7 @@ fn apply_nested_json(
                 .ok_or_else(|| anyhow!("hook event {event} must be an array"))?;
             let mut next = definitions
                 .iter()
-                .filter(|definition| !definition_is_managed(definition, spec))
+                .filter(|definition| !definition_mentions_managed_script(definition, script_stem))
                 .cloned()
                 .collect::<Vec<_>>();
             if install {
@@ -852,7 +945,7 @@ fn managed_json_event_count(
     };
 
     let mut count = 0;
-    for event in json_spec.events {
+    for event in completion_json_events(spec, json_spec) {
         let Some(value) = event_root.get(*event) else {
             continue;
         };
@@ -862,6 +955,38 @@ fn managed_json_event_count(
         if definitions
             .iter()
             .any(|definition| definition_is_managed(definition, spec))
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn managed_nested_event_count(
+    config: &JsonValue,
+    events: &[&str],
+    script_stem: &str,
+) -> Result<usize> {
+    let root = config
+        .as_object()
+        .ok_or_else(|| anyhow!("hook config root must be an object"))?;
+    let Some(hooks) = root.get("hooks") else {
+        return Ok(0);
+    };
+    let hooks = hooks
+        .as_object()
+        .ok_or_else(|| anyhow!("hook config 'hooks' must be an object"))?;
+    let mut count = 0;
+    for event in events {
+        let Some(definitions) = hooks.get(*event) else {
+            continue;
+        };
+        let definitions = definitions
+            .as_array()
+            .ok_or_else(|| anyhow!("hook event {event} must be an array"))?;
+        if definitions
+            .iter()
+            .any(|definition| definition_mentions_managed_script(definition, script_stem))
         {
             count += 1;
         }
@@ -883,6 +1008,10 @@ fn managed_nested_group_index(
 }
 
 fn definition_is_managed(definition: &JsonValue, spec: &AgentHookSpec) -> bool {
+    definition_mentions_managed_script(definition, &format!("{}-complete", spec.id))
+}
+
+fn definition_mentions_managed_script(definition: &JsonValue, script_stem: &str) -> bool {
     let Some(object) = definition.as_object() else {
         return false;
     };
@@ -890,7 +1019,7 @@ fn definition_is_managed(definition: &JsonValue, spec: &AgentHookSpec) -> bool {
         if object
             .get(key)
             .and_then(JsonValue::as_str)
-            .is_some_and(|command| command_mentions_managed_script(command, spec))
+            .is_some_and(|command| command_mentions_script(command, script_stem))
         {
             return true;
         }
@@ -903,17 +1032,17 @@ fn definition_is_managed(definition: &JsonValue, spec: &AgentHookSpec) -> bool {
                 handler
                     .get("command")
                     .and_then(JsonValue::as_str)
-                    .is_some_and(|command| command_mentions_managed_script(command, spec))
+                    .is_some_and(|command| command_mentions_script(command, script_stem))
             })
         })
 }
 
-fn command_mentions_managed_script(command: &str, spec: &AgentHookSpec) -> bool {
+fn command_mentions_script(command: &str, script_stem: &str) -> bool {
     let decoded = decode_powershell_encoded_command(command).unwrap_or_default();
     let normalized = format!("{command}\n{decoded}")
         .replace('\\', "/")
         .to_lowercase();
-    normalized.contains(&format!("/{}-complete.", spec.id.to_lowercase()))
+    normalized.contains(&format!("/{}.", script_stem.to_lowercase()))
 }
 
 fn managed_command(_spec: &AgentHookSpec, json_spec: JsonHookSpec, script_path: &Path) -> String {
@@ -924,6 +1053,14 @@ fn managed_command(_spec: &AgentHookSpec, json_spec: JsonHookSpec, script_path: 
         WindowsCommandStyle::GitBash => wrap_windows_git_bash_hook_command(script_path),
         WindowsCommandStyle::Direct => wrap_windows_direct_hook_command(script_path),
         WindowsCommandStyle::PowerShell => wrap_windows_powershell_hook_command(script_path),
+    }
+}
+
+fn claude_memory_command(script_path: &Path) -> String {
+    if cfg!(windows) {
+        wrap_windows_powershell_hook_command(script_path)
+    } else {
+        wrap_posix_hook_command(&script_path.to_string_lossy())
     }
 }
 
@@ -949,6 +1086,31 @@ fn write_managed_script(spec: &AgentHookSpec, path: &Path) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))?;
     set_executable_if_posix(path)?;
     Ok(())
+}
+
+fn write_claude_memory_script(path: &Path) -> Result<()> {
+    ensure_parent(path)?;
+    fs::write(path, render_claude_memory_script()?)
+        .with_context(|| format!("write {}", path.display()))?;
+    set_executable_if_posix(path)
+}
+
+fn render_claude_memory_script() -> Result<String> {
+    Ok(render_claude_memory_script_for_cli(&hook_cli_path()?))
+}
+
+fn render_claude_memory_script_for_cli(cli: &Path) -> String {
+    if cfg!(windows) {
+        return format!(
+            "# {HOOK_MARKER}\n[Console]::In.ReadToEnd() | Out-Null\nif (-not $env:VIBELINK_SESSION_ID) {{ exit 0 }}\ntry {{\n  $raw = & {} --json memory list --workspace $env:VIBELINK_SESSION_ID --limit 500 2>$null\n  if ($LASTEXITCODE -ne 0) {{ exit 0 }}\n  $payload = $raw | ConvertFrom-Json\n  if ($payload.ok -ne $true) {{ exit 0 }}\n  $count = @($payload.result.entries).Count\n  if ($count -gt 0) {{\n    [Console]::Out.WriteLine('VibeLink workspace memory has {{0}} entries. Run `vibelink memory search --query \"<terms>\"` before investigating anything non-trivial here.' -f $count)\n  }}\n}} catch {{ }}\nexit 0\n",
+            quote_powershell(&cli.to_string_lossy()),
+        );
+    }
+
+    format!(
+        "#!/bin/sh\n# {HOOK_MARKER}\ncat >/dev/null\n[ -n \"$VIBELINK_SESSION_ID\" ] || exit 0\noutput=$({} memory list --workspace \"$VIBELINK_SESSION_ID\" --limit 500 2>/dev/null) || exit 0\ncount=$(printf '%s\\n' \"$output\" | grep -c '^      \"id\":' 2>/dev/null) || exit 0\ncase \"$count\" in ''|*[!0-9]*) exit 0 ;; esac\n[ \"$count\" -gt 0 ] || exit 0\nprintf 'VibeLink workspace memory has %s entries. Run `vibelink memory search --query \"<terms>\"` before investigating anything non-trivial here.\\n' \"$count\"\nexit 0\n",
+        quote_posix(&cli.to_string_lossy())
+    )
 }
 
 fn render_batch_script(spec: &AgentHookSpec) -> Result<String> {
@@ -2013,6 +2175,162 @@ mod tests {
             "user-hook"
         );
         assert!(config["hooks"].get("PreToolUse").is_some());
+        assert_eq!(json_spec.events, CLAUDE_EVENTS);
+    }
+
+    #[test]
+    fn claude_install_and_remove_manage_stop_and_session_start() {
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-claude-hook-roundtrip-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app_data = root.join("app-data");
+        let config_path = root.join("settings.json");
+        let claude = spec("claude");
+        let HookKind::Json(json_spec) = claude.kind else {
+            panic!("Claude JSON spec");
+        };
+        write_json_config(
+            &config_path,
+            &json!({
+                "theme": "dark",
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "user-stop"}]}],
+                    "SessionStart": [{"hooks": [{"type": "command", "command": "user-start"}]}],
+                    "PreToolUse": [{"matcher": ".*", "hooks": []}]
+                }
+            }),
+        )
+        .expect("write Claude fixture");
+
+        install_json_hook(claude, json_spec, &app_data, &config_path)
+            .expect("install Claude hooks");
+        let installed = read_json_config(&config_path, false).expect("read installed config");
+        assert_eq!(installed["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            installed["hooks"]["SessionStart"].as_array().unwrap().len(),
+            2
+        );
+        // Windows wraps the command as `-EncodedCommand <base64>`, so the script
+        // path is not a substring of it. Identify the managed entry exactly the
+        // way install and uninstall do.
+        let session_start = installed["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|definition| {
+                definition_mentions_managed_script(definition, CLAUDE_MEMORY_SCRIPT_STEM)
+            })
+            .expect("managed SessionStart hook");
+        assert_eq!(session_start["hooks"][0]["type"], "command");
+        assert_eq!(session_start["hooks"][0]["timeout"], 5);
+        assert!(
+            inspect_json_hook(claude, json_spec, &app_data, &config_path)
+                .expect("inspect installed Claude hooks")
+                .installed
+        );
+
+        uninstall_json_hook(claude, json_spec, &app_data, &config_path)
+            .expect("remove Claude hooks");
+        let restored = read_json_config(&config_path, false).expect("read restored config");
+        assert_eq!(restored["theme"], "dark");
+        assert_eq!(restored["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            restored["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "user-stop"
+        );
+        assert_eq!(
+            restored["hooks"]["SessionStart"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            restored["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "user-start"
+        );
+        assert!(restored["hooks"].get("PreToolUse").is_some());
+        assert!(
+            !inspect_json_hook(claude, json_spec, &app_data, &config_path)
+                .expect("inspect removed Claude hooks")
+                .installed
+        );
+        assert!(!app_data
+            .join("data")
+            .join("agent-hooks")
+            .join(if cfg!(windows) {
+                "claude-memory.ps1"
+            } else {
+                "claude-memory.sh"
+            })
+            .exists());
+
+        fs::remove_dir_all(&root).expect("remove Claude hook fixtures");
+    }
+
+    #[test]
+    fn claude_memory_script_is_silent_outside_vibelink_and_prints_one_nudge_inside() {
+        use std::process::{Command, Stdio};
+
+        let root = std::env::temp_dir().join(format!(
+            "vibelink-claude-memory-script-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("create Claude memory script fixtures");
+        let fake_cli = root.join(if cfg!(windows) {
+            "fake-vibelink.cmd"
+        } else {
+            "fake-vibelink"
+        });
+        let fake_output = if cfg!(windows) {
+            "@echo off\r\necho {\"version\":1,\"ok\":true,\"result\":{\"entries\":[{\"id\":\"one\"},{\"id\":\"two\"}]}}\r\nexit /b 0\r\n"
+        } else {
+            "#!/bin/sh\nprintf '%s\\n' '{' '  \"entries\": [' '    {' '      \"id\": \"one\"' '    },' '    {' '      \"id\": \"two\"' '    }' '  ]' '}'\n"
+        };
+        fs::write(&fake_cli, fake_output).expect("write fake VibeLink CLI");
+        set_executable_if_posix(&fake_cli).expect("make fake VibeLink CLI executable");
+
+        let script = root.join(if cfg!(windows) {
+            "claude-memory.ps1"
+        } else {
+            "claude-memory.sh"
+        });
+        fs::write(&script, render_claude_memory_script_for_cli(&fake_cli))
+            .expect("write Claude memory script");
+        set_executable_if_posix(&script).expect("make Claude memory script executable");
+
+        let run = |session_id: Option<&str>| {
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new("powershell.exe");
+                command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                command.arg(&script);
+                command
+            } else {
+                let mut command = Command::new("/bin/sh");
+                command.arg(&script);
+                command
+            };
+            command
+                .stdin(Stdio::null())
+                .env_remove("VIBELINK_SESSION_ID");
+            if let Some(session_id) = session_id {
+                command.env("VIBELINK_SESSION_ID", session_id);
+            }
+            command.output().expect("run Claude memory script")
+        };
+
+        let outside = run(None);
+        assert!(outside.status.success());
+        assert!(outside.stdout.is_empty());
+
+        let inside = run(Some("workspace-1"));
+        assert!(inside.status.success());
+        let stdout = String::from_utf8(inside.stdout).expect("Claude memory stdout is UTF-8");
+        assert_eq!(stdout.lines().count(), 1);
+        assert_eq!(
+            stdout.trim_end(),
+            "VibeLink workspace memory has 2 entries. Run `vibelink memory search --query \"<terms>\"` before investigating anything non-trivial here."
+        );
+
+        fs::remove_dir_all(&root).expect("remove Claude memory script fixtures");
     }
 
     #[test]

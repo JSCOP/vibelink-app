@@ -42,3 +42,13 @@ export async function installAgentSkill(targetIds: string[]): Promise<AgentSkill
 export async function uninstallAgentSkill(targetIds: string[]): Promise<AgentSkillStatus> {
   return invoke<AgentSkillStatus>('agent_skill_uninstall', { targetIds })
 }
+
+/**
+ * Installs or refreshes the skill for every target whose agent home already
+ * exists, and leaves the rest alone. Called once per launch when
+ * `settings.autoInstallAgentSkill` is on, so a bare host never collects config
+ * folders for agents the user never installed.
+ */
+export async function syncAgentSkill(): Promise<AgentSkillStatus> {
+  return invoke<AgentSkillStatus>('agent_skill_sync')
+}

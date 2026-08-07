@@ -2,11 +2,15 @@
 name: vibelink-memory
 description: >-
   Read and record durable project facts shared by every coding agent working in
-  this VibeLink workspace, through the `vibelink memory` CLI. Use BEFORE starting
-  work to recall prior root causes, decisions, and gotchas, and AFTER confirming a
-  durable fact to record it. Triggers include "what do we know about", "have we hit
-  this before", "remember this", "record this decision", "vibelink memory", and any
-  task in a repository where VibeLink is running.
+  this VibeLink workspace, through the `vibelink memory` CLI. Run
+  `vibelink memory search` FIRST, at the start of any non-trivial task in a
+  repository where VibeLink is running — before reading code, reproducing a bug,
+  or planning a change — because a previous agent may already have recorded the
+  root cause, the decision, or the trap you are about to hit. Record a fact AFTER
+  you have confirmed it. Triggers include "what do we know about", "have we hit
+  this before", "why is it done this way", "remember this", "record this
+  decision", "vibelink memory", starting work in an unfamiliar area, and
+  debugging anything that has a history.
 ---
 
 # VibeLink Memory
