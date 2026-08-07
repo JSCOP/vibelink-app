@@ -426,6 +426,7 @@ pub fn run() {
             commands::rename_session,
             commands::set_session_workspace_folder,
             commands::resource_snapshot,
+            commands::kill_pane_process,
             commands::attention_snapshot,
             commands::agent_hook_status,
             commands::set_agent_hook_enabled,

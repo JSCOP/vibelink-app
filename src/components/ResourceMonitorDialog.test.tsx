@@ -79,6 +79,25 @@ describe('ResourceMonitorDialog', () => {
     await waitFor(() => expect(closePane).toHaveBeenCalledWith('pane-1', 'session-1'))
   })
 
+  test('stops one process inside a terminal without closing the terminal', async () => {
+    render(<ResourceMonitorDialog onClose={() => undefined} onStopWorkspaceTerminals={() => undefined} onAfterRestart={() => undefined} />)
+    fireEvent.click(await screen.findByTitle('Stop omp.exe'))
+
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({ title: 'Stop omp.exe?', danger: true })))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('kill_pane_process', { paneId: 'pane-1', pid: 86460 }))
+    expect(closePane).not.toHaveBeenCalled()
+  })
+
+  test('lists the heaviest process first and warns that the root process ends the terminal', async () => {
+    render(<ResourceMonitorDialog onClose={() => undefined} onStopWorkspaceTerminals={() => undefined} onAfterRestart={() => undefined} />)
+    await screen.findByText('pid 86460')
+
+    expect(screen.getAllByText(/^pid /).map((node) => node.textContent)).toEqual(['pid 86460', 'pid 86960'])
+
+    fireEvent.click(screen.getByTitle('Stop pwsh.exe'))
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('the whole terminal stops with it') })))
+  })
+
   test('pauses automatic polling while hidden, then refreshes on focus when visible', async () => {
     vi.useFakeTimers()
     setDocumentVisibility('hidden')

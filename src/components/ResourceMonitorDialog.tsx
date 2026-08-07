@@ -12,7 +12,7 @@ type ResourceMonitorDialogProps = {
   onAfterRestart: () => Promise<void> | void
 }
 
-type BusyAction = 'refresh' | 'stopWorkspace' | 'restartDaemon' | `pane:${string}` | null
+type BusyAction = 'refresh' | 'stopWorkspace' | 'restartDaemon' | `pane:${string}` | `process:${number}` | null
 
 export function ResourceMonitorDialog({ onClose, onStopWorkspaceTerminals, onAfterRestart }: ResourceMonitorDialogProps) {
   const sessions = useWorkspaceStore((state) => state.sessions)
@@ -66,6 +66,7 @@ export function ResourceMonitorDialog({ onClose, onStopWorkspaceTerminals, onAft
   const runtimeCpu = snapshot ? snapshot.app.cpuPercentX10 + snapshot.daemon.cpuPercentX10 : 0
   const runtimeMemory = snapshot ? snapshot.app.memBytes + snapshot.daemon.memBytes : 0
   const runtimeProcesses = snapshot ? snapshot.app.processCount + snapshot.daemon.processCount : 0
+  const busyPid = busy?.startsWith('process:') ? Number(busy.slice('process:'.length)) : null
 
   const toggleSession = (sessionId: string) => {
     setCollapsedSessions((current) => {
@@ -113,6 +114,28 @@ export function ResourceMonitorDialog({ onClose, onStopWorkspaceTerminals, onAft
     setBusy(`pane:${pane.paneId}`)
     try {
       await closePane(pane.paneId, pane.sessionId)
+      await loadSnapshot()
+    } catch (caught) {
+      setError(String(caught))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const stopProcess = async (pane: ResourcePane, process: ResourceProcess) => {
+    const name = process.name || `PID ${process.pid}`
+    const confirmed = await confirmDialog({
+      title: `Stop ${name}?`,
+      message: process.pid === pane.rootPid
+        ? 'This is the root process of the terminal, so the whole terminal stops with it. This cannot be undone.'
+        : `Process ${process.pid} and everything it spawned will be stopped. The terminal keeps running. This cannot be undone.`,
+      confirmLabel: 'Stop process',
+      danger: true,
+    })
+    if (!confirmed) return
+    setBusy(`process:${process.pid}`)
+    try {
+      await invoke('kill_pane_process', { paneId: pane.paneId, pid: process.pid })
       await loadSnapshot()
     } catch (caught) {
       setError(String(caught))
@@ -191,7 +214,7 @@ export function ResourceMonitorDialog({ onClose, onStopWorkspaceTerminals, onAft
                   const livePane = panes[pane.paneId]
                   const label = pane.title?.trim() || livePane?.config.title?.trim() || livePane?.config.shell?.trim() || `Terminal ${index + 1}`
                   const role = pane.role?.trim() || livePane?.config.role?.trim() || ''
-                  return <TerminalResourceRow key={pane.paneId} pane={pane} label={label} role={role} busy={busy === `pane:${pane.paneId}`} onStop={() => void stopPane(pane, label)} />
+                  return <TerminalResourceRow key={pane.paneId} pane={pane} label={label} role={role} busy={busy === `pane:${pane.paneId}`} busyPid={busyPid} onStop={() => void stopPane(pane, label)} onStopProcess={(process) => void stopProcess(pane, process)} />
                 }) : null}
               </section>
             )
@@ -275,9 +298,10 @@ function ResourceGroupHeader({ label, collapsed, cpuPercentX10, memBytes, proces
   )
 }
 
-function TerminalResourceRow({ pane, label, role, busy, onStop }: { pane: ResourcePane; label: string; role: string; busy: boolean; onStop: () => void }) {
+function TerminalResourceRow({ pane, label, role, busy, busyPid, onStop, onStopProcess }: { pane: ResourcePane; label: string; role: string; busy: boolean; busyPid: number | null; onStop: () => void; onStopProcess: (process: ResourceProcess) => void }) {
+  // Heaviest process first: the manager exists to find and stop the one eating memory.
   const processes = pane.processes.length > 0
-    ? pane.processes
+    ? [...pane.processes].sort((left, right) => right.memBytes - left.memBytes)
     : pane.rootPid ? [{ pid: pane.rootPid, name: '', cpuPercentX10: pane.cpuPercentX10, memBytes: pane.memBytes }] : []
   return (
     <div className="resource-manager-terminal">
@@ -290,7 +314,7 @@ function TerminalResourceRow({ pane, label, role, busy, onStop }: { pane: Resour
           <X className={busy ? 'spin' : undefined} size={11} aria-hidden="true" />
         </button>
       </div>
-      {processes.map((process) => <ProcessResourceRow key={process.pid} process={process} />)}
+      {processes.map((process) => <ProcessResourceRow key={process.pid} process={process} busy={busyPid === process.pid} onStop={() => onStopProcess(process)} />)}
     </div>
   )
 }
@@ -310,14 +334,19 @@ function RuntimeResourceRow({ label, resource }: { label: string; resource: Reso
   )
 }
 
-function ProcessResourceRow({ process }: { process: ResourceProcess }) {
+function ProcessResourceRow({ process, busy, onStop }: { process: ResourceProcess; busy?: boolean; onStop?: () => void }) {
+  const name = process.name || `PID ${process.pid}`
   return (
-    <div className="resource-manager-row resource-manager-process-row" title={process.name || `PID ${process.pid}`}>
+    <div className="resource-manager-row resource-manager-process-row" title={name}>
       <span className="resource-manager-process-dot" aria-hidden="true" />
       <span className="resource-manager-name"><span>pid {process.pid}</span>{process.name ? <small>{process.name}</small> : null}</span>
       <Metric value={formatCpu(process.cpuPercentX10)} />
       <Metric value={formatBytes(process.memBytes)} />
-      <span />
+      {onStop ? (
+        <button type="button" className="resource-manager-kill" title={`Stop ${name}`} aria-label={`Stop ${name}`} disabled={busy} onClick={onStop}>
+          <X className={busy ? 'spin' : undefined} size={11} aria-hidden="true" />
+        </button>
+      ) : <span />}
     </div>
   )
 }

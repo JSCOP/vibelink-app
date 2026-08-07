@@ -657,6 +657,47 @@ pub async fn resource_snapshot(
     })
 }
 
+/// Stop ONE process (and its descendants) inside a terminal pane's tree.
+///
+/// Ownership gate: the PID must still be inside the daemon-reported pane tree,
+/// so the resource manager can never terminate the app, the daemon, or an
+/// unrelated user process. Killing the pane root ends that terminal, which is
+/// what the confirmation in the UI says.
+#[tauri::command]
+pub async fn kill_pane_process(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+    pane_id: String,
+    pid: u32,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::WorkspaceMutate)
+        .map_err(to_string)?;
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    let data = match client
+        .request_reply(|req| ClientToDaemon::ResourceSnapshot { req })
+        .map_err(to_string)?
+    {
+        ReplyResult::ResourceSnapshot(data) => data,
+        other => return Err(format!("unexpected daemon response: {other:?}")),
+    };
+    let root_pid = data
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .and_then(|pane| pane.root_pid)
+        .ok_or_else(|| "terminal has no running process".to_string())?;
+    // ponytail: two PID-only snapshots per click (~20 ms each) — merge into one
+    // proc helper only if this ever runs in a loop.
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    if !crate::daemon::proc::tree_pids(&sys, root_pid).contains(&pid) {
+        return Err(format!("process {pid} is not part of this terminal"));
+    }
+    crate::daemon::proc::kill_process_tree(pid);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn restart_daemon(
     supervisor: State<'_, Arc<EntitlementSupervisor>>,
