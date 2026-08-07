@@ -30,6 +30,7 @@ export type WorkspaceContentKind =
   | 'todo'
   | 'diff'
   | 'agentSessions'
+  | 'memory'
 
 export type WorkspaceContentParams =
   | { schema: 1; kind: 'terminal'; instanceId: string; title: string; icon: string; paneId: string }
@@ -38,7 +39,7 @@ export type WorkspaceContentParams =
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
   | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
-  | { schema: 1; kind: 'workspaces' | 'explorer' | 'workspaceFiles' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'automation' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions'; instanceId: string; title: string; icon: string }
+  | { schema: 1; kind: 'workspaces' | 'explorer' | 'workspaceFiles' | 'sourceControl' | 'gitHistory' | 'gitBranches' | 'automation' | 'workbench' | 'agent' | 'orchestration' | 'kanban' | 'todo' | 'diff' | 'agentSessions' | 'memory'; instanceId: string; title: string; icon: string }
 
 export type WorkspaceLayoutEnvelope = {
   version: 3
@@ -68,6 +69,7 @@ export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, Work
   todo: 'singleton',
   diff: 'singleton',
   agentSessions: 'singleton',
+  memory: 'singleton',
 }
 
 const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
@@ -85,6 +87,7 @@ const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
   todo: true,
   diff: true,
   agentSessions: true,
+  memory: true,
 }
 const contentKinds: Record<WorkspaceContentKind, true> = {
   terminal: true,
@@ -107,6 +110,7 @@ const contentKinds: Record<WorkspaceContentKind, true> = {
   todo: true,
   diff: true,
   agentSessions: true,
+  memory: true,
 }
 
 const leftStructuralKinds: Partial<Record<WorkspaceContentKind, true>> = {

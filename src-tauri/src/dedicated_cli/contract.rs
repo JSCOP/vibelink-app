@@ -1165,6 +1165,87 @@ pub fn command_contracts() -> Vec<CommandContract> {
             ReadOnly
         ),
         contract!(
+            "memory",
+            "list",
+            "List memory entries visible to this workspace.",
+            WORKSPACE,
+            &[
+                O::enum_string("scope", &["workspace", "global", "all"]),
+                O::string("tag"),
+                O::unsigned("limit")
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "memory",
+            "search",
+            "Search memory entries by term over title, body, tags, and referenced paths.",
+            WORKSPACE,
+            &[
+                O::required_string("query"),
+                O::enum_string("scope", &["workspace", "global", "all"]),
+                O::unsigned("limit")
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            ReadOnly
+        ),
+        contract!(
+            "memory",
+            "add",
+            "Record one durable memory entry for this workspace.",
+            WORKSPACE,
+            &[
+                O::required_string("title"),
+                O::required_string("body"),
+                O::repeated("tag"),
+                O::repeated("ref"),
+                O::enum_string("scope", &["workspace", "global"]),
+                O::string("agent")
+            ],
+            &["pin"],
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "memory",
+            "remove",
+            "Delete one memory entry by id.",
+            WORKSPACE,
+            &[
+                O::required_string("id"),
+                O::enum_string("scope", &["workspace", "global"])
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
+            "memory",
+            "link",
+            "Show or change which agent files this workspace's memory is projected into.",
+            WORKSPACE,
+            &[
+                O::enum_string("target", &["digest", "agents", "claude"]),
+                O::enum_string("state", &["on", "off"])
+            ],
+            NONE,
+            Some(0),
+            None,
+            false,
+            Mutating
+        ),
+        contract!(
             "remote",
             "status",
             "Read remote server and protocol status.",
@@ -1644,6 +1725,7 @@ fn command_parts(
         Command::Browser(command) => parts!("browser", command),
         Command::Computer(command) => parts!("computer", command),
         Command::Skill(command) => parts!("skill", command),
+        Command::Memory(command) => parts!("memory", command),
         Command::Remote(command) => parts!("remote", command),
         Command::Status | Command::Mcp(_) => None,
     }
@@ -1856,6 +1938,7 @@ mod tests {
             vec!["automation", "list"],
             vec!["computer", "list-apps"],
             vec!["skill", "list"],
+            vec!["memory", "list"],
             vec!["remote", "status"],
         ] {
             parse_args(args).expect("contract parses representative command");

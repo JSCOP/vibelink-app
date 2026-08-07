@@ -19,6 +19,7 @@ pub mod git;
 pub mod hermes;
 pub mod license;
 pub mod mcp_check;
+pub mod memory;
 pub mod orchestration;
 pub mod provider_integrations;
 pub mod skills;
@@ -327,6 +328,12 @@ pub fn run() {
             license::account_sign_in_poll,
             license::account_sign_out,
             license::bug_report_submit,
+            memory::memory_add,
+            memory::memory_projection_status,
+            memory::memory_remove,
+            memory::memory_set_link,
+            memory::memory_set_pinned,
+            memory::memory_snapshot,
             diagnostics::export_diagnostics,
             fsops::fs_create_dir,
             fsops::fs_create_file,

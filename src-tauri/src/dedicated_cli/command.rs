@@ -169,6 +169,14 @@ action_enum!(SkillAction {
     Doctor => "doctor",
 });
 
+action_enum!(MemoryAction {
+    List => "list",
+    Search => "search",
+    Add => "add",
+    Remove => "remove",
+    Link => "link",
+});
+
 action_enum!(RemoteAction {
     Status => "status",
     Configure => "configure",
@@ -237,6 +245,7 @@ pub enum Command {
     Browser(ActionCommand<BrowserAction>),
     Computer(ActionCommand<ComputerAction>),
     Skill(ActionCommand<SkillAction>),
+    Memory(ActionCommand<MemoryAction>),
     Remote(ActionCommand<RemoteAction>),
     Mcp(McpAction),
 }
@@ -268,6 +277,7 @@ pub const COMMAND_DOMAINS: &[&str] = &[
     "browser",
     "computer",
     "skill",
+    "memory",
     "remote",
     "mcp",
 ];
@@ -314,6 +324,9 @@ pub fn parse_args(
             .map(Command::Computer)?,
         "skill" => {
             parse_action_command(&tokens, "skill", SkillAction::parse).map(Command::Skill)?
+        }
+        "memory" => {
+            parse_action_command(&tokens, "memory", MemoryAction::parse).map(Command::Memory)?
         }
         "remote" => {
             parse_action_command(&tokens, "remote", RemoteAction::parse).map(Command::Remote)?
@@ -445,7 +458,13 @@ fn parse_action_command<A>(
         .ok_or_else(|| CliError::invalid(format!("missing {domain} action")))?;
     let action = parse_action(action_token)
         .ok_or_else(|| CliError::invalid(format!("unknown {domain} action '{action_token}'")))?;
-    let (selectors, arguments) = parse_operation_arguments(&tokens[2..])?;
+    let (mut selectors, mut arguments) = parse_operation_arguments(&tokens[2..])?;
+    // `--agent` is normally a selector, but memory add stores it as origin metadata.
+    if domain == "memory" {
+        if let Some(agent) = selectors.agent.take() {
+            arguments.options.insert("agent".to_string(), vec![agent]);
+        }
+    }
     Ok(ActionCommand {
         action,
         selectors,
@@ -583,6 +602,7 @@ fn is_switch(flag: &str) -> bool {
             | "--clear-comment"
             | "--clear-review-target"
             | "--no-parent"
+            | "--pin"
     )
 }
 
@@ -595,7 +615,7 @@ fn arguments_are_empty(arguments: &OperationArguments) -> bool {
 }
 
 pub fn usage() -> &'static str {
-    "usage: vibelink [--json] [--flavor dev|prod] [--request-timeout-seconds N] [--operation-id UUID] [--expected-revision N] <status|workspace|worktree|terminal|orchestration|automation|browser|computer|skill|remote|mcp> ..."
+    "usage: vibelink [--json] [--flavor dev|prod] [--request-timeout-seconds N] [--operation-id UUID] [--expected-revision N] <status|workspace|worktree|terminal|orchestration|automation|browser|computer|skill|memory|remote|mcp> ..."
 }
 
 #[cfg(test)]
@@ -619,6 +639,7 @@ mod tests {
                 "computer",
             ),
             (vec!["skill", "doctor"], "skill"),
+            (vec!["memory", "list"], "memory"),
             (vec!["remote", "devices"], "remote"),
             (vec!["mcp", "serve"], "mcp"),
             (vec!["worktree", "current"], "worktree"),
@@ -764,6 +785,7 @@ mod tests {
                 ],
             ),
             ("skill", &["list", "show", "apply", "delete", "doctor"]),
+            ("memory", &["list", "search", "add", "remove", "link"]),
             ("remote", &["status", "pair", "devices", "revoke"]),
         ];
         for (domain, actions) in command_tree {
@@ -806,6 +828,42 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{domain} {action} did not parse: {error}"));
             }
         }
+    }
+
+    #[test]
+    fn parses_memory_add_with_repeated_tags_and_pin() {
+        let invocation = parse_args([
+            "memory", "add", "--title", "T", "--body", "B", "--tag", "a", "--tag", "b", "--pin",
+        ])
+        .expect("parse memory add");
+        let Command::Memory(command) = invocation.command else {
+            panic!("expected memory command")
+        };
+
+        assert_eq!(command.action, MemoryAction::Add);
+        assert_eq!(command.arguments.options["title"], ["T"]);
+        assert_eq!(command.arguments.options["body"], ["B"]);
+        assert_eq!(command.arguments.options["tag"], ["a", "b"]);
+        assert!(command.arguments.switches.contains("pin"));
+    }
+
+    #[test]
+    fn rejects_unknown_memory_action() {
+        assert!(parse_args(["memory", "guess"]).is_err());
+    }
+
+    #[test]
+    fn parses_memory_agent_as_origin_option() {
+        let invocation = parse_args([
+            "memory", "add", "--title", "T", "--body", "B", "--agent", "omp",
+        ])
+        .expect("parse memory agent");
+        let Command::Memory(command) = invocation.command else {
+            panic!("expected memory command")
+        };
+
+        assert_eq!(command.selectors.agent, None);
+        assert_eq!(command.arguments.options["agent"], ["omp"]);
     }
 
     #[test]

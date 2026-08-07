@@ -46,7 +46,7 @@ beforeEach(() => {
 })
 
 describe('VibeLink Pro gates', () => {
-  test('locks every Pro workspace content kind', async () => { expect(PRO_CONTENT_KINDS).toEqual(['browser', 'editor', 'explorer', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff'])
+  test('locks every Pro workspace content kind', async () => { expect(PRO_CONTENT_KINDS).toEqual(['browser', 'editor', 'explorer', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'memory'])
   expect(requiresProContent('terminal')).toBe(false)
   for (const kind of PRO_CONTENT_KINDS) expect(requiresProContent(kind)).toBe(true) })
 

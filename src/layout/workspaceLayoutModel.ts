@@ -45,6 +45,7 @@ export const workspaceContentDescriptors: Record<WorkspaceContentKind, Workspace
   todo: { kind: 'todo', component: 'todo', title: 'Todo List', icon: 'list-todo' },
   diff: { kind: 'diff', component: 'diff', title: 'Diff', icon: 'git-compare' },
   agentSessions: { kind: 'agentSessions', component: 'agentSessions', title: 'Agent Sessions', icon: 'messages-square' },
+  memory: { kind: 'memory', component: 'memory', title: 'Memory Graph', icon: 'brain' },
 }
 
 export const workspaceLeftEdgeGroupId = 'workspace-left-tools'

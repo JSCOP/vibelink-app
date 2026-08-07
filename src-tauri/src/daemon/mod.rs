@@ -52,6 +52,7 @@ use crate::daemon::terminal_history::{
     load_pane_history, prune_orphan_history, remove_pane_history, remove_session_history,
     TerminalHistoryWriter,
 };
+use crate::dedicated_cli::command::MemoryAction;
 use crate::dedicated_cli::{
     AutomationAction, CliControlRequest, Command as DedicatedCommand, ComputerAction,
     OrchestrationAction, RemoteAction, SkillAction, TerminalAction, WorkspaceAction,
@@ -4026,6 +4027,7 @@ fn dispatch_cli_request(
             }
         }
         DedicatedCommand::Skill(command) => dispatch_skill_cli(state, command),
+        DedicatedCommand::Memory(command) => dispatch_memory_cli(state, command),
         DedicatedCommand::Automation(command) => dispatch_automation_cli(
             state,
             sessions_path,
@@ -4269,6 +4271,35 @@ fn automation_workspace(state: &SharedState, session_id: &str) -> Result<PathBuf
         .map(PathBuf::from)
         .context("automation workspace folder is unavailable")
 }
+
+fn memory_workspace_folder(state: &SharedState, session_id: Uuid) -> Option<PathBuf> {
+    lock_state(state)
+        .list_sessions()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.workspace_folder)
+        .map(PathBuf::from)
+}
+
+fn project_memory_best_effort(state: &SharedState, session_id: Option<Uuid>) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let Some(workspace_folder) = memory_workspace_folder(state, session_id) else {
+        return;
+    };
+    if let Err(error) =
+        crate::app::memory::project_workspace_memory(&session_id.to_string(), &workspace_folder)
+    {
+        warn!(
+            ?error,
+            %session_id,
+            workspace_folder = %workspace_folder.display(),
+            "failed to project workspace memory"
+        );
+    }
+}
+
 fn run_automation_in_visible_terminal(
     automation_service: &AutomationService,
     runner: &AutomationRunner,
@@ -4617,6 +4648,163 @@ fn dispatch_skill_cli(
                 "installedCount": skills.iter().filter(|entry| !entry.read_only).count(),
                 "precedence": ["workspace", "global", "builtin"],
             }))
+        }
+    }
+}
+
+fn dispatch_memory_cli(
+    state: &SharedState,
+    command: crate::dedicated_cli::ActionCommand<MemoryAction>,
+) -> Result<Value> {
+    use crate::app::memory::{
+        add_memory, list_memory, memory_projection_status_at, remove_memory, search_memory,
+        set_memory_link, MemoryAddInput, MemoryOrigin, MemoryOriginKind, MemoryQueryScope,
+        MemoryScope,
+    };
+
+    let session_id = command
+        .selectors
+        .workspace
+        .as_deref()
+        .map(|selector| resolve_cli_session(state, Some(selector)))
+        .transpose()?;
+    let session_id_text = session_id.map(|id| id.to_string());
+    let selected_scope = || -> Result<MemoryScope> {
+        match cli_option(&command.arguments, "scope")? {
+            Some("global") => Ok(MemoryScope::Global),
+            Some("workspace") => {
+                session_id.context("--workspace is required for workspace memory scope")?;
+                Ok(MemoryScope::Workspace)
+            }
+            Some(_) => anyhow::bail!("--scope must be workspace or global"),
+            None if session_id.is_some() => Ok(MemoryScope::Workspace),
+            None => Ok(MemoryScope::Global),
+        }
+    };
+    let selected_query_scope = || -> Result<MemoryQueryScope> {
+        match cli_option(&command.arguments, "scope")? {
+            Some("all") => Ok(MemoryQueryScope::All),
+            Some("global") => Ok(MemoryQueryScope::Global),
+            Some("workspace") => {
+                session_id.context("--workspace is required for workspace memory scope")?;
+                Ok(MemoryQueryScope::Workspace)
+            }
+            Some(_) => anyhow::bail!("--scope must be workspace, global, or all"),
+            None if session_id.is_some() => Ok(MemoryQueryScope::Workspace),
+            None => Ok(MemoryQueryScope::Global),
+        }
+    };
+
+    match command.action {
+        MemoryAction::List => {
+            let mut entries = list_memory(session_id_text.as_deref(), selected_query_scope()?)?;
+            if let Some(tag) = cli_option(&command.arguments, "tag")? {
+                entries.retain(|entry| {
+                    entry
+                        .tags
+                        .iter()
+                        .any(|entry_tag| entry_tag.eq_ignore_ascii_case(tag.trim()))
+                });
+            }
+            let limit = cli_option(&command.arguments, "limit")?
+                .unwrap_or("50")
+                .parse::<usize>()
+                .context("--limit must be an unsigned integer")?
+                .clamp(1, 500);
+            entries.truncate(limit);
+            Ok(json!({ "entries": entries }))
+        }
+        MemoryAction::Search => {
+            let limit = cli_option(&command.arguments, "limit")?
+                .unwrap_or("50")
+                .parse::<usize>()
+                .context("--limit must be an unsigned integer")?;
+            Ok(json!({
+                "entries": search_memory(
+                    session_id_text.as_deref(),
+                    selected_query_scope()?,
+                    required_cli_option(&command.arguments, "query")?,
+                    limit,
+                )?
+            }))
+        }
+        MemoryAction::Add => {
+            let scope = selected_scope()?;
+            let scoped_session_id = match &scope {
+                MemoryScope::Workspace => session_id_text.clone(),
+                MemoryScope::Global => None,
+            };
+            let record = add_memory(MemoryAddInput {
+                id: None,
+                scope,
+                session_id: scoped_session_id,
+                title: required_cli_option(&command.arguments, "title")?.to_string(),
+                body: required_cli_option(&command.arguments, "body")?.to_string(),
+                tags: command
+                    .arguments
+                    .options
+                    .get("tag")
+                    .cloned()
+                    .unwrap_or_default(),
+                refs: command
+                    .arguments
+                    .options
+                    .get("ref")
+                    .cloned()
+                    .unwrap_or_default(),
+                origin: MemoryOrigin {
+                    kind: MemoryOriginKind::Agent,
+                    agent_id: cli_option(&command.arguments, "agent")?.map(str::to_string),
+                    pane_id: command.selectors.pane.clone(),
+                    source_path: None,
+                },
+                pinned: command.arguments.switches.contains("pin"),
+            })?;
+            project_memory_best_effort(state, session_id);
+            Ok(serde_json::to_value(record)?)
+        }
+        MemoryAction::Remove => {
+            let scope = selected_scope()?;
+            let scoped_session_id = match &scope {
+                MemoryScope::Workspace => session_id_text.as_deref(),
+                MemoryScope::Global => None,
+            };
+            remove_memory(
+                required_cli_option(&command.arguments, "id")?,
+                scoped_session_id,
+                scope,
+            )?;
+            project_memory_best_effort(state, session_id);
+            Ok(json!({ "ok": true }))
+        }
+        MemoryAction::Link => {
+            let session_id = session_id.context("--workspace is required for memory link")?;
+            let workspace_folder = memory_workspace_folder(state, session_id)
+                .context("memory link requires a workspace folder")?;
+            let session_id = session_id.to_string();
+            match (
+                cli_option(&command.arguments, "target")?,
+                cli_option(&command.arguments, "state")?,
+            ) {
+                (None, None) => Ok(serde_json::to_value(memory_projection_status_at(
+                    &session_id,
+                    &workspace_folder,
+                )?)?),
+                (Some(target), Some(state)) => {
+                    let enabled = match state {
+                        "on" => true,
+                        "off" => false,
+                        _ => anyhow::bail!("--state must be on or off"),
+                    };
+                    Ok(serde_json::to_value(set_memory_link(
+                        &session_id,
+                        &workspace_folder,
+                        target,
+                        enabled,
+                    )?)?)
+                }
+                _ => anyhow::bail!("--target and --state must be supplied together"),
+            }
         }
     }
 }

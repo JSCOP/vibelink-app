@@ -139,6 +139,7 @@ const KanbanBoard = lazy(() => import('../components/KanbanBoard').then((module)
 const TaskDiffView = lazy(() => import('../components/TaskDiffView').then((module) => ({ default: module.TaskDiffView })))
 const OrchestratorChat = lazy(() => import('../components/OrchestratorChat').then((module) => ({ default: module.OrchestratorChat })))
 const OrchestrationWorkspacePanel = lazy(() => import('../components/OrchestrationWorkspacePanel').then((module) => ({ default: module.OrchestrationWorkspacePanel })))
+const MemoryGraphPanel = lazy(() => import('../components/memory/MemoryGraphPanel').then((module) => ({ default: module.MemoryGraphPanel })))
 const NativeBrowserContentPanel = lazy(() => import('../browser/BrowserDockPanel').then((module) => ({ default: module.BrowserContentPanel })))
 const EditorContentPanel = lazy(() => import('../editor/EditorContentPanel').then((module) => ({ default: module.EditorContentPanel })))
 
@@ -348,6 +349,10 @@ function KanbanContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban"><ProPanelBoundary feature="Kanban"><ErrorBoundary label="Kanban panel"><Suspense fallback={null}><KanbanBoard /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
+function MemoryContentPanel(props: WorkspaceContentPanelProps) {
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-memory"><ProPanelBoundary feature="Memory Graph"><ErrorBoundary label="Memory graph panel"><Suspense fallback={null}><MemoryGraphPanel /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+}
+
 function TodoContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-todo"><ProPanelBoundary feature="Todo orchestration"><ErrorBoundary label="Todo panel"><WorkspaceTodoPanel /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
@@ -532,6 +537,7 @@ const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPan
   todo: TodoContentPanel,
   diff: DiffContentPanel,
   agentSessions: AgentSessionsContentPanel,
+  memory: MemoryContentPanel,
 }
 
 /** dockview-react re-runs `updateOptions` — a full `_layoutFromShell` plus a

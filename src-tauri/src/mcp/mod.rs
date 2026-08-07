@@ -453,6 +453,7 @@ fn scope_mcp_invocation(
         crate::dedicated_cli::Command::Automation(value) => scope!(value, "automation"),
         crate::dedicated_cli::Command::Computer(value) => scope!(value, "computer"),
         crate::dedicated_cli::Command::Skill(value) => scope!(value, "skill"),
+        crate::dedicated_cli::Command::Memory(value) => scope!(value, "memory"),
         crate::dedicated_cli::Command::Remote(value) => scope!(value, "remote"),
         crate::dedicated_cli::Command::Browser(value) => scope!(value, "browser"),
         crate::dedicated_cli::Command::Status | crate::dedicated_cli::Command::Mcp(_) => {}
@@ -696,8 +697,9 @@ fn cli_contract_tool_name(contract: &CommandContract) -> String {
 }
 
 fn mcp_exposes_contract(contract: &CommandContract) -> bool {
-    contract.domain == "worktree"
-        && matches!(
+    match contract.domain {
+        "memory" => true,
+        "worktree" => matches!(
             contract.action,
             "list"
                 | "show"
@@ -708,7 +710,9 @@ fn mcp_exposes_contract(contract: &CommandContract) -> bool {
                 | "set"
                 | "checkpoint"
                 | "comment"
-        )
+        ),
+        _ => false,
+    }
 }
 
 fn mcp_cli_contract(name: &str) -> Option<CommandContract> {
@@ -1612,6 +1616,16 @@ mod tests {
         assert!(names.contains(&"vibelink_skill_get"));
         assert!(names.contains(&"vibelink_skill_apply"));
         assert!(names.contains(&"vibelink_skill_delete"));
+        for name in [
+            "vibelink_memory_list",
+            "vibelink_memory_search",
+            "vibelink_memory_add",
+            "vibelink_memory_remove",
+            "vibelink_memory_link",
+        ] {
+            assert!(names.contains(&name), "missing generated MCP tool {name}");
+        }
+        assert!(mcp_cli_contract("vibelink_memory_add").is_some());
         for name in [
             "vibelink_workspace_list",
             "vibelink_terminal_wait",

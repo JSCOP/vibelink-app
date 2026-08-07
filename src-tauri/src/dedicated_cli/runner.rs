@@ -228,6 +228,7 @@ fn apply_environment_scope(command: &mut Command) {
         Command::Browser(command) => scope!(command),
         Command::Computer(command) => scope!(command),
         Command::Skill(command) => scope!(command),
+        Command::Memory(command) => scope!(command),
         Command::Remote(command) => scope!(command),
         Command::Status | Command::Worktree(_) | Command::Mcp(_) => {}
     }

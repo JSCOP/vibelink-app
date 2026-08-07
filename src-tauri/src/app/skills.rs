@@ -716,7 +716,7 @@ fn required_session_id(session_id: Option<&str>) -> Result<String> {
         .ok_or_else(|| anyhow!("sessionId is required for workspace skills"))
 }
 
-fn sanitize_session_id(session_id: &str) -> Result<String> {
+pub(crate) fn sanitize_session_id(session_id: &str) -> Result<String> {
     let mut sanitized = String::with_capacity(session_id.len().min(63));
     let mut last_was_hyphen = false;
 

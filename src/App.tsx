@@ -43,6 +43,7 @@ import { newCompletionPaneIds, notifyPaneCompletion } from './notifications/comp
 import { appRuntimeIdentity } from './runtimeIdentity'
 import './styles/theme.css'
 import './styles/kanban.css'
+import './styles/memory.css'
 import './App.css'
 import './styles/gitHistory.css'
 const SettingsDialog = lazy(() => import('./components/SettingsDialog').then((module) => ({ default: module.SettingsDialog })))

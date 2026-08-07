@@ -84,9 +84,10 @@ OS 창 (native window)                       getCurrentWindow() — Tauri 창. �
 | split | 분할 | `splitTerminal(paneId, 'right'|'below')`, `localSplitSizing` | 기준 페인을 반으로 나눠 새 페인을 만든다. 윈도우는 새로 만들지 않는다 |
 | inner dock | 내부 도크 | `inner`, `getInnerApi()`, `.workspace-window-inner-dock` | 컨테이너 안에 중첩된 Dockview 레벨 |
 | overlay | 오버레이 | `settleDockviewOverlayLayout`, `dockviewOverlaysSettled` | 드래그/드롭 중의 일시적 렌더 레이어. 계층 노드가 아님 |
+| memory graph | 메모리 그래프 | kind `memory`, `MemoryGraphPanel`, 디스크립터 제목 `Memory Graph`, 아이콘 `brain` | `+ → Memory Graph`로 여는 **중앙 싱글턴 콘텐츠 탭**(→ `content tab`). 활성 `workspace` 또는 전체 워크스페이스의 `workspace → memory document → memory entry → 태그/파일/에이전트` 관계를 그래프로 렌더링한다. 워크스페이스당 1개만 존재하며 사이드 패널이 아니다. `knowledge graph`·`memory window`로 부르지 않는다 |
 
 **콘텐츠 종류 리터럴** (`WorkspaceContentKind`, `workspaceContentModel.ts:13-36`):
-`terminal`, `terminalWindow`, `workspaceWindow`, `browser`, `editor`, `preview`, `workspaces`, `explorer`, `workspaceFiles`, `sourceControl`, `gitHistory`, `gitBranches`, `automation`, `workbench`, `agent`, `orchestration`, `kanban`, `todo`, `diff`, `agentSessions`.
+`terminal`, `terminalWindow`, `workspaceWindow`, `browser`, `editor`, `preview`, `workspaces`, `explorer`, `workspaceFiles`, `sourceControl`, `gitHistory`, `gitBranches`, `automation`, `workbench`, `agent`, `orchestration`, `kanban`, `todo`, `diff`, `agentSessions`, `memory`.
 
 ## 3. 도메인 엔티티
 
@@ -99,6 +100,8 @@ OS 창 (native window)                       getCurrentWindow() — Tauri 창. �
 | profile | 프로필 | `Profile {id,name,type,shell,args,command,env,cwd,color,icon}` | — | 페인을 띄우는 실행 설정. 페인 기본 title/icon/cwd의 출처 |
 | worktree | 워크트리 | `WorktreeRecord`, `WorktreeProjection` | — | Git 워크트리 체크아웃. 자체 `sessionId`(= 워크스페이스)를 갖는다 |
 | agent session | 에이전트 세션 | `HermesSessionInfo {id,title,updatedAt,cwd}` | `HermesSessionInfo` | Hermes/ACP 대화 세션. `acpSessionId`로 참조하며 VibeLink 워크스페이스와 다른 축 |
+| memory entry | 메모리 엔트리 | `MemoryEntry` (`src/ipc/memory.ts`) | `MemoryRecord` (`app/memory.rs`) | `workspace` 또는 전역(`scope`)에 기록된 durable fact 1개. **stored 엔트리**는 `vibelink memory add` 또는 `memory graph` 탭에서 만들어 VibeLink 메모리 스토어에 쌓이고, **harvested 엔트리**는 워크스페이스의 기존 에이전트 지시 파일(`AGENTS.md`, `CLAUDE.md`, `GEMINI.md` 등)을 `## ` 섹션 단위로 파싱한 **읽기 전용** 항목이다. 출처는 항상 `memory document` 1개 |
+| memory document | 메모리 도큐먼트 | `MemoryGraphNode` kind `document` (`src/memory/memoryGraph.ts`) | `HARVEST_SOURCES` 표 / `MemoryOrigin.sourcePath` (`app/memory.rs`) | `memory entry`가 나온 파일 또는 스토어. VibeLink 메모리 스토어(노드 id `…:__vibelink__`, 라벨 `VibeLink Memory`) 또는 수확된 지시 파일 1개. `memory graph`에서 한 `workspace`의 엔트리들을 묶는 노드이며, 그 파일을 기본으로 읽는 에이전트로부터 `reads` 엣지를 받는다 |
 
 **ID 관계**
 

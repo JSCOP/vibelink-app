@@ -31,6 +31,7 @@ import {
   ListTodo,
   MonitorCog,
   Timer,
+  Brain,
 } from 'lucide-react'
 
 /** Brand marks stand in for Lucide glyphs anywhere an icon component is taken,
@@ -106,6 +107,7 @@ export const profileIcons: Record<string, IconComponent> = {
   'list-todo': ListTodo,
   'monitor-cog': MonitorCog,
   timer: Timer,
+  brain: Brain,
 }
 
 export const defaultProfileIconName = 'terminal'

@@ -9,7 +9,7 @@ import { ProfileIcon } from './ProfileIcon'
 import { steppedPickerId, type PickerEntry } from './pickerModel'
 import { workspaceAddMenuPlacement } from './workspaceContentTabModel'
 
-type WorkspaceWindowKind = 'browser' | 'agent' | 'orchestration' | 'workbench' | 'kanban' | 'todo' | 'diff'
+type WorkspaceWindowKind = 'browser' | 'agent' | 'orchestration' | 'workbench' | 'kanban' | 'todo' | 'diff' | 'memory'
 /** Singleton structural sidebar panels: revealed on their edge, never opened as a central tab. */
 type WorkspaceStructuralPanelKind = 'automation'
 type WorkspaceAddMenuItem =
@@ -37,6 +37,7 @@ const windowItems: Array<{ kind: WorkspaceWindowKind | 'editor'; label: string; 
   { kind: 'kanban', label: 'Kanban', icon: 'layout-grid' },
   { kind: 'todo', label: 'Todo List', icon: 'list-todo' },
   { kind: 'diff', label: 'Task Diff', icon: 'git-compare' },
+  { kind: 'memory', label: 'Memory Graph', icon: 'brain' },
 ]
 
 const panelItems: Array<{ kind: WorkspaceStructuralPanelKind; label: string; icon: string }> = [
