@@ -33,6 +33,9 @@ const ADD_COMMAND = 'vibelink memory add --title "<fact>" --body "<detail>" [--t
 
 const FILTER_KINDS: MemoryNodeKind[] = ['document', 'entry', 'tag', 'agent', 'file']
 const GLOBAL_SESSION = '__global__'
+/** `document:<session>:<rest>` uses this sentinel for the store itself, which is
+ *  the one document with no file behind it. Must match `memoryGraph.ts`. */
+const STORED_DOCUMENT = '__vibelink__'
 /** Stable identity so a graph with no dragged node never invalidates memos. */
 const EMPTY_POSITIONS: Record<string, { x: number; y: number }> = {}
 
@@ -48,13 +51,18 @@ function entryMatches(entry: MemoryEntry, query: string): boolean {
   return entry.refs.some((ref) => ref.toLowerCase().includes(query))
 }
 
-/** Harvested ids (`harvest:AGENTS.md:0`) repeat across workspaces, so an entry
- *  id alone is not unique. Workspace-anchored node ids carry the session that
- *  disambiguates them; `tag:`/`agent:` nodes are shared and match every session. */
-function nodeSessionId(nodeId: string): string | null {
-  const [kind, session] = nodeId.split(':')
-  if (kind === 'tag' || kind === 'agent') return null
-  return session ?? null
+/** Node ids are `<kind>:<session>:<rest>`, and `rest` (a workspace-relative
+ *  path or an entry id) may itself contain `:`, so only the first two
+ *  separators are structural. `tag:`/`agent:` nodes are shared across
+ *  workspaces and carry no session. */
+function nodeParts(nodeId: string): { kind: string; session: string | null; rest: string } {
+  const first = nodeId.indexOf(':')
+  if (first < 0) return { kind: nodeId, session: null, rest: '' }
+  const kind = nodeId.slice(0, first)
+  if (kind === 'tag' || kind === 'agent') return { kind, session: null, rest: nodeId.slice(first + 1) }
+  const second = nodeId.indexOf(':', first + 1)
+  if (second < 0) return { kind, session: nodeId.slice(first + 1), rest: '' }
+  return { kind, session: nodeId.slice(first + 1, second), rest: nodeId.slice(second + 1) }
 }
 
 function nodeRadius(weight: number): number {
@@ -167,12 +175,38 @@ export function MemoryGraphPanel() {
 
   const selectedEntries = useMemo<MemoryEntry[]>(() => {
     if (!selectedNode) return []
-    const session = nodeSessionId(selectedNode.id)
+    const { session } = nodeParts(selectedNode.id)
     const wanted = new Set(selectedNode.entryIds)
     return entries.filter((entry) => wanted.has(entry.id) && (session === null || (entry.sessionId ?? GLOBAL_SESSION) === session))
   }, [selectedNode, entries])
 
+  /** Node id -> workspace-relative file it stands for. Only nodes in the ACTIVE
+   *  workspace are openable: the editor resolves paths against that workspace,
+   *  so opening another one's file would silently show the wrong file (or none)
+   *  under `All workspaces`. Tag, agent, workspace, and the generated
+   *  `VibeLink Memory` document have no file and are absent from the map. */
+  const openablePaths = useMemo(() => {
+    const sourceByEntry = new Map(
+      entries.flatMap((entry) =>
+        entry.origin.sourcePath ? [[`${entry.sessionId ?? GLOBAL_SESSION}:${entry.id}`, entry.origin.sourcePath] as const] : [],
+      ),
+    )
+    const paths = new Map<string, string>()
+    for (const node of layout.nodes) {
+      const { kind, session, rest } = nodeParts(node.id)
+      if (!rest || session !== activeSessionId) continue
+      if (kind === 'file') paths.set(node.id, rest)
+      else if (kind === 'document' && rest !== STORED_DOCUMENT) paths.set(node.id, rest)
+      else if (kind === 'entry') {
+        const source = sourceByEntry.get(`${session}:${rest}`)
+        if (source) paths.set(node.id, source)
+      }
+    }
+    return paths
+  }, [layout, activeSessionId, entries])
+
   const activeNodeId = hoveredId ?? selectedId
+  const selectedOpenPath = selectedNode ? openablePaths.get(selectedNode.id) ?? null : null
 
   // Sync popover ------------------------------------------------------------
 
@@ -422,19 +456,31 @@ export function MemoryGraphPanel() {
                   />
                 )
               })}
-              {positioned.map(({ node, x, y }) => (
-                <circle
-                  key={node.id}
-                  className={`memory-node memory-node-${node.kind}${selectedId === node.id ? ' is-selected' : ''}`}
-                  cx={x}
-                  cy={y}
-                  r={nodeRadius(node.weight)}
-                  aria-label={node.label}
-                  onPointerDown={(event) => onPointerDownNode(event, { ...node, x, y })}
-                  onPointerEnter={() => setHoveredId(node.id)}
-                  onPointerLeave={() => setHoveredId((current) => (current === node.id ? null : current))}
-                />
-              ))}
+              {positioned.map(({ node, x, y }) => {
+                const openPath = openablePaths.get(node.id)
+                return (
+                  <circle
+                    key={node.id}
+                    className={`memory-node memory-node-${node.kind}${selectedId === node.id ? ' is-selected' : ''}`}
+                    cx={x}
+                    cy={y}
+                    r={nodeRadius(node.weight)}
+                    aria-label={node.label}
+                    onPointerDown={(event) => onPointerDownNode(event, { ...node, x, y })}
+                    onPointerEnter={() => setHoveredId(node.id)}
+                    onPointerLeave={() => setHoveredId((current) => (current === node.id ? null : current))}
+                    onDoubleClick={(event) => {
+                      // Without this the SVG's own handler also fires and resets the camera.
+                      event.stopPropagation()
+                      if (openPath) void openContent({ kind: 'editor', relPath: openPath })
+                    }}
+                  >
+                    {/* Most nodes carry no rendered label, so the native tooltip is
+                        the only way to identify one without selecting it. */}
+                    <title>{openPath ? `${node.label}\nDouble-click to open ${openPath}` : node.label}</title>
+                  </circle>
+                )
+              })}
               {positioned
                 .filter(({ node }) => node.weight >= LABEL_WEIGHT || node.id === selectedId || node.id === hoveredId)
                 .map(({ node, x, y }) => (
@@ -457,6 +503,11 @@ export function MemoryGraphPanel() {
                   <header className="memory-detail-header">
                     <strong>{selectedNode.label}</strong>
                     <span className="memory-detail-kind" data-kind={selectedNode.kind}>{selectedNode.kind} · {selectedEntries.length} {selectedEntries.length === 1 ? 'entry' : 'entries'}</span>
+                    {selectedOpenPath ? (
+                      <button type="button" className="memory-detail-open" onClick={() => void openContent({ kind: 'editor', relPath: selectedOpenPath })}>
+                        <ExternalLink size={12} aria-hidden="true" /> Open {selectedOpenPath}
+                      </button>
+                    ) : null}
                   </header>
                   <div className="memory-detail-list">
                     {selectedEntries.length === 0 ? <p className="memory-detail-empty">This node has no entries in the current snapshot.</p> : null}

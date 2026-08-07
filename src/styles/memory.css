@@ -388,6 +388,29 @@
 .memory-detail-kind[data-kind="agent"] { --vibelink-memory-chip: var(--vibelink-memory-agent); }
 .memory-detail-kind[data-kind="file"] { --vibelink-memory-chip: var(--vibelink-memory-file); }
 
+.memory-detail-open {
+  align-items: center;
+  background: var(--vibelink-surface-raised, transparent);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 5px;
+  color: var(--vibelink-text);
+  cursor: pointer;
+  display: inline-flex;
+  font: 11px/1 var(--vibelink-sans);
+  gap: 5px;
+  justify-self: start;
+  margin-top: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 5px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-detail-open:hover {
+  border-color: var(--vibelink-memory-ring);
+}
+
 .memory-detail-list {
   display: flex;
   flex: 1;

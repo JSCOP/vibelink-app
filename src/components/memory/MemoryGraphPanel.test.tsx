@@ -185,6 +185,22 @@ describe('MemoryGraphPanel', () => {
     expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'AGENTS.md' })
   })
 
+  test('double-clicking a harvested document opens its file; the store document has none', async () => {
+    await renderWithGraph()
+    fireEvent.doubleClick(screen.getByLabelText('AGENTS.md'))
+    expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'AGENTS.md' })
+    openContent.mockClear()
+    fireEvent.doubleClick(screen.getByLabelText('VibeLink Memory'))
+    expect(openContent).not.toHaveBeenCalled()
+  })
+
+  test('selecting a node backed by a file offers an explicit open button', async () => {
+    await renderWithGraph()
+    selectNode('src/terminal/TerminalManager.ts')
+    fireEvent.click(screen.getByRole('button', { name: 'Open src/terminal/TerminalManager.ts' }))
+    expect(openContent).toHaveBeenCalledWith({ kind: 'editor', relPath: 'src/terminal/TerminalManager.ts' })
+  })
+
   test('the sync popover renders one switch per target and disables missing files', async () => {
     await renderWithGraph()
     fireEvent.click(screen.getByRole('button', { name: 'Sync' }))
