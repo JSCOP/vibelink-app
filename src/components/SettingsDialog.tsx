@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { cloneElement, createContext, useContext, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from 'react'
 import {
   ALargeSmall,
   Archive,
@@ -102,7 +102,7 @@ import {
   SettingsMessage,
   SettingsNumber,
   SettingsPill,
-  SettingsRow,
+  SettingsRow as SettingsRowBase,
   SettingsSegmented,
   SettingsSelect,
   SettingsSwitch,
@@ -111,7 +111,7 @@ import {
   type SettingsIcon,
 } from './settings/controls'
 import { agentIconName } from './settings/agentBrand'
-import { filterSettingsSections, searchSettingsEntries, settingsSectionById, settingsSectionGroups, type SettingsSectionId } from './settings/sections'
+import { filterSettingsSections, searchSettingsEntries, settingsSearchKey, settingsSectionById, settingsSectionGroups, type SettingsSectionId } from './settings/sections'
 
 type SettingsDialogProps = {
   settings: Settings
@@ -133,6 +133,26 @@ const profileKindLabels: Record<ProfileKind, string> = {
   local: 'Local',
   ssh: 'SSH',
   command: 'Command',
+}
+
+const SettingsSectionContext = createContext<SettingsSectionId>('account')
+
+function SettingsRow({ searchLabel, ...props }: ComponentProps<typeof SettingsRowBase> & { searchLabel?: string }) {
+  const section = useContext(SettingsSectionContext)
+  return cloneElement(SettingsRowBase(props), {
+    'data-setting-key': settingsSearchKey(section, searchLabel ?? props.label),
+    tabIndex: -1,
+  })
+}
+
+function SettingsSearchTarget({ labels, children }: { labels: string | string[]; children: ReactNode }) {
+  const section = useContext(SettingsSectionContext)
+  const searchLabels = typeof labels === 'string' ? [labels] : labels
+  return searchLabels.reduceRight<ReactNode>((content, label) => (
+    <div className="vl-set-search-target" data-setting-key={settingsSearchKey(section, label)} tabIndex={-1}>
+      {content}
+    </div>
+  ), children)
 }
 
 export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, initialSection = 'account' }: SettingsDialogProps) {
@@ -163,6 +183,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
   const [worktreeResolution, setWorktreeResolution] = useState<WorktreeStorageResolution | null>(null)
   const [worktreeResolutionError, setWorktreeResolutionError] = useState('')
   const worktreeResolutionRequestRef = useRef(0)
+  const [pendingSettingKey, setPendingSettingKey] = useState<string | null>(null)
+  const settingsBodyRef = useRef<HTMLDivElement | null>(null)
   const loginPaneIdsRef = useRef(new Set<string>())
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const sessions = useWorkspaceStore((state) => state.sessions)
@@ -215,6 +237,27 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
     }
     return rows
   }, [agentClis, agentHooks])
+
+  useEffect(() => {
+    if (!pendingSettingKey) return
+    const target = Array.from(settingsBodyRef.current?.querySelectorAll<HTMLElement>('[data-setting-key]') ?? [])
+      .find((element) => element.dataset.settingKey === pendingSettingKey)
+    if (!target) return setPendingSettingKey(null)
+
+    target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    target.classList.add('vl-set-search-target-highlight')
+    const focusTarget = target.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])')
+    ;(focusTarget ?? target).focus({ preventScroll: true })
+
+    const timer = window.setTimeout(() => {
+      target.classList.remove('vl-set-search-target-highlight')
+      setPendingSettingKey((current) => current === pendingSettingKey ? null : current)
+    }, 1600)
+    return () => {
+      window.clearTimeout(timer)
+      target.classList.remove('vl-set-search-target-highlight')
+    }
+  }, [activeSection, pendingSettingKey])
 
   useEffect(() => {
     let cancelled = false
@@ -561,12 +604,13 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   const group = settingsSectionGroups.find((candidate) => candidate.sections.some((candidateSection) => candidateSection.id === result.section))
                   return (
                     <button
-                      key={`${result.section}:${result.label}`}
+                      key={result.key}
                       type="button"
                       className="vl-set-nav-item vl-set-search-result"
                       onClick={() => {
                         setActiveSection(result.section)
                         setSearch('')
+                        setPendingSettingKey(result.key)
                       }}
                     >
                       <Icon size={14} strokeWidth={1.9} aria-hidden="true" />
@@ -612,11 +656,17 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
             </button>
           </header>
 
-          <div className="vl-set-body">
-            {activeSection === 'account' ? <LicenseSettings /> : null}
+          <SettingsSectionContext.Provider value={activeSection}>
+            <div ref={settingsBodyRef} className="vl-set-body">
+            {activeSection === 'account' ? (
+              <SettingsSearchTarget labels={['Sign in / account status', 'Plan & trial', 'Registered devices']}>
+                <LicenseSettings />
+              </SettingsSearchTarget>
+            ) : null}
 
             {activeSection === 'agents' ? (
               <>
+                <SettingsSearchTarget labels={['Installed agents', 'Agent hooks']}>
                 <SettingsCard
                   icon={Sparkles}
                   title="AI coding agents"
@@ -655,6 +705,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   ))}
                   {agentHookMessage ? <SettingsMessage icon={Info}>{agentHookMessage}</SettingsMessage> : null}
                 </SettingsCard>
+                </SettingsSearchTarget>
                 <SettingsCard icon={Bell} title="Completion detection" hint="Hooks are exact and work even when you start an agent by typing its name in a plain shell. Terminal-output detection is the fallback.">
                   <SettingsRow icon={Volume2} label="Completion sound" control={<SettingsSwitch label="Completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />} />
                   <SettingsRow icon={Bell} label="More sound options" control={<SettingsButton icon={ChevronRight} label="Notifications" onClick={() => setActiveSection('notifications')} />} />
@@ -670,7 +721,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   hint="Hermes owns provider, login, and model configuration. VibeLink reads the global installation without modifying it."
                   status={runtime?.detected ? <SettingsPill tone="ok" icon={CircleCheck}>Detected</SettingsPill> : <SettingsPill tone="warn" icon={TriangleAlert}>Missing</SettingsPill>}
                 >
-                  <SettingsRow icon={Package} label="Version" control={<SettingsValue value={runtime?.version ?? 'Not detected'} />} />
+                  <SettingsRow searchLabel="Hermes runtime" icon={Package} label="Version" control={<SettingsValue value={runtime?.version ?? 'Not detected'} />} />
                   <SettingsRow icon={Terminal} label="Command" control={<SettingsValue mono value={runtime?.command ?? 'Not detected'} />} />
                   <SettingsRow icon={FolderCog} label="HERMES_HOME" control={<SettingsValue mono value={runtime?.home ?? workspaceState?.home ?? 'Not resolved'} />} />
                   <SettingsRow icon={Wrench} label="Command override" hint="Point VibeLink at a specific hermes-acp binary." stacked control={<SettingsText label="hermes-acp override" value={draft.hermesCommand} placeholder="hermes-acp" onChange={(value) => patchDraft({ hermesCommand: value })} />} />
@@ -683,7 +734,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   />
                 </SettingsCard>
                 <SettingsCard icon={Cpu} title="Model" status={<SettingsIconButton icon={RefreshCw} label="Refresh model status" onClick={() => void refreshHermesState()} />}>
-                  <SettingsRow icon={Server} label="Provider" control={<SettingsValue value={workspaceState?.model?.provider || runtime?.configuredModel?.provider || 'Hermes default'} />} />
+                  <SettingsRow searchLabel="Model & provider" icon={Server} label="Provider" control={<SettingsValue value={workspaceState?.model?.provider || runtime?.configuredModel?.provider || 'Hermes default'} />} />
                   <SettingsRow icon={Bot} label="Model" control={<SettingsValue value={workspaceState?.model?.model ?? runtime?.configuredModel?.model ?? 'Not configured'} />} />
                   <SettingsRow icon={Braces} label="Base URL" control={<SettingsValue mono value={workspaceState?.model?.baseUrl || runtime?.configuredModel?.baseUrl || 'Provider default'} />} />
                   <div className="vl-set-actions vl-set-actions-bordered">
@@ -716,9 +767,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                     />
                   )}
                 />
-                <SettingsRow icon={Eye} label="Show thinking" control={<SettingsSwitch label="Show thinking / reasoning" checked={draft.chatReasoningBlocks} onChange={(checked) => patchDraft({ chatReasoningBlocks: checked })} />} />
+                <SettingsRow searchLabel="Show thinking / reasoning" icon={Eye} label="Show thinking" control={<SettingsSwitch label="Show thinking / reasoning" checked={draft.chatReasoningBlocks} onChange={(checked) => patchDraft({ chatReasoningBlocks: checked })} />} />
                 <SettingsRow icon={Wrench} label="Show tool calls" control={<SettingsSwitch label="Show tool calls" checked={draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCalls: checked })} />} />
-                <SettingsRow icon={Braces} label="Tool call contents" control={<SettingsSwitch label="Show tool call contents" checked={draft.chatToolCallContent} disabled={!draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCallContent: checked })} />} />
+                <SettingsRow searchLabel="Show tool call contents" icon={Braces} label="Tool call contents" control={<SettingsSwitch label="Show tool call contents" checked={draft.chatToolCallContent} disabled={!draft.chatToolCalls} onChange={(checked) => patchDraft({ chatToolCallContent: checked })} />} />
                 <SettingsRow
                   icon={Camera}
                   label="Image attachments"
@@ -748,6 +799,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   status={<SettingsButton icon={Search} label="Browse" title="Browse fonts with live preview" onClick={openFontPicker} />}
                 >
                   <SettingsRow
+                    searchLabel="Font family / size / weight"
                     icon={Baseline}
                     label="Family"
                     control={(
@@ -775,6 +827,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   />
                   <SettingsRow
                     icon={MousePointer}
+                    searchLabel="Cursor style"
                     label="Cursor"
                     control={(
                       <SettingsSegmented
@@ -800,6 +853,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   status={<SettingsButton icon={Search} label="Browse" title="Browse themes with live preview" onClick={openThemePicker} />}
                 >
                   <SettingsRow
+                    searchLabel="Color theme"
                     icon={Palette}
                     label="Palette"
                     control={(
@@ -820,9 +874,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                       </SettingsSelect>
                     )}
                   />
-                  <SettingsRow icon={Highlighter} label="Selected pane" control={<input className="vl-set-color" type="color" aria-label="Selected pane highlight" value={draft.selectedPaneHighlightColor} onChange={(event) => previewHighlightColors({ selectedPaneHighlightColor: event.target.value })} />} />
-                  <SettingsRow icon={Bell} label="Completion alert" control={<input className="vl-set-color" type="color" aria-label="Alarm highlight" value={draft.alarmHighlightColor} onChange={(event) => previewHighlightColors({ alarmHighlightColor: event.target.value })} />} />
-                  <SettingsRow icon={Check} label="Reviewed pane" control={<input className="vl-set-color" type="color" aria-label="Reviewed pane highlight" value={draft.reviewedPaneHighlightColor} onChange={(event) => previewHighlightColors({ reviewedPaneHighlightColor: event.target.value })} />} />
+                  <SettingsRow searchLabel="Selected pane highlight" icon={Highlighter} label="Selected pane" control={<input className="vl-set-color" type="color" aria-label="Selected pane highlight" value={draft.selectedPaneHighlightColor} onChange={(event) => previewHighlightColors({ selectedPaneHighlightColor: event.target.value })} />} />
+                  <SettingsRow searchLabel="Alarm highlight" icon={Bell} label="Completion alert" control={<input className="vl-set-color" type="color" aria-label="Alarm highlight" value={draft.alarmHighlightColor} onChange={(event) => previewHighlightColors({ alarmHighlightColor: event.target.value })} />} />
+                  <SettingsRow searchLabel="Reviewed pane highlight" icon={Check} label="Reviewed pane" control={<input className="vl-set-color" type="color" aria-label="Reviewed pane highlight" value={draft.reviewedPaneHighlightColor} onChange={(event) => previewHighlightColors({ reviewedPaneHighlightColor: event.target.value })} />} />
                   <div className="vl-set-theme-preview" style={{ background: selectedTheme.terminal.background, color: selectedTheme.terminal.foreground }}>
                     <span>{selectedTheme.name}</span>
                     <small>{selectedTheme.description}</small>
@@ -836,6 +890,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
 
                 <SettingsCard icon={GitBranch} title="Git status labels" hint="Every mode keeps a plain-language hover explanation. Words is clearest; letters is most compact.">
                   <SettingsRow
+                    searchLabel="Git status presentation"
                     icon={Tag}
                     label="Presentation"
                     control={(
@@ -857,6 +912,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
 
             {activeSection === 'notifications' ? (
               <>
+                <SettingsSearchTarget labels="Completion alert">
                 <SettingsCard
                   icon={Volume2}
                   title="Completion sound"
@@ -864,6 +920,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   status={<SettingsSwitch label="Play completion sound" checked={draft.completionSoundEnabled} onChange={(checked) => patchDraft({ completionSoundEnabled: checked })} />}
                 >
                   <SettingsRow
+                    searchLabel="Completion sound & volume"
                     icon={Bell}
                     label="Sound"
                     sub={builtInCompletionSounds.find((sound) => sound.id === draft.completionSoundId)?.description}
@@ -904,7 +961,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                     {/* Preview stays enabled while the toggle is off so the sound
                         can always be auditioned before committing to it. */}
                     <SettingsButton icon={Play} label="Preview" onClick={() => void previewCompletionSound()} />
-                    <SettingsButton icon={Upload} label="Add file" title="Add a custom MP3, WAV, OGG, M4A, AAC, or FLAC up to 10 MB" onClick={() => completionSoundInputRef.current?.click()} />
+                    <SettingsSearchTarget labels="Custom sound file">
+                      <SettingsButton icon={Upload} label="Add file" title="Add a custom MP3, WAV, OGG, M4A, AAC, or FLAC up to 10 MB" onClick={() => completionSoundInputRef.current?.click()} />
+                    </SettingsSearchTarget>
                     <input
                       ref={completionSoundInputRef}
                       hidden
@@ -933,6 +992,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   ))}
                   {completionSoundMessage ? <SettingsMessage icon={Info}>{completionSoundMessage}</SettingsMessage> : null}
                 </SettingsCard>
+                </SettingsSearchTarget>
                 <SettingsCard
                   icon={Bell}
                   title="Desktop notification"
@@ -940,6 +1000,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   status={<SettingsSwitch label="Show desktop notification" checked={draft.completionNotificationEnabled} onChange={(checked) => patchDraft({ completionNotificationEnabled: checked })} />}
                 >
                   <SettingsRow
+                    searchLabel="Desktop notification"
                     icon={Info}
                     label="Notify even for the pane you are watching"
                     hint="On by default so every finished pane raises a toast, including the one already on screen."
@@ -965,12 +1026,13 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                 </SettingsCard>
                 <SettingsCard icon={LayoutGrid} title="Layout">
                   <SettingsRow icon={PanelTop} label="Pane header height" control={<SettingsNumber label="Pane header height" value={draft.paneHeaderHeight} min={24} max={56} onChange={(value) => patchDraft({ paneHeaderHeight: value })} />} />
-                  <SettingsRow icon={Scaling} label="Resize snap" hint="Pixel tolerance for snapping a divider to a neighbouring edge." control={<SettingsNumber label="Resize snap" value={draft.resizeSnapTolerance} min={0} max={128} onChange={(value) => patchDraft({ resizeSnapTolerance: value })} />} />
-                  <SettingsRow icon={Rows3} label="Scrollback" hint="Lines of terminal history kept per pane." control={<SettingsNumber label="Scrollback" value={draft.scrollback} min={100} max={200000} step={100} onChange={(value) => patchDraft({ scrollback: value })} />} />
+                  <SettingsRow searchLabel="Pane roles & resize snap" icon={Scaling} label="Resize snap" hint="Pixel tolerance for snapping a divider to a neighbouring edge." control={<SettingsNumber label="Resize snap" value={draft.resizeSnapTolerance} min={0} max={128} onChange={(value) => patchDraft({ resizeSnapTolerance: value })} />} />
+                  <SettingsRow searchLabel="Scrollback / word wrap" icon={Rows3} label="Scrollback" hint="Lines of terminal history kept per pane." control={<SettingsNumber label="Scrollback" value={draft.scrollback} min={100} max={200000} step={100} onChange={(value) => patchDraft({ scrollback: value })} />} />
                   <SettingsRow icon={Cpu} label="Inactive terminal updates" hint="Visible inactive panes parse and paint output at this rate. The selected pane always stays immediate." control={<SettingsNumber label="Inactive terminal updates per second" value={draft.inactiveTerminalUpdatesPerSecond} min={1} max={60} step={1} onChange={(value) => patchDraft({ inactiveTerminalUpdatesPerSecond: value })} />} />
                 </SettingsCard>
                 <SettingsCard icon={MonitorCog} title="Startup and exit" hint="Closing VibeLink is a real quit. Terminals only survive when you ask them to.">
                   <SettingsRow
+                    searchLabel="When reopening (session restore)"
                     icon={MonitorCog}
                     label="When reopening"
                     hint="Resume reattaches the same terminals and agent sessions. Start fresh stops them on exit and opens an initialized screen; a crash still restores your work."
@@ -991,6 +1053,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                     control={<SettingsSwitch label="Minimize to the tray instead of quitting" checked={draft.minimizeToTrayOnClose} onChange={(checked) => patchDraft({ minimizeToTrayOnClose: checked })} />}
                   />
                   <SettingsRow
+                    searchLabel="Confirm when agents are still working"
                     icon={Info}
                     label="Ask before stopping busy agents"
                     hint="Only asks when Start fresh would interrupt an agent that is still working."
@@ -1024,6 +1087,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
             ) : null}
 
             {activeSection === 'terminals' ? (
+              <SettingsSearchTarget labels={['Profiles', 'Default profile', 'Profile command & icon']}>
               <SettingsCard
                 icon={SquareTerminal}
                 title="Terminal profiles"
@@ -1106,6 +1170,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                   )
                 })}
               </SettingsCard>
+              </SettingsSearchTarget>
             ) : null}
 
             {activeSection === 'integrations' ? (
@@ -1116,12 +1181,18 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
 
             {activeSection === 'gitHosting' ? (
               <>
-                <GitHostingSettings />
+                <SettingsSearchTarget labels="GitHub / GitLab credentials">
+                  <GitHostingSettings />
+                </SettingsSearchTarget>
                 <ProviderIntegrationsPanel />
               </>
             ) : null}
 
-            {activeSection === 'remote' ? <RemoteSettings /> : null}
+            {activeSection === 'remote' ? (
+              <SettingsSearchTarget labels={['Remote access & pairing', 'LAN & firewall']}>
+                <RemoteSettings />
+              </SettingsSearchTarget>
+            ) : null}
 
             {activeSection === 'safety' ? (
               <SettingsCard icon={Shield} title="Process safety" hint="VibeLink never kills a broad process image name; it proves exact workspace ownership first.">
@@ -1132,7 +1203,9 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
 
             {activeSection === 'memory' ? (
               <>
-                <AgentSkillSettings />
+                <SettingsSearchTarget labels="Agent memory skill">
+                  <AgentSkillSettings />
+                </SettingsSearchTarget>
                 <SettingsCard icon={Blocks} title="Memory & context" hint="Native Hermes manages durable memory and compression.">
                   <SettingsRow icon={Database} label="Persistent memory" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
                   <SettingsRow icon={Layers} label="Auto-compression" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
@@ -1143,7 +1216,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
 
             {activeSection === 'voice' ? (
               <SettingsCard icon={Mic} title="Voice" hint="Reserved for a future VibeLink Agent provider.">
-                <SettingsRow icon={Mic} label="Voice input" control={<SettingsSwitch label="Voice input" checked={false} disabled />} />
+                <SettingsRow searchLabel="Voice input / output" icon={Mic} label="Voice input" control={<SettingsSwitch label="Voice input" checked={false} disabled />} />
                 <SettingsRow icon={Volume2} label="Voice output" control={<SettingsSwitch label="Voice output" checked={false} disabled />} />
               </SettingsCard>
             ) : null}
@@ -1152,6 +1225,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
               <>
                 <SettingsCard icon={Camera} title="Capture" hint="Screenshots use the capture folder; recordings download ffmpeg on first use unless you set an override path.">
                   <SettingsRow
+                    searchLabel="Capture folder & ffmpeg"
                     icon={FolderOpen}
                     label="Capture folder"
                     stacked
@@ -1175,6 +1249,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                     )}
                   />
                 </SettingsCard>
+                <SettingsSearchTarget labels="Keybindings">
                 <SettingsCard
                   icon={Keyboard}
                   title="Keyboard shortcuts"
@@ -1205,7 +1280,10 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                     ))}
                   </div>
                 </SettingsCard>
-                <AndroidDeviceLabPanel />
+                </SettingsSearchTarget>
+                <SettingsSearchTarget labels="Android device lab">
+                  <AndroidDeviceLabPanel />
+                </SettingsSearchTarget>
               </>
             ) : null}
 
@@ -1227,6 +1305,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                 />
                 <SettingsRow
                   icon={HardDrive}
+                  searchLabel="Storage mode & folder"
                   label="Location"
                   control={(
                     <SettingsSelect
@@ -1287,29 +1366,33 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
             ) : null}
 
             {activeSection === 'messaging' ? (
-              <SettingsCard
-                icon={Send}
-                title="Messaging gateways"
-                hint="Telegram, Discord, Slack, and WhatsApp gateways are owned by your Hermes install."
-                status={runtime?.detected ? <SettingsPill tone="ok" icon={CircleCheck}>Hermes ready</SettingsPill> : <SettingsPill tone="warn" icon={TriangleAlert}>Install Hermes</SettingsPill>}
-              >
-                <div className="vl-set-actions">
-                  <SettingsButton icon={Settings2} label="Set up" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('setup')} />
-                  <SettingsButton icon={Info} label="Status" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('status')} />
-                  <SettingsButton icon={Play} label="Run" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('run')} />
-                </div>
-              </SettingsCard>
+              <SettingsSearchTarget labels="Telegram / Discord gateways">
+                <SettingsCard
+                  icon={Send}
+                  title="Messaging gateways"
+                  hint="Telegram, Discord, Slack, and WhatsApp gateways are owned by your Hermes install."
+                  status={runtime?.detected ? <SettingsPill tone="ok" icon={CircleCheck}>Hermes ready</SettingsPill> : <SettingsPill tone="warn" icon={TriangleAlert}>Install Hermes</SettingsPill>}
+                >
+                  <div className="vl-set-actions">
+                    <SettingsButton icon={Settings2} label="Set up" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('setup')} />
+                    <SettingsButton icon={Info} label="Status" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('status')} />
+                    <SettingsButton icon={Play} label="Run" disabled={!activeSessionId || !runtime?.detected} onClick={() => void openHermesGateway('run')} />
+                  </div>
+                </SettingsCard>
+              </SettingsSearchTarget>
             ) : null}
 
             {activeSection === 'apiKeys' ? (
-              <SettingsCard
-                icon={KeyRound}
-                title="Provider auth"
-                hint="VibeLink never stores provider API keys. Native Hermes auth remains the source of truth."
-                status={<SettingsIconButton icon={RefreshCw} label="Refresh auth list" disabled={!activeSessionId || authBusy} onClick={() => void refreshAuthList()} />}
-              >
-                <pre className="vl-set-pre">{authList || 'No auth list loaded.'}</pre>
-              </SettingsCard>
+              <SettingsSearchTarget labels="Provider credentials">
+                <SettingsCard
+                  icon={KeyRound}
+                  title="Provider auth"
+                  hint="VibeLink never stores provider API keys. Native Hermes auth remains the source of truth."
+                  status={<SettingsIconButton icon={RefreshCw} label="Refresh auth list" disabled={!activeSessionId || authBusy} onClick={() => void refreshAuthList()} />}
+                >
+                  <pre className="vl-set-pre">{authList || 'No auth list loaded.'}</pre>
+                </SettingsCard>
+              </SettingsSearchTarget>
             ) : null}
 
             {activeSection === 'mcp' ? (
@@ -1319,7 +1402,7 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                 hint="VibeLink registers its workspace MCP bridge per agent session over ACP; your Hermes config file is never modified."
                 status={<SettingsButton icon={Play} label={mcpCheckBusy ? 'Checking…' : 'Self-check'} disabled={!activeSessionId || mcpCheckBusy} onClick={() => void checkMcp()} />}
               >
-                <SettingsRow icon={Server} label="Server" control={<SettingsValue value="vibelink" />} />
+                <SettingsRow searchLabel="MCP server & self-check" icon={Server} label="Server" control={<SettingsValue value="vibelink" />} />
                 <SettingsRow icon={Terminal} label="Command" control={<SettingsValue mono value="vibelink.exe mcp serve" />} />
                 <SettingsRow icon={Hash} label="Scope" control={<SettingsValue mono value={activeSessionId ? `VIBELINK_SESSION_ID=${activeSessionId}` : 'Open a workspace'} />} />
                 {mcpCheck ? (
@@ -1335,13 +1418,13 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
 
             {activeSection === 'archived' ? (
               <SettingsCard icon={Archive} title="Archived chats" hint="Archived agent chats remain owned by your Hermes installation.">
-                <SettingsRow icon={StickyNote} label="Management" control={<SettingsValue value="Resume from the Agent session list" />} />
+                <SettingsRow searchLabel="Archived chats" icon={StickyNote} label="Management" control={<SettingsValue value="Resume from the Agent session list" />} />
               </SettingsCard>
             ) : null}
 
             {activeSection === 'about' ? (
               <SettingsCard icon={Info} title="About VibeLink">
-                <SettingsRow icon={Package} label="Product" control={<SettingsValue value="VibeLink" />} />
+                <SettingsRow searchLabel="Version & setup wizard" icon={Package} label="Product" control={<SettingsValue value="VibeLink" />} />
                 <SettingsRow icon={Bot} label="Hermes runtime" control={<SettingsValue mono value={runtime?.version ?? 'Unknown'} />} />
                 <SettingsRow icon={CircleUser} label="Account" control={<SettingsButton icon={ChevronRight} label="Open" onClick={() => setActiveSection('account')} />} />
                 <div className="vl-set-actions vl-set-actions-bordered">
@@ -1349,7 +1432,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
                 </div>
               </SettingsCard>
             ) : null}
-          </div>
+            </div>
+          </SettingsSectionContext.Provider>
 
           <footer className="vl-set-footer">
             <span className="vl-set-footer-note">Changes are staged until Apply or OK.</span>

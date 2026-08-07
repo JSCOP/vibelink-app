@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
+import { readAppStylesheet } from '../appStylesheet.test-support'
 import { isSetupStepId, setupStepAutoPass, setupStepIds, setupStepTitle } from './setupWizardSteps'
 
 describe('setup wizard steps', () => {
@@ -19,7 +19,7 @@ describe('setup wizard steps', () => {
   })
 
   test('keeps the setup backdrop below the draggable topbar', () => {
-    const css = readFileSync(new URL('../App.css', import.meta.url), 'utf8')
+    const css = readAppStylesheet()
 
     expect(css).toMatch(/\.main-surface\s*\{[^}]*--vibelink-topbar-height:\s*36px/s)
     expect(css).toMatch(/\.topbar\s*\{[^}]*flex:\s*0 0 var\(--vibelink-topbar-height\)/s)

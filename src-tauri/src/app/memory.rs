@@ -589,7 +589,15 @@ pub fn harvest_workspace_memory(session_id: &str, workspace_folder: &Path) -> Ve
         let Ok(mut content) = fs::read_to_string(&path) else {
             continue;
         };
-        truncate_utf8_bytes(&mut content, HARVEST_FILE_MAX_BYTES);
+        let original_bytes = content.len();
+        if truncate_utf8_bytes(&mut content, HARVEST_FILE_MAX_BYTES) {
+            tracing::warn!(
+                source_path = %path.display(),
+                original_bytes = original_bytes,
+                truncated_bytes = content.len(),
+                "memory harvest source exceeded byte limit and was truncated"
+            );
+        }
         let updated_at = path
             .metadata()
             .ok()
@@ -638,8 +646,10 @@ fn split_harvest_sections(content: &str, source_path: &str) -> Vec<HarvestSectio
     let mut sections = Vec::new();
     let mut preamble_title = None;
     let mut preamble: Vec<&str> = Vec::new();
+    let mut parent_h2_title: Option<String> = None;
     let mut current_title: Option<String> = None;
     let mut current_body: Vec<&str> = Vec::new();
+    let mut current_is_h3 = false;
 
     for line in content.lines() {
         if let Some(title) = line.strip_prefix("## ") {
@@ -660,7 +670,38 @@ fn split_harvest_sections(content: &str, source_path: &str) -> Vec<HarvestSectio
                 });
                 preamble.clear();
             }
-            current_title = Some(title.trim().to_string());
+            let title = title.trim().to_string();
+            parent_h2_title = Some(title.clone());
+            current_title = Some(title);
+            current_is_h3 = false;
+        } else if let Some(title) = line.strip_prefix("### ") {
+            if let Some(title) = current_title.take() {
+                if current_is_h3 || current_body.iter().any(|line| !line.trim().is_empty()) {
+                    sections.push(HarvestSection {
+                        title,
+                        body: current_body.join("\n"),
+                    });
+                }
+                current_body.clear();
+            } else if preamble_title.is_some()
+                || preamble.iter().any(|line| !line.trim().is_empty())
+            {
+                sections.push(HarvestSection {
+                    title: preamble_title
+                        .take()
+                        .unwrap_or_else(|| fallback_title.to_string()),
+                    body: preamble.join("\n"),
+                });
+                preamble.clear();
+            }
+            let title = title.trim();
+            current_title = Some(
+                parent_h2_title
+                    .as_ref()
+                    .map(|parent| format!("{parent} / {title}"))
+                    .unwrap_or_else(|| title.to_string()),
+            );
+            current_is_h3 = true;
         } else if current_title.is_some() {
             current_body.push(line);
         } else if preamble_title.is_none() {
@@ -733,15 +774,16 @@ fn push_unique_ref(refs: &mut Vec<String>, seen: &mut HashSet<String>, reference
     }
 }
 
-fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) {
+fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) -> bool {
     if value.len() <= max_bytes {
-        return;
+        return false;
     }
     let mut end = max_bytes;
     while !value.is_char_boundary(end) {
         end -= 1;
     }
     value.truncate(end);
+    true
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -876,6 +918,72 @@ mod tests {
             pinned: false,
             id: Some(id.to_string()),
         }
+    }
+
+    fn section_pairs(sections: &[HarvestSection]) -> Vec<(&str, &str)> {
+        sections
+            .iter()
+            .map(|section| (section.title.as_str(), section.body.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn harvest_sections_preserve_h2_only_documents() {
+        let sections = split_harvest_sections(
+            "## Build\nUse `src/a.ts`.\n## Test\nSee tests.\n",
+            "AGENTS.md",
+        );
+        assert_eq!(
+            section_pairs(&sections),
+            vec![("Build", "Use `src/a.ts`."), ("Test", "See tests.")]
+        );
+    }
+
+    #[test]
+    fn harvest_sections_split_h3_children_without_empty_parent() {
+        let sections = split_harvest_sections(
+            "## Parent\n\n### One\nFirst.\n### Two\nSecond.\n### Three\nThird.\n",
+            "PROJECT_MEMORY.md",
+        );
+        assert_eq!(
+            section_pairs(&sections),
+            vec![
+                ("Parent / One", "First."),
+                ("Parent / Two", "Second."),
+                ("Parent / Three", "Third."),
+            ]
+        );
+    }
+
+    #[test]
+    fn harvest_sections_keep_parent_body_before_h3_children() {
+        let sections = split_harvest_sections(
+            "## Parent\nParent body.\n### One\nFirst.\n### Two\nSecond.\n",
+            "PROJECT_MEMORY.md",
+        );
+        assert_eq!(
+            section_pairs(&sections),
+            vec![
+                ("Parent", "Parent body."),
+                ("Parent / One", "First."),
+                ("Parent / Two", "Second."),
+            ]
+        );
+    }
+
+    #[test]
+    fn harvest_sections_preserve_hash_preamble() {
+        let sections = split_harvest_sections(
+            "# Workspace Memory\nPreamble body.\n## Build\nBuild body.\n",
+            "PROJECT_MEMORY.md",
+        );
+        assert_eq!(
+            section_pairs(&sections),
+            vec![
+                ("Workspace Memory", "Preamble body."),
+                ("Build", "Build body."),
+            ]
+        );
     }
 
     #[test]

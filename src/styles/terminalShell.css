@@ -1,0 +1,654 @@
+/* Owns terminal windows, panes, xterm surfaces, and pane headers; import order is load-bearing. */
+/* Terminal WINDOW: hosts the nested pane Dockview. Fills its outer panel; the
+ * inner Dockview lays out the pane grid. */
+.terminal-window-panel {
+  background: var(--vibelink-terminal-bg);
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+  width: 100%;
+}
+
+.terminal-window-panel > .dv-dockview {
+  height: 100%;
+  width: 100%;
+}
+
+/* Per-pane title bar (the inner Dockview tab). Reuses terminal tab chrome but
+ * always reads as a status/title bar, never an addable tab strip. */
+.terminal-pane-title-bar {
+  cursor: grab;
+}
+
+.terminal-window-panel .dv-groupview[data-vl-terminal-pane-drop-guide='true'] {
+  position: relative;
+}
+
+.terminal-window-panel[data-vl-terminal-pane-drop-guide='true'] .dv-drop-target-container {
+  opacity: 0;
+}
+
+.terminal-pane-drop-guide {
+  display: grid;
+  filter: drop-shadow(0 10px 22px rgb(0 0 0 / 45%));
+  gap: 5px;
+  grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+}
+
+.terminal-pane-drop-guide > span {
+  background: color-mix(in srgb, var(--vibelink-dialog) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vibelink-border) 80%, white 20%);
+  border-radius: var(--vibelink-radius-sm);
+  box-sizing: border-box;
+  position: relative;
+}
+
+.terminal-pane-drop-guide [data-direction='top'] { grid-area: 1 / 2; }
+.terminal-pane-drop-guide [data-direction='left'] { grid-area: 2 / 1; }
+.terminal-pane-drop-guide [data-direction='center'] { grid-area: 2 / 2; }
+.terminal-pane-drop-guide [data-direction='right'] { grid-area: 2 / 3; }
+.terminal-pane-drop-guide [data-direction='bottom'] { grid-area: 3 / 2; }
+
+.terminal-pane-drop-guide > span::before {
+  background: color-mix(in srgb, var(--vibelink-muted) 55%, transparent);
+  border-radius: 999px;
+  content: '';
+  height: 2px;
+  left: 14%;
+  position: absolute;
+  right: 14%;
+  top: 12%;
+}
+
+.terminal-pane-drop-guide-option::after {
+  content: '';
+  position: absolute;
+}
+
+.terminal-pane-drop-guide-option[data-direction='top']::after,
+.terminal-pane-drop-guide-option[data-direction='bottom']::after {
+  border-top: 1px dashed var(--vibelink-muted);
+  left: 14%;
+  right: 14%;
+  top: 50%;
+}
+
+.terminal-pane-drop-guide-option[data-direction='left']::after,
+.terminal-pane-drop-guide-option[data-direction='right']::after {
+  border-left: 1px dashed var(--vibelink-muted);
+  bottom: 14%;
+  left: 50%;
+  top: 14%;
+}
+
+.terminal-pane-drop-guide[data-active-direction='top'] [data-direction='top'],
+.terminal-pane-drop-guide[data-active-direction='left'] [data-direction='left'],
+.terminal-pane-drop-guide[data-active-direction='center'] [data-direction='center'],
+.terminal-pane-drop-guide[data-active-direction='right'] [data-direction='right'],
+.terminal-pane-drop-guide[data-active-direction='bottom'] [data-direction='bottom'] {
+  background: color-mix(in srgb, var(--vibelink-accent) 24%, var(--vibelink-dialog));
+  border-color: var(--vibelink-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vibelink-accent) 38%, transparent);
+}
+
+/* Globally hide every pane title bar in this window. Collapse the inner tab
+ * strip so panes use the full height. */
+.terminal-window-titles-hidden .dv-tabs-and-actions-container {
+  display: none;
+}
+
+.remote-pane-lease-cover {
+  align-items: center;
+  backdrop-filter: blur(5px);
+  background: color-mix(in srgb, var(--vibelink-terminal-bg) 82%, transparent);
+  display: flex;
+  inset: 5px;
+  justify-content: center;
+  padding: 18px;
+  position: absolute;
+  z-index: 6;
+}
+
+/* Collapsed: the phone keeps control, but the desktop keeps watching the output. */
+.remote-pane-lease-cover[data-collapsed='true'] {
+  align-items: flex-start;
+  backdrop-filter: none;
+  background: transparent;
+  justify-content: flex-end;
+  padding: 8px;
+  pointer-events: none;
+}
+
+.remote-pane-lease-badge {
+  align-items: center;
+  background: color-mix(in srgb, var(--vibelink-dialog) 92%, transparent);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 999px;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 10px;
+  pointer-events: auto;
+}
+
+.remote-pane-lease-badge > span {
+  background: var(--vibelink-accent);
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+}
+
+.remote-pane-lease-body {
+  color: var(--vibelink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.remote-pane-lease-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.remote-pane-lease-card button.remote-pane-lease-secondary {
+  background: transparent;
+  border-color: var(--vibelink-border);
+  color: var(--vibelink-text);
+}
+
+.remote-pane-lease-card {
+  align-items: center;
+  background: color-mix(in srgb, var(--vibelink-dialog) 94%, transparent);
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-lg);
+  box-shadow: var(--vibelink-shadow);
+  color: var(--vibelink-text);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 360px;
+  padding: 20px 24px;
+  text-align: center;
+  width: min(100%, 360px);
+}
+
+.remote-pane-lease-card strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.remote-pane-lease-state {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 7px;
+}
+
+.remote-pane-lease-state > span {
+  background: var(--vibelink-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vibelink-accent) 18%, transparent);
+  height: 7px;
+  width: 7px;
+}
+
+.remote-pane-lease-geometry {
+  color: var(--vibelink-muted);
+  font-size: 12px;
+}
+
+.remote-pane-lease-card button {
+  background: var(--vibelink-accent);
+  border: 1px solid var(--vibelink-accent-border);
+  border-radius: var(--vibelink-radius-sm);
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  min-height: 32px;
+  padding: 0 14px;
+}
+
+.remote-pane-lease-card button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.remote-pane-lease-card button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.remote-pane-lease-error {
+  color: var(--vibelink-danger);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.terminal-panel-shell[data-active='true']::before,
+.terminal-panel-shell[data-pane-reviewed='true']::before {
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 5;
+}
+
+.terminal-panel-shell[data-active='true']::before {
+  outline: 2px solid var(--vibelink-selected-pane-highlight);
+  outline-offset: -4px;
+}
+
+.terminal-panel-shell[data-pane-reviewed='true']::before {
+  outline: 2px solid var(--vibelink-reviewed-pane-highlight);
+  outline-offset: -4px;
+}
+
+.terminal-panel-shell::after,
+.workspace-window-panel::after {
+  border: 2px solid transparent;
+  border-radius: var(--vibelink-radius-sm);
+  content: '';
+  inset: 6px;
+  pointer-events: none;
+  position: absolute;
+  transition: background 80ms ease, border-color 80ms ease;
+  z-index: 4;
+}
+
+.terminal-panel-shell[data-pane-response-complete='true']::after {
+  animation: terminal-response-complete-pulse 1.6s ease-in-out infinite;
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 14%, transparent);
+  border-color: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 58%, transparent), 0 0 24px color-mix(in srgb, var(--vibelink-alarm-highlight) 28%, transparent);
+}
+
+@keyframes terminal-response-complete-pulse {
+  0%, 100% {
+    opacity: 0.78;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.terminal-tab-response-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 12%, transparent);
+  box-shadow: inset 0 -2px 0 var(--vibelink-alarm-highlight), 0 0 16px color-mix(in srgb, var(--vibelink-alarm-highlight) 24%, transparent);
+  color: var(--vibelink-text);
+}
+
+.terminal-tab-response-complete .terminal-tab-icon,
+.terminal-tab-response-complete .terminal-tab-role {
+  color: var(--vibelink-alarm-highlight);
+}
+
+.terminal-tab-reviewed {
+  background: color-mix(in srgb, var(--vibelink-reviewed-pane-highlight) 10%, transparent);
+}
+
+.terminal-tab-reviewed .terminal-tab-icon,
+.terminal-tab-review-button-active {
+  color: var(--vibelink-reviewed-pane-highlight) !important;
+}
+
+.terminal-tab,
+.workspace-content-tab {
+  align-items: center;
+  color: var(--vibelink-text);
+  display: flex;
+  font: 700 12px/1 var(--vibelink-sans);
+  gap: 8px;
+  height: 100%;
+  min-width: 0;
+  padding: 0 7px 0 9px;
+}
+
+.terminal-tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-tab-title {
+  justify-content: flex-start;
+  padding: 0;
+  text-align: left;
+}
+
+.terminal-tab-title-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
+  background: var(--vibelink-input-strong);
+  color: var(--vibelink-text);
+  font: 700 12px/1 var(--vibelink-sans);
+  padding: 0 6px;
+}
+
+.terminal-tab-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 1px;
+}
+
+.terminal-tab-actions button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-muted);
+  display: flex;
+  height: 20px;
+  justify-content: center;
+  padding: 0;
+  transition: background-color 120ms ease, color 120ms ease;
+  width: 20px;
+}
+
+.terminal-tab-actions button:hover {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.terminal-tab-close:hover {
+  background: color-mix(in srgb, var(--vibelink-danger) 22%, transparent);
+  color: var(--vibelink-danger);
+}
+
+/* Collapsing action rail. A resting tab is icon + title + close; the rest of
+   the row is revealed only on hover or keyboard focus. `grid-template-columns:
+   0fr -> 1fr` animates to the row's INTRINSIC width, so nothing has to hard-code
+   how many buttons a tab kind renders. */
+.terminal-tab-quick-actions {
+  display: grid;
+  grid-template-columns: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-columns 190ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 130ms ease 40ms;
+}
+
+.terminal-tab-quick-actions > div {
+  display: flex;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.terminal-tab-quick-actions > div > * {
+  transform: translateX(4px);
+  transition: transform 190ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.workspace-content-tab:hover .terminal-tab-quick-actions,
+.workspace-content-tab:focus-within .terminal-tab-quick-actions {
+  grid-template-columns: 1fr;
+  opacity: 1;
+}
+
+.workspace-content-tab:hover .terminal-tab-quick-actions > div > *,
+.workspace-content-tab:focus-within .terminal-tab-quick-actions > div > * {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-tab-quick-actions,
+  .terminal-tab-quick-actions > div > * {
+    transition-duration: 1ms;
+  }
+}
+
+.workspace-dock {
+  --dv-tabs-and-actions-container-height: var(--vibelink-pane-header-height, 28px);
+}
+
+.workspace-dock .dv-tabs-and-actions-container,
+.workspace-dock .dv-scrollable,
+.workspace-dock .dv-tabs-container,
+.workspace-dock .dv-tab {
+  height: var(--dv-tabs-and-actions-container-height);
+}
+
+/* During an INNER window-tab drag, ignore renderer overlays only inside that
+   grouped workspace window. This exposes its Dockview split targets without
+   making the fixed outer workspace tab draggable or revealing outer targets. */
+.workspace-window-container[data-vl-window-drag='true'] .dv-render-overlay {
+  pointer-events: none;
+}
+
+/* One outer Dockview tab owns the full split. Its child segments mirror every
+   editor/browser/terminal window without adding a separate "Group 1" row. */
+.workspace-content-tab-workspaceWindow {
+  align-items: stretch;
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.workspace-window-combined-group {
+  display: contents;
+}
+
+.workspace-window-combined-segment {
+  align-items: stretch;
+  background: var(--dv-activegroup-hiddenpanel-tab-background-color);
+  border-right: 1px solid var(--vibelink-border);
+  display: flex;
+  min-width: 0;
+}
+
+.workspace-window-combined-segment[draggable='true'] {
+  cursor: grab;
+}
+
+.workspace-window-combined-segment[data-window-drop-position='center'] {
+  box-shadow: inset 0 0 0 2px var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='left'] {
+  box-shadow: inset 3px 0 var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='right'] {
+  box-shadow: inset -3px 0 var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='top'] {
+  box-shadow: inset 0 3px var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment[data-window-drop-position='bottom'] {
+  box-shadow: inset 0 -3px var(--vibelink-accent);
+}
+
+.workspace-window-combined-segment.is-visible {
+  background: var(--dv-activegroup-visiblepanel-tab-background-color);
+}
+
+.workspace-window-combined-segment > .workspace-content-tab {
+  max-width: 280px;
+  min-width: 120px;
+}
+
+/* Tab chrome. The strip reads as a rail of quiet labels with ONE lit tab: the
+   active tab lifts out of the bar with a rounded top and an accent hairline,
+   everything else stays flat and muted. Dockview owns the background colors
+   through its `--dv-*` variables, so only shape/edges are set here. */
+.workspace-dock .dv-tab {
+  border-radius: 7px 7px 0 0;
+  position: relative;
+  transition: background-color 140ms ease;
+}
+
+.workspace-dock .dv-tab:not(.dv-active-tab):hover {
+  background: var(--vibelink-hover);
+}
+
+/* Orca reads the active tab from its surface lift, not a bright rule. Keep a
+   marker for dense multi-pane grids, but at muted weight so it frames instead
+   of shouting — `--vibelink-accent` is near-white in the Orca palette. */
+.workspace-dock .dv-tab.dv-active-tab::after {
+  background: var(--vibelink-muted);
+  border-radius: 2px;
+  content: '';
+  height: 2px;
+  left: 8px;
+  position: absolute;
+  right: 8px;
+  top: 0;
+}
+
+/* Inner pane title bars are status bars, not a tab rail: no lifted corners. */
+.workspace-dock .terminal-window-panel .dv-tab {
+  border-radius: 0;
+}
+
+.workspace-dock .terminal-window-panel .dv-tab.dv-active-tab::after {
+  left: 0;
+  right: 0;
+}
+
+.workspace-dock .dv-default-tab,
+.workspace-dock .dv-react-part {
+  height: 100%;
+}
+
+/* Dockview ships no rules for the left-actions slot (it only styles the right
+   one). The `+` palette lives there so it sits immediately after the tab strip;
+   without an explicit flex box it would be squeezed away as tabs accumulate. */
+.workspace-dock .dv-left-actions-container {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.workspace-group-actions {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+  height: 100%;
+  padding: 0 4px;
+  position: relative;
+}
+
+.workspace-group-actions > button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vibelink-muted);
+  display: flex;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  width: 22px;
+}
+
+.workspace-group-actions > button:hover {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.workspace-group-menu {
+  background: var(--vibelink-dialog);
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
+  box-shadow: var(--vibelink-shadow);
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  position: fixed;
+  width: 196px;
+  z-index: calc(var(--z-popover) + 2);
+}
+
+.workspace-group-menu-backdrop {
+  inset: 0;
+  position: fixed;
+  z-index: calc(var(--z-popover) + 1);
+}
+
+.workspace-group-menu button {
+  align-items: center;
+  color: var(--vibelink-text);
+  display: flex;
+  font: 12px/1 var(--vibelink-sans);
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 28px;
+  padding: 0 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-group-menu button:hover {
+  background: var(--vibelink-hover);
+}
+
+.dock-terminal-host {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  /* No padding here: PaneFitAddon measures this element (xterm's parent) via
+     getComputedStyle(height), which returns the BORDER-BOX height under the
+     global `box-sizing: border-box`. Any padding here is counted as usable
+     space, so the addon allocates one row too many and clips the bottom prompt
+     line. The visual inset lives on .terminal-panel-shell instead. */
+  padding: 0;
+  background: var(--vibelink-terminal-bg);
+}
+
+.dock-terminal-host .xterm,
+.dock-terminal-host .xterm-viewport,
+.dock-terminal-host .xterm-screen {
+  height: 100%;
+  background: var(--vibelink-terminal-bg) !important;
+}
+
+/* xterm 6 keeps an empty legacy `.xterm-viewport` beside its real
+ * SmoothScrollableElement. WebView2 paints that node's native vertical
+ * scrollbar button as the small down-arrow in each pane. The custom overlay
+ * scrollbar below is the only scroll UI VibeLink uses. */
+.dock-terminal-host .xterm-viewport {
+  overflow: hidden !important;
+}
+
+/* Pane scrollbar. xterm renders VS Code's scrollable element: a 14px-wide
+ * `.scrollbar.vertical` track holding an inline-sized `.slider`. The slider's
+ * background comes from an xterm-injected <style> inside the terminal element,
+ * so these rules must out-specify `.xterm .xterm-scrollable-element > .scrollbar
+ * > .slider` (3 classes) — the `.dock-terminal-host` prefix does that without
+ * !important. The visible bar is drawn as the slider's CONTENT box so the full
+ * 14px stays grabbable while only a slim pill is painted. */
+.dock-terminal-host .xterm .xterm-scrollable-element > .scrollbar > .slider {
+  background: color-mix(in srgb, var(--vibelink-terminal-fg) 34%, transparent);
+  background-clip: content-box;
+  border-radius: 999px;
+  padding: 2px 3px 2px 7px;
+  transition: background-color 120ms linear;
+}
+
+.dock-terminal-host .xterm .xterm-scrollable-element > .scrollbar > .slider:hover {
+  background: color-mix(in srgb, var(--vibelink-terminal-fg) 52%, transparent);
+  background-clip: content-box;
+}
+
+.dock-terminal-host .xterm .xterm-scrollable-element > .scrollbar > .slider.active {
+  background: color-mix(in srgb, var(--vibelink-terminal-fg) 68%, transparent);
+  background-clip: content-box;
+}
+

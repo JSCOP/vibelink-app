@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, SquareTerminal, TextSelect, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, SquareTerminal, TextSelect, X } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { TerminalSearchBar } from '../components/TerminalSearchBar'
@@ -12,11 +12,14 @@ import { terminalImageDropText } from '../terminal/imageDrop'
 import { useWorkspaceContentActions } from './contentActions'
 import { getHermesRuntimeStatus } from '../ipc/hermes'
 import { readClipboardText } from '../ipc/clipboard'
-import type { WorkspaceContentParams } from './workspaceContentModel'
+import { parseWorkspaceContentParams, type WorkspaceContentParams } from './workspaceContentModel'
 import { reclaimAllRemotePaneLeases, reclaimRemotePaneLease, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { findTerminalWindowForPane } from './terminalWindowRegistry'
 import { toast } from '../components/toast/toastStore'
 import { agentSessionDropPaneId, subscribeAgentSessionDropPane } from '../components/agent/agentSessionDrag'
+import { formatKeyChord } from '../state/keybindings'
+import { getContentRect } from './workspaceDockGeometry'
+import { nearestPaneIdInDirection, swapPanelsInDockviewApi, type PaneDirection } from './paneSwap'
 
 type TerminalPanelParams = Extract<WorkspaceContentParams, { kind: 'terminal' }>
 
@@ -25,10 +28,12 @@ type ContextMenuState = {
   y: number
   hasSelection: boolean
   selectedPath: string | null
+  directionalTargets: Record<PaneDirection, string | null>
 }
 
 const CONTEXT_MENU_WIDTH = 232
-const CONTEXT_MENU_HEIGHT = 416
+const CONTEXT_MENU_HEIGHT = 656
+const CONTEXT_MENU_SHORTCUT_STYLE = { color: 'var(--vibelink-muted)', marginLeft: 'auto' } as const
 
 type DeferredTerminalMount = { cancelled: boolean; mount: () => void }
 
@@ -79,6 +84,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const completionHighlight = useWorkspaceStore((state) => paneId ? state.paneCompletionHighlights[paneId] : undefined)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const hermesCommand = useWorkspaceStore((state) => state.settings?.hermesCommand ?? '')
+  const keybindings = useWorkspaceStore((state) => state.settings.keybindings)
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
   const paneTitle = useWorkspaceStore((state) => paneId ? state.panes[paneId]?.config.title : undefined)
   const remoteLease = useRemotePaneLeaseStore((state) => paneId ? state.leases[paneId] : undefined)
@@ -148,11 +154,20 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     event.stopPropagation()
     if (remoteLease) return
     const selection = TerminalManager.getSelection(paneId)
+    const innerApi = findTerminalWindowForPane(paneId)?.getInnerApi()
+    const panelIds = innerApi?.panels.map((panel) => panel.id) ?? []
+    const directionalTargets: Record<PaneDirection, string | null> = {
+      left: nearestPaneIdInDirection(props.api.id, panelIds, 'left', getContentRect),
+      right: nearestPaneIdInDirection(props.api.id, panelIds, 'right', getContentRect),
+      up: nearestPaneIdInDirection(props.api.id, panelIds, 'up', getContentRect),
+      down: nearestPaneIdInDirection(props.api.id, panelIds, 'down', getContentRect),
+    }
     setContextMenu({
       x: Math.min(event.clientX, window.innerWidth - CONTEXT_MENU_WIDTH),
-      y: Math.min(event.clientY, window.innerHeight - CONTEXT_MENU_HEIGHT),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - CONTEXT_MENU_HEIGHT - 8)),
       hasSelection: selection.length > 0,
       selectedPath: pathFromTerminalSelection(selection),
+      directionalTargets,
     })
   }
 
@@ -219,6 +234,31 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
   const arrangeTerminals = () => {
     closeContextMenu()
     if (paneId) void actions.arrangeTerminals(null, findTerminalWindowForPane(paneId)?.windowId)
+  }
+
+  const focusTerminal = (direction: PaneDirection) => {
+    const targetPanelId = contextMenu?.directionalTargets[direction]
+    closeContextMenu()
+    if (!paneId || !targetPanelId) return
+    const targetPanel = findTerminalWindowForPane(paneId)?.getInnerApi()?.getPanel(targetPanelId)
+    if (!targetPanel) return
+    targetPanel.api.setActive()
+    const targetContent = parseWorkspaceContentParams(targetPanel.params)
+    if (targetContent?.kind === 'terminal') TerminalManager.focus(targetContent.paneId)
+  }
+
+  const moveTerminal = async (direction: PaneDirection) => {
+    const targetPanelId = contextMenu?.directionalTargets[direction]
+    closeContextMenu()
+    if (!paneId || !targetPanelId) return
+    const terminalWindow = findTerminalWindowForPane(paneId)
+    if (!terminalWindow) return
+    const innerApi = terminalWindow.getInnerApi()
+    if (!innerApi || !swapPanelsInDockviewApi(innerApi, props.api.id, targetPanelId)) return
+    innerApi.getPanel(props.api.id)?.api.setActive()
+    TerminalManager.focus(paneId)
+    await terminalWindow.settle()
+    terminalWindow.persist()
   }
 
   const closeTerminal = () => {
@@ -372,7 +412,7 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
       {!remoteLease && contextMenu ? (
         <>
           <div className="terminal-context-backdrop" onMouseDown={closeContextMenu} onContextMenu={(event) => { event.preventDefault(); closeContextMenu() }} />
-          <div className="terminal-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+          <div className="terminal-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }}>
             <button type="button" role="menuitem" disabled={!contextMenu.hasSelection} onClick={copySelection}>
               <Copy size={13} /> Copy
             </button>
@@ -410,8 +450,33 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             <button type="button" role="menuitem" onClick={() => splitTerminal('below')}>
               <SplitSquareHorizontal size={13} /> Split terminal below
             </button>
+            <div className="terminal-context-separator" role="separator" />
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.left} onClick={() => focusTerminal('left')}>
+              <ArrowLeft size={13} /> Focus Left <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.focusLeft)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.right} onClick={() => focusTerminal('right')}>
+              <ArrowRight size={13} /> Focus Right <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.focusRight)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.up} onClick={() => focusTerminal('up')}>
+              <ArrowUp size={13} /> Focus Up <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.focusUp)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.down} onClick={() => focusTerminal('down')}>
+              <ArrowDown size={13} /> Focus Down <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.focusDown)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.left} onClick={() => void moveTerminal('left')}>
+              <ArrowLeft size={13} /> Move Left <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.moveLeft)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.right} onClick={() => void moveTerminal('right')}>
+              <ArrowRight size={13} /> Move Right <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.moveRight)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.up} onClick={() => void moveTerminal('up')}>
+              <ArrowUp size={13} /> Move Up <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.moveUp)}</span>
+            </button>
+            <button type="button" role="menuitem" disabled={!contextMenu.directionalTargets.down} onClick={() => void moveTerminal('down')}>
+              <ArrowDown size={13} /> Move Down <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.moveDown)}</span>
+            </button>
             <button type="button" role="menuitem" onClick={arrangeTerminals}>
-              <LayoutGrid size={13} /> Arrange panes in this window
+              <LayoutGrid size={13} /> Arrange panes <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.arrangePanes)}</span>
             </button>
             <div className="terminal-context-separator" role="separator" />
             <button type="button" role="menuitem" onClick={closeTerminal}>

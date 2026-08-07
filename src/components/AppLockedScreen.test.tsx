@@ -55,11 +55,11 @@ describe('AppLockedScreen', () => {
 
   afterEach(cleanup)
 
-  it('offers purchase, account refresh, and account switching for an expired trial', async () => {
+  it('offers purchase and account refresh for an expired trial', async () => {
     render(<AppLockedScreen />)
 
-    expect(screen.getByRole('heading', { name: 'Your 7-day VibeLink trial has ended' })).toBeInTheDocument()
-    expect(screen.getByText('Use the same signed-in Moobang account to purchase. VibeLink will unlock within at most 70 seconds.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Your VibeLink trial has ended' })).toBeInTheDocument()
+    expect(screen.getByText('VibeLink is locked because the trial ended. Your workspaces remain saved. Purchase VibeLink to continue.')).toBeInTheDocument()
     expect(screen.getByText('Signed in as buyer@example.com')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Buy VibeLink' }))
@@ -68,17 +68,12 @@ describe('AppLockedScreen', () => {
     })
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'I already purchased — Refresh account' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh account' }))
     })
     expect(mocks.revalidateLicense).toHaveBeenCalledOnce()
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Sign out / switch account' }))
-    })
-    expect(mocks.signOutAccount).toHaveBeenCalledOnce()
   })
 
-  it('uses generic entitlement copy for other locked account states', () => {
+  it('uses revoked-access copy and account switching', async () => {
     mocks.store.license.status = {
       ...trialExpiredStatus,
       state: 'revoked',
@@ -88,9 +83,13 @@ describe('AppLockedScreen', () => {
 
     render(<AppLockedScreen />)
 
-    expect(screen.getByRole('heading', { name: 'VibeLink is locked' })).toBeInTheDocument()
-    expect(screen.getByText('VibeLink does not currently have an active account entitlement. Your workspaces stay in place while you refresh the account or switch to another Moobang account.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'VibeLink access was revoked' })).toBeInTheDocument()
+    expect(screen.getByText('VibeLink is locked because this account no longer has access. Switch to another account to continue.')).toBeInTheDocument()
     expect(screen.queryByText(/trial has ended/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/70 seconds/i)).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Switch account' }))
+    })
+    expect(mocks.signOutAccount).toHaveBeenCalledOnce()
   })
 })

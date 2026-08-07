@@ -9,6 +9,16 @@ describe('settings section search index', () => {
     }
   })
 
+  it('gives every searchable row a unique stable key', () => {
+    const results = settingsSearchEntries.map((entry) =>
+      searchSettingsEntries(entry.label, settingsSearchEntries.length).find(
+        (result) => result.section === entry.section && result.label === entry.label,
+      ),
+    )
+    expect(results.every((result) => Boolean(result?.key))).toBe(true)
+    expect(new Set(results.map((result) => result?.key)).size).toBe(results.length)
+  })
+
   it('finds rows by English and Korean row terms', () => {
     expect(searchSettingsEntries('font family')[0]).toMatchObject({ section: 'appearance', label: 'Font family / size / weight' })
     expect(searchSettingsEntries('폰트')[0]?.section).toBe('appearance')

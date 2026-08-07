@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest'
-import { filterPaletteItems, fuzzyScore, orderWithRecents, type PaletteItem } from './paletteModel'
+import { filterPaletteItems, fuzzyScore, orderWithRecents, paletteCategoryTitle, type PaletteCategory, type PaletteItem } from './paletteModel'
 import { closePalette, isPaletteOpen, openPalette, readPaletteRecents, recordPaletteRecent, togglePalette } from './paletteStore'
 
 const item = (id: string, label: string, category: PaletteItem['category'] = 'command', detail?: string): PaletteItem => ({
@@ -29,6 +29,13 @@ describe('fuzzyScore', () => {
   })
 })
 
+describe('palette categories', () => {
+  it('names project and workspace group sections', () => {
+    const categories: PaletteCategory[] = ['project', 'group']
+    expect(categories.map((category) => paletteCategoryTitle[category])).toEqual(['Project workspaces', 'Workspace groups'])
+  })
+})
+
 describe('filterPaletteItems', () => {
   const items = [
     item('ws:a', 'vibelink', 'workspace'),
@@ -51,6 +58,19 @@ describe('filterPaletteItems', () => {
     const labelHit = filterPaletteItems([item('a', 'omp', 'content', 'zzz'), item('b', 'Terminal 2', 'content', 'omp')], 'omp')
     expect(labelHit[0]?.id).toBe('a')
     expect(labelHit.map((entry) => entry.id)).toContain('b')
+  })
+
+  it('matches workspace host, project, and group metadata through search text', () => {
+    const workspace: PaletteItem = {
+      ...item('ws:metadata', 'Fix login', 'project', 'E:/worktrees/fix-login'),
+      host: 'github.com',
+      project: 'VibeLink',
+      group: 'Desktop apps',
+      searchText: 'github.com VibeLink Desktop apps',
+    }
+    expect(filterPaletteItems([workspace], 'github').map((entry) => entry.id)).toEqual(['ws:metadata'])
+    expect(filterPaletteItems([workspace], 'vibelink').map((entry) => entry.id)).toEqual(['ws:metadata'])
+    expect(filterPaletteItems([workspace], 'desktop apps').map((entry) => entry.id)).toEqual(['ws:metadata'])
   })
 })
 

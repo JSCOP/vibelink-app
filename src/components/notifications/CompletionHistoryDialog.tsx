@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Bell, Trash2, X } from 'lucide-react'
 import type { CompletionHistoryEntry } from '../../state/store'
 import { useWorkspaceStore } from '../../state/store'
+import { SettingsSegmented } from '../settings/controls'
 import './CompletionHistoryDialog.css'
 
 type CompletionHistoryDialogProps = {
@@ -9,11 +11,14 @@ type CompletionHistoryDialogProps = {
 }
 
 export function CompletionHistoryDialog({ onClose, onActivate }: CompletionHistoryDialogProps) {
+  const [filter, setFilter] = useState<'all' | 'unread'>('all')
   const history = useWorkspaceStore((state) => state.completionHistory)
   const sessions = useWorkspaceStore((state) => state.sessions)
+  const markCompletionRead = useWorkspaceStore((state) => state.markCompletionRead)
   const markCompletionUnread = useWorkspaceStore((state) => state.markCompletionUnread)
   const clearCompletionHistory = useWorkspaceStore((state) => state.clearCompletionHistory)
-
+  const unreadHistory = history.filter((entry) => !entry.read)
+  const visibleHistory = filter === 'unread' ? unreadHistory : history
   return (
     <div className="settings-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="settings-dialog completion-history-dialog" role="dialog" aria-modal="true" aria-labelledby="completion-history-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -22,10 +27,19 @@ export function CompletionHistoryDialog({ onClose, onActivate }: CompletionHisto
           <div className="completion-history-header-actions"><button type="button" disabled={history.length === 0} onClick={clearCompletionHistory}><Trash2 size={13} aria-hidden="true" />Clear all</button><button type="button" className="settings-close" title="Close" aria-label="Close completion history" onClick={onClose}><X size={14} aria-hidden="true" /></button></div>
         </header>
         <div className="settings-dialog-body completion-history-body">
-          {history.length > 0 ? <ol>{history.map((entry) => {
+          <div className="completion-history-toolbar">
+            <SettingsSegmented
+              label="Completion history filter"
+              value={filter}
+              options={[{ value: 'all', label: 'All' }, { value: 'unread', label: 'Unread' }]}
+              onChange={setFilter}
+            />
+            <button type="button" disabled={unreadHistory.length === 0} onClick={() => unreadHistory.forEach((entry) => markCompletionRead(entry.id))}>Mark all read</button>
+          </div>
+          {visibleHistory.length > 0 ? <ol>{visibleHistory.map((entry) => {
             const workspaceName = sessions.find((session) => session.id === entry.sessionId)?.name ?? 'Unknown workspace'
             return <li key={entry.id} data-unread={!entry.read || undefined}><button type="button" className="completion-history-entry" onClick={() => { void onActivate(entry) }}><strong>{entry.paneTitle}</strong><span>{workspaceName} · {entry.agent ?? 'Agent'} · {formatRelativeTime(entry.completedAt)}</span></button><button type="button" className="completion-history-unread" disabled={!entry.read} onClick={() => markCompletionUnread(entry.id)}>{entry.read ? 'Mark unread' : 'Unread'}</button></li>
-          })}</ol> : <p className="completion-history-empty">No agent hook completions yet.</p>}
+          })}</ol> : <p className="completion-history-empty">{filter === 'unread' ? 'No unread completions.' : 'No agent hook completions yet.'}</p>}
         </div>
       </section>
     </div>

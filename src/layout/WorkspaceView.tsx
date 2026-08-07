@@ -2200,7 +2200,7 @@ export function WorkspaceView({
           activateContent(panelId)
         }}
         >
-          <WorkspaceEmptyState api={dockApi} actions={actions} />
+          <WorkspaceEmptyState api={dockApi} actions={actions} variant="no-workspace" />
           <DockviewReact
           components={components}
           tabComponents={workspaceTabComponents}

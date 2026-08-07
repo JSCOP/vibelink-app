@@ -1,0 +1,1918 @@
+/* Owns late shared overrides and the workspace edge rail/side-panel trees; import order is load-bearing. */
+/* Shared confirm/prompt surface (`AppDialogHost`). It replaces WebView2's
+   native `window.confirm` / `window.prompt` bar, so it must outrank every
+   other dialog: Settings, Kanban, and Git dialogs can all raise one. */
+.app-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--vibelink-overlay);
+}
+
+.app-dialog {
+  width: min(460px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-lg);
+  background: var(--vibelink-dialog);
+  box-shadow: var(--vibelink-shadow), var(--vibelink-inset);
+  color: var(--vibelink-text);
+  font-size: calc(12px * var(--vibelink-ui-scale, 1));
+}
+
+.app-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-dialog-header h2 {
+  margin: 0;
+  font-size: calc(14px * var(--vibelink-ui-scale, 1));
+}
+
+.app-dialog-danger .app-dialog-header {
+  color: var(--vibelink-danger);
+}
+
+.app-dialog-message {
+  margin: 0;
+  color: var(--vibelink-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-dialog-form {
+  display: grid;
+  gap: 12px;
+}
+
+.app-dialog-field {
+  display: grid;
+  gap: 6px;
+  color: var(--vibelink-muted);
+}
+
+.app-dialog-field input {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-text);
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.app-dialog-field input:focus-visible {
+  border-color: var(--vibelink-accent-border);
+  outline: none;
+}
+
+.app-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.app-dialog-actions button {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-lg);
+  color: var(--vibelink-text);
+  min-height: 28px;
+  padding: 0 12px;
+}
+
+.app-dialog-actions button:disabled {
+  opacity: 0.5;
+}
+
+.app-dialog-actions button.primary-action {
+  background: var(--vibelink-accent-soft);
+  border-color: var(--vibelink-accent-border);
+}
+
+.app-dialog-actions button.app-dialog-danger-action {
+  background: var(--vibelink-danger-soft);
+  border-color: var(--vibelink-danger-border);
+  color: var(--vibelink-danger-text);
+}
+
+/* Global app-chrome stacking contract. Dockview/native surfaces stay below
+   launchers, while every app dialog remains the final interaction layer. */
+.topbar {
+  z-index: calc(var(--z-overlay) + 1);
+}
+
+.topbar button,
+.topbar select,
+.new-terminal-popover {
+  -webkit-app-region: no-drag;
+}
+
+.new-terminal-popover {
+  z-index: calc(var(--z-overlay) + 2);
+}
+
+.settings-backdrop,
+.workspace-create-backdrop,
+.startup-workspace-backdrop,
+.capture-annotator-backdrop,
+.setup-wizard-backdrop,
+.git-clone-backdrop {
+  z-index: calc(var(--z-modal) + 10);
+}
+
+.vibelink-quick-pick-backdrop,
+.dirty-editor-backdrop {
+  z-index: calc(var(--z-modal) + 20);
+}
+
+.app-dialog-backdrop {
+  z-index: calc(var(--z-modal) + 30);
+}
+
+.workspace-sidebar-panel-shell {
+  background: var(--vibelink-panel);
+  color: var(--vibelink-text);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.workspace-sidebar-panel-header {
+  align-items: center;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  display: flex;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 7px 0 9px;
+}
+
+.workspace-sidebar-panel-header h2 {
+  flex: 1;
+  font: 700 13px/1 var(--vibelink-sans);
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-sidebar-panel-icon {
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.workspace-sidebar-panel-actions {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+}
+
+.workspace-sidebar-panel-actions button,
+.workspace-sidebar-panel-collapse {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  width: 24px;
+}
+
+.workspace-sidebar-panel-actions button:hover,
+.workspace-sidebar-panel-actions button:focus-visible,
+.workspace-sidebar-panel-collapse:hover,
+.workspace-sidebar-panel-collapse:focus-visible {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+  outline: 1px solid var(--vibelink-border-soft);
+}
+
+.workspace-sidebar-panel-filter {
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  padding: 6px 7px;
+}
+
+.workspace-sidebar-panel-filter input {
+  font: 12px/1 var(--vibelink-sans);
+  min-height: 26px;
+  width: 100%;
+}
+
+.workspace-sidebar-panel-body {
+  display: flex;
+  flex-direction: column;
+  font: 12px/1.35 var(--vibelink-sans);
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Flex children keep their natural height by default (flex-shrink:0) so a tall
+   change list or session list scrolls the body instead of compressing the
+   commit box / branch row / section labels into each other. The one region
+   that should absorb remaining space and scroll internally opts in per panel. */
+.workspace-sidebar-panel-body > * {
+  flex: 0 0 auto;
+}
+
+/* A single full-height content wrapper (Explorer/Git window) fills the body so
+   its own background reaches the bottom instead of stopping at content height. */
+.workspace-sidebar-panel-body > :only-child {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.workspace-sidebar-panel-footer {
+  background: var(--vibelink-panel);
+  border-top: 1px solid var(--vibelink-border-soft);
+  padding: 7px;
+}
+
+.workspace-sidebar-panel-state {
+  align-items: flex-start;
+  color: var(--vibelink-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  justify-content: center;
+  min-height: 120px;
+  padding: 16px;
+  text-align: left;
+}
+
+.workspace-sidebar-panel-state strong {
+  color: var(--vibelink-text);
+  font-size: 12px;
+}
+
+.workspace-sidebar-panel-state-error strong {
+  color: var(--vibelink-danger);
+}
+
+.workspace-sidebar-panel-shell.is-active .workspace-sidebar-panel-header {
+  box-shadow: inset 2px 0 0 var(--vibelink-accent);
+}
+
+.workspace-dock .dv-edge-group {
+  border-color: var(--vibelink-border-soft);
+}
+
+/* Activity rail sizing is anchored on Dockview's own `dv-groupview-header-vertical`
+   (set from headerPosition) instead of `dv-edge-group`, which is stamped on the
+   group element only by the shell's EdgeGroupView. Whenever that shell class was
+   missing for a beat — a re-created edge group, a relayout after the window came
+   back from the background — the rail fell back to the horizontal pane-header
+   height, the strip collapsed to a few pixels, and Dockview measured EVERY tab as
+   clipped: the whole rail emptied into the "hidden tabs" dropdown and stayed there
+   until the strip happened to resize again. */
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical {
+  height: auto;
+  width: 38px;
+}
+
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical .dv-tabs-container-vertical {
+  /* Stack every activity-bar tab (Workspaces, Explorer, Source Control,
+     Git History, Branches) vertically. No clamp and no clipping: with
+     `overflow: visible` the strip's scrollHeight always equals its clientHeight,
+     so Dockview's overflow observer stays silent and can never hide a tab. */
+  height: auto;
+  max-height: none;
+  min-height: 0;
+  overflow: visible;
+  width: 38px;
+}
+
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical > .dv-scrollable {
+  /* The activity bar is a fixed, non-scrolling rail: it keeps the full stacked
+     height of its tabs instead of being flex-shrunk down by a short header. */
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical .dv-tab,
+.workspace-dock .dv-tabs-and-actions-container.dv-groupview-header-vertical .dv-react-part {
+  height: 38px;
+  min-height: 38px;
+  padding: 0;
+  width: 38px;
+}
+
+.workspace-edge-rail-tab {
+  align-items: center;
+  background: transparent;
+  display: flex;
+  height: 38px;
+  justify-content: center;
+  min-height: 38px;
+  min-width: 38px;
+  padding: 0;
+  position: relative;
+  width: 38px;
+  /* Dockview's vertical tab strip sets writing-mode: vertical-rl on the tabs
+     container; without resetting it here the rail icon, the "99+" change badge,
+     and the agent status dot inherit vertical text and render rotated. */
+  writing-mode: horizontal-tb;
+}
+
+.workspace-edge-rail-tab::before {
+  background: transparent;
+  content: '';
+  inset: 5px auto 5px 0;
+  position: absolute;
+  width: 2px;
+}
+
+.workspace-edge-rail-tab.is-active {
+  background: var(--vibelink-accent-soft);
+  color: var(--vibelink-accent);
+}
+
+.workspace-edge-rail-tab.is-active::before {
+  background: var(--vibelink-accent);
+}
+
+.workspace-edge-rail-icon {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.workspace-edge-rail-badge {
+  align-items: center;
+  background: var(--vibelink-accent);
+  border-radius: var(--vibelink-radius-md);
+  color: var(--vibelink-panel);
+  display: inline-flex;
+  font: 700 9px/1 var(--vibelink-sans);
+  justify-content: center;
+  min-height: 14px;
+  min-width: 14px;
+  padding: 0 3px;
+  position: absolute;
+  right: 1px;
+  top: 2px;
+}
+
+.workspace-edge-rail-badge.is-warning {
+  background: var(--vibelink-warning);
+  color: var(--vibelink-bg);
+}
+
+.workspace-agent-status-dot {
+  background: var(--vibelink-muted);
+  border: 1px solid var(--vibelink-panel);
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+  height: 8px;
+  width: 8px;
+}
+
+.workspace-edge-rail-tab .workspace-agent-status-dot {
+  bottom: 3px;
+  position: absolute;
+  right: 4px;
+}
+
+/* One vocabulary across every agent dot: working is yellow, finished is green,
+ * and an acknowledged pane simply loses its state class and falls back to the
+ * muted base. Waiting shifts toward red so "act now" never reads as "busy". */
+.workspace-agent-status-dot.is-waiting {
+  background: color-mix(in srgb, var(--vibelink-warning) 45%, var(--vibelink-danger));
+}
+
+.workspace-agent-status-dot.is-working {
+  background: var(--vibelink-warning);
+}
+
+.workspace-agent-status-dot.is-error {
+  background: var(--vibelink-danger);
+}
+
+.workspace-agent-status-dot.is-done {
+  background: var(--vibelink-success);
+}
+
+.workspace-agent-status-dot.is-pulsing {
+  animation: workspace-agent-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes workspace-agent-status-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-agent-status-dot.is-pulsing {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* While a divider or window drag is in flight the pointer belongs to the sash,
+ * not to a terminal. xterm's mousemove handler measures its screen element to
+ * map the pointer to a cell, and a horizontal divider drag sweeps the pointer
+ * straight across every pane — that forced measurement showed up as a
+ * top-three cost in the drag profile. Take the panes out of hit-testing for
+ * the duration; TerminalManager owns the class. */
+.vibelink-interacting .xterm {
+  pointer-events: none;
+}
+
+/* Import repos dialog */
+.import-repos-backdrop {
+  align-items: center;
+  background: var(--vibelink-overlay);
+  display: grid;
+  inset: 0;
+  justify-items: center;
+  padding: 24px;
+  position: fixed;
+  z-index: calc(var(--z-modal) + 10);
+}
+
+.import-repos-dialog {
+  background: var(--vibelink-dialog);
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
+  box-shadow: var(--vibelink-shadow);
+  display: grid;
+  font-size: calc(12px * var(--vibelink-ui-scale));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: min(780px, calc(100vh - 48px));
+  overflow: hidden;
+  width: min(760px, 100%);
+}
+
+.import-repos-header {
+  align-items: center;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 12px 14px;
+}
+
+.import-repos-header-button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  padding: 0;
+  width: 30px;
+}
+
+.import-repos-header-button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+  border-color: var(--vibelink-border);
+  color: var(--vibelink-text);
+}
+
+.import-repos-heading {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.import-repos-heading h2,
+.import-repos-grouping h3,
+.import-repos-heading p,
+.import-repos-grouping p {
+  margin: 0;
+}
+
+.import-repos-heading h2 {
+  font-size: 16px;
+}
+
+.import-repos-heading p {
+  color: var(--vibelink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-repos-body {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+
+.import-repos-selection,
+.import-repos-grouping {
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: 3px;
+}
+
+.import-repos-selection {
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.import-repos-selection-toolbar {
+  align-items: center;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-muted);
+  display: flex;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 6px 10px;
+}
+
+.import-repos-selection-toolbar button {
+  background: transparent;
+  border: 0;
+  color: var(--vibelink-accent);
+  padding: 4px 6px;
+}
+
+.import-repos-selection-toolbar button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.import-repos-list {
+  max-height: 320px;
+  min-height: 72px;
+  overflow: auto;
+}
+
+.import-repos-row {
+  align-items: center;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-text);
+  cursor: pointer;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  min-height: 54px;
+  padding: 8px 10px;
+}
+
+.import-repos-row:last-child {
+  border-bottom: 0;
+}
+
+.import-repos-row:hover {
+  background: var(--vibelink-hover);
+}
+
+.import-repos-row > input {
+  accent-color: var(--vibelink-accent);
+  margin: 0;
+}
+
+.import-repos-row > svg {
+  color: var(--vibelink-accent);
+}
+
+.import-repos-row-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.import-repos-row-copy strong,
+.import-repos-row-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-repos-row-copy small {
+  color: var(--vibelink-muted);
+  font: 10px/1.3 var(--vibelink-mono);
+}
+
+.import-repos-submodule-badge {
+  align-items: center;
+  border: 1px solid var(--vibelink-accent-border);
+  border-radius: 3px;
+  color: var(--vibelink-accent);
+  display: inline-flex;
+  font: 700 8px/1 var(--vibelink-mono);
+  font-style: normal;
+  padding: 2px 3px;
+}
+
+.import-repos-empty {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  min-height: 96px;
+  padding: 16px;
+  text-align: center;
+}
+
+.import-repos-spinner {
+  animation: setup-spin 900ms linear infinite;
+}
+
+.import-repos-grouping {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.import-repos-grouping h3 {
+  font-size: 13px;
+}
+
+.import-repos-grouping p {
+  color: var(--vibelink-muted);
+  line-height: 1.45;
+}
+
+.import-repos-grouping label {
+  color: var(--vibelink-muted);
+  display: grid;
+  gap: 6px;
+}
+
+.import-repos-grouping input {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: 3px;
+  color: var(--vibelink-text);
+  height: 34px;
+  padding: 0 10px;
+}
+
+.import-repos-grouping input:focus {
+  border-color: var(--vibelink-accent-border);
+  outline: 1px solid var(--vibelink-accent-border);
+}
+
+.import-repos-footer {
+  border-top: 1px solid var(--vibelink-border-soft);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 10px 14px;
+}
+
+@media (max-width: 640px) {
+  .import-repos-backdrop {
+    padding: 12px;
+  }
+
+  .import-repos-footer {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+}
+
+/* Workspaces rail panel */
+
+.workspaces-sidebar .workspace-sidebar-panel-body {
+  overflow: hidden;
+}
+
+.workspaces-list {
+  gap: 2px;
+  padding: 6px;
+  width: 100%;
+}
+
+.workspaces-group {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspaces-group-row {
+  align-items: center;
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-text);
+  cursor: pointer;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 14px 16px minmax(0, 1fr);
+  min-height: 30px;
+  padding: 4px 6px;
+  position: relative;
+}
+
+.workspaces-group-row:hover {
+  background: var(--vibelink-hover);
+}
+
+.workspaces-group-row.active {
+  background: var(--vibelink-accent-muted);
+  box-shadow: inset 2px 0 0 var(--vibelink-accent);
+}
+
+.workspaces-group-row.has-active-worktree:not(.active) {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--vibelink-accent) 65%, transparent);
+}
+
+.workspaces-group-row.has-completions {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 7%, transparent);
+  box-shadow: inset 2px 0 0 var(--vibelink-alarm-highlight), 0 0 14px color-mix(in srgb, var(--vibelink-alarm-highlight) 10%, transparent);
+}
+
+.workspaces-group-row.has-completions .session-name {
+  color: var(--vibelink-alarm-highlight);
+}
+
+.workspaces-group-row > svg,
+.workspaces-group-chevron {
+  color: var(--vibelink-muted);
+}
+
+.workspaces-group-chevron {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.workspaces-group-row > strong {
+  font: 700 12px/1.25 var(--vibelink-sans);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspaces-group.is-drop-target > .workspaces-group-row,
+.workspaces-ungrouped-region.is-drop-target {
+  background: color-mix(in srgb, var(--vibelink-accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px var(--vibelink-accent);
+}
+
+.workspaces-group-members {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspaces-group-members .session-row {
+  margin-left: 18px;
+  width: calc(100% - 18px);
+}
+
+.workspaces-ungrouped-region {
+  border-radius: var(--vibelink-radius-sm);
+  display: grid;
+  gap: 2px;
+  min-height: 8px;
+  min-width: 0;
+}
+
+.workspaces-ungrouped-region.is-dragging {
+  min-height: 30px;
+}
+
+.workspaces-ungrouped-drop-hint {
+  align-items: center;
+  color: var(--vibelink-muted);
+  display: flex;
+  font: 11px/1.3 var(--vibelink-sans);
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 8px;
+}
+
+.workspaces-sidebar .session-row {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 42px;
+  min-width: 0;
+}
+
+.workspaces-sidebar .session-row:not(.active):not(.has-completions):hover {
+  background: var(--vibelink-hover);
+}
+
+.workspaces-sidebar .session-main {
+  cursor: grab;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 20px 8px minmax(0, 1fr) auto auto;
+  min-height: 42px;
+  padding: 5px 6px;
+}
+
+.workspaces-sidebar .session-row.dragging .session-main {
+  cursor: grabbing;
+}
+
+.workspaces-sidebar .session-order {
+  flex: none;
+  width: 20px;
+}
+
+.workspaces-session-status {
+  background: var(--vibelink-muted);
+  border-radius: 50%;
+  height: 7px;
+  opacity: 0.55;
+  width: 7px;
+}
+
+.workspaces-session-status.is-active {
+  background: var(--vibelink-success);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--vibelink-success) 18%, transparent);
+  opacity: 1;
+}
+
+.workspaces-session-copy {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+}
+
+.workspaces-sidebar .session-name {
+  display: block;
+  flex: 0 1 auto;
+  font: 700 12px/1.25 var(--vibelink-sans);
+  min-width: 0;
+}
+
+.workspaces-session-folder {
+  color: var(--vibelink-muted);
+  direction: ltr;
+  font: 10.5px/1.3 var(--vibelink-sans);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  unicode-bidi: plaintext;
+  white-space: nowrap;
+}
+
+.workspaces-sidebar .session-badge {
+  background: var(--vibelink-input);
+  border-radius: 999px;
+  min-width: 20px;
+  padding: 3px 5px;
+  text-align: center;
+}
+
+.workspaces-row-actions {
+  align-items: center;
+  background: color-mix(in srgb, var(--vibelink-panel) 92%, transparent);
+  border-radius: var(--vibelink-radius-sm);
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  padding: 1px;
+  pointer-events: none;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  transition: opacity 100ms ease;
+}
+
+.workspaces-sidebar .session-row > .workspaces-row-actions {
+  top: 21px;
+}
+
+.workspaces-group-row:hover .workspaces-row-actions,
+.workspaces-group-row:focus-within .workspaces-row-actions,
+.workspaces-sidebar .session-row:hover .workspaces-row-actions,
+.workspaces-sidebar .session-row:focus-within .workspaces-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.workspaces-sidebar .session-small-action {
+  height: 22px;
+  min-width: 22px;
+}
+
+.workspaces-sidebar .session-row:hover .session-completion-badge,
+.workspaces-sidebar .session-row:hover .session-badge,
+.workspaces-sidebar .session-row:focus-within .session-completion-badge,
+.workspaces-sidebar .session-row:focus-within .session-badge {
+  opacity: 0;
+}
+
+.workspace-open-content-list {
+  border-left: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 1px;
+  margin: 0 5px 5px 34px;
+  min-width: 0;
+  padding: 1px 0 1px 6px;
+}
+
+/* Terminal panes list dozens of rows; keep each row ~13px (roughly half the
+   previous 25px) so a long window fits without scrolling the sidebar. */
+.workspace-open-content-item {
+  align-items: center;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+  display: grid;
+  font: 10px/13px var(--vibelink-sans);
+  gap: 5px;
+  grid-template-columns: 13px minmax(0, 1fr) 6px;
+  height: 13px;
+  justify-content: start;
+  justify-items: stretch;
+  min-width: 0;
+  padding: 0 5px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-open-content-item.is-terminal-pane {
+  padding-left: 9px;
+}
+
+.workspace-open-content-item:hover,
+.workspace-open-content-item:focus-visible {
+  background: var(--vibelink-hover);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-item.is-active {
+  background: color-mix(in srgb, var(--vibelink-accent) 10%, transparent);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-item.is-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--vibelink-alarm-highlight), inset 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 24%, transparent);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-item.is-complete .workspace-open-content-icon,
+.workspace-open-content-group-header.is-complete .workspace-open-content-icon {
+  color: var(--vibelink-alarm-highlight);
+}
+
+.workspace-open-content-icon {
+  align-items: center;
+  display: inline-flex;
+  height: 13px;
+  justify-content: center;
+}
+
+.workspace-open-content-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-open-content-status {
+  background: var(--vibelink-muted);
+  border-radius: 50%;
+  height: 4px;
+  justify-self: center;
+  opacity: 0.35;
+  width: 4px;
+}
+
+/* Green means "the agent finished", nothing else. Selection is already carried
+ * by the row background and aria-current, so an acknowledged (open, checked)
+ * terminal keeps the neutral dot. */
+.workspace-open-content-status.is-active {
+  background: var(--vibelink-muted);
+  opacity: 0.8;
+}
+
+.workspace-open-content-status.is-complete {
+  background: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
+  opacity: 1;
+}
+
+/* Agent state outranks "active"/"complete" on the dot: the row already carries
+ * selection and alert chrome, so the dot is free to answer the only question
+ * the sidebar cannot otherwise answer — is this agent still working? */
+.workspace-open-content-status.is-agent-working {
+  background: var(--vibelink-warning);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-warning) 55%, transparent);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-agent-waiting {
+  background: color-mix(in srgb, var(--vibelink-warning) 45%, var(--vibelink-danger));
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-danger) 45%, transparent);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-agent-error {
+  background: var(--vibelink-danger);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-agent-done {
+  background: var(--vibelink-success);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success) 55%, transparent);
+  opacity: 1;
+}
+
+.workspace-open-content-status.is-pulsing {
+  animation: workspace-agent-status-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-open-content-status.is-pulsing {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.profile-brand-icon {
+  display: block;
+  flex: none;
+  object-fit: contain;
+}
+
+.repository-session-row.has-active-worktree {
+  border-left-color: color-mix(in srgb, var(--vibelink-accent) 65%, transparent);
+}
+
+.workspace-worktree-list {
+  border-left: 1px solid color-mix(in srgb, var(--vibelink-accent) 28%, var(--vibelink-border-soft));
+  display: grid;
+  gap: 2px;
+  margin: 0 5px 5px 28px;
+  min-width: 0;
+  padding: 1px 0 1px 6px;
+}
+
+.workspaces-group-members .workspace-worktree-list .session-row {
+  margin-left: 0;
+  width: 100%;
+}
+
+.workspaces-sidebar .worktree-session-row {
+  min-height: 38px;
+}
+
+.workspaces-sidebar .worktree-session-row .session-main {
+  cursor: pointer;
+  min-height: 38px;
+  padding-block: 4px;
+}
+
+.workspaces-sidebar .worktree-session-row > .workspaces-row-actions {
+  top: 19px;
+}
+
+.worktree-session-name {
+  align-items: center;
+  display: flex !important;
+  gap: 5px;
+}
+
+.worktree-session-name > svg {
+  color: var(--vibelink-accent);
+  flex: none;
+}
+
+.worktree-add-action {
+  color: var(--vibelink-accent) !important;
+}
+
+.workspace-open-content-group {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.workspace-open-content-group-header {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--vibelink-muted);
+  cursor: pointer;
+  display: grid;
+  font: 700 10px/15px var(--vibelink-sans);
+  gap: 4px;
+  grid-template-columns: 11px 13px minmax(0, 1fr) 6px;
+  height: 15px;
+  padding: 0 5px 0 1px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-open-content-group-header > .workspace-open-content-icon,
+.workspace-open-content-group-chevron {
+  height: 15px;
+}
+
+.workspace-open-content-group-header:hover,
+.workspace-open-content-group-header:focus-visible,
+.workspace-open-content-group.is-active > .workspace-open-content-group-header {
+  background: color-mix(in srgb, var(--vibelink-accent) 8%, var(--vibelink-hover));
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-group-header.is-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--vibelink-alarm-highlight), inset 0 0 0 1px color-mix(in srgb, var(--vibelink-alarm-highlight) 20%, transparent);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-group-chevron {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  padding: 0;
+}
+
+.workspace-open-content-group-members {
+  border-left: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 1px;
+  margin-left: 7px;
+  min-width: 0;
+  padding-left: 4px;
+}
+
+/* Exactly eight columns so a collapsed terminal window shows up to 8 program
+   icons per row at any sidebar width instead of a few oversized tiles. */
+.workspace-open-content-icon-strip {
+  display: grid;
+  gap: 3px;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  justify-items: stretch;
+  padding: 2px 3px 4px 8px;
+}
+
+.workspace-open-content-icon-button {
+  align-items: center;
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-muted);
+  display: inline-flex;
+  height: 20px;
+  justify-content: center;
+  max-width: 24px;
+  padding: 0;
+  position: relative;
+  width: 100%;
+}
+
+.workspace-open-content-icon-button:hover,
+.workspace-open-content-icon-button:focus-visible {
+  background: var(--vibelink-hover);
+  border-color: var(--vibelink-accent-border);
+  color: var(--vibelink-text);
+}
+
+.workspace-open-content-icon-button.is-active {
+  background: var(--vibelink-accent-muted);
+  border-color: var(--vibelink-accent);
+}
+
+.workspace-open-content-icon-button.is-complete {
+  background: color-mix(in srgb, var(--vibelink-alarm-highlight) 15%, var(--vibelink-input));
+  border-color: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--vibelink-alarm-highlight) 28%, transparent);
+  color: var(--vibelink-alarm-highlight);
+}
+
+.workspace-open-content-icon-button-status {
+  background: transparent;
+  border-radius: 50%;
+  bottom: 1px;
+  height: 4px;
+  position: absolute;
+  right: 1px;
+  width: 4px;
+}
+
+.workspace-open-content-icon-button.is-active .workspace-open-content-icon-button-status {
+  background: var(--vibelink-muted);
+}
+
+.workspace-open-content-icon-button.is-complete .workspace-open-content-icon-button-status {
+  background: var(--vibelink-alarm-highlight);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-alarm-highlight) 55%, transparent);
+}
+
+/* Declared after the active/complete rules so equal specificity resolves in
+ * favour of live agent state on a collapsed terminal group's icon strip. */
+.workspace-open-content-icon-button-status.is-agent-working {
+  background: var(--vibelink-warning);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-warning) 55%, transparent);
+}
+
+.workspace-open-content-icon-button-status.is-agent-waiting {
+  background: color-mix(in srgb, var(--vibelink-warning) 45%, var(--vibelink-danger));
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-danger) 45%, transparent);
+}
+
+.workspace-open-content-icon-button-status.is-agent-error {
+  background: var(--vibelink-danger);
+  box-shadow: none;
+}
+
+.workspace-open-content-icon-button-status.is-agent-done {
+  background: var(--vibelink-success);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--vibelink-success) 55%, transparent);
+}
+
+.workspace-open-content-icon-button-status.is-pulsing {
+  animation: workspace-agent-status-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-open-content-icon-button-status.is-pulsing {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.workspace-context-menu-backdrop {
+  inset: 0;
+  position: fixed;
+  z-index: calc(var(--z-popover) + 5);
+}
+
+.workspace-context-menu {
+  background: var(--vibelink-dialog);
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
+  box-shadow: var(--vibelink-shadow);
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  position: fixed;
+  width: 212px;
+}
+
+.workspace-context-menu button {
+  align-items: center;
+  color: var(--vibelink-text);
+  display: flex;
+  font: 12px/1 var(--vibelink-sans);
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 30px;
+  padding: 0 9px;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-context-menu button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+}
+
+.workspace-context-menu button.danger {
+  color: var(--vibelink-danger);
+}
+
+.worktree-create-dialog {
+  width: min(600px, 100%);
+}
+
+.worktree-create-heading,
+.worktree-create-source,
+.worktree-profile-select {
+  align-items: center;
+  display: flex;
+}
+
+.worktree-create-heading {
+  gap: 10px;
+}
+
+.worktree-create-heading h2,
+.worktree-create-heading p {
+  margin: 0;
+}
+
+.worktree-create-mark {
+  align-items: center;
+  background: var(--vibelink-accent-muted);
+  border: 1px solid var(--vibelink-accent-border);
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-accent);
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.worktree-create-source {
+  background: var(--vibelink-panel-3);
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  color: var(--vibelink-accent);
+  gap: 9px;
+  padding: 10px 20px;
+}
+
+.worktree-create-source > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.worktree-create-source strong,
+.worktree-create-source small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-create-source small {
+  color: var(--vibelink-muted);
+}
+
+.worktree-create-fields {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.worktree-create-fields label {
+  color: var(--vibelink-muted);
+  display: grid;
+  font: 12px/1.25 var(--vibelink-sans);
+  gap: 7px;
+}
+
+.worktree-create-fields input,
+.worktree-create-fields select {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-text);
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.worktree-create-fields input:focus,
+.worktree-create-fields select:focus {
+  border-color: var(--vibelink-accent);
+  outline: none;
+}
+
+.worktree-create-field-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+}
+
+.worktree-create-field-hint {
+  color: var(--vibelink-muted);
+  font: 10px/1.35 var(--vibelink-sans);
+}
+
+.worktree-profile-select {
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border);
+  border-radius: var(--vibelink-radius-sm);
+  gap: 9px;
+  padding-left: 10px;
+}
+
+.worktree-profile-select select {
+  border: 0;
+}
+
+.worktree-create-hint,
+.worktree-create-error {
+  font: 11px/1.5 var(--vibelink-sans);
+  margin: 0;
+}
+
+.worktree-create-hint {
+  color: var(--vibelink-muted);
+}
+
+.worktree-create-summary {
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-sm);
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+}
+
+.worktree-create-summary > div {
+  align-items: baseline;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 88px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.worktree-create-summary span {
+  color: var(--vibelink-muted);
+  font: 10px/1.3 var(--vibelink-sans);
+  text-transform: uppercase;
+}
+
+.worktree-create-summary code,
+.worktree-create-summary strong {
+  color: var(--vibelink-text);
+  min-width: 0;
+}
+
+/* The resolved storage path is the point of this row, so wrap it instead of
+   truncating; long Windows roots must stay fully readable. */
+.worktree-create-summary code {
+  font: 11px/1.4 var(--vibelink-mono);
+  overflow-wrap: anywhere;
+}
+
+.worktree-create-summary strong {
+  font: 600 11px/1.3 var(--vibelink-sans);
+}
+
+.worktree-create-warning {
+  align-items: flex-start;
+  background: var(--vibelink-warning-soft);
+  border: 1px solid color-mix(in srgb, var(--vibelink-warning) 32%, transparent);
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-warning);
+  display: flex;
+  font: 11px/1.4 var(--vibelink-sans);
+  gap: 7px;
+  margin: 0;
+  padding: 7px 9px;
+}
+
+.worktree-create-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.worktree-create-warning strong {
+  font-weight: 650;
+}
+
+.worktree-create-footer {
+  justify-content: flex-end;
+}
+
+.worktree-create-progress {
+  color: var(--vibelink-muted);
+  font: 11px/1.3 var(--vibelink-sans);
+  margin-right: auto;
+}
+
+.worktree-create-error {
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-dialog {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  max-height: min(680px, calc(100vh - 48px));
+  width: min(780px, 100%);
+}
+
+.worktree-manage-list {
+  display: grid;
+  gap: 6px;
+  min-height: 96px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.worktree-manage-row {
+  align-items: center;
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-sm);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.worktree-manage-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.worktree-manage-title-line,
+.worktree-manage-badges,
+.worktree-manage-actions,
+.worktree-manage-footer .workspace-create-footer-actions {
+  align-items: center;
+  display: flex;
+}
+
+.worktree-manage-title-line {
+  gap: 7px;
+  min-width: 0;
+}
+
+.worktree-manage-title-line > strong {
+  font: 600 12px/1.25 var(--vibelink-sans);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-manage-badges {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.worktree-manage-badge {
+  border: 1px solid var(--vibelink-border);
+  border-radius: 999px;
+  color: var(--vibelink-muted);
+  font: 9px/1 var(--vibelink-sans);
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+
+.worktree-manage-badge.is-main {
+  border-color: var(--vibelink-accent-border);
+  color: var(--vibelink-accent);
+}
+
+.worktree-manage-badge.is-warning {
+  border-color: color-mix(in srgb, var(--vibelink-warning) 36%, transparent);
+  color: var(--vibelink-warning);
+}
+
+.worktree-manage-badge.is-danger {
+  border-color: color-mix(in srgb, var(--vibelink-danger) 38%, transparent);
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-path {
+  color: var(--vibelink-muted);
+  font: 10px/1.3 var(--vibelink-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-manage-note {
+  color: var(--vibelink-muted);
+  font: 10px/1.45 var(--vibelink-sans);
+  margin: 3px 0 0;
+}
+
+.worktree-manage-note code {
+  color: var(--vibelink-text);
+  font: 10px/1.3 var(--vibelink-mono);
+}
+
+.workspaces-sidebar .worktree-pending-row,
+.workspaces-sidebar .worktree-detached-row {
+  cursor: default;
+}
+
+.workspaces-sidebar .worktree-pending-row .session-order,
+.workspaces-sidebar .worktree-detached-row .session-order {
+  color: var(--vibelink-muted);
+}
+
+.workspaces-sidebar .worktree-pending-row.is-failed .session-order,
+.workspaces-sidebar .worktree-detached-row .session-order {
+  color: var(--vibelink-warning);
+}
+
+.worktree-pending-spinner {
+  animation: worktree-pending-spin 1.1s linear infinite;
+}
+
+@keyframes worktree-pending-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .worktree-pending-spinner { animation: none; }
+}
+
+.worktree-pending-recovery {
+  color: var(--vibelink-warning);
+  font: 10px/1.45 var(--vibelink-mono);
+  margin: 0 8px 6px 26px;
+  overflow-wrap: anywhere;
+}
+
+.worktree-manage-actions {
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.worktree-manage-actions button,
+.worktree-manage-footer button {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.worktree-manage-actions button {
+  font: 10px/1 var(--vibelink-sans);
+  min-height: 26px;
+  padding: 0 7px;
+}
+
+.worktree-manage-actions button.danger {
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-error,
+.worktree-manage-empty {
+  font: 11px/1.4 var(--vibelink-sans);
+  margin: 0;
+  padding: 8px 4px;
+}
+
+.worktree-manage-error {
+  color: var(--vibelink-danger);
+}
+
+.worktree-manage-empty,
+.worktree-manage-progress {
+  color: var(--vibelink-muted);
+}
+
+.worktree-manage-progress {
+  font: 11px/1.3 var(--vibelink-sans);
+  margin-right: auto;
+}
+
+.worktree-manage-footer {
+  justify-content: flex-end;
+}
+
+.worktree-manage-footer .workspace-create-footer-actions {
+  gap: 7px;
+}
+
+@media (max-width: 720px) {
+  .worktree-create-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .worktree-manage-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .worktree-manage-actions {
+    justify-content: flex-start;
+  }
+}
+/* Terminal window tab controls + add menu */
+.workspace-add-menu {
+  display: grid;
+  gap: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: min(520px, calc(100vh - 48px));
+  overflow: hidden;
+  padding: 0;
+  /* width comes from `workspaceAddMenuPlacement` so the box and the measured
+     left/flip placement share one source. */
+}
+
+.workspace-add-menu-search {
+  align-items: center;
+  border-bottom: 1px solid var(--vibelink-border-soft);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 6px 9px;
+}
+
+.workspace-add-menu-search > svg {
+  color: var(--vibelink-muted);
+}
+
+.workspace-add-menu-search input {
+  background: transparent;
+  border: 0;
+  color: var(--vibelink-text);
+  font: 12px/1 var(--vibelink-sans);
+  min-height: 30px;
+  min-width: 0;
+  outline: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.workspace-add-menu-search input::placeholder {
+  color: var(--vibelink-muted);
+}
+
+.workspace-add-menu-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 5px;
+}
+
+.workspace-add-menu-section {
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-add-menu-section-title {
+  color: var(--vibelink-muted);
+  font: 700 10px/1 var(--vibelink-sans);
+  letter-spacing: 0.08em;
+  padding: 7px 8px 4px;
+  text-transform: uppercase;
+}
+
+.workspace-group-menu button.workspace-add-menu-item {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  justify-content: start;
+  justify-items: stretch;
+  min-height: 34px;
+  padding: 5px 8px;
+}
+
+.workspace-group-menu button.workspace-add-menu-item:hover:not(:disabled),
+.workspace-group-menu button.workspace-add-menu-item[data-active='true'] {
+  background: var(--vibelink-hover);
+}
+
+.workspace-group-menu button.workspace-add-menu-item:disabled {
+  background: transparent;
+  color: var(--vibelink-muted);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.workspace-add-menu-icon {
+  align-items: center;
+  color: var(--vibelink-accent);
+  display: inline-flex;
+  justify-content: center;
+}
+
+.workspace-add-menu-item-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-add-menu-item-copy > span,
+.workspace-add-menu-item-copy > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-add-menu-item-copy > small {
+  color: var(--vibelink-muted);
+  font: 10px/1.2 var(--vibelink-sans);
+}
+
+.workspace-add-menu-empty {
+  color: var(--vibelink-muted);
+  font: 12px/1.35 var(--vibelink-sans);
+  padding: 18px 12px;
+  text-align: center;
+}
+
+/* Shown only when the centre area holds no windows at all. Without it, closing
+   the last window left nothing to click: the `+` lives in a group header, and
+   with no groups there is no header. Inset past the sidebar rails so it never
+   covers them. */
+.workspace-empty-state {
+  align-items: center;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  z-index: 1;
+}
+
+.workspace-empty-state-card {
+  color: var(--vibelink-muted);
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+  max-width: 420px;
+  pointer-events: auto;
+  text-align: center;
+}
+
+.workspace-empty-state-card h2 {
+  color: var(--vibelink-text);
+  font: 600 16px/1.3 var(--vibelink-sans);
+  margin: 0;
+}
+
+.workspace-empty-state-card p {
+  font: 12px/1.5 var(--vibelink-sans);
+  margin: 0;
+}
+
+.workspace-empty-state-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.workspace-empty-state-actions button {
+  align-items: center;
+  background: var(--vibelink-input);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-md);
+  color: var(--vibelink-text);
+  display: inline-flex;
+  font: 12px/1 var(--vibelink-sans);
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+}
+
+.workspace-empty-state-actions button:hover:not(:disabled) {
+  background: var(--vibelink-hover);
+  border-color: var(--vibelink-border);
+}
+
+.workspace-empty-state-actions button:disabled {
+  opacity: 0.45;
+}
+
+.workspace-empty-state-shortcuts {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+  width: 100%;
+}
+
+.workspace-empty-state-shortcuts > div {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.workspace-empty-state-shortcuts dt {
+  font: 12px/1 var(--vibelink-sans);
+}
+
+.workspace-empty-state-shortcuts dd {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+}
+
+.workspace-empty-state-shortcuts kbd {
+  background: var(--vibelink-panel-3);
+  border: 1px solid var(--vibelink-border-soft);
+  border-radius: var(--vibelink-radius-sm);
+  color: var(--vibelink-muted);
+  font: 10px/1 var(--vibelink-mono, var(--vibelink-sans));
+  padding: 4px 6px;
+}
+
+/* Dockview paints its own watermark over an empty dock, and it sits above the
+   empty state, swallowing the clicks on its buttons. Ours replaces it. The
+   nested terminal-window Dockview keeps its watermark: an empty group there is
+   a real signal, not the workspace-level "nothing is open" case. */
+.workspace-dock .dv-watermark,
+.workspace-dock .dv-watermark-container {
+  display: none;
+}
+
+.workspace-dock .terminal-window-panel .dv-watermark,
+.workspace-dock .terminal-window-panel .dv-watermark-container {
+  display: block;
+}

@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readAppStylesheet } from '../appStylesheet.test-support'
 
 /** The activity rail is pure CSS, and its one catastrophic failure mode is a
  * sizing rule that stops matching for a beat. The strip then falls back to the
@@ -15,12 +14,12 @@ import { describe, expect, it } from 'vitest'
 type CssRule = { selectors: string[]; body: string }
 
 function railRules(): CssRule[] {
-  const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
+  const css = readAppStylesheet()
     .replace(/\r\n/g, '\n')
     .replace(/\/\*[\s\S]*?\*\//g, '')
   const rules = [...css.matchAll(/([^{}]*dv-groupview-header-vertical[^{}]*)\{([^{}]*)\}/g)]
     .map((match) => ({ selectors: match[1].split(',').map((selector) => selector.trim()).filter(Boolean), body: match[2] }))
-  if (rules.length === 0) throw new Error('no vertical activity-rail rules in App.css')
+  if (rules.length === 0) throw new Error('no vertical activity-rail rules in the app stylesheet')
   return rules
 }
 

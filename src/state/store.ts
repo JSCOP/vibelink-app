@@ -23,6 +23,7 @@ import type { WorkspaceTodoItem, WorkspaceTodoLists, WorkspaceTodoNotes } from '
 import { disposeEditorDocumentStore } from '../editor/documentStore'
 import type { HermesModelsState, HermesPendingPrompt, HermesPlanEntry, HermesSessionInfo, HermesStatus, HermesTextPartKind, HermesToolCallView, HermesTurn, PendingPermission } from './hermes'
 import { appendHermesTextPart, appendHermesToolCallPart, capHermesTurns, updateHermesPlanPart, updateLastAssistantTurn } from './hermesTranscript'
+import { stateWithoutSession, withoutPaneKeys } from './sessionStateCleanup'
 import {
   normalizeWorkspaceLayoutState,
   serializeWorkspaceLayoutState,
@@ -813,8 +814,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       throw error
     }
     set((state) => {
-      const capturesByPane = withoutPaneKey(state.capturesByPane, paneId)
-      const captureSessionByPane = withoutPaneKey(state.captureSessionByPane, paneId)
+      const paneIds = [paneId]
+      const capturesByPane = withoutPaneKeys(state.capturesByPane, paneIds)
+      const captureSessionByPane = withoutPaneKeys(state.captureSessionByPane, paneIds)
       if (state.activeSessionId !== sessionId) return { capturesByPane, captureSessionByPane }
       const panes = { ...state.panes }
       delete panes[paneId]
@@ -822,10 +824,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         panes,
         paneLifecycle: { ...state.paneLifecycle, [paneId]: 'closed' },
         activePaneId: state.activePaneId === paneId ? undefined : state.activePaneId,
-        paneCompletionHighlights: withoutPaneKey(state.paneCompletionHighlights, paneId),
-        paneReviewMarkers: withoutPaneKey(state.paneReviewMarkers, paneId),
-        paneAgentActivity: withoutPaneKey(state.paneAgentActivity, paneId),
-        manualPaneTitles: withoutPaneKey(state.manualPaneTitles, paneId),
+        paneCompletionHighlights: withoutPaneKeys(state.paneCompletionHighlights, paneIds),
+        paneReviewMarkers: withoutPaneKeys(state.paneReviewMarkers, paneIds),
+        paneAgentActivity: withoutPaneKeys(state.paneAgentActivity, paneIds),
+        manualPaneTitles: withoutPaneKeys(state.manualPaneTitles, paneIds),
         capturesByPane,
         captureSessionByPane,
       }
@@ -1505,16 +1507,6 @@ function withoutPaneKey<T>(record: Record<string, T>, paneId: string): Record<st
   return next
 }
 
-function withoutPaneKeys<T>(record: Record<string, T>, paneIds: readonly string[]): Record<string, T> {
-  let next: Record<string, T> | null = null
-  for (const paneId of paneIds) {
-    if (!(paneId in record)) continue
-    next ??= { ...record }
-    delete next[paneId]
-  }
-  return next ?? record
-}
-
 function paneRecordsEqual(left: Record<string, PaneMeta>, right: Record<string, PaneMeta>): boolean {
   const paneIds = Object.keys(left)
   if (paneIds.length !== Object.keys(right).length) return false
@@ -1555,103 +1547,12 @@ function reconcilePaneCompletionHighlights(
   return Object.fromEntries(nextEntries)
 }
 
-function withoutSessionCompletionHighlights(
-  highlights: Record<string, PaneCompletionHighlight>,
-  sessionId: string,
-): Record<string, PaneCompletionHighlight> {
-  const nextEntries = Object.entries(highlights).filter(([, highlight]) => highlight.sessionId !== sessionId)
-  if (nextEntries.length === Object.keys(highlights).length) return highlights
-  return Object.fromEntries(nextEntries)
-}
-
 function reconcilePaneReviewMarkers(
   markers: Record<string, PaneReviewMarker>,
   sessionId: string,
   panes: Record<string, PaneMeta>,
 ): Record<string, PaneReviewMarker> {
   const nextEntries = Object.entries(markers).filter(([paneId, marker]) => marker.sessionId !== sessionId || panes[paneId]?.alive)
-  if (nextEntries.length === Object.keys(markers).length) return markers
-  return Object.fromEntries(nextEntries)
-}
-
-function stateWithoutSession(state: WorkspaceState, sessionId: string, sessions: SessionMeta[]): Partial<WorkspaceState> {
-  const deletedPaneIds = state.activeSessionId === sessionId ? Object.keys(state.panes) : []
-  const capturedPaneIds = Object.keys(state.captureSessionByPane).filter((paneId) => state.captureSessionByPane[paneId] === sessionId)
-  const deletedCapturePaneIds = [...deletedPaneIds, ...capturedPaneIds]
-  const taskIds = new Set(state.kanban.taskOrder[sessionId] ?? [])
-  const tasks = { ...state.kanban.tasks }
-  for (const taskId of taskIds) delete tasks[taskId]
-  const taskOrder = { ...state.kanban.taskOrder }
-  delete taskOrder[sessionId]
-  const viewModes = { ...state.viewModes }
-  const kanbanLayouts = { ...state.kanbanLayouts }
-  const orchestratorPaneIds = { ...state.orchestratorPaneIds }
-  const selectedTaskId = { ...state.selectedTaskId }
-  const workspaceTodos = { ...state.workspaceTodos }
-  const workspaceTodoNotes = { ...state.workspaceTodoNotes }
-  const workspaceBriefs = { ...state.workspaceBriefs }
-  const hermesStatus = { ...state.hermesStatus }
-  const hermesTranscript = { ...state.hermesTranscript }
-  const hermesPermissions = { ...state.hermesPermissions }
-  const hermesUsage = { ...state.hermesUsage }
-  const hermesModels = { ...state.hermesModels }
-  const hermesPendingPrompts = { ...state.hermesPendingPrompts }
-  const hermesGenerations = { ...state.hermesGenerations }
-  const hermesCurrentSession = { ...state.hermesCurrentSession }
-  const hermesSessions = { ...state.hermesSessions }
-  const workspaceProfileIds = { ...state.settings.workspaceProfileIds }
-  const workspaceDetails = { ...state.settings.workspaceDetails }
-  const workspaceGroupIds = { ...state.settings.workspaceGroupIds }
-  delete workspaceProfileIds[sessionId]
-  delete workspaceDetails[sessionId]
-  delete workspaceGroupIds[sessionId]
-  for (const collection of [viewModes, kanbanLayouts, orchestratorPaneIds, selectedTaskId, workspaceTodos, workspaceTodoNotes, workspaceBriefs, hermesStatus, hermesTranscript, hermesPermissions, hermesUsage, hermesModels, hermesPendingPrompts, hermesGenerations, hermesCurrentSession, hermesSessions]) {
-    delete collection[sessionId]
-  }
-  return {
-    sessions,
-    activeSessionId: state.activeSessionId === sessionId ? undefined : state.activeSessionId,
-    panes: state.activeSessionId === sessionId ? {} : state.panes,
-    paneLifecycle: state.activeSessionId === sessionId ? {} : state.paneLifecycle,
-    activePaneId: state.activeSessionId === sessionId ? undefined : state.activePaneId,
-    kanban: { tasks, taskOrder },
-    viewModes,
-    kanbanLayouts,
-    orchestratorPaneIds,
-    selectedTaskId,
-    workspaceTodos,
-    workspaceTodoNotes,
-    workspaceBriefs,
-    hermesStatus,
-    hermesTranscript,
-    hermesPermissions,
-    hermesUsage,
-    hermesModels,
-    hermesPendingPrompts,
-    hermesGenerations,
-    hermesCurrentSession,
-    hermesSessions,
-    manualPaneTitles: withoutPaneKeys(state.manualPaneTitles, deletedPaneIds),
-    capturesByPane: withoutPaneKeys(state.capturesByPane, deletedCapturePaneIds),
-    captureSessionByPane: withoutPaneKeys(state.captureSessionByPane, deletedCapturePaneIds),
-    paneCompletionHighlights: withoutSessionCompletionHighlights(state.paneCompletionHighlights, sessionId),
-    paneReviewMarkers: withoutSessionReviewMarkers(state.paneReviewMarkers, sessionId),
-    settings: {
-      ...state.settings,
-      paneRoles: withoutPaneKeys(state.settings.paneRoles, deletedPaneIds),
-      workspaceProfileIds,
-      workspaceDetails,
-      workspaceGroupIds,
-      workspaceOrder: state.settings.workspaceOrder.filter((id) => id !== sessionId),
-    },
-  }
-}
-
-function withoutSessionReviewMarkers(
-  markers: Record<string, PaneReviewMarker>,
-  sessionId: string,
-): Record<string, PaneReviewMarker> {
-  const nextEntries = Object.entries(markers).filter(([, marker]) => marker.sessionId !== sessionId)
   if (nextEntries.length === Object.keys(markers).length) return markers
   return Object.fromEntries(nextEntries)
 }

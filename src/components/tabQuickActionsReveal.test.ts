@@ -2,16 +2,17 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readAppStylesheet } from '../appStylesheet.test-support'
 
 /** The collapsing tab action rail is pure CSS, and its one real failure mode is
  * an active-tab selector that reveals controls before the pointer arrives.
- * Pull the live expansion selector out of App.css and run it against active and
- * inactive Dockview groups; none may match until its own tab is hovered or
- * keyboard-focused. */
+ * Pull the live expansion selector out of the app stylesheet and run it against
+ * active and inactive Dockview groups; none may match until its own tab is
+ * hovered or keyboard-focused. */
 function revealSelector(): string {
-  const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
+  const css = readAppStylesheet()
   const rule = css.match(/([^{}]*\.terminal-tab-quick-actions\s*\{\s*grid-template-columns:\s*1fr)/)
-  if (!rule) throw new Error('no expanded-rail rule in App.css')
+  if (!rule) throw new Error('no expanded-rail rule in the app stylesheet')
   return rule[1].replace(/\{[\s\S]*$/, '').trim()
 }
 
@@ -52,9 +53,9 @@ describe('tab action rail reveal', () => {
  * name. Rename either alone and the split overlays silently stop appearing. */
 describe('workspace window chrome', () => {
   it('drops renderer overlays out of hit-testing only during an inner window drag', () => {
-    const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8')
+    const css = readAppStylesheet()
     const rule = css.match(/([^{}]*\.dv-render-overlay\s*)\{\s*pointer-events:\s*none/)
-    if (!rule) throw new Error('no window-drag hit-testing rule in App.css')
+    if (!rule) throw new Error('no window-drag hit-testing rule in the app stylesheet')
     const selector = rule[1].trim()
 
     document.body.innerHTML = '<div class="workspace-window-container"><div class="dv-render-overlay"></div></div>'
@@ -70,7 +71,7 @@ describe('workspace window chrome', () => {
   })
 
   it('uses the outer combined tab as the only window-tab row', () => {
-    const css = readFileSync(join(process.cwd(), 'src/App.css'), 'utf8').replace(/\r\n/g, '\n')
+    const css = readAppStylesheet().replace(/\r\n/g, '\n')
     const panel = readFileSync(join(process.cwd(), 'src/layout/WorkspaceWindowPanel.tsx'), 'utf8')
 
     expect(panel).toContain('className="workspace-window-inner-dock"')

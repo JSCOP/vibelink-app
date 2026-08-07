@@ -1,12 +1,17 @@
 import type { LucideIcon } from 'lucide-react'
 
-export type PaletteCategory = 'recent' | 'workspace' | 'content' | 'terminal' | 'command'
+export type PaletteCategory = 'recent' | 'group' | 'project' | 'workspace' | 'content' | 'terminal' | 'command'
 
 export type PaletteItem = {
   id: string
   category: Exclude<PaletteCategory, 'recent'>
   label: string
   detail?: string
+  /** Workspace scope metadata used by palette search and filter chips. */
+  host?: string
+  project?: string
+  group?: string
+  searchText?: string
   icon?: LucideIcon
   /** Profile-icon registry name (brand marks, agent icons); wins over `icon`. */
   iconName?: string
@@ -16,6 +21,8 @@ export type PaletteItem = {
 
 export const paletteCategoryTitle: Record<PaletteCategory, string> = {
   recent: 'Recent',
+  group: 'Workspace groups',
+  project: 'Project workspaces',
   workspace: 'Switch workspace',
   content: 'Open content',
   terminal: 'New terminal',
@@ -56,7 +63,7 @@ export function filterPaletteItems(items: PaletteItem[], query: string): Palette
   const trimmed = query.trim()
   if (!trimmed) return items
   return items
-    .map((item, index) => ({ item, index, score: Math.max(fuzzyScore(trimmed, item.label), item.detail ? fuzzyScore(trimmed, item.detail) * 0.6 : -1) }))
+    .map((item, index) => ({ item, index, score: Math.max(fuzzyScore(trimmed, item.label), item.detail ? fuzzyScore(trimmed, item.detail) * 0.6 : -1, item.searchText ? fuzzyScore(trimmed, item.searchText) * 0.5 : -1) }))
     .filter((entry) => entry.score >= 0)
     .sort((left, right) => right.score - left.score || left.index - right.index)
     .map((entry) => entry.item)

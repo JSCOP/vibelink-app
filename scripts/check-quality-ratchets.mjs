@@ -1,17 +1,62 @@
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const sourceBudgets = {
-  'src/App.css': 7_373,
-  'src/layout/WorkspaceView.tsx': 2_555,
-  'src/terminal/TerminalManager.ts': 2_372,
-  'src/state/store.ts': 2_338,
+  // Tracked hotspots: current non-growth baselines; lower them when files shrink.
+  'src/layout/WorkspaceView.tsx': 2_530,
+  'src/terminal/TerminalManager.ts': 2_363,
+  'src/state/store.ts': 2_197,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
+  'src-tauri/src/remote/bridge.rs': 5_568,
+  'src-tauri/src/orchestration/mod.rs': 4_683,
+  'src-tauri/src/app/git/worktree_registry.rs': 3_149,
+  'src-tauri/src/browser/manager.rs': 3_126,
+  'src-tauri/src/daemon/session.rs': 3_072,
+  'src-tauri/src/browser/provider.rs': 2_834,
+  'src-tauri/src/app/hermes.rs': 2_706,
+  'src-tauri/src/control_plane.rs': 2_471,
+  // Over-cap baseline: split or justify before raising.
+  'src/components/SettingsDialog.tsx': 1_483,
+  'src/styles/appChrome.css': 1_834,
+  'src/styles/gitWindow.css': 1_465,
+  'src/styles/workspaceRail.css': 1_918,
+  'src/state/store.test.ts': 1_427,
+  'src-tauri/src/app/agent_hooks.rs': 2_652,
+  'src-tauri/src/app/android_device_lab.rs': 1_680,
+  'src-tauri/src/app/browser.rs': 1_427,
+  'src-tauri/src/app/capture.rs': 1_435,
+  'src-tauri/src/app/daemon_client.rs': 1_210,
+  'src-tauri/src/app/fsops.rs': 1_704,
+  'src-tauri/src/daemon/dispatch.rs': 4_766,
+  'src-tauri/src/daemon/tests.rs': 1_580,
+  'src-tauri/src/app/git/worktree_lifecycle.rs': 2_396,
+  'src-tauri/src/app/license.rs': 1_882,
+  'src-tauri/src/app/provider_integrations.rs': 2_056,
+  'src-tauri/src/app/spawn_daemon.rs': 1_982,
+  'src-tauri/src/daemon/automation/runner.rs': 1_390,
+  'src-tauri/src/dedicated_cli/browser_cdp.rs': 2_107,
+  'src-tauri/src/dedicated_cli/contract.rs': 2_019,
+  'src-tauri/src/mcp/mod.rs': 2_046,
+  'src-tauri/src/protocol.rs': 1_227,
+  'src-tauri/src/remote/server.rs': 1_273,
 }
+
+const sourceHardCap = 1_200
+const sourceScanRoots = [
+  ['src', /\.(?:ts|tsx|css)$/],
+  ['src-tauri/src', /\.rs$/],
+]
+const sourceExclusions = [
+  'src-tauri/gen',
+  'node_modules',
+  'dist',
+  'target',
+  'uniffi',
+]
 
 const bundleBudgets = [
   ['App', /^App-.*\.js$/, 480_256],
@@ -24,6 +69,35 @@ const bundleBudgets = [
 function lineCount(text) {
   if (!text) return 0
   return text.split(/\r?\n/).length - (text.endsWith('\n') ? 1 : 0)
+}
+
+function normalizeSourcePath(file) {
+  return file.replaceAll('\\', '/')
+}
+
+function isExcludedSourcePath(file) {
+  const normalized = normalizeSourcePath(file)
+  const segments = normalized.split('/')
+  return sourceExclusions.some((excluded) =>
+    excluded.includes('/')
+      ? normalized === excluded || normalized.startsWith(`${excluded}/`)
+      : segments.includes(excluded),
+  )
+}
+
+function isOverSourceHardCap(lines) {
+  return lines > sourceHardCap
+}
+
+function walkSourceFiles(directory, filePattern, files = []) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const absolutePath = join(directory, entry.name)
+    const file = normalizeSourcePath(relative(root, absolutePath))
+    if (isExcludedSourcePath(file)) continue
+    if (entry.isDirectory()) walkSourceFiles(absolutePath, filePattern, files)
+    else if (entry.isFile() && filePattern.test(entry.name)) files.push(file)
+  }
+  return files
 }
 
 function staticGraph(manifest, entry) {
@@ -68,6 +142,17 @@ function checkSources() {
   for (const [file, maximum] of Object.entries(sourceBudgets)) {
     overBudget(file, lineCount(readFileSync(join(root, file), 'utf8')), maximum, failures)
   }
+  for (const [directory, filePattern] of sourceScanRoots) {
+    for (const file of walkSourceFiles(join(root, directory), filePattern).sort()) {
+      if (Object.hasOwn(sourceBudgets, file)) continue
+      const lines = lineCount(readFileSync(join(root, file), 'utf8'))
+      if (isOverSourceHardCap(lines)) {
+        failures.push(
+          `${file}: ${lines.toLocaleString()} lines exceeds the ${sourceHardCap.toLocaleString()}-line hard cap; split the file or add an explicit sourceBudgets baseline with a reason`,
+        )
+      }
+    }
+  }
   report('Source line ratchet', failures)
 }
 
@@ -101,6 +186,10 @@ function checkBundles() {
 
 function selfTest() {
   assert.equal(lineCount('one\r\n\r\nthree\n'), 3)
+  assert.equal(isExcludedSourcePath('src-tauri/gen/schema.rs'), true)
+  assert.equal(isExcludedSourcePath('src/components/App.tsx'), false)
+  assert.equal(isOverSourceHardCap(1_201), true)
+  assert.equal(isOverSourceHardCap(1_200), false)
   const manifest = {
     'index.html': { file: 'assets/index.js', imports: ['_shared.js'], dynamicImports: ['src/editor/monaco.ts'] },
     '_shared.js': { file: 'assets/shared.js' },

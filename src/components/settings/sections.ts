@@ -130,7 +130,16 @@ export type SettingsSearchEntry = {
   label: string
   /** Extra match words; Korean aliases live here, never rendered. */
   keywords: string
+  /** Derived from section + label so search results and rendered targets cannot maintain separate ids. */
+  key: string
 }
+
+export function settingsSearchKey(section: SettingsSectionId, label: string): string {
+  const labelSlug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+  return `${section}-${labelSlug}`
+}
+
+type SettingsSearchEntryDefinition = Omit<SettingsSearchEntry, 'key'>
 
 /**
  * Curated row-level index for the settings search. One entry per visible row or
@@ -138,7 +147,7 @@ export type SettingsSearchEntry = {
  * keeps its rows. Add/remove entries with the rows they describe; the tests
  * require every section to keep at least one entry.
  */
-export const settingsSearchEntries: SettingsSearchEntry[] = [
+const settingsSearchEntryDefinitions: SettingsSearchEntryDefinition[] = [
   { section: 'account', label: 'Sign in / account status', keywords: 'log in login moobang sign out session 로그인 로그아웃 계정' },
   { section: 'account', label: 'Plan & trial', keywords: 'license pro trial price entitlement 라이선스 플랜 트라이얼 결제' },
   { section: 'account', label: 'Registered devices', keywords: 'device slots deactivate 기기 등록 해제' },
@@ -149,7 +158,7 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'appearance', label: 'Reviewed pane highlight', keywords: 'blue outline review 검토 테두리' },
   { section: 'appearance', label: 'Alarm highlight', keywords: 'completion color alert 완료 색상' },
   { section: 'appearance', label: 'Cursor style', keywords: 'block underline bar 커서' },
-  { section: 'appearance', label: 'Pane header height', keywords: 'tab title bar 탭 높이 제목' },
+  { section: 'workspace', label: 'Pane header height', keywords: 'tab title bar 탭 높이 제목' },
   { section: 'notifications', label: 'Completion alert', keywords: 'response complete highlight 완료 알림' },
   { section: 'notifications', label: 'Completion sound & volume', keywords: 'play audio sound volume 소리 볼륨' },
   { section: 'notifications', label: 'Custom sound file', keywords: 'add file mp3 wav 파일' },
@@ -165,7 +174,7 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'mcp', label: 'MCP server & self-check', keywords: 'server bridge tools self check 서버 점검' },
   { section: 'memory', label: 'Persistent memory', keywords: 'memory context compression 메모리 압축' },
   { section: 'memory', label: 'Agent memory skill', keywords: 'skill install claude codex omp agents share 스킬 설치 에이전트 메모리' },
-  { section: 'workspace', label: 'Workspace ordering', keywords: 'sort mode smart manual 정렬 순서' },
+  { section: 'worktrees', label: 'Workspace ordering', keywords: 'sort mode smart manual 정렬 순서' },
   { section: 'workspace', label: 'When reopening (session restore)', keywords: 'resume clean restart exit restore 재시작 복원 종료' },
   { section: 'workspace', label: 'Close button minimizes to tray', keywords: 'tray minimize quit 닫기 트레이' },
   { section: 'workspace', label: 'Confirm when agents are still working', keywords: 'confirm exit busy 종료 확인' },
@@ -178,7 +187,7 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'worktrees', label: 'Storage mode & folder', keywords: 'drive folder custom root 저장 위치' },
   { section: 'worktrees', label: 'Group by repository', keywords: 'repository grouping 레포 그룹' },
   { section: 'gitHosting', label: 'GitHub / GitLab credentials', keywords: 'token credential scopes 깃헙 토큰' },
-  { section: 'gitHosting', label: 'Git status presentation', keywords: 'words letters icons 상태 표시' },
+  { section: 'appearance', label: 'Git status presentation', keywords: 'words letters icons 상태 표시' },
   { section: 'remote', label: 'Remote access & pairing', keywords: 'mobile phone pairing qr 모바일 페어링' },
   { section: 'remote', label: 'LAN & firewall', keywords: 'lan port firewall 방화벽 포트' },
   { section: 'integrations', label: 'Editor command', keywords: 'external editor code 편집기 명령' },
@@ -192,6 +201,11 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
   { section: 'archived', label: 'Archived chats', keywords: 'history sessions 보관 대화' },
   { section: 'about', label: 'Version & setup wizard', keywords: 'version product wizard setup 버전 마법사 설정' },
 ]
+
+export const settingsSearchEntries: SettingsSearchEntry[] = settingsSearchEntryDefinitions.map((entry) => ({
+  ...entry,
+  key: settingsSearchKey(entry.section, entry.label),
+}))
 
 export type SettingsSearchResult = SettingsSearchEntry & { score: number }
 

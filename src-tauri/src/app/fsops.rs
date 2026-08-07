@@ -1,4 +1,4 @@
-use super::git::paths::contain_path;
+use super::git::{git_output, paths::contain_path, split_nul};
 use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -105,6 +105,17 @@ pub async fn fs_list_dir(
 ) -> Result<Vec<DirEntryInfo>, String> {
     authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
         list_dir_native(&workspace_folder, &rel_path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fs_list_workspace_files(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    workspace_folder: String,
+) -> Result<Vec<String>, String> {
+    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+        list_workspace_files_native(&workspace_folder)
     })
     .await
 }
@@ -277,6 +288,31 @@ pub async fn open_in_editor(
         open_in_editor_native(&workspace_folder, &rel_path, &editor_command)
     })
     .await
+}
+
+fn list_workspace_files_native(workspace_folder: &str) -> Result<Vec<String>> {
+    let output = match git_output(
+        workspace_folder,
+        [
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    ) {
+        Ok(output) => output,
+        Err(error)
+            if error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("not a git repository") =>
+        {
+            bail!("workspace is not a Git repository")
+        }
+        Err(error) => return Err(error).context("list workspace files with git"),
+    };
+    Ok(split_nul(&output))
 }
 
 fn list_dir_native(root: &str, rel_path: &str) -> Result<Vec<DirEntryInfo>> {

@@ -343,6 +343,7 @@ pub fn run() {
             fsops::fs_create_file,
             fsops::fs_delete,
             fsops::fs_list_dir,
+            fsops::fs_list_workspace_files,
             fsops::fs_read_image,
             fsops::fs_read_text,
             fsops::fs_path_kind,

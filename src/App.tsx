@@ -46,6 +46,11 @@ import './styles/theme.css'
 import './styles/kanban.css'
 import './styles/memory.css'
 import './App.css'
+import './styles/workspaceShell.css'
+import './styles/terminalShell.css'
+import './styles/appChrome.css'
+import './styles/gitWindow.css'
+import './styles/workspaceRail.css'
 import './styles/gitHistory.css'
 const SettingsDialog = lazy(() => import('./components/SettingsDialog').then((module) => ({ default: module.SettingsDialog })))
 const StartupWorkspaceDialog = lazy(() => import('./components/StartupWorkspaceDialog').then((module) => ({ default: module.StartupWorkspaceDialog })))
@@ -694,14 +699,18 @@ function App() {
     void openSession(sessionId)
   }, [openSession])
 
+  const activateTerminalPane = useCallback(async (workspaceId: string, paneId: string) => {
+    if (workspaceId !== useWorkspaceStore.getState().activeSessionId) await openSession(workspaceId)
+    contentActionsRef.current?.activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+  }, [openSession])
+
   const activateCompletionHistoryEntry = useCallback(async (entry: CompletionHistoryEntry) => {
-    if (entry.sessionId !== useWorkspaceStore.getState().activeSessionId) await openSession(entry.sessionId)
-    contentActionsRef.current?.activateContent(workspaceContentPanelId({ kind: 'terminal', instanceId: entry.paneId }))
+    await activateTerminalPane(entry.sessionId, entry.paneId)
     const state = useWorkspaceStore.getState()
     state.clearPaneCompletionHighlight(entry.paneId)
     state.markCompletionRead(entry.id)
     setIsCompletionHistoryOpen(false)
-  }, [openSession])
+  }, [activateTerminalPane])
 
 
   useEffect(() => {
@@ -1024,7 +1033,7 @@ function App() {
             </section>
           </div>
         ) : null}
-        {status === 'ready' && !setupWizardVisible ? <StatusBar onOpenCompletionHistory={() => setIsCompletionHistoryOpen(true)} onOpenResourceMonitor={() => setIsResourceMonitorOpen(true)} /> : null}
+        {status === 'ready' && !setupWizardVisible ? <StatusBar onActivateAgentPane={activateTerminalPane} onOpenCompletionHistory={() => setIsCompletionHistoryOpen(true)} onOpenResourceMonitor={() => setIsResourceMonitorOpen(true)} /> : null}
       </section>
     </main>
     {dirtyEditorPrompt && typeof document !== 'undefined' ? createPortal(

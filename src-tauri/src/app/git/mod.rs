@@ -17,10 +17,8 @@ pub(crate) mod worktree_lifecycle;
 pub(crate) mod worktree_operation;
 pub(crate) mod worktree_registry;
 
-use self::exec::{
-    git_exit_status, git_read as git_output, git_read_allow_fail as git_output_allow_fail,
-    git_write,
-};
+pub(crate) use self::exec::git_read as git_output;
+use self::exec::{git_exit_status, git_read_allow_fail as git_output_allow_fail, git_write};
 use self::paths::{resolve_repo_file_path, validate_base_ref};
 use self::worktree::{WorktreeStorage, WorktreeStorageOptions, WorktreeStorageResolution};
 use self::worktree_lifecycle::{WorktreeCreateResult, WorktreeMoveResult};

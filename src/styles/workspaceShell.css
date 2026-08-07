@@ -1,0 +1,81 @@
+/* Owns workspace views and nested Dockview shells; import order is load-bearing. */
+/* Window tabs are mirrored into the one outer combined tab. Hide only the
+   nested workspace-window rows; terminal pane title rows remain visible. */
+.workspace-window-inner-dock .dv-tabs-and-actions-container {
+  display: none;
+}
+
+.workspace-window-inner-dock .terminal-window-panel .dv-tabs-and-actions-container {
+  display: flex;
+}
+
+.workspace-window-inner-dock .dv-groupview[data-vl-window-drop-position] {
+  position: relative;
+}
+
+.workspace-window-inner-dock .dv-groupview[data-vl-window-drop-position]::after {
+  background: color-mix(in srgb, var(--vibelink-accent) 14%, transparent);
+  border: 2px solid var(--vibelink-accent);
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+}
+
+.workspace-window-inner-dock .dv-groupview[data-vl-window-drop-position='left']::after {
+  inset: 0 50% 0 0;
+}
+
+.workspace-window-inner-dock .dv-groupview[data-vl-window-drop-position='right']::after {
+  inset: 0 0 0 50%;
+}
+
+.workspace-window-inner-dock .dv-groupview[data-vl-window-drop-position='top']::after {
+  inset: 0 0 50%;
+}
+
+.workspace-window-inner-dock .dv-groupview[data-vl-window-drop-position='bottom']::after {
+  inset: 50% 0 0;
+}
+
+.workspace-window-inner-dock .terminal-window-panel.terminal-window-titles-hidden .dv-tabs-and-actions-container {
+  display: none;
+}
+
+.terminal-panel-shell {
+  /* Visual inset around the terminal content. Lives here (not on
+     .dock-terminal-host) so it is NOT counted by PaneFitAddon's height
+     measurement, which would otherwise over-allocate a row and clip the prompt line. */
+  padding: 5px;
+}
+
+.agent-session-terminal-drop {
+  align-items: center;
+  backdrop-filter: blur(3px);
+  background: color-mix(in srgb, var(--vibelink-terminal-bg) 76%, var(--vibelink-accent-soft));
+  border: 2px solid var(--vibelink-accent);
+  color: var(--vibelink-text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  inset: 5px;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  z-index: 12;
+}
+
+.agent-session-terminal-drop svg {
+  color: var(--vibelink-accent);
+}
+
+.agent-session-terminal-drop strong {
+  font: 600 13px/1.2 var(--vibelink-sans);
+}
+
+.agent-session-terminal-drop span {
+  color: var(--vibelink-muted);
+  font: 11px/1.35 var(--vibelink-sans);
+}
+

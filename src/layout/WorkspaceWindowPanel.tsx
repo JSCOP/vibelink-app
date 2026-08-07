@@ -279,7 +279,7 @@ export function WorkspaceWindowPanel({
           theme={vibelinkDockviewTheme}
         />
       </div>
-      <WorkspaceEmptyState api={innerApi} actions={actions} />
+      <WorkspaceEmptyState api={innerApi} actions={actions} variant="empty-window" />
     </div>
   )
 }

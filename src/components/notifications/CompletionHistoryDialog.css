@@ -3,6 +3,8 @@
 .completion-history-header-actions { align-items: center; display: flex; gap: 8px; }
 .completion-history-header-actions > button:not(.settings-close) { align-items: center; display: inline-flex; gap: 5px; }
 .completion-history-body { display: block; }
+.completion-history-toolbar { align-items: center; display: flex; gap: 12px; justify-content: space-between; margin-bottom: 12px; }
+.completion-history-toolbar > button { font-size: 11px; }
 .completion-history-body ol { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
 .completion-history-body li { align-items: center; border: 1px solid var(--vibelink-border-soft); border-radius: var(--vibelink-radius-sm); display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 5px; }
 .completion-history-body li[data-unread] { border-color: var(--vibelink-accent); background: color-mix(in srgb, var(--vibelink-accent) 8%, transparent); }

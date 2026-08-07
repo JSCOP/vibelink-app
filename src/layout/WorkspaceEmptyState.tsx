@@ -6,13 +6,13 @@ import type { WorkspaceContentActions } from './contentActions'
 type WorkspaceEmptyStateProps = {
   api: DockviewApi | null
   actions: WorkspaceContentActions | null
+  variant: 'no-workspace' | 'empty-window'
 }
 
-/** Only the shortcuts that actually work with no window open. Both are handled
- *  in `WorkspaceView`'s keydown listener ahead of the panel-scoped bindings. */
+/** Ctrl+N is handled in `WorkspaceView` before panel-scoped bindings, so it
+ * remains available when an open workspace window has no content. */
 const shortcuts: Array<{ label: string; keys: string[] }> = [
   { label: 'New terminal', keys: ['Ctrl', 'N'] },
-  { label: 'Open file', keys: ['Ctrl', 'P'] },
 ]
 
 /** Closing the last window left the centre area completely inert: the `+` lives
@@ -31,7 +31,7 @@ function edgeInsets(api: DockviewApi): { left: number; right: number } {
   return { left: width('left'), right: width('right') }
 }
 
-export function WorkspaceEmptyState({ api, actions }: WorkspaceEmptyStateProps) {
+export function WorkspaceEmptyState({ api, actions, variant }: WorkspaceEmptyStateProps) {
   const [revision, setRevision] = useState(0)
 
   useEffect(() => {
@@ -56,24 +56,30 @@ export function WorkspaceEmptyState({ api, actions }: WorkspaceEmptyStateProps) 
   return (
     <div className="workspace-empty-state" style={{ left: state.left, right: state.right }}>
       <div className="workspace-empty-state-card">
-        <h2>No windows open</h2>
-        <p>Open a terminal or another window to start working in this workspace.</p>
-        <div className="workspace-empty-state-actions">
-          <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminal' })}>
-            <SquareTerminal size={15} aria-hidden="true" /> New terminal
-          </button>
-          <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminalWindow' })}>
-            <LayoutGrid size={15} aria-hidden="true" /> New terminal window
-          </button>
-        </div>
-        <dl className="workspace-empty-state-shortcuts">
-          {shortcuts.map((shortcut) => (
-            <div key={shortcut.label}>
-              <dt>{shortcut.label}</dt>
-              <dd>{shortcut.keys.map((key) => <kbd key={key}>{key}</kbd>)}</dd>
+        <h2>{variant === 'empty-window' ? 'Empty workspace window' : 'No workspace open'}</h2>
+        <p>{variant === 'empty-window'
+          ? 'Add a terminal pane or terminal window to this workspace.'
+          : 'Create or open a workspace to start working.'}</p>
+        {variant === 'empty-window' ? (
+          <>
+            <div className="workspace-empty-state-actions">
+              <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminal' })}>
+                <SquareTerminal size={15} aria-hidden="true" /> New terminal
+              </button>
+              <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminalWindow' })}>
+                <LayoutGrid size={15} aria-hidden="true" /> New terminal window
+              </button>
             </div>
-          ))}
-        </dl>
+            <dl className="workspace-empty-state-shortcuts">
+              {shortcuts.map((shortcut) => (
+                <div key={shortcut.label}>
+                  <dt>{shortcut.label}</dt>
+                  <dd>{shortcut.keys.map((key) => <kbd key={key}>{key}</kbd>)}</dd>
+                </div>
+              ))}
+            </dl>
+          </>
+        ) : null}
       </div>
     </div>
   )

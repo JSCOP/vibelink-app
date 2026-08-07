@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { WorkspaceContentParams } from './workspaceContentModel'
@@ -264,7 +264,14 @@ describe('automation pane role', () => {
     // The frontend routes these panes into their own terminal window purely by
     // this string. Rename it on one side only and automation runs silently go
     // back to landing in whichever window happens to be first.
-    const daemon = readFileSync(join(process.cwd(), 'src-tauri/src/daemon/mod.rs'), 'utf8')
+    // Scan every production daemon module rather than one file, so moving the
+    // spawn code between modules cannot silently retire this check. `tests.rs`
+    // is excluded: a fixture repeating the literal must not satisfy it.
+    const daemonDir = join(process.cwd(), 'src-tauri/src/daemon')
+    const daemon = readdirSync(daemonDir)
+      .filter((name) => name.endsWith('.rs') && name !== 'tests.rs')
+      .map((name) => readFileSync(join(daemonDir, name), 'utf8'))
+      .join('\n')
     expect(daemon).toContain(`role: Some("${AUTOMATION_PANE_ROLE}".to_string())`)
   })
 })
