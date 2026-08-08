@@ -8,6 +8,8 @@ pub const DEV_MAIN_WEBVIEW_CDP_PORT_END: u16 = 19_363;
 pub const PROD_BROWSER_PROFILE_PORT_START: u16 = 9_334;
 pub const DEV_BROWSER_PROFILE_PORT_START: u16 = 19_400;
 pub const BROWSER_PROFILE_PORT_CAPACITY: u16 = 256;
+pub const PROD_BROWSER_EXTENSION_PORT: u16 = 9_332;
+pub const DEV_BROWSER_EXTENSION_PORT: u16 = 19_399;
 pub const PROD_REMOTE_PORT: u16 = 42_811;
 pub const DEV_REMOTE_PORT: u16 = 42_812;
 
@@ -41,6 +43,17 @@ pub const fn default_remote_port(debug_build: bool) -> u16 {
         DEV_REMOTE_PORT
     } else {
         PROD_REMOTE_PORT
+    }
+}
+
+/// Loopback port the Chrome extension connects back to. Flavor-isolated and
+/// deliberately outside the WebView2 main and browser-profile ranges so one
+/// Chrome can serve a DEV and a RELEASE daemon at the same time.
+pub fn browser_extension_port(main_cdp_port: u16) -> u16 {
+    if (DEV_MAIN_WEBVIEW_CDP_PORT..=DEV_MAIN_WEBVIEW_CDP_PORT_END).contains(&main_cdp_port) {
+        DEV_BROWSER_EXTENSION_PORT
+    } else {
+        PROD_BROWSER_EXTENSION_PORT
     }
 }
 

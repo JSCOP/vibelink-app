@@ -7,7 +7,7 @@ use super::browser_page::{
 };
 use crate::{
     browser::{BrowserDeviceMetrics, BrowserPolicy, BrowserRiskCapability},
-    dedicated_cli::{chrome_profile, ActionCommand, BrowserAction},
+    dedicated_cli::{browser_extension, chrome_profile, ActionCommand, BrowserAction},
     runtime_ports,
 };
 use anyhow::{bail, Context, Result};
@@ -20,6 +20,8 @@ use std::{
     io::Read,
     net::TcpStream,
     path::{Path, PathBuf},
+    sync::Arc,
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
@@ -105,21 +107,25 @@ impl CdpAccessPolicy {
 #[serde(rename_all = "camelCase")]
 pub(super) struct DebugTarget {
     pub(super) id: String,
-    title: String,
-    url: String,
+    pub(super) title: String,
+    pub(super) url: String,
     #[serde(rename = "type")]
-    target_type: String,
-    web_socket_debugger_url: Option<String>,
+    pub(super) target_type: String,
+    pub(super) web_socket_debugger_url: Option<String>,
     #[serde(skip)]
-    cdp_port: u16,
+    pub(super) cdp_port: u16,
     #[serde(skip)]
-    page_id: Option<String>,
+    pub(super) page_id: Option<String>,
     #[serde(skip)]
-    profile_id: Option<String>,
+    pub(super) profile_id: Option<String>,
     #[serde(skip)]
-    workspace_id: Option<String>,
+    pub(super) workspace_id: Option<String>,
     #[serde(skip)]
-    external: bool,
+    pub(super) external: bool,
+    /// Set only for a tab reached through the Chrome extension backend, where
+    /// there is no debugging port and no websocket URL.
+    #[serde(skip)]
+    pub(super) extension_tab_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -145,9 +151,19 @@ struct BrowserCdpPage {
     workspace_id: String,
 }
 
-pub(super) struct CdpConnection {
-    socket: WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: u64,
+/// Two transports, one command surface. A VibeLink-owned WebView2 page is a
+/// loopback CDP websocket; a tab in the user's running Chrome is reached
+/// through the extension bridge. Every element action funnels through `call`,
+/// so nothing above this type knows which backend it is talking to.
+pub(super) enum CdpConnection {
+    Socket {
+        socket: Box<WebSocket<MaybeTlsStream<TcpStream>>>,
+        next_id: u64,
+    },
+    Extension {
+        bridge: Arc<browser_extension::ExtensionBridge>,
+        tab_id: i64,
+    },
 }
 
 impl CdpConnection {
@@ -172,17 +188,24 @@ impl CdpConnection {
             }
             _ => bail!("browser target exposed a non-plain CDP websocket transport"),
         }
-        Ok(Self { socket, next_id: 1 })
+        Ok(Self::Socket {
+            socket: Box::new(socket),
+            next_id: 1,
+        })
     }
 
     pub(super) fn call(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.socket.send(Message::Text(
+        let (socket, next_id) = match self {
+            Self::Extension { bridge, tab_id } => return bridge.send(*tab_id, method, params),
+            Self::Socket { socket, next_id } => (socket, next_id),
+        };
+        let id = *next_id;
+        *next_id += 1;
+        socket.send(Message::Text(
             serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?.into(),
         ))?;
         loop {
-            let message = self.socket.read()?;
+            let message = socket.read()?;
             let Message::Text(text) = message else {
                 continue;
             };
@@ -220,14 +243,23 @@ impl CdpConnection {
     }
 
     fn collect_events(&mut self, duration: Duration) -> Result<Vec<Value>> {
-        if let MaybeTlsStream::Plain(stream) = self.socket.get_mut() {
+        let socket = match self {
+            // The bridge buffers events as the extension forwards them, so the
+            // collection window is a plain wait rather than a socket read loop.
+            Self::Extension { bridge, tab_id } => {
+                thread::sleep(duration);
+                return Ok(bridge.drain_events(*tab_id, MAX_EVENTS));
+            }
+            Self::Socket { socket, .. } => socket,
+        };
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
             stream.set_read_timeout(Some(Duration::from_millis(100)))?;
         }
         let deadline = Instant::now() + duration;
         let mut events = Vec::new();
         let mut event_bytes = 0usize;
         while Instant::now() < deadline && events.len() < MAX_EVENTS {
-            match self.socket.read() {
+            match socket.read() {
                 Ok(Message::Text(text)) => {
                     if text.len() > MAX_EVENT_BYTES
                         || event_bytes.saturating_add(text.len()) > MAX_EVENT_BYTES
@@ -270,23 +302,12 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         .unwrap_or_else(runtime_ports::current_main_webview_cdp_port);
     let registry = read_registry(artifact_root)?;
     if matches!(command.action, BrowserAction::Chrome) {
-        if !command.arguments.switches.contains("confirm") {
-            bail!("--confirm is required: this copies the signed-in Chrome profile into VibeLink-owned storage");
-        }
-        // Desktop WebView2 profiles own ports in the same flavor range even when
-        // their pages are closed, so the launcher must see them as taken.
         let mut reserved = vec![main_port];
         if let Some(registry) = &registry {
             reserved.push(registry.main_port);
             reserved.extend(registry.profiles.iter().map(|profile| profile.port));
         }
-        return Ok(serde_json::to_value(chrome_profile::ensure(
-            artifact_root,
-            main_port,
-            &reserved,
-            option(&command, "source-profile"),
-            command.arguments.switches.contains("refresh"),
-        )?)?);
+        return browser_extension::chrome_backend(&command, artifact_root, main_port, &reserved);
     }
     let chrome_profiles = chrome_profile::registered(artifact_root);
     let mut ports = vec![main_port];
@@ -309,6 +330,14 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
     }
     annotate_targets(&mut targets, registry.as_ref());
     annotate_chrome_targets(&mut targets, &chrome_profiles, scoped_workspace.as_deref());
+    if let Ok(bridge) = browser_extension::bridge_for(artifact_root, main_port) {
+        if let Ok(tabs) = bridge.list_tabs() {
+            targets.extend(
+                tabs.into_iter()
+                    .map(|tab| browser_extension::extension_target(tab, scoped_workspace.clone())),
+            );
+        }
+    }
     if let Some(workspace_id) = scoped_workspace.as_deref() {
         targets.retain(|target| target.workspace_id.as_deref() == Some(workspace_id));
     }
@@ -339,7 +368,13 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             bail!("browser page belongs to another workspace");
         }
     }
-    let mut cdp = CdpConnection::open(target)?;
+    let mut cdp = match target.extension_tab_id {
+        Some(tab_id) => CdpConnection::Extension {
+            bridge: browser_extension::bridge_for(artifact_root, main_port)?,
+            tab_id,
+        },
+        None => CdpConnection::open(target)?,
+    };
     let object_id = match element_target(&command)? {
         Some(element) => Some(resolve_element(&mut cdp, artifact_root, target, &element)?),
         None => None,
@@ -784,9 +819,9 @@ fn annotate_targets(targets: &mut [DebugTarget], registry: Option<&BrowserCdpReg
     }
 }
 
-/// External Chrome is the user's own browser, not a workspace-scoped embedded
-/// page. Stamping the caller's workspace keeps the existing workspace filters
-/// honest for embedded pages while leaving the real browser reachable.
+/// A copied-profile Chrome is not workspace-scoped either. Stamping the
+/// caller's workspace keeps the existing workspace filters honest for embedded
+/// pages while leaving that browser reachable.
 fn annotate_chrome_targets(
     targets: &mut [DebugTarget],
     profiles: &[chrome_profile::ChromeProfileRecord],
@@ -1736,6 +1771,7 @@ mod tests {
                 profile_id: Some("profile-a".to_string()),
                 workspace_id: Some("workspace-a".to_string()),
                 external: false,
+                extension_tab_id: None,
             },
             DebugTarget {
                 id: "cdp-b".to_string(),
@@ -1748,6 +1784,7 @@ mod tests {
                 profile_id: Some("profile-b".to_string()),
                 workspace_id: Some("workspace-b".to_string()),
                 external: false,
+                extension_tab_id: None,
             },
             DebugTarget {
                 id: "unregistered-cdp-target".to_string(),
@@ -1760,6 +1797,7 @@ mod tests {
                 profile_id: None,
                 workspace_id: None,
                 external: false,
+                extension_tab_id: None,
             },
         ];
 
@@ -1907,6 +1945,7 @@ mod tests {
             profile_id: None,
             workspace_id: None,
             external: false,
+            extension_tab_id: None,
         };
         let error = match CdpConnection::open(&target) {
             Ok(_) => panic!("hostile websocket URL was accepted"),

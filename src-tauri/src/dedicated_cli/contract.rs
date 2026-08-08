@@ -1529,9 +1529,9 @@ fn browser_contracts() -> Vec<CommandContract> {
         ),
         browser_action(
             "chrome",
-            "Attach to the user's real Chrome profile through a VibeLink-owned copy.",
+            "Attach VibeLink to the user's running Chrome, or install the extension that makes that possible.",
             &[O::string("source-profile")],
-            &["confirm", "refresh"],
+            &["confirm", "install", "copy-profile", "refresh"],
             Some(0),
             HighRisk,
         ),

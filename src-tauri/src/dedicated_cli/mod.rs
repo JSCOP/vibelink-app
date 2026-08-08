@@ -1,4 +1,5 @@
 pub mod browser_cdp;
+pub mod browser_extension;
 pub mod browser_page;
 pub mod builtin_skills;
 pub mod chrome_profile;
