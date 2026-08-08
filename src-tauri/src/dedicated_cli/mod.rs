@@ -1,5 +1,7 @@
 pub mod browser_cdp;
+pub mod browser_page;
 pub mod builtin_skills;
+pub mod chrome_profile;
 pub mod client;
 pub mod command;
 pub mod contract;

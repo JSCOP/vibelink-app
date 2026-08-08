@@ -1,6 +1,13 @@
+use super::browser_page::{
+    call_on, clear_element, compress_ax_tree, current_page_url, element_action, element_center,
+    element_id, element_target, resolve_element, wait_for_condition, write_snapshot_state,
+    BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput, BrowserPageScale,
+    BrowserPointerInput, BrowserViewport, MAX_TEXT_INPUT_BYTES, PREPARE_TEXT_INPUT,
+    SELECT_ALL_TEXT, SET_CHECKED, SET_NATIVE_VALUE, SET_SELECT_VALUE,
+};
 use crate::{
     browser::{BrowserDeviceMetrics, BrowserPolicy, BrowserRiskCapability},
-    dedicated_cli::{ActionCommand, BrowserAction},
+    dedicated_cli::{chrome_profile, ActionCommand, BrowserAction},
     runtime_ports,
 };
 use anyhow::{bail, Context, Result};
@@ -13,7 +20,6 @@ use std::{
     io::Read,
     net::TcpStream,
     path::{Path, PathBuf},
-    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
@@ -24,19 +30,10 @@ const MAX_CDP_MESSAGE_BYTES: usize = 80 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EVENTS: usize = 1024;
-const MAX_INSPECT_SNAPSHOT_BYTES: usize = 256 * 1024;
+pub(super) const MAX_INSPECT_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 pub const MAX_BROWSER_JPEG_BYTES: usize = 60 * 1024;
-pub const DEFAULT_MOBILE_VIEWPORT_WIDTH: u32 = 390;
-pub const DEFAULT_MOBILE_VIEWPORT_HEIGHT: u32 = 844;
-pub const DEFAULT_MOBILE_DEVICE_SCALE_FACTOR: f64 = 3.0;
 
-const MAX_POINTER_COORDINATE: f64 = 10_000.0;
-const MAX_SCROLL_DELTA: f64 = 10_000.0;
-const MAX_TEXT_INPUT_BYTES: usize = 16 * 1024;
-const MAX_KEY_INPUT_BYTES: usize = 64;
-const MIN_PAGE_SCALE: f64 = 0.25;
-const MAX_PAGE_SCALE: f64 = 5.0;
 const MIN_CAPTURE_SCALE: f64 = 0.05;
 const MIN_ADAPTIVE_JPEG_QUALITY: u8 = 35;
 const MAX_JPEG_CAPTURE_ATTEMPTS: usize = 10;
@@ -48,231 +45,6 @@ pub struct EmbeddedBrowserTab {
     pub title: String,
     pub url: String,
     pub workspace_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserJpegCaptureOptions {
-    pub quality: u8,
-}
-
-impl Default for BrowserJpegCaptureOptions {
-    fn default() -> Self {
-        Self { quality: 80 }
-    }
-}
-
-impl BrowserJpegCaptureOptions {
-    fn validate(self) -> Result<()> {
-        if !(1..=100).contains(&self.quality) {
-            bail!("browser JPEG quality must be between 1 and 100");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserJpegFrame {
-    pub bytes: Vec<u8>,
-    pub viewport_width: u32,
-    pub viewport_height: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserInspectSnapshot {
-    pub snapshot_json: String,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
-pub enum BrowserPointerInput {
-    Tap {
-        x: f64,
-        y: f64,
-    },
-    Drag {
-        from_x: f64,
-        from_y: f64,
-        to_x: f64,
-        to_y: f64,
-    },
-    Scroll {
-        x: f64,
-        y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    },
-}
-
-impl BrowserPointerInput {
-    fn validate(self) -> Result<()> {
-        let valid_coordinate =
-            |value: f64| value.is_finite() && (0.0..=MAX_POINTER_COORDINATE).contains(&value);
-        let valid_delta = |value: f64| value.is_finite() && value.abs() <= MAX_SCROLL_DELTA;
-        match self {
-            Self::Tap { x, y } => {
-                if !valid_coordinate(x) || !valid_coordinate(y) {
-                    bail!("browser pointer coordinates are out of bounds");
-                }
-            }
-            Self::Drag {
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-            } => {
-                if !valid_coordinate(from_x)
-                    || !valid_coordinate(from_y)
-                    || !valid_coordinate(to_x)
-                    || !valid_coordinate(to_y)
-                {
-                    bail!("browser pointer coordinates are out of bounds");
-                }
-            }
-            Self::Scroll {
-                x,
-                y,
-                delta_x,
-                delta_y,
-            } => {
-                if !valid_coordinate(x)
-                    || !valid_coordinate(y)
-                    || !valid_delta(delta_x)
-                    || !valid_delta(delta_y)
-                    || (delta_x == 0.0 && delta_y == 0.0)
-                {
-                    bail!("browser scroll input is out of bounds");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_for_viewport(self, width: u32, height: u32) -> Result<()> {
-        self.validate()?;
-        let contains = |x: f64, y: f64| x < f64::from(width) && y < f64::from(height);
-        let inside = match self {
-            Self::Tap { x, y } | Self::Scroll { x, y, .. } => contains(x, y),
-            Self::Drag {
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-            } => contains(from_x, from_y) && contains(to_x, to_y),
-        };
-        if !inside {
-            bail!("browser pointer coordinates exceed the CSS viewport");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
-pub enum BrowserKeyInput {
-    Text { text: String },
-    Key { key: String },
-}
-
-impl BrowserKeyInput {
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::Text { text } => {
-                if text.is_empty()
-                    || text.len() > MAX_TEXT_INPUT_BYTES
-                    || text.chars().any(|character| character == '\0')
-                {
-                    bail!("browser text input is empty or exceeds the bounded size");
-                }
-            }
-            Self::Key { key } => {
-                if key.is_empty()
-                    || key.len() > MAX_KEY_INPUT_BYTES
-                    || key.chars().any(char::is_control)
-                {
-                    bail!("browser key input is invalid or exceeds the bounded size");
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
-pub enum BrowserViewport {
-    Web,
-    Mobile {
-        width: u32,
-        height: u32,
-        device_scale_factor: f64,
-    },
-}
-
-impl BrowserViewport {
-    /// The same bounded 390x844 CSS-pixel, 3x-density phone projection used by
-    /// the embedded browser UI. Pointer mapping remains in CSS viewport units.
-    pub fn mobile_default() -> Self {
-        Self::Mobile {
-            width: DEFAULT_MOBILE_VIEWPORT_WIDTH,
-            height: DEFAULT_MOBILE_VIEWPORT_HEIGHT,
-            device_scale_factor: DEFAULT_MOBILE_DEVICE_SCALE_FACTOR,
-        }
-    }
-
-    fn device_metrics(self) -> Result<Option<BrowserDeviceMetrics>> {
-        match self {
-            Self::Web => Ok(None),
-            Self::Mobile {
-                width,
-                height,
-                device_scale_factor,
-            } => {
-                let metrics = BrowserDeviceMetrics {
-                    width,
-                    height,
-                    device_scale_factor,
-                    mobile: true,
-                };
-                if !metrics.validate() {
-                    bail!("invalid mobile browser viewport");
-                }
-                Ok(Some(metrics))
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrowserPageScale {
-    pub scale: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub center_x: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub center_y: Option<f64>,
-}
-
-impl BrowserPageScale {
-    pub(crate) fn validate(self) -> Result<()> {
-        if !self.scale.is_finite() || !(MIN_PAGE_SCALE..=MAX_PAGE_SCALE).contains(&self.scale) {
-            bail!("browser page scale must be finite and between 0.25 and 5");
-        }
-        match (self.center_x, self.center_y) {
-            (None, None) => {}
-            (Some(x), Some(y))
-                if x.is_finite()
-                    && y.is_finite()
-                    && (0.0..=MAX_POINTER_COORDINATE).contains(&x)
-                    && (0.0..=MAX_POINTER_COORDINATE).contains(&y) => {}
-            (Some(_), Some(_)) => bail!("browser page scale center is out of bounds"),
-            _ => bail!("browser page scale center requires both centerX and centerY"),
-        }
-        Ok(())
-    }
 }
 
 struct CdpAccessPolicy {
@@ -331,8 +103,8 @@ impl CdpAccessPolicy {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DebugTarget {
-    id: String,
+pub(super) struct DebugTarget {
+    pub(super) id: String,
     title: String,
     url: String,
     #[serde(rename = "type")]
@@ -346,6 +118,8 @@ struct DebugTarget {
     profile_id: Option<String>,
     #[serde(skip)]
     workspace_id: Option<String>,
+    #[serde(skip)]
+    external: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -370,7 +144,8 @@ struct BrowserCdpPage {
     page_id: String,
     workspace_id: String,
 }
-struct CdpConnection {
+
+pub(super) struct CdpConnection {
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: u64,
 }
@@ -400,7 +175,7 @@ impl CdpConnection {
         Ok(Self { socket, next_id: 1 })
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(super) fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.socket.send(Message::Text(
@@ -425,7 +200,7 @@ impl CdpConnection {
         }
     }
 
-    fn evaluate(&mut self, expression: &str) -> Result<Value> {
+    pub(super) fn evaluate(&mut self, expression: &str) -> Result<Value> {
         let result = self.call(
             "Runtime.evaluate",
             json!({
@@ -494,11 +269,32 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         .filter(|port| *port != 0)
         .unwrap_or_else(runtime_ports::current_main_webview_cdp_port);
     let registry = read_registry(artifact_root)?;
+    if matches!(command.action, BrowserAction::Chrome) {
+        if !command.arguments.switches.contains("confirm") {
+            bail!("--confirm is required: this copies the signed-in Chrome profile into VibeLink-owned storage");
+        }
+        // Desktop WebView2 profiles own ports in the same flavor range even when
+        // their pages are closed, so the launcher must see them as taken.
+        let mut reserved = vec![main_port];
+        if let Some(registry) = &registry {
+            reserved.push(registry.main_port);
+            reserved.extend(registry.profiles.iter().map(|profile| profile.port));
+        }
+        return Ok(serde_json::to_value(chrome_profile::ensure(
+            artifact_root,
+            main_port,
+            &reserved,
+            option(&command, "source-profile"),
+            command.arguments.switches.contains("refresh"),
+        )?)?);
+    }
+    let chrome_profiles = chrome_profile::registered(artifact_root);
     let mut ports = vec![main_port];
     if let Some(registry) = &registry {
         ports.push(registry.main_port);
         ports.extend(registry.profiles.iter().map(|profile| profile.port));
     }
+    ports.extend(chrome_profiles.iter().map(|profile| profile.port));
     ports.retain(|port| *port != 0);
     ports.sort_unstable();
     ports.dedup();
@@ -512,11 +308,14 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         }
     }
     annotate_targets(&mut targets, registry.as_ref());
+    annotate_chrome_targets(&mut targets, &chrome_profiles, scoped_workspace.as_deref());
     if let Some(workspace_id) = scoped_workspace.as_deref() {
         targets.retain(|target| target.workspace_id.as_deref() == Some(workspace_id));
     }
     if targets.is_empty() {
-        bail!("embedded browser CDP is unavailable; start VibeLink desktop");
+        bail!(
+            "browser CDP is unavailable; start VibeLink desktop or run `vibelink browser chrome`"
+        );
     }
     if matches!(command.action, BrowserAction::Tabs) {
         return Ok(json!({ "targets": targets.iter().map(target_json).collect::<Vec<_>>() }));
@@ -525,7 +324,7 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         let profiles = registry
             .map(|registry| profiles_for_workspace(registry.profiles, scoped_workspace.as_deref()))
             .unwrap_or_default();
-        return Ok(json!({ "profiles": profiles }));
+        return Ok(json!({ "profiles": profiles, "chromeProfiles": chrome_profiles }));
     }
     let target = select_target(
         &targets,
@@ -541,7 +340,10 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         }
     }
     let mut cdp = CdpConnection::open(target)?;
-    let selector = option(&command, "selector");
+    let object_id = match element_target(&command)? {
+        Some(element) => Some(resolve_element(&mut cdp, artifact_root, target, &element)?),
+        None => None,
+    };
 
     match command.action {
         BrowserAction::Navigate => {
@@ -556,15 +358,18 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         }
         BrowserAction::Snapshot => {
             cdp.call("Accessibility.enable", json!({}))?;
-            let mut tree = cdp.call("Accessibility.getFullAXTree", json!({}))?;
-            let truncated = tree
-                .get("nodes")
-                .and_then(Value::as_array)
-                .is_some_and(|nodes| nodes.len() > 5_000);
-            if let Some(nodes) = tree.get_mut("nodes").and_then(Value::as_array_mut) {
-                nodes.truncate(5_000);
-            }
-            Ok(json!({ "target": target_json(target), "tree": tree, "truncated": truncated }))
+            let tree = cdp.call("Accessibility.getFullAXTree", json!({}))?;
+            let url = current_page_url(&mut cdp)?;
+            let snapshot = compress_ax_tree(&tree, &target.id, url.clone());
+            write_snapshot_state(artifact_root, &snapshot.state)?;
+            Ok(json!({
+                "target": target_json(target),
+                "generation": snapshot.state.generation,
+                "url": url,
+                "refs": snapshot.state.refs.len(),
+                "truncated": snapshot.truncated,
+                "tree": snapshot.tree,
+            }))
         }
         BrowserAction::Screenshot | BrowserAction::FullScreenshot => {
             fs::create_dir_all(artifact_root)?;
@@ -606,95 +411,154 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         }
         BrowserAction::Back | BrowserAction::Forward => {
             let history = cdp.call("Page.getNavigationHistory", json!({}))?;
-            let current = history.get("currentIndex").and_then(Value::as_i64).unwrap_or(0);
-            let desired = current + if matches!(command.action, BrowserAction::Back) { -1 } else { 1 };
-            let entry = history.get("entries").and_then(Value::as_array)
+            let current = history
+                .get("currentIndex")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let desired = current
+                + if matches!(command.action, BrowserAction::Back) {
+                    -1
+                } else {
+                    1
+                };
+            let entry = history
+                .get("entries")
+                .and_then(Value::as_array)
                 .and_then(|entries| entries.get(desired.max(0) as usize))
                 .context("no navigation history entry")?;
-            cdp.call("Page.navigateToHistoryEntry", json!({ "entryId": entry.get("id").context("history entry id missing")? }))
+            cdp.call(
+                "Page.navigateToHistoryEntry",
+                json!({ "entryId": entry.get("id").context("history entry id missing")? }),
+            )
         }
-        BrowserAction::Reload => cdp.call("Page.reload", json!({ "ignoreCache": command.arguments.switches.contains("ignore-cache") })),
-        BrowserAction::Wait => {
-            let milliseconds = option(&command, "ms").unwrap_or("1000").parse::<u64>().context("--ms must be an unsigned integer")?;
-            thread::sleep(Duration::from_millis(milliseconds.min(60_000)));
-            Ok(json!({ "waitedMs": milliseconds.min(60_000) }))
-        }
+        BrowserAction::Reload => cdp.call(
+            "Page.reload",
+            json!({ "ignoreCache": command.arguments.switches.contains("ignore-cache") }),
+        ),
+        BrowserAction::Wait => wait_for_condition(&mut cdp, &command),
         BrowserAction::Click | BrowserAction::DoubleClick | BrowserAction::Hover => {
-            let point = element_center(&mut cdp, selector.context("--selector is required")?)?;
+            let point = element_center(&mut cdp, element_id(&object_id)?)?;
             if matches!(command.action, BrowserAction::Hover) {
-                cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": point.0, "y": point.1 }))?;
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseMoved", "x": point.0, "y": point.1 }),
+                )?;
             } else {
-                let count = if matches!(command.action, BrowserAction::DoubleClick) { 2 } else { 1 };
+                let count = if matches!(command.action, BrowserAction::DoubleClick) {
+                    2
+                } else {
+                    1
+                };
                 cdp.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": point.0, "y": point.1, "button": "left", "clickCount": count }))?;
                 cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": point.0, "y": point.1, "button": "left", "clickCount": count }))?;
             }
             Ok(json!({ "x": point.0, "y": point.1 }))
         }
         BrowserAction::Fill | BrowserAction::Type => {
-            let selector = selector.context("--selector is required")?;
+            let object_id = element_id(&object_id)?;
             let text = option(&command, "text").context("--text is required")?;
-            let script = format!(
-                "(()=>{{const e=document.querySelector({});if(!e)throw new Error('element not found');e.focus();{}e.dispatchEvent(new Event('input',{{bubbles:true}}));e.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()",
-                serde_json::to_string(selector)?,
-                if matches!(command.action, BrowserAction::Fill) {
-                    format!("e.value={};", serde_json::to_string(text)?)
-                } else {
-                    format!("e.value=(e.value||'')+{};", serde_json::to_string(text)?)
+            if text.len() > MAX_TEXT_INPUT_BYTES {
+                bail!("--text exceeds the bounded browser input size");
+            }
+            let replace = matches!(command.action, BrowserAction::Fill);
+            let mode = call_on(
+                &mut cdp,
+                object_id,
+                PREPARE_TEXT_INPUT,
+                vec![json!({ "value": replace })],
+            )?;
+            match mode.as_str() {
+                Some("value") => {
+                    let value = call_on(
+                        &mut cdp,
+                        object_id,
+                        SET_NATIVE_VALUE,
+                        vec![json!({ "value": text }), json!({ "value": !replace })],
+                    )?;
+                    Ok(json!({ "mode": "value", "value": value }))
                 }
-            );
-            cdp.evaluate(&script)
+                Some("editable") => {
+                    cdp.call("Input.insertText", json!({ "text": text }))?;
+                    Ok(json!({ "mode": "editable" }))
+                }
+                _ => bail!("browser element does not accept text input"),
+            }
         }
-        BrowserAction::Select => dom_action(&mut cdp, selector, "const v=VALUE;e.value=v;e.dispatchEvent(new Event('change',{bubbles:true}));return e.value", option(&command, "value")),
-        BrowserAction::Check => dom_action(&mut cdp, selector, "e.checked=VALUE==='true';e.dispatchEvent(new Event('change',{bubbles:true}));return e.checked", Some(option(&command, "value").unwrap_or("true"))),
-        BrowserAction::Focus => dom_action(&mut cdp, selector, "e.focus();return true", None),
-        BrowserAction::Clear => dom_action(&mut cdp, selector, "e.value='';e.dispatchEvent(new Event('input',{bubbles:true}));return true", None),
-        BrowserAction::SelectAll => dom_action(&mut cdp, selector, "e.focus();e.select();return true", None),
+        BrowserAction::Select => element_action(
+            &mut cdp,
+            element_id(&object_id)?,
+            SET_SELECT_VALUE,
+            option(&command, "value"),
+        ),
+        BrowserAction::Check => element_action(
+            &mut cdp,
+            element_id(&object_id)?,
+            SET_CHECKED,
+            Some(option(&command, "value").unwrap_or("true")),
+        ),
+        BrowserAction::Focus => element_action(
+            &mut cdp,
+            element_id(&object_id)?,
+            "function(){this.focus();return this.ownerDocument.activeElement===this}",
+            None,
+        ),
+        BrowserAction::Clear => clear_element(&mut cdp, element_id(&object_id)?),
+        BrowserAction::SelectAll => {
+            element_action(&mut cdp, element_id(&object_id)?, SELECT_ALL_TEXT, None)
+        }
         BrowserAction::Keypress => {
             let key = option(&command, "key").context("--key is required")?;
-            cdp.call("Input.dispatchKeyEvent", json!({ "type": "keyDown", "key": key }))?;
-            cdp.call("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": key }))
+            cdp.call(
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyDown", "key": key }),
+            )?;
+            cdp.call(
+                "Input.dispatchKeyEvent",
+                json!({ "type": "keyUp", "key": key }),
+            )
         }
         BrowserAction::Drag => {
-            let from = element_center(&mut cdp, selector.context("--selector is required")?)?;
-            let to_x = option(&command, "to-x").context("--to-x is required")?.parse::<f64>()?;
-            let to_y = option(&command, "to-y").context("--to-y is required")?.parse::<f64>()?;
+            let from = element_center(&mut cdp, element_id(&object_id)?)?;
+            let to_x = option(&command, "to-x")
+                .context("--to-x is required")?
+                .parse::<f64>()?;
+            let to_y = option(&command, "to-y")
+                .context("--to-y is required")?
+                .parse::<f64>()?;
             cdp.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "buttons": 1 }))?;
             cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": to_x, "y": to_y, "button": "left", "buttons": 1 }))?;
-            cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": to_x, "y": to_y, "button": "left" }))
+            cdp.call(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseReleased", "x": to_x, "y": to_y, "button": "left" }),
+            )
         }
         BrowserAction::Upload => {
-            let selector = selector.context("--selector is required")?;
+            let object_id = element_id(&object_id)?;
             let values = command
                 .arguments
                 .options
                 .get("file")
                 .context("--file is required")?;
             let files = access.upload_files(values)?;
-            let document = cdp.call("DOM.getDocument", json!({ "depth": 0 }))?;
-            let node_id = document
-                .pointer("/root/nodeId")
-                .and_then(Value::as_u64)
-                .context("DOM root missing")?;
-            let queried = cdp.call(
-                "DOM.querySelector",
-                json!({ "nodeId": node_id, "selector": selector }),
-            )?;
-            let file_node = queried
-                .get("nodeId")
-                .and_then(Value::as_u64)
-                .filter(|id| *id != 0)
-                .context("file input not found")?;
             cdp.call(
                 "DOM.setFileInputFiles",
-                json!({ "nodeId": file_node, "files": files }),
+                json!({ "objectId": object_id, "files": files }),
             )
         }
         BrowserAction::Scroll => {
             let x = option(&command, "x").unwrap_or("0").parse::<f64>()?;
             let y = option(&command, "y").unwrap_or("0").parse::<f64>()?;
-            cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseWheel", "x": 0, "y": 0, "deltaX": x, "deltaY": y }))
+            cdp.call(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseWheel", "x": 0, "y": 0, "deltaX": x, "deltaY": y }),
+            )
         }
-        BrowserAction::ScrollIntoView => dom_action(&mut cdp, selector, "e.scrollIntoView({block:'center',inline:'center'});return true", None),
+        BrowserAction::ScrollIntoView => element_action(
+            &mut cdp,
+            element_id(&object_id)?,
+            "function(){this.scrollIntoView({block:'center',inline:'center'});return true}",
+            None,
+        ),
         BrowserAction::Find => {
             let text = option(&command, "text").context("--text is required")?;
             cdp.evaluate(&format!("window.find({})", serde_json::to_string(text)?))
@@ -714,23 +578,25 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             ) {
                 bail!("unsupported safe browser property: {property}");
             }
-            dom_action(
+            element_action(
                 &mut cdp,
-                selector,
-                &format!("return e[{}]", serde_json::to_string(property)?),
-                None,
+                element_id(&object_id)?,
+                "function(property){return this[property]}",
+                Some(property),
             )
         }
         BrowserAction::Is => {
             let state = option(&command, "state").unwrap_or("visible");
-            let body = match state {
-                "visible" => "const r=e.getBoundingClientRect();return !!(r.width&&r.height)",
-                "enabled" => "return !e.disabled",
-                "checked" => "return !!e.checked",
-                "focused" => "return document.activeElement===e",
+            let declaration = match state {
+                "visible" => {
+                    "function(){const r=this.getBoundingClientRect();return !!(r.width&&r.height)}"
+                }
+                "enabled" => "function(){return !this.disabled}",
+                "checked" => "function(){return !!this.checked}",
+                "focused" => "function(){return this.ownerDocument.activeElement===this}",
                 _ => bail!("unsupported browser state: {state}"),
             };
-            dom_action(&mut cdp, selector, body, None)
+            element_action(&mut cdp, element_id(&object_id)?, declaration, None)
         }
         BrowserAction::Mouse => {
             let event_type = option(&command, "type").unwrap_or("mouseMoved");
@@ -740,14 +606,23 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             ) {
                 bail!("unsupported mouse event type: {event_type}");
             }
-            let x = option(&command, "x").context("--x is required")?.parse::<f64>()?;
-            let y = option(&command, "y").context("--y is required")?.parse::<f64>()?;
+            let x = option(&command, "x")
+                .context("--x is required")?
+                .parse::<f64>()?;
+            let y = option(&command, "y")
+                .context("--y is required")?
+                .parse::<f64>()?;
             if !x.is_finite() || !y.is_finite() {
                 bail!("mouse coordinates must be finite");
             }
             cdp.call("Input.dispatchMouseEvent", json!({ "type": event_type, "x": x, "y": y, "button": option(&command, "button").unwrap_or("none") }))
         }
-        BrowserAction::Highlight => dom_action(&mut cdp, selector, "e.style.outline='3px solid #ff2d55';return true", None),
+        BrowserAction::Highlight => element_action(
+            &mut cdp,
+            element_id(&object_id)?,
+            "function(){this.style.outline='3px solid #ff2d55';return true}",
+            None,
+        ),
         BrowserAction::Download => {
             access.require(BrowserRiskCapability::Download)?;
             let path = access.browser.download_root();
@@ -781,17 +656,29 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         }
         BrowserAction::Console => {
             cdp.call("Runtime.enable", json!({}))?;
-            let ms = option(&command, "ms").unwrap_or("1000").parse::<u64>()?.min(30_000);
+            let ms = option(&command, "ms")
+                .unwrap_or("1000")
+                .parse::<u64>()?
+                .min(30_000);
             let events = cdp.collect_events(Duration::from_millis(ms))?;
-            Ok(json!({ "events": events.into_iter().filter(|event| event.get("method").and_then(Value::as_str) == Some("Runtime.consoleAPICalled")).collect::<Vec<_>>() }))
+            Ok(
+                json!({ "events": events.into_iter().filter(|event| event.get("method").and_then(Value::as_str) == Some("Runtime.consoleAPICalled")).collect::<Vec<_>>() }),
+            )
         }
         BrowserAction::Network => {
             cdp.call("Network.enable", json!({}))?;
-            let ms = option(&command, "ms").unwrap_or("1000").parse::<u64>()?.min(30_000);
+            let ms = option(&command, "ms")
+                .unwrap_or("1000")
+                .parse::<u64>()?
+                .min(30_000);
             let events = cdp.collect_events(Duration::from_millis(ms))?;
-            Ok(json!({ "events": events.into_iter().filter(|event| event.get("method").and_then(Value::as_str).is_some_and(|method| method.starts_with("Network."))).collect::<Vec<_>>() }))
+            Ok(
+                json!({ "events": events.into_iter().filter(|event| event.get("method").and_then(Value::as_str).is_some_and(|method| method.starts_with("Network."))).collect::<Vec<_>>() }),
+            )
         }
-        BrowserAction::Tabs | BrowserAction::Profiles => unreachable!("handled before target selection"),
+        BrowserAction::Tabs | BrowserAction::Profiles | BrowserAction::Chrome => {
+            unreachable!("handled before target selection")
+        }
     }
 }
 
@@ -894,6 +781,27 @@ fn annotate_targets(targets: &mut [DebugTarget], registry: Option<&BrowserCdpReg
                 }
             }
         }
+    }
+}
+
+/// External Chrome is the user's own browser, not a workspace-scoped embedded
+/// page. Stamping the caller's workspace keeps the existing workspace filters
+/// honest for embedded pages while leaving the real browser reachable.
+fn annotate_chrome_targets(
+    targets: &mut [DebugTarget],
+    profiles: &[chrome_profile::ChromeProfileRecord],
+    workspace_id: Option<&str>,
+) {
+    for target in targets {
+        let Some(profile) = profiles
+            .iter()
+            .find(|profile| profile.port == target.cdp_port)
+        else {
+            continue;
+        };
+        target.external = true;
+        target.profile_id = Some(profile.profile_id.clone());
+        target.workspace_id = workspace_id.map(str::to_string);
     }
 }
 
@@ -1018,90 +926,6 @@ pub fn capture_jpeg_for_page(
         "browser JPEG capture cannot fit the {} byte remote-v2 payload limit",
         MAX_BROWSER_JPEG_BYTES
     )
-}
-
-pub fn inspect_page(
-    registry_path: &Path,
-    page_id: &str,
-    x: Option<f64>,
-    y: Option<f64>,
-) -> Result<BrowserInspectSnapshot> {
-    let point = match (x, y) {
-        (None, None) => None,
-        (Some(x), Some(y))
-            if x.is_finite()
-                && y.is_finite()
-                && (0.0..=MAX_POINTER_COORDINATE).contains(&x)
-                && (0.0..=MAX_POINTER_COORDINATE).contains(&y) =>
-        {
-            Some((x, y))
-        }
-        (Some(_), Some(_)) => bail!("browser inspect coordinates are out of bounds"),
-        _ => bail!("browser inspect requires both x and y"),
-    };
-    let mut cdp = open_registered_page(registry_path, page_id)?;
-    let snapshot = if let Some((x, y)) = point {
-        cdp.call("DOM.enable", json!({}))?;
-        cdp.call("Accessibility.enable", json!({}))?;
-        let location = cdp.call(
-            "DOM.getNodeForLocation",
-            json!({
-                "x": x,
-                "y": y,
-                "includeUserAgentShadowDOM": true,
-                "ignorePointerEventsNone": false,
-            }),
-        )?;
-        let backend_node_id = location
-            .get("backendNodeId")
-            .and_then(Value::as_u64)
-            .context("browser inspect target has no backend node id")?;
-        let dom = cdp.call(
-            "DOM.describeNode",
-            json!({ "backendNodeId": backend_node_id, "depth": 2, "pierce": true }),
-        )?;
-        let accessibility = cdp.call(
-            "Accessibility.getPartialAXTree",
-            json!({ "backendNodeId": backend_node_id, "fetchRelatives": true }),
-        )?;
-        json!({ "point": { "x": x, "y": y }, "dom": dom, "accessibility": accessibility })
-    } else {
-        cdp.call("Accessibility.enable", json!({}))?;
-        cdp.call("Accessibility.getFullAXTree", json!({}))?
-    };
-    bounded_snapshot_json(snapshot)
-}
-
-fn bounded_snapshot_json(mut snapshot: Value) -> Result<BrowserInspectSnapshot> {
-    let mut truncated = false;
-    loop {
-        let snapshot_json = serde_json::to_string(&snapshot)?;
-        if snapshot_json.len() <= MAX_INSPECT_SNAPSHOT_BYTES {
-            return Ok(BrowserInspectSnapshot {
-                snapshot_json,
-                truncated,
-            });
-        }
-        let Some(nodes) = inspect_nodes_mut(&mut snapshot) else {
-            bail!("browser inspect snapshot exceeds the bounded size");
-        };
-        if nodes.is_empty() {
-            bail!("browser inspect snapshot metadata exceeds the bounded size");
-        }
-        truncated = true;
-        let keep = nodes.len().saturating_mul(3) / 4;
-        nodes.truncate(keep);
-    }
-}
-
-fn inspect_nodes_mut(snapshot: &mut Value) -> Option<&mut Vec<Value>> {
-    if snapshot.get("nodes").and_then(Value::as_array).is_some() {
-        return snapshot.get_mut("nodes").and_then(Value::as_array_mut);
-    }
-    snapshot
-        .get_mut("accessibility")
-        .and_then(|value| value.get_mut("nodes"))
-        .and_then(Value::as_array_mut)
 }
 
 pub fn dispatch_pointer_for_page(
@@ -1271,7 +1095,7 @@ fn registered_targets(registry: &BrowserCdpRegistry) -> Result<Vec<DebugTarget>>
     Ok(targets)
 }
 
-fn open_registered_page(registry_path: &Path, page_id: &str) -> Result<CdpConnection> {
+pub(super) fn open_registered_page(registry_path: &Path, page_id: &str) -> Result<CdpConnection> {
     let registry = read_registry_path(registry_path)?
         .context("embedded browser CDP registry is unavailable")?;
     let targets = registered_targets(&registry)?;
@@ -1496,10 +1320,11 @@ fn target_json(target: &DebugTarget) -> Value {
         "title": target.title,
         "url": target.url,
         "type": target.target_type,
+        "external": target.external,
     })
 }
 
-fn option<'a>(command: &'a ActionCommand<BrowserAction>, name: &str) -> Option<&'a str> {
+pub(super) fn option<'a>(command: &'a ActionCommand<BrowserAction>, name: &str) -> Option<&'a str> {
     command
         .arguments
         .options
@@ -1512,7 +1337,7 @@ fn option<'a>(command: &'a ActionCommand<BrowserAction>, name: &str) -> Option<&
 
 fn required_capability(action: BrowserAction) -> Option<BrowserRiskCapability> {
     match action {
-        BrowserAction::Cookies => Some(BrowserRiskCapability::Cookies),
+        BrowserAction::Cookies | BrowserAction::Chrome => Some(BrowserRiskCapability::Cookies),
         BrowserAction::Storage => Some(BrowserRiskCapability::Storage),
         BrowserAction::Upload => Some(BrowserRiskCapability::Upload),
         BrowserAction::Download => Some(BrowserRiskCapability::Download),
@@ -1537,7 +1362,7 @@ fn parse_grants(values: Option<&Vec<String>>) -> Result<HashSet<BrowserRiskCapab
     Ok(grants)
 }
 
-fn valid_registry_id(value: &str) -> bool {
+pub(super) fn valid_registry_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -1547,34 +1372,6 @@ fn valid_registry_id(value: &str) -> bool {
 
 fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
-}
-
-fn element_center(cdp: &mut CdpConnection, selector: &str) -> Result<(f64, f64)> {
-    let value = cdp.evaluate(&format!(
-        "(()=>{{const e=document.querySelector({});if(!e)throw new Error('element not found');e.scrollIntoView({{block:'center',inline:'center'}});const r=e.getBoundingClientRect();return {{x:r.left+r.width/2,y:r.top+r.height/2}}}})()",
-        serde_json::to_string(selector)?
-    ))?;
-    Ok((
-        value
-            .get("x")
-            .and_then(Value::as_f64)
-            .context("element x missing")?,
-        value
-            .get("y")
-            .and_then(Value::as_f64)
-            .context("element y missing")?,
-    ))
-}
-
-fn dom_action(
-    cdp: &mut CdpConnection,
-    selector: Option<&str>,
-    body: &str,
-    value: Option<&str>,
-) -> Result<Value> {
-    let selector = selector.context("--selector is required")?;
-    let body = body.replace("VALUE", &serde_json::to_string(value.unwrap_or(""))?);
-    cdp.evaluate(&format!("(()=>{{const e=document.querySelector({});if(!e)throw new Error('element not found');{}}})()", serde_json::to_string(selector)?, body))
 }
 
 fn artifact_path(root: &Path, stem: &str, extension: &str) -> Result<PathBuf> {
@@ -1623,17 +1420,26 @@ fn write_base64_artifact(path: &Path, data: &str) -> Result<()> {
     Ok(())
 }
 
-fn expires_at_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
-        .saturating_add(15 * 60 * 1_000)
+}
+
+fn expires_at_ms() -> u64 {
+    now_ms().saturating_add(15 * 60 * 1_000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dedicated_cli::browser_page::inspect;
+    use crate::dedicated_cli::browser_page::{
+        DEFAULT_MOBILE_DEVICE_SCALE_FACTOR, DEFAULT_MOBILE_VIEWPORT_HEIGHT,
+        DEFAULT_MOBILE_VIEWPORT_WIDTH, MAX_KEY_INPUT_BYTES, MAX_PAGE_SCALE, MAX_SCROLL_DELTA,
+        MIN_PAGE_SCALE,
+    };
     use crate::dedicated_cli::{OperationArguments, SelectorSet};
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -1880,12 +1686,12 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("text input"));
-        assert!(inspect_page(&missing_registry, "page-a", Some(1.0), None)
+        assert!(inspect(&missing_registry, "page-a", Some(1.0), None)
             .unwrap_err()
             .to_string()
             .contains("requires both"));
         assert!(
-            inspect_page(&missing_registry, "page-a", Some(10_001.0), Some(0.0))
+            inspect(&missing_registry, "page-a", Some(10_001.0), Some(0.0))
                 .unwrap_err()
                 .to_string()
                 .contains("out of bounds")
@@ -1929,6 +1735,7 @@ mod tests {
                 page_id: Some("page-a".to_string()),
                 profile_id: Some("profile-a".to_string()),
                 workspace_id: Some("workspace-a".to_string()),
+                external: false,
             },
             DebugTarget {
                 id: "cdp-b".to_string(),
@@ -1940,6 +1747,7 @@ mod tests {
                 page_id: Some("page-b".to_string()),
                 profile_id: Some("profile-b".to_string()),
                 workspace_id: Some("workspace-b".to_string()),
+                external: false,
             },
             DebugTarget {
                 id: "unregistered-cdp-target".to_string(),
@@ -1951,6 +1759,7 @@ mod tests {
                 page_id: None,
                 profile_id: None,
                 workspace_id: None,
+                external: false,
             },
         ];
 
@@ -2097,6 +1906,7 @@ mod tests {
             page_id: None,
             profile_id: None,
             workspace_id: None,
+            external: false,
         };
         let error = match CdpConnection::open(&target) {
             Ok(_) => panic!("hostile websocket URL was accepted"),

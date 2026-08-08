@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_SKILL_VERSION: &str = "1.3.1";
+pub const BUILTIN_SKILL_VERSION: &str = "1.4.0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,18 +56,21 @@ Use `vibelink orchestration run` to submit a mission. Inspect with `check`, `inb
 
 const BROWSER_CONTENT: &str = r#"# VibeLink Browser
 
-Browser authority lives in the desktop BrowserManager and its native WebView2 provider. Use stable page/tab/profile IDs and the browser capability granted to this workspace.
+Two backends share one command surface. Embedded WebView2 pages owned by the desktop BrowserManager render inside a workspace pane. `vibelink browser chrome --grant browser.cookies --confirm` copies the user's real Chrome profile into VibeLink-owned storage and attaches to that copy in a separate Chrome window, so signed-in sessions are already present; it never opens or mutates the user's live Chrome directory.
 
 ## Workflow
 
-1. Select or create the intended profile/tab.
-2. Navigate and obtain a fresh `vibelink browser snapshot`.
-3. Act with snapshot-scoped refs using `click`, `double-click`, `fill`, `type`, `select`, `check`, `focus`, `clear`, `keypress`, `hover`, `drag`, `upload`, `scroll`, or `scroll-into-view`.
-4. Verify with `wait`, a new snapshot, `get`/`is`, screenshot, console, or network inspection.
+1. Select the intended page with `--tab`/`--page`, or run `chrome` once for a signed-in browser.
+2. Navigate, then settle with `wait --for load|selector|no-selector|url|idle` instead of guessing a sleep. `--ms` is the deadline for a condition and the duration for `--for sleep`.
+3. Capture `vibelink browser snapshot`. It returns an indented `eN role "name"` tree plus the generation that issued those refs.
+4. Act with `--ref eN` using `click`, `double-click`, `fill`, `type`, `select`, `check`, `focus`, `clear`, `select-all`, `hover`, `drag`, `upload`, `scroll-into-view`, `get`, `is`, or `highlight`. `--selector <css>` stays supported for backward compatibility; `--ref` and `--selector` are mutually exclusive.
+5. Verify with a new snapshot, `get`/`is`, screenshot, console, or network inspection.
 
-Refs are valid only for their page, navigation generation, and snapshot. A stale backend node may recover once only when role, name, and duplicate ordinal resolve uniquely. Otherwise accept `stale_ref`, obtain a new snapshot, and never click a guessed match.
+Refs belong to one page, one URL, and one snapshot generation. A navigation, an unknown ref, or a detached node fails as `stale_ref`; capture a new snapshot and never act on a guessed match.
 
-Basic control does not imply permission to evaluate arbitrary script, export cookies, mutate storage, download files, access local files, or perform authenticated/destructive website actions. Those operations require their own capability or approval. Never print cookies, passwords, tokens, or private account data.
+`fill` and `type` route through the element's own input path: `input`/`textarea` commit through the native value setter so controlled React components keep the change, and a `contenteditable` host receives real inserted text. `wait --for idle` reports the page still after `--quiet-ms` with no DOM mutation and no resource load.
+
+Basic control does not imply permission to evaluate arbitrary script, export cookies, mutate storage, copy a browser profile, download files, access local files, or perform authenticated/destructive website actions. Those operations require their own capability or approval. Never print cookies, passwords, tokens, or private account data.
 "#;
 
 const COMPUTER_CONTENT: &str = r#"# VibeLink Computer Use
@@ -223,6 +226,22 @@ mod tests {
             .expect("browser skill")
             .content
             .contains("stale_ref"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("--ref eN"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("wait --for load|selector|no-selector|url|idle"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("native value setter"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("browser chrome --grant browser.cookies --confirm"));
         assert!(builtin_skill("vibelink-computer-use")
             .expect("computer skill")
             .content

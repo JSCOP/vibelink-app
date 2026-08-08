@@ -1351,82 +1351,76 @@ fn browser_contracts() -> Vec<CommandContract> {
         ),
         browser_action(
             "wait",
-            "Wait for a bounded interval.",
-            &[O::unsigned("ms")],
+            "Wait for a bounded page condition or a fixed interval.",
+            &[
+                O::enum_string(
+                    "for",
+                    &["sleep", "selector", "no-selector", "load", "url", "idle"],
+                ),
+                O::unsigned("ms"),
+                O::unsigned("quiet-ms"),
+                O::string("selector"),
+                O::string("url"),
+            ],
             NONE,
             Some(0),
             ReadOnly,
         ),
-        browser_action(
+        browser_element_action(
             "click",
-            "Click a uniquely selected DOM element.",
-            &[O::required_string("selector")],
+            "Click a snapshot ref or uniquely selected DOM element.",
+            &[],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "double-click",
-            "Double-click a uniquely selected DOM element.",
-            &[O::required_string("selector")],
+            "Double-click a snapshot ref or uniquely selected DOM element.",
+            &[],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "fill",
-            "Replace a selected element value.",
-            &[O::required_string("selector"), O::required_string("text")],
+            "Replace element text through the element's own input path.",
+            &[O::required_string("text")],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "type",
-            "Append text to a selected element value.",
-            &[O::required_string("selector"), O::required_string("text")],
+            "Append element text through the element's own input path.",
+            &[O::required_string("text")],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "select",
             "Select a value in a selected element.",
-            &[O::required_string("selector"), O::required_string("value")],
+            &[O::required_string("value")],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "check",
             "Set the checked state of a selected element.",
-            &[O::required_string("selector"), O::string("value")],
+            &[O::string("value")],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
-            "focus",
-            "Focus a selected element.",
-            &[O::required_string("selector")],
-            NONE,
-            Some(0),
-            Mutating,
-        ),
-        browser_action(
+        browser_element_action("focus", "Focus a selected element.", &[], NONE, Mutating),
+        browser_element_action(
             "clear",
             "Clear a selected element value.",
-            &[O::required_string("selector")],
+            &[],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "select-all",
             "Select all text in a selected element.",
-            &[O::required_string("selector")],
+            &[],
             NONE,
-            Some(0),
             Mutating,
         ),
         browser_action(
@@ -1437,32 +1431,19 @@ fn browser_contracts() -> Vec<CommandContract> {
             Some(0),
             Mutating,
         ),
-        browser_action(
-            "hover",
-            "Hover a selected element.",
-            &[O::required_string("selector")],
-            NONE,
-            Some(0),
-            Mutating,
-        ),
-        browser_action(
+        browser_element_action("hover", "Hover a selected element.", &[], NONE, Mutating),
+        browser_element_action(
             "drag",
             "Drag a selected element to page coordinates.",
-            &[
-                O::required_string("selector"),
-                O::required_string("to-x"),
-                O::required_string("to-y"),
-            ],
+            &[O::required_string("to-x"), O::required_string("to-y")],
             NONE,
-            Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "upload",
             "Upload contained workspace files to a selected input.",
-            &[O::required_string("selector"), O::required_repeated("file")],
+            &[O::required_repeated("file")],
             &["confirm"],
-            Some(0),
             HighRisk,
         ),
         browser_action(
@@ -1473,12 +1454,11 @@ fn browser_contracts() -> Vec<CommandContract> {
             Some(0),
             Mutating,
         ),
-        browser_action(
+        browser_element_action(
             "scroll-into-view",
             "Scroll a selected element into view.",
-            &[O::required_string("selector")],
+            &[],
             NONE,
-            Some(0),
             Mutating,
         ),
         browser_action(
@@ -1489,20 +1469,18 @@ fn browser_contracts() -> Vec<CommandContract> {
             Some(0),
             ReadOnly,
         ),
-        browser_action(
+        browser_element_action(
             "get",
             "Read one safe property from a selected element.",
-            &[O::required_string("selector"), O::string("property")],
+            &[O::string("property")],
             NONE,
-            Some(0),
             ReadOnly,
         ),
-        browser_action(
+        browser_element_action(
             "is",
             "Test one safe state on a selected element.",
-            &[O::required_string("selector"), O::string("state")],
+            &[O::string("state")],
             NONE,
-            Some(0),
             ReadOnly,
         ),
         browser_action(
@@ -1518,12 +1496,11 @@ fn browser_contracts() -> Vec<CommandContract> {
             Some(0),
             HighRisk,
         ),
-        browser_action(
+        browser_element_action(
             "highlight",
             "Highlight a selected element.",
-            &[O::required_string("selector")],
+            &[],
             NONE,
-            Some(0),
             Mutating,
         ),
         browser_action(
@@ -1549,6 +1526,14 @@ fn browser_contracts() -> Vec<CommandContract> {
             NONE,
             Some(0),
             ReadOnly,
+        ),
+        browser_action(
+            "chrome",
+            "Attach to the user's real Chrome profile through a VibeLink-owned copy.",
+            &[O::string("source-profile")],
+            &["confirm", "refresh"],
+            Some(0),
+            HighRisk,
         ),
         browser_action(
             "cookies",
@@ -1634,6 +1619,20 @@ fn browser_action(
         requires_expected_revision: false,
         risk,
     }
+}
+
+/// Element actions accept either a snapshot ref or a CSS selector. Both stay
+/// optional here because exactly-one-of is a runtime rule, not an arity rule.
+fn browser_element_action(
+    action: &'static str,
+    description: &'static str,
+    extra: &[OptionSpec],
+    switches: &'static [&'static str],
+    risk: RiskLevel,
+) -> CommandContract {
+    let mut options = vec![OptionSpec::string("ref"), OptionSpec::string("selector")];
+    options.extend_from_slice(extra);
+    browser_action(action, description, &options, switches, Some(0), risk)
 }
 
 fn computer_action(

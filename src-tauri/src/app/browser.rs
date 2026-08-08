@@ -6,7 +6,7 @@ use crate::browser::{
     CertificateDecision, CertificateRequest, NativeBrowserProvider, PermissionDecision,
     PermissionRequest, PhysicalBounds, ProfileKind,
 };
-use crate::dedicated_cli::browser_cdp::{
+use crate::dedicated_cli::browser_page::{
     BrowserJpegCaptureOptions, BrowserKeyInput as CdpKeyInput, BrowserPageScale,
     BrowserPointerInput as CdpPointerInput, BrowserViewport,
 };

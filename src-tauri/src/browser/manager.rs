@@ -13,7 +13,7 @@ use super::{
         SnapshotNodeRecord, VisibilityLeaseToken,
     },
 };
-use crate::dedicated_cli::browser_cdp::{
+use crate::dedicated_cli::browser_page::{
     BrowserInspectSnapshot, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
     BrowserPageScale, BrowserPointerInput,
 };

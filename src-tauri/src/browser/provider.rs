@@ -7,7 +7,7 @@ use super::{
         PermissionDecision, PhysicalBounds,
     },
 };
-use crate::dedicated_cli::browser_cdp::{
+use crate::dedicated_cli::browser_page::{
     BrowserInspectSnapshot, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
     BrowserPageScale, BrowserPointerInput,
 };
@@ -1242,7 +1242,7 @@ impl BrowserProvider for NativeBrowserProvider {
         x: Option<f64>,
         y: Option<f64>,
     ) -> BrowserResult<BrowserInspectSnapshot> {
-        crate::dedicated_cli::browser_cdp::inspect_page(&self.registry_path, page_id, x, y).map_err(
+        crate::dedicated_cli::browser_page::inspect(&self.registry_path, page_id, x, y).map_err(
             |error| BrowserError::new(BrowserErrorCode::RuntimeUnavailable, error.to_string()),
         )
     }
