@@ -436,6 +436,7 @@ pub fn run() {
             commands::list_installed_fonts,
             commands::list_sessions,
             commands::ping,
+            commands::take_daemon_replacement,
             commands::rename_session,
             commands::set_session_workspace_folder,
             commands::resource_snapshot,

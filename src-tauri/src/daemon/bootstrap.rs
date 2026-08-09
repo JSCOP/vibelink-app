@@ -25,6 +25,9 @@ fn run_inner() -> Result<()> {
     }
 
     let _pid_file = PidFileGuard::create(paths.pid.clone())?;
+    if let Err(err) = write_daemon_info(&paths.info) {
+        warn!(?err, "failed to write daemon identity");
+    }
 
     // Bind the bundled ConPTY before the first pane spawns; otherwise
     // portable-pty's bare `LoadLibrary("conpty.dll")` picks up whatever install
@@ -165,6 +168,16 @@ fn run_inner() -> Result<()> {
     Ok(())
 }
 
+fn write_daemon_info(path: &Path) -> Result<()> {
+    let info = paths::DaemonInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exe: std::env::current_exe().context("resolve daemon executable")?,
+        pid: std::process::id(),
+    };
+    let bytes = serde_json::to_vec(&info).context("serialize daemon identity")?;
+    crate::persistence::write_bytes_atomic(path, &bytes)
+}
+
 /// Sweeps pane process trees the daemon still parents without owning, and ends
 /// a daemon that has nothing left to serve. See `daemon::lifecycle`.
 fn start_lifecycle_monitor(
@@ -254,6 +267,7 @@ pub(super) fn exit_daemon_process(state: &SharedState, sessions_path: &Path) -> 
     }
     if let Ok(paths) = paths::daemon_paths() {
         let _ = fs::remove_file(paths.pid);
+        let _ = fs::remove_file(paths.info);
     }
     std::process::exit(0);
 }
@@ -438,18 +452,26 @@ pub(super) fn request_computer_host(
 
 pub(super) struct PidFileGuard {
     path: PathBuf,
+    info: PathBuf,
 }
 
 impl PidFileGuard {
     pub(super) fn create(path: PathBuf) -> Result<Self> {
         fs::write(&path, std::process::id().to_string())?;
-        Ok(Self { path })
+        let mut info_name = path
+            .file_stem()
+            .unwrap_or_else(|| OsStr::new("daemon"))
+            .to_os_string();
+        info_name.push("-info.json");
+        let info = path.with_file_name(info_name);
+        Ok(Self { path, info })
     }
 }
 
 impl Drop for PidFileGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.info);
     }
 }
 

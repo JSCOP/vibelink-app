@@ -172,6 +172,13 @@ pub async fn ping(client: State<'_, DaemonClient>) -> Result<(), String> {
     client.ping().map_err(to_string)
 }
 
+/// Pull after the WebView mounts so startup cannot race an event listener.
+/// Taking once also keeps a reload from resurrecting an old notice.
+#[tauri::command]
+pub fn take_daemon_replacement() -> Option<super::spawn_daemon::DaemonReplacement> {
+    super::spawn_daemon::take_daemon_replacement()
+}
+
 /// Mirrors `settings.sessionRestore` / `settings.minimizeToTrayOnClose` into
 /// native state, because `RunEvent::Exit` cannot call into the WebView.
 #[tauri::command]

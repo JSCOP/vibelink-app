@@ -28,5 +28,6 @@ describe('Git diff syntax highlighting', () => {
     const monacoCss = [...document.querySelectorAll('style.monaco-colors')].map((style) => style.textContent ?? '').join('\n').toLowerCase()
     expect(monacoCss).toContain(theme.terminal.blue.toLowerCase())
     expect(monacoCss).toContain(theme.terminal.green.toLowerCase())
-  }, 20_000)
+    // Loads the real Monaco bundle transitively; see monaco.test.ts.
+  }, 60_000)
 })

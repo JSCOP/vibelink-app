@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     io::Write,
@@ -17,7 +18,15 @@ pub struct DaemonPaths {
     pub lock: PathBuf,
     pub log: PathBuf,
     pub pid: PathBuf,
+    pub info: PathBuf,
     pub auth_token: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonInfo {
+    pub version: String,
+    pub exe: PathBuf,
+    pub pid: u32,
 }
 
 pub fn daemon_paths() -> Result<DaemonPaths> {
@@ -31,9 +40,14 @@ pub fn daemon_paths() -> Result<DaemonPaths> {
         lock: data_dir.join("daemon.lock"),
         log: data_dir.join("daemon.log"),
         pid: data_dir.join("daemon.pid"),
+        info: data_dir.join("daemon-info.json"),
         auth_token: data_dir.join("daemon-auth.token"),
         data_dir,
     })
+}
+
+pub fn read_daemon_info(path: &Path) -> Option<DaemonInfo> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
 pub fn socket_name_string() -> String {
@@ -224,6 +238,32 @@ mod tests {
     }
 
     #[test]
+    fn daemon_info_read_handles_missing_corrupt_and_valid_files() {
+        let path = std::env::temp_dir().join(format!(
+            "vibelink-daemon-info-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let expected = DaemonInfo {
+            version: "0.5.24".to_string(),
+            exe: PathBuf::from(r"C:\VibeLink\daemon-bin\app-daemon-prod-current.exe"),
+            pid: 35_588,
+        };
+
+        assert_eq!(read_daemon_info(&path), None);
+        fs::write(&path, b"{not-json").expect("write corrupt daemon info");
+        assert_eq!(read_daemon_info(&path), None);
+        fs::write(
+            &path,
+            serde_json::to_vec(&expected).expect("serialize daemon info"),
+        )
+        .expect("write daemon info");
+        assert_eq!(read_daemon_info(&path), Some(expected));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn daemon_paths_use_project_data_dir() {
         let paths = daemon_paths().expect("project dirs available");
 
@@ -235,6 +275,7 @@ mod tests {
         assert!(paths.lock.ends_with("daemon.lock"));
         assert!(paths.log.ends_with("daemon.log"));
         assert!(paths.pid.ends_with("daemon.pid"));
+        assert!(paths.info.ends_with("daemon-info.json"));
         assert!(paths.auth_token.ends_with("daemon-auth.token"));
     }
 }

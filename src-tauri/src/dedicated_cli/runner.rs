@@ -89,7 +89,10 @@ impl ControlExecutor for SocketExecutor {
         match invocation.command.clone() {
             Command::Status => {
                 ControlSocketClient::connect(config)?.ping()?;
-                Ok(status_result(flavor, socket_name))
+                let daemon_info = paths::daemon_paths()
+                    .ok()
+                    .and_then(|daemon_paths| paths::read_daemon_info(&daemon_paths.info));
+                Ok(status_result(flavor, socket_name, daemon_info))
             }
             Command::Terminal(command) if command.action == TerminalAction::Wait => {
                 terminal_wait(config, invocation, command, progress)
@@ -116,8 +119,14 @@ impl ControlExecutor for SocketExecutor {
     }
 }
 
-fn status_result(flavor: Flavor, socket_name: String) -> Value {
+fn status_result(
+    flavor: Flavor,
+    socket_name: String,
+    daemon_info: Option<paths::DaemonInfo>,
+) -> Value {
     let flavor_name = flavor.as_str();
+    let daemon_version = daemon_info.map(|info| info.version);
+    let daemon_up_to_date = daemon_version.as_deref() == Some(env!("CARGO_PKG_VERSION"));
     json!({
         "state": "running",
         "flavor": flavor,
@@ -126,6 +135,8 @@ fn status_result(flavor: Flavor, socket_name: String) -> Value {
         "hostProtected": paths::host_protected_for_flavor(flavor_name),
         "hostWindowTitle": paths::app_name_for_flavor(flavor_name),
         "version": env!("CARGO_PKG_VERSION"),
+        "daemonVersion": daemon_version,
+        "daemonUpToDate": daemon_up_to_date,
     })
 }
 
@@ -458,15 +469,33 @@ mod tests {
 
     #[test]
     fn status_exposes_release_host_protection_and_dev_target_identity() {
-        let release = status_result(Flavor::Prod, "prod-socket".to_string());
+        let release = status_result(Flavor::Prod, "prod-socket".to_string(), None);
         assert_eq!(release["hostRuntime"], "release");
         assert_eq!(release["hostProtected"], true);
         assert_eq!(release["hostWindowTitle"], "VibeLink");
+        assert_eq!(release["daemonVersion"], Value::Null);
+        assert_eq!(release["daemonUpToDate"], false);
 
-        let development = status_result(Flavor::Dev, "dev-socket".to_string());
+        let development = status_result(Flavor::Dev, "dev-socket".to_string(), None);
         assert_eq!(development["hostRuntime"], "development");
         assert_eq!(development["hostProtected"], false);
         assert_eq!(development["hostWindowTitle"], "VibeLink Dev");
+    }
+
+    #[test]
+    fn status_reports_matching_daemon_version_as_up_to_date() {
+        let status = status_result(
+            Flavor::Prod,
+            "prod-socket".to_string(),
+            Some(paths::DaemonInfo {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                exe: "daemon.exe".into(),
+                pid: 42,
+            }),
+        );
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["daemonVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(status["daemonUpToDate"], true);
     }
 
     #[test]
