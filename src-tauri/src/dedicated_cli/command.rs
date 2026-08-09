@@ -592,6 +592,7 @@ fn is_switch(flag: &str) -> bool {
             | "--ignore-cache"
             | "--install"
             | "--copy-profile"
+            | "--unpair"
             | "--refresh"
             | "--enable"
             | "--disable"

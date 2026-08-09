@@ -3,6 +3,12 @@ const INITIAL_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_BASE_MS = 24_000;
 const MAX_RECONNECT_MS = 30_000;
 const KEEPALIVE_MS = 20_000;
+// The installed VibeLink desktop owns exactly one of these: release uses 9332
+// and a developer build uses 19399 (runtime_ports::browser_extension_port).
+// Trying both keeps this file identical for every user, which is what lets one
+// Chrome Web Store build serve everyone; the unused port backs off and retries
+// quietly.
+const BRIDGE_PORTS = [9332, 19399];
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
 const GROUP_COLORS = new Set([
   "grey",
@@ -49,42 +55,12 @@ async function start() {
   if (started) return;
   started = true;
 
-  try {
-    const response = await fetch(chrome.runtime.getURL("pairing.json"), {
-      cache: "no-store",
-    });
-    if (!response.ok) throw new Error("pairing.json is missing");
-
-    const pairing = validatePairing(await response.json());
-    for (const port of pairing.ports) connectPort(port, pairing.token);
-  } catch (error) {
-    console.error(`VibeLink Browser Control is idle: ${errorMessage(error)}`);
-  }
+  for (const port of BRIDGE_PORTS) connectPort(port);
 }
 
-function validatePairing(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("pairing.json must contain an object");
-  }
-  if (typeof value.token !== "string" || !/^[0-9a-fA-F]{64}$/.test(value.token)) {
-    throw new Error("pairing.json has an invalid token");
-  }
-  if (!Array.isArray(value.ports) || value.ports.length === 0) {
-    throw new Error("pairing.json has no ports");
-  }
-
-  const ports = [...new Set(value.ports)];
-  if (ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65_535)) {
-    throw new Error("pairing.json has an invalid port");
-  }
-
-  return { token: value.token, ports };
-}
-
-function connectPort(port, token) {
+function connectPort(port) {
   const connection = {
     port,
-    token,
     attempt: 0,
     socket: null,
     reconnectTimer: null,
@@ -112,7 +88,6 @@ function openSocket(connection) {
     sendFrame(socket, {
       v: PROTOCOL_VERSION,
       type: "hello",
-      token: connection.token,
       browser: "chrome",
       extensionVersion: chrome.runtime.getManifest().version,
       userAgent: navigator.userAgent,

@@ -58,6 +58,10 @@ pub struct ExtensionStatus {
     pub browser: Option<String>,
     pub extension_version: Option<String>,
     pub connected_at_ms: Option<u64>,
+    /// The extension id this daemon has bound itself to, if any.
+    pub trusted_extension_id: Option<String>,
+    /// Set when an extension was turned away because another id is trusted.
+    pub rejected_extension_id: Option<String>,
 }
 
 struct OutboundFrame {
@@ -82,6 +86,8 @@ struct BridgeState {
     browser: Option<String>,
     extension_version: Option<String>,
     connected_at_ms: Option<u64>,
+    trusted_extension_id: Option<String>,
+    rejected_extension_id: Option<String>,
     pending: HashMap<u64, Sender<PendingResult>>,
     events: VecDeque<BufferedEvent>,
     event_bytes: usize,
@@ -89,7 +95,10 @@ struct BridgeState {
 
 pub struct ExtensionBridge {
     port: u16,
-    token: String,
+    /// Where the trusted extension id is remembered, next to the extension
+    /// folder rather than inside it: the folder must stay byte-identical for
+    /// every user so one Chrome Web Store build serves everyone.
+    trust_path: PathBuf,
     next_id: AtomicU64,
     state: Mutex<BridgeState>,
 }
@@ -98,7 +107,7 @@ impl ExtensionBridge {
     /// Starts (once per process) the loopback listener on `port` and returns the
     /// shared handle. Repeat calls with the same port return the same handle;
     /// a call with a different port is an error.
-    pub fn shared(port: u16, token: &str) -> Result<Arc<ExtensionBridge>> {
+    pub fn shared(port: u16, trust_path: PathBuf) -> Result<Arc<ExtensionBridge>> {
         if let Some(bridge) = SHARED.get() {
             return bridge.for_port(port);
         }
@@ -113,7 +122,7 @@ impl ExtensionBridge {
         let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| {
             format!("bind VibeLink browser extension listener on 127.0.0.1:{port}")
         })?;
-        let bridge = Self::start(listener, token.to_string())?;
+        let bridge = Self::start(listener, trust_path)?;
         SHARED
             .set(Arc::clone(&bridge))
             .map_err(|_| anyhow!("initialize shared VibeLink browser extension bridge"))?;
@@ -129,6 +138,49 @@ impl ExtensionBridge {
             browser: state.browser.clone(),
             extension_version: state.extension_version.clone(),
             connected_at_ms: state.connected_at_ms,
+            trusted_extension_id: state.trusted_extension_id.clone(),
+            rejected_extension_id: state.rejected_extension_id.clone(),
+        }
+    }
+
+    /// Forgets the trusted extension so a different build — a developer's
+    /// unpacked copy replaced by the Chrome Web Store one, say — can bind.
+    pub fn unpair(&self) -> Result<()> {
+        let mut state = self.state.lock().expect("browser extension state mutex");
+        state.trusted_extension_id = None;
+        state.rejected_extension_id = None;
+        state.connection = None;
+        state.browser = None;
+        state.extension_version = None;
+        state.connected_at_ms = None;
+        drop(state);
+        write_trust(&self.trust_path, None)
+    }
+
+    /// Binds the bridge to one extension id: the first that connects wins, and
+    /// after that only that id is served. The window is the moment right after
+    /// the user enables the extension, and no page can compete for it because a
+    /// page cannot present an extension origin.
+    fn authorize(&self, extension_id: &str) -> bool {
+        let mut state = self.state.lock().expect("browser extension state mutex");
+        match state.trusted_extension_id.as_deref() {
+            Some(trusted) if trusted == extension_id => {
+                state.rejected_extension_id = None;
+                true
+            }
+            Some(_) => {
+                state.rejected_extension_id = Some(extension_id.to_string());
+                false
+            }
+            None => {
+                state.trusted_extension_id = Some(extension_id.to_string());
+                state.rejected_extension_id = None;
+                drop(state);
+                if let Err(error) = write_trust(&self.trust_path, Some(extension_id)) {
+                    tracing::warn!(%error, "remember the trusted browser extension");
+                }
+                true
+            }
         }
     }
 
@@ -219,7 +271,7 @@ impl ExtensionBridge {
         }
     }
 
-    fn start(listener: TcpListener, token: String) -> Result<Arc<Self>> {
+    fn start(listener: TcpListener, trust_path: PathBuf) -> Result<Arc<Self>> {
         let address = listener
             .local_addr()
             .context("read VibeLink browser extension listener address")?;
@@ -228,9 +280,12 @@ impl ExtensionBridge {
         }
         let bridge = Arc::new(Self {
             port: address.port(),
-            token,
             next_id: AtomicU64::new(1),
-            state: Mutex::new(BridgeState::default()),
+            state: Mutex::new(BridgeState {
+                trusted_extension_id: read_trust(&trust_path),
+                ..BridgeState::default()
+            }),
+            trust_path,
         });
         let listener_bridge = Arc::clone(&bridge);
         thread::Builder::new()
@@ -277,13 +332,39 @@ impl ExtensionBridge {
             .max_write_buffer_size(MAX_TEXT_FRAME_BYTES)
             .max_message_size(Some(MAX_TEXT_FRAME_BYTES))
             .max_frame_size(Some(MAX_TEXT_FRAME_BYTES));
+        // The browser sets `Origin` on the upgrade and script cannot override it,
+        // so an extension origin is proof the peer really is an installed
+        // extension rather than a page that guessed the port. That is what
+        // replaces a per-machine shared secret and lets one identical Chrome Web
+        // Store build authenticate on every user's machine.
+        let origin = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&origin);
         let mut websocket = tungstenite::accept_hdr_with_config(
             stream,
-            |_: &tungstenite::handshake::server::Request,
-             response: tungstenite::handshake::server::Response| { Ok(response) },
+            move |request: &tungstenite::handshake::server::Request,
+                  response: tungstenite::handshake::server::Response| {
+                *captured.lock().expect("browser extension origin mutex") = request
+                    .headers()
+                    .get("origin")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(extension_id_from_origin);
+                Ok(response)
+            },
             Some(config),
         )
         .context("accept VibeLink browser extension WebSocket")?;
+        let extension_id = origin
+            .lock()
+            .expect("browser extension origin mutex")
+            .take();
+        let Some(extension_id) = extension_id else {
+            let _ = websocket.send(Message::Close(None));
+            return Ok(());
+        };
+        if !self.authorize(&extension_id) {
+            let _ = websocket.send(Message::Close(None));
+            return Ok(());
+        }
 
         let hello_text = match websocket
             .read()
@@ -302,7 +383,7 @@ impl ExtensionBridge {
                 return Ok(());
             }
         };
-        if hello.v != 1 || hello.message_type != "hello" || hello.token != self.token {
+        if hello.v != 1 || hello.message_type != "hello" {
             let _ = websocket.send(Message::Close(None));
             return Ok(());
         }
@@ -607,17 +688,58 @@ impl ExtensionBridge {
     }
 }
 
+/// The extension identifies itself; it no longer proves anything here, because
+/// the WebSocket `Origin` already did.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HelloFrame {
     v: u8,
     #[serde(rename = "type")]
     message_type: String,
-    token: String,
     browser: String,
     extension_version: String,
     #[serde(rename = "userAgent")]
     _user_agent: String,
+}
+
+/// `chrome-extension://<32 chars a-p>` is the only origin this bridge serves.
+fn extension_id_from_origin(origin: &str) -> Option<String> {
+    let id = origin
+        .strip_prefix("chrome-extension://")
+        .or_else(|| origin.strip_prefix("moz-extension://"))?;
+    let id = id.trim_end_matches('/');
+    (id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_lowercase())).then(|| id.to_string())
+}
+
+fn read_trust(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("extensionId")
+        .and_then(Value::as_str)
+        .and_then(extension_id_from_origin_bare)
+}
+
+fn extension_id_from_origin_bare(id: &str) -> Option<String> {
+    (id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_lowercase())).then(|| id.to_string())
+}
+
+fn write_trust(path: &Path, extension_id: Option<&str>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create the VibeLink browser extension data folder")?;
+    }
+    match extension_id {
+        Some(extension_id) => fs::write(
+            path,
+            serde_json::to_vec_pretty(&json!({ "extensionId": extension_id }))?,
+        )
+        .context("write the VibeLink browser extension trust file"),
+        None => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("clear the VibeLink browser extension trust file"),
+        },
+    }
 }
 
 /// Starts the loopback listener at daemon boot so the extension can connect
@@ -655,6 +777,8 @@ fn now_ms() -> u64 {
 const MANIFEST_JSON: &str = include_str!("../../resources/browser-extension/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("../../resources/browser-extension/service-worker.js");
 const EXTENSION_README: &str = include_str!("../../resources/browser-extension/README.md");
+const ICON_32_PNG: &[u8] = include_bytes!("../../resources/browser-extension/icons/icon-32.png");
+const ICON_128_PNG: &[u8] = include_bytes!("../../resources/browser-extension/icons/icon-128.png");
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -668,9 +792,10 @@ pub fn install_directory(data_root: &Path) -> PathBuf {
     data_root.join("browser-extension")
 }
 
-/// Writes the unpacked extension plus its pairing file. Chrome cannot install
-/// an off-store MV3 extension unattended, so the user still loads this folder
-/// once through `chrome://extensions` in developer mode.
+/// Writes the unpacked extension. Every file is identical on every machine —
+/// no per-user secret is baked in — so this same folder is what gets zipped for
+/// the Chrome Web Store. Off-store, Chrome still needs the user to load it once
+/// through `chrome://extensions` in developer mode.
 pub fn install(data_root: &Path, ports: &[u16]) -> Result<ExtensionInstall> {
     let directory = install_directory(data_root);
     fs::create_dir_all(&directory).context("create the VibeLink browser extension directory")?;
@@ -682,8 +807,20 @@ pub fn install(data_root: &Path, ports: &[u16]) -> Result<ExtensionInstall> {
         fs::write(directory.join(name), contents)
             .with_context(|| format!("write VibeLink browser extension file {name}"))?;
     }
-    let token = pairing_token(data_root)?;
-    write_pairing(&directory, &token, ports)?;
+    let icons = directory.join("icons");
+    fs::create_dir_all(&icons).context("create the VibeLink browser extension icon directory")?;
+    for (name, bytes) in [("icon-32.png", ICON_32_PNG), ("icon-128.png", ICON_128_PNG)] {
+        fs::write(icons.join(name), bytes)
+            .with_context(|| format!("write VibeLink browser extension icon {name}"))?;
+    }
+    // Older builds baked a per-machine token here. Leaving it behind would keep
+    // one user's folder different from the store build for no reason.
+    let stale = directory.join("pairing.json");
+    if let Err(error) = fs::remove_file(&stale) {
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error).context("remove the obsolete browser extension pairing file");
+        }
+    }
     Ok(ExtensionInstall {
         load_unpacked_hint: format!(
             "Open chrome://extensions, enable Developer mode, choose \"Load unpacked\", and select {}",
@@ -694,50 +831,10 @@ pub fn install(data_root: &Path, ports: &[u16]) -> Result<ExtensionInstall> {
     })
 }
 
-/// The shared secret this daemon requires in `hello`. Created on first use so
-/// the bridge can listen before the user has installed the extension.
-pub fn pairing_token(data_root: &Path) -> Result<String> {
-    let directory = install_directory(data_root);
-    let path = directory.join("pairing.json");
-    if let Ok(bytes) = fs::read(&path) {
-        if let Ok(existing) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(token) = existing.get("token").and_then(Value::as_str) {
-                if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Ok(token.to_string());
-                }
-            }
-        }
-    }
-    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    fs::create_dir_all(&directory).context("create the VibeLink browser extension directory")?;
-    write_pairing(&directory, &token, &[])?;
-    Ok(token)
-}
-
-fn write_pairing(directory: &Path, token: &str, ports: &[u16]) -> Result<()> {
-    let path = directory.join("pairing.json");
-    let ports = if ports.is_empty() {
-        fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|value| {
-                value.get("ports").and_then(Value::as_array).map(|ports| {
-                    ports
-                        .iter()
-                        .filter_map(Value::as_u64)
-                        .filter_map(|port| u16::try_from(port).ok())
-                        .collect::<Vec<_>>()
-                })
-            })
-            .unwrap_or_default()
-    } else {
-        ports.to_vec()
-    };
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&json!({ "token": token, "ports": ports }))?,
-    )
-    .context("write the VibeLink browser extension pairing file")
+/// Where the trusted extension id is remembered: beside the extension folder,
+/// never inside it.
+pub fn trust_path(data_root: &Path) -> PathBuf {
+    data_root.join("browser-extension.json")
 }
 
 /// `browser chrome` owns the real-Chrome backend. The default report and
@@ -759,6 +856,11 @@ pub(super) fn chrome_backend(
         bridge_for(artifact_root, main_port)?;
         let install = install(data_root, &[port])?;
         return Ok(serde_json::to_value(install)?);
+    }
+    if command.arguments.switches.contains("unpair") {
+        let bridge = bridge_for(artifact_root, main_port)?;
+        bridge.unpair()?;
+        return Ok(json!({ "backend": "extension", "status": bridge.status() }));
     }
     if command.arguments.switches.contains("copy-profile") {
         if !command.arguments.switches.contains("confirm") {
@@ -803,8 +905,10 @@ pub(super) fn chrome_backend(
 
 pub(super) fn bridge_for(artifact_root: &Path, main_port: u16) -> Result<Arc<ExtensionBridge>> {
     let data_root = artifact_root.parent().unwrap_or(artifact_root);
-    let token = pairing_token(data_root)?;
-    ExtensionBridge::shared(runtime_ports::browser_extension_port(main_port), &token)
+    ExtensionBridge::shared(
+        runtime_ports::browser_extension_port(main_port),
+        trust_path(data_root),
+    )
 }
 
 /// A tab in the user's Chrome is not workspace-scoped, so it carries the
@@ -830,25 +934,45 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const EXTENSION_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+    const OTHER_EXTENSION_ID: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
 
-    fn test_bridge(token: &str) -> Arc<ExtensionBridge> {
+    fn test_bridge() -> Arc<ExtensionBridge> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral test port");
-        ExtensionBridge::start(listener, token.to_string()).expect("start test bridge")
+        let trust = std::env::temp_dir().join(format!(
+            "vibelink-browser-extension-trust-{}.json",
+            Uuid::new_v4()
+        ));
+        ExtensionBridge::start(listener, trust).expect("start test bridge")
+    }
+
+    fn open(
+        bridge: &ExtensionBridge,
+        origin: Option<&str>,
+    ) -> WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+        use tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://127.0.0.1:{}", bridge.port)
+            .into_client_request()
+            .expect("build extension request");
+        if let Some(origin) = origin {
+            request
+                .headers_mut()
+                .insert("origin", origin.parse().expect("origin header value"));
+        }
+        let (socket, _) = tungstenite::connect(request).expect("connect test extension");
+        socket
     }
 
     fn connect(
         bridge: &ExtensionBridge,
-        token: &str,
+        extension_id: &str,
     ) -> WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
-        let (mut socket, _) = tungstenite::connect(format!("ws://127.0.0.1:{}", bridge.port))
-            .expect("connect test extension");
+        let mut socket = open(bridge, Some(&format!("chrome-extension://{extension_id}")));
         socket
             .send(Message::Text(
                 json!({
                     "v": 1,
                     "type": "hello",
-                    "token": token,
                     "browser": "chrome",
                     "extensionVersion": "1.0.0",
                     "userAgent": "test",
@@ -873,8 +997,8 @@ mod tests {
 
     #[test]
     fn list_tabs_round_trip_uses_real_websocket() {
-        let bridge = test_bridge(TOKEN);
-        let mut socket = connect(&bridge, TOKEN);
+        let bridge = test_bridge();
+        let mut socket = connect(&bridge, EXTENSION_ID);
         wait_for_connected(&bridge);
 
         let caller_bridge = Arc::clone(&bridge);
@@ -929,22 +1053,68 @@ mod tests {
     }
 
     #[test]
-    fn wrong_hello_token_is_closed_without_connecting() {
-        let bridge = test_bridge(TOKEN);
-        let mut socket = connect(
+    fn a_page_origin_is_refused_because_only_an_extension_may_drive_the_browser() {
+        let bridge = test_bridge();
+        for origin in [None, Some("https://evil.example"), Some("null")] {
+            let mut socket = open(&bridge, origin);
+            assert!(
+                matches!(socket.read().expect("read close"), Message::Close(_)),
+                "origin {origin:?} must be refused"
+            );
+        }
+        assert!(!bridge.status().connected);
+        assert!(bridge.status().trusted_extension_id.is_none());
+    }
+
+    #[test]
+    fn the_first_extension_is_trusted_and_a_second_one_is_refused_until_unpaired() {
+        let bridge = test_bridge();
+        let _first = connect(&bridge, EXTENSION_ID);
+        wait_for_connected(&bridge);
+        assert_eq!(
+            bridge.status().trusted_extension_id.as_deref(),
+            Some(EXTENSION_ID)
+        );
+
+        let mut intruder = open(
             &bridge,
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            Some(&format!("chrome-extension://{OTHER_EXTENSION_ID}")),
         );
         assert!(matches!(
-            socket.read().expect("read authentication close"),
+            intruder.read().expect("read intruder close"),
             Message::Close(_)
         ));
-        assert!(!bridge.status().connected);
+        assert_eq!(
+            bridge.status().rejected_extension_id.as_deref(),
+            Some(OTHER_EXTENSION_ID)
+        );
+
+        bridge.unpair().expect("unpair");
+        assert!(bridge.status().trusted_extension_id.is_none());
+        let _second = connect(&bridge, OTHER_EXTENSION_ID);
+        wait_for_connected(&bridge);
+        assert_eq!(
+            bridge.status().trusted_extension_id.as_deref(),
+            Some(OTHER_EXTENSION_ID)
+        );
+    }
+
+    #[test]
+    fn the_trusted_extension_survives_a_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "vibelink-browser-extension-trust-{}.json",
+            Uuid::new_v4()
+        ));
+        write_trust(&path, Some(EXTENSION_ID)).expect("write trust");
+        assert_eq!(read_trust(&path).as_deref(), Some(EXTENSION_ID));
+
+        write_trust(&path, None).expect("clear trust");
+        assert!(read_trust(&path).is_none());
     }
 
     #[test]
     fn send_without_extension_is_unavailable() {
-        let bridge = test_bridge(TOKEN);
+        let bridge = test_bridge();
         let error = bridge
             .send(1, "Runtime.evaluate", json!({"expression": "1 + 1"}))
             .expect_err("disconnected send must fail");
@@ -953,7 +1123,7 @@ mod tests {
 
     #[test]
     fn event_ring_drops_oldest_and_drain_removes_returned_events() {
-        let bridge = test_bridge(TOKEN);
+        let bridge = test_bridge();
         for sequence in 0..=MAX_EVENTS_PER_TAB {
             bridge.push_event(7, json!({"sequence": sequence}));
         }

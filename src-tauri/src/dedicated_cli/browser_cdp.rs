@@ -343,13 +343,17 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         targets.retain(|target| target.workspace_id.as_deref() == Some(workspace_id));
     }
     if targets.is_empty() {
-        // A listening bridge with nothing attached is the failure users hit: the
-        // extension is unloaded, or loaded from the OTHER flavor's folder, so it
-        // dials a port this daemon does not serve. "Start VibeLink desktop" there
-        // sends the caller in a circle.
-        if bridge.is_some_and(|bridge| !bridge.status().connected) {
+        // "Start VibeLink desktop" sends the caller in a circle when it already
+        // runs, so name whichever real cause applies.
+        if let Some(status) = bridge
+            .map(|bridge| bridge.status())
+            .filter(|s| !s.connected)
+        {
+            if let Some(refused) = status.rejected_extension_id {
+                bail!("no browser tab is available: extension {refused} was refused because this daemon is bound to {}. Run `vibelink browser chrome --unpair` to bind the new one", status.trusted_extension_id.unwrap_or_default());
+            }
             let data_root = artifact_root.parent().unwrap_or(artifact_root);
-            bail!("no browser tab is available: the VibeLink extension is not connected. Load {} once via chrome://extensions (Developer mode, Load unpacked), and remove any copy loaded from another VibeLink flavor's data folder", browser_extension::install_directory(data_root).display());
+            bail!("no browser tab is available: the VibeLink extension is not connected. Install it from the Chrome Web Store, or load {} once via chrome://extensions with Developer mode on, and keep Chrome running", browser_extension::install_directory(data_root).display());
         }
         bail!(
             "browser CDP is unavailable; start VibeLink desktop or run `vibelink browser chrome`"

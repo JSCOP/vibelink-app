@@ -1535,7 +1535,7 @@ fn browser_contracts() -> Vec<CommandContract> {
                 O::string("session-title"),
                 O::string("session-color"),
             ],
-            &["confirm", "install", "copy-profile", "refresh"],
+            &["confirm", "install", "copy-profile", "refresh", "unpair"],
             Some(0),
             HighRisk,
         ),
