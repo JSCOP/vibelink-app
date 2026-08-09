@@ -32,9 +32,16 @@ error envelope, and diagnostics stay on stderr.
 - **The user's real Chrome** — their profile, their logins, their open tabs.
   This is what you want for anything authenticated. It needs a one-time setup:
   `browser chrome --install --grant browser.cookies` writes an unpacked
-  extension and prints the folder; the user loads it once through
-  `chrome://extensions` with Developer mode on. `browser chrome` then reports
-  `status.connected`.
+  extension and prints `installDirectory`; the user loads THAT EXACT folder once
+  through `chrome://extensions` with Developer mode on. `browser chrome` then
+  reports `status.connected: true` and lists their tabs.
+  If `connected` stays `false` while `listening` is `true`, the extension is not
+  loaded, or a copy from the other flavor's data folder is loaded instead —
+  `VibeLink Dev\data\browser-extension` dials a different port than
+  `VibeLink\data\browser-extension` and will never connect. Compare the
+  extension's load path in `chrome://extensions` against `installDirectory` and
+  reload the right one. Never spawn a second Chrome to work around this; the
+  point of this backend is the browser the user already has open.
 - **VibeLink in-pane pages** — the WebView2 browser inside a workspace pane.
   Already available, but it is a separate profile and starts signed out.
 

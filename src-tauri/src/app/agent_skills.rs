@@ -12,7 +12,7 @@ pub const VIBELINK_BROWSER_SKILL_NAME: &str = "vibelink-browser";
 pub const VIBELINK_SKILLS_REPOSITORY: &str = "JSCOP/vibelink-skills";
 // Bump whenever any bundled SKILL.md changes: an installed copy whose SHA-256
 // differs from the built-in one reads as `Stale`, and refresh then rewrites it.
-pub const VIBELINK_SKILLS_REVISION: u32 = 3;
+pub const VIBELINK_SKILLS_REVISION: u32 = 4;
 
 /// A skill VibeLink writes into an agent's own skills directory. The capability
 /// itself lives in the daemon behind the `vibelink` CLI; these files only teach
