@@ -77,6 +77,7 @@ fn run_inner() -> Result<()> {
     let policy_heartbeat = Arc::new(Mutex::new(PolicyHeartbeat::default()));
     let connections = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let sessions_path = Arc::new(paths.sessions.clone());
+    crate::dedicated_cli::browser_extension::start_for_daemon(&sessions_path);
     let shutdown = Arc::new(AtomicBool::new(false));
     start_automation_scheduler(
         Arc::clone(&automation),

@@ -1,9 +1,9 @@
 use super::browser_page::{
     call_on, clear_element, compress_ax_tree, current_page_url, element_action, element_center,
-    element_id, element_target, resolve_element, wait_for_condition, write_snapshot_state,
-    BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput, BrowserPageScale,
-    BrowserPointerInput, BrowserViewport, MAX_TEXT_INPUT_BYTES, PREPARE_TEXT_INPUT,
-    SELECT_ALL_TEXT, SET_CHECKED, SET_NATIVE_VALUE, SET_SELECT_VALUE,
+    element_id, element_target, resolve_element, show_cursor, wait_for_condition,
+    write_snapshot_state, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
+    BrowserPageScale, BrowserPointerInput, BrowserViewport, MAX_TEXT_INPUT_BYTES,
+    PREPARE_TEXT_INPUT, SELECT_ALL_TEXT, SET_CHECKED, SET_NATIVE_VALUE, SET_SELECT_VALUE,
 };
 use crate::{
     browser::{BrowserDeviceMetrics, BrowserPolicy, BrowserRiskCapability},
@@ -484,6 +484,7 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
                 } else {
                     1
                 };
+                show_cursor(&mut cdp, point.0, point.1, true);
                 cdp.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": point.0, "y": point.1, "button": "left", "clickCount": count }))?;
                 cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": point.0, "y": point.1, "button": "left", "clickCount": count }))?;
             }
@@ -560,8 +561,10 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             let to_y = option(&command, "to-y")
                 .context("--to-y is required")?
                 .parse::<f64>()?;
+            show_cursor(&mut cdp, from.0, from.1, true);
             cdp.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "buttons": 1 }))?;
             cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": to_x, "y": to_y, "button": "left", "buttons": 1 }))?;
+            show_cursor(&mut cdp, to_x, to_y, false);
             cdp.call(
                 "Input.dispatchMouseEvent",
                 json!({ "type": "mouseReleased", "x": to_x, "y": to_y, "button": "left" }),
@@ -650,6 +653,7 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             if !x.is_finite() || !y.is_finite() {
                 bail!("mouse coordinates must be finite");
             }
+            show_cursor(&mut cdp, x, y, event_type == "mousePressed");
             cdp.call("Input.dispatchMouseEvent", json!({ "type": event_type, "x": x, "y": y, "button": option(&command, "button").unwrap_or("none") }))
         }
         BrowserAction::Highlight => element_action(

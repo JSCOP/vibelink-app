@@ -236,6 +236,18 @@ async function dispatch(request) {
         throw new Error("method must be a non-empty string");
       }
       await ensureAttached(tabId);
+      // Chrome does not deliver synthesized input to a tab that is not the
+      // active one in its window: the compositor is not driving it, so the
+      // event is accepted and dropped. Raise the tab first, exactly as a
+      // person would, and the user also gets to see what is being clicked.
+      if (request.method.startsWith("Input.")) {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (!tab.active) await chrome.tabs.update(tabId, { active: true });
+        } catch (error) {
+          // A tab that vanished fails on the command below with a clearer message.
+        }
+      }
       return (
         (await chrome.debugger.sendCommand(
           { tabId },

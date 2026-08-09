@@ -620,6 +620,23 @@ struct HelloFrame {
     _user_agent: String,
 }
 
+/// Starts the loopback listener at daemon boot so the extension can connect
+/// before any browser command has run. A failure must not stop the daemon.
+pub fn start_for_daemon(sessions_path: &Path) {
+    let artifact_root = sessions_path
+        .parent()
+        .unwrap_or(sessions_path)
+        .join("browser-artifacts");
+    let main_port = std::env::var("VIBELINK_BROWSER_CDP_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or_else(runtime_ports::current_main_webview_cdp_port);
+    if let Err(error) = bridge_for(&artifact_root, main_port) {
+        tracing::warn!(%error, "browser extension bridge unavailable");
+    }
+}
+
 fn unavailable() -> anyhow::Error {
     anyhow!(UNAVAILABLE_ERROR)
 }
@@ -735,13 +752,12 @@ pub(super) fn chrome_backend(
 ) -> Result<Value> {
     let data_root = artifact_root.parent().unwrap_or(artifact_root);
     if command.arguments.switches.contains("install") {
-        let install = install(
-            data_root,
-            &[
-                runtime_ports::PROD_BROWSER_EXTENSION_PORT,
-                runtime_ports::DEV_BROWSER_EXTENSION_PORT,
-            ],
-        )?;
+        // Only this flavor's port. Listing a port no daemon serves makes the
+        // service worker retry a dead endpoint forever, and Chrome records every
+        // refused WebSocket as an extension error the user has to read.
+        let port = runtime_ports::browser_extension_port(main_port);
+        bridge_for(artifact_root, main_port)?;
+        let install = install(data_root, &[port])?;
         return Ok(serde_json::to_value(install)?);
     }
     if command.arguments.switches.contains("copy-profile") {
@@ -757,6 +773,24 @@ pub(super) fn chrome_backend(
         )?)?);
     }
     let bridge = bridge_for(artifact_root, main_port)?;
+    if let Some(title) = option(command, "session-title") {
+        // Naming the session groups the tab in Chrome's own tab strip, so the
+        // user can see at a glance which tabs an agent is working in.
+        let tab_id = command
+            .selectors
+            .tab
+            .as_deref()
+            .and_then(|value| value.strip_prefix("chrome-tab-"))
+            .and_then(|value| value.parse::<i64>().ok())
+            .context("--tab must name a chrome-tab-<id> target")?;
+        bridge.name_session(
+            tab_id,
+            title,
+            option(command, "session-color").unwrap_or("blue"),
+        )?;
+        return Ok(json!({ "tabId": tab_id, "sessionTitle": title }));
+    }
+
     let status = bridge.status();
     let tabs = bridge.list_tabs().unwrap_or_default();
     Ok(json!({

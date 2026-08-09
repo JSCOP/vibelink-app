@@ -58,6 +58,11 @@ pub(super) const SELECT_ALL_TEXT: &str = "function(){this.focus();if(typeof this
 // only reports how long the page has been still, so repeated polling stays a
 // single boolean read.
 pub(super) const IDLE_PROBE: &str = "(quiet=>{const k='__vibelinkWaitIdle';let s=window[k];if(!s){s=window[k]={at:Date.now()};const touch=()=>{s.at=Date.now()};new MutationObserver(touch).observe(document,{subtree:true,childList:true,attributes:true,characterData:true});try{new PerformanceObserver(touch).observe({type:'resource',buffered:false})}catch(e){}}return document.readyState==='complete'&&Date.now()-s.at>=quiet})";
+// A pointer the user can follow while an agent drives their browser. Without
+// it a remotely controlled page moves on its own with no indication of what was
+// touched. Purely decorative: `pointer-events:none`, aria-hidden, and it
+// removes itself once the agent stops acting.
+pub(super) const CURSOR_OVERLAY: &str = "((x,y,click)=>{const id='__vibelinkCursor';let el=document.getElementById(id);const host=document.body||document.documentElement;if(!host)return false;if(!el){el=document.createElement('div');el.id=id;el.setAttribute('aria-hidden','true');el.style.cssText='position:fixed;left:0;top:0;width:22px;height:22px;margin:-3px 0 0 -3px;z-index:2147483647;pointer-events:none;transition:transform .18s cubic-bezier(.22,.61,.36,1);will-change:transform;filter:drop-shadow(0 1px 2px rgba(0,0,0,.45))';el.innerHTML='<svg width=\"22\" height=\"22\" viewBox=\"0 0 22 22\"><path d=\"M3 2l14 7-6 1.6L8.6 17z\" fill=\"#ff2d55\" stroke=\"#fff\" stroke-width=\"1.4\" stroke-linejoin=\"round\"/></svg>';host.appendChild(el)}el.style.transform='translate('+x+'px,'+y+'px)';clearTimeout(el.__vibelinkIdle);el.__vibelinkIdle=setTimeout(()=>el.remove(),5000);if(click){const ring=document.createElement('div');ring.setAttribute('aria-hidden','true');ring.style.cssText='position:fixed;left:'+x+'px;top:'+y+'px;width:16px;height:16px;margin:-8px 0 0 -8px;border:2px solid #ff2d55;border-radius:50%;z-index:2147483646;pointer-events:none;opacity:.9;transition:transform .4s ease-out,opacity .4s ease-out';host.appendChild(ring);requestAnimationFrame(()=>{ring.style.transform='scale(2.6)';ring.style.opacity='0'});setTimeout(()=>ring.remove(),450)}return true})";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -549,9 +554,21 @@ pub(super) fn element_action(
     call_on(cdp, object_id, declaration, arguments)
 }
 
+/// Best effort by design: a page that refuses the overlay (CSP, a detached
+/// document, an about: page) must never fail the action the user asked for.
+pub(super) fn show_cursor(cdp: &mut CdpConnection, x: f64, y: f64, click: bool) {
+    let _ = cdp.call(
+        "Runtime.evaluate",
+        json!({
+            "expression": format!("{CURSOR_OVERLAY}({x},{y},{click})"),
+            "returnByValue": true,
+        }),
+    );
+}
+
 pub(super) fn element_center(cdp: &mut CdpConnection, object_id: &str) -> Result<(f64, f64)> {
     let value = call_on(cdp, object_id, ELEMENT_CENTER, Vec::new())?;
-    Ok((
+    let point = (
         value
             .get("x")
             .and_then(Value::as_f64)
@@ -560,7 +577,9 @@ pub(super) fn element_center(cdp: &mut CdpConnection, object_id: &str) -> Result
             .get("y")
             .and_then(Value::as_f64)
             .context("element y missing")?,
-    ))
+    );
+    show_cursor(cdp, point.0, point.1, false);
+    Ok(point)
 }
 
 pub(super) fn clear_element(cdp: &mut CdpConnection, object_id: &str) -> Result<Value> {
