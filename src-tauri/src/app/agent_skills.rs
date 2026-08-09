@@ -11,9 +11,9 @@ use std::{
 pub const VIBELINK_MEMORY_SKILL_NAME: &str = "vibelink-memory";
 pub const VIBELINK_BROWSER_SKILL_NAME: &str = "vibelink-browser";
 pub const VIBELINK_SKILLS_REPOSITORY: &str = "JSCOP/vibelink-skills";
-// Keep this list limited to directories published in `JSCOP/vibelink-skills`.
-// Add vibelink-browser only after `skills/vibelink-browser` is published there.
-const SKILLS_CLI_PUBLISHED_SKILLS: [&str; 1] = [VIBELINK_MEMORY_SKILL_NAME];
+// Which skills the public repository serves is discovered at runtime by
+// `published_skills_at`, not hardcoded here: a hardcoded list drifted once and
+// told users to install `vibelink-browser` before it existed.
 // Bump whenever any bundled SKILL.md changes: an installed copy whose SHA-256
 // differs reads as `Stale`, and refresh rewrites that installed skill only.
 // 6: the browser skill gained `new-tab`, the not-on-PATH warning, and the
@@ -317,7 +317,27 @@ pub fn refresh_installed_skills() -> Result<AgentSkillStatus> {
     refresh_installed_skills_at(&user_home()?)
 }
 
-pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
+/// A skill belongs in the emitted command only once the repository is PROVEN to
+/// serve it, because `npx skills add --skill <name>` fails outright on a name
+/// the repository does not have. A successful remote fetch is that proof, so
+/// publishing `skills/<name>/SKILL.md` is the only step needed to add one — no
+/// code change, and no way for this list to claim something that is not there.
+fn published_skills_at(home: &Path) -> Vec<&'static str> {
+    let confirmed: Vec<&'static str> = BUNDLED_SKILLS
+        .iter()
+        .map(|skill| skill.name)
+        .filter(|name| super::agent_skills_remote::cached(home, name).is_some())
+        .collect();
+    if confirmed.is_empty() {
+        // Nothing fetched yet (first run, or offline): fall back to the one
+        // skill whose publication is known, rather than emitting a command with
+        // no skills or a guessed one that would fail.
+        return vec![VIBELINK_MEMORY_SKILL_NAME];
+    }
+    confirmed
+}
+
+pub fn skills_cli_install_command_at(home: &Path, agent_keys: &[String]) -> Result<String> {
     if agent_keys.is_empty() {
         return Err(anyhow!("at least one agent key is required"));
     }
@@ -333,7 +353,7 @@ pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
     }
 
     let mut command = format!("npx skills add {VIBELINK_SKILLS_REPOSITORY}");
-    for skill in SKILLS_CLI_PUBLISHED_SKILLS {
+    for skill in published_skills_at(home) {
         command.push_str(" --skill ");
         command.push_str(skill);
     }
@@ -343,6 +363,10 @@ pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
         command.push_str(key);
     }
     Ok(command)
+}
+
+pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
+    skills_cli_install_command_at(&user_home()?, agent_keys)
 }
 
 pub fn uninstall_skill_at(home: &Path, target_ids: &[String]) -> Result<AgentSkillStatus> {
@@ -746,17 +770,55 @@ mod tests {
 
     #[test]
     fn skills_cli_command_preserves_order_and_removes_duplicates() {
-        let command = skills_cli_install_command(&[
-            "amp".to_string(),
-            "claude-code".to_string(),
-            "amp".to_string(),
-        ])
+        // `_at` with a temp home, so the emitted skill list cannot depend on
+        // whatever this machine happens to have cached.
+        let root = temp_root("agent-skills-cli-order");
+        let command = skills_cli_install_command_at(
+            &root,
+            &[
+                "amp".to_string(),
+                "claude-code".to_string(),
+                "amp".to_string(),
+            ],
+        )
         .expect("build skills CLI command");
 
         assert_eq!(
             command,
             "npx skills add JSCOP/vibelink-skills --skill vibelink-memory --global --agent amp --agent claude-code"
         );
+        cleanup_root(root);
+    }
+
+    /// Publishing `skills/<name>/SKILL.md` must be the ONLY step needed to add a
+    /// skill to the install command. The previous hardcoded list named
+    /// `vibelink-browser` before it existed upstream, which made the command it
+    /// printed fail for every user who ran it.
+    #[test]
+    fn the_install_command_picks_up_a_skill_once_the_repository_serves_it() {
+        let root = temp_root("agent-skills-cli-published");
+        let cache = root.join(".vibelink/agent-skills-remote");
+        fs::create_dir_all(&cache).expect("create cache dir");
+
+        let before = skills_cli_install_command_at(&root, &["amp".to_string()])
+            .expect("command before publication");
+        assert!(!before.contains(VIBELINK_BROWSER_SKILL_NAME));
+
+        for skill in &BUNDLED_SKILLS {
+            fs::write(
+                cache.join(format!("{}.md", skill.name)),
+                format!("---\nname: {}\ndescription: published\n---\n\n# Body\n", skill.name),
+            )
+            .expect("cache published skill");
+        }
+
+        let after = skills_cli_install_command_at(&root, &["amp".to_string()])
+            .expect("command after publication");
+        assert_eq!(
+            after,
+            "npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --global --agent amp"
+        );
+        cleanup_root(root);
     }
 
     #[test]
