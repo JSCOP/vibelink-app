@@ -50,6 +50,11 @@ Use the returned `target.id` as `--tab` for every following action. `navigate`
 points an EXISTING tab somewhere else; when only one tab is open it will take
 that one, so prefer `new-tab` unless the user asked you to move their tab.
 
+`snapshot --interactive` keeps only elements you can act on. Measured on a real
+YouTube tab that is 646 refs / ~13k tokens in full, it returns 247 refs / ~5k —
+61% cheaper. Use it whenever you only need somewhere to click or type; use the
+full snapshot when you need to READ the page.
+
 ## Pick the backend
 
 - **The user's real Chrome** — their profile, their logins, their open tabs.

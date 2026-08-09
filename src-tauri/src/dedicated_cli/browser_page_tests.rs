@@ -157,6 +157,7 @@
             "target-1",
             "https://example.test/app".to_string(),
             1,
+            false,
         )
         .expect("first snapshot");
         write_snapshot_state(&root, &first.state).expect("persist first snapshot");
@@ -168,6 +169,7 @@
             "target-1",
             "https://example.test/app".to_string(),
             next_snapshot_ref(Some(&previous)),
+            false,
         )
         .expect("second snapshot");
         assert_eq!(first.state.refs[0].reference, "e1");
@@ -273,7 +275,7 @@
                   "properties": [{"name": "focusable", "value": {"value": true}}] }
             ]
         });
-        let snapshot = compress_ax_tree(&tree, "target-1", "https://example.test/".to_string(), 1)
+        let snapshot = compress_ax_tree(&tree, "target-1", "https://example.test/".to_string(), 1, false)
             .expect("compress accessibility tree");
         assert_eq!(snapshot.state.refs.len(), 3);
         assert_eq!(snapshot.state.refs[0].reference, "e1");
@@ -285,6 +287,30 @@
             "    e1 button \"Save now\"\n      e2 textbox \"Email\"\n  e3 generic \"Composer\" [editable]"
         );
         assert!(!snapshot.truncated);
+    }
+
+    #[test]
+    fn interactive_only_drops_text_but_keeps_editables() {
+        let tree = json!({
+            "nodes": [
+                { "nodeId": "1", "role": {"value": "RootWebArea"}, "backendDOMNodeId": 1 },
+                { "nodeId": "2", "parentId": "1", "role": {"value": "button"}, "name": {"value": "Save"}, "backendDOMNodeId": 2 },
+                { "nodeId": "3", "parentId": "1", "role": {"value": "StaticText"}, "name": {"value": "some prose"}, "backendDOMNodeId": 3 },
+                { "nodeId": "4", "parentId": "1", "role": {"value": "heading"}, "name": {"value": "Title"}, "backendDOMNodeId": 4 },
+                { "nodeId": "5", "parentId": "1", "role": {"value": "generic"}, "name": {"value": "Composer"}, "backendDOMNodeId": 5,
+                  "properties": [{"name": "editable", "value": {"value": "richtext"}}] }
+            ]
+        });
+        let full = compress_ax_tree(&tree, "t", "https://example.test/".to_string(), 1, false)
+            .expect("full snapshot");
+        assert_eq!(full.state.refs.len(), 4);
+
+        let lean = compress_ax_tree(&tree, "t", "https://example.test/".to_string(), 1, true)
+            .expect("interactive snapshot");
+        let roles: Vec<&str> = lean.state.refs.iter().map(|r| r.role.as_str()).collect();
+        // The editable composer survives even though `generic` is not actionable.
+        assert_eq!(roles, vec!["button", "generic"]);
+        assert!(lean.tree.len() < full.tree.len());
     }
 
     #[test]

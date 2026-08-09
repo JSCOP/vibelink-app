@@ -1321,9 +1321,9 @@ fn browser_contracts() -> Vec<CommandContract> {
         ),
         browser_action(
             "snapshot",
-            "Capture a bounded accessibility snapshot.",
+            "Capture a bounded accessibility snapshot. --interactive keeps only actionable elements.",
             &[],
-            NONE,
+            &["interactive"],
             Some(0),
             ReadOnly,
         ),

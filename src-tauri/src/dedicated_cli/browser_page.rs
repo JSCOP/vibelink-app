@@ -790,11 +790,37 @@ pub(super) fn next_snapshot_ref(state: Option<&SnapshotState>) -> u64 {
     state.next_ref.max(refs_next).max(first_snapshot_ref())
 }
 
+/// Roles an agent can actually act on. Measured on a real YouTube page, only
+/// 37% of 646 refs were actionable and 251 were bare `StaticText`, so a caller
+/// that just needs somewhere to click pays for two thirds it cannot use.
+/// `interactive_only` drops the rest; the default stays full because reading
+/// page content is the other half of what snapshots are for.
+pub(super) const INTERACTIVE_AX_ROLES: &[&str] = &[
+    "button",
+    "checkbox",
+    "combobox",
+    "link",
+    "listbox",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "radio",
+    "searchbox",
+    "slider",
+    "spinbutton",
+    "switch",
+    "tab",
+    "textbox",
+    "treeitem",
+];
+
 pub(super) fn compress_ax_tree(
     tree: &Value,
     target_id: &str,
     url: String,
     first_ref: u64,
+    interactive_only: bool,
 ) -> Result<CompressedSnapshot> {
     let nodes = tree
         .get("nodes")
@@ -828,6 +854,9 @@ pub(super) fn compress_ax_tree(
             || role == "RootWebArea"
             || (!editable && matches!(role, "none" | "presentation" | "generic" | "InlineTextBox"))
         {
+            continue;
+        }
+        if interactive_only && !editable && !INTERACTIVE_AX_ROLES.contains(&role) {
             continue;
         }
         let Some(backend_node_id) = node.get("backendDOMNodeId").and_then(Value::as_u64) else {

@@ -681,6 +681,7 @@ fn is_switch(flag: &str) -> bool {
             | "--clear-review-target"
             | "--no-parent"
             | "--pin"
+            | "--interactive"
     )
 }
 

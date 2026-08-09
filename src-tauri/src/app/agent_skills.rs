@@ -15,7 +15,9 @@ pub const VIBELINK_SKILLS_REPOSITORY: &str = "JSCOP/vibelink-skills";
 const SKILLS_CLI_PUBLISHED_SKILLS: [&str; 1] = [VIBELINK_MEMORY_SKILL_NAME];
 // Bump whenever any bundled SKILL.md changes: an installed copy whose SHA-256
 // differs reads as `Stale`, and refresh rewrites that installed skill only.
-pub const VIBELINK_SKILLS_REVISION: u32 = 5;
+// 6: the browser skill gained `new-tab`, the not-on-PATH warning, and the
+// no-`--help` discovery rule.
+pub const VIBELINK_SKILLS_REVISION: u32 = 6;
 
 /// A skill VibeLink writes into an agent's own skills directory. The capability
 /// itself lives in the daemon behind the `vibelink` CLI; these files only teach

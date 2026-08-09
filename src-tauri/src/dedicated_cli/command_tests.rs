@@ -1,5 +1,26 @@
 use super::*;
 
+/// `is_switch` is a second source of truth beside the contract table. Declaring
+/// a switch in a contract without adding it here does not fail loudly: the
+/// parser falls through to the option branch and reports
+/// `--<name> requires a value`, which reads like a caller mistake. Caught in
+/// practice when `browser snapshot --interactive` shipped with only the
+/// contract half.
+#[test]
+fn every_contract_switch_is_known_to_the_parser() {
+    for contract in crate::dedicated_cli::contract::command_contracts() {
+        for switch in contract.switches {
+            let flag = format!("--{switch}");
+            assert!(
+                is_switch(&flag),
+                "{} {} declares `{flag}` but is_switch() does not list it",
+                contract.domain,
+                contract.action
+            );
+        }
+    }
+}
+
 #[test]
 fn parses_every_stable_command_family() {
     let cases = [

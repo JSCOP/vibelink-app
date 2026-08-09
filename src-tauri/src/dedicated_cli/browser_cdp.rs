@@ -536,6 +536,7 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
                 &target.id,
                 url.clone(),
                 next_snapshot_ref(previous.as_ref()),
+                command.arguments.switches.contains("interactive"),
             )?;
             write_snapshot_state(artifact_root, &snapshot.state)?;
             Ok(json!({
