@@ -3,6 +3,7 @@ use directories::BaseDirs;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     fs,
     path::{Path, PathBuf},
 };
@@ -270,6 +271,29 @@ pub fn install_skill(target_ids: &[String]) -> Result<AgentSkillStatus> {
 }
 
 fn refresh_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
+    // Pull the published text FIRST, so the staleness comparison below is made
+    // against what the skill should now say rather than what this build was
+    // compiled with. A skill nobody has installed is never fetched: that keeps
+    // the network work proportional to what the user actually uses, and it
+    // keeps the per-skill consent rule intact.
+    let status = skill_status_at(home)?;
+    for skill in &BUNDLED_SKILLS {
+        let installed_somewhere = status.targets.iter().any(|target| {
+            target
+                .skills
+                .iter()
+                .any(|entry| entry.name == skill.name && entry.state != AgentSkillState::AgentAbsent
+                    && entry.state != AgentSkillState::Missing)
+        });
+        if !installed_somewhere {
+            continue;
+        }
+        if let Err(error) = super::agent_skills_remote::refresh(home, skill.name) {
+            // Offline, unpublished, or rejected by validation: the bundled copy
+            // stays authoritative and the user sees nothing break.
+            tracing::debug!(?error, skill_name = skill.name, "published agent skill unavailable");
+        }
+    }
     let status = skill_status_at(home)?;
     for (target, target_status) in INSTALL_TARGETS.iter().zip(&status.targets) {
         for (skill, skill_status) in BUNDLED_SKILLS.iter().zip(&target_status.skills) {
@@ -434,7 +458,7 @@ fn target_skill_status(
     } else {
         let content = fs::read(&skill_path)
             .with_context(|| format!("read installed agent skill {}", skill_path.display()))?;
-        if Sha256::digest(&content) == Sha256::digest(skill.markdown.as_bytes()) {
+        if Sha256::digest(&content) == Sha256::digest(effective_markdown(home, skill).as_bytes()) {
             AgentSkillState::Installed
         } else {
             AgentSkillState::Stale
@@ -466,6 +490,18 @@ fn install_target_at(home: &Path, target: &InstallTarget) -> Result<()> {
     }
 }
 
+/// The text an installed copy should hold: the published document when one has
+/// been cached, otherwise the copy baked into this build. Resolving it here is
+/// what lets a wording fix reach agents without a new desktop release, and it
+/// must be the SAME resolution `target_skill_status` compares against or a
+/// remote update would read as permanently `Stale`.
+fn effective_markdown(home: &Path, skill: &BundledSkill) -> Cow<'static, str> {
+    match super::agent_skills_remote::cached(home, skill.name) {
+        Some(published) => Cow::Owned(published),
+        None => Cow::Borrowed(skill.markdown),
+    }
+}
+
 fn install_bundled_skill_at(
     home: &Path,
     target: &InstallTarget,
@@ -474,7 +510,7 @@ fn install_bundled_skill_at(
     let skill_dir = skill_dir(home, target, skill.name);
     crate::persistence::write_bytes_atomic(
         &skill_dir.join(SKILL_FILE),
-        skill.markdown.as_bytes(),
+        effective_markdown(home, skill).as_bytes(),
     )
     .with_context(|| format!("write agent skill {} for {}", skill.name, target.id))?;
     crate::persistence::write_bytes_atomic(
@@ -589,6 +625,54 @@ mod tests {
         assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
         assert_eq!(
             fs::read_to_string(skill_path).expect("read refreshed skill"),
+            BUNDLED_SKILLS[0].markdown
+        );
+        cleanup_root(root);
+    }
+
+    /// The whole point of the remote path: a published wording fix must reach
+    /// an agent home without rebuilding and reinstalling the desktop app.
+    #[test]
+    fn a_published_skill_overrides_the_bundled_copy() {
+        let root = temp_root("agent-skills-published");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+        install_skill_at(&root, &["claude".to_string()]).expect("install skill");
+
+        let published = format!(
+            "---\nname: {VIBELINK_MEMORY_SKILL_NAME}\ndescription: published\n---\n\n# Newer\n"
+        );
+        let cache = root
+            .join(".vibelink/agent-skills-remote")
+            .join(format!("{VIBELINK_MEMORY_SKILL_NAME}.md"));
+        fs::create_dir_all(cache.parent().expect("cache parent")).expect("create cache dir");
+        fs::write(&cache, &published).expect("cache published skill");
+
+        // With a published document cached, the installed bundled copy is the
+        // one that now reads as stale.
+        let status = skill_status_at(&root).expect("status against published text");
+        let memory = &target(&status, "claude").skills[0];
+        assert_eq!(memory.name, VIBELINK_MEMORY_SKILL_NAME);
+        assert_eq!(memory.state, AgentSkillState::Stale);
+
+        let refreshed = refresh_installed_skills_at(&root).expect("refresh onto published text");
+        assert_eq!(
+            target(&refreshed, "claude").skills[0].state,
+            AgentSkillState::Installed
+        );
+        let skill_path = root
+            .join(".claude/skills")
+            .join(VIBELINK_MEMORY_SKILL_NAME)
+            .join(SKILL_FILE);
+        assert_eq!(
+            fs::read_to_string(&skill_path).expect("read refreshed skill"),
+            published
+        );
+
+        // A corrupt cache must fall back to the bundled copy, never blank it.
+        fs::write(&cache, "not a skill").expect("corrupt cache");
+        refresh_installed_skills_at(&root).expect("refresh after cache corruption");
+        assert_eq!(
+            fs::read_to_string(&skill_path).expect("read fallback skill"),
             BUNDLED_SKILLS[0].markdown
         );
         cleanup_root(root);

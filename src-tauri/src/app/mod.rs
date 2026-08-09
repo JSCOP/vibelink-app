@@ -1,6 +1,7 @@
 pub mod agent_history;
 pub mod agent_hooks;
 pub mod agent_skills;
+pub mod agent_skills_remote;
 pub mod agents;
 pub mod android_device_lab;
 pub mod app_update;
