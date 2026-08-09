@@ -1,4 +1,4 @@
-import { useContext, useMemo, useState, useSyncExternalStore } from 'react'
+import { useContext, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { WorkspaceContentActionsContext } from '../../layout/contentActions'
 import { getOpenContentSnapshot, subscribeOpenContent, type OpenContentItem } from '../../layout/openContentRegistry'
@@ -14,6 +14,25 @@ export type OpenWorkspaceItemsProps = {
 }
 
 const terminalPanelIdPrefix = workspaceContentPanelId({ kind: 'terminal', instanceId: '' })
+
+const GROUP_ACTIVATION_STYLE: CSSProperties = {
+  alignItems: 'center',
+  background: 'transparent',
+  border: 0,
+  color: 'inherit',
+  cursor: 'pointer',
+  display: 'grid',
+  font: 'inherit',
+  gap: 4,
+  gridColumn: '2 / -1',
+  gridTemplateColumns: '13px minmax(0, 1fr) 6px',
+  height: 15,
+  justifyContent: 'stretch',
+  minWidth: 0,
+  padding: 0,
+  textAlign: 'left',
+  width: '100%',
+}
 
 
 function readCollapsedGroups(sessionId?: string): Set<string> {
@@ -108,19 +127,31 @@ function SessionOpenWorkspaceItems({ completionHighlights, activeSessionId }: Op
         const groupStatus = aggregateAgentPaneStatus(group.panes.flatMap((pane) => agentStatusFor(pane) ?? []))
         return (
           <div key={group.window.panelId} className={`workspace-open-content-group${active ? ' is-active' : ''}${hasCompletion ? ' has-completions' : ''}${collapsed ? ' is-collapsed' : ''}`} role="listitem">
-            <button
-              type="button"
-              className={`workspace-open-content-group-header${hasCompletion ? ' is-complete' : ''}`}
-              aria-expanded={!collapsed}
-              aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${group.window.title}`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => { event.stopPropagation(); toggleGroup(group.window.panelId) }}
-            >
-              <span className="workspace-open-content-group-chevron" aria-hidden="true">{collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}</span>
-              <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={group.window.icon} size={11} strokeWidth={1.8} /></span>
-              <span className="workspace-open-content-title" title={group.window.title}>{group.window.title}</span>
-              <span className={`workspace-open-content-status${active ? ' is-active' : ''}${hasCompletion ? ' is-complete' : ''}${groupStatus ? ` is-agent-${groupStatus.state}${groupStatus.pulsing ? ' is-pulsing' : ''}` : ''}`} title={groupStatus ? `${group.window.title} · ${groupStatus.label}` : hasCompletion ? `${completionCount} completed ${completionCount === 1 ? 'pane' : 'panes'}` : active ? 'Active terminal window' : 'Open terminal window'} aria-hidden="true" />
-            </button>
+            <div className={`workspace-open-content-group-header${hasCompletion ? ' is-complete' : ''}`}>
+              <button
+                type="button"
+                className="workspace-open-content-group-chevron"
+                aria-expanded={!collapsed}
+                aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${group.window.title}`}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => { event.stopPropagation(); toggleGroup(group.window.panelId) }}
+              >{collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}</button>
+              <button
+                type="button"
+                className="workspace-open-content-group-activation"
+                style={GROUP_ACTIVATION_STYLE}
+                aria-current={active ? 'true' : undefined}
+                aria-label={group.window.title}
+                data-open-content-panel-id={group.window.panelId}
+                disabled={!actions}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => { event.stopPropagation(); activate(group.window) }}
+              >
+                <span className="workspace-open-content-icon" aria-hidden="true"><ProfileIcon name={group.window.icon} size={11} strokeWidth={1.8} /></span>
+                <span className="workspace-open-content-title" title={group.window.title}>{group.window.title}</span>
+                <span className={`workspace-open-content-status${active ? ' is-active' : ''}${hasCompletion ? ' is-complete' : ''}${groupStatus ? ` is-agent-${groupStatus.state}${groupStatus.pulsing ? ' is-pulsing' : ''}` : ''}`} title={groupStatus ? `${group.window.title} · ${groupStatus.label}` : hasCompletion ? `${completionCount} completed ${completionCount === 1 ? 'pane' : 'panes'}` : active ? 'Active terminal window' : 'Open terminal window'} aria-hidden="true" />
+              </button>
+            </div>
             {collapsed ? (
               <div className="workspace-open-content-icon-strip" role="group" aria-label={`${group.window.title} programs`}>
                 {group.panes.map((pane) => {

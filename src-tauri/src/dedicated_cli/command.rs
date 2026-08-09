@@ -5,6 +5,12 @@ use uuid::Uuid;
 
 pub const COMMAND_SCHEMA_VERSION: u16 = 1;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+/// A `browser wait` blocks in the daemon for up to its `--ms`; these mirror the
+/// bounds `browser_page` enforces so the outer request deadline always outlives
+/// the condition it is waiting on.
+pub const BROWSER_WAIT_DEFAULT_MS: u64 = 10_000;
+pub const BROWSER_WAIT_MAX_MS: u64 = 60_000;
+pub const BROWSER_WAIT_TIMEOUT_MARGIN_MS: u64 = 5_000;
 
 macro_rules! action_enum {
     ($name:ident { $($variant:ident => $token:literal),+ $(,)? }) => {
@@ -291,7 +297,7 @@ pub fn parse_args(
     args: impl IntoIterator<Item = impl Into<String>>,
 ) -> Result<Invocation, CliError> {
     let raw = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    let (tokens, globals) = extract_globals(raw)?;
+    let (tokens, mut globals) = extract_globals(raw)?;
     let domain = tokens
         .first()
         .ok_or_else(|| CliError::invalid(format!("missing command\n{}", usage())))?;
@@ -346,6 +352,26 @@ pub fn parse_args(
     };
 
     super::contract::validate_invocation(&command, globals.expected_revision)?;
+    // A conditional `browser wait` blocks for its own `--ms`, which the 10 s
+    // default request timeout would cut short long before the condition can
+    // settle or legitimately time out. Derive the outer deadline from `--ms`
+    // unless the caller pinned one explicitly.
+    if !globals.timeout_explicit {
+        if let Command::Browser(browser) = &command {
+            if browser.action == BrowserAction::Wait {
+                let wait_ms = browser
+                    .arguments
+                    .options
+                    .get("ms")
+                    .and_then(|values| values.last())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(BROWSER_WAIT_DEFAULT_MS)
+                    .min(BROWSER_WAIT_MAX_MS);
+                globals.timeout_ms = wait_ms + BROWSER_WAIT_TIMEOUT_MARGIN_MS;
+            }
+        }
+    }
+
     Ok(Invocation {
         json: globals.json,
         flavor: globals.flavor,
@@ -361,6 +387,7 @@ struct ParsedGlobals {
     json: bool,
     flavor: Option<Flavor>,
     timeout_ms: u64,
+    timeout_explicit: bool,
     operation_id: Option<Uuid>,
     expected_revision: Option<u64>,
 }
@@ -382,7 +409,6 @@ fn extract_globals(raw: Vec<String>) -> Result<(Vec<String>, ParsedGlobals), Cli
         .map(|domain_index| domain_index + 1);
     let mut tokens = Vec::with_capacity(raw.len());
     let mut index = 0;
-    let mut timeout_seen = false;
     while index < raw.len() {
         let token = &raw[index];
         if token == "--" {
@@ -412,16 +438,20 @@ fn extract_globals(raw: Vec<String>) -> Result<(Vec<String>, ParsedGlobals), Cli
                 globals.flavor = Some(Flavor::parse(&value)?);
             }
             "--request-timeout-seconds" => {
-                ensure_unset(!timeout_seen, "--request-timeout-seconds")?;
-                timeout_seen = true;
+                ensure_unset(!globals.timeout_explicit, "--request-timeout-seconds")?;
+                globals.timeout_explicit = true;
                 let value =
                     flag_value(&raw, &mut index, inline_value, "--request-timeout-seconds")?;
                 let seconds = value.parse::<u64>().map_err(|_| {
                     CliError::invalid("--request-timeout-seconds must be an integer")
                 })?;
-                if !(1..=600).contains(&seconds) {
+                // 900 rather than 600 so a caller can always outlast a backend
+                // command that itself times out at 600 s: the client must observe
+                // the real result, not give up during process-tree cleanup and
+                // response serialization.
+                if !(1..=900).contains(&seconds) {
                     return Err(CliError::invalid(
-                        "--request-timeout-seconds must be between 1 and 600",
+                        "--request-timeout-seconds must be between 1 and 900",
                     ));
                 }
                 globals.timeout_ms = seconds * 1_000;

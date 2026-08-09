@@ -18,7 +18,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 pub const DEFAULT_MOBILE_VIEWPORT_WIDTH: u32 = 390;
@@ -34,6 +34,7 @@ pub(super) const MAX_PAGE_SCALE: f64 = 5.0;
 
 pub(super) const MAX_SNAPSHOT_STATE_BYTES: u64 = 4 * 1024 * 1024;
 pub(super) const MAX_SNAPSHOT_REFS: usize = 2_000;
+pub(super) const MAX_SNAPSHOT_STATE_FILES: usize = 256;
 pub(super) const MAX_AX_NODES: usize = 5_000;
 pub(super) const MAX_AX_NAME_CHARS: usize = 120;
 pub(super) const MAX_WAIT_MS: u64 = 60_000;
@@ -44,7 +45,8 @@ pub(super) const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // Every element operation runs as a `this`-bound function on a resolved CDP
 // remote object, so a snapshot ref and a CSS selector share one execution path
 // and no caller string is ever spliced into page script.
-pub(super) const ELEMENT_CENTER: &str = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}}";
+pub(super) const ELEMENT_IS_LIVE: &str = "function(){return !!this.isConnected&&this.ownerDocument===document}";
+pub(super) const ELEMENT_CENTER: &str = "function(){if(!this.isConnected||this.ownerDocument!==document)return {live:false};this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();const x=r.left+r.width/2,y=r.top+r.height/2;const root=this.getRootNode(),hit=(root.elementFromPoint?root:document).elementFromPoint(x,y);return {live:true,x,y,width:r.width,height:r.height,hit:!!hit&&(hit===this||this.contains(hit))}}";
 // Classifies the text-input surface AND leaves the selection where the caller
 // needs it. A React controlled input reverts a plain `value` assignment and a
 // `contenteditable` host has no `value` at all, so the two need different
@@ -305,10 +307,16 @@ pub(super) struct SnapshotRef {
 pub(super) struct SnapshotState {
     pub(super) version: u8,
     pub(super) generation: String,
+    #[serde(default = "first_snapshot_ref")]
+    pub(super) next_ref: u64,
     pub(super) target_id: String,
     pub(super) url: String,
     pub(super) captured_at_ms: u64,
     pub(super) refs: Vec<SnapshotRef>,
+}
+
+fn first_snapshot_ref() -> u64 {
+    1
 }
 
 pub(super) struct CompressedSnapshot {
@@ -371,6 +379,12 @@ pub fn inspect(
 
 pub(super) fn bounded_snapshot_json(mut snapshot: Value) -> Result<BrowserInspectSnapshot> {
     let mut truncated = false;
+    if let Some(nodes) = inspect_nodes_mut(&mut snapshot) {
+        if nodes.len() > MAX_AX_NODES {
+            nodes.truncate(MAX_AX_NODES);
+            truncated = true;
+        }
+    }
     loop {
         let snapshot_json = serde_json::to_string(&snapshot)?;
         if snapshot_json.len() <= MAX_INSPECT_SNAPSHOT_BYTES {
@@ -487,33 +501,62 @@ pub(super) fn resolve_element(
                     state.generation
                 );
             }
-            let entry = state
-                .refs
-                .iter()
-                .find(|entry| entry.reference == *reference)
-                .with_context(|| {
-                    format!(
-                        "stale_ref: {reference} does not belong to snapshot {}",
-                        state.generation
-                    )
-                })?;
-            let resolved = cdp
-                .call(
-                    "DOM.resolveNode",
-                    json!({ "backendNodeId": entry.backend_node_id }),
-                )
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "stale_ref: {reference} no longer resolves to a live node; capture a new snapshot"
-                    )
-                })?;
-            resolved
+            let entry = snapshot_ref(&state, reference)?;
+            let resolved = match cdp.call(
+                "DOM.resolveNode",
+                json!({ "backendNodeId": entry.backend_node_id }),
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) if is_stale_node_error(&error) => bail!(
+                    "stale_ref: {reference} no longer resolves to a live node; capture a new snapshot"
+                ),
+                Err(error) => return Err(error.context("resolve browser snapshot node")),
+            };
+            let object_id = resolved
                 .pointer("/object/objectId")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .context("stale_ref: the resolved node carried no object id")
+                .context("stale_ref: the resolved node carried no object id")?;
+            let live = match call_on(cdp, &object_id, ELEMENT_IS_LIVE, Vec::new()) {
+                Ok(live) => live,
+                Err(error) if is_stale_node_error(&error) => bail!(
+                    "stale_ref: {reference} detached after resolution; capture a new snapshot"
+                ),
+                Err(error) => return Err(error),
+            };
+            if live != Value::Bool(true) {
+                bail!("stale_ref: {reference} is detached from the current document; capture a new snapshot");
+            }
+            Ok(object_id)
         }
     }
+}
+
+fn snapshot_ref<'a>(state: &'a SnapshotState, reference: &str) -> Result<&'a SnapshotRef> {
+    state
+        .refs
+        .iter()
+        .find(|entry| entry.reference == reference)
+        .with_context(|| {
+            format!(
+                "stale_ref: {reference} does not belong to snapshot {}",
+                state.generation
+            )
+        })
+}
+
+fn is_stale_node_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "could not find node with given id",
+        "no node with given id",
+        "no node with given backend",
+        "node with given id does not belong to the document",
+        "could not find object with given id",
+        "cannot find object with id",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 pub(super) fn call_on(
@@ -567,17 +610,31 @@ pub(super) fn show_cursor(cdp: &mut CdpConnection, x: f64, y: f64, click: bool) 
 }
 
 pub(super) fn element_center(cdp: &mut CdpConnection, object_id: &str) -> Result<(f64, f64)> {
-    let value = call_on(cdp, object_id, ELEMENT_CENTER, Vec::new())?;
+    let value = match call_on(cdp, object_id, ELEMENT_CENTER, Vec::new()) {
+        Ok(value) => value,
+        Err(error) if is_stale_node_error(&error) => {
+            bail!("stale_ref: browser element detached before pointer dispatch")
+        }
+        Err(error) => return Err(error),
+    };
     let point = (
-        value
-            .get("x")
-            .and_then(Value::as_f64)
-            .context("element x missing")?,
-        value
-            .get("y")
-            .and_then(Value::as_f64)
-            .context("element y missing")?,
+        value.get("x").and_then(Value::as_f64).unwrap_or(f64::NAN),
+        value.get("y").and_then(Value::as_f64).unwrap_or(f64::NAN),
     );
+    let width = value.get("width").and_then(Value::as_f64).unwrap_or(0.0);
+    let height = value
+        .get("height")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if value.get("live").and_then(Value::as_bool) != Some(true)
+        || value.get("hit").and_then(Value::as_bool) != Some(true)
+        || !point.0.is_finite()
+        || !point.1.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        bail!("stale_ref: browser element is detached, has no visible bounds, or is obscured at its center")
+    }
     show_cursor(cdp, point.0, point.1, false);
     Ok(point)
 }
@@ -650,16 +707,33 @@ pub(super) fn wait_for_condition(
     let started = Instant::now();
     let deadline = started + Duration::from_millis(timeout_ms);
     loop {
-        if cdp.evaluate(&expression)? == Value::Bool(true) {
-            return Ok(json!({
-                "for": condition,
-                "waitedMs": started.elapsed().as_millis() as u64,
-            }));
-        }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             bail!("browser wait for '{condition}' timed out after {timeout_ms}ms");
         }
-        thread::sleep(WAIT_POLL_INTERVAL);
+        let result = cdp.evaluate_with_timeout(&expression, deadline.saturating_duration_since(now));
+        let finished = Instant::now();
+        match result {
+            Ok(Value::Bool(true)) if finished <= deadline => {
+                return Ok(json!({
+                    "for": condition,
+                    "waitedMs": started.elapsed().as_millis() as u64,
+                }));
+            }
+            Ok(_) if finished >= deadline => {
+                bail!("browser wait for '{condition}' timed out after {timeout_ms}ms");
+            }
+            Ok(_) => {}
+            Err(_) if finished >= deadline => {
+                bail!("browser wait for '{condition}' timed out after {timeout_ms}ms");
+            }
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("browser wait for '{condition}' timed out after {timeout_ms}ms");
+        }
+        thread::sleep(WAIT_POLL_INTERVAL.min(remaining));
     }
 }
 
@@ -702,17 +776,38 @@ pub(super) fn wait_expression(
 /// Turns the raw accessibility tree into indented `eN role "name"` lines plus
 /// the ref table that backs them. The raw tree is large and not directly
 /// actionable; this is what an agent can read and act on in one step.
-pub(super) fn compress_ax_tree(tree: &Value, target_id: &str, url: String) -> CompressedSnapshot {
-    let empty = Vec::new();
+pub(super) fn next_snapshot_ref(state: Option<&SnapshotState>) -> u64 {
+    let Some(state) = state else {
+        return first_snapshot_ref();
+    };
+    let refs_next = state
+        .refs
+        .iter()
+        .filter_map(|entry| entry.reference.strip_prefix('e')?.parse::<u64>().ok())
+        .max()
+        .map(|value| value.saturating_add(1))
+        .unwrap_or_else(first_snapshot_ref);
+    state.next_ref.max(refs_next).max(first_snapshot_ref())
+}
+
+pub(super) fn compress_ax_tree(
+    tree: &Value,
+    target_id: &str,
+    url: String,
+    first_ref: u64,
+) -> Result<CompressedSnapshot> {
     let nodes = tree
         .get("nodes")
         .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let depths = ax_depths(nodes);
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let bounded_nodes = &nodes[..nodes.len().min(MAX_AX_NODES)];
+    let depths = ax_depths(bounded_nodes);
     let mut refs = Vec::new();
     let mut lines = Vec::new();
-    let mut truncated = nodes.len() > MAX_AX_NODES;
-    for node in nodes.iter().take(MAX_AX_NODES) {
+    let mut truncated = nodes.len() > bounded_nodes.len();
+    let first_ref = first_ref.max(first_snapshot_ref());
+    for node in bounded_nodes {
         if node
             .get("ignored")
             .and_then(Value::as_bool)
@@ -747,7 +842,10 @@ pub(super) fn compress_ax_tree(tree: &Value, target_id: &str, url: String) -> Co
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         );
-        let reference = format!("e{}", refs.len() + 1);
+        let ref_index = first_ref
+            .checked_add(refs.len() as u64)
+            .context("browser snapshot ref counter is exhausted")?;
+        let reference = format!("e{ref_index}");
         let depth = node
             .get("nodeId")
             .and_then(Value::as_str)
@@ -771,11 +869,15 @@ pub(super) fn compress_ax_tree(tree: &Value, target_id: &str, url: String) -> Co
             name,
         });
     }
+    let next_ref = first_ref
+        .checked_add(refs.len() as u64)
+        .context("browser snapshot ref counter is exhausted")?;
     let captured_at_ms = now_ms();
-    CompressedSnapshot {
+    Ok(CompressedSnapshot {
         state: SnapshotState {
             version: 1,
             generation: format!("s{captured_at_ms}"),
+            next_ref,
             target_id: target_id.to_string(),
             url,
             captured_at_ms,
@@ -783,7 +885,7 @@ pub(super) fn compress_ax_tree(tree: &Value, target_id: &str, url: String) -> Co
         },
         tree: lines.join("\n"),
         truncated,
-    }
+    })
 }
 
 fn ax_flag(node: &Value, name: &str) -> bool {
@@ -856,11 +958,51 @@ pub(super) fn snapshot_state_path(artifact_root: &Path, target_id: &str) -> Path
 }
 
 pub(super) fn write_snapshot_state(artifact_root: &Path, state: &SnapshotState) -> Result<()> {
+    let bytes = serde_json::to_vec(state)?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_STATE_BYTES {
+        bail!("browser snapshot state exceeds the bounded size");
+    }
     let path = snapshot_state_path(artifact_root, &state.target_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec(state)?)?;
+    fs::write(&path, bytes)?;
+    if let Some(parent) = path.parent() {
+        prune_snapshot_states(parent, &path)?;
+    }
+    Ok(())
+}
+
+fn prune_snapshot_states(directory: &Path, current: &Path) -> Result<()> {
+    let mut states = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        if path != current && metadata.len() > MAX_SNAPSHOT_STATE_BYTES {
+            fs::remove_file(path)?;
+            continue;
+        }
+        states.push((
+            path == current,
+            metadata.modified().unwrap_or(UNIX_EPOCH),
+            path,
+        ));
+    }
+    if states.len() <= MAX_SNAPSHOT_STATE_FILES {
+        return Ok(());
+    }
+    states.sort_by_key(|(is_current, modified, _)| (*is_current, *modified));
+    let remove = states.len() - MAX_SNAPSHOT_STATE_FILES;
+    for (_, _, path) in states.into_iter().take(remove) {
+        fs::remove_file(path)?;
+    }
     Ok(())
 }
 
@@ -875,185 +1017,14 @@ pub(super) fn read_snapshot_state(
         Err(error) => return Err(error.into()),
     };
     if metadata.len() > MAX_SNAPSHOT_STATE_BYTES {
-        bail!("browser snapshot state exceeds the bounded size");
+        fs::remove_file(path).context("remove oversized browser snapshot state")?;
+        return Ok(None);
     }
-    Ok(serde_json::from_slice::<SnapshotState>(&fs::read(&path)?)
-        .ok()
-        .filter(|state| state.version == 1))
+    let state = serde_json::from_slice::<SnapshotState>(&fs::read(&path)?)
+        .context("parse browser snapshot state")?;
+    Ok((state.version == 1).then_some(state))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::dedicated_cli::{OperationArguments, SelectorSet};
-    use std::collections::BTreeMap;
-    use uuid::Uuid;
-
-    fn command(
-        action: BrowserAction,
-        options: impl IntoIterator<Item = (&'static str, Vec<String>)>,
-    ) -> ActionCommand<BrowserAction> {
-        ActionCommand {
-            action,
-            selectors: SelectorSet::default(),
-            arguments: OperationArguments {
-                options: options
-                    .into_iter()
-                    .map(|(name, values)| (name.to_string(), values))
-                    .collect::<BTreeMap<_, _>>(),
-                ..OperationArguments::default()
-            },
-        }
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("vibelink-browser-page-{label}-{}", Uuid::new_v4()))
-    }
-
-    fn element_command(
-        action: BrowserAction,
-        options: &[(&'static str, &str)],
-    ) -> ActionCommand<BrowserAction> {
-        command(
-            action,
-            options
-                .iter()
-                .map(|(name, value)| (*name, vec![(*value).to_string()]))
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    #[test]
-    fn element_target_requires_exactly_one_targeting_mode() {
-        assert!(
-            element_target(&element_command(BrowserAction::Snapshot, &[]))
-                .unwrap()
-                .is_none()
-        );
-        assert!(matches!(
-            element_target(&element_command(BrowserAction::Click, &[("ref", "e4")])).unwrap(),
-            Some(ElementTarget::Ref(reference)) if reference == "e4"
-        ));
-        assert!(matches!(
-            element_target(&element_command(BrowserAction::Click, &[("selector", "#save")]))
-                .unwrap(),
-            Some(ElementTarget::Selector(selector)) if selector == "#save"
-        ));
-        assert!(element_target(&element_command(
-            BrowserAction::Click,
-            &[("ref", "e4"), ("selector", "#save")]
-        ))
-        .is_err());
-        assert!(element_target(&element_command(BrowserAction::Click, &[])).is_err());
-    }
-
-    #[test]
-    fn snapshot_refs_survive_between_commands() {
-        let root = temp_root("snapshot");
-        let state = SnapshotState {
-            version: 1,
-            generation: "s1".to_string(),
-            target_id: "TARGET/1".to_string(),
-            url: "https://example.test/a".to_string(),
-            captured_at_ms: 1,
-            refs: vec![SnapshotRef {
-                reference: "e1".to_string(),
-                backend_node_id: 42,
-                role: "button".to_string(),
-                name: "Save".to_string(),
-            }],
-        };
-        write_snapshot_state(&root, &state).expect("write snapshot state");
-        let restored = read_snapshot_state(&root, "TARGET/1")
-            .expect("read snapshot state")
-            .expect("snapshot state present");
-        assert_eq!(restored.url, state.url);
-        assert_eq!(restored.refs[0].backend_node_id, 42);
-        assert!(read_snapshot_state(&root, "OTHER").unwrap().is_none());
-        assert_eq!(
-            snapshot_state_path(&root, "TARGET/1").file_name().unwrap(),
-            std::ffi::OsStr::new("TARGET_1.json")
-        );
-        assert_eq!(
-            snapshot_state_path(&root, "../../evil")
-                .file_name()
-                .unwrap(),
-            std::ffi::OsStr::new("______evil.json")
-        );
-        fs::write(
-            snapshot_state_path(&root, "TARGET/1"),
-            br#"{"version":9,"generation":"s1","targetId":"TARGET/1","url":"u","capturedAtMs":1,"refs":[]}"#,
-        )
-        .expect("overwrite snapshot state");
-        assert!(read_snapshot_state(&root, "TARGET/1").unwrap().is_none());
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn ax_tree_compression_emits_actionable_refs() {
-        let tree = json!({
-            "nodes": [
-                { "nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Doc"}, "backendDOMNodeId": 1 },
-                { "nodeId": "2", "parentId": "1", "role": {"value": "generic"}, "backendDOMNodeId": 2 },
-                { "nodeId": "3", "parentId": "2", "role": {"value": "button"}, "name": {"value": "  Save\n  now  "}, "backendDOMNodeId": 3 },
-                { "nodeId": "4", "parentId": "3", "role": {"value": "textbox"}, "name": {"value": "Email"}, "backendDOMNodeId": 4 },
-                { "nodeId": "5", "parentId": "1", "role": {"value": "button"}, "ignored": true, "backendDOMNodeId": 5 },
-                { "nodeId": "6", "parentId": "1", "role": {"value": "button"}, "name": {"value": "No node"} },
-                { "nodeId": "7", "parentId": "1", "role": {"value": "generic"}, "name": {"value": "Composer"}, "backendDOMNodeId": 7,
-                  "properties": [{"name": "editable", "value": {"value": "richtext"}}] },
-                { "nodeId": "8", "parentId": "1", "role": {"value": "generic"}, "backendDOMNodeId": 8,
-                  "properties": [{"name": "focusable", "value": {"value": true}}] }
-            ]
-        });
-        let snapshot = compress_ax_tree(&tree, "target-1", "https://example.test/".to_string());
-        assert_eq!(snapshot.state.refs.len(), 3);
-        assert_eq!(snapshot.state.refs[0].reference, "e1");
-        assert_eq!(snapshot.state.refs[0].backend_node_id, 3);
-        assert_eq!(snapshot.state.refs[0].name, "Save now");
-        assert_eq!(snapshot.state.refs[1].role, "textbox");
-        assert_eq!(
-            snapshot.tree,
-            "    e1 button \"Save now\"\n      e2 textbox \"Email\"\n  e3 generic \"Composer\" [editable]"
-        );
-        assert!(!snapshot.truncated);
-    }
-
-    #[test]
-    fn wait_conditions_build_bounded_expressions() {
-        assert_eq!(
-            wait_expression("load", &element_command(BrowserAction::Wait, &[])).unwrap(),
-            "document.readyState==='complete'"
-        );
-        let selector = wait_expression(
-            "selector",
-            &element_command(BrowserAction::Wait, &[("selector", "#ready")]),
-        )
-        .unwrap();
-        assert!(selector.contains("\"#ready\"") && selector.contains("getBoundingClientRect"));
-        assert_eq!(
-            wait_expression(
-                "url",
-                &element_command(BrowserAction::Wait, &[("url", "/done")])
-            )
-            .unwrap(),
-            "location.href.includes(\"/done\")"
-        );
-        let idle = wait_expression(
-            "idle",
-            &element_command(BrowserAction::Wait, &[("quiet-ms", "750")]),
-        )
-        .unwrap();
-        assert!(idle.ends_with("(750)") && idle.contains("MutationObserver"));
-        assert!(wait_expression("selector", &element_command(BrowserAction::Wait, &[])).is_err());
-        assert!(wait_expression("teleport", &element_command(BrowserAction::Wait, &[])).is_err());
-    }
-
-    #[test]
-    fn ax_names_are_collapsed_and_bounded() {
-        assert_eq!(bounded_ax_name("  a \n b  "), "a b");
-        assert_eq!(
-            bounded_ax_name(&"x".repeat(500)).chars().count(),
-            MAX_AX_NAME_CHARS
-        );
-    }
-}
+#[path = "browser_page_tests.rs"]
+mod tests;

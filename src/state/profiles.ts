@@ -117,8 +117,8 @@ export type Settings = {
   chatImageAttachments: ChatImageAttachmentMode
   captureDir: string
   captureFfmpegPath: string
-  /** Refresh `<agent home>/skills/vibelink-memory/SKILL.md` on launch, but only
-   *  where it is already installed. Never creates a new install location. */
+  /** Refresh each installed `<agent home>/skills/<skill>/SKILL.md` on launch.
+   * Missing bundled skills and new agent homes require an explicit install. */
   autoUpdateAgentSkill: boolean
   setupWizard: SetupWizardSettings
 }

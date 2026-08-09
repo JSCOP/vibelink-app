@@ -1,8 +1,8 @@
 use super::browser_page::{
     call_on, clear_element, compress_ax_tree, current_page_url, element_action, element_center,
-    element_id, element_target, resolve_element, show_cursor, wait_for_condition,
-    write_snapshot_state, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
-    BrowserPageScale, BrowserPointerInput, BrowserViewport, MAX_TEXT_INPUT_BYTES,
+    element_id, element_target, next_snapshot_ref, read_snapshot_state, resolve_element, show_cursor,
+    wait_for_condition, write_snapshot_state, BrowserJpegCaptureOptions, BrowserJpegFrame,
+    BrowserKeyInput, BrowserPageScale, BrowserPointerInput, BrowserViewport, MAX_TEXT_INPUT_BYTES,
     PREPARE_TEXT_INPUT, SELECT_ALL_TEXT, SET_CHECKED, SET_NATIVE_VALUE, SET_SELECT_VALUE,
 };
 use crate::{
@@ -20,11 +20,14 @@ use std::{
     io::Read,
     net::TcpStream,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
+
+#[cfg(test)]
+use std::collections::VecDeque;
 
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_TARGET_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
@@ -32,6 +35,7 @@ const MAX_CDP_MESSAGE_BYTES: usize = 80 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EVENTS: usize = 1024;
+const DEFAULT_CDP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const MAX_INSPECT_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 pub const MAX_BROWSER_JPEG_BYTES: usize = 60 * 1024;
@@ -39,6 +43,9 @@ pub const MAX_BROWSER_JPEG_BYTES: usize = 60 * 1024;
 const MIN_CAPTURE_SCALE: f64 = 0.05;
 const MIN_ADAPTIVE_JPEG_QUALITY: u8 = 35;
 const MAX_JPEG_CAPTURE_ATTEMPTS: usize = 10;
+
+// Snapshot files are process-global; serialize their read/increment/write step.
+static SNAPSHOT_STATE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -164,6 +171,11 @@ pub(super) enum CdpConnection {
         bridge: Arc<browser_extension::ExtensionBridge>,
         tab_id: i64,
     },
+    #[cfg(test)]
+    Scripted {
+        calls: Arc<Mutex<Vec<(String, Value)>>>,
+        responses: VecDeque<std::result::Result<Value, String>>,
+    },
 }
 
 impl CdpConnection {
@@ -184,7 +196,8 @@ impl CdpConnection {
         let (socket, _) = connect(raw).context("connect to embedded browser CDP")?;
         match socket.get_ref() {
             MaybeTlsStream::Plain(stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(30)))?
+                stream.set_read_timeout(Some(DEFAULT_CDP_TIMEOUT))?;
+                stream.set_write_timeout(Some(DEFAULT_CDP_TIMEOUT))?;
             }
             _ => bail!("browser target exposed a non-plain CDP websocket transport"),
         }
@@ -195,51 +208,69 @@ impl CdpConnection {
     }
 
     pub(super) fn call(&mut self, method: &str, params: Value) -> Result<Value> {
-        let (socket, next_id) = match self {
-            Self::Extension { bridge, tab_id } => return bridge.send(*tab_id, method, params),
-            Self::Socket { socket, next_id } => (socket, next_id),
-        };
-        let id = *next_id;
-        *next_id += 1;
-        socket.send(Message::Text(
-            serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?.into(),
-        ))?;
-        loop {
-            let message = socket.read()?;
-            let Message::Text(text) = message else {
-                continue;
-            };
-            if text.len() > MAX_CDP_MESSAGE_BYTES {
-                bail!("CDP response exceeds the bounded message size");
+        self.call_inner(method, params, None)
+    }
+
+    pub(super) fn call_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
+        if timeout.is_zero() {
+            bail!("CDP call deadline elapsed");
+        }
+        self.call_inner(method, params, Some(timeout))
+    }
+
+    fn call_inner(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
+        match self {
+            Self::Extension { bridge, tab_id } => match timeout {
+                Some(timeout) => bridge.send_with_timeout(*tab_id, method, params, timeout),
+                None => bridge.send(*tab_id, method, params),
+            },
+            Self::Socket { socket, next_id } => call_socket(
+                socket.as_mut(),
+                next_id,
+                method,
+                params,
+                timeout.unwrap_or(DEFAULT_CDP_TIMEOUT),
+            ),
+            #[cfg(test)]
+            Self::Scripted { calls, responses } => {
+                calls
+                    .lock()
+                    .expect("scripted CDP calls")
+                    .push((method.to_string(), params));
+                responses
+                    .pop_front()
+                    .context("scripted CDP response missing")?
+                    .map_err(anyhow::Error::msg)
             }
-            let value: Value = serde_json::from_str(text.as_str())?;
-            if value.get("id").and_then(Value::as_u64) != Some(id) {
-                continue;
-            }
-            if let Some(error) = value.get("error") {
-                bail!("CDP {method} failed: {error}");
-            }
-            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
     pub(super) fn evaluate(&mut self, expression: &str) -> Result<Value> {
-        let result = self.call(
+        let result = self.call("Runtime.evaluate", evaluate_params(expression))?;
+        evaluated_value(result)
+    }
+
+    pub(super) fn evaluate_with_timeout(
+        &mut self,
+        expression: &str,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let result = self.call_with_timeout(
             "Runtime.evaluate",
-            json!({
-                "expression": expression,
-                "awaitPromise": true,
-                "returnByValue": true,
-                "userGesture": true
-            }),
+            evaluate_params(expression),
+            timeout,
         )?;
-        if let Some(exception) = result.get("exceptionDetails") {
-            bail!("browser script failed: {exception}");
-        }
-        Ok(result
-            .pointer("/result/value")
-            .cloned()
-            .unwrap_or(Value::Null))
+        evaluated_value(result)
     }
 
     fn collect_events(&mut self, duration: Duration) -> Result<Vec<Value>> {
@@ -251,6 +282,11 @@ impl CdpConnection {
                 return Ok(bridge.drain_events(*tab_id, MAX_EVENTS));
             }
             Self::Socket { socket, .. } => socket,
+            #[cfg(test)]
+            Self::Scripted { .. } => {
+                thread::sleep(duration);
+                return Ok(Vec::new());
+            }
         };
         if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
             stream.set_read_timeout(Some(Duration::from_millis(100)))?;
@@ -283,6 +319,84 @@ impl CdpConnection {
         }
         Ok(events)
     }
+
+    #[cfg(test)]
+    pub(super) fn scripted(
+        responses: Vec<std::result::Result<Value, String>>,
+    ) -> (Self, Arc<Mutex<Vec<(String, Value)>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self::Scripted {
+                calls: Arc::clone(&calls),
+                responses: responses.into_iter().collect(),
+            },
+            calls,
+        )
+    }
+}
+
+fn call_socket(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    next_id: &mut u64,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
+    match socket.get_mut() {
+        MaybeTlsStream::Plain(stream) => stream.set_write_timeout(Some(timeout))?,
+        _ => bail!("browser target exposed a non-plain CDP websocket transport"),
+    }
+    let id = *next_id;
+    *next_id = (*next_id)
+        .checked_add(1)
+        .context("CDP request id exhausted")?;
+    socket.send(Message::Text(
+        serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?.into(),
+    ))?;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .with_context(|| format!("CDP {method} timed out"))?;
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream.set_read_timeout(Some(remaining))?;
+        }
+        let message = socket.read()?;
+        let Message::Text(text) = message else {
+            continue;
+        };
+        if text.len() > MAX_CDP_MESSAGE_BYTES {
+            bail!("CDP response exceeds the bounded message size");
+        }
+        let value: Value = serde_json::from_str(text.as_str())?;
+        if value.get("id").and_then(Value::as_u64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            bail!("CDP {method} failed: {error}");
+        }
+        return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+    }
+}
+
+fn evaluate_params(expression: &str) -> Value {
+    json!({
+        "expression": expression,
+        "awaitPromise": true,
+        "returnByValue": true,
+        "userGesture": true
+    })
+}
+
+fn evaluated_value(result: Value) -> Result<Value> {
+    if let Some(exception) = result.get("exceptionDetails") {
+        bail!("browser script failed: {exception}");
+    }
+    Ok(result
+        .pointer("/result/value")
+        .cloned()
+        .unwrap_or(Value::Null))
 }
 
 pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> Result<Value> {
@@ -408,7 +522,16 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             cdp.call("Accessibility.enable", json!({}))?;
             let tree = cdp.call("Accessibility.getFullAXTree", json!({}))?;
             let url = current_page_url(&mut cdp)?;
-            let snapshot = compress_ax_tree(&tree, &target.id, url.clone());
+            let _state_guard = SNAPSHOT_STATE_LOCK
+                .lock()
+                .expect("browser snapshot state mutex");
+            let previous = read_snapshot_state(artifact_root, &target.id)?;
+            let snapshot = compress_ax_tree(
+                &tree,
+                &target.id,
+                url.clone(),
+                next_snapshot_ref(previous.as_ref()),
+            )?;
             write_snapshot_state(artifact_root, &snapshot.state)?;
             Ok(json!({
                 "target": target_json(target),
@@ -486,20 +609,28 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         BrowserAction::Wait => wait_for_condition(&mut cdp, &command),
         BrowserAction::Click | BrowserAction::DoubleClick | BrowserAction::Hover => {
             let point = element_center(&mut cdp, element_id(&object_id)?)?;
+            let input = BrowserPointerInput::Tap {
+                x: point.0,
+                y: point.1,
+            };
+            validate_pointer_input(&mut cdp, input)?;
             if matches!(command.action, BrowserAction::Hover) {
                 cdp.call(
                     "Input.dispatchMouseEvent",
-                    json!({ "type": "mouseMoved", "x": point.0, "y": point.1 }),
+                    json!({ "type": "mouseMoved", "x": point.0, "y": point.1, "button": "none", "buttons": 0 }),
                 )?;
             } else {
-                let count = if matches!(command.action, BrowserAction::DoubleClick) {
-                    2
-                } else {
-                    1
-                };
                 show_cursor(&mut cdp, point.0, point.1, true);
-                cdp.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": point.0, "y": point.1, "button": "left", "clickCount": count }))?;
-                cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": point.0, "y": point.1, "button": "left", "clickCount": count }))?;
+                dispatch_click(
+                    &mut cdp,
+                    point.0,
+                    point.1,
+                    if matches!(command.action, BrowserAction::DoubleClick) {
+                        2
+                    } else {
+                        1
+                    },
+                )?;
             }
             Ok(json!({ "x": point.0, "y": point.1 }))
         }
@@ -557,14 +688,8 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
         }
         BrowserAction::Keypress => {
             let key = option(&command, "key").context("--key is required")?;
-            cdp.call(
-                "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "key": key }),
-            )?;
-            cdp.call(
-                "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": key }),
-            )
+            dispatch_key(&mut cdp, key)?;
+            Ok(Value::Null)
         }
         BrowserAction::Drag => {
             let from = element_center(&mut cdp, element_id(&object_id)?)?;
@@ -574,14 +699,18 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
             let to_y = option(&command, "to-y")
                 .context("--to-y is required")?
                 .parse::<f64>()?;
+            let input = BrowserPointerInput::Drag {
+                from_x: from.0,
+                from_y: from.1,
+                to_x,
+                to_y,
+            };
+            validate_pointer_input(&mut cdp, input)?;
             show_cursor(&mut cdp, from.0, from.1, true);
-            cdp.call("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "buttons": 1 }))?;
-            cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": to_x, "y": to_y, "button": "left", "buttons": 1 }))?;
+            let result = dispatch_drag(&mut cdp, from.0, from.1, to_x, to_y);
             show_cursor(&mut cdp, to_x, to_y, false);
-            cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mouseReleased", "x": to_x, "y": to_y, "button": "left" }),
-            )
+            result?;
+            Ok(Value::Null)
         }
         BrowserAction::Upload => {
             let object_id = element_id(&object_id)?;
@@ -980,6 +1109,85 @@ pub fn capture_jpeg_for_page(
     )
 }
 
+fn validate_pointer_input(cdp: &mut CdpConnection, input: BrowserPointerInput) -> Result<()> {
+    input.validate()?;
+    let metrics = cdp.call("Page.getLayoutMetrics", json!({}))?;
+    let width = viewport_dimension(&metrics, "clientWidth")?;
+    let height = viewport_dimension(&metrics, "clientHeight")?;
+    input.validate_for_viewport(width, height)
+}
+
+fn dispatch_pointer_input(cdp: &mut CdpConnection, input: BrowserPointerInput) -> Result<()> {
+    validate_pointer_input(cdp, input)?;
+    match input {
+        BrowserPointerInput::Tap { x, y } => dispatch_click(cdp, x, y, 1),
+        BrowserPointerInput::Drag {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+        } => dispatch_drag(cdp, from_x, from_y, to_x, to_y),
+        BrowserPointerInput::Scroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => {
+            cdp.call(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseWheel", "x": x, "y": y, "button": "none", "buttons": 0, "deltaX": delta_x, "deltaY": delta_y }),
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn dispatch_click(
+    cdp: &mut CdpConnection,
+    x: f64,
+    y: f64,
+    click_count: u8,
+) -> Result<()> {
+    for count in 1..=click_count {
+        let press_result = cdp.call(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": count }),
+        );
+        let release_result = cdp.call(
+            "Input.dispatchMouseEvent",
+            json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": count }),
+        );
+        press_result?;
+        release_result?;
+    }
+    Ok(())
+}
+
+fn dispatch_drag(
+    cdp: &mut CdpConnection,
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+) -> Result<()> {
+    let press_result = cdp.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mousePressed", "x": from_x, "y": from_y, "button": "left", "buttons": 1, "clickCount": 1 }),
+    );
+    let move_result = cdp.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseMoved", "x": to_x, "y": to_y, "button": "left", "buttons": 1 }),
+    );
+    let release_result = cdp.call(
+        "Input.dispatchMouseEvent",
+        json!({ "type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "buttons": 0, "clickCount": 1 }),
+    );
+    press_result?;
+    move_result?;
+    release_result?;
+    Ok(())
+}
+
 pub fn dispatch_pointer_for_page(
     registry_path: &Path,
     page_id: &str,
@@ -990,56 +1198,167 @@ pub fn dispatch_pointer_for_page(
     }
     input.validate()?;
     let mut cdp = open_registered_page(registry_path, page_id)?;
-    let metrics = cdp.call("Page.getLayoutMetrics", json!({}))?;
-    let width = viewport_dimension(&metrics, "clientWidth")?;
-    let height = viewport_dimension(&metrics, "clientHeight")?;
-    input.validate_for_viewport(width, height)?;
+    dispatch_pointer_input(&mut cdp, input)
+}
 
-    match input {
-        BrowserPointerInput::Tap { x, y } => {
-            cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
-            )?;
-            cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
-            )?;
-        }
-        BrowserPointerInput::Drag {
-            from_x,
-            from_y,
-            to_x,
-            to_y,
-        } => {
-            cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mousePressed", "x": from_x, "y": from_y, "button": "left", "buttons": 1, "clickCount": 1 }),
-            )?;
-            let move_result = cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mouseMoved", "x": to_x, "y": to_y, "button": "left", "buttons": 1 }),
-            );
-            let release_result = cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mouseReleased", "x": to_x, "y": to_y, "button": "left", "buttons": 0, "clickCount": 1 }),
-            );
-            move_result?;
-            release_result?;
-        }
-        BrowserPointerInput::Scroll {
-            x,
-            y,
-            delta_x,
-            delta_y,
-        } => {
-            cdp.call(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y }),
-            )?;
-        }
-    }
+const CDP_MODIFIER_ALT: u8 = 1;
+const CDP_MODIFIER_CONTROL: u8 = 2;
+const CDP_MODIFIER_META: u8 = 4;
+const CDP_MODIFIER_SHIFT: u8 = 8;
+
+struct CdpKeyDefinition {
+    key: String,
+    code: String,
+    virtual_key_code: u32,
+    modifiers: u8,
+}
+
+fn dispatch_key(cdp: &mut CdpConnection, input: &str) -> Result<()> {
+    let Some(key) = resolve_key_definition(input)? else {
+        cdp.call("Input.insertText", json!({ "text": input }))?;
+        return Ok(());
+    };
+    let event = |kind: &str| {
+        json!({
+            "type": kind,
+            "key": &key.key,
+            "code": &key.code,
+            "windowsVirtualKeyCode": key.virtual_key_code,
+            "nativeVirtualKeyCode": key.virtual_key_code,
+            "modifiers": key.modifiers,
+        })
+    };
+    let down_result = cdp.call("Input.dispatchKeyEvent", event("rawKeyDown"));
+    let up_result = cdp.call("Input.dispatchKeyEvent", event("keyUp"));
+    down_result?;
+    up_result?;
     Ok(())
+}
+
+fn resolve_key_definition(input: &str) -> Result<Option<CdpKeyDefinition>> {
+    if input.chars().count() == 1 {
+        return Ok(None);
+    }
+    let mut parts = input.split('+').collect::<Vec<_>>();
+    let name = parts.pop().unwrap_or_default();
+    if name.is_empty() {
+        bail!("browser key chord has no key");
+    }
+    let mut modifiers = 0;
+    for modifier in parts {
+        modifiers |= match modifier.to_ascii_lowercase().as_str() {
+            "alt" | "option" => CDP_MODIFIER_ALT,
+            "control" | "ctrl" => CDP_MODIFIER_CONTROL,
+            "command" | "cmd" | "meta" | "win" | "windows" => CDP_MODIFIER_META,
+            "shift" => CDP_MODIFIER_SHIFT,
+            _ => bail!("unsupported browser key modifier: {modifier}"),
+        };
+    }
+    let normalized = name.to_ascii_lowercase();
+    let (key, code, virtual_key_code, own_modifier) = if let Some(definition) =
+        named_key_definition(&normalized)
+    {
+        let (key, code, virtual_key_code, own_modifier) = definition;
+        (
+            key.to_string(),
+            code.to_string(),
+            virtual_key_code,
+            own_modifier,
+        )
+    } else if let Some(number) = normalized
+        .strip_prefix('f')
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|number| (1..=24).contains(number))
+    {
+        let key = format!("F{number}");
+        (key.clone(), key, 111 + number, 0)
+    } else if name.chars().count() == 1 {
+        ascii_key_definition(name.chars().next().unwrap(), modifiers)
+            .context("unsupported browser key chord")?
+    } else {
+        bail!("unsupported browser key: {name}");
+    };
+    Ok(Some(CdpKeyDefinition {
+        key,
+        code,
+        virtual_key_code,
+        modifiers: modifiers | own_modifier,
+    }))
+}
+
+fn named_key_definition(name: &str) -> Option<(&'static str, &'static str, u32, u8)> {
+    Some(match name {
+        "enter" | "return" => ("Enter", "Enter", 13, 0),
+        "tab" => ("Tab", "Tab", 9, 0),
+        "escape" | "esc" => ("Escape", "Escape", 27, 0),
+        "backspace" => ("Backspace", "Backspace", 8, 0),
+        "delete" | "del" => ("Delete", "Delete", 46, 0),
+        "insert" => ("Insert", "Insert", 45, 0),
+        "home" => ("Home", "Home", 36, 0),
+        "end" => ("End", "End", 35, 0),
+        "pageup" => ("PageUp", "PageUp", 33, 0),
+        "pagedown" => ("PageDown", "PageDown", 34, 0),
+        "arrowleft" | "left" => ("ArrowLeft", "ArrowLeft", 37, 0),
+        "arrowup" | "up" => ("ArrowUp", "ArrowUp", 38, 0),
+        "arrowright" | "right" => ("ArrowRight", "ArrowRight", 39, 0),
+        "arrowdown" | "down" => ("ArrowDown", "ArrowDown", 40, 0),
+        "space" => (" ", "Space", 32, 0),
+        "control" | "ctrl" => ("Control", "ControlLeft", 17, CDP_MODIFIER_CONTROL),
+        "shift" => ("Shift", "ShiftLeft", 16, CDP_MODIFIER_SHIFT),
+        "alt" | "option" => ("Alt", "AltLeft", 18, CDP_MODIFIER_ALT),
+        "command" | "cmd" | "meta" | "win" | "windows" => {
+            ("Meta", "MetaLeft", 91, CDP_MODIFIER_META)
+        }
+        _ => return None,
+    })
+}
+
+fn ascii_key_definition(
+    value: char,
+    modifiers: u8,
+) -> Option<(String, String, u32, u8)> {
+    let value = value.to_ascii_lowercase();
+    if value.is_ascii_alphabetic() {
+        let key = if modifiers & CDP_MODIFIER_SHIFT != 0 {
+            value.to_ascii_uppercase()
+        } else {
+            value
+        };
+        return Some((
+            key.to_string(),
+            format!("Key{}", value.to_ascii_uppercase()),
+            value.to_ascii_uppercase() as u32,
+            0,
+        ));
+    }
+    if value.is_ascii_digit() {
+        return Some((
+            value.to_string(),
+            format!("Digit{value}"),
+            value as u32,
+            0,
+        ));
+    }
+    let (code, virtual_key_code) = match value {
+        '-' => ("Minus", 189),
+        '=' => ("Equal", 187),
+        '[' => ("BracketLeft", 219),
+        ']' => ("BracketRight", 221),
+        '\\' => ("Backslash", 220),
+        ';' => ("Semicolon", 186),
+        '\'' => ("Quote", 222),
+        ',' => ("Comma", 188),
+        '.' => ("Period", 190),
+        '/' => ("Slash", 191),
+        '`' => ("Backquote", 192),
+        _ => return None,
+    };
+    Some((
+        value.to_string(),
+        code.to_string(),
+        virtual_key_code,
+        0,
+    ))
 }
 
 pub fn dispatch_key_input_for_page(
@@ -1056,16 +1375,7 @@ pub fn dispatch_key_input_for_page(
         BrowserKeyInput::Text { text } => {
             cdp.call("Input.insertText", json!({ "text": text }))?;
         }
-        BrowserKeyInput::Key { key } => {
-            cdp.call(
-                "Input.dispatchKeyEvent",
-                json!({ "type": "keyDown", "key": key }),
-            )?;
-            cdp.call(
-                "Input.dispatchKeyEvent",
-                json!({ "type": "keyUp", "key": key }),
-            )?;
-        }
+        BrowserKeyInput::Key { key } => dispatch_key(&mut cdp, &key)?,
     }
     Ok(())
 }
@@ -1484,490 +1794,5 @@ fn expires_at_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::dedicated_cli::browser_page::inspect;
-    use crate::dedicated_cli::browser_page::{
-        DEFAULT_MOBILE_DEVICE_SCALE_FACTOR, DEFAULT_MOBILE_VIEWPORT_HEIGHT,
-        DEFAULT_MOBILE_VIEWPORT_WIDTH, MAX_KEY_INPUT_BYTES, MAX_PAGE_SCALE, MAX_SCROLL_DELTA,
-        MIN_PAGE_SCALE,
-    };
-    use crate::dedicated_cli::{OperationArguments, SelectorSet};
-    use std::collections::BTreeMap;
-    use uuid::Uuid;
-
-    fn command(
-        action: BrowserAction,
-        options: impl IntoIterator<Item = (&'static str, Vec<String>)>,
-    ) -> ActionCommand<BrowserAction> {
-        ActionCommand {
-            action,
-            selectors: SelectorSet::default(),
-            arguments: OperationArguments {
-                options: options
-                    .into_iter()
-                    .map(|(name, values)| (name.to_string(), values))
-                    .collect::<BTreeMap<_, _>>(),
-                ..OperationArguments::default()
-            },
-        }
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("vibelink-browser-cdp-{label}-{}", Uuid::new_v4()))
-    }
-
-    #[test]
-    fn capture_viewport_metrics_are_bounded() {
-        let metrics = json!({
-            "cssVisualViewport": { "clientWidth": 390.25, "clientHeight": 844.1 }
-        });
-        assert_eq!(viewport_dimension(&metrics, "clientWidth").unwrap(), 391);
-        assert_eq!(viewport_dimension(&metrics, "clientHeight").unwrap(), 845);
-        assert!(viewport_dimension(
-            &json!({ "cssVisualViewport": { "clientWidth": 10001.0 } }),
-            "clientWidth"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn typed_pointer_inputs_reject_hostile_values() {
-        BrowserPointerInput::Tap { x: 12.0, y: 34.0 }
-            .validate_for_viewport(390, 844)
-            .unwrap();
-        BrowserPointerInput::Drag {
-            from_x: 1.0,
-            from_y: 2.0,
-            to_x: 389.0,
-            to_y: 843.0,
-        }
-        .validate_for_viewport(390, 844)
-        .unwrap();
-        BrowserPointerInput::Scroll {
-            x: 10.0,
-            y: 20.0,
-            delta_x: 0.0,
-            delta_y: -120.0,
-        }
-        .validate_for_viewport(390, 844)
-        .unwrap();
-
-        for hostile in [
-            BrowserPointerInput::Tap {
-                x: f64::NAN,
-                y: 0.0,
-            },
-            BrowserPointerInput::Tap { x: -1.0, y: 0.0 },
-            BrowserPointerInput::Drag {
-                from_x: 0.0,
-                from_y: 0.0,
-                to_x: f64::INFINITY,
-                to_y: 1.0,
-            },
-            BrowserPointerInput::Scroll {
-                x: 0.0,
-                y: 0.0,
-                delta_x: MAX_SCROLL_DELTA + 1.0,
-                delta_y: 0.0,
-            },
-            BrowserPointerInput::Scroll {
-                x: 0.0,
-                y: 0.0,
-                delta_x: 0.0,
-                delta_y: 0.0,
-            },
-        ] {
-            assert!(hostile.validate().is_err());
-        }
-        assert!(BrowserPointerInput::Tap { x: 390.0, y: 1.0 }
-            .validate_for_viewport(390, 844)
-            .is_err());
-    }
-
-    #[test]
-    fn viewport_and_page_scale_validation_is_bounded() {
-        assert_eq!(
-            BrowserViewport::mobile_default().device_metrics().unwrap(),
-            Some(BrowserDeviceMetrics {
-                width: DEFAULT_MOBILE_VIEWPORT_WIDTH,
-                height: DEFAULT_MOBILE_VIEWPORT_HEIGHT,
-                device_scale_factor: DEFAULT_MOBILE_DEVICE_SCALE_FACTOR,
-                mobile: true,
-            })
-        );
-        assert_eq!(BrowserViewport::Web.device_metrics().unwrap(), None);
-        for hostile in [
-            BrowserViewport::Mobile {
-                width: 0,
-                height: 844,
-                device_scale_factor: 1.0,
-            },
-            BrowserViewport::Mobile {
-                width: 390,
-                height: 10_001,
-                device_scale_factor: 1.0,
-            },
-            BrowserViewport::Mobile {
-                width: 390,
-                height: 844,
-                device_scale_factor: f64::NAN,
-            },
-        ] {
-            assert!(hostile.device_metrics().is_err());
-        }
-
-        for scale in [MIN_PAGE_SCALE, 1.0, MAX_PAGE_SCALE] {
-            BrowserPageScale {
-                scale,
-                center_x: None,
-                center_y: None,
-            }
-            .validate()
-            .unwrap();
-        }
-        BrowserPageScale {
-            scale: 2.0,
-            center_x: Some(195.0),
-            center_y: Some(422.0),
-        }
-        .validate()
-        .unwrap();
-        for scale in [f64::NAN, 0.0, MIN_PAGE_SCALE - 0.01, MAX_PAGE_SCALE + 0.01] {
-            assert!(BrowserPageScale {
-                scale,
-                center_x: None,
-                center_y: None,
-            }
-            .validate()
-            .is_err());
-        }
-        assert!(BrowserPageScale {
-            scale: 2.0,
-            center_x: Some(f64::NAN),
-            center_y: Some(1.0),
-        }
-        .validate()
-        .is_err());
-        assert!(BrowserPageScale {
-            scale: 2.0,
-            center_x: Some(1.0),
-            center_y: None,
-        }
-        .validate()
-        .is_err());
-    }
-
-    #[test]
-    fn text_and_key_input_validation_is_bounded() {
-        BrowserKeyInput::Text {
-            text: "한글 text\n".to_string(),
-        }
-        .validate()
-        .unwrap();
-        BrowserKeyInput::Key {
-            key: "Enter".to_string(),
-        }
-        .validate()
-        .unwrap();
-
-        for hostile in [
-            BrowserKeyInput::Text {
-                text: String::new(),
-            },
-            BrowserKeyInput::Text {
-                text: "x".repeat(MAX_TEXT_INPUT_BYTES + 1),
-            },
-            BrowserKeyInput::Text {
-                text: "bad\0text".to_string(),
-            },
-            BrowserKeyInput::Key {
-                key: "\n".to_string(),
-            },
-            BrowserKeyInput::Key {
-                key: "x".repeat(MAX_KEY_INPUT_BYTES + 1),
-            },
-        ] {
-            assert!(hostile.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn capture_options_reject_invalid_quality() {
-        BrowserJpegCaptureOptions::default().validate().unwrap();
-        BrowserJpegCaptureOptions { quality: 1 }.validate().unwrap();
-        BrowserJpegCaptureOptions { quality: 100 }
-            .validate()
-            .unwrap();
-        assert!(BrowserJpegCaptureOptions { quality: 0 }.validate().is_err());
-        assert!(BrowserJpegCaptureOptions { quality: 101 }
-            .validate()
-            .is_err());
-    }
-
-    #[test]
-    fn public_helpers_validate_before_browser_discovery() {
-        let missing_registry = temp_root("typed-validation").join("cdp-registry.json");
-
-        assert!(capture_jpeg_for_page(
-            &missing_registry,
-            "page-a",
-            BrowserJpegCaptureOptions { quality: 0 },
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("JPEG quality"));
-        assert!(dispatch_pointer_for_page(
-            &missing_registry,
-            "page-a",
-            BrowserPointerInput::Tap {
-                x: f64::NAN,
-                y: 0.0,
-            },
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("pointer coordinates"));
-        assert!(dispatch_key_input_for_page(
-            &missing_registry,
-            "page-a",
-            BrowserKeyInput::Text {
-                text: String::new(),
-            },
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("text input"));
-        assert!(inspect(&missing_registry, "page-a", Some(1.0), None)
-            .unwrap_err()
-            .to_string()
-            .contains("requires both"));
-        assert!(
-            inspect(&missing_registry, "page-a", Some(10_001.0), Some(0.0))
-                .unwrap_err()
-                .to_string()
-                .contains("out of bounds")
-        );
-        assert!(set_viewport_for_page(
-            &missing_registry,
-            "page-a",
-            BrowserViewport::Mobile {
-                width: 0,
-                height: 844,
-                device_scale_factor: 1.0,
-            },
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("mobile browser viewport"));
-        assert!(set_page_scale_for_page(
-            &missing_registry,
-            "page-a",
-            BrowserPageScale {
-                scale: f64::NAN,
-                center_x: None,
-                center_y: None,
-            },
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("page scale"));
-    }
-
-    #[test]
-    fn tab_projection_uses_only_authoritative_registry_annotations() {
-        let targets = vec![
-            DebugTarget {
-                id: "cdp-a".to_string(),
-                title: "First".to_string(),
-                url: "https://example.test/first".to_string(),
-                target_type: "page".to_string(),
-                web_socket_debugger_url: None,
-                cdp_port: 9334,
-                page_id: Some("page-a".to_string()),
-                profile_id: Some("profile-a".to_string()),
-                workspace_id: Some("workspace-a".to_string()),
-                external: false,
-                extension_tab_id: None,
-            },
-            DebugTarget {
-                id: "cdp-b".to_string(),
-                title: "Second".to_string(),
-                url: "https://example.test/second".to_string(),
-                target_type: "page".to_string(),
-                web_socket_debugger_url: None,
-                cdp_port: 9335,
-                page_id: Some("page-b".to_string()),
-                profile_id: Some("profile-b".to_string()),
-                workspace_id: Some("workspace-b".to_string()),
-                external: false,
-                extension_tab_id: None,
-            },
-            DebugTarget {
-                id: "unregistered-cdp-target".to_string(),
-                title: "Application shell".to_string(),
-                url: "tauri://localhost".to_string(),
-                target_type: "page".to_string(),
-                web_socket_debugger_url: None,
-                cdp_port: 9333,
-                page_id: None,
-                profile_id: None,
-                workspace_id: None,
-                external: false,
-                extension_tab_id: None,
-            },
-        ];
-
-        assert_eq!(
-            project_embedded_tabs(&targets, Some("workspace-a")),
-            vec![EmbeddedBrowserTab {
-                id: "page-a".to_string(),
-                title: "First".to_string(),
-                url: "https://example.test/first".to_string(),
-                workspace_id: "workspace-a".to_string(),
-            }]
-        );
-        assert_eq!(project_embedded_tabs(&targets, None).len(), 2);
-    }
-    #[test]
-    fn risky_actions_are_denied_before_any_cdp_connection() {
-        let root = temp_root("risk");
-        for action in [
-            BrowserAction::Cookies,
-            BrowserAction::Storage,
-            BrowserAction::Upload,
-            BrowserAction::Download,
-        ] {
-            let error = execute(command(action, []), &root).unwrap_err();
-            assert!(error.to_string().contains("requires explicit browser."));
-        }
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn upload_paths_require_a_grant_and_canonical_workspace_containment() {
-        let root = temp_root("upload");
-        let workspace = root.join("workspace");
-        let outside = root.join("outside.txt");
-        fs::create_dir_all(&workspace).unwrap();
-        let inside = workspace.join("inside.txt");
-        fs::write(&inside, b"inside").unwrap();
-        fs::write(&outside, b"outside").unwrap();
-        let access = CdpAccessPolicy::from_command(
-            &command(
-                BrowserAction::Upload,
-                [
-                    ("grant", vec!["browser.upload".to_string()]),
-                    (
-                        "workspace-root",
-                        vec![workspace.to_string_lossy().into_owned()],
-                    ),
-                ],
-            ),
-            &root.join("artifacts"),
-        )
-        .unwrap();
-        assert_eq!(
-            access
-                .upload_files(&[inside.to_string_lossy().into_owned()])
-                .unwrap(),
-            vec![fs::canonicalize(&inside).unwrap()]
-        );
-        assert!(access
-            .upload_files(&[outside.to_string_lossy().into_owned()])
-            .unwrap_err()
-            .to_string()
-            .contains("outside the explicitly granted workspace roots"));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn registry_routes_pages_only_to_their_declared_profile() {
-        let first = BrowserCdpProfile {
-            profile_id: "profile-a".to_string(),
-            port: 9334,
-            pages: vec![BrowserCdpPage {
-                page_id: "page-a".to_string(),
-                workspace_id: "workspace-a".to_string(),
-            }],
-        };
-        let second = BrowserCdpProfile {
-            profile_id: "profile-b".to_string(),
-            port: 9335,
-            pages: vec![BrowserCdpPage {
-                page_id: "page-b".to_string(),
-                workspace_id: "workspace-b".to_string(),
-            }],
-        };
-        validate_registry(&BrowserCdpRegistry {
-            version: 2,
-            main_port: 9333,
-            profiles: vec![first.clone(), second.clone()],
-        })
-        .unwrap();
-        let mut claimed = HashSet::new();
-        assert_eq!(
-            registered_page_for_name(&first, "vibelink-page:page-a", &mut claimed)
-                .map(|page| (page.page_id.as_str(), page.workspace_id.as_str())),
-            Some(("page-a", "workspace-a"))
-        );
-        assert!(registered_page_for_name(&second, "vibelink-page:page-a", &mut claimed).is_none());
-        assert_eq!(
-            registered_page_for_name(&second, "vibelink-page:page-b", &mut claimed)
-                .map(|page| (page.page_id.as_str(), page.workspace_id.as_str())),
-            Some(("page-b", "workspace-b"))
-        );
-        assert_eq!(
-            profiles_for_workspace(vec![first, second], Some("workspace-a"))
-                .into_iter()
-                .map(|profile| profile.profile_id)
-                .collect::<Vec<_>>(),
-            vec!["profile-a"]
-        );
-    }
-
-    #[test]
-    fn hostile_registry_and_websocket_inputs_fail_closed() {
-        let duplicate = BrowserCdpRegistry {
-            version: 2,
-            main_port: 9333,
-            profiles: vec![
-                BrowserCdpProfile {
-                    profile_id: "a".to_string(),
-                    port: 9334,
-                    pages: vec![BrowserCdpPage {
-                        page_id: "same".to_string(),
-                        workspace_id: "workspace-a".to_string(),
-                    }],
-                },
-                BrowserCdpProfile {
-                    profile_id: "b".to_string(),
-                    port: 9335,
-                    pages: vec![BrowserCdpPage {
-                        page_id: "same".to_string(),
-                        workspace_id: "workspace-b".to_string(),
-                    }],
-                },
-            ],
-        };
-        assert!(validate_registry(&duplicate).is_err());
-        let target = DebugTarget {
-            id: "target".to_string(),
-            title: "Hostile".to_string(),
-            url: "https://example.test".to_string(),
-            target_type: "page".to_string(),
-            web_socket_debugger_url: Some("ws://example.test:9334/devtools/page/1".to_string()),
-            cdp_port: 9334,
-            page_id: None,
-            profile_id: None,
-            workspace_id: None,
-            external: false,
-            extension_tab_id: None,
-        };
-        let error = match CdpConnection::open(&target) {
-            Ok(_) => panic!("hostile websocket URL was accepted"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("unsafe CDP websocket URL"));
-    }
-}
+#[path = "browser_cdp_tests.rs"]
+mod tests;

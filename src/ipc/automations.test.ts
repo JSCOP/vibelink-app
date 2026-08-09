@@ -60,6 +60,15 @@ const AUTOMATION_RECORD_FIXTURE: AutomationRecord = {
   updatedAt: 100,
 }
 
+const MAX_PRECHECK_COMMAND_TIMEOUT_SECONDS = 600
+
+function argvOf(payload: unknown): string[] {
+  if (!payload || typeof payload !== 'object' || !('args' in payload) || !Array.isArray(payload.args)) {
+    throw new Error('cli_request was invoked without an argv payload')
+  }
+  return payload.args
+}
+
 describe('automations IPC wrapper', () => {
   const mockInvoke = vi.mocked(invoke)
 
@@ -143,9 +152,10 @@ describe('automations IPC wrapper', () => {
       mockInvoke.mockResolvedValueOnce(precheckRes)
 
       const res = await precheckAutomation('auto-1')
-      expect(mockInvoke).toHaveBeenCalledWith('cli_request', {
-        args: ['--request-timeout-seconds', '600', 'automation', 'precheck', '--id', 'auto-1'],
-      })
+      const args = argvOf(mockInvoke.mock.calls[0]?.[1])
+      expect(args[0]).toBe('--request-timeout-seconds')
+      expect(Number(args[1])).toBeGreaterThan(MAX_PRECHECK_COMMAND_TIMEOUT_SECONDS)
+      expect(args.slice(2)).toEqual(['automation', 'precheck', '--id', 'auto-1'])
       expect(res).toEqual(precheckRes)
     })
 
@@ -338,15 +348,11 @@ describe('automations IPC wrapper', () => {
       await updateAutomation('auto-1', { enabled: false })
       await deleteAutomation('auto-1')
 
-      const argvOf = (payload: unknown): string[] => {
-        if (!payload || typeof payload !== 'object' || !('args' in payload) || !Array.isArray(payload.args)) {
-          throw new Error('cli_request was invoked without an argv payload')
-        }
-        return payload.args
-      }
       const argv = mockInvoke.mock.calls.map((call) => argvOf(call[1]))
       expect(argv[0].slice(0, 3)).toEqual(['--request-timeout-seconds', '180', 'automation'])
-      expect(argv[1].slice(0, 3)).toEqual(['--request-timeout-seconds', '600', 'automation'])
+      expect(argv[1][0]).toBe('--request-timeout-seconds')
+      expect(Number(argv[1][1])).toBeGreaterThan(MAX_PRECHECK_COMMAND_TIMEOUT_SECONDS)
+      expect(argv[1][2]).toBe('automation')
       for (const args of argv.slice(2)) {
         expect(args).not.toContain('--request-timeout-seconds')
         expect(args[0]).toBe('automation')

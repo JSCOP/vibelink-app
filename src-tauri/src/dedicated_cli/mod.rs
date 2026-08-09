@@ -3,6 +3,7 @@ pub mod browser_extension;
 pub mod browser_page;
 pub mod builtin_skills;
 pub mod chrome_profile;
+mod chrome_profile_windows;
 pub mod client;
 pub mod command;
 pub mod contract;

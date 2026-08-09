@@ -8,6 +8,10 @@ import { WorkspaceTodoPanel } from './WorkspaceTodoPanel'
 
 const setWorkspaceTodoNote = vi.fn<(sessionId: string, note: string) => void>()
 const originalSetWorkspaceTodoNote = useWorkspaceStore.getState().setWorkspaceTodoNote
+const sessions = [
+  { id: 'workspace-1', name: 'Workspace 1', paneCount: 0, createdAt: 1 },
+  { id: 'workspace-2', name: 'Workspace 2', paneCount: 0, createdAt: 2 },
+]
 
 const renderPanel = () => {
   render(<WorkspaceTodoPanel />)
@@ -18,8 +22,10 @@ describe('WorkspaceTodoPanel memo persistence', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     setWorkspaceTodoNote.mockReset()
+    window.localStorage.removeItem('vibelink:kanban')
     useWorkspaceStore.setState({
       activeSessionId: 'workspace-1',
+      sessions,
       error: undefined,
       workspaceTodos: {},
       workspaceTodoNotes: {},
@@ -31,10 +37,12 @@ describe('WorkspaceTodoPanel memo persistence', () => {
     cleanup()
     useWorkspaceStore.setState({
       activeSessionId: undefined,
+      sessions: [],
       workspaceTodos: {},
       workspaceTodoNotes: {},
       setWorkspaceTodoNote: originalSetWorkspaceTodoNote,
     })
+    window.localStorage.removeItem('vibelink:kanban')
     vi.useRealTimers()
   })
 
@@ -74,6 +82,22 @@ describe('WorkspaceTodoPanel memo persistence', () => {
 
     expect(setWorkspaceTodoNote).toHaveBeenCalledOnce()
     expect(setWorkspaceTodoNote).toHaveBeenCalledWith('workspace-1', 'Unmounted memo')
+  })
+
+  test('does not resurrect a pending memo after its workspace is deleted', () => {
+    useWorkspaceStore.setState({ setWorkspaceTodoNote: originalSetWorkspaceTodoNote })
+    const textarea = renderPanel()
+    fireEvent.change(textarea, { target: { value: 'Deleted workspace memo' } })
+
+    act(() => useWorkspaceStore.setState({
+      sessions: sessions.slice(1),
+      activeSessionId: 'workspace-2',
+      workspaceTodoNotes: {},
+    }))
+    act(() => vi.advanceTimersByTime(300))
+
+    expect(useWorkspaceStore.getState().workspaceTodoNotes['workspace-1']).toBeUndefined()
+    expect(window.localStorage.getItem('vibelink:kanban') ?? '').not.toContain('Deleted workspace memo')
   })
 
   test('flushes the previous workspace memo before switching drafts', () => {

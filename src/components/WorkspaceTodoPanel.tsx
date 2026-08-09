@@ -36,7 +36,9 @@ export function WorkspaceTodoPanel() {
     const pending = pendingNoteRef.current
     if (!pending) return
     pendingNoteRef.current = null
-    setWorkspaceTodoNote(pending.sessionId, pending.note)
+    if (useWorkspaceStore.getState().sessions.some((session) => session.id === pending.sessionId)) {
+      setWorkspaceTodoNote(pending.sessionId, pending.note)
+    }
   }, [setWorkspaceTodoNote])
 
   useEffect(() => flushPendingNote, [flushPendingNote, sessionId])

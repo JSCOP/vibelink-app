@@ -307,6 +307,8 @@ fn map_daemon_error(message: String) -> CliError {
         ErrorCode::AmbiguousSelector
     } else if folded.contains("not found") || folded.contains("does not exist") {
         ErrorCode::NotFound
+    } else if folded.contains("stale_ref") {
+        ErrorCode::StaleRef
     } else if folded.contains("stale") {
         ErrorCode::StaleTarget
     } else if folded.contains("denied")

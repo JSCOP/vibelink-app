@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async () => null) }))
@@ -21,25 +21,38 @@ vi.mock('../ipc/agentSkills', () => ({
   agentSkillCliCommand: mocks.agentSkillCliCommand,
 }))
 
-import type { AgentSkillStatus } from '../ipc/agentSkills'
+import type { AgentSkillState, AgentSkillStatus, AgentSkillTarget } from '../ipc/agentSkills'
 import { defaultSettings, normalizeSettings } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 import { AgentSkillSettings } from './AgentSkillSettings'
+
+const targetSkills = (memory: AgentSkillState, browser: AgentSkillState): AgentSkillTarget['skills'] => [
+  {
+    name: 'vibelink-memory',
+    state: memory,
+    installedRevision: memory === 'installed' ? 3 : memory === 'stale' ? 1 : null,
+  },
+  {
+    name: 'vibelink-browser',
+    state: browser,
+    installedRevision: browser === 'installed' ? 3 : browser === 'stale' ? 1 : null,
+  },
+]
 
 const freshStatus: AgentSkillStatus = {
   skills: ['vibelink-memory', 'vibelink-browser'],
   revision: 3,
   targets: [
-    { id: 'agents', label: 'Shared agents', path: 'C:/Users/js/.agents/skills', state: 'installed', installedRevision: 3 },
-    { id: 'claude', label: 'Claude Code', path: 'C:/Users/js/.claude/skills', state: 'installed', installedRevision: 3 },
-    { id: 'codex', label: 'Codex', path: 'C:/Users/js/.codex/skills', state: 'missing', installedRevision: null },
-    { id: 'grok', label: 'Grok', path: 'C:/Users/js/.grok/skills', state: 'agentAbsent', installedRevision: null },
+    { id: 'agents', label: 'Shared agents', path: 'C:/Users/js/.agents/skills', state: 'installed', skills: targetSkills('installed', 'installed') },
+    { id: 'claude', label: 'Claude Code', path: 'C:/Users/js/.claude/skills', state: 'installed', skills: targetSkills('installed', 'installed') },
+    { id: 'codex', label: 'Codex', path: 'C:/Users/js/.codex/skills', state: 'missing', skills: targetSkills('missing', 'missing') },
+    { id: 'grok', label: 'Grok', path: 'C:/Users/js/.grok/skills', state: 'agentAbsent', skills: targetSkills('agentAbsent', 'agentAbsent') },
   ],
 }
 
 const staleStatus: AgentSkillStatus = {
   ...freshStatus,
-  targets: [{ ...freshStatus.targets[0], state: 'stale', installedRevision: 1 }, ...freshStatus.targets.slice(1)],
+  targets: [{ ...freshStatus.targets[0], state: 'stale', skills: targetSkills('stale', 'installed') }, ...freshStatus.targets.slice(1)],
 }
 
 /** What a machine that has never installed the skill reports. */
@@ -47,7 +60,13 @@ const bareStatus: AgentSkillStatus = {
   ...freshStatus,
   targets: freshStatus.targets.map((target) => target.state === 'agentAbsent'
     ? target
-    : { ...target, state: 'missing', installedRevision: null }),
+    : { ...target, state: 'missing', skills: targetSkills('missing', 'missing') }),
+}
+
+/** An existing memory install must not imply consent to browser control. */
+const memoryOnlyStatus: AgentSkillStatus = {
+  ...freshStatus,
+  targets: [{ ...freshStatus.targets[0], state: 'stale', skills: targetSkills('installed', 'missing') }],
 }
 
 const setAutoUpdate = (autoUpdateAgentSkill: boolean) => {
@@ -58,6 +77,11 @@ const showDetails = () => fireEvent.click(screen.getByRole('button', { name: 'Sh
 const openCliSection = async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Command for other agents' }))
 }
+const skillRow = (label: string) => {
+  const row = screen.getByText(label).closest('.vl-set-row')
+  if (!(row instanceof HTMLElement)) throw new Error(`Missing settings row for ${label}`)
+  return within(row)
+}
 
 describe('AgentSkillSettings', () => {
   beforeEach(() => {
@@ -67,7 +91,7 @@ describe('AgentSkillSettings', () => {
     mocks.uninstallAgentSkill.mockResolvedValue(freshStatus)
     mocks.refreshAgentSkill.mockResolvedValue(freshStatus)
     mocks.agentSkillCliCommand.mockImplementation(async (keys: string[]) =>
-      `npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --agent ${keys.join(',')} -y`)
+      `npx skills add JSCOP/vibelink-skills --skill vibelink-memory --agent ${keys.join(',')} -y`)
     setAutoUpdate(true)
   })
 
@@ -142,6 +166,28 @@ describe('AgentSkillSettings', () => {
     await waitFor(() => expect(mocks.refreshAgentSkill).toHaveBeenCalledTimes(1))
   })
 
+  test('keeps Browser use uninstalled when auto-update refreshes a memory-only home', async () => {
+    setAutoUpdate(false)
+    mocks.fetchAgentSkillStatus.mockResolvedValue(memoryOnlyStatus)
+    mocks.refreshAgentSkill.mockResolvedValue(memoryOnlyStatus)
+    render(<AgentSkillSettings />)
+
+    await screen.findByText('Browser use')
+    expect(skillRow('Memory').getByText('Installed')).toBeInTheDocument()
+    expect(skillRow('Browser use').getByText('Not installed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Install missing skills' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Keep the installed skill up to date' }))
+    await waitFor(() => expect(mocks.refreshAgentSkill).toHaveBeenCalledTimes(1))
+    expect(skillRow('Browser use').getByText('Not installed')).toBeInTheDocument()
+    expect(mocks.installAgentSkill).not.toHaveBeenCalled()
+
+    const installMissing = screen.getByRole('button', { name: 'Install missing skills' })
+    await waitFor(() => expect(installMissing).not.toBeDisabled())
+    fireEvent.click(installMissing)
+    await waitFor(() => expect(mocks.installAgentSkill).toHaveBeenCalledWith(['agents']))
+  })
+
   test('hides the stale notice while auto-update keeps every copy current', async () => {
     mocks.fetchAgentSkillStatus.mockResolvedValue(staleStatus)
     render(<AgentSkillSettings />)
@@ -169,8 +215,8 @@ describe('AgentSkillSettings', () => {
 
     showDetails()
     expect(screen.getByText('C:/Users/js/.claude/skills')).toBeInTheDocument()
-    // One badge per bundled skill, plus one per target in the details list.
-    expect(screen.getAllByText('Installed')).toHaveLength(4)
+    expect(skillRow('Memory').getByText('Installed')).toBeInTheDocument()
+    expect(skillRow('Browser use').getByText('Installed')).toBeInTheDocument()
     expect(screen.getByText('Not installed')).toBeInTheDocument()
     expect(screen.getByText('Agent not found')).toBeInTheDocument()
   })
@@ -226,7 +272,7 @@ describe('AgentSkillSettings', () => {
       fireEvent.click(screen.getByRole('checkbox', { name: 'claude-code' }))
       await waitFor(() => expect(mocks.agentSkillCliCommand).toHaveBeenLastCalledWith(['claude-code', 'codex']))
 
-      expect(await screen.findByText('npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --agent claude-code,codex -y')).toBeInTheDocument()
+      expect(await screen.findByText('npx skills add JSCOP/vibelink-skills --skill vibelink-memory --agent claude-code,codex -y')).toBeInTheDocument()
       expect(screen.queryByText(/Pick at least one agent/)).not.toBeInTheDocument()
     })
 
@@ -263,7 +309,7 @@ describe('AgentSkillSettings', () => {
 
       fireEvent.click(screen.getByRole('button', { name: /Copy/ }))
       await waitFor(() => expect(invoke).toHaveBeenCalledWith('clipboard_write_text', {
-        text: 'npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --agent cursor -y',
+        text: 'npx skills add JSCOP/vibelink-skills --skill vibelink-memory --agent cursor -y',
       }))
     })
 

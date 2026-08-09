@@ -289,9 +289,9 @@ export function normalizeAutomationRpcError(
 
 // The CLI's global request timeout defaults to 10s, which aborts these two long
 // daemon calls every time: draft preview runs Hermes with a hard 120s cap, and
-// precheck clamps its command timeout to 600s.
+// precheck may spend 600s in its child command before cleanup and serialization.
 const DRAFT_PREVIEW_TIMEOUT_SECONDS = 180
-const PRECHECK_TIMEOUT_SECONDS = 600
+const PRECHECK_TIMEOUT_SECONDS = 660
 
 async function automationRequest<T>(action: string, args: string[] = [], timeoutSeconds?: number): Promise<T> {
   const globals = timeoutSeconds === undefined ? [] : ['--request-timeout-seconds', String(timeoutSeconds)]

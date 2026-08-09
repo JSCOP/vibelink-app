@@ -4,11 +4,15 @@ This Manifest V3 extension lets VibeLink control tabs in the user's already-runn
 
 ## How it pairs
 
-Every file here is identical on every machine — no per-user secret is baked in —
-so this same folder is what gets zipped for the Chrome Web Store.
+The Chrome Web Store zip contains `manifest.json`, `service-worker.js`,
+`bridge-port.json` (committed with the release port `9332`), and both icons.
+This README is deliberately left out of that zip.
 
-The service worker opens a loopback WebSocket to `127.0.0.1:9332` (a VibeLink
-developer build listens on `19399`; it tries both and keeps whichever answers).
+For an unpacked install, VibeLink copies the bundle and rewrites
+`bridge-port.json` with that flavor's runtime port (`9332` for release or
+`19399` for a developer build). The service worker fetches that file, falls
+back to `9332` if it cannot read a valid port, and opens exactly one loopback
+WebSocket instead of probing both flavors.
 Chrome sets `Origin: chrome-extension://<id>` on that upgrade and page script
 cannot forge it, so the daemon authenticates the peer from the header alone: the
 first extension id to connect is remembered in `<dataDir>/browser-extension.json`
@@ -18,10 +22,13 @@ for the Chrome Web Store build.
 
 ## Installation
 
-Published: Chrome installs it from the Web Store, and the VibeLink installer can
-pre-register it by writing `update_url` under
-`HKLM\Software\Google\Chrome\Extensions\<id>`; Chrome then asks the user once to
-enable it.
+Published — the intended path once the extension is on the Web Store. Chrome
+installs it from the store, and a production build whose `STORE_EXTENSION_ID` is
+set has `vibelink browser chrome --install` pre-register it by writing
+`update_url` under `HKCU\Software\Google\Chrome\Extensions\<id>`, so Chrome picks
+it up on its next start and asks the user once to enable it; `--unpair` removes
+that registration again. `STORE_EXTENSION_ID` is `None` today, and a DEV build
+never writes that key at all, so both cases write only the unpacked bundle below.
 
 Off-store: `vibelink browser chrome --install` writes this bundle into the
 flavor-specific app-data `browser-extension/` directory (for example

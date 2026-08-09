@@ -1,16 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 
-/**
- * Install state of VibeLink's bundled skills in one agent's home skills root.
- * The bundle is one unit: a target carrying an older or partial set reads
- * `stale`, so a refresh rewrites every skill instead of leaving a silent gap.
- *
- * `agentAbsent` means the agent's own home directory does not exist on this
- * machine. The target is still offered — installing would create the directory —
- * but it is left unchecked so a bare host does not collect config folders for
- * agents the user never installed.
- */
+/** Install state of one bundled skill in one agent-owned skills root. */
 export type AgentSkillState = 'installed' | 'stale' | 'missing' | 'agentAbsent'
+
+export type AgentSkillTargetSkill = {
+  name: string
+  state: AgentSkillState
+  /** Revision found beside this skill, or null when it is absent or invalid. */
+  installedRevision: number | null
+}
 
 /**
  * One install location. `path` is the directory VibeLink writes each
@@ -21,12 +19,12 @@ export type AgentSkillTarget = {
   id: string
   label: string
   path: string
+  /** Aggregate state; a partial bundle remains `stale` until the user installs it. */
   state: AgentSkillState
-  /** Revision found on disk, or null when nothing is installed there. */
-  installedRevision: number | null
+  skills: AgentSkillTargetSkill[]
 }
 
-/** Bundled skill names, their shared revision, and the per-target scan result. */
+/** Bundled skill names, their shared revision, and per-skill state at each target. */
 export type AgentSkillStatus = {
   skills: string[]
   revision: number
@@ -46,9 +44,9 @@ export async function uninstallAgentSkill(targetIds: string[]): Promise<AgentSki
 }
 
 /**
- * Refreshes the copies that are already on disk and installs nowhere new.
- * Called once per launch when `settings.autoUpdateAgentSkill` is on, so a host
- * that never opted in stays untouched — a first run writes nothing at all.
+ * Refreshes each skill that is already present on disk and installs nothing
+ * missing. A newly bundled skill and a new agent home both require an explicit
+ * user-initiated install.
  */
 export async function refreshAgentSkill(): Promise<AgentSkillStatus> {
   return invoke<AgentSkillStatus>('agent_skill_refresh')

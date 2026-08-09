@@ -791,7 +791,7 @@ fn cli_contract_tool_schema(contract: CommandContract) -> Value {
     );
     properties.insert(
         "requestTimeoutSeconds".to_string(),
-        json!({ "type": "integer", "minimum": 1, "maximum": 600 }),
+        json!({ "type": "integer", "minimum": 1, "maximum": 900 }),
     );
     properties.insert(
         "flavor".to_string(),

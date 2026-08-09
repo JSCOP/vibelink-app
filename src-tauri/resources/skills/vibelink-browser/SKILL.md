@@ -33,16 +33,27 @@ error envelope, and diagnostics stay on stderr.
   This is what you want for anything authenticated. It needs the VibeLink
   extension installed once, either from the Chrome Web Store or, off-store, by
   running `browser chrome --install --grant browser.cookies` and having the user
-  load the printed `installDirectory` through `chrome://extensions` with
-  Developer mode on. `browser chrome` then reports `status.connected: true` and
-  lists their tabs.
+  load the printed `directory` through `chrome://extensions` with
+  Developer mode on. `browser chrome --grant browser.cookies` then reports
+  `status.connected: true` and lists their tabs.
+  A RELEASE build that carries a published store id also pre-registers the
+  extension under `HKCU\Software\Google\Chrome\Extensions\<id>` and echoes
+  `registryKey`; the user then only restarts Chrome and accepts its one-time
+  enable prompt. No `registryKey` in the response is the normal case today —
+  no store id is configured yet, and a DEV build never writes that key — so
+  fall back to the unpacked path above.
   The daemon binds to the FIRST extension id that connects and refuses every
   other one, so `status.rejectedExtensionId` means a different copy is trying —
-  tell the user, and run `browser chrome --unpair` only if they confirm the new
-  one is the copy they want. `connected: false` with `listening: true` means the
-  extension is not installed or not enabled, and Chrome must be running.
-  Never spawn a second Chrome to work around any of this; the point of this
-  backend is the browser the user already has open.
+  tell the user, and run `browser chrome --unpair --grant browser.cookies` only
+  if they confirm the new one is the copy they want. `connected: false` with
+  `listening: true` means the extension is not installed or not enabled, and
+  Chrome must be running.
+  If the extension cannot be loaded, the explicit fallback is
+  `browser chrome --copy-profile --confirm --grant browser.cookies`. It copies
+  the signed-in profile into VibeLink-owned storage and opens that separate
+  copy; it never mutates the live Chrome profile.
+  Do not launch another Chrome process yourself. Use the live extension by
+  default, and let the fallback command own its separate copy.
 - **VibeLink in-pane pages** — the WebView2 browser inside a workspace pane.
   Already available, but it is a separate profile and starts signed out.
 
@@ -86,8 +97,10 @@ real inserted text. You do not choose the mode; the element does.
 
 ## Risk gates
 
-`cookies`, `storage`, `upload`, `download`, and `chrome` require an explicit
-`--grant browser.<capability>`, and the high-risk ones also require `--confirm`.
+Every `chrome` action requires `--grant browser.cookies`; `--copy-profile` also
+requires `--confirm`. `cookies`, `storage`, `upload`, and `download` use their
+matching `browser.<capability>` grants and reject any required confirmation that
+was not supplied.
 A denial is a real answer: report it and ask, never work around it.
 
 ## Safety

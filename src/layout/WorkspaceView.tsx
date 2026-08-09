@@ -263,21 +263,27 @@ function ProPanelBoundary({ feature, children }: { feature: string; children: Re
   return entitled ? children : <ProLockedPanel feature={feature} />
 }
 
+/** `active` is dockview focus (drives the header accent); `visible` is "this
+ * panel is the selected tab in its group". Content and data gating MUST use
+ * `visible` — an unfocused edge panel is still on screen, and gating it on
+ * `active` blanks the panel as soon as the user clicks a terminal. */
 function useEdgePanelState(api: WorkspaceContentPanelProps['api']) {
-  const [state, setState] = useState(() => ({ active: api.isActive, collapsed: api.group.api.isCollapsed() }))
+  const [state, setState] = useState(() => ({ active: api.isActive, visible: api.isVisible, collapsed: api.group.api.isCollapsed() }))
   useEffect(() => {
     let collapsed: { dispose: () => void } | undefined
-    const syncState = () => setState({ active: api.isActive, collapsed: api.group.api.isCollapsed() })
+    const syncState = () => setState({ active: api.isActive, visible: api.isVisible, collapsed: api.group.api.isCollapsed() })
     const subscribeCollapsed = () => {
       collapsed?.dispose()
       collapsed = api.group.api.onDidCollapsedChange(({ isCollapsed }) => setState((current) => ({ ...current, collapsed: isCollapsed })))
       syncState()
     }
     const active = api.onDidActiveChange(syncState)
+    const visible = api.onDidVisibilityChange(syncState)
     const group = api.onDidGroupChange(subscribeCollapsed)
     subscribeCollapsed()
     return () => {
       active.dispose()
+      visible.dispose()
       group.dispose()
       collapsed?.dispose()
     }
@@ -298,12 +304,12 @@ function SourceControlContentPanel(props: WorkspaceContentPanelProps) {
 
 function GitHistoryContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-history"><ProPanelBoundary feature="Git History"><ErrorBoundary label="Git History panel"><GitHistorySidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-history"><ProPanelBoundary feature="Git History"><ErrorBoundary label="Git History panel"><GitHistorySidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function GitBranchesContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-branches"><ProPanelBoundary feature="Git Branches"><ErrorBoundary label="Git Branches panel"><GitBranchesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-branches"><ProPanelBoundary feature="Git Branches"><ErrorBoundary label="Git Branches panel"><GitBranchesSidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 /** Automations is a left-edge structural singleton. Unlike the Git sidebars,
@@ -323,7 +329,7 @@ function AutomationContentPanel(props: WorkspaceContentPanelProps) {
               collapsed={state.collapsed}
               onCollapse={() => props.api.group.api.collapse()}
             >
-              <AutomationPanel active={state.active && !state.collapsed} />
+              <AutomationPanel active={state.visible && !state.collapsed} />
             </WorkspaceSidebarPanelShell>
           </SidebarChromeContext.Provider>
         </ErrorBoundary>
@@ -334,7 +340,7 @@ function AutomationContentPanel(props: WorkspaceContentPanelProps) {
 
 function AgentSessionsContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
 function AgentContentPanel(props: WorkspaceContentPanelProps) {
@@ -516,7 +522,7 @@ function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   return <WindowPanelShell panelId={props.api.id} className="workspace-window-editor"><ProPanelBoundary feature="Editor"><ErrorBoundary label="Editor panel"><Suspense fallback={null}><EditorContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
 }
 
-const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPanelComponent> = {
+export const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPanelComponent> = {
   terminal: TerminalContentPanel,
   terminalWindow: TerminalWindowContentPanel,
   workspaceWindow: WorkspaceWindowContentPanel,

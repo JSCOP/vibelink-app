@@ -1,14 +1,10 @@
 const PROTOCOL_VERSION = 1;
+const DEFAULT_BRIDGE_PORT = 9332;
+const RECONNECT_ALARM_NAME = "bridge-reconnect";
 const INITIAL_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_BASE_MS = 24_000;
 const MAX_RECONNECT_MS = 30_000;
 const KEEPALIVE_MS = 20_000;
-// The installed VibeLink desktop owns exactly one of these: release uses 9332
-// and a developer build uses 19399 (runtime_ports::browser_extension_port).
-// Trying both keeps this file identical for every user, which is what lets one
-// Chrome Web Store build serve everyone; the unused port backs off and retries
-// quietly.
-const BRIDGE_PORTS = [9332, 19399];
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
 const GROUP_COLORS = new Set([
   "grey",
@@ -23,8 +19,14 @@ const GROUP_COLORS = new Set([
 ]);
 
 const attachedTabIds = new Set();
-const connections = new Map();
-let started = false;
+const connection = {
+  port: null,
+  attempt: 0,
+  socket: null,
+  reconnectTimer: null,
+  keepaliveTimer: null,
+};
+let bridgePortPromise = null;
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
@@ -46,36 +48,46 @@ chrome.debugger.onDetach.addListener((source) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   attachedTabIds.delete(tabId);
 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM_NAME) void start();
+});
 
 chrome.runtime.onInstalled.addListener(() => void start());
 chrome.runtime.onStartup.addListener(() => void start());
 void start();
 
 async function start() {
-  if (started) return;
-  started = true;
-
-  for (const port of BRIDGE_PORTS) connectPort(port);
+  if (bridgePortPromise === null) bridgePortPromise = readBridgePort();
+  connection.port = await bridgePortPromise;
+  openSocket();
 }
 
-function connectPort(port) {
-  const connection = {
-    port,
-    attempt: 0,
-    socket: null,
-    reconnectTimer: null,
-    keepaliveTimer: null,
-  };
-  connections.set(port, connection);
-  openSocket(connection);
+async function readBridgePort() {
+  try {
+    const response = await fetch(chrome.runtime.getURL("bridge-port.json"));
+    if (!response.ok) throw new Error("Could not read bridge-port.json");
+
+    const config = await response.json();
+    if (!Number.isInteger(config?.port) || config.port < 1 || config.port > 65_535) {
+      throw new Error("bridge-port.json has an invalid port");
+    }
+    return config.port;
+  } catch {
+    return DEFAULT_BRIDGE_PORT;
+  }
 }
 
-function openSocket(connection) {
+function openSocket() {
+  if (connection.socket !== null || connection.port === null) return;
+  if (connection.reconnectTimer !== null) {
+    clearTimeout(connection.reconnectTimer);
+    connection.reconnectTimer = null;
+  }
   let socket;
   try {
     socket = new WebSocket(`ws://127.0.0.1:${connection.port}`);
   } catch {
-    scheduleReconnect(connection);
+    scheduleReconnect();
     return;
   }
 
@@ -84,7 +96,6 @@ function openSocket(connection) {
   socket.addEventListener("open", () => {
     if (connection.socket !== socket) return;
 
-    connection.attempt = 0;
     sendFrame(socket, {
       v: PROTOCOL_VERSION,
       type: "hello",
@@ -116,11 +127,13 @@ function openSocket(connection) {
       connection.keepaliveTimer = null;
     }
     connection.socket = null;
-    scheduleReconnect(connection);
+    scheduleReconnect();
   });
 }
 
-function scheduleReconnect(connection) {
+function scheduleReconnect() {
+  if (connection.reconnectTimer !== null) return;
+
   const base = Math.min(
     MAX_RECONNECT_BASE_MS,
     INITIAL_RECONNECT_MS * 2 ** Math.min(connection.attempt, 5),
@@ -130,9 +143,12 @@ function scheduleReconnect(connection) {
     Math.round(base * (1 + Math.random() * 0.25)),
   );
   connection.attempt += 1;
+  chrome.alarms.create(RECONNECT_ALARM_NAME, {
+    when: Date.now() + MAX_RECONNECT_MS,
+  });
   connection.reconnectTimer = setTimeout(() => {
     connection.reconnectTimer = null;
-    openSocket(connection);
+    openSocket();
   }, delay);
 }
 
@@ -151,6 +167,9 @@ async function handleMessage(socket, data) {
     }
 
     const result = await dispatch(request);
+    // The 101 upgrade precedes extension-id authorization; only a dispatched
+    // daemon request proves this connection was accepted.
+    if (connection.socket === socket) connection.attempt = 0;
     sendFrame(socket, {
       v: PROTOCOL_VERSION,
       type: "result",
@@ -256,12 +275,7 @@ async function dispatch(request) {
 async function ensureAttached(tabId) {
   if (attachedTabIds.has(tabId)) return;
 
-  try {
-    await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
-  } catch (error) {
-    if (!errorMessage(error).toLowerCase().includes("already attached")) throw error;
-  }
-
+  await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
   attachedTabIds.add(tabId);
 }
 
@@ -284,9 +298,7 @@ function tabResult(tab) {
 }
 
 function broadcast(frame) {
-  for (const connection of connections.values()) {
-    if (connection.socket) sendFrame(connection.socket, frame);
-  }
+  if (connection.socket) sendFrame(connection.socket, frame);
 }
 
 function sendFrame(socket, frame) {

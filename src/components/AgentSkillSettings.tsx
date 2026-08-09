@@ -31,6 +31,8 @@ const stateBadges: Record<AgentSkillState, { label: string; tone?: 'ok' | 'warn'
   agentAbsent: { label: 'Agent not found', icon: CircleX },
 }
 
+const isSkillPresent = (state: AgentSkillState) => state === 'installed' || state === 'stale'
+
 // What each bundled skill actually buys the user, in their words rather than the
 // trigger blob the agent reads. Keyed by the backend's skill name so a skill this
 // build does not know about still renders instead of vanishing.
@@ -64,10 +66,9 @@ const otherAgentKeys = [
 const allAgentKeys = [...featuredAgentKeys, ...otherAgentKeys]
 
 /**
- * Three blocks, in the order a user meets them: what is installed (and the one
- * button that installs it), whether installed copies are kept current, and a
- * copyable `npx skills add` command for the agents VibeLink cannot write to
- * itself. Nothing here writes to disk until the user asks for it.
+ * Three blocks, in the order a user meets them: per-skill install state and
+ * explicit install actions, per-skill maintenance, and a copyable
+ * `npx skills add` command for agents VibeLink cannot write to itself.
  */
 export function AgentSkillSettings() {
   const autoUpdate = useWorkspaceStore((state) => state.settings.autoUpdateAgentSkill)
@@ -128,10 +129,14 @@ export function AgentSkillSettings() {
   }, [copied])
 
   const targets = status?.targets ?? []
-  const installed = targets.filter((target) => target.state === 'installed' || target.state === 'stale')
-  const absent = targets.filter((target) => target.state === 'agentAbsent')
-  const staleTargets = targets.filter((target) => target.state === 'stale')
-  const installable = targets.filter((target) => target.state === 'missing' || target.state === 'stale')
+  const installed = targets.filter((target) => target.skills.some((skill) => isSkillPresent(skill.state)))
+  const absent = targets.filter((target) => target.skills.every((skill) => skill.state === 'agentAbsent'))
+  const staleTargets = targets.filter((target) => target.skills.some((skill) => skill.state === 'stale'))
+  const partialTargets = targets.filter((target) =>
+    target.skills.some((skill) => isSkillPresent(skill.state))
+      && target.skills.some((skill) => skill.state === 'missing'))
+  const installable = targets.filter((target) =>
+    target.skills.some((skill) => skill.state === 'missing' || skill.state === 'stale'))
   const notInstalled = targets.length - installed.length - absent.length
 
   const summary = !status
@@ -163,15 +168,24 @@ export function AgentSkillSettings() {
 
       {(status?.skills ?? []).map((skill) => {
         const copy = skillCopy[skill]
+        const state: AgentSkillState = targets.some((target) =>
+          target.skills.some((targetSkill) => targetSkill.name === skill && targetSkill.state === 'stale'))
+          ? 'stale'
+          : targets.some((target) =>
+              target.skills.some((targetSkill) => targetSkill.name === skill && targetSkill.state === 'installed'))
+            ? 'installed'
+            : targets.length > 0 && targets.every((target) =>
+                target.skills.some((targetSkill) => targetSkill.name === skill && targetSkill.state === 'agentAbsent'))
+              ? 'agentAbsent'
+              : 'missing'
+        const badge = stateBadges[state]
         return (
           <SettingsRow
             key={skill}
             icon={copy?.icon ?? Bot}
             label={copy?.label ?? skill}
             sub={copy?.sub ?? `Bundled skill ${skill}.`}
-            control={installed.length > 0
-              ? <SettingsPill tone="ok" icon={CircleCheck}>Installed</SettingsPill>
-              : <SettingsPill icon={CircleX}>Not installed</SettingsPill>}
+            control={<SettingsPill tone={badge.tone} icon={badge.icon}>{badge.label}</SettingsPill>}
           />
         )
       })}
@@ -191,16 +205,33 @@ export function AgentSkillSettings() {
         <div className="vl-set-message vl-set-message-action" data-tone="ok" role="status">
           <Download size={13} strokeWidth={1.9} aria-hidden="true" />
           <span>
-            VibeLink has not written anything to your home folder. Installing drops the skill file into the skills folder of
+            VibeLink has not written anything to your home folder. Installing drops the skill files into the skills folder of
             each of the {installable.length} {installable.length === 1 ? 'agent' : 'agents'} found here.
           </span>
           <SettingsButton
             icon={Download}
             tone="accent"
             label={installable.length === 1 ? 'Install for 1 agent' : `Install for ${installable.length} agents`}
-            title="Write the skill file into every agent skills folder found on this machine"
+            title="Write the skill files into every agent skills folder found on this machine"
             disabled={busy || installable.length === 0}
             onClick={() => void run(() => installAgentSkill(installable.map((target) => target.id)))}
+          />
+        </div>
+      ) : null}
+
+      {status && partialTargets.length > 0 ? (
+        <div className="vl-set-message vl-set-message-action" data-tone="ok" role="status">
+          <Download size={13} strokeWidth={1.9} aria-hidden="true" />
+          <span>
+            One or more newly bundled skills are ready for agents that already have another VibeLink skill. Auto-update will not install them.
+          </span>
+          <SettingsButton
+            icon={Download}
+            tone="accent"
+            label="Install missing skills"
+            title="Explicitly install the missing bundled skills"
+            disabled={busy}
+            onClick={() => void run(() => installAgentSkill(partialTargets.map((target) => target.id)))}
           />
         </div>
       ) : null}
@@ -208,7 +239,7 @@ export function AgentSkillSettings() {
       <SettingsRow
         icon={RefreshCw}
         label="Keep the installed skill up to date"
-        sub="Refreshes the copies you installed. It never installs anywhere new."
+        sub="Refreshes each skill already installed. New skills and agent homes require an explicit install."
         control={(
           <SettingsSwitch
             label="Keep the installed skill up to date"
@@ -252,8 +283,13 @@ export function AgentSkillSettings() {
       {!expanded ? null : targets.length === 0 ? (
         <SettingsMessage icon={Info}>No agent skill directories are known on this machine.</SettingsMessage>
       ) : targets.map((target) => {
-        const badge = stateBadges[target.state]
-        const present = target.state === 'installed' || target.state === 'stale'
+        const present = target.skills.some((skill) => isSkillPresent(skill.state))
+        const missing = target.skills.some((skill) => skill.state === 'missing')
+        const stale = target.skills.some((skill) => skill.state === 'stale')
+        const badge = present && missing
+          ? { label: 'Needs install', tone: 'warn' as const, icon: Download }
+          : stateBadges[target.state]
+        const installAction = missing || stale || !present
         return (
           <div key={target.id} className="vl-set-agent" data-installed={target.state === 'agentAbsent' ? 'false' : 'true'}>
             <span className="vl-set-agent-icon">
@@ -264,7 +300,15 @@ export function AgentSkillSettings() {
               <span className="mono" title={target.path}>{target.path}</span>
             </span>
             <SettingsPill tone={badge.tone} icon={badge.icon}>{badge.label}</SettingsPill>
-            {present ? (
+            {installAction ? (
+              <SettingsButton
+                icon={stale && !missing ? RefreshCw : Download}
+                label={stale && !missing ? 'Update' : 'Install'}
+                title={`Write the bundled skills into ${target.path}`}
+                disabled={busy}
+                onClick={() => void run(() => installAgentSkill([target.id]))}
+              />
+            ) : (
               <SettingsButton
                 icon={Trash2}
                 tone="danger"
@@ -272,14 +316,6 @@ export function AgentSkillSettings() {
                 title={`Delete the skill from ${target.path}`}
                 disabled={busy}
                 onClick={() => void run(() => uninstallAgentSkill([target.id]))}
-              />
-            ) : (
-              <SettingsButton
-                icon={Download}
-                label="Install"
-                title={`Write the skill into ${target.path}`}
-                disabled={busy}
-                onClick={() => void run(() => installAgentSkill([target.id]))}
               />
             )}
           </div>

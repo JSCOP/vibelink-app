@@ -1843,6 +1843,17 @@ impl<P: BrowserProvider> BrowserManager<P> {
                     }
                 }
                 BrowserLifecycleEventKind::DownloadRequested => {
+                    if state.downloads.len() >= MAX_DOWNLOAD_RECORDS {
+                        let Some(completed_index) = state
+                            .downloads
+                            .iter()
+                            .position(|download| download.success.is_some())
+                        else {
+                            // Pending records are the only join key for later completion events.
+                            continue;
+                        };
+                        state.downloads.remove(completed_index);
+                    }
                     state.downloads.push_back(BrowserDownloadRecord {
                         id: Uuid::new_v4().to_string(),
                         page_id: event.page_id.clone(),
@@ -1852,9 +1863,6 @@ impl<P: BrowserProvider> BrowserManager<P> {
                         error: None,
                         updated_at_ms: event.timestamp_ms,
                     });
-                    while state.downloads.len() > MAX_DOWNLOAD_RECORDS {
-                        state.downloads.pop_front();
-                    }
                 }
                 BrowserLifecycleEventKind::DownloadFinished => {
                     let success = event
@@ -3135,149 +3143,5 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::browser::types::ChildWebViewState;
-
-    #[derive(Default)]
-    struct TestProvider {
-        events: Mutex<VecDeque<BrowserLifecycleEvent>>,
-    }
-
-    impl BrowserProvider for TestProvider {
-        fn create_child_webview(&self, _request: &ChildWebViewCreate) -> BrowserResult<()> {
-            Ok(())
-        }
-
-        fn set_bounds(&self, _page_id: &str, _bounds: PhysicalBounds) -> BrowserResult<()> {
-            Ok(())
-        }
-
-        fn set_visible(&self, _page_id: &str, _visible: bool) -> BrowserResult<()> {
-            Ok(())
-        }
-
-        fn set_focus(&self, _page_id: &str, _focused: bool) -> BrowserResult<()> {
-            Ok(())
-        }
-
-        fn navigate(
-            &self,
-            _page_id: &str,
-            _url: &str,
-            _navigation_generation: u64,
-        ) -> BrowserResult<()> {
-            Ok(())
-        }
-
-        fn drain_events(&self) -> BrowserResult<Vec<BrowserLifecycleEvent>> {
-            Ok(lock(&self.events)?.drain(..).collect())
-        }
-
-        fn close(&self, _page_id: &str) -> BrowserResult<()> {
-            Ok(())
-        }
-
-        fn state(&self, _page_id: &str) -> BrowserResult<ChildWebViewState> {
-            Err(BrowserError::unsupported("surface_state"))
-        }
-    }
-
-    #[test]
-    fn lifecycle_events_keep_the_latest_bounded_sequence() {
-        let mut state = ManagerState::default();
-
-        for _ in 0..=MAX_LIFECYCLE_EVENTS {
-            push_event_locked(
-                &mut state,
-                "page",
-                0,
-                BrowserLifecycleEventKind::CaptureUpdated,
-                None,
-                None,
-            );
-        }
-
-        assert_eq!(state.events.len(), MAX_LIFECYCLE_EVENTS);
-        assert_eq!(state.events.front().unwrap().sequence, 2);
-        assert_eq!(
-            state.events.back().unwrap().sequence,
-            MAX_LIFECYCLE_EVENTS as u64 + 1
-        );
-        assert_eq!(state.event_sequence, MAX_LIFECYCLE_EVENTS as u64 + 1);
-        assert!(
-            state
-                .events
-                .iter()
-                .zip(state.events.iter().skip(1))
-                .all(|(left, right)| left.sequence < right.sequence)
-        );
-    }
-
-    #[test]
-    fn download_records_keep_only_the_latest_requests() {
-        let root = std::env::temp_dir().join(format!(
-            "vibelink-browser-manager-test-{}",
-            Uuid::new_v4()
-        ));
-        let provider = Arc::new(TestProvider::default());
-        let manager = BrowserManager::new(
-            provider.clone(),
-            BrowserPolicy::new(
-                false,
-                Vec::new(),
-                root.join("downloads"),
-                root.join("artifacts"),
-                1,
-            )
-            .unwrap(),
-            root.join("profiles"),
-        );
-        manager
-            .create_profile(
-                "profile",
-                crate::browser::types::ProfileKind::Incognito,
-                None,
-            )
-            .unwrap();
-        manager
-            .create_page(
-                "page",
-                "workspace",
-                "profile",
-                PhysicalBounds {
-                    x: 0,
-                    y: 0,
-                    width: 1,
-                    height: 1,
-                    scale_factor_milli: 1_000,
-                },
-            )
-            .unwrap();
-
-        lock(&provider.events).unwrap().extend(
-            (1..=MAX_DOWNLOAD_RECORDS as u64 + 1).map(|sequence| BrowserLifecycleEvent {
-                sequence,
-                page_id: "page".to_string(),
-                navigation_generation: 0,
-                kind: BrowserLifecycleEventKind::DownloadRequested,
-                url: Some(format!("https://example.test/{sequence}")),
-                detail: Some(format!("download-{sequence}.bin")),
-                timestamp_ms: sequence,
-            }),
-        );
-
-        manager.sync_provider_events().unwrap();
-        let downloads = manager.downloads().unwrap();
-
-        assert_eq!(downloads.len(), MAX_DOWNLOAD_RECORDS);
-        assert_eq!(downloads.first().unwrap().url, "https://example.test/2");
-        assert_eq!(
-            downloads.last().unwrap().url,
-            format!(
-                "https://example.test/{}",
-                MAX_DOWNLOAD_RECORDS as u64 + 1
-            )
-        );
-    }
-}
+#[path = "manager_tests.rs"]
+mod tests;

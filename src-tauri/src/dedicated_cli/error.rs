@@ -9,6 +9,10 @@ pub enum ErrorCode {
     UnavailableRuntime,
     NotFound,
     StaleTarget,
+    /// A snapshot ref that no longer names the element it was issued for. Kept
+    /// distinct from `StaleTarget` so an agent knows to re-snapshot the page
+    /// rather than re-resolve the target.
+    StaleRef,
     DeniedCapability,
     Conflict,
     AmbiguousSelector,
@@ -81,7 +85,7 @@ impl CliError {
         match self.code {
             ErrorCode::InvalidArguments => 2,
             ErrorCode::UnavailableRuntime => 3,
-            ErrorCode::NotFound | ErrorCode::StaleTarget => 4,
+            ErrorCode::NotFound | ErrorCode::StaleTarget | ErrorCode::StaleRef => 4,
             ErrorCode::DeniedCapability => 5,
             ErrorCode::Conflict | ErrorCode::AmbiguousSelector => 6,
             ErrorCode::Timeout => 7,

@@ -496,6 +496,7 @@ impl RotatingLogWriter {
         {
             if let Err(error) = self.rotate(&mut file) {
                 eprintln!("failed to rotate daemon log {}: {error}", self.path.display());
+                return;
             }
         }
 
@@ -653,6 +654,30 @@ mod rotating_log_tests {
         let current = fs::read(&log).expect("read current log");
         assert_eq!(current.as_slice(), second_event);
         assert!(rotated_len + current_len <= DAEMON_LOG_ROTATE_LIMIT * 2);
+
+        drop(writer);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn daemon_log_drops_events_when_rotation_fails() {
+        let root = std::env::temp_dir().join(format!("vibelink-runtime-log-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create runtime log test directory");
+        let log = root.join("daemon.log");
+        std::fs::File::create(&log)
+            .expect("create current log")
+            .set_len(DAEMON_LOG_ROTATE_LIMIT)
+            .expect("grow current log");
+        fs::create_dir(log.with_extension("log.1")).expect("block rotated log removal");
+        let writer = RotatingLogWriter::open(&log).expect("open rotating log writer");
+
+        writer.write_event(b"first dropped event\n");
+        writer.write_event(b"second dropped event\n");
+
+        assert_eq!(
+            fs::metadata(&log).expect("current log exists").len(),
+            DAEMON_LOG_ROTATE_LIMIT
+        );
 
         drop(writer);
         let _ = fs::remove_dir_all(root);

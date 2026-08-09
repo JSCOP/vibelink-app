@@ -2,18 +2,17 @@
   "manifest_version": 3,
   "name": "VibeLink Browser Control",
   "version": "0.1.0",
+  "minimum_chrome_version": "116",
   "description": "Lets the VibeLink desktop app drive the Chrome tabs you already have open, over a local-only connection.",
   "icons": {
     "32": "icons/icon-32.png",
     "128": "icons/icon-128.png"
   },
   "permissions": [
+    "alarms",
     "debugger",
     "tabs",
     "tabGroups"
-  ],
-  "host_permissions": [
-    "<all_urls>"
   ],
   "background": {
     "service_worker": "service-worker.js",

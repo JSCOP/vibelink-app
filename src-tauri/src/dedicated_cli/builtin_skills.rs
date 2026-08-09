@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_SKILL_VERSION: &str = "1.4.0";
+pub const BUILTIN_SKILL_VERSION: &str = "1.4.1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,11 +56,13 @@ Use `vibelink orchestration run` to submit a mission. Inspect with `check`, `inb
 
 const BROWSER_CONTENT: &str = r#"# VibeLink Browser
 
-Two backends share one command surface. Embedded WebView2 pages owned by the desktop BrowserManager render inside a workspace pane. `vibelink browser chrome --grant browser.cookies --confirm` copies the user's real Chrome profile into VibeLink-owned storage and attaches to that copy in a separate Chrome window, so signed-in sessions are already present; it never opens or mutates the user's live Chrome directory.
+Two backends share one command surface. The default authenticated path controls the user's already-running Chrome through the VibeLink extension. Check that live connection with `vibelink browser chrome --grant browser.cookies`; if the extension is not loaded, materialize it with `vibelink browser chrome --install --grant browser.cookies` and have the user load the returned directory through `chrome://extensions`.
+
+Only when the extension cannot be loaded, use the explicit profile-copy fallback: `vibelink browser chrome --copy-profile --confirm --grant browser.cookies`. It copies the signed-in profile into VibeLink-owned storage and opens that copy in a separate Chrome process; it never mutates the live profile. Embedded WebView2 pages owned by the desktop BrowserManager remain available inside a workspace pane with a separate, signed-out profile.
 
 ## Workflow
 
-1. Select the intended page with `--tab`/`--page`, or run `chrome` once for a signed-in browser.
+1. Use the live-extension path above for authenticated work, then select the intended page with `browser tabs` and `--tab`/`--page`.
 2. Navigate, then settle with `wait --for load|selector|no-selector|url|idle` instead of guessing a sleep. `--ms` is the deadline for a condition and the duration for `--for sleep`.
 3. Capture `vibelink browser snapshot`. It returns an indented `eN role "name"` tree plus the generation that issued those refs.
 4. Act with `--ref eN` using `click`, `double-click`, `fill`, `type`, `select`, `check`, `focus`, `clear`, `select-all`, `hover`, `drag`, `upload`, `scroll-into-view`, `get`, `is`, or `highlight`. `--selector <css>` stays supported for backward compatibility; `--ref` and `--selector` are mutually exclusive.
@@ -241,7 +243,15 @@ mod tests {
         assert!(builtin_skill("vibelink-browser")
             .expect("browser skill")
             .content
-            .contains("browser chrome --grant browser.cookies --confirm"));
+            .contains("browser chrome --grant browser.cookies"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("browser chrome --install --grant browser.cookies"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("browser chrome --copy-profile --confirm --grant browser.cookies"));
         assert!(builtin_skill("vibelink-computer-use")
             .expect("computer skill")
             .content

@@ -14,7 +14,8 @@ const sourceBudgets = {
   'src-tauri/src/remote/bridge.rs': 5_568,
   'src-tauri/src/orchestration/mod.rs': 4_683,
   'src-tauri/src/app/git/worktree_registry.rs': 3_149,
-  'src-tauri/src/browser/manager.rs': 3_126,
+  // Keeps pending download records joinable after the manager tests moved out.
+  'src-tauri/src/browser/manager.rs': 3_147,
   'src-tauri/src/daemon/session.rs': 3_072,
   'src-tauri/src/browser/provider.rs': 2_834,
   'src-tauri/src/app/hermes.rs': 2_706,
