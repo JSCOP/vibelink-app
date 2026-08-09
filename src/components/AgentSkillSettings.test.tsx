@@ -169,7 +169,8 @@ describe('AgentSkillSettings', () => {
 
     showDetails()
     expect(screen.getByText('C:/Users/js/.claude/skills')).toBeInTheDocument()
-    expect(screen.getAllByText('Installed')).toHaveLength(3)
+    // One badge per bundled skill, plus one per target in the details list.
+    expect(screen.getAllByText('Installed')).toHaveLength(4)
     expect(screen.getByText('Not installed')).toBeInTheDocument()
     expect(screen.getByText('Agent not found')).toBeInTheDocument()
   })

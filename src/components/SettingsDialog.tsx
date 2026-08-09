@@ -1201,17 +1201,16 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
               </SettingsCard>
             ) : null}
 
+            {activeSection === 'skills' ? (
+              <SettingsSearchTarget labels={['Memory skill', 'Browser use skill']}><AgentSkillSettings /></SettingsSearchTarget>
+            ) : null}
+
             {activeSection === 'memory' ? (
-              <>
-                <SettingsSearchTarget labels="Agent memory skill">
-                  <AgentSkillSettings />
-                </SettingsSearchTarget>
-                <SettingsCard icon={Blocks} title="Memory & context" hint="Native Hermes manages durable memory and compression.">
-                  <SettingsRow icon={Database} label="Persistent memory" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
-                  <SettingsRow icon={Layers} label="Auto-compression" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
-                  <SettingsRow icon={Cpu} label="Context engine" control={<SettingsValue value="Native Hermes" />} />
-                </SettingsCard>
-              </>
+              <SettingsCard icon={Blocks} title="Memory & context" hint="Native Hermes manages durable memory and compression.">
+                <SettingsRow icon={Database} label="Persistent memory" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
+                <SettingsRow icon={Layers} label="Auto-compression" control={<SettingsPill tone="ok" icon={CircleCheck}>On</SettingsPill>} />
+                <SettingsRow icon={Cpu} label="Context engine" control={<SettingsValue value="Native Hermes" />} />
+              </SettingsCard>
             ) : null}
 
             {activeSection === 'voice' ? (

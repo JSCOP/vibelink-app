@@ -13,6 +13,7 @@ import {
   Palette,
   PanelsTopLeft,
   Plug,
+  Puzzle,
   Shield,
   SlidersHorizontal,
   Smartphone,
@@ -24,6 +25,7 @@ import type { SettingsIcon } from './controls'
 export type SettingsSectionId =
   | 'account'
   | 'agents'
+  | 'skills'
   | 'model'
   | 'chat'
   | 'appearance'
@@ -79,6 +81,7 @@ export const settingsSectionGroups: SettingsSectionGroup[] = [
     label: 'AI',
     sections: [
       { id: 'agents', label: 'Agents', icon: Sparkles, keywords: 'claude codex omp oh my pi opencode cli hook install login' },
+      { id: 'skills', label: 'Skills', icon: Puzzle, keywords: 'skill memory browser use chrome install claude codex omp opencode 스킬 브라우저 메모리 설치' },
       { id: 'model', label: 'Model', icon: profileIcons.hermes as SettingsIcon, keywords: 'hermes provider acp runtime version' },
       { id: 'chat', label: 'Chat', icon: MessageSquare, keywords: 'personality reasoning tool calls images' },
       { id: 'mcp', label: 'MCP', icon: Box, keywords: 'server bridge tools self check' },
@@ -173,7 +176,8 @@ const settingsSearchEntryDefinitions: SettingsSearchEntryDefinition[] = [
   { section: 'chat', label: 'Image attachments', keywords: 'images paste 이미지 첨부' },
   { section: 'mcp', label: 'MCP server & self-check', keywords: 'server bridge tools self check 서버 점검' },
   { section: 'memory', label: 'Persistent memory', keywords: 'memory context compression 메모리 압축' },
-  { section: 'memory', label: 'Agent memory skill', keywords: 'skill install claude codex omp agents share 스킬 설치 에이전트 메모리' },
+  { section: 'skills', label: 'Memory skill', keywords: 'skill install claude codex omp agents share memory record search 스킬 설치 에이전트 메모리 기록 검색' },
+  { section: 'skills', label: 'Browser use skill', keywords: 'skill browser use chrome profile session page click fill 스킬 브라우저 크롬 세션 클릭' },
   { section: 'worktrees', label: 'Workspace ordering', keywords: 'sort mode smart manual 정렬 순서' },
   { section: 'workspace', label: 'When reopening (session restore)', keywords: 'resume clean restart exit restore 재시작 복원 종료' },
   { section: 'workspace', label: 'Close button minimizes to tray', keywords: 'tray minimize quit 닫기 트레이' },

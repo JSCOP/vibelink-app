@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bot, ChevronRight, CircleCheck, CircleX, ClipboardCopy, Download, Info, RefreshCw, Terminal, Trash2, TriangleAlert } from 'lucide-react'
+import { Bot, Brain, ChevronRight, CircleCheck, CircleX, ClipboardCopy, Download, Globe, Info, RefreshCw, Terminal, Trash2, TriangleAlert } from 'lucide-react'
 import {
   SettingsButton,
   SettingsCard,
@@ -29,6 +29,22 @@ const stateBadges: Record<AgentSkillState, { label: string; tone?: 'ok' | 'warn'
   stale: { label: 'Update available', tone: 'warn', icon: RefreshCw },
   missing: { label: 'Not installed', icon: CircleX },
   agentAbsent: { label: 'Agent not found', icon: CircleX },
+}
+
+// What each bundled skill actually buys the user, in their words rather than the
+// trigger blob the agent reads. Keyed by the backend's skill name so a skill this
+// build does not know about still renders instead of vanishing.
+const skillCopy: Record<string, { label: string; icon: SettingsIcon; sub: string }> = {
+  'vibelink-memory': {
+    label: 'Memory',
+    icon: Brain,
+    sub: 'Search and record this workspace\u2019s durable facts — one shared store every agent reads and writes.',
+  },
+  'vibelink-browser': {
+    label: 'Browser use',
+    icon: Globe,
+    sub: 'Drive your own running Chrome with your profile and signed-in sessions, or a VibeLink in-pane page.',
+  },
 }
 
 // The 75 `--agent` keys the standard `skills` CLI accepts, split so the nine
@@ -145,13 +161,28 @@ export function AgentSkillSettings() {
         folder — it never edits their config.
       </p>
 
+      {(status?.skills ?? []).map((skill) => {
+        const copy = skillCopy[skill]
+        return (
+          <SettingsRow
+            key={skill}
+            icon={copy?.icon ?? Bot}
+            label={copy?.label ?? skill}
+            sub={copy?.sub ?? `Bundled skill ${skill}.`}
+            control={installed.length > 0
+              ? <SettingsPill tone="ok" icon={CircleCheck}>Installed</SettingsPill>
+              : <SettingsPill icon={CircleX}>Not installed</SettingsPill>}
+          />
+        )
+      })}
+
       <SettingsRow
         icon={Bot}
-        label="Memory and browser skills"
+        label="Installed on this machine"
         sub={summary}
         control={installed.length > 0
-          ? <SettingsPill tone="ok" icon={CircleCheck}>Installed</SettingsPill>
-          : <SettingsPill icon={CircleX}>Not installed</SettingsPill>}
+          ? <SettingsPill tone="ok" icon={CircleCheck}>{`${installed.length} of ${targets.length}`}</SettingsPill>
+          : <SettingsPill icon={CircleX}>None</SettingsPill>}
       />
 
       {/* Nothing is written to the user's home until this button is pressed —
