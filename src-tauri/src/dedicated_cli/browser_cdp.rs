@@ -401,7 +401,7 @@ fn evaluated_value(result: Value) -> Result<Value> {
 
 pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> Result<Value> {
     let access = CdpAccessPolicy::from_command(&command, artifact_root)?;
-    if let Some(capability) = required_capability(command.action) {
+    if let Some(capability) = required_capability(&command) {
         access.require(capability)?;
     }
     let scoped_workspace = command
@@ -452,6 +452,11 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
                     .map(|tab| browser_extension::extension_target(tab, scoped_workspace.clone())),
             );
         }
+    }
+    // Before the empty-target bail: opening the first tab is exactly what a
+    // caller does when nothing is open yet.
+    if matches!(command.action, BrowserAction::NewTab) {
+        return open_new_tab(&command, bridge.as_ref(), artifact_root, scoped_workspace);
     }
     if let Some(workspace_id) = scoped_workspace.as_deref() {
         targets.retain(|target| target.workspace_id.as_deref() == Some(workspace_id));
@@ -857,7 +862,10 @@ pub fn execute(command: ActionCommand<BrowserAction>, artifact_root: &Path) -> R
                 json!({ "events": events.into_iter().filter(|event| event.get("method").and_then(Value::as_str).is_some_and(|method| method.starts_with("Network."))).collect::<Vec<_>>() }),
             )
         }
-        BrowserAction::Tabs | BrowserAction::Profiles | BrowserAction::Chrome => {
+        BrowserAction::Tabs
+        | BrowserAction::Profiles
+        | BrowserAction::Chrome
+        | BrowserAction::NewTab => {
             unreachable!("handled before target selection")
         }
     }
@@ -1697,14 +1705,57 @@ pub(super) fn option<'a>(command: &'a ActionCommand<BrowserAction>, name: &str) 
         })
 }
 
-fn required_capability(action: BrowserAction) -> Option<BrowserRiskCapability> {
-    match action {
-        BrowserAction::Cookies | BrowserAction::Chrome => Some(BrowserRiskCapability::Cookies),
+/// `chrome` reports bridge status and lists tabs, which needs no cookie access;
+/// only its profile-copy/install/unpair switches touch the signed-in profile.
+/// Gating the report itself just taught agents to pass the grant reflexively.
+fn required_capability(command: &ActionCommand<BrowserAction>) -> Option<BrowserRiskCapability> {
+    match command.action {
+        BrowserAction::Chrome => command
+            .arguments
+            .switches
+            .iter()
+            .any(|switch| matches!(switch.as_str(), "install" | "unpair" | "copy-profile"))
+            .then_some(BrowserRiskCapability::Cookies),
+        BrowserAction::Cookies => Some(BrowserRiskCapability::Cookies),
         BrowserAction::Storage => Some(BrowserRiskCapability::Storage),
         BrowserAction::Upload => Some(BrowserRiskCapability::Upload),
         BrowserAction::Download => Some(BrowserRiskCapability::Download),
         _ => None,
     }
+}
+
+/// Opening a tab is the extension backend's job: VibeLink's own in-pane pages
+/// are created by the desktop, not the CLI. Without this an agent that wants a
+/// fresh page has to either hijack a tab the user is using or shell out to
+/// `chrome.exe`, which leaves the tab outside VibeLink's target list entirely.
+fn open_new_tab(
+    command: &ActionCommand<BrowserAction>,
+    bridge: Option<&Arc<browser_extension::ExtensionBridge>>,
+    artifact_root: &Path,
+    scoped_workspace: Option<String>,
+) -> Result<Value> {
+    let url = option(command, "url")
+        .or_else(|| command.arguments.positionals.first().map(String::as_str))
+        .unwrap_or("about:blank");
+    let Some(bridge) = bridge.filter(|bridge| bridge.status().connected) else {
+        let data_root = artifact_root.parent().unwrap_or(artifact_root);
+        bail!(
+            "cannot open a tab: the VibeLink extension is not connected. Install it from the Chrome Web Store, or load {} once via chrome://extensions with Developer mode on, and keep Chrome running",
+            browser_extension::install_directory(data_root).display()
+        );
+    };
+    let tab = bridge.new_tab(url)?;
+    if let Some(title) = option(command, "session-title") {
+        // Best effort: the tab exists and is usable even when Chrome refuses to
+        // group it, so a naming failure must not lose the target we just made.
+        let _ = bridge.name_session(
+            tab.tab_id,
+            title,
+            option(command, "session-color").unwrap_or("blue"),
+        );
+    }
+    let target = browser_extension::extension_target(tab, scoped_workspace);
+    Ok(json!({ "target": target_json(&target) }))
 }
 
 fn parse_grants(values: Option<&Vec<String>>) -> Result<HashSet<BrowserRiskCapability>> {

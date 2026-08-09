@@ -14,18 +14,41 @@ description: >-
 
 # VibeLink Browser
 
-One command surface over two backends. Every action is a `vibelink browser`
-subcommand; nothing here needs a headless browser or a scraping library.
+One command surface over two backends. Nothing here needs a headless browser or
+a scraping library.
 
 ## Resolve the CLI once
 
-Inside a VibeLink terminal, `VIBELINK_CLI_EXE` already points at the matching
-dev/release binary. Always pass `--json`: stdout is then exactly one result or
-error envelope, and diagnostics stay on stderr.
+**`vibelink` is not on PATH. A bare `vibelink ...` fails with
+`command not found`.** Inside a VibeLink terminal, `VIBELINK_CLI_EXE` already
+points at the matching dev/release binary; always call through it. Always pass
+`--json`: stdout is then exactly one result or error envelope, and diagnostics
+stay on stderr.
 
 ```powershell
 & $env:VIBELINK_CLI_EXE --json browser tabs
 ```
+
+There is no `--help`. Run the domain with no action to get its action list
+back, and any wrong action name returns the same list:
+
+```powershell
+& $env:VIBELINK_CLI_EXE browser        # -> "browser actions: new-tab, navigate, snapshot, ..."
+```
+
+## Open a page
+
+`new-tab` opens a fresh tab and returns it as a target, so you never have to
+take over a tab the user is reading. `--session-title` also names that tab's
+Chrome group, which is how the user sees at a glance which tabs you are in.
+
+```powershell
+& $env:VIBELINK_CLI_EXE --json browser new-tab --url https://example.com --session-title "가격 확인"
+```
+
+Use the returned `target.id` as `--tab` for every following action. `navigate`
+points an EXISTING tab somewhere else; when only one tab is open it will take
+that one, so prefer `new-tab` unless the user asked you to move their tab.
 
 ## Pick the backend
 
@@ -34,8 +57,9 @@ error envelope, and diagnostics stay on stderr.
   extension installed once, either from the Chrome Web Store or, off-store, by
   running `browser chrome --install --grant browser.cookies` and having the user
   load the printed `directory` through `chrome://extensions` with
-  Developer mode on. `browser chrome --grant browser.cookies` then reports
-  `status.connected: true` and lists their tabs.
+  Developer mode on. Plain `browser chrome` then reports
+  `status.connected: true` and lists their tabs — the status report needs no
+  grant; only `--install`, `--unpair` and `--copy-profile` do.
   A RELEASE build that carries a published store id also pre-registers the
   extension under `HKCU\Software\Google\Chrome\Extensions\<id>` and echoes
   `registryKey`; the user then only restarts Chrome and accepts its one-time
@@ -52,8 +76,9 @@ error envelope, and diagnostics stay on stderr.
   `browser chrome --copy-profile --confirm --grant browser.cookies`. It copies
   the signed-in profile into VibeLink-owned storage and opens that separate
   copy; it never mutates the live Chrome profile.
-  Do not launch another Chrome process yourself. Use the live extension by
-  default, and let the fallback command own its separate copy.
+  Do not launch Chrome yourself: a tab you start with `chrome.exe` is outside
+  VibeLink's target list and cannot be driven. Use `new-tab` on the live
+  extension, and let the fallback command own its separate copy.
 - **VibeLink in-pane pages** — the WebView2 browser inside a workspace pane.
   Already available, but it is a separate profile and starts signed out.
 

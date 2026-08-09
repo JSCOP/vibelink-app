@@ -942,13 +942,23 @@ mod tests {
             "stale_ref",
             "browser wait --for load|selector|no-selector|url|idle",
             "browser chrome --install --grant browser.cookies",
-            "browser chrome --grant browser.cookies",
             "browser chrome --unpair --grant browser.cookies",
             "browser chrome --copy-profile --confirm --grant browser.cookies",
             "VIBELINK_CLI_EXE",
+            // The three dead ends that cost a real agent three minutes: a bare
+            // `vibelink` is not on PATH, there is no `--help`, and without
+            // `new-tab` it shelled out to chrome.exe and lost the tab.
+            "`vibelink` is not on PATH",
+            "browser new-tab --url",
+            "no action to get its action list",
         ] {
             assert!(markdown.contains(token), "browser skill lost `{token}`");
         }
+        // Status is a plain report; only the profile-touching switches are gated.
+        assert!(
+            !markdown.contains("browser chrome --grant browser.cookies"),
+            "browser skill still tells agents to pay a cookies grant for a status read"
+        );
     }
 
     fn temp_root(prefix: &str) -> PathBuf {

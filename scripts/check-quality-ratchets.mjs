@@ -42,7 +42,8 @@ const sourceBudgets = {
   // Grew once to carry both browser backends after browser_page/browser_extension/chrome_profile were split out,
   // then again for the extension diagnostics — unloaded vs. refused-by-id — that keep agents out of a guessing loop.
   'src-tauri/src/dedicated_cli/browser_cdp.rs': 1_973,
-  'src-tauri/src/dedicated_cli/contract.rs': 2_022,
+  // One entry per CLI action, so the `browser new-tab` spec costs twelve lines here.
+  'src-tauri/src/dedicated_cli/contract.rs': 2_034,
   'src-tauri/src/mcp/mod.rs': 2_046,
   'src-tauri/src/protocol.rs': 1_227,
   'src-tauri/src/remote/server.rs': 1_273,

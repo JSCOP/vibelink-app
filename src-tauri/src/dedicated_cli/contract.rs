@@ -1300,6 +1300,18 @@ fn browser_contracts() -> Vec<CommandContract> {
     use RiskLevel::{HighRisk, Mutating, ReadOnly};
     vec![
         browser_action(
+            "new-tab",
+            "Open a new browser tab and return it as a target. Names the tab's Chrome group when --session-title is given.",
+            &[
+                O::string("url"),
+                O::string("session-title"),
+                O::string("session-color"),
+            ],
+            NONE,
+            Some(1),
+            Mutating,
+        ),
+        browser_action(
             "navigate",
             "Navigate a selected browser page.",
             &[O::string("url")],

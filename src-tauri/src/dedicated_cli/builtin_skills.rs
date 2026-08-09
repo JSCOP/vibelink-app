@@ -56,13 +56,15 @@ Use `vibelink orchestration run` to submit a mission. Inspect with `check`, `inb
 
 const BROWSER_CONTENT: &str = r#"# VibeLink Browser
 
-Two backends share one command surface. The default authenticated path controls the user's already-running Chrome through the VibeLink extension. Check that live connection with `vibelink browser chrome --grant browser.cookies`; if the extension is not loaded, materialize it with `vibelink browser chrome --install --grant browser.cookies` and have the user load the returned directory through `chrome://extensions`.
+`vibelink` is not on PATH: call the CLI through `$env:VIBELINK_CLI_EXE`, and pass `--json`. There is no `--help` — run a domain with no action (`vibelink browser`) and the error lists every action it accepts.
+
+Two backends share one command surface. The default authenticated path controls the user's already-running Chrome through the VibeLink extension. Check that live connection with `vibelink browser chrome`, which needs no grant; if the extension is not loaded, materialize it with `vibelink browser chrome --install --grant browser.cookies` and have the user load the returned directory through `chrome://extensions`. Only `--install`, `--unpair` and `--copy-profile` require the grant.
 
 Only when the extension cannot be loaded, use the explicit profile-copy fallback: `vibelink browser chrome --copy-profile --confirm --grant browser.cookies`. It copies the signed-in profile into VibeLink-owned storage and opens that copy in a separate Chrome process; it never mutates the live profile. Embedded WebView2 pages owned by the desktop BrowserManager remain available inside a workspace pane with a separate, signed-out profile.
 
 ## Workflow
 
-1. Use the live-extension path above for authenticated work, then select the intended page with `browser tabs` and `--tab`/`--page`.
+1. Use the live-extension path above for authenticated work. Open your own page with `browser new-tab --url <url> --session-title "<what you are doing>"`, which returns the new target and names its Chrome tab group; never start `chrome.exe` yourself, because a tab opened that way is outside VibeLink's target list. Use `browser tabs` and `--tab`/`--page` to select an existing page, and `navigate` only to move a tab the user asked you to move.
 2. Navigate, then settle with `wait --for load|selector|no-selector|url|idle` instead of guessing a sleep. `--ms` is the deadline for a condition and the duration for `--for sleep`.
 3. Capture `vibelink browser snapshot`. It returns an indented `eN role "name"` tree plus the generation that issued those refs.
 4. Act with `--ref eN` using `click`, `double-click`, `fill`, `type`, `select`, `check`, `focus`, `clear`, `select-all`, `hover`, `drag`, `upload`, `scroll-into-view`, `get`, `is`, or `highlight`. `--selector <css>` stays supported for backward compatibility; `--ref` and `--selector` are mutually exclusive.
@@ -243,7 +245,7 @@ mod tests {
         assert!(builtin_skill("vibelink-browser")
             .expect("browser skill")
             .content
-            .contains("browser chrome --grant browser.cookies"));
+            .contains("vibelink browser chrome`, which needs no grant"));
         assert!(builtin_skill("vibelink-browser")
             .expect("browser skill")
             .content
@@ -252,6 +254,14 @@ mod tests {
             .expect("browser skill")
             .content
             .contains("browser chrome --copy-profile --confirm --grant browser.cookies"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("browser new-tab --url"));
+        assert!(builtin_skill("vibelink-browser")
+            .expect("browser skill")
+            .content
+            .contains("`vibelink` is not on PATH"));
         assert!(builtin_skill("vibelink-computer-use")
             .expect("computer skill")
             .content
