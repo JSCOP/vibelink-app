@@ -135,18 +135,19 @@ export function AgentSkillSettings() {
   return (
     <SettingsCard
       icon={Bot}
-      title="Agent memory skill"
-      hint="VibeLink writes one file per agent — <agent home>/skills/vibelink-memory/SKILL.md — and never edits an agent's own config file."
+      title="Agent skills"
+      hint="VibeLink writes one folder per skill under <agent home>/skills/ — vibelink-memory and vibelink-browser — and never edits an agent's own config file."
       status={<SettingsIconButton icon={RefreshCw} label="Re-check skill status" disabled={busy} onClick={() => void run(fetchAgentSkillStatus)} />}
     >
       <p className="vl-set-card-note">
-        Install this and Claude Code, Codex, omp and your other agents can search and record this workspace&apos;s memory on
-        their own. VibeLink only drops the skill file into each agent&apos;s own skills folder — it never edits their config.
+        Install these and Claude Code, Codex, omp and your other agents can search and record this workspace&apos;s memory,
+        and drive your real browser, on their own. VibeLink only drops the skill files into each agent&apos;s own skills
+        folder — it never edits their config.
       </p>
 
       <SettingsRow
         icon={Bot}
-        label="Memory skill"
+        label="Memory and browser skills"
         sub={summary}
         control={installed.length > 0
           ? <SettingsPill tone="ok" icon={CircleCheck}>Installed</SettingsPill>

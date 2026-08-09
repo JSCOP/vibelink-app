@@ -8,12 +8,31 @@ use std::{
 };
 
 pub const VIBELINK_MEMORY_SKILL_NAME: &str = "vibelink-memory";
+pub const VIBELINK_BROWSER_SKILL_NAME: &str = "vibelink-browser";
 pub const VIBELINK_SKILLS_REPOSITORY: &str = "JSCOP/vibelink-skills";
-// Bump whenever SKILL.md changes: an installed copy whose SHA-256 differs from
-// the built-in one reads as `Stale`, and refresh then rewrites it.
-pub const VIBELINK_MEMORY_SKILL_REVISION: u32 = 2;
-pub const VIBELINK_MEMORY_SKILL_MARKDOWN: &str =
-    include_str!("../../resources/skills/vibelink-memory/SKILL.md");
+// Bump whenever any bundled SKILL.md changes: an installed copy whose SHA-256
+// differs from the built-in one reads as `Stale`, and refresh then rewrites it.
+pub const VIBELINK_SKILLS_REVISION: u32 = 3;
+
+/// A skill VibeLink writes into an agent's own skills directory. The capability
+/// itself lives in the daemon behind the `vibelink` CLI; these files only teach
+/// an agent the contract, which is why adding one is a documentation change.
+#[derive(Clone, Copy, Debug)]
+struct BundledSkill {
+    name: &'static str,
+    markdown: &'static str,
+}
+
+const BUNDLED_SKILLS: [BundledSkill; 2] = [
+    BundledSkill {
+        name: VIBELINK_MEMORY_SKILL_NAME,
+        markdown: include_str!("../../resources/skills/vibelink-memory/SKILL.md"),
+    },
+    BundledSkill {
+        name: VIBELINK_BROWSER_SKILL_NAME,
+        markdown: include_str!("../../resources/skills/vibelink-browser/SKILL.md"),
+    },
+];
 
 const SKILL_FILE: &str = "SKILL.md";
 const REVISION_FILE: &str = ".vibelink-revision";
@@ -191,7 +210,7 @@ pub struct AgentSkillTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSkillStatus {
-    pub skill: String,
+    pub skills: Vec<String>,
     pub revision: u32,
     pub targets: Vec<AgentSkillTarget>,
 }
@@ -203,8 +222,11 @@ pub fn skill_status_at(home: &Path) -> Result<AgentSkillStatus> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(AgentSkillStatus {
-        skill: VIBELINK_MEMORY_SKILL_NAME.to_string(),
-        revision: VIBELINK_MEMORY_SKILL_REVISION,
+        skills: BUNDLED_SKILLS
+            .iter()
+            .map(|skill| skill.name.to_string())
+            .collect(),
+        revision: VIBELINK_SKILLS_REVISION,
         targets,
     })
 }
@@ -260,9 +282,12 @@ pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
         }
     }
 
-    let mut command = format!(
-        "npx skills add {VIBELINK_SKILLS_REPOSITORY} --skill {VIBELINK_MEMORY_SKILL_NAME} --global"
-    );
+    let mut command = format!("npx skills add {VIBELINK_SKILLS_REPOSITORY}");
+    for skill in BUNDLED_SKILLS {
+        command.push_str(" --skill ");
+        command.push_str(skill.name);
+    }
+    command.push_str(" --global");
     for key in unique_keys {
         command.push_str(" --agent ");
         command.push_str(key);
@@ -273,10 +298,13 @@ pub fn skills_cli_install_command(agent_keys: &[String]) -> Result<String> {
 pub fn uninstall_skill_at(home: &Path, target_ids: &[String]) -> Result<AgentSkillStatus> {
     let targets = resolve_targets(target_ids)?;
     for target in targets {
-        let skill_dir = skill_dir(home, target);
-        if skill_dir.exists() {
-            fs::remove_dir_all(&skill_dir)
-                .with_context(|| format!("remove agent skill directory {}", skill_dir.display()))?;
+        for skill in BUNDLED_SKILLS {
+            let skill_dir = skill_dir(home, target, skill.name);
+            if skill_dir.exists() {
+                fs::remove_dir_all(&skill_dir).with_context(|| {
+                    format!("remove agent skill directory {}", skill_dir.display())
+                })?;
+            }
         }
     }
     skill_status_at(home)
@@ -324,26 +352,45 @@ pub async fn agent_skill_uninstall(target_ids: Vec<String>) -> Result<AgentSkill
 }
 
 fn target_status(home: &Path, target: &InstallTarget) -> Result<AgentSkillTarget> {
-    let skill_dir = skill_dir(home, target);
-    let skill_path = skill_dir.join(SKILL_FILE);
-    let installed = skill_path.is_file();
-    let state = if installed {
+    // The bundle is one unit: a target that carries an older or partial set is
+    // `Stale`, so refresh rewrites every skill instead of leaving a gap the user
+    // cannot see.
+    let mut present = 0usize;
+    let mut current = 0usize;
+    for skill in BUNDLED_SKILLS {
+        let skill_path = skill_dir(home, target, skill.name).join(SKILL_FILE);
+        if !skill_path.is_file() {
+            continue;
+        }
+        present += 1;
         let content = fs::read(&skill_path)
             .with_context(|| format!("read installed agent skill {}", skill_path.display()))?;
-        if Sha256::digest(&content) == Sha256::digest(VIBELINK_MEMORY_SKILL_MARKDOWN.as_bytes()) {
-            AgentSkillState::Installed
-        } else {
-            AgentSkillState::Stale
+        if Sha256::digest(&content) == Sha256::digest(skill.markdown.as_bytes()) {
+            current += 1;
         }
-    } else if home.join(target.agent_home_relative).is_dir() {
-        AgentSkillState::Missing
+    }
+    let state = if present == 0 {
+        if home.join(target.agent_home_relative).is_dir() {
+            AgentSkillState::Missing
+        } else {
+            AgentSkillState::AgentAbsent
+        }
+    } else if current == BUNDLED_SKILLS.len() {
+        AgentSkillState::Installed
     } else {
-        AgentSkillState::AgentAbsent
+        AgentSkillState::Stale
     };
-    let installed_revision = installed
-        .then(|| fs::read_to_string(skill_dir.join(REVISION_FILE)).ok())
+    // Deterministically the first bundled skill's marker: falling through to a
+    // sibling would report a revision the corrupt copy does not have.
+    let installed_revision = (present > 0)
+        .then(|| {
+            fs::read_to_string(skill_dir(home, target, BUNDLED_SKILLS[0].name).join(REVISION_FILE))
+                .ok()
+        })
         .flatten()
         .and_then(|revision| revision.trim().parse().ok());
+
+    let skill_path = skill_dir(home, target, BUNDLED_SKILLS[0].name).join(SKILL_FILE);
 
     Ok(AgentSkillTarget {
         id: target.id.to_string(),
@@ -355,16 +402,18 @@ fn target_status(home: &Path, target: &InstallTarget) -> Result<AgentSkillTarget
 }
 
 fn install_target_at(home: &Path, target: &InstallTarget) -> Result<()> {
-    let skill_dir = skill_dir(home, target);
-    fs::create_dir_all(&skill_dir)
-        .with_context(|| format!("create agent skill directory {}", skill_dir.display()))?;
-    fs::write(skill_dir.join(SKILL_FILE), VIBELINK_MEMORY_SKILL_MARKDOWN)
-        .with_context(|| format!("write agent skill for {}", target.id))?;
-    fs::write(
-        skill_dir.join(REVISION_FILE),
-        format!("{VIBELINK_MEMORY_SKILL_REVISION}\n"),
-    )
-    .with_context(|| format!("write agent skill revision for {}", target.id))?;
+    for skill in BUNDLED_SKILLS {
+        let skill_dir = skill_dir(home, target, skill.name);
+        fs::create_dir_all(&skill_dir)
+            .with_context(|| format!("create agent skill directory {}", skill_dir.display()))?;
+        fs::write(skill_dir.join(SKILL_FILE), skill.markdown)
+            .with_context(|| format!("write agent skill {} for {}", skill.name, target.id))?;
+        fs::write(
+            skill_dir.join(REVISION_FILE),
+            format!("{VIBELINK_SKILLS_REVISION}\n"),
+        )
+        .with_context(|| format!("write agent skill revision for {}", target.id))?;
+    }
     Ok(())
 }
 
@@ -380,9 +429,8 @@ fn resolve_targets(target_ids: &[String]) -> Result<Vec<&'static InstallTarget>>
         .collect()
 }
 
-fn skill_dir(home: &Path, target: &InstallTarget) -> PathBuf {
-    home.join(target.skills_relative)
-        .join(VIBELINK_MEMORY_SKILL_NAME)
+fn skill_dir(home: &Path, target: &InstallTarget, skill: &str) -> PathBuf {
+    home.join(target.skills_relative).join(skill)
 }
 
 fn user_home() -> Result<PathBuf> {
@@ -400,8 +448,14 @@ mod tests {
         let root = temp_root("agent-skills-empty");
         let status = skill_status_at(&root).expect("read empty status");
 
-        assert_eq!(status.skill, VIBELINK_MEMORY_SKILL_NAME);
-        assert_eq!(status.revision, VIBELINK_MEMORY_SKILL_REVISION);
+        assert_eq!(
+            status.skills,
+            vec![
+                VIBELINK_MEMORY_SKILL_NAME.to_string(),
+                VIBELINK_BROWSER_SKILL_NAME.to_string()
+            ]
+        );
+        assert_eq!(status.revision, VIBELINK_SKILLS_REVISION);
         assert_eq!(status.targets.len(), INSTALL_TARGETS.len());
         assert!(status
             .targets
@@ -464,7 +518,7 @@ mod tests {
         assert_eq!(target(&status, "claude").state, AgentSkillState::Installed);
         assert_eq!(
             fs::read_to_string(skill_path).expect("read refreshed skill"),
-            VIBELINK_MEMORY_SKILL_MARKDOWN
+            BUNDLED_SKILLS[0].markdown
         );
         cleanup_root(root);
     }
@@ -559,7 +613,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "npx skills add JSCOP/vibelink-skills --skill vibelink-memory --global --agent amp --agent claude-code"
+            "npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --global --agent amp --agent claude-code"
         );
     }
 
@@ -570,10 +624,7 @@ mod tests {
         let installed = target(&status, "agents");
 
         assert_eq!(installed.state, AgentSkillState::Installed);
-        assert_eq!(
-            installed.installed_revision,
-            Some(VIBELINK_MEMORY_SKILL_REVISION)
-        );
+        assert_eq!(installed.installed_revision, Some(VIBELINK_SKILLS_REVISION));
         assert!(status
             .targets
             .iter()
@@ -623,7 +674,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(skill_path).expect("read reinstalled skill"),
-            VIBELINK_MEMORY_SKILL_MARKDOWN
+            BUNDLED_SKILLS[0].markdown
         );
         cleanup_root(root);
     }
@@ -674,6 +725,66 @@ mod tests {
             .join("skills")
             .join(VIBELINK_MEMORY_SKILL_NAME)
             .join(SKILL_FILE)
+    }
+    #[test]
+    fn install_writes_every_bundled_skill() {
+        let root = temp_root("agent-skills-bundle");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+        install_skill_at(&root, &["claude".to_string()]).expect("install bundle");
+
+        for skill in BUNDLED_SKILLS {
+            let path = root
+                .join(".claude/skills")
+                .join(skill.name)
+                .join(SKILL_FILE);
+            assert_eq!(
+                fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {}", path.display())),
+                skill.markdown
+            );
+        }
+        cleanup_root(root);
+    }
+
+    #[test]
+    fn a_partial_bundle_reads_as_stale() {
+        let root = temp_root("agent-skills-partial");
+        fs::create_dir_all(root.join(".claude")).expect("create Claude home");
+        install_skill_at(&root, &["claude".to_string()]).expect("install bundle");
+        fs::remove_dir_all(
+            root.join(".claude/skills")
+                .join(VIBELINK_BROWSER_SKILL_NAME),
+        )
+        .expect("remove one bundled skill");
+
+        let status = skill_status_at(&root).expect("read partial status");
+        assert_eq!(target(&status, "claude").state, AgentSkillState::Stale);
+
+        let refreshed = refresh_installed_skills_at(&root).expect("refresh partial bundle");
+        assert_eq!(
+            target(&refreshed, "claude").state,
+            AgentSkillState::Installed
+        );
+        cleanup_root(root);
+    }
+
+    /// The installed skill is the only thing an agent reads before acting, so a
+    /// contract it no longer describes is worse than no skill at all.
+    #[test]
+    fn the_browser_skill_describes_the_shipped_contract() {
+        let markdown = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == VIBELINK_BROWSER_SKILL_NAME)
+            .expect("browser skill is bundled")
+            .markdown;
+        for token in [
+            "--ref eN",
+            "stale_ref",
+            "browser wait --for load|selector|no-selector|url|idle",
+            "browser chrome --install --grant browser.cookies",
+            "VIBELINK_CLI_EXE",
+        ] {
+            assert!(markdown.contains(token), "browser skill lost `{token}`");
+        }
     }
 
     fn temp_root(prefix: &str) -> PathBuf {

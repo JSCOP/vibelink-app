@@ -27,11 +27,11 @@ import { useWorkspaceStore } from '../state/store'
 import { AgentSkillSettings } from './AgentSkillSettings'
 
 const freshStatus: AgentSkillStatus = {
-  skill: 'vibelink-memory',
-  revision: 2,
+  skills: ['vibelink-memory', 'vibelink-browser'],
+  revision: 3,
   targets: [
-    { id: 'agents', label: 'Shared agents', path: 'C:/Users/js/.agents/skills', state: 'installed', installedRevision: 2 },
-    { id: 'claude', label: 'Claude Code', path: 'C:/Users/js/.claude/skills', state: 'installed', installedRevision: 2 },
+    { id: 'agents', label: 'Shared agents', path: 'C:/Users/js/.agents/skills', state: 'installed', installedRevision: 3 },
+    { id: 'claude', label: 'Claude Code', path: 'C:/Users/js/.claude/skills', state: 'installed', installedRevision: 3 },
     { id: 'codex', label: 'Codex', path: 'C:/Users/js/.codex/skills', state: 'missing', installedRevision: null },
     { id: 'grok', label: 'Grok', path: 'C:/Users/js/.grok/skills', state: 'agentAbsent', installedRevision: null },
   ],
@@ -67,7 +67,7 @@ describe('AgentSkillSettings', () => {
     mocks.uninstallAgentSkill.mockResolvedValue(freshStatus)
     mocks.refreshAgentSkill.mockResolvedValue(freshStatus)
     mocks.agentSkillCliCommand.mockImplementation(async (keys: string[]) =>
-      `npx skills add JSCOP/vibelink-skills --skill vibelink-memory --agent ${keys.join(',')} -y`)
+      `npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --agent ${keys.join(',')} -y`)
     setAutoUpdate(true)
   })
 
@@ -155,7 +155,7 @@ describe('AgentSkillSettings', () => {
     mocks.fetchAgentSkillStatus.mockResolvedValue(staleStatus)
     render(<AgentSkillSettings />)
 
-    expect(await screen.findByText(/Skill update available \(revision 2\)/)).toBeInTheDocument()
+    expect(await screen.findByText(/Skill update available \(revision 3\)/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Update all/ }))
     await waitFor(() => expect(mocks.installAgentSkill).toHaveBeenCalledWith(['agents']))
@@ -225,7 +225,7 @@ describe('AgentSkillSettings', () => {
       fireEvent.click(screen.getByRole('checkbox', { name: 'claude-code' }))
       await waitFor(() => expect(mocks.agentSkillCliCommand).toHaveBeenLastCalledWith(['claude-code', 'codex']))
 
-      expect(await screen.findByText('npx skills add JSCOP/vibelink-skills --skill vibelink-memory --agent claude-code,codex -y')).toBeInTheDocument()
+      expect(await screen.findByText('npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --agent claude-code,codex -y')).toBeInTheDocument()
       expect(screen.queryByText(/Pick at least one agent/)).not.toBeInTheDocument()
     })
 
@@ -262,7 +262,7 @@ describe('AgentSkillSettings', () => {
 
       fireEvent.click(screen.getByRole('button', { name: /Copy/ }))
       await waitFor(() => expect(invoke).toHaveBeenCalledWith('clipboard_write_text', {
-        text: 'npx skills add JSCOP/vibelink-skills --skill vibelink-memory --agent cursor -y',
+        text: 'npx skills add JSCOP/vibelink-skills --skill vibelink-memory --skill vibelink-browser --agent cursor -y',
       }))
     })
 

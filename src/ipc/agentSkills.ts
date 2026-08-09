@@ -1,7 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
 
 /**
- * Install state of the `vibelink-memory` skill in one agent's home skills root.
+ * Install state of VibeLink's bundled skills in one agent's home skills root.
+ * The bundle is one unit: a target carrying an older or partial set reads
+ * `stale`, so a refresh rewrites every skill instead of leaving a silent gap.
  *
  * `agentAbsent` means the agent's own home directory does not exist on this
  * machine. The target is still offered — installing would create the directory —
@@ -11,8 +13,8 @@ import { invoke } from '@tauri-apps/api/core'
 export type AgentSkillState = 'installed' | 'stale' | 'missing' | 'agentAbsent'
 
 /**
- * One install location. `path` is the exact directory VibeLink writes
- * `<path>/vibelink-memory/SKILL.md` into, and is shown in Settings because the
+ * One install location. `path` is the directory VibeLink writes each
+ * `<path>/<skill>/SKILL.md` into, and is shown in Settings because the
  * write lands in a directory the user owns.
  */
 export type AgentSkillTarget = {
@@ -24,9 +26,9 @@ export type AgentSkillTarget = {
   installedRevision: number | null
 }
 
-/** Built-in skill revision plus the per-target scan result. */
+/** Bundled skill names, their shared revision, and the per-target scan result. */
 export type AgentSkillStatus = {
-  skill: string
+  skills: string[]
   revision: number
   targets: AgentSkillTarget[]
 }
