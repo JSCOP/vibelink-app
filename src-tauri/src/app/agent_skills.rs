@@ -390,12 +390,15 @@ fn target_status(home: &Path, target: &InstallTarget) -> Result<AgentSkillTarget
         .flatten()
         .and_then(|revision| revision.trim().parse().ok());
 
-    let skill_path = skill_dir(home, target, BUNDLED_SKILLS[0].name).join(SKILL_FILE);
-
+    // The bundle writes several folders, so the honest location to show the user
+    // is the skills root they own, not one skill's file.
     Ok(AgentSkillTarget {
         id: target.id.to_string(),
         label: target.label.to_string(),
-        path: skill_path.to_string_lossy().into_owned(),
+        path: home
+            .join(target.skills_relative)
+            .to_string_lossy()
+            .into_owned(),
         state,
         installed_revision,
     })
