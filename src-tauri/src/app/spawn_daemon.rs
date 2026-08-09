@@ -357,7 +357,8 @@ pub(super) fn ensure_daemon_with_recovery_for(
     let initial_error = loop {
         match connect_ready_daemon(client_kind) {
             Ok(stream) => {
-                if let Some(stream) = reuse_or_replace_ready_daemon(stream, recovery)? {
+                if let Some(stream) = reuse_or_replace_ready_daemon(stream, recovery, client_kind)?
+                {
                     return Ok(stream);
                 }
                 break None;
@@ -431,10 +432,21 @@ pub(super) fn ensure_daemon_with_recovery_for(
     ))
 }
 
+/// Only the desktop app may replace a daemon. The identity comparison is against
+/// `current_exe`, and the CLI is a DIFFERENT executable than the app, so letting
+/// a CLI call run this made every `vibelink ...` invocation judge the app's own
+/// daemon stale, kill it, and spawn the CLI as a daemon — which the app then
+/// judged stale in turn. That ping-pong restarted the daemon continuously and
+/// killed every terminal pane with it. A CLI is also simply not the lifecycle
+/// owner: it must never take down the user's terminals as a side effect.
 fn reuse_or_replace_ready_daemon(
     stream: DaemonStream,
     recovery: &mut StartupRecoveryBudget,
+    client_kind: ClientKind,
 ) -> Result<Option<DaemonStream>> {
+    if !client_kind_may_replace_daemon(client_kind) {
+        return Ok(Some(stream));
+    }
     let daemon_paths = paths::daemon_paths()?;
     let expected_exe = expected_daemon_executable(&daemon_paths.data_dir)?;
     let info = paths::read_daemon_info(&daemon_paths.info);
@@ -464,6 +476,10 @@ fn daemon_info_is_stale(info: Option<&paths::DaemonInfo>, expected_exe: &Path) -
         Some(info) => info.exe != expected_exe,
         None => true,
     }
+}
+
+fn client_kind_may_replace_daemon(client_kind: ClientKind) -> bool {
+    matches!(client_kind, ClientKind::App)
 }
 
 pub fn connect_daemon() -> io::Result<DaemonStream> {

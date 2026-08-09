@@ -411,6 +411,22 @@ fn daemon_identity_staleness_uses_expected_executable_path() {
     assert!(daemon_info_is_stale(None, expected_exe));
 }
 
+/// Shipped once and caused a live daemon restart loop. The identity comparison
+/// is against `current_exe`, and `vibelink.exe` is not `app.exe`, so a CLI call
+/// judged the app's daemon stale, killed it, and spawned itself as the daemon;
+/// the app then judged THAT stale and killed it back. Every cycle destroyed the
+/// user's terminal panes. Only the app owns daemon lifecycle.
+#[test]
+fn only_the_app_may_replace_a_daemon() {
+    for kind in [ClientKind::Cli, ClientKind::Remote] {
+        assert!(
+            !client_kind_may_replace_daemon(kind),
+            "{kind:?} must never replace a running daemon"
+        );
+    }
+    assert!(client_kind_may_replace_daemon(ClientKind::App));
+}
+
 #[test]
 fn spawned_daemon_cleanup_removes_only_matching_pid_file() {
     let path = std::env::temp_dir().join(format!(
