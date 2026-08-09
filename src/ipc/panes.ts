@@ -12,6 +12,5 @@ export async function submitAgentPrompt(sessionId: string, paneId: string): Prom
 
 export async function sendAgentPromptToPane(sessionId: string, paneId: string, text: string): Promise<void> {
   await sendToPane(sessionId, paneId, text, false)
-  await new Promise((resolve) => setTimeout(resolve, 120))
   await submitAgentPrompt(sessionId, paneId)
 }

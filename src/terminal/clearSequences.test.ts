@@ -101,6 +101,68 @@ describe('terminal clear sequence filtering', () => {
 
     expect(decode(result.bytes)).toBe('\x1b[?1049l\x1b[2J\x1b[3J\x1b[H\x1b[?25h')
   })
+
+  it('keeps the last-finishing clear of an overlapping clear cluster', () => {
+    // `\x1b[1;1H` opens two clear candidates that never complete and the
+    // `\x1b[H\x1b[J` behind it overlaps them. The retained tail must start at
+    // the clear that finishes LAST, with its adjacent cluster pulled back in.
+    const result = terminalOutputAfterLastHardClear(enc.encode('out\x1b[1;1H\x1b[H\x1b[J\x1b[3Jtail'))
+
+    expect(result.clear).toBe(true)
+    expect(decode(result.bytes)).toBe('\x1b[H\x1b[J\x1b[3Jtail')
+  })
+
+  it('ignores a clear candidate whose prefix never completes', () => {
+    const result = terminalOutputAfterLastHardClear(enc.encode('\x1b[H\x1b[2Jtail'))
+
+    expect(result.clear).toBe(true)
+    expect(decode(result.bytes)).toBe('\x1b[2Jtail')
+  })
+
+  it.each([
+    ['at the buffer start', '\x1b[2Jtail', '\x1b[2Jtail'],
+    ['at the buffer end', 'head\x1b[2J', '\x1b[2J'],
+    ['as the whole buffer', '\x1bc', '\x1bc'],
+  ])('detects a hard clear %s', (_name, input, expected) => {
+    const result = terminalOutputAfterLastHardClear(enc.encode(input))
+
+    expect(result.clear).toBe(true)
+    expect(decode(result.bytes)).toBe(expected)
+  })
+
+  it.each([
+    ['erase', 'head\x1b[2'],
+    ['cursor-home cluster', 'head\x1b[H\x1b['],
+  ])('leaves a %s truncated by the buffer end alone', (_name, input) => {
+    const bytes = enc.encode(input)
+
+    const result = terminalOutputAfterLastHardClear(bytes)
+
+    expect(result.clear).toBe(false)
+    expect(result.bytes).toBe(bytes)
+  })
+
+  it('finds no hard clear in a large ESC-dense ANSI buffer', () => {
+    // The cold-replay path runs this over a whole snapshot before it starts
+    // yielding, so an ESC on every few bytes must not cost a rescan per clear
+    // pattern — and must not produce a false positive either.
+    const frame = '\x1b[38;5;196m\x1b[1m\x1b[10;20H\x1b[Kcell\x1b[0m\x1b]0;title\x07\x1b[?25l\x1b[?25h'
+    const bytes = enc.encode(frame.repeat(4000))
+
+    const result = terminalOutputAfterLastHardClear(bytes)
+
+    expect(result.clear).toBe(false)
+    expect(result.bytes).toBe(bytes)
+  })
+
+  it('finds a hard clear behind a large ESC-dense ANSI prefix', () => {
+    const frame = '\x1b[38;5;196m\x1b[1m\x1b[10;20H\x1b[Kcell\x1b[0m'
+
+    const result = terminalOutputAfterLastHardClear(enc.encode(`${frame.repeat(4000)}\x1b[2Jprompt`))
+
+    expect(result.clear).toBe(true)
+    expect(decode(result.bytes)).toBe('\x1b[2Jprompt')
+  })
 })
 
 describe('terminalStateSequences', () => {

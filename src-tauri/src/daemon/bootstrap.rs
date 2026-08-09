@@ -463,21 +463,200 @@ pub(super) fn rotate_daemon_log(log_path: &Path) {
     }
 }
 
+struct RotatingLogWriter {
+    path: PathBuf,
+    file: Mutex<Option<std::fs::File>>,
+    len: std::sync::atomic::AtomicU64,
+}
+
+impl RotatingLogWriter {
+    fn open(path: &Path) -> io::Result<Self> {
+        let (file, len) = Self::open_file(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file: Mutex::new(Some(file)),
+            len: std::sync::atomic::AtomicU64::new(len),
+        })
+    }
+
+    fn open_file(path: &Path) -> io::Result<(std::fs::File, u64)> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let len = file.metadata()?.len();
+        Ok((file, len))
+    }
+
+    fn write_event(&self, event: &[u8]) {
+        let event_len = event.len() as u64;
+        let mut file = lock_mutex(&self.file);
+        if self
+            .len
+            .load(Ordering::Relaxed)
+            .saturating_add(event_len)
+            > DAEMON_LOG_ROTATE_LIMIT
+        {
+            if let Err(error) = self.rotate(&mut file) {
+                eprintln!("failed to rotate daemon log {}: {error}", self.path.display());
+            }
+        }
+
+        if file.is_none() {
+            match Self::open_file(&self.path) {
+                Ok((reopened, len)) => {
+                    *file = Some(reopened);
+                    self.len.store(len, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    eprintln!("failed to reopen daemon log {}: {error}", self.path.display());
+                    return;
+                }
+            }
+        }
+
+        let Some(current) = file.as_mut() else {
+            return;
+        };
+        if let Err(error) = current.write_all(event) {
+            if let Ok(metadata) = current.metadata() {
+                self.len.store(metadata.len(), Ordering::Relaxed);
+            }
+            eprintln!("failed to write daemon log {}: {error}", self.path.display());
+            return;
+        }
+        self.len.fetch_add(event_len, Ordering::Relaxed);
+    }
+
+    fn rotate(&self, file: &mut Option<std::fs::File>) -> io::Result<()> {
+        // Verify that the current path is still writable before releasing the live handle.
+        drop(OpenOptions::new().create(true).append(true).open(&self.path)?);
+        if let Some(current) = file.as_mut() {
+            current.flush()?;
+        }
+        drop(file.take());
+
+        let rotated = self.path.with_extension("log.1");
+        match fs::remove_file(&rotated) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(&self.path, &rotated)?;
+
+        match Self::open_file(&self.path) {
+            Ok((new_file, len)) => {
+                *file = Some(new_file);
+                self.len.store(len, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(error) => {
+                if let Err(restore_error) = fs::rename(&rotated, &self.path) {
+                    eprintln!(
+                        "failed to restore daemon log {} after rotation error: {restore_error}",
+                        self.path.display()
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+struct BufferedLogEvent<'a> {
+    writer: &'a RotatingLogWriter,
+    event: Vec<u8>,
+}
+
+impl Write for BufferedLogEvent<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.event.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for BufferedLogEvent<'_> {
+    fn drop(&mut self) {
+        if !self.event.is_empty() {
+            self.writer.write_event(&self.event);
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RotatingLogWriter {
+    type Writer = BufferedLogEvent<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        BufferedLogEvent {
+            writer: self,
+            event: Vec::new(),
+        }
+    }
+}
+
 fn init_logging(log_path: &Path) {
     rotate_daemon_log(log_path);
 
-    let file = OpenOptions::new().create(true).append(true).open(log_path);
-    let Ok(file) = file else {
+    let Ok(writer) = RotatingLogWriter::open(log_path) else {
         return;
     };
-
-    let file = Arc::new(Mutex::new(file));
-    let writer = move || lock_mutex(&file).try_clone().expect("clone daemon log");
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(writer)
         .try_init();
+}
+
+#[cfg(test)]
+mod rotating_log_tests {
+    use super::*;
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    use tracing_subscriber::fmt::MakeWriter as _;
+
+    #[test]
+    fn daemon_log_rotates_while_running() {
+        let root = std::env::temp_dir().join(format!("vibelink-runtime-log-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create runtime log test directory");
+        let log = root.join("daemon.log");
+        let first_event = b"first event\n";
+        let second_event = b"second event\n";
+        std::fs::File::create(&log)
+            .expect("create current log")
+            .set_len(DAEMON_LOG_ROTATE_LIMIT - first_event.len() as u64)
+            .expect("grow current log");
+        fs::write(log.with_extension("log.1"), b"old").expect("write old generation");
+        let writer = RotatingLogWriter::open(&log).expect("open rotating log writer");
+
+        {
+            let mut event = writer.make_writer();
+            event.write_all(first_event).expect("write first event");
+        }
+        {
+            let mut event = writer.make_writer();
+            event.write_all(second_event).expect("write second event");
+        }
+
+        let rotated = log.with_extension("log.1");
+        let rotated_len = fs::metadata(&rotated).expect("rotated log exists").len();
+        let current_len = fs::metadata(&log).expect("current log exists").len();
+        let mut rotated_tail = vec![0; first_event.len()];
+        let mut rotated_file = std::fs::File::open(&rotated).expect("open rotated log");
+        rotated_file
+            .seek(SeekFrom::End(-(first_event.len() as i64)))
+            .expect("seek to first event");
+        rotated_file
+            .read_exact(&mut rotated_tail)
+            .expect("read first event");
+
+        assert_eq!(rotated_tail.as_slice(), first_event);
+        let current = fs::read(&log).expect("read current log");
+        assert_eq!(current.as_slice(), second_event);
+        assert!(rotated_len + current_len <= DAEMON_LOG_ROTATE_LIMIT * 2);
+
+        drop(writer);
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

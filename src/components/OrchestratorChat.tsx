@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { type ButtonHTMLAttributes, type ComponentType, useEffect, useMemo, useState } from 'react'
+import { type ButtonHTMLAttributes, type ComponentType, useEffect, useState } from 'react'
 import { Archive, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Square, Wrench, type LucideProps } from 'lucide-react'
 import { dispatchHermesPrompt, getHermesRuntimeStatus, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
 import type { HermesRuntimeStatus, HermesWorkspaceState, SkillApplyInput, SkillEntry } from '../ipc/types'
@@ -26,9 +26,6 @@ export function OrchestratorChat() {
   const usage = useWorkspaceStore((state) => sessionId ? state.hermesUsage[sessionId] : undefined)
   const models = useWorkspaceStore((state) => sessionId ? state.hermesModels[sessionId] : undefined)
   const pendingCount = useWorkspaceStore((state) => sessionId ? state.hermesPendingPrompts[sessionId]?.filter((prompt) => prompt.status === 'queued').length ?? 0 : 0)
-  const panes = useWorkspaceStore((state) => state.panes)
-  const kanban = useWorkspaceStore((state) => state.kanban)
-  const workspaceBrief = useWorkspaceStore((state) => sessionId ? state.workspaceBriefs[sessionId] : null)
   const error = controller.error
   const setHermesStatus = useWorkspaceStore((state) => state.setHermesStatus)
   const sendAgentPrompt = useWorkspaceStore((state) => state.sendAgentPrompt)
@@ -42,7 +39,6 @@ export function OrchestratorChat() {
   const [now, setNow] = useState(() => Date.now())
   const [agentSection, setAgentSection] = useState<AgentSection>('chat')
 
-  const workspaceTasks = useMemo(() => sessionId ? tasksForSession(kanban, sessionId) : [], [kanban, sessionId])
   const workspaceFolderLabel = controller.workspaceFolder || workspace?.workspaceFolder || 'VibeLink agent workspace'
   const statusLabel = status === 'busy' ? 'waiting for response' : status
   const canSend = Boolean(message.trim())
@@ -174,8 +170,13 @@ export function OrchestratorChat() {
 
   const sendWorkspaceDigest = async () => {
     if (!sessionId) return
+    // Read pane/kanban/brief only on click: subscribing to them re-renders this
+    // transcript-heavy component on every coalesced pane title change.
+    const state = useWorkspaceStore.getState()
+    // Dynamic import: TerminalManager pulls the whole xterm runtime, which this
+    // chat must not load just to render.
     const { TerminalManager } = await import('../terminal/TerminalManager')
-    const terminalOutputs = Object.values(panes)
+    const terminalOutputs = Object.values(state.panes)
       .filter((pane) => pane.alive && pane.config.paneId !== 'vibelink-agent')
       .map((pane) => ({
         title: pane.config.title?.trim() || pane.id,
@@ -184,8 +185,8 @@ export function OrchestratorChat() {
       .filter(({ output }) => output.length > 0)
     await sendAgentPrompt(sessionId, composeWorkspaceDigestPrompt({
       workspaceName: controller.workspaceName,
-      brief: workspaceBrief,
-      tasks: workspaceTasks,
+      brief: state.workspaceBriefs[sessionId],
+      tasks: tasksForSession(state.kanban, sessionId),
       terminalOutputs,
     }))
   }

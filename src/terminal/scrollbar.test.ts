@@ -119,4 +119,45 @@ describe('pane terminal fit', () => {
     fit.dispose()
     parent.remove()
   })
+
+  it('caches terminal padding until disposed and reactivated', () => {
+    const parent = document.createElement('div')
+    const element = document.createElement('div')
+    element.style.padding = '2px 3px 4px 5px'
+    parent.appendChild(element)
+    document.body.appendChild(parent)
+
+    const terminal = {
+      element,
+      cols: 2,
+      rows: 1,
+      resize: vi.fn(),
+      _core: {
+        _renderService: {
+          clear: vi.fn(),
+          dimensions: { css: { cell: { width: 10, height: 10 } } },
+        },
+      },
+    } as unknown as Terminal
+    const fit = new PaneFitAddon()
+    fit.activate(terminal)
+
+    const computedStyle = vi.spyOn(window, 'getComputedStyle')
+    const hostSize = { width: 300, height: 200 }
+    expect(fit.proposeDimensions(hostSize)).toEqual({ cols: 29, rows: 19 })
+    expect(fit.proposeDimensions(hostSize)).toEqual({ cols: 29, rows: 19 })
+    expect(computedStyle).toHaveBeenCalledTimes(1)
+    expect(computedStyle).toHaveBeenCalledWith(element)
+
+    fit.dispose()
+    fit.activate(terminal)
+    computedStyle.mockClear()
+    expect(fit.proposeDimensions(hostSize)).toEqual({ cols: 29, rows: 19 })
+    expect(fit.proposeDimensions(hostSize)).toEqual({ cols: 29, rows: 19 })
+    expect(computedStyle).toHaveBeenCalledTimes(1)
+
+    computedStyle.mockRestore()
+    fit.dispose()
+    parent.remove()
+  })
 })

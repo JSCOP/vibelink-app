@@ -1,24 +1,79 @@
 import { useMemo } from 'react'
-import { buildAgentPaneStatuses, resolveAgentPaneStatus, type AgentPaneStatus } from './agentPaneStatus'
-import { isAgentPane } from './profiles'
+import type { PaneMeta } from '../ipc/types'
+import {
+  buildAgentPaneStatuses,
+  resolveAgentPaneStatus,
+  type AgentPaneActivity,
+  type AgentPaneStatus,
+} from './agentPaneStatus'
+import { isAgentPane, type Settings } from './profiles'
 import { useWorkspaceStore } from './store'
+import type { AttentionSnapshot } from './worktreeAttention'
+
+export type AgentPaneStatusesSelectorState = {
+  panes: Record<string, PaneMeta>
+  settings: Settings
+  paneAgentActivity: Record<string, AgentPaneActivity>
+  attentionSnapshot: AttentionSnapshot | null
+  paneCompletionHighlights: Readonly<Record<string, unknown>>
+}
+
+function equalAgentPaneStatuses(
+  previous: Record<string, AgentPaneStatus>,
+  next: Record<string, AgentPaneStatus>,
+): boolean {
+  const paneIds = Object.keys(previous)
+  if (paneIds.length !== Object.keys(next).length) return false
+  return paneIds.every((paneId) => {
+    const previousStatus = previous[paneId]
+    const nextStatus = next[paneId]
+    return nextStatus?.state === previousStatus.state && nextStatus.source === previousStatus.source
+  })
+}
+
+export function createAgentPaneStatusesSelector() {
+  let panes: AgentPaneStatusesSelectorState['panes'] | undefined
+  let profiles: Settings['profiles'] | undefined
+  let activity: AgentPaneStatusesSelectorState['paneAgentActivity'] | undefined
+  let attention: AttentionSnapshot | null | undefined
+  let completions: AgentPaneStatusesSelectorState['paneCompletionHighlights'] | undefined
+  let statuses: Record<string, AgentPaneStatus> | undefined
+
+  return (state: AgentPaneStatusesSelectorState): Record<string, AgentPaneStatus> => {
+    if (
+      statuses
+      && panes === state.panes
+      && profiles === state.settings.profiles
+      && activity === state.paneAgentActivity
+      && attention === state.attentionSnapshot
+      && completions === state.paneCompletionHighlights
+    ) return statuses
+
+    const next = buildAgentPaneStatuses({
+      panes: state.panes,
+      settings: state.settings,
+      activity: state.paneAgentActivity,
+      attention: state.attentionSnapshot,
+      completions: state.paneCompletionHighlights,
+    })
+    panes = state.panes
+    profiles = state.settings.profiles
+    activity = state.paneAgentActivity
+    attention = state.attentionSnapshot
+    completions = state.paneCompletionHighlights
+    if (statuses && equalAgentPaneStatuses(statuses, next)) return statuses
+    statuses = next
+    return statuses
+  }
+}
 
 /** Live agent state for every pane of the attached workspace.
  *
  *  Panes resolving to `idle` are omitted, so a plain shell never renders a dot
  *  and consumers can treat a missing entry as "nothing to show". */
 export function useAgentPaneStatuses(): Record<string, AgentPaneStatus> {
-  const panes = useWorkspaceStore((state) => state.panes)
-  const settings = useWorkspaceStore((state) => state.settings)
-  const activity = useWorkspaceStore((state) => state.paneAgentActivity)
-  const attention = useWorkspaceStore((state) => state.attentionSnapshot)
-  const completions = useWorkspaceStore((state) => state.paneCompletionHighlights)
-  return useMemo(
-    // `attention` is refreshed on a timer, so the memo is also how a stale
-    // local `working` guess eventually decays back to idle on screen.
-    () => buildAgentPaneStatuses({ panes, settings, activity, attention, completions }),
-    [activity, attention, completions, panes, settings],
-  )
+  const selector = useMemo(() => createAgentPaneStatusesSelector(), [])
+  return useWorkspaceStore(selector)
 }
 
 /** Live agent state for one pane. Kept separate from the map builder so a

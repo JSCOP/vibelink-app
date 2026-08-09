@@ -144,7 +144,7 @@ describe('automations IPC wrapper', () => {
 
       const res = await precheckAutomation('auto-1')
       expect(mockInvoke).toHaveBeenCalledWith('cli_request', {
-        args: ['automation', 'precheck', '--id', 'auto-1'],
+        args: ['--request-timeout-seconds', '600', 'automation', 'precheck', '--id', 'auto-1'],
       })
       expect(res).toEqual(precheckRes)
     })
@@ -306,6 +306,8 @@ describe('automations IPC wrapper', () => {
       expect(mockInvoke).toHaveBeenCalledTimes(1)
       expect(mockInvoke).toHaveBeenCalledWith('cli_request', {
         args: [
+          '--request-timeout-seconds',
+          '180',
           'automation',
           'draft-preview',
           '--workspace',
@@ -316,6 +318,39 @@ describe('automations IPC wrapper', () => {
       })
       expect(res).toEqual(draftRes)
       expect(res.requestId).toBe(requestId)
+    })
+  })
+
+  describe('CLI request timeout', () => {
+    test('only the long daemon actions raise it above the 10s CLI default', async () => {
+      for (let index = 0; index < 6; index += 1) mockInvoke.mockResolvedValueOnce({})
+
+      await previewAutomationDraft('sess-1', { request: 'Run daily check' })
+      await precheckAutomation('auto-1')
+      await listAutomations('sess-1')
+      await createAutomation('sess-1', {
+        name: 'New Job',
+        prompt: 'Check build',
+        scheduleKind: 'daily',
+        scheduleValue: '08:00',
+        timezone: 'UTC',
+      })
+      await updateAutomation('auto-1', { enabled: false })
+      await deleteAutomation('auto-1')
+
+      const argvOf = (payload: unknown): string[] => {
+        if (!payload || typeof payload !== 'object' || !('args' in payload) || !Array.isArray(payload.args)) {
+          throw new Error('cli_request was invoked without an argv payload')
+        }
+        return payload.args
+      }
+      const argv = mockInvoke.mock.calls.map((call) => argvOf(call[1]))
+      expect(argv[0].slice(0, 3)).toEqual(['--request-timeout-seconds', '180', 'automation'])
+      expect(argv[1].slice(0, 3)).toEqual(['--request-timeout-seconds', '600', 'automation'])
+      for (const args of argv.slice(2)) {
+        expect(args).not.toContain('--request-timeout-seconds')
+        expect(args[0]).toBe('automation')
+      }
     })
   })
 

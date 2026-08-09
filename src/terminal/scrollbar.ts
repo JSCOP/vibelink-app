@@ -38,13 +38,17 @@ export type PaneGrid = { cols: number; rows: number }
 
 export class PaneFitAddon implements ITerminalAddon {
   private terminal?: Terminal
+  // Dynamic terminal padding needs an explicit invalidation hook before it is introduced.
+  private padding?: { horizontal: number; vertical: number }
 
   activate(terminal: Terminal): void {
     this.terminal = terminal
+    this.padding = undefined
   }
 
   dispose(): void {
     this.terminal = undefined
+    this.padding = undefined
   }
 
   /** `hostSize` is the host's CONTENT box, the same box `getComputedStyle`
@@ -58,14 +62,20 @@ export class PaneFitAddon implements ITerminalAddon {
     const dimensions = (terminal as (Terminal & TerminalInternals) | undefined)?._core?._renderService?.dimensions
     if (!terminal?.element || !parent || !dimensions || dimensions.css.cell.width === 0 || dimensions.css.cell.height === 0) return undefined
 
-    const elementStyle = window.getComputedStyle(terminal.element)
+    let padding = this.padding
+    if (!padding) {
+      const elementStyle = window.getComputedStyle(terminal.element)
+      padding = {
+        horizontal: cssPixels(elementStyle.paddingLeft, 0) + cssPixels(elementStyle.paddingRight, 0),
+        vertical: cssPixels(elementStyle.paddingTop, 0) + cssPixels(elementStyle.paddingBottom, 0),
+      }
+      this.padding = padding
+    }
     const measured = hostSize ?? measureHost(parent)
-    const horizontalPadding = cssPixels(elementStyle.paddingLeft, 0) + cssPixels(elementStyle.paddingRight, 0)
-    const verticalPadding = cssPixels(elementStyle.paddingTop, 0) + cssPixels(elementStyle.paddingBottom, 0)
 
     return {
-      cols: Math.max(MINIMUM_COLS, Math.floor((measured.width - horizontalPadding) / dimensions.css.cell.width)),
-      rows: Math.max(MINIMUM_ROWS, Math.floor((measured.height - verticalPadding) / dimensions.css.cell.height)),
+      cols: Math.max(MINIMUM_COLS, Math.floor((measured.width - padding.horizontal) / dimensions.css.cell.width)),
+      rows: Math.max(MINIMUM_ROWS, Math.floor((measured.height - padding.vertical) / dimensions.css.cell.height)),
     }
   }
 

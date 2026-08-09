@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   aggregateAgentPaneStatus,
   agentActivityStaleMs,
@@ -7,6 +7,12 @@ import {
   type AgentPaneStatus,
   type AgentPaneStatusInput,
 } from './agentPaneStatus'
+import type { PaneMeta } from '../ipc/types'
+import { defaultSettings } from './profiles'
+import {
+  createAgentPaneStatusesSelector,
+  type AgentPaneStatusesSelectorState,
+} from './useAgentPaneStatuses'
 import { EXPLICIT_ATTENTION_TTL_MS, type NativeAttentionPane } from './worktreeAttention'
 
 const now = 1_000_000_000
@@ -29,6 +35,34 @@ function attentionPane(overrides: Partial<NativeAttentionPane>): NativeAttention
 
 function resolve(overrides: Partial<AgentPaneStatusInput>) {
   return resolveAgentPaneStatus({ isAgentPane: true, alive: true, now, ...overrides })
+}
+
+function pane(): PaneMeta {
+  return {
+    id: 'pane-1',
+    alive: true,
+    config: {
+      paneId: 'pane-1',
+      shell: 'pwsh.exe',
+      args: [],
+      env: [],
+      title: 'pwsh',
+      profileId: 'powershell',
+      cols: 80,
+      rows: 24,
+    },
+  }
+}
+
+function selectorState(overrides: Partial<AgentPaneStatusesSelectorState> = {}): AgentPaneStatusesSelectorState {
+  return {
+    panes: { 'pane-1': pane() },
+    settings: defaultSettings,
+    paneAgentActivity: {},
+    attentionSnapshot: null,
+    paneCompletionHighlights: {},
+    ...overrides,
+  }
 }
 
 describe('agentStateFromTitle', () => {
@@ -116,5 +150,93 @@ describe('aggregateAgentPaneStatus', () => {
     expect(aggregateAgentPaneStatus([status('done'), status('working'), status('waiting')])?.state).toBe('waiting')
     expect(aggregateAgentPaneStatus([status('done'), status('working')])?.state).toBe('working')
     expect(aggregateAgentPaneStatus([])).toBeNull()
+  })
+})
+
+describe('createAgentPaneStatusesSelector', () => {
+  afterEach(() => vi.useRealTimers())
+
+  test('reuses the map when only the attention capture time changes', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const selector = createAgentPaneStatusesSelector()
+    const attentionSnapshot = {
+      capturedAt: now,
+      panes: [attentionPane({ state: 'working' })],
+    }
+    const state = selectorState({ attentionSnapshot })
+
+    const first = selector(state)
+    const next = selector({
+      ...state,
+      attentionSnapshot: { ...attentionSnapshot, capturedAt: now + 15_000 },
+    })
+
+    expect(next).toBe(first)
+  })
+
+  test('returns a new map when an attention state crosses its TTL', () => {
+    vi.useFakeTimers()
+    const selector = createAgentPaneStatusesSelector()
+    const attentionSnapshot = {
+      capturedAt: now,
+      panes: [attentionPane({ state: 'working' })],
+    }
+    const state = selectorState({
+      attentionSnapshot,
+      paneCompletionHighlights: {
+        'pane-1': { completedAt: now, source: 'agent-hook', sessionId: 'workspace-1' },
+      },
+    })
+    vi.setSystemTime(now + EXPLICIT_ATTENTION_TTL_MS)
+    const fresh = selector(state)
+
+    vi.setSystemTime(now + EXPLICIT_ATTENTION_TTL_MS + 1)
+    const stale = selector({
+      ...state,
+      attentionSnapshot: { ...attentionSnapshot, capturedAt: now + EXPLICIT_ATTENTION_TTL_MS + 1 },
+    })
+
+    expect(fresh['pane-1']).toMatchObject({ state: 'working', source: 'orchestration' })
+    expect(stale).not.toBe(fresh)
+    expect(stale['pane-1']).toMatchObject({ state: 'done', source: 'agent-hook' })
+  })
+
+  test('ignores unrelated settings changes', () => {
+    const selector = createAgentPaneStatusesSelector()
+    const state = selectorState({
+      paneCompletionHighlights: {
+        'pane-1': { completedAt: now, source: 'agent-hook', sessionId: 'workspace-1' },
+      },
+    })
+
+    const first = selector(state)
+    const next = selector({
+      ...state,
+      settings: { ...state.settings, fontSize: state.settings.fontSize + 1 },
+    })
+
+    expect(next).toBe(first)
+  })
+
+  test('returns a new map when profiles change agent recognition', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const selector = createAgentPaneStatusesSelector()
+    const state = selectorState({ paneAgentActivity: { 'pane-1': { startedAt: now } } })
+
+    const plain = selector(state)
+    const recognized = selector({
+      ...state,
+      settings: {
+        ...state.settings,
+        profiles: state.settings.profiles.map((profile) =>
+          profile.id === 'powershell' ? { ...profile, name: 'Codex' } : profile),
+      },
+    })
+
+    expect(plain).toEqual({})
+    expect(recognized).not.toBe(plain)
+    expect(recognized['pane-1']).toMatchObject({ state: 'working', source: 'terminal-activity' })
   })
 })

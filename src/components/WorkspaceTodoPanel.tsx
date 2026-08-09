@@ -1,10 +1,13 @@
-import { useMemo, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { CheckSquare, Plus, Send, Trash2, X } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
+import type { WorkspaceTodoItem } from '../state/workspaceTodos'
+
+const EMPTY_TODOS: WorkspaceTodoItem[] = []
 
 export function WorkspaceTodoPanel() {
   const sessionId = useWorkspaceStore((state) => state.activeSessionId)
-  const todos = useWorkspaceStore((state) => sessionId ? state.workspaceTodos?.[sessionId] ?? [] : [])
+  const todos = useWorkspaceStore((state) => sessionId ? state.workspaceTodos?.[sessionId] ?? EMPTY_TODOS : EMPTY_TODOS)
   const note = useWorkspaceStore((state) => sessionId ? state.workspaceTodoNotes?.[sessionId] ?? '' : '')
   const addWorkspaceTodo = useWorkspaceStore((state) => state.addWorkspaceTodo)
   const deleteWorkspaceTodo = useWorkspaceStore((state) => state.deleteWorkspaceTodo)
@@ -13,13 +16,44 @@ export function WorkspaceTodoPanel() {
   const setWorkspaceTodoNote = useWorkspaceStore((state) => state.setWorkspaceTodoNote)
   const injectWorkspaceTodosToKanban = useWorkspaceStore((state) => state.injectWorkspaceTodosToKanban)
   const [draft, setDraft] = useState('')
+  const [noteDraft, setNoteDraft] = useState({ sessionId, value: note })
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingText, setEditingText] = useState('')
+  const pendingNoteRef = useRef<{ sessionId: string; note: string } | null>(null)
+  const noteTimerRef = useRef<number | null>(null)
   const todoIds = useMemo(() => todos.map((todo) => todo.id), [todos])
-  const selectedInjectableIds = selectedIds.filter((id) => todos.some((todo) => todo.id === id && !todo.kanbanTaskId))
+  const selectedInjectableIds = useMemo(
+    () => selectedIds.filter((id) => todos.some((todo) => todo.id === id && !todo.kanbanTaskId)),
+    [selectedIds, todos],
+  )
+
+  const flushPendingNote = useCallback(() => {
+    if (noteTimerRef.current !== null) {
+      window.clearTimeout(noteTimerRef.current)
+      noteTimerRef.current = null
+    }
+    const pending = pendingNoteRef.current
+    if (!pending) return
+    pendingNoteRef.current = null
+    setWorkspaceTodoNote(pending.sessionId, pending.note)
+  }, [setWorkspaceTodoNote])
+
+  useEffect(() => flushPendingNote, [flushPendingNote, sessionId])
+
+  useEffect(() => {
+    window.addEventListener('pagehide', flushPendingNote)
+    return () => window.removeEventListener('pagehide', flushPendingNote)
+  }, [flushPendingNote])
 
   if (!sessionId) return <div className="workspace-todo-empty">Open a workspace to keep a todo list.</div>
+
+  const updateNoteDraft = (nextNote: string) => {
+    setNoteDraft({ sessionId, value: nextNote })
+    pendingNoteRef.current = { sessionId, note: nextNote }
+    if (noteTimerRef.current !== null) window.clearTimeout(noteTimerRef.current)
+    noteTimerRef.current = window.setTimeout(flushPendingNote, 300)
+  }
 
   const addTodo = () => {
     const created = addWorkspaceTodo(sessionId, draft)
@@ -89,7 +123,7 @@ export function WorkspaceTodoPanel() {
       <section className="workspace-todo-note">
         <label>
           Memo
-          <textarea value={note} placeholder="구현 방향, 참고 사항, 완료 기준을 메모하세요." onChange={(event) => setWorkspaceTodoNote(sessionId, event.target.value)} />
+          <textarea value={noteDraft.sessionId === sessionId ? noteDraft.value : note} placeholder="구현 방향, 참고 사항, 완료 기준을 메모하세요." onBlur={flushPendingNote} onChange={(event) => updateNoteDraft(event.target.value)} />
         </label>
       </section>
 

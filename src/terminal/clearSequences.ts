@@ -12,8 +12,12 @@ const CLEAR_SEQUENCE_TEXT = [
 
 const CLEAR_SEQUENCES = CLEAR_SEQUENCE_TEXT.map(asciiBytes)
 
+// Bucketed by the byte after ESC so the forward scan only compares the
+// candidates that can start at the ESC it just found.
+const CSI_CLEAR_SEQUENCES = CLEAR_SEQUENCES.filter((sequence) => sequence[1] === 0x5b)
+const NON_CSI_CLEAR_SEQUENCES = CLEAR_SEQUENCES.filter((sequence) => sequence[1] !== 0x5b)
+
 export function terminalOutputAfterLastHardClear(bytes: Uint8Array): { bytes: Uint8Array; clear: boolean } {
-  if (bytes.indexOf(0x1b) < 0) return { bytes, clear: false }
   const span = findLastClearSpan(bytes)
   if (!span) return { bytes, clear: false }
   const start = includeAdjacentClearPrefix(bytes, span.start)
@@ -246,23 +250,26 @@ function includeAdjacentClearPrefix(bytes: Uint8Array, start: number): number {
   }
 }
 
+/** Single forward pass: hop ESC to ESC and compare only the family the byte
+ *  after ESC allows. The previous per-pattern reverse scan re-walked the whole
+ *  buffer nine times, and `writeReplayBytes` runs this over an entire cold
+ *  snapshot before its cooperative chunking gets a chance to yield. */
 function findLastClearSpan(bytes: Uint8Array): { start: number; end: number } | undefined {
-  let match: { start: number; end: number } | undefined
-  for (const sequence of CLEAR_SEQUENCES) {
-    const start = findLastSubarray(bytes, sequence)
-    if (start < 0) continue
-    const end = start + sequence.byteLength
-    if (!match || end > match.end) match = { start, end }
+  let start = -1
+  let end = -1
+  for (let index = bytes.indexOf(0x1b); index >= 0; index = bytes.indexOf(0x1b, index + 1)) {
+    // Largest `end`, NOT latest `start`: the retained tail begins at the clear
+    // that finishes last. bytesMatch reads past the buffer as undefined, so a
+    // candidate truncated by the buffer end simply fails to match.
+    for (const sequence of bytes[index + 1] === 0x5b ? CSI_CLEAR_SEQUENCES : NON_CSI_CLEAR_SEQUENCES) {
+      const candidateEnd = index + sequence.byteLength
+      if (candidateEnd > end && bytesMatch(bytes, index, sequence)) {
+        start = index
+        end = candidateEnd
+      }
+    }
   }
-  return match
-}
-
-function findLastSubarray(haystack: Uint8Array, needle: Uint8Array): number {
-  if (needle.byteLength === 0 || needle.byteLength > haystack.byteLength) return -1
-  for (let i = haystack.byteLength - needle.byteLength; i >= 0; i -= 1) {
-    if (bytesMatch(haystack, i, needle)) return i
-  }
-  return -1
+  return end < 0 ? undefined : { start, end }
 }
 
 function bytesMatch(haystack: Uint8Array, offset: number, needle: Uint8Array): boolean {

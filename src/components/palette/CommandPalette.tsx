@@ -28,6 +28,15 @@ const NO_FILES: string[] = []
 
 export function CommandPaletteHost({ contentActions, commands = [] }: CommandPaletteProps) {
   const { open } = useSyncExternalStore(paletteStore.subscribe, paletteStore.getSnapshot, paletteStore.getSnapshot)
+  if (!open) return null
+  return <CommandPaletteContents contentActions={contentActions} commands={commands} />
+}
+
+// A closed palette must observe nothing: attention refreshes every 15s and Git root
+// polling publishes refreshing/result twice per 30s, which re-rendered the closed host
+// for no visible result. External-store hooks cannot be called conditionally, so every
+// subscription lives in a component that mounts only while the palette is open.
+function CommandPaletteContents({ contentActions, commands }: { contentActions: WorkspaceContentActions | null; commands: PaletteItem[] }) {
   const sessions = useWorkspaceStore((state) => state.sessions)
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId)
   const workspaceReadyEpoch = useWorkspaceStore((state) => state.workspaceReadyEpoch)
@@ -43,7 +52,6 @@ export function CommandPaletteHost({ contentActions, commands = [] }: CommandPal
   const openContent = useSyncExternalStore(subscribeOpenContent, getOpenContentSnapshot, getOpenContentSnapshot)
 
   const items = useMemo<PaletteItem[]>(() => {
-    if (!open) return []
     const attentionByWorkspace = buildAttentionByWorkspace(sessions, worktrees, attentionSnapshot, {
       completionHighlights: paneCompletionHighlights,
       hermesStatus,
@@ -126,9 +134,8 @@ export function CommandPaletteHost({ contentActions, commands = [] }: CommandPal
     }))
 
     return [...RESULT_CATEGORY_ORDER.flatMap((category) => workspaces.filter((item) => item.category === category)), ...content, ...terminals, ...commands]
-  }, [open, sessions, activeSessionId, settings, worktrees, attentionSnapshot, hermesStatus, hermesPermissions, paneCompletionHighlights, paneReviewMarkers, openSession, openContent, contentActions, commands, gitSessions])
+  }, [sessions, activeSessionId, settings, worktrees, attentionSnapshot, hermesStatus, hermesPermissions, paneCompletionHighlights, paneReviewMarkers, openSession, openContent, contentActions, commands, gitSessions])
 
-  if (!open) return null
   const activeWorkspaceFolder = sessions.find((session) => session.id === activeSessionId)?.workspaceFolder ?? null
   return (
     <PaletteSurface

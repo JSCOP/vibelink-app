@@ -287,9 +287,16 @@ export function normalizeAutomationRpcError(
   return new AutomationRpcError(code, message || fallbackMessage, details)
 }
 
-async function automationRequest<T>(action: string, args: string[] = []): Promise<T> {
+// The CLI's global request timeout defaults to 10s, which aborts these two long
+// daemon calls every time: draft preview runs Hermes with a hard 120s cap, and
+// precheck clamps its command timeout to 600s.
+const DRAFT_PREVIEW_TIMEOUT_SECONDS = 180
+const PRECHECK_TIMEOUT_SECONDS = 600
+
+async function automationRequest<T>(action: string, args: string[] = [], timeoutSeconds?: number): Promise<T> {
+  const globals = timeoutSeconds === undefined ? [] : ['--request-timeout-seconds', String(timeoutSeconds)]
   try {
-    return await invoke<T>('cli_request', { args: ['automation', action, ...args] })
+    return await invoke<T>('cli_request', { args: [...globals, 'automation', action, ...args] })
   } catch (cause) {
     throw normalizeAutomationRpcError(cause)
   }
@@ -326,7 +333,7 @@ export function listAutomationRuns(id: string, limit?: number): Promise<Automati
 }
 
 export function precheckAutomation(id: string): Promise<AutomationPrecheckResult> {
-  return automationRequest('precheck', ['--id', id])
+  return automationRequest('precheck', ['--id', id], PRECHECK_TIMEOUT_SECONDS)
 }
 
 export function previewAutomationSchedule(input: AutomationSchedulePreviewInput): Promise<number[]> {
@@ -360,5 +367,9 @@ export function previewAutomationDraft(
   sessionId: string,
   input: AutomationDraftPreviewInput,
 ): Promise<AutomationDraftPreview> {
-  return automationRequest('draft-preview', ['--workspace', sessionId, '--json', jsonPayload(input)])
+  return automationRequest(
+    'draft-preview',
+    ['--workspace', sessionId, '--json', jsonPayload(input)],
+    DRAFT_PREVIEW_TIMEOUT_SECONDS,
+  )
 }
