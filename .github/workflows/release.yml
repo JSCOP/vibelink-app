@@ -123,6 +123,10 @@ jobs:
     needs: release-contract
     runs-on: windows-latest
     environment: release
+    # Releases are published to this repository now, so the built-in token is
+    # enough; only the private canonical-web checkout above still needs a PAT.
+    permissions:
+      contents: write
     env:
       VIBELINK_API_URL: https://vibelink.moobang.net
       RELEASE_VERSION: ${{ needs.release-contract.outputs.version }}
@@ -167,7 +171,7 @@ jobs:
           [System.IO.File]::WriteAllLines($env:CHECKSUM_NAME, $lines, [System.Text.Encoding]::ASCII)
       - name: Publish manifest-derived direct release
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -182,7 +186,7 @@ jobs:
             --notes-file release-metadata/direct-release-notes.md
       - name: Verify public release assets and checksum manifest
         env:
-          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           node scripts/release-contract.mjs validate-public-release
           --manifest release-metadata/vibelink-product.v1.json
