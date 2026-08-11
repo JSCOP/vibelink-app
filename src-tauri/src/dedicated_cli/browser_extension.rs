@@ -445,6 +445,9 @@ impl ExtensionBridge {
         }
     }
 
+    // The error type here is `tungstenite`'s handshake `ErrorResponse`, whose
+    // size the callback signature dictates. Boxing it is not an option.
+    #[allow(clippy::result_large_err)]
     fn handle_connection(
         self: &Arc<Self>,
         stream: TcpStream,

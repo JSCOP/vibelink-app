@@ -699,6 +699,9 @@ fn route_daemon_message(senders: &DaemonSenders, message: DaemonToClient) -> boo
     }
 }
 
+// `tungstenite::accept_hdr_with_config` fixes the callback's error type as
+// `http::Response<Option<String>>`; we cannot box what the library declares.
+#[allow(clippy::result_large_err)]
 pub fn handle_connection(
     stream: TcpStream,
     tls_config: Arc<ServerConfig>,

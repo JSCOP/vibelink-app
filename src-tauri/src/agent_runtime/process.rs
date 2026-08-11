@@ -164,7 +164,7 @@ impl AdapterRuntime for PtyProcessRuntime {
                 .map_err(|error| AdapterError::Runtime(format!("inspect agent: {error}")))?
             {
                 None => AgentLifecycleStatus::Running,
-                Some(status) if instance.cancelled => AgentLifecycleStatus::Cancelled,
+                Some(_) if instance.cancelled => AgentLifecycleStatus::Cancelled,
                 Some(status) if status.success() => AgentLifecycleStatus::Completed,
                 Some(_) => AgentLifecycleStatus::Failed,
             };

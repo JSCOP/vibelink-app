@@ -1371,10 +1371,7 @@ fn extract_kimi_block(text: &str) -> Result<Option<&str>> {
 fn remove_kimi_blocks(text: &str) -> Result<(String, bool)> {
     let mut output = text.to_string();
     let mut changed = false;
-    loop {
-        let Some(start) = output.find(KIMI_BLOCK_START) else {
-            break;
-        };
+    while let Some(start) = output.find(KIMI_BLOCK_START) {
         let Some(end_relative) = output[start..].find(KIMI_BLOCK_END) else {
             bail!("Kimi config contains an unterminated VibeLink hook block");
         };

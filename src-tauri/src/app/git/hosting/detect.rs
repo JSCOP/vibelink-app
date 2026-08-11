@@ -59,19 +59,17 @@ pub(crate) fn parse_remote_origin(remote_url: &str) -> Option<RemoteOrigin> {
         (host, path)
     } else if let Some(rest) = remote_url.strip_prefix("ssh://") {
         let (authority, path) = rest.split_once('/')?;
-        let host = authority.strip_prefix("git@")?;
-        if host.is_empty() {
-            return None;
-        }
+        let host = authority
+            .strip_prefix("git@")
+            .filter(|host| !host.is_empty())?;
         (host, path)
-    } else if let Some(rest) = remote_url.strip_prefix("git@") {
+    } else {
+        let rest = remote_url.strip_prefix("git@")?;
         let (host, path) = rest.split_once(':')?;
         if host.is_empty() {
             return None;
         }
         (host, path)
-    } else {
-        return None;
     };
 
     let host = normalize_host(host).ok()?;
