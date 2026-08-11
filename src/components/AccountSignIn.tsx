@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useState } from 'react'
-import { pollAccountSignIn, startAccountSignIn, type AccountSignInStart } from '../ipc/license'
+import { pollAccountSignIn, startAccountSignIn, type AccountSignInStart } from '../ipc/account'
 import { useWorkspaceStore } from '../state/store'
 
 type AccountSignInProps = {
@@ -34,13 +34,13 @@ export function AccountSignIn({ onActivated }: AccountSignInProps) {
           timer = window.setTimeout(poll, Math.max(1, pending.interval) * 1_000)
           return
         }
-        useWorkspaceStore.setState({ license: { ready: true, status: result } })
+        useWorkspaceStore.setState({ account: { ready: true, status: result } })
         setPending(null)
-        if (!['core', 'validOnline', 'validOffline'].includes(result.state)) {
-          setMessage(result.message || 'Could not finish loading this Moobang account.')
+        if (result.signedIn !== true) {
+          setMessage('Could not finish signing in to this Moobang account.')
           return
         }
-        setMessage(result.plan === 'pro' ? 'Moobang account connected. VibeLink Pro is active.' : 'Moobang account connected. VibeLink Core is active.')
+        setMessage('Moobang account connected.')
         onActivated?.()
       } catch (error) {
         if (cancelled) return

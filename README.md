@@ -1,10 +1,22 @@
 # VibeLink
 
-Tauri v2 desktop terminal workspace with dockview splits, workspace sessions, grid templates, xterm.js rendering, and a detached Rust PTY daemon.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4.svg)](#windows-only)
 
-## Run
+VibeLink is a Windows desktop terminal workspace built for driving coding agents. It combines dockview split layouts, persistent workspace sessions, grid templates, and xterm.js rendering on top of a detached Rust PTY daemon, so agent-driven terminals survive app restarts and can be scripted from the outside through a CLI and an MCP server.
+
+<!-- screenshot placeholder: docs/assets/screenshot-workspace.png (workspace with split terminal panes) -->
+
+## Windows only
+
+VibeLink runs on Windows 10/11 and nowhere else. The codebase depends directly on Win32 UI Automation (`src-tauri/src/computer_use/windows_backend.rs`), ConPTY (`src-tauri/src/daemon/conpty.rs`), Job Objects (`src-tauri/src/daemon/proc.rs`), HWND subclassing (`src-tauri/src/app/window_chrome.rs`), the Windows Credential Manager (via `keyring`), and PowerShell build scripts (`scripts/*.ps1`). The project does not build on macOS or Linux; cross-platform support is currently out of scope.
+
+Prerequisites: Windows 10/11, Node 22, pnpm 10.13.1, Rust stable (1.85+), the MSVC toolchain with the Windows SDK, the WebView2 runtime, and PowerShell.
+
+## Quickstart
 
 ```bash
+git clone https://github.com/JSCOP/vibelink-app.git && cd vibelink-app
 pnpm install
 pnpm tauri:dev
 ```
@@ -18,17 +30,18 @@ pnpm build
 pnpm tauri:build
 ```
 
-`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release` and performs the local release-preparation version bump. Versioned bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_0.1.13_x64_en-US.msi` and `VibeLink_0.1.13_x64-setup.exe`.
+`pnpm tauri:build` invokes `scripts/vibelink.ps1 -Action installer-release` and performs the local release-preparation version bump. Versioned bundles are emitted under `src-tauri\target\release\bundle\msi` and `src-tauri\target\release\bundle\nsis`, for example `VibeLink_<version>_x64_en-US.msi` and `VibeLink_<version>_x64-setup.exe`.
 
-## VibeLink trial and Pro licensing
+`VIBELINK_API_URL` is compiled into the application (`src-tauri/build.rs`) and defaults to `https://vibelink.moobang.net`; a fork may point it at its own origin. Release builds only require a clean HTTPS origin.
 
-- VibeLink 0.3.0+ is trial-first: signing in with a Moobang account starts a server-anchored 7-day full-featured trial. The trial cannot be reset by reinstalling or changing the clock, and it unlocks every feature (terminal, grids, themes, profiles, capture, plus Agent, Kanban, Todo, Diff, Hermes/MCP, task/pane roles, git, and board operations).
-- When the trial ends, the entire app locks to a sign-in/purchase screen until a one-time VibeLink Pro purchase (₩20,000 / $20). Existing paid Pro accounts keep lifetime entitlement.
-- Sign-in is mandatory: an unentitled desktop (signed out or expired trial) locks the GUI, CLI, and MCP surfaces. Older builds (≤0.2.0) stay on the legacy free-Core model until superseded, enforced by an `appVersion` version gate on the server.
-- Settings → Account manages the Moobang account and shows plan (trial with end date, or Pro), active/review devices, and offline grace. One Pro license supports three devices; current or remote devices can be removed.
-- Successful online validation stores only encrypted Windows Credential Manager state. Session tokens are never persisted in localStorage, Zustand settings, session JSON, or logs.
-- The last successful server timestamps grant up to seven days of offline entitlement (capped at the trial end for trials). Explicit refund/revocation/deactivation or trial expiry locks at the next online validation; clock rollback also locks.
-- `VIBELINK_LICENSE_API_URL` is compiled into the application. Debug defaults to `http://localhost:3000`; release builds accept only `https://vibelink.moobang.net`.
+## Free and open source
+
+VibeLink is free software under GPL-3.0. Every feature works for everyone: there are no feature gates and no account requirement. An optional Moobang account sign-in exists only to file bug reports from inside the app.
+
+Development is funded two ways:
+
+- [GitHub Sponsors](https://github.com/sponsors/JSCOP)
+- A paid build on the Microsoft Store. The Store build is the same code with the same features; the only thing it adds is automatic updates. Buying it supports development, in the same spirit as Krita's store editions. If you don't want that, use the free build — it is not a lesser version.
 
 ## Release signing and verification
 
@@ -36,6 +49,8 @@ pnpm tauri:build
 - The Microsoft Store artifact is a Store submission package. Final consumer signing is performed by Microsoft at the Store certification/re-signing boundary.
 
 ## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full module map. In short:
 
 - React owns layout, workspace UI, dockview panels, and xterm.js rendering.
 - The Tauri app is a thin bridge. Frontend calls Rust commands via `invoke`; terminal output arrives through one `Channel` keyed by `paneId`.
@@ -77,8 +92,6 @@ The same binary exposes a lightweight CLI for agents and scripts. A skill can ca
 `sessions` and `panes` print JSON. `read` prints pane scrollback with ANSI CSI escape sequences stripped for LLM readability. `write --enter` appends carriage return so PowerShell and shells execute the command. `agent send` relays a prompt to the VibeLink Agent panel for the current workspace. `task done` and `task note` are Kanban callbacks used by assigned agents to move cards to done or append progress notes. `skill` commands manage VibeLink-owned Markdown skills under app data; enabled persisted skills are injected into VibeLink Agent prompts for the matching workspace. The built-in terminal integration skill is `vibelink-terminal`.
 VibeLink-launched panes receive `VIBELINK_SESSION_ID`, `VIBELINK_PANE_ID`, `VIBELINK_APP_EXE`, and `VIBELINK_APP_FLAVOR`; `panes`, `read`, `write`, `agent`, `task`, and workspace-scoped `skill` commands use `VIBELINK_SESSION_ID` when `--session` is omitted, so agents should run `$env:VIBELINK_APP_EXE cli ...` and stay current-workspace scoped instead of scanning every workspace. Spawned PTYs advertise `TERM_PROGRAM=VibeLink`.
 
-On 0.3.0+ every daemon-touching CLI command and `mcp serve` require an entitled cache (active trial or paid Pro); an unentitled caller (signed out or expired trial) receives `VibeLink trial expired or not signed in. Open VibeLink to sign in or purchase.` rather than an unguarded native operation.
-
 `mcp serve` is a session-scoped stdio MCP server registered through ACP when VibeLink opens or resumes a Hermes session; VibeLink never edits the user's global Hermes `config.yaml`. The server requires `VIBELINK_SESSION_ID`, receives `VIBELINK_APP_FLAVOR`, and exposes `vibelink_pane_*`, `vibelink_terminal_grid_launch`, `vibelink_skill_*`, `vibelink_task_*`, and workspace-brief tools. Install or update Hermes independently with its official installer and `hermes update`; VibeLink only detects `hermes-acp` / `hermes` and connects to the installed version.
 
 ## Daemon smoke checks
@@ -109,3 +122,19 @@ $env:VIBELINK_SMOKE_CLI = "codex"
 $env:VIBELINK_SMOKE_CLI_ARGS = "--version"
 cargo run --example smoke_terminal
 ```
+
+## Contributing and project docs
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — toolchain, workflow, and DCO sign-off
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map and where to start reading
+- [SECURITY.md](SECURITY.md) — how to report vulnerabilities
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [NOTICE.md](NOTICE.md) — third-party notices
+
+## Third-party notices
+
+VibeLink bundles Microsoft ConPTY (`conpty.dll` / `OpenConsole.exe`, MIT), the Geist variable font (SIL OFL 1.1), and third-party agent brand icons used nominatively to indicate interoperability. Full attributions and license pointers are in [NOTICE.md](NOTICE.md).
+
+## License
+
+VibeLink is licensed under [GPL-3.0-only](https://www.gnu.org/licenses/gpl-3.0.txt). The full text ships as the `LICENSE` file at the repository root.

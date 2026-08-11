@@ -202,10 +202,7 @@ fn authenticated_client_sends_valid_current_proof() {
         nonce,
         expires_at_unix_ms: unix_time_millis_for_test() + 3_000,
     };
-    let authenticated = DaemonToClient::Authenticated {
-        policy_epoch: 8,
-        lease_until_unix_ms: unix_time_millis_for_test() + 90_000,
-    };
+    let authenticated = DaemonToClient::Authenticated;
     let mut stream = ScriptedStream::with_responses(&[challenge, authenticated]);
 
     let result = authenticate_daemon_stream_with_client_id(
@@ -217,7 +214,7 @@ fn authenticated_client_sends_valid_current_proof() {
     .expect("valid proof accepted");
     let messages = stream.written_messages();
 
-    assert_eq!(result.policy_epoch, 8);
+    assert_eq!(result, AuthenticatedDaemon);
     assert_eq!(
         messages[0],
         ClientToDaemon::Hello {

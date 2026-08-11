@@ -61,7 +61,7 @@ beforeEach(() => {
   })
   useGitStore.setState({ sessions: {} })
   useExplorerStore.setState({ sessions: {} })
-  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], license: { ready: true, status: { state: 'development', entitled: true } as never } })
+  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }] })
 })
 
 test('refreshes active branches when polling observes a new HEAD commit', async () => {

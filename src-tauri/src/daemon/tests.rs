@@ -1,5 +1,4 @@
 use super::*;
-use crate::app::authorization::AuthorizationState;
 use std::io::Cursor;
 
 struct AdmissionScript {
@@ -60,24 +59,6 @@ fn oversized_daemon_log_replaces_the_previous_generation() {
         DAEMON_LOG_ROTATE_LIMIT + 1,
     );
     let _ = fs::remove_dir_all(root);
-}
-
-fn authorization_snapshot(
-    entitled: bool,
-    lease_until: chrono::DateTime<Utc>,
-) -> AuthorizationSnapshot {
-    AuthorizationSnapshot {
-        state: if entitled {
-            AuthorizationState::ValidOnline
-        } else {
-            AuthorizationState::TrialExpired
-        },
-        entitled,
-        observed_at: Utc::now(),
-        lease_until,
-        offline_grace_until: None,
-        policy_epoch: 9,
-    }
 }
 
 fn pending_challenge() -> (PendingChallenge, [u8; 32]) {
@@ -253,7 +234,7 @@ fn wrong_secret_expired_nonce_and_replay_fail_closed() {
             &wrong_proof,
             Instant::now()
         ),
-        Err(AuthorizationErrorCode::AuthRequired)
+        Err(AdmissionError::AuthRequired)
     );
 
     let (mut expired, secret) = pending_challenge();
@@ -272,7 +253,7 @@ fn wrong_secret_expired_nonce_and_replay_fail_closed() {
             &proof,
             expired.expires_at + Duration::from_millis(1),
         ),
-        Err(AuthorizationErrorCode::AuthRequired)
+        Err(AdmissionError::AuthRequired)
     );
 
     let (mut replayed, secret) = pending_challenge();
@@ -289,7 +270,7 @@ fn wrong_secret_expired_nonce_and_replay_fail_closed() {
         .is_ok());
     assert_eq!(
         replayed.verify(&secret, replayed.client_id, &proof, Instant::now()),
-        Err(AuthorizationErrorCode::AuthRequired)
+        Err(AdmissionError::AuthRequired)
     );
 }
 
@@ -305,7 +286,7 @@ fn unauthenticated_command_and_shutdown_are_rejected_as_first_frame() {
         let mut stream = AdmissionScript::from_client_message(&message);
         assert_eq!(
             authenticate_connection(&mut stream, Uuid::new_v4(), &[7_u8; 32]),
-            Err(AuthorizationErrorCode::AuthRequired)
+            Err(AdmissionError::AuthRequired)
         );
         assert_eq!(
             stream.response(),
@@ -315,61 +296,6 @@ fn unauthenticated_command_and_shutdown_are_rejected_as_first_frame() {
             }
         );
     }
-}
-
-#[test]
-fn expired_entitlement_and_logout_fail_next_request_with_stable_codes() {
-    let message = ClientToDaemon::WritePane {
-        req: 1,
-        session_id: Uuid::new_v4(),
-        pane_id: Uuid::new_v4(),
-        data: b"whoami\r".to_vec(),
-        origin: crate::protocol::PaneCommandOrigin::Desktop,
-    };
-    let active = authorization_snapshot(true, Utc::now() + chrono::Duration::minutes(1));
-    assert_eq!(
-        authorize_daemon_message_with(&message, ClientKind::Cli, || Ok(active)),
-        Ok(())
-    );
-
-    let logged_out = authorization_snapshot(false, Utc::now());
-    assert_eq!(
-        authorize_daemon_message_with(&message, ClientKind::Cli, || Ok(logged_out)),
-        Err(AuthorizationErrorCode::EntitlementRequired)
-    );
-
-    let expired = authorization_snapshot(true, Utc::now() - chrono::Duration::milliseconds(1));
-    assert_eq!(
-        authorize_daemon_message_with(&message, ClientKind::App, || Ok(expired)),
-        Err(AuthorizationErrorCode::AuthorizationStale)
-    );
-}
-
-#[test]
-fn stale_policy_heartbeat_requires_daemon_shutdown() {
-    let heartbeat = Mutex::new(PolicyHeartbeat {
-        deadline: Some(Instant::now() - Duration::from_millis(1)),
-        policy_epoch: 12,
-        revoked: false,
-    });
-
-    assert_eq!(
-        heartbeat_revocation(&heartbeat, Instant::now()),
-        Some((AuthorizationErrorCode::AuthorizationStale, 12, true))
-    );
-}
-
-#[test]
-fn heartbeat_lease_is_bounded_to_ninety_seconds() {
-    let mut heartbeat = PolicyHeartbeat::default();
-    heartbeat.update(authorization_snapshot(
-        true,
-        Utc::now() + chrono::Duration::hours(1),
-    ));
-    let deadline = heartbeat.deadline.expect("heartbeat deadline");
-
-    assert!(deadline <= Instant::now() + POLICY_HEARTBEAT_TTL);
-    assert!(!heartbeat.revoked);
 }
 
 #[test]

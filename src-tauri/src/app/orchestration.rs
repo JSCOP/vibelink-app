@@ -1,21 +1,15 @@
-use super::{authorization::Capability, entitlement::EntitlementSupervisor, spawn_daemon};
+use super::spawn_daemon;
 use crate::protocol::{read_frame, write_frame, ClientToDaemon, DaemonToClient, ReplyResult};
 use anyhow::{bail, Context, Result};
 use interprocess::local_socket::prelude::*;
-use std::sync::Arc;
-use tauri::State;
 use uuid::Uuid;
 
 #[tauri::command]
 pub async fn orchestration_request(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     method: String,
     payload_json: String,
     operation_id: String,
 ) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let operation_id =
             Uuid::parse_str(&operation_id).context("invalid orchestration operation id")?;

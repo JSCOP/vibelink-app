@@ -1,13 +1,11 @@
-use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+
 const SKILL_ROOT: &str = "skills";
 const GLOBAL_SCOPE_DIR: &str = "global";
 const WORKSPACE_SCOPE_DIR: &str = "workspaces";
@@ -113,12 +111,8 @@ const LEGACY_BUILTIN_SKILLS: &[LegacyBuiltinSkill] = &[
 
 #[tauri::command]
 pub async fn vibelink_skill_list(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: Option<String>,
 ) -> Result<Vec<SkillEntry>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || list_skills(session_id.as_deref()))
         .await
         .map_err(to_string)?
@@ -127,14 +121,10 @@ pub async fn vibelink_skill_list(
 
 #[tauri::command]
 pub async fn vibelink_skill_get(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     id: String,
     session_id: Option<String>,
     scope: Option<SkillScope>,
 ) -> Result<SkillEntry, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || get_skill(&id, session_id.as_deref(), scope))
         .await
         .map_err(to_string)?
@@ -143,12 +133,8 @@ pub async fn vibelink_skill_get(
 
 #[tauri::command]
 pub async fn vibelink_skill_apply(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     input: SkillApplyInput,
 ) -> Result<SkillEntry, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || apply_skill(input))
         .await
         .map_err(to_string)?
@@ -157,14 +143,10 @@ pub async fn vibelink_skill_apply(
 
 #[tauri::command]
 pub async fn vibelink_skill_delete(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     id: String,
     session_id: Option<String>,
     scope: Option<SkillScope>,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || delete_skill(&id, session_id.as_deref(), scope))
         .await
         .map_err(to_string)?

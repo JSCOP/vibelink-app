@@ -194,7 +194,6 @@ type BranchesModel = {
 }
 
 export type GitWorkspaceController = {
-  entitled: boolean
   sessionId: string | null
   workspaceFolder: string | null
   activeRepoRoot: string
@@ -290,7 +289,6 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   const sessionId = useWorkspaceStore((state) => state.activeSessionId ?? null)
   const sessions = useWorkspaceStore((state) => state.sessions)
   const worktrees = useWorkspaceStore((state) => state.worktreeProjections)
-  const entitled = useWorkspaceStore((state) => Boolean(state.license.ready && state.license.status?.entitled))
   const workspaceGroups = useWorkspaceStore((state) => state.settings.workspaceGroups)
   const workspaceGroupIds = useWorkspaceStore((state) => state.settings.workspaceGroupIds)
   const workspaceFolder = useMemo(() => sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null, [sessionId, sessions])
@@ -378,7 +376,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   }, [discoveredRepositoryTargets, gitState, workspaceFolder])
 
   const refreshRepositoryDiscovery = useCallback(async () => {
-    if (!entitled || !sessionId || !workspaceFolder) return
+    if (!sessionId || !workspaceFolder) return
     const generation = repositoryDiscoveryGeneration.current + 1
     repositoryDiscoveryGeneration.current = generation
     setRepositoryDiscoveryLoading(true)
@@ -396,7 +394,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     } finally {
       if (repositoryDiscoveryGeneration.current === generation) setRepositoryDiscoveryLoading(false)
     }
-  }, [entitled, refreshRepository, repositoryDiscoveryFolders, sessionId, workspaceFolder])
+  }, [refreshRepository, repositoryDiscoveryFolders, sessionId, workspaceFolder])
 
   const selectedRelativePath = useMemo(() => {
     if (!gitState.selectedPath || gitState.selectedRepoRoot !== activeRepoRoot) return null
@@ -413,7 +411,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   } : null, [activeWorktree, repoInfo?.headSha, reviewBaseHead])
 
   const refreshReview = useCallback(async () => {
-    if (!entitled || !activeWorktree || !activeWorkspaceFolder) {
+    if (!activeWorktree || !activeWorkspaceFolder) {
       setReviewBaseHead(null)
       setReviewComments([])
       setReviewCheckpoints([])
@@ -466,7 +464,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     } finally {
       setReviewLoading(false)
     }
-  }, [activeWorkspaceFolder, activeWorktree, entitled, repoInfo?.headSha])
+  }, [activeWorkspaceFolder, activeWorktree, repoInfo?.headSha])
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refreshReview() }, 0)
@@ -474,12 +472,12 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   }, [diffRefreshRevision, refreshReview])
 
   const refresh = useCallback(async () => {
-    if (!entitled || !sessionId) return
+    if (!sessionId) return
     await refreshRepository(sessionId, workspaceFolder, activeRepoRoot)
-  }, [activeRepoRoot, entitled, refreshRepository, sessionId, workspaceFolder])
+  }, [activeRepoRoot, refreshRepository, sessionId, workspaceFolder])
 
   useEffect(() => {
-    if (!entitled || !sessionId) return
+    if (!sessionId) return
     const refreshVisible = () => {
       if (document.visibilityState === 'visible') void refresh()
     }
@@ -490,23 +488,23 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
       window.clearInterval(timer)
       window.removeEventListener('focus', refreshVisible)
     }
-  }, [entitled, pollIntervalMs, refresh, sessionId])
+  }, [pollIntervalMs, refresh, sessionId])
   useEffect(() => {
-    if (!entitled || !sessionId) return
+    if (!sessionId) return
     if (!repoInfo?.headSha && gitState.activeTab !== 'assigned') return
     void refreshHosting(sessionId, workspaceFolder, 'HEAD', false, activeRepoRoot)
-  }, [activeRepoRoot, entitled, gitState.activeTab, refreshHosting, repoInfo?.headSha, sessionId, workspaceFolder])
+  }, [activeRepoRoot, gitState.activeTab, refreshHosting, repoInfo?.headSha, sessionId, workspaceFolder])
 
 
   useEffect(() => {
     setDiscoveredRepositoryTargets([])
     setRepositoryDiscoveryError(null)
     setRepositoryDiscoveryLoading(false)
-    if (entitled && sessionId && workspaceFolder) void refreshRepositoryDiscovery()
+    if (sessionId && workspaceFolder) void refreshRepositoryDiscovery()
     return () => {
       repositoryDiscoveryGeneration.current += 1
     }
-  }, [entitled, refreshRepositoryDiscovery, sessionId, workspaceFolder])
+  }, [refreshRepositoryDiscovery, sessionId, workspaceFolder])
 
   const orderedEntries = useMemo(
     () => [...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked],
@@ -576,10 +574,10 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   }, [activeRemoteComparison, activeWorkspaceFolder, diffRefreshRevision, selectedArea, selectedPath])
 
   const runMutation = useCallback(async (operation: () => Promise<unknown>) => {
-    if (!entitled || !sessionId || !workspaceFolder) return
+    if (!sessionId || !workspaceFolder) return
     await runGitMutation(sessionId, workspaceFolder, operation, activeRepoRoot)
     setDiffRefreshRevision((current) => current + 1)
-  }, [activeRepoRoot, entitled, runGitMutation, sessionId, workspaceFolder])
+  }, [activeRepoRoot, runGitMutation, sessionId, workspaceFolder])
 
   const mutate = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     void runMutation(operation).then(after).catch(() => {})
@@ -904,7 +902,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   }, [historyAuthor])
 
   const loadHistory = useCallback(async (reset: boolean) => {
-    if (!entitled || !activeWorkspaceFolder || !historyActivated) return
+    if (!activeWorkspaceFolder || !historyActivated) return
     const generation = reset ? historyRequestGeneration.current + 1 : historyRequestGeneration.current
     if (reset) historyRequestGeneration.current = generation
     setHistoryLoading(true)
@@ -941,7 +939,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     } finally {
       if (historyRequestGeneration.current === generation) setHistoryLoading(false)
     }
-  }, [activeWorkspaceFolder, debouncedHistoryAuthor, debouncedHistorySearch, entitled, gitState.pathFilter, historyActivated])
+  }, [activeWorkspaceFolder, debouncedHistoryAuthor, debouncedHistorySearch, gitState.pathFilter, historyActivated])
 
   useEffect(() => {
     if (historyActivated) void loadHistory(true)
@@ -1077,7 +1075,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   const [includeUntracked, setIncludeUntracked] = useState(false)
 
   const loadBranches = useCallback(async () => {
-    if (!entitled || !activeWorkspaceFolder || !branchesActivated) return
+    if (!activeWorkspaceFolder || !branchesActivated) return
     setBranchesLoading(true)
     setBranchesError(null)
     try {
@@ -1103,7 +1101,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     } finally {
       setBranchesLoading(false)
     }
-  }, [activeWorkspaceFolder, branchesActivated, entitled, repoInfo?.branch, repoInfo?.upstream])
+  }, [activeWorkspaceFolder, branchesActivated, repoInfo?.branch, repoInfo?.upstream])
 
   useEffect(() => {
     setCompareFiles([])
@@ -1122,7 +1120,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   // the repository is known, on idle so the workspace load keeps the main
   // thread, with a timeout so a busy workspace cannot starve the warm-up.
   useEffect(() => {
-    if (!entitled || !repoInfo?.isRepo) return
+    if (!repoInfo?.isRepo) return
     const warm = () => {
       setHistoryActivated(true)
       setBranchesActivated(true)
@@ -1133,7 +1131,7 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     }
     const handle = requestIdleCallback(warm, { timeout: 3_000 })
     return () => cancelIdleCallback(handle)
-  }, [activeRepoRoot, entitled, repoInfo?.isRepo])
+  }, [activeRepoRoot, repoInfo?.isRepo])
 
   const mutateBranch = useCallback((operation: () => Promise<unknown>, after?: () => void) => {
     void runMutation(operation)
@@ -1285,20 +1283,19 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
   const [cloneRunning, setCloneRunning] = useState(false)
 
   const refreshRepositoryNow = useCallback(async () => {
-    if (!entitled || !sessionId) return
+    if (!sessionId) return
     await refreshRepository(sessionId, workspaceFolder, activeRepoRoot)
-  }, [activeRepoRoot, entitled, refreshRepository, sessionId, workspaceFolder])
+  }, [activeRepoRoot, refreshRepository, sessionId, workspaceFolder])
   const refreshHostingNow = useCallback(async (force = true) => {
-    if (!entitled || !sessionId) return
+    if (!sessionId) return
     await refreshHosting(sessionId, workspaceFolder, 'HEAD', force, activeRepoRoot)
-  }, [activeRepoRoot, entitled, refreshHosting, sessionId, workspaceFolder])
+  }, [activeRepoRoot, refreshHosting, sessionId, workspaceFolder])
   const refreshAll = useCallback(async () => {
     await Promise.all([refresh(), refreshRepositoryDiscovery()])
     setDiffRefreshRevision((current) => current + 1)
   }, [refresh, refreshRepositoryDiscovery])
 
   const value = useMemo<GitWorkspaceController>(() => ({
-    entitled,
     sessionId,
     workspaceFolder,
     activeRepoRoot,
@@ -1388,7 +1385,6 @@ export function GitWorkspaceProvider({ children, pollIntervalMs = 30_000 }: GitW
     discardPaths,
     draft.amend,
     draft.message,
-    entitled,
     fetchRepo,
     gitState.activeTab,
     groups,

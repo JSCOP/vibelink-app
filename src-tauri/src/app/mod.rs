@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent_history;
 pub mod agent_hooks;
 pub mod agent_skills;
@@ -5,7 +6,6 @@ pub mod agent_skills_remote;
 pub mod agents;
 pub mod android_device_lab;
 pub mod app_update;
-pub mod authorization;
 pub mod board;
 pub mod browser;
 pub mod capture;
@@ -15,11 +15,9 @@ pub mod commands;
 pub mod computer_use;
 pub mod daemon_client;
 pub mod diagnostics;
-pub mod entitlement;
 pub mod fsops;
 pub mod git;
 pub mod hermes;
-pub mod license;
 pub mod mcp_check;
 pub mod memory;
 pub mod orchestration;
@@ -138,21 +136,13 @@ pub fn run() {
                 let boxed: Box<dyn std::error::Error> = err.into();
                 boxed
             })?;
-            let daemon_client = DaemonClient::new_with_app(stream, app.handle().clone());
-            app.manage(daemon_client.clone());
-            let hermes = Arc::new(hermes::HermesManager::new());
-            app.manage(Arc::clone(&hermes));
-            let license = Arc::new(license::LicenseService::new().map_err(|error| {
+            app.manage(DaemonClient::new_with_app(stream, app.handle().clone()));
+            app.manage(Arc::new(hermes::HermesManager::new()));
+            let account = Arc::new(account::AccountService::new().map_err(|error| {
                 let boxed: Box<dyn std::error::Error> = error.into();
                 boxed
             })?);
-            let entitlement =
-                entitlement::EntitlementSupervisor::new(Arc::clone(&license), app.handle().clone())
-                    .map_err(|error| {
-                        let boxed: Box<dyn std::error::Error> = error.into();
-                        boxed
-                    })?;
-            app.manage(license);
+            app.manage(account);
             let data_dir = crate::daemon::paths::daemon_paths()
                 .map_err(|error| {
                     let boxed: Box<dyn std::error::Error> = error.into();
@@ -189,26 +179,6 @@ pub fn run() {
                 browser_root.join("profiles"),
             )));
 
-            let hermes_observer = Arc::clone(&hermes);
-            let daemon_observer = daemon_client.clone();
-            entitlement
-                .subscribe(Arc::new(move |snapshot| {
-                    let entitled = snapshot.entitled;
-                    if let Err(error) =
-                        daemon_observer.send_authorization_heartbeat(snapshot.clone())
-                    {
-                        tracing::warn!(?error, "daemon authorization heartbeat failed");
-                    }
-                    if !entitled {
-                        hermes_observer.shutdown_all();
-                    }
-                }))
-                .map_err(|error| {
-                    let boxed: Box<dyn std::error::Error> = error.into();
-                    boxed
-                })?;
-            entitlement.start_background();
-            app.manage(entitlement);
             app.manage(capture::CaptureState::default());
             app.manage(ExitPrefs::default());
             if let Err(error) = tray::build(app.handle()) {
@@ -327,14 +297,11 @@ pub fn run() {
             hermes::hermes_workspace_state,
             hermes::agent_workspace_cleanup,
             hermes::hermes_runtime_status,
-            license::license_status,
-            license::license_revalidate,
-            license::license_deactivate_device,
-            license::license_forget_local,
-            license::account_sign_in_start,
-            license::account_sign_in_poll,
-            license::account_sign_out,
-            license::bug_report_submit,
+            account::account_status,
+            account::account_sign_in_start,
+            account::account_sign_in_poll,
+            account::account_sign_out,
+            account::bug_report_submit,
             memory::memory_add,
             memory::memory_remove,
             memory::memory_set_pinned,

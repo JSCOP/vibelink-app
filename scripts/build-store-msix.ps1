@@ -76,8 +76,8 @@ if ($IdentityName -notmatch '^[A-Za-z0-9.-]{3,50}$') {
 if ($Publisher -notmatch '^CN=') {
   throw 'Publisher must be the exact Partner Center identity subject and start with CN=.'
 }
-if ([string]::IsNullOrWhiteSpace($env:VIBELINK_LICENSE_API_URL)) {
-  throw 'VIBELINK_LICENSE_API_URL is required. Set it to https://vibelink.moobang.net for Store release builds.'
+if ([string]::IsNullOrWhiteSpace($env:VIBELINK_API_URL)) {
+  throw 'VIBELINK_API_URL is required. Set it to https://vibelink.moobang.net for Store release builds.'
 }
 if ($TrustCertificate) {
   $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())

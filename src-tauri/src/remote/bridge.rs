@@ -31,7 +31,7 @@ use super::{
 };
 use crate::dedicated_cli::{parse_args as parse_cli_args, CliControlRequest};
 use crate::{
-    app::{authorization::Capability, spawn_daemon},
+    app::spawn_daemon,
     protocol::{
         read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient, PaneCommandOrigin,
         PaneMeta, RemoteConnectionCleanupRequest, RemotePaneActivity, RemotePaneLease,
@@ -704,9 +704,6 @@ pub fn handle_connection(
     tls_config: Arc<ServerConfig>,
     shared: Arc<RemoteShared>,
 ) -> Result<()> {
-    shared
-        .authorize(Capability::RemoteConnect)
-        .map_err(|denied| anyhow!(denied.code.as_str()))?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))?;
@@ -855,14 +852,6 @@ fn authenticate(
         )?;
         bail!("protocol mismatch");
     }
-    let _authorization = match shared.authorization_guard(Capability::RemoteConnect) {
-        Ok(authorization) => authorization,
-        Err(denied) => {
-            let code = denied.code.as_str();
-            send_error(ws, code, "remote authorization denied", None)?;
-            bail!(code);
-        }
-    };
     let mut devices = shared.devices.lock().expect("remote devices mutex");
     match auth {
         AuthRequest::Pair { code, device_name } => {
@@ -975,7 +964,7 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
         serde_json::from_slice(&auth_payload).context("parse remote-v2 auth")?;
     let mut transport = handshake.finish(None)?;
     let peer_fingerprint = transport.peer_fingerprint().to_string();
-    let authorization = (|| -> Result<(String, Vec<String>, u64)> {
+    let device_access_result = (|| -> Result<(String, Vec<String>, u64)> {
         let mut devices = shared.devices.lock().expect("remote devices mutex");
         match auth.mode.as_str() {
             "pair" => {
@@ -995,23 +984,23 @@ fn handle_v2_connection(mut ws: RemoteSocket, shared: Arc<RemoteShared>) -> Resu
                 devices
                     .verify_v2_identity(&device_id, &peer_fingerprint)
                     .map_err(|_| anyhow!("remote-v2 identity verification failed"))?;
-                let authorization = devices
+                let device_access = devices
                     .v2_authorization(&device_id, &peer_fingerprint)
                     .context("remote-v2 device was revoked")?;
-                if auth.revocation_epoch != Some(authorization.revocation_epoch) {
+                if auth.revocation_epoch != Some(device_access.revocation_epoch) {
                     bail!("remote-v2 stale revocation epoch");
                 }
                 Ok((
                     device_id,
-                    authorization.grants,
-                    authorization.revocation_epoch,
+                    device_access.grants,
+                    device_access.revocation_epoch,
                 ))
             }
             _ => bail!("unsupported remote-v2 auth mode"),
         }
     })();
-    let (device_id, grants, revocation_epoch) = match authorization {
-        Ok(authorization) => authorization,
+    let (device_id, grants, revocation_epoch) = match device_access_result {
+        Ok(device_access) => device_access,
         Err(error) => {
             let _ = send_v2_auth_failure(&mut ws, &mut transport);
             return Err(error);
@@ -1188,12 +1177,12 @@ fn run_v2_authenticated(
             )?;
         }
 
-        let authorization = shared
+        let device_access = shared
             .devices
             .lock()
             .expect("remote devices mutex")
             .v2_authorization(device_id, peer_fingerprint);
-        let Some(authorization) = authorization else {
+        let Some(device_access) = device_access else {
             send_v2_session_error(
                 ws,
                 transport,
@@ -1204,13 +1193,13 @@ fn run_v2_authenticated(
             let _ = ws.send(Message::Close(None));
             break;
         };
-        if authorization.revocation_epoch != session_epoch {
+        if device_access.revocation_epoch != session_epoch {
             send_v2_session_error(
                 ws,
                 transport,
-                authorization.revocation_epoch,
+                device_access.revocation_epoch,
                 "revoked",
-                "remote device authorization changed",
+                "remote device access changed",
             )?;
             let _ = ws.send(Message::Close(None));
             break;
@@ -1225,7 +1214,7 @@ fn run_v2_authenticated(
                 Ok(RemotePush::AppearanceChanged(event)) => {
                     let ciphertext = seal_v2_appearance_changed_event(
                         transport,
-                        authorization.revocation_epoch,
+                        device_access.revocation_epoch,
                         &event,
                     )?;
                     ws.send(Message::Binary(ciphertext.into()))?;
@@ -1252,8 +1241,8 @@ fn run_v2_authenticated(
                         "protocol_mismatch",
                         "remote protocol version mismatch",
                     )
-                } else if request.revocation_epoch != authorization.revocation_epoch {
-                    v2_error(&request, "revoked", "remote device authorization is stale")
+                } else if request.revocation_epoch != device_access.revocation_epoch {
+                    v2_error(&request, "revoked", "remote device access is stale")
                 } else if Uuid::parse_str(&request.operation_id).is_err() {
                     v2_error(&request, "invalid_argument", "operationId must be a UUID")
                 } else {
@@ -1316,7 +1305,7 @@ fn run_v2_authenticated(
                             let result = if request.domain == "terminal"
                                 && request.method == "snapshot"
                             {
-                                require_grant(&authorization.grants, TERMINAL_VIEW_GRANT)
+                                require_grant(&device_access.grants, TERMINAL_VIEW_GRANT)
                                     .and_then(|_| {
                                         v2_terminal_snapshot(
                                             &request,
@@ -1334,7 +1323,7 @@ fn run_v2_authenticated(
                                     })
                             } else if request.domain == "terminal" && request.method == "subscribe"
                             {
-                                require_grant(&authorization.grants, TERMINAL_VIEW_GRANT)
+                                require_grant(&device_access.grants, TERMINAL_VIEW_GRANT)
                                     .and_then(|_| {
                                         v2_terminal_subscribe(
                                             &request,
@@ -1353,7 +1342,7 @@ fn run_v2_authenticated(
                             } else {
                                 handle_v2_request(
                                     &request,
-                                    &authorization.grants,
+                                    &device_access.grants,
                                     shared,
                                     owner_connection_id,
                                     device_id,
@@ -1416,7 +1405,7 @@ fn run_v2_authenticated(
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
             Err(error) => return Err(error.into()),
         }
-        if authorization
+        if device_access
             .grants
             .iter()
             .any(|grant| grant == TERMINAL_VIEW_GRANT || grant == "admin")
@@ -3663,9 +3652,6 @@ fn run_authenticated(
     device_id: &str,
     grants: &[String],
 ) -> Result<()> {
-    shared
-        .authorize(Capability::RemoteConnect)
-        .map_err(|denied| anyhow!(denied.code.as_str()))?;
     if !has_grant(grants, TERMINAL_VIEW_GRANT) {
         send_error(
             ws,
@@ -3719,11 +3705,6 @@ fn run_authenticated(
     let mut last_lease_renewal = Instant::now();
     let mut last_peer_activity = Instant::now();
     loop {
-        if let Err(denied) = shared.authorize(Capability::RemoteConnect) {
-            let code = denied.code.as_str();
-            let _ = send_error(ws, code, "remote authorization denied", None);
-            bail!(code);
-        }
         if close_requested.load(Ordering::Acquire) {
             let _ = ws.send(Message::Close(None));
             return Ok(());
@@ -3848,10 +3829,6 @@ fn handle_client_message(
     grants: &[String],
     message: ClientMessage,
 ) -> Result<()> {
-    if let Err(denied) = authorize_client_message(shared, &message) {
-        let code = denied.code.as_str();
-        return send_error(ws, code, "remote authorization denied", message.req_id());
-    }
     if let Some(required) = required_grant(&message) {
         if !has_grant(grants, required) {
             return send_error(
@@ -4146,23 +4123,6 @@ fn required_grant(message: &ClientMessage) -> Option<&'static str> {
 
 fn has_grant(grants: &[String], required: &str) -> bool {
     grants.iter().any(|grant| grant == required)
-}
-
-fn authorize_client_message(
-    shared: &RemoteShared,
-    message: &ClientMessage,
-) -> std::result::Result<(), crate::app::authorization::AuthorizationDenied> {
-    let capability = match message {
-        ClientMessage::AttachWorkspace { .. } | ClientMessage::ClaimPane { .. } => {
-            Some(Capability::RemoteConnect)
-        }
-        ClientMessage::WritePane { .. } => Some(Capability::TerminalWrite),
-        _ => None,
-    };
-    if let Some(capability) = capability {
-        shared.authorize(capability)?;
-    }
-    Ok(())
 }
 
 fn handle_daemon_control(
@@ -5479,90 +5439,5 @@ mod tests {
             frame,
             vec![0, 6, b'p', b'a', b'n', b'e', b'-', b'1', b'a', b'b', b'c']
         );
-    }
-    fn authorization_messages() -> Vec<ClientMessage> {
-        vec![
-            ClientMessage::AttachWorkspace {
-                session_id: Uuid::new_v4().to_string(),
-                req_id: Some(1),
-            },
-            ClientMessage::WritePane {
-                pane_id: Uuid::new_v4().to_string(),
-                data: "input".to_string(),
-                req_id: Some(2),
-            },
-            ClientMessage::ClaimPane {
-                pane_id: Uuid::new_v4().to_string(),
-                cols: 48,
-                rows: 32,
-                req_id: Some(3),
-            },
-        ]
-    }
-
-    fn authorization_snapshot(
-        entitled: bool,
-        lease_until: chrono::DateTime<chrono::Utc>,
-    ) -> crate::app::authorization::AuthorizationSnapshot {
-        crate::app::authorization::AuthorizationSnapshot {
-            state: if entitled {
-                crate::app::authorization::AuthorizationState::ValidOnline
-            } else {
-                crate::app::authorization::AuthorizationState::TrialExpired
-            },
-            entitled,
-            observed_at: chrono::Utc::now(),
-            lease_until,
-            offline_grace_until: None,
-            policy_epoch: 9,
-        }
-    }
-
-    #[test]
-    fn authorization_denies_remote_resume_input_and_new_leases_but_allows_entitled_v1_messages() {
-        let directory = std::env::temp_dir().join(format!(
-            "vibelink-remote-bridge-authorization-{}",
-            Uuid::new_v4()
-        ));
-        let server = crate::remote::server::RemoteServer::new(directory.clone())
-            .expect("create remote server");
-
-        for message in authorization_messages() {
-            assert_eq!(
-                authorize_client_message(&server.shared, &message)
-                    .expect_err("unentitled message must fail")
-                    .code
-                    .as_str(),
-                "ENTITLEMENT_REQUIRED"
-            );
-        }
-
-        server
-            .update_authorization(authorization_snapshot(
-                true,
-                chrono::Utc::now() - chrono::Duration::milliseconds(1),
-            ))
-            .expect("store stale authorization");
-        for message in authorization_messages() {
-            assert_eq!(
-                authorize_client_message(&server.shared, &message)
-                    .expect_err("stale message must fail")
-                    .code
-                    .as_str(),
-                "AUTHORIZATION_STALE"
-            );
-        }
-
-        server
-            .update_authorization(authorization_snapshot(
-                true,
-                chrono::Utc::now() + chrono::Duration::minutes(1),
-            ))
-            .expect("authorize remote");
-        for message in authorization_messages() {
-            authorize_client_message(&server.shared, &message)
-                .expect("entitled protocol-v1 message must remain authorized");
-        }
-        let _ = std::fs::remove_dir_all(directory);
     }
 }

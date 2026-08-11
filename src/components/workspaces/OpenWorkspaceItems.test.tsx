@@ -6,7 +6,6 @@ import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '..
 import { clearOpenContentSnapshot, publishOpenContentSnapshot } from '../../layout/openContentRegistry'
 import { workspaceContentPanelId } from '../../layout/workspaceContentModel'
 import { builtInContentComponents } from '../../layout/WorkspaceView'
-import { useWorkspaceStore } from '../../state/store'
 import { OpenWorkspaceItems } from './OpenWorkspaceItems'
 
 vi.mock('../AutomationPanel', () => ({
@@ -227,11 +226,9 @@ describe('OpenWorkspaceItems', () => {
 describe('WorkspaceView edge panel visibility', () => {
   afterEach(() => {
     cleanup()
-    useWorkspaceStore.setState({ license: { ready: false, status: null } })
   })
 
-  test('passes Dockview visibility to all data-gated edge panel consumers', () => {
-    useWorkspaceStore.setState({ license: { ready: true, status: { state: 'development', entitled: true } as never } })
+  test('passes Dockview visibility to all edge panel consumers', () => {
     const edge = fakeEdgePanelApi()
     const GitHistory = builtInContentComponents.gitHistory
     const GitBranches = builtInContentComponents.gitBranches

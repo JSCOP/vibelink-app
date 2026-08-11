@@ -64,7 +64,7 @@ jobs:
     runs-on: windows-latest
     environment: release
     env:
-      VIBELINK_LICENSE_API_URL: https://vibelink.moobang.net
+      VIBELINK_API_URL: https://vibelink.moobang.net
       STORE_IDENTITY_NAME: ${{ vars.STORE_IDENTITY_NAME }}
       STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER }}
       STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.STORE_PUBLISHER_DISPLAY_NAME }}
@@ -124,7 +124,7 @@ jobs:
     runs-on: windows-latest
     environment: release
     env:
-      VIBELINK_LICENSE_API_URL: https://vibelink.moobang.net
+      VIBELINK_API_URL: https://vibelink.moobang.net
       RELEASE_VERSION: ${{ needs.release-contract.outputs.version }}
       RELEASE_REPOSITORY: ${{ needs.release-contract.outputs.repository }}
       EXE_NAME: ${{ needs.release-contract.outputs.exe_name }}

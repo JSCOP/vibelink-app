@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { CheckCircle2, Circle, Palette, Type } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { terminalThemeDefinitionById, type TerminalThemeId } from '../state/terminalThemes'
 import { applyThemeToDocument } from '../state/themePreview'
 import { useWorkspaceStore } from '../state/store'
@@ -18,17 +18,14 @@ export type SetupWizardProps = {
 
 export function SetupWizard({ onComplete, onOpenSettings }: SetupWizardProps) {
   const settings = useWorkspaceStore((state) => state.settings)
-  const license = useWorkspaceStore((state) => state.license)
   const updateSettings = useWorkspaceStore((state) => state.updateSettings)
   const [stepIndex, setStepIndex] = useState(0)
   const [skippedSteps, setSkippedSteps] = useState<SetupStepId[]>(() => settings.setupWizard.skippedSteps.filter(isSetupStepId))
   const [installedFonts, setInstalledFonts] = useState<string[]>([])
   const [picker, setPicker] = useState<'theme' | 'font' | null>(null)
-  const entitled = Boolean(license.status?.entitled)
-  const developmentMode = license.status?.state === 'development'
   const step = setupStepIds[stepIndex]
   const selectedTheme = terminalThemeDefinitionById(settings.terminalThemeId)
-  const autoPass = useMemo(() => setupStepAutoPass({ entitled }), [entitled])
+  const autoPass = setupStepAutoPass()
 
   useEffect(() => {
     let cancelled = false
@@ -127,7 +124,7 @@ export function SetupWizard({ onComplete, onOpenSettings }: SetupWizardProps) {
           {step === 'welcome' ? (
             <div className="setup-wizard-panel">
               <h3>Make VibeLink yours in a few quick steps.</h3>
-              <p>Connect your account and choose a theme and terminal font. Agent CLI sign-in, Hermes, and MCP checks can wait until you need them.</p>
+              <p>Optionally connect your account, then choose a theme and terminal font. Agent CLI sign-in, Hermes, and MCP checks can wait until you need them.</p>
               <div className="setup-wizard-actions">
                 <button type="button" className="primary-action" onClick={next}>Start setup</button>
                 <button type="button" onClick={skipEverything}>Skip everything</button>
@@ -137,19 +134,11 @@ export function SetupWizard({ onComplete, onOpenSettings }: SetupWizardProps) {
 
           {step === 'account' ? (
             <div className="setup-wizard-panel">
-              {developmentMode ? (
-                <>
-                  <h3>Development entitlement is active.</h3>
-                  <p>Account and trial checks are skipped only in this debug build. Release builds still require a Moobang account entitlement.</p>
-                </>
-              ) : (
-                <>
-                  <AccountSignIn onActivated={next} />
-                  <p>Sign in with your Moobang account to start your 7-day free trial. Every feature is unlocked during the trial.</p>
-                </>
-              )}
+              <h3>Moobang account sign-in is optional.</h3>
+              <AccountSignIn onActivated={next} />
+              <p>Sign in only if you want to submit bug reports. You can continue without an account.</p>
               <div className="setup-wizard-actions">
-                <button type="button" className="primary-action" disabled={!entitled} onClick={next}>Continue</button>
+                <button type="button" className="primary-action" onClick={next}>Continue</button>
               </div>
             </div>
           ) : null}
@@ -187,7 +176,7 @@ export function SetupWizard({ onComplete, onOpenSettings }: SetupWizardProps) {
             <div className="setup-wizard-panel">
               <h3>VibeLink is ready.</h3>
               <ul className="setup-finish-summary">
-                <li>{developmentMode ? 'Development entitlement active' : entitled ? 'Moobang account connected' : 'Account setup skipped'}</li>
+                <li>Account sign-in is optional for bug reports.</li>
                 <li>Theme: {selectedTheme.name}</li>
                 <li>Terminal font: {settings.fontFamily}</li>
               </ul>

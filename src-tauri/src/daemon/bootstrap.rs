@@ -77,8 +77,7 @@ fn run_inner() -> Result<()> {
 
     let ipc_secret = Arc::new(load_or_create_ipc_secret()?);
     let boot_id = Uuid::new_v4();
-    let policy_heartbeat = Arc::new(Mutex::new(PolicyHeartbeat::default()));
-    let connections = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let connections = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let sessions_path = Arc::new(paths.sessions.clone());
     crate::dedicated_cli::browser_extension::start_for_daemon(&sessions_path);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -91,13 +90,6 @@ fn run_inner() -> Result<()> {
         Arc::clone(&worktrees),
     )?;
     start_remote_pane_lease_expiry_sweep(Arc::clone(&state), Arc::clone(&shutdown))?;
-    spawn_policy_monitor(
-        Arc::clone(&state),
-        Arc::clone(&sessions_path),
-        Arc::clone(&connections),
-        Arc::clone(&policy_heartbeat),
-        Arc::clone(&shutdown),
-    )?;
     start_lifecycle_monitor(
         Arc::clone(&state),
         Arc::clone(&sessions_path),
@@ -130,7 +122,6 @@ fn run_inner() -> Result<()> {
                 let worktrees = Arc::clone(&worktrees);
                 let remote = Arc::clone(&remote);
                 let ipc_secret = Arc::clone(&ipc_secret);
-                let policy_heartbeat = Arc::clone(&policy_heartbeat);
                 let connections = Arc::clone(&connections);
                 thread::Builder::new()
                     .name("vibelink-daemon-client".to_string())
@@ -150,7 +141,6 @@ fn run_inner() -> Result<()> {
                             computer,
                             boot_id,
                             ipc_secret,
-                            policy_heartbeat,
                             connections,
                         )
                     })?;

@@ -1,7 +1,17 @@
 {
   "name": "vibelink",
   "private": true,
-  "version": "0.5.27",
+  "version": "0.6.0",
+  "license": "GPL-3.0-only",
+  "author": "JSCOP",
+  "homepage": "https://vibelink.moobang.net",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JSCOP/vibelink-app.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JSCOP/vibelink-app/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -117,6 +117,7 @@ describe('terminal session change reloads', () => {
       if (command === 'list_sessions') return [session]
       if (command === 'worktree_registry_list') return []
       if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
+      if (command === 'board_read') return JSON.stringify({ revision: 0, tasks: {}, taskOrder: [] })
       if (command === 'terminal_ws_port') return 42800
       return null
     })
@@ -128,7 +129,7 @@ describe('terminal session change reloads', () => {
       activePaneId: undefined,
       panes: {},
       layoutJson: null,
-      license: { ready: false, status: null },
+      account: { ready: false, status: null },
       paneCompletionHighlights: {},
       completionHistory: [],
       paneReviewMarkers: {},
@@ -198,7 +199,7 @@ describe('terminal session change reloads', () => {
     expect(useWorkspaceStore.getState().completionHistory).toHaveLength(8)
     expect(useWorkspaceStore.getState().completionHistory[0]).toMatchObject({ agent: 'omp', sessionId: session.id, read: false })
   })
-  test('does not create a completion alert for task done', async () => {
+  test('refreshes the board for task changes while signed out without creating a completion alert', async () => {
     await startTerminalOutputStream({ force: true })
 
     emitTerminalEvent?.({
@@ -207,6 +208,7 @@ describe('terminal session change reloads', () => {
       signal: { kind: 'done', taskId: 'task-1', paneId: pane.id },
     })
 
+    expect(invoke).toHaveBeenCalledWith('board_read', { sessionId: session.id })
     expect(useWorkspaceStore.getState().paneCompletionHighlights).toEqual({})
     expect(useWorkspaceStore.getState().completionHistory).toEqual([])
   })

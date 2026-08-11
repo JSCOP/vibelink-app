@@ -2,13 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { Channel, invoke } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
 import { register, unregister } from '@tauri-apps/plugin-global-shortcut'
 import { Activity, AlertTriangle, Bug, Camera, Eraser, LayoutGrid, Minus, Settings2, Sparkles, Square, Video, X } from 'lucide-react'
 import { useAppChromeStore } from './state/appChrome'
-import { AppLockedScreen } from './components/AppLockedScreen'
 import { AppDialogHost } from './components/AppDialog'
 import { ToastHost } from './components/toast/ToastHost'
 import { useDaemonReplacementNotice } from './components/toast/daemonReplacementNotice'
@@ -36,7 +35,6 @@ import { isAgentPane, selectedProfileForWorkspace } from './state/profiles'
 import { buildAttentionByWorkspace, deriveVisibleWorkspaceOrder } from './state/worktreeAttention'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
-import { isAppLocked } from './state/licenseGate'
 import { buildRemoteAppearance } from './remote/appearancePayload'
 import { applyRemotePaneLeaseEvent, type RemotePaneLeaseEvent } from './remote/paneLease'
 import { desktopSelectionPayload } from './remote/desktopSelection'
@@ -87,13 +85,13 @@ function hermesWarmupStatus(commandOverride: string | null): Promise<HermesRunti
   return hermesWarmupRuntime.promise
 }
 
-function RuntimeIdentityBadge({ floating = false }: { floating?: boolean }) {
+function RuntimeIdentityBadge() {
   const badge = appRuntimeIdentity.badge
   if (!badge) return null
 
   return (
     <div
-      className={`runtime-identity-badge runtime-identity-${appRuntimeIdentity.kind}${floating ? ' runtime-identity-badge-floating' : ''}`}
+      className={`runtime-identity-badge runtime-identity-${appRuntimeIdentity.kind}`}
       role="status"
       aria-label={badge.description}
       title={badge.description}
@@ -160,9 +158,7 @@ function App() {
   const error = useWorkspaceStore((state) => state.error)
   const dismissError = useWorkspaceStore((state) => state.dismissError)
   const bootstrap = useWorkspaceStore((state) => state.bootstrap)
-  const license = useWorkspaceStore((state) => state.license)
-  const revalidateLicense = useWorkspaceStore((state) => state.revalidateLicense)
-  const refreshLicense = useWorkspaceStore((state) => state.refreshLicense)
+  const account = useWorkspaceStore((state) => state.account)
   const createSession = useWorkspaceStore((state) => state.createSession)
   const renameSession = useWorkspaceStore((state) => state.renameSession)
   const deleteSession = useWorkspaceStore((state) => state.deleteSession)
@@ -199,8 +195,7 @@ function App() {
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const editingWorkspace = sessions.find((session) => session.id === editingWorkspaceId) ?? null
   const activeProfile = selectedProfileForWorkspace(settings, activeSessionId)
-  const appLocked = status === 'ready' && license.ready && isAppLocked(license.status)
-  const setupWizardVisible = !appLocked && (isSetupWizardOpen || (status === 'ready' && license.ready && settings.setupWizard.completedAt === null))
+  const setupWizardVisible = isSetupWizardOpen || (status === 'ready' && account.ready && settings.setupWizard.completedAt === null)
   const [startupLastActiveSessionId] = useState(() => window.localStorage.getItem('vibelink:lastActiveSessionId'))
   const startupDialogVisible = status === 'ready' && !setupWizardVisible && !activeSessionId && !isCreateOpen
   const appWorkspaceInteractionSuspended = isSettingsOpen
@@ -306,31 +301,6 @@ function App() {
   }, [bootstrap])
 
   useEffect(() => startAppUpdateChecks(), [])
-
-  useEffect(() => {
-    let disposed = false
-    let unlisten: (() => void) | undefined
-    void listen('authorization://changed', () => {
-      if (!disposed) void refreshLicense()
-    }).then((dispose) => {
-      if (disposed) dispose()
-      else unlisten = dispose
-    })
-    return () => {
-      disposed = true
-      unlisten?.()
-    }
-  }, [refreshLicense])
-
-
-  useEffect(() => {
-    if (!appLocked) return
-    // A completed purchase or sign-in should unlock promptly, so revalidate
-    // whenever the locked window regains focus.
-    const onFocus = () => { void revalidateLicense() }
-    window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
-  }, [appLocked, revalidateLicense])
 
   useEffect(() => {
     if (!activeSessionId || !activeSession?.workspaceFolder) return
@@ -666,7 +636,7 @@ function App() {
   }, [settings.inactiveTerminalUpdatesPerSecond])
 
   useEffect(() => {
-    if (!activeSessionId || !license.ready || !license.status?.entitled) return
+    if (!activeSessionId) return
     const sessionId = activeSessionId
     const workspaceFolder = activeSession?.workspaceFolder ?? null
     const commandOverride = settings.hermesCommand || null
@@ -677,7 +647,7 @@ function App() {
         ? startHermesAgent({ sessionId, commandOverride, workspaceFolder })
         : undefined)
       .catch(() => {})
-  }, [activeSessionId, activeSession?.workspaceFolder, license.ready, license.status?.entitled, settings.hermesCommand])
+  }, [activeSessionId, activeSession?.workspaceFolder, settings.hermesCommand])
 
   useEffect(() => {
     // Suppress the stock WebView2 context menu (Back/Reload/Print/...) —
@@ -882,18 +852,6 @@ function App() {
 
   const ffmpegDownloadPercent = ffmpegDownload ? ffmpegProgressPercent(ffmpegDownload) : null
   const ffmpegDownloadLabel = ffmpegDownload ? formatFfmpegProgress(ffmpegDownload) : ''
-
-  if (appLocked) {
-    return (
-      <main className="app-shell app-shell-locked" data-vibelink-runtime={appRuntimeIdentity.kind} data-vibelink-protected={String(appRuntimeIdentity.protected)} style={{ '--vibelink-ui-scale': settings.uiScale } as CSSProperties}>
-        <RuntimeIdentityBadge floating />
-        <AppLockedScreen onReportBug={license.status?.email ? openBugReport : undefined} />
-        <Suspense fallback={null}>
-          {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
-        </Suspense>
-      </main>
-    )
-  }
 
   return (
     <>

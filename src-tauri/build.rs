@@ -10,7 +10,7 @@ const CONPTY_RESOURCES: [&str; 2] = [
     "resources/conpty/x64/OpenConsole.exe",
 ];
 
-const RELEASE_LICENSE_ORIGIN: &str = "https://vibelink.moobang.net";
+const DEFAULT_API_ORIGIN: &str = "https://vibelink.moobang.net";
 
 #[cfg(windows)]
 fn files_identical(source: &Path, destination: &Path) -> io::Result<bool> {
@@ -80,38 +80,31 @@ fn stage_conpty_runtime() -> io::Result<()> {
 }
 
 fn main() {
-    let configured = std::env::var("VIBELINK_LICENSE_API_URL").ok();
-    let raw = configured.as_deref().unwrap_or_else(|| {
-        if cfg!(debug_assertions) {
-            "http://localhost:3000"
-        } else {
-            panic!("VIBELINK_LICENSE_API_URL is required for release builds")
-        }
-    });
-    let url = Url::parse(raw).expect("VIBELINK_LICENSE_API_URL must be an absolute URL");
+    // Forks build against their own backend, so the origin is configurable in
+    // every profile and only has to be a credential-free HTTP(S) origin.
+    let configured = std::env::var("VIBELINK_API_URL").ok();
+    let raw = configured.as_deref().unwrap_or(DEFAULT_API_ORIGIN);
+    let url = Url::parse(raw).expect("VIBELINK_API_URL must be an absolute URL");
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
         || (url.path() != "/" && !url.path().is_empty())
     {
-        panic!("VIBELINK_LICENSE_API_URL must be an origin without credentials, path, query, or fragment");
-    }
-    if !cfg!(debug_assertions) && url.scheme() != "https" {
-        panic!("VIBELINK_LICENSE_API_URL must use HTTPS for release builds");
-    }
-    if !cfg!(debug_assertions) && url.origin().ascii_serialization() != RELEASE_LICENSE_ORIGIN {
-        panic!("VIBELINK_LICENSE_API_URL must be https://vibelink.moobang.net for release builds");
+        panic!("VIBELINK_API_URL must be an origin without credentials, path, query, or fragment");
     }
     if url.scheme() != "http" && url.scheme() != "https" {
-        panic!("VIBELINK_LICENSE_API_URL must use HTTP(S)");
+        panic!("VIBELINK_API_URL must use HTTP(S)");
     }
-    println!("cargo:rerun-if-env-changed=VIBELINK_LICENSE_API_URL");
+    if !cfg!(debug_assertions) && url.scheme() != "https" {
+        panic!("VIBELINK_API_URL must use HTTPS for release builds");
+    }
+    println!("cargo:rerun-if-env-changed=VIBELINK_API_URL");
     for resource in CONPTY_RESOURCES {
         println!("cargo:rerun-if-changed={resource}");
     }
     println!(
-        "cargo:rustc-env=VIBELINK_LICENSE_API_URL={}",
+        "cargo:rustc-env=VIBELINK_API_URL={}",
         url.origin().ascii_serialization()
     );
     // Library test harnesses do not receive Tauri's resource manifest. Declaring the dependency

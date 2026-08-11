@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a reproducible problem in VibeLink.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please do not include secrets, tokens, or private workspace data.
+
+  - type: input
+    id: vibelink-version
+    attributes:
+      label: VibeLink version
+      description: Include the full version shown by VibeLink.
+      placeholder: "0.6.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version and build
+      description: Include the Windows edition, version, and OS build number.
+      placeholder: "Windows 11 24H2, OS build 26100."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation-source
+    attributes:
+      label: Installation source
+      description: Which build are you using?
+      options:
+        - GitHub release
+        - Microsoft Store install
+        - Local build
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What went wrong? Include the relevant context and impact.
+      placeholder: Describe the problem clearly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest reliable sequence that reproduces the problem.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect VibeLink to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+      description: What did VibeLink do instead? Include exact error text when available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs-screenshots
+    attributes:
+      label: Logs or screenshots (optional)
+      description: Attach relevant logs or screenshots. Redact secrets, tokens, private paths, and personal data.
+
+  - type: checkboxes
+    id: windows-only
+    attributes:
+      label: Windows-only acknowledgement
+      options:
+        - label: I understand that VibeLink is Windows-only and does not build or run on macOS or Linux.
+          required: true

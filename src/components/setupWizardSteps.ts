@@ -5,12 +5,8 @@ export function isSetupStepId(value: string): value is SetupStepId {
   return setupStepIds.includes(value as SetupStepId)
 }
 
-export function setupStepAutoPass(input: {
-  entitled: boolean
-}): Partial<Record<SetupStepId, boolean>> {
-  return {
-    account: input.entitled,
-  }
+export function setupStepAutoPass(): Partial<Record<SetupStepId, boolean>> {
+  return {}
 }
 
 export function setupStepTitle(step: SetupStepId): string {

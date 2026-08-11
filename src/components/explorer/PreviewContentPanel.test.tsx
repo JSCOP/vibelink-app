@@ -56,7 +56,6 @@ beforeEach(async () => {
     workspaceEpoch: 0,
     workspaceReadyEpoch: 0,
     panes: {},
-    license: { ready: false, status: null },
     sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
     settings: normalizeSettings(defaultSettings),
   })

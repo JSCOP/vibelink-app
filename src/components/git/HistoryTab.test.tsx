@@ -53,7 +53,7 @@ beforeEach(() => {
   })
   useGitStore.setState({ sessions: {} })
   useExplorerStore.setState({ sessions: {} })
-  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], license: { ready: true, status: { state: 'development', entitled: true } as never } })
+  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }] })
 })
 
 test('loads history lazily on sidebar activation and paginates with the current skip', async () => {

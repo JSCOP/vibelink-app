@@ -1,4 +1,3 @@
-use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -6,10 +5,9 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Command, Stdio},
-    sync::{mpsc, Arc},
+    sync::mpsc,
     time::{Duration, Instant},
 };
-use tauri::State;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -30,12 +28,8 @@ pub struct McpCheckReport {
 
 #[tauri::command]
 pub async fn mcp_self_check(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     session_id: String,
 ) -> Result<McpCheckReport, String> {
-    supervisor
-        .authorize(Capability::McpCall)
-        .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let executable = super::cli_path::dedicated_cli_path()?;
         Ok::<_, anyhow::Error>(mcp_self_check_native(

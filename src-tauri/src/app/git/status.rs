@@ -1,15 +1,12 @@
 use super::exec::{git_command, git_read, git_read_output};
 use super::paths::{contain_path, validate_repo_relative_path};
 use super::{change_type_from_status, to_string, ChangeType};
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use tauri::State;
 
 const STATUS_ENTRY_LIMIT: usize = 5_000;
 
@@ -93,12 +90,8 @@ pub struct GitDirEntry {
 
 #[tauri::command]
 pub async fn git_repo_info(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<RepoInfo, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || git_repo_info_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -107,12 +100,8 @@ pub async fn git_repo_info(
 
 #[tauri::command]
 pub async fn git_working_status(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<WorkingStatus, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || git_working_status_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -121,13 +110,9 @@ pub async fn git_working_status(
 
 #[tauri::command]
 pub async fn git_check_ignored(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_paths: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         check_ignored_native(&workspace_folder, &rel_paths)
     })
@@ -138,13 +123,9 @@ pub async fn git_check_ignored(
 
 #[tauri::command]
 pub async fn git_dir_entries(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<Vec<GitDirEntry>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || dir_entries_native(&workspace_folder, &rel_path))
         .await
         .map_err(to_string)?

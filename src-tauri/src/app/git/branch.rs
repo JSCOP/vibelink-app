@@ -3,11 +3,8 @@ use super::exec::{
 };
 use super::paths::{validate_base_ref, validate_repo_relative_path};
 use super::to_string;
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::sync::Arc;
-use tauri::State;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,12 +29,8 @@ pub struct TagInfo {
 
 #[tauri::command]
 pub async fn git_branches(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<Vec<BranchInfo>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || branches_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -48,11 +41,9 @@ macro_rules! unit_command {
     ($name:ident, ($($arg:ident : $ty:ty),*), $body:expr) => {
         #[tauri::command]
         pub async fn $name(
-            supervisor: State<'_, Arc<EntitlementSupervisor>>,
             workspace_folder: String,
             $($arg: $ty),*
         ) -> Result<(), String> {
-            supervisor.authorize(Capability::WorkspaceMutate).map_err(to_string)?;
             tauri::async_runtime::spawn_blocking(move || $body(&workspace_folder, $($arg),*))
                 .await
                 .map_err(to_string)?
@@ -73,34 +64,22 @@ unit_command!(git_tag_delete, (name: String), tag_delete_native);
 
 #[tauri::command]
 pub async fn git_merge_abort(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_simple(workspace_folder, vec!["merge".into(), "--abort".into()]).await
 }
 
 #[tauri::command]
 pub async fn git_rebase_abort(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_simple(workspace_folder, vec!["rebase".into(), "--abort".into()]).await
 }
 
 #[tauri::command]
 pub async fn git_rebase_continue(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         ensure_success(git_write_output_with_env(
             &workspace_folder,
@@ -116,12 +95,8 @@ pub async fn git_rebase_continue(
 
 #[tauri::command]
 pub async fn git_tag_list(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<Vec<TagInfo>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || tag_list_native(&workspace_folder))
         .await
         .map_err(to_string)?

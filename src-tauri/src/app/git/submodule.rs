@@ -1,20 +1,13 @@
 use super::exec::git_write;
 use super::paths::validate_repo_relative_path;
 use super::to_string;
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::Result;
-use std::sync::Arc;
-use tauri::State;
 
 #[tauri::command]
 pub async fn git_submodule_update(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     path: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || submodule_update_native(&workspace_folder, &path))
         .await
         .map_err(to_string)?
@@ -23,13 +16,9 @@ pub async fn git_submodule_update(
 
 #[tauri::command]
 pub async fn git_submodule_sync(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     path: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || submodule_sync_native(&workspace_folder, &path))
         .await
         .map_err(to_string)?

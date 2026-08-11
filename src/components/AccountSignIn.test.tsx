@@ -2,7 +2,7 @@
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { LicenseStatus } from '../ipc/types'
+import type { AccountStatus } from '../ipc/types'
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
-vi.mock('../ipc/license', () => ({
+vi.mock('../ipc/account', () => ({
   pollAccountSignIn: mocks.pollAccountSignIn,
   startAccountSignIn: mocks.startAccountSignIn,
 }))
@@ -20,23 +20,7 @@ vi.mock('../state/store', () => ({ useWorkspaceStore: { setState: mocks.setState
 
 import { AccountSignIn } from './AccountSignIn'
 
-const proStatus: LicenseStatus = {
-  state: 'validOnline',
-  entitled: true,
-  provider: 'vibelink',
-  plan: 'pro',
-  email: 'account@example.com',
-  maskedKey: null,
-  activationId: 'activation-1',
-  deviceId: 'device-1',
-  deviceName: 'Desktop',
-  maxDevices: 3,
-  devices: [],
-  validatedAt: '2026-07-16T00:00:00.000Z',
-  offlineGraceUntil: '2026-07-23T00:00:00.000Z',
-  purchaseUrl: 'https://vibelink.moobang.net/checkout',
-  message: 'VibeLink Pro is active.',
-}
+const signedInStatus: AccountStatus = { signedIn: true, email: 'account@example.com' }
 
 describe('AccountSignIn', () => {
   beforeEach(() => {
@@ -57,9 +41,9 @@ describe('AccountSignIn', () => {
     vi.useRealTimers()
   })
 
-  it('opens the browser, renders the code, and applies the approved entitlement after pending polls', async () => {
+  it('opens the browser and completes sign-in when signedIn is true', async () => {
     const onActivated = vi.fn()
-    mocks.pollAccountSignIn.mockResolvedValueOnce('pending').mockResolvedValueOnce(proStatus)
+    mocks.pollAccountSignIn.mockResolvedValueOnce('pending').mockResolvedValueOnce(signedInStatus)
     render(<AccountSignIn onActivated={onActivated} />)
 
     await act(async () => {
@@ -72,30 +56,18 @@ describe('AccountSignIn', () => {
     })
 
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve() })
-    expect(mocks.pollAccountSignIn).toHaveBeenCalledTimes(1)
     expect(screen.getByText('Waiting for approval…')).toBeInTheDocument()
 
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve() })
-    expect(mocks.pollAccountSignIn).toHaveBeenCalledTimes(2)
-    expect(mocks.setState).toHaveBeenCalledWith({ license: { ready: true, status: proStatus } })
+    expect(mocks.setState).toHaveBeenCalledWith({ account: { ready: true, status: signedInStatus } })
+    expect(screen.getByText('Moobang account connected.')).toBeInTheDocument()
     expect(onActivated).toHaveBeenCalledOnce()
   })
 
-  it('keeps a transport failure from masquerading as a connected Core account', async () => {
+  it('does not report success when signedIn is false', async () => {
     const onActivated = vi.fn()
-    const unavailableStatus: LicenseStatus = {
-      ...proStatus,
-      state: 'configurationError',
-      entitled: false,
-      provider: null,
-      plan: undefined,
-      email: undefined,
-      activationId: null,
-      validatedAt: null,
-      offlineGraceUntil: null,
-      message: 'Account service is unavailable.',
-    }
-    mocks.pollAccountSignIn.mockResolvedValue(unavailableStatus)
+    const signedOutStatus: AccountStatus = { signedIn: false, email: null }
+    mocks.pollAccountSignIn.mockResolvedValue(signedOutStatus)
     render(<AccountSignIn onActivated={onActivated} />)
 
     await act(async () => {
@@ -103,8 +75,8 @@ describe('AccountSignIn', () => {
     })
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve() })
 
-    expect(mocks.setState).toHaveBeenCalledWith({ license: { ready: true, status: unavailableStatus } })
-    expect(screen.getByText('Account service is unavailable.')).toBeInTheDocument()
+    expect(mocks.setState).toHaveBeenCalledWith({ account: { ready: true, status: signedOutStatus } })
+    expect(screen.getByText('Could not finish signing in to this Moobang account.')).toBeInTheDocument()
     expect(onActivated).not.toHaveBeenCalled()
   })
 })

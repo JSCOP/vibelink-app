@@ -13,7 +13,8 @@ pub enum ErrorCode {
     /// distinct from `StaleTarget` so an agent knows to re-snapshot the page
     /// rather than re-resolve the target.
     StaleRef,
-    DeniedCapability,
+    #[serde(rename = "denied_capability")]
+    PermissionDenied,
     Conflict,
     AmbiguousSelector,
     Timeout,
@@ -86,7 +87,7 @@ impl CliError {
             ErrorCode::InvalidArguments => 2,
             ErrorCode::UnavailableRuntime => 3,
             ErrorCode::NotFound | ErrorCode::StaleTarget | ErrorCode::StaleRef => 4,
-            ErrorCode::DeniedCapability => 5,
+            ErrorCode::PermissionDenied => 5,
             ErrorCode::Conflict | ErrorCode::AmbiguousSelector => 6,
             ErrorCode::Timeout => 7,
             ErrorCode::InternalFailure => 1,

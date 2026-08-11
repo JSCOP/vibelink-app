@@ -71,7 +71,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
-import { LicenseSettings } from './LicenseSettings'
+import { AccountSettings } from './AccountSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
@@ -659,8 +659,8 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
           <SettingsSectionContext.Provider value={activeSection}>
             <div ref={settingsBodyRef} className="vl-set-body">
             {activeSection === 'account' ? (
-              <SettingsSearchTarget labels={['Sign in / account status', 'Plan & trial', 'Registered devices']}>
-                <LicenseSettings />
+              <SettingsSearchTarget labels={['Sign in / account status', 'Bug reports']}>
+                <AccountSettings />
               </SettingsSearchTarget>
             ) : null}
 

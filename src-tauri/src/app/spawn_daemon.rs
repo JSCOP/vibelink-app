@@ -34,10 +34,7 @@ const IPC_SECRET_LEN: usize = 32;
 const IPC_SECRET_ACCOUNT: &str = "daemon-ipc-secret-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AuthenticatedDaemon {
-    pub policy_epoch: u64,
-    pub lease_until_unix_ms: i64,
-}
+pub struct AuthenticatedDaemon;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,13 +154,7 @@ fn authenticate_daemon_stream_with_client_id<S: Read + Write>(
     write_frame(stream, &ClientToDaemon::Authenticate { client_id, proof })
         .context("write daemon authentication")?;
     match read_frame::<_, DaemonToClient>(stream).context("read daemon authentication result")? {
-        DaemonToClient::Authenticated {
-            policy_epoch,
-            lease_until_unix_ms,
-        } => Ok(AuthenticatedDaemon {
-            policy_epoch,
-            lease_until_unix_ms,
-        }),
+        DaemonToClient::Authenticated => Ok(AuthenticatedDaemon),
         DaemonToClient::Error { message, .. } => bail!(message),
         other => bail!("unexpected daemon authentication response: {other:?}"),
     }

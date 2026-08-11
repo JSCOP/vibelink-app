@@ -37,7 +37,7 @@ function manifest(candidateRelease = null) {
       ],
     },
     candidateRelease,
-    capabilities: { mcpTools: 19, terminalThemes: 26, keybindingActions: 24, profiles: 6, maxPanes: 12 },
+    capabilities: { mcpTools: 19, terminalThemes: 28, keybindingActions: 26, profiles: 6, maxPanes: 12 },
     commerce: {
       trialDays: 7,
       krwOneTime: 20000,
@@ -127,8 +127,8 @@ const lockFor = (sha256) => ({
 
 test('current desktop source registries match manifest counts and unique-name gates', async () => {
   const registries = await validateSourceRegistries(manifest(), desktopRoot)
-  assert.equal(registries.terminalThemes.length, 26)
-  assert.equal(registries.keybindingActions.length, 24)
+  assert.equal(registries.terminalThemes.length, 28)
+  assert.equal(registries.keybindingActions.length, 26)
   assert.equal(registries.profiles.length, 6)
   assert.equal(registries.mcpTools.length, 19)
 })
@@ -139,7 +139,7 @@ test('source registry drift fails closed', async (t) => {
   const keybindingsPath = join(root, 'src/state/keybindings.ts')
   const source = await readFile(keybindingsPath, 'utf8')
   await writeFile(keybindingsPath, source.replace(/\s*'toggleWorkspaces',\r?\n/, '\n'), 'utf8')
-  await assert.rejects(() => validateSourceRegistries(manifest(), root), /keybindingActionIds count drift: manifest=24, source=23/)
+  await assert.rejects(() => validateSourceRegistries(manifest(), root), /keybindingActionIds count drift: manifest=26, source=25/)
 })
 
 test('source registry duplicate names fail without changing the count', async (t) => {

@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
@@ -7,31 +6,10 @@ use uuid::Uuid;
 
 pub type Req = u64;
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
-pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
 pub const DAEMON_AUTH_REQUIRED: &str = "AUTH_REQUIRED";
 pub const DAEMON_PROTOCOL_MISMATCH: &str = "DAEMON_PROTOCOL_MISMATCH";
 pub const DAEMON_AUTH_DOMAIN: &[u8] = b"vibelink-daemon-auth-v1\0";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AuthorizationStateWire {
-    Trial,
-    TrialExpired,
-    ValidOnline,
-    Unlicensed,
-    ConfigurationError,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthorizationLease {
-    pub state: AuthorizationStateWire,
-    pub entitled: bool,
-    pub observed_at: DateTime<Utc>,
-    pub lease_until: DateTime<Utc>,
-    pub offline_grace_until: Option<DateTime<Utc>>,
-    pub policy_epoch: u64,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -442,9 +420,6 @@ pub enum ClientToDaemon {
     Ping {
         req: Req,
     },
-    AuthorizationHeartbeat {
-        snapshot: AuthorizationLease,
-    },
     ListSessions {
         req: Req,
     },
@@ -664,14 +639,7 @@ pub enum DaemonToClient {
         nonce: [u8; 32],
         expires_at_unix_ms: i64,
     },
-    Authenticated {
-        policy_epoch: u64,
-        lease_until_unix_ms: i64,
-    },
-    AuthorizationChanged {
-        code: String,
-        policy_epoch: u64,
-    },
+    Authenticated,
     Pong {
         req: Req,
     },

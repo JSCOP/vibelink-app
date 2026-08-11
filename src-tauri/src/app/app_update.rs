@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const UPDATE_API_ORIGIN: &str = env!("VIBELINK_LICENSE_API_URL");
+const UPDATE_API_ORIGIN: &str = env!("VIBELINK_API_URL");
 const UPDATE_MANIFEST_PATH: &str = "/api/releases/latest";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

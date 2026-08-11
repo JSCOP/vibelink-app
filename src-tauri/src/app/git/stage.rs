@@ -3,12 +3,9 @@ use super::exec::{
 };
 use super::paths::{resolve_repo_file_path, validate_repo_relative_path};
 use super::to_string;
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
-use tauri::State;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,84 +16,56 @@ pub struct StashInfo {
 
 #[tauri::command]
 pub async fn git_init(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || git_write(&workspace_folder, ["init"]).map(|_| ())).await
 }
 
 #[tauri::command]
 pub async fn git_stage(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || stage_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
 pub async fn git_unstage(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || unstage_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
 pub async fn git_stage_all(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || git_write(&workspace_folder, ["add", "-A"]).map(|_| ())).await
 }
 
 #[tauri::command]
 pub async fn git_unstage_all(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || unstage_all_native(&workspace_folder)).await
 }
 
 #[tauri::command]
 pub async fn git_discard(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || discard_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
 pub async fn git_commit(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     message: String,
     amend: bool,
     signoff: bool,
 ) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         commit_native(&workspace_folder, &message, amend, signoff)
     })
@@ -107,25 +76,17 @@ pub async fn git_commit(
 
 #[tauri::command]
 pub async fn git_stash_save(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     message: String,
     include_untracked: bool,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || stash_save_native(&workspace_folder, &message, include_untracked)).await
 }
 
 #[tauri::command]
 pub async fn git_stash_list(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<Vec<StashInfo>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || stash_list_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -136,13 +97,9 @@ macro_rules! stash_command {
     ($name:ident, $verb:literal) => {
         #[tauri::command]
         pub async fn $name(
-            supervisor: State<'_, Arc<EntitlementSupervisor>>,
             workspace_folder: String,
             index: u32,
         ) -> Result<(), String> {
-            supervisor
-                .authorize(Capability::WorkspaceMutate)
-                .map_err(to_string)?;
             spawn_unit(move || {
                 let stash_ref = format!("stash@{{{index}}}");
                 git_write(&workspace_folder, ["stash", $verb, &stash_ref]).map(|_| ())
@@ -345,16 +302,12 @@ struct ParsedFileDiff {
 
 #[tauri::command]
 pub async fn git_diff_hunks(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     path: String,
     area: GitDiffArea,
     base_ref: Option<String>,
     head_ref: Option<String>,
 ) -> Result<UnifiedFileDiff, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         diff_hunks_native(
             &workspace_folder,
@@ -372,16 +325,12 @@ pub async fn git_diff_hunks(
 
 #[tauri::command]
 pub async fn git_apply_hunk(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     path: String,
     area: GitDiffArea,
     hunk_id: String,
     action: GitHunkAction,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     spawn_unit(move || apply_hunk_native(&workspace_folder, &path, area, &hunk_id, action)).await
 }
 

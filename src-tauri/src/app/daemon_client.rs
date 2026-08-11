@@ -1,11 +1,9 @@
-use crate::app::authorization::AuthorizationSnapshot;
 use crate::protocol::{
     constant_time_eq, read_frame, write_frame, ClientKind, ClientToDaemon, DaemonToClient,
     RemoteBrowserHostRequest, RemoteBrowserHostResponse, ReplyResult, Req, TaskSignal,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{Duration as ChronoDuration, Utc};
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use interprocess::local_socket::{
     prelude::*, RecvHalf as LocalSocketRecvHalf, SendHalf as LocalSocketSendHalf,
@@ -64,11 +62,6 @@ pub enum TerminalEvent {
     },
     ConnectionLost {
         message: String,
-    },
-    AuthorizationChanged {
-        code: String,
-        #[serde(rename = "policyEpoch")]
-        policy_epoch: u64,
     },
     ConnectionRestored,
 }
@@ -246,16 +239,6 @@ impl DaemonClient {
             DaemonToClient::Error { message, .. } => bail!(message),
             other => bail!("unexpected worktree response: {other:?}"),
         }
-    }
-
-    pub fn send_authorization_heartbeat(&self, mut snapshot: AuthorizationSnapshot) -> Result<()> {
-        let heartbeat_cap = Utc::now() + ChronoDuration::seconds(90);
-        if snapshot.lease_until > heartbeat_cap {
-            snapshot.lease_until = heartbeat_cap;
-        }
-        self.send(ClientToDaemon::AuthorizationHeartbeat {
-            snapshot: snapshot.into(),
-        })
     }
 
     pub fn request_reply<F>(&self, make_msg: F) -> Result<ReplyResult>
@@ -765,9 +748,6 @@ fn forward_terminal_event(shared: &ClientShared, msg: DaemonToClient) -> Result<
     }
 
     let event = match msg {
-        DaemonToClient::AuthorizationChanged { code, policy_epoch } => {
-            TerminalEvent::AuthorizationChanged { code, policy_epoch }
-        }
         DaemonToClient::PaneExited { pane_id, exit_code } => TerminalEvent::Exited {
             pane_id: pane_id.to_string(),
             exit_code,
@@ -809,8 +789,7 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
         DaemonToClient::Pong { req } | DaemonToClient::Reply { req, .. } => Some(*req),
         DaemonToClient::Error { req, .. } => *req,
         DaemonToClient::Challenge { .. }
-        | DaemonToClient::Authenticated { .. }
-        | DaemonToClient::AuthorizationChanged { .. }
+        | DaemonToClient::Authenticated
         | DaemonToClient::Output { .. }
         | DaemonToClient::PaneExited { .. }
         | DaemonToClient::PaneResized { .. }

@@ -28,7 +28,9 @@ const sourceBudgets = {
   'src/styles/appChrome.css': 1_834,
   'src/styles/gitWindow.css': 1_465,
   'src/styles/workspaceRail.css': 1_918,
-  'src/state/store.test.ts': 1_427,
+  // +19 for the signed-out regression test that pins the removed paywall shut:
+  // every previously gated store action must still run with no account.
+  'src/state/store.test.ts': 1_446,
   'src-tauri/src/app/agent_hooks.rs': 2_652,
   'src-tauri/src/app/android_device_lab.rs': 1_680,
   'src-tauri/src/app/browser.rs': 1_427,
@@ -39,7 +41,6 @@ const sourceBudgets = {
   'src-tauri/src/daemon/dispatch.rs': 4_776,
   'src-tauri/src/daemon/tests.rs': 1_580,
   'src-tauri/src/app/git/worktree_lifecycle.rs': 2_396,
-  'src-tauri/src/app/license.rs': 1_882,
   'src-tauri/src/app/provider_integrations.rs': 2_056,
   'src-tauri/src/app/spawn_daemon.rs': 1_982,
   'src-tauri/src/daemon/automation/runner.rs': 1_390,

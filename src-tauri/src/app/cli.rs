@@ -1,19 +1,12 @@
-use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use crate::dedicated_cli::{
     parse_args, CliError, ControlExecutor, Flavor, Invocation, SocketExecutor,
 };
 use serde_json::Value;
-use std::sync::Arc;
-use tauri::State;
 
 #[tauri::command]
 pub async fn cli_request(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     args: Vec<String>,
 ) -> Result<Value, String> {
-    supervisor
-        .authorize(Capability::CliControl)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || {
         let invocation = parse_app_invocation(args).map_err(to_string)?;
         let mut executor = SocketExecutor;

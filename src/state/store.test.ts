@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { LicenseStatus, PaneMeta, SessionMeta } from '../ipc/types'
+import type { AccountStatus, PaneMeta, SessionMeta, Task } from '../ipc/types'
 import { defaultSettings, normalizeSettings } from './profiles'
 import type { WorktreeProjection, WorktreeRecord } from './worktrees'
 import { getWorkspaceSessionEpoch, isWorkspaceInitialPanePending, loadCompletionHistory, loadPaneCompletionHighlights, loadPaneReviewMarkers, paneCompletionCountsBySession, persistCompletionHistory, persistPaneCompletionHighlights, persistPaneReviewMarkers, resetWorkspaceSessionOwnershipForTests, useWorkspaceStore } from './store'
@@ -74,21 +74,7 @@ function worktreeFixture(session: SessionMeta = {
   return { id: record.id, instanceId: record.instanceId, state: 'managed', record, native: null, parentWorktreeId: record.parentWorktreeId, childWorktreeIds: [] }
 }
 
-const unlicensedStatus: LicenseStatus = {
-  state: 'unlicensed',
-  entitled: false,
-  provider: null,
-  maskedKey: null,
-  activationId: null,
-  deviceId: 'device-test',
-  deviceName: 'Test device',
-  maxDevices: 0,
-  devices: [],
-  validatedAt: null,
-  offlineGraceUntil: null,
-  purchaseUrl: 'https://example.com',
-  message: 'License required',
-}
+const signedOutAccountStatus: AccountStatus = { signedIn: false, email: null }
 
 const localStorageStub = {
   getItem: vi.fn((key: string): string | null => { void key; return null }),
@@ -99,7 +85,7 @@ const localStorageStub = {
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (command: string) => {
-    if (command === 'license_status') return unlicensedStatus
+    if (command === 'account_status') return signedOutAccountStatus
     if (command === 'spawn_pane') return spawnedPane
     if (command === 'attach_session') return { layoutJson: null, panes: [] }
     if (command === 'list_sessions') return []
@@ -126,7 +112,7 @@ describe('workspace store profiles', () => {
     localStorageStub.clear.mockClear()
     vi.mocked(invoke).mockClear()
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'license_status') return unlicensedStatus
+      if (command === 'account_status') return signedOutAccountStatus
       if (command === 'spawn_pane') return spawnedPane
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'list_sessions') return useWorkspaceStore.getState().sessions
@@ -135,7 +121,7 @@ describe('workspace store profiles', () => {
     useWorkspaceStore.setState({
       workspaceEpoch: 0,
       workspaceReadyEpoch: 0,
-      license: { ready: false, status: null },
+      account: { ready: false, status: null },
       sessions: [],
       activeSessionId: undefined,
       activePaneId: undefined,
@@ -526,7 +512,7 @@ describe('workspace store profiles', () => {
       }),
     })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'license_status') return unlicensedStatus
+      if (command === 'account_status') return signedOutAccountStatus
       if (command === 'agent_cli_status') return []
       if (command === 'list_sessions') return [root, app, web]
       if (command === 'worktree_registry_reconcile') return []
@@ -566,7 +552,7 @@ describe('workspace store profiles', () => {
       }),
     })
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'license_status') return unlicensedStatus
+      if (command === 'account_status') return signedOutAccountStatus
       if (command === 'agent_cli_status') return []
       if (command === 'list_sessions') return [duplicateRoot, app, root, web]
       if (command === 'worktree_registry_reconcile') return []
@@ -766,7 +752,7 @@ describe('workspace store profiles', () => {
 
   test('bootstrap loads sessions without auto-opening a workspace', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'license_status') return unlicensedStatus
+      if (command === 'account_status') return signedOutAccountStatus
       if (command === 'list_sessions') return [createdSession]
       if (command === 'attach_session') return { layoutJson: null, panes: [] }
       if (command === 'spawn_pane') return spawnedPane
@@ -780,6 +766,39 @@ describe('workspace store profiles', () => {
     expect(useWorkspaceStore.getState().status).toBe('ready')
     expect(invoke).not.toHaveBeenCalledWith('attach_session', expect.anything())
     expect(invoke).not.toHaveBeenCalledWith('spawn_pane', expect.anything())
+  })
+
+  test('signed-out accounts can create board tasks', async () => {
+    const task: Task = {
+      id: 'task-signed-out',
+      sessionId: createdSession.id,
+      title: 'Create task',
+      description: 'No entitlement required',
+      status: 'pending',
+      statusTimestamps: { pending: 1 },
+      createdAt: 1,
+      updatedAt: 1,
+    }
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'account_status') return signedOutAccountStatus
+      if (command === 'agent_cli_status') return []
+      if (command === 'list_sessions') return [createdSession]
+      if (command === 'worktree_registry_reconcile') return []
+      if (command === 'attention_snapshot') return { capturedAt: 0, panes: [] }
+      if (command === 'board_task_create') return task
+      return null
+    })
+
+    await useWorkspaceStore.getState().bootstrap()
+    const created = await useWorkspaceStore.getState().createTask(createdSession.id, {
+      title: ' Create task ',
+      description: 'No entitlement required',
+    })
+
+    expect(useWorkspaceStore.getState().account).toEqual({ ready: true, status: signedOutAccountStatus })
+    expect(created).toEqual(task)
+    expect(useWorkspaceStore.getState().kanban.tasks[task.id]).toEqual(task)
+    expect(useWorkspaceStore.getState().error).toBeUndefined()
   })
 
   test('openSession leaves an empty workspace ready for a measured pane spawn', async () => {

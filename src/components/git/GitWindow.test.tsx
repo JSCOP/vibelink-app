@@ -109,7 +109,6 @@ beforeEach(() => {
   useWorkspaceStore.setState({
     activeSessionId: 'session-1',
     sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }],
-    license: { ready: true, status: { state: 'development', entitled: true } as never },
     settings: { ...settings, workspaceGroups: [], workspaceGroupIds: {} },
   })
 })

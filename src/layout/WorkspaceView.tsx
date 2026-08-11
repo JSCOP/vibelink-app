@@ -10,7 +10,6 @@ import {
   useRef,
   useState,
   type FunctionComponent,
-  type ReactNode,
 } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
@@ -44,7 +43,6 @@ import { AgentSessionsSidebar } from '../components/agent/AgentSessionsSidebar'
 import { WorkspaceTodoPanel } from '../components/WorkspaceTodoPanel'
 import { WorkspaceFolderPrompt } from '../components/WorkspaceFolderPrompt'
 import { ErrorBoundary } from '../components/ErrorBoundary'
-import { ProLockedPanel } from '../components/ProLockedPanel'
 import { closeBrowserContent } from '../browser/browserContentLifecycle'
 import type { BrowserPage, BrowserProfile } from '../browser/types'
 import {
@@ -219,10 +217,6 @@ function TerminalWindowContentPanel(props: WorkspaceContentPanelProps) {
 }
 
 
-function ProPanelBoundary({ feature, children }: { feature: string; children: ReactNode }) {
-  const entitled = useWorkspaceStore((state) => Boolean(state.license.ready && state.license.status?.entitled))
-  return entitled ? children : <ProLockedPanel feature={feature} />
-}
 
 /** `active` is dockview focus (drives the header accent); `visible` is "this
  * panel is the selected tab in its group". Content and data gating MUST use
@@ -255,22 +249,22 @@ function useEdgePanelState(api: WorkspaceContentPanelProps['api']) {
 function WorkspacesContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
   const integration = useContext(WorkspaceIntegrationContext)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-workspaces"><ProPanelBoundary feature="Workspaces"><ErrorBoundary label="Workspaces panel"><SidebarChromeContext.Provider value={true}><WorkspacesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} integration={integration} /></SidebarChromeContext.Provider></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-workspaces"><ErrorBoundary label="Workspaces panel"><SidebarChromeContext.Provider value={true}><WorkspacesSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} integration={integration} /></SidebarChromeContext.Provider></ErrorBoundary></WindowPanelShell>
 }
 
 function SourceControlContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-source-control"><ProPanelBoundary feature="Source Control"><ErrorBoundary label="Source Control panel"><SourceControlSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-source-control"><ErrorBoundary label="Source Control panel"><SourceControlSidebar active={state.active} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></WindowPanelShell>
 }
 
 function GitHistoryContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-history"><ProPanelBoundary feature="Git History"><ErrorBoundary label="Git History panel"><GitHistorySidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-history"><ErrorBoundary label="Git History panel"><GitHistorySidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></WindowPanelShell>
 }
 
 function GitBranchesContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-branches"><ProPanelBoundary feature="Git Branches"><ErrorBoundary label="Git Branches panel"><GitBranchesSidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git-branches"><ErrorBoundary label="Git Branches panel"><GitBranchesSidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></WindowPanelShell>
 }
 
 /** Automations is a left-edge structural singleton. Unlike the Git sidebars,
@@ -280,7 +274,6 @@ function AutomationContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-automation">
-      <ProPanelBoundary feature="Automations">
         <ErrorBoundary label="Automations panel">
           <SidebarChromeContext.Provider value={true}>
             <WorkspaceSidebarPanelShell
@@ -294,38 +287,37 @@ function AutomationContentPanel(props: WorkspaceContentPanelProps) {
             </WorkspaceSidebarPanelShell>
           </SidebarChromeContext.Provider>
         </ErrorBoundary>
-      </ProPanelBoundary>
     </WindowPanelShell>
   )
 }
 
 function AgentSessionsContentPanel(props: WorkspaceContentPanelProps) {
   const state = useEdgePanelState(props.api)
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ProPanelBoundary feature="Agent Sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent-sessions"><ErrorBoundary label="Agent Sessions panel"><AgentSessionsSidebar active={state.active} visible={state.visible} collapsed={state.collapsed} onCollapse={() => props.api.group.api.collapse()} /></ErrorBoundary></WindowPanelShell>
 }
 
 function AgentContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent"><ProPanelBoundary feature="VibeLink Agent"><ErrorBoundary label="VibeLink Agent panel"><Suspense fallback={null}><OrchestratorChat /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-agent"><ErrorBoundary label="VibeLink Agent panel"><Suspense fallback={null}><OrchestratorChat /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
 function OrchestrationContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-orchestration"><ProPanelBoundary feature="Orchestration"><ErrorBoundary label="Orchestration panel"><Suspense fallback={null}><OrchestrationWorkspacePanel /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-orchestration"><ErrorBoundary label="Orchestration panel"><Suspense fallback={null}><OrchestrationWorkspacePanel /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
 function KanbanContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban"><ProPanelBoundary feature="Kanban"><ErrorBoundary label="Kanban panel"><Suspense fallback={null}><KanbanBoard /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-kanban"><ErrorBoundary label="Kanban panel"><Suspense fallback={null}><KanbanBoard /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
 function MemoryContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-memory"><ProPanelBoundary feature="Memory Graph"><ErrorBoundary label="Memory graph panel"><Suspense fallback={null}><MemoryGraphPanel /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-memory"><ErrorBoundary label="Memory graph panel"><Suspense fallback={null}><MemoryGraphPanel /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
 function TodoContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-todo"><ProPanelBoundary feature="Todo orchestration"><ErrorBoundary label="Todo panel"><WorkspaceTodoPanel /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-todo"><ErrorBoundary label="Todo panel"><WorkspaceTodoPanel /></ErrorBoundary></WindowPanelShell>
 }
 
 function DiffContentPanel(props: WorkspaceContentPanelProps) {
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-diff"><ProPanelBoundary feature="Task diff"><ErrorBoundary label="Diff panel"><Suspense fallback={null}><TaskDiffView /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-diff"><ErrorBoundary label="Diff panel"><Suspense fallback={null}><TaskDiffView /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
 type WorkspaceIntegrationContextValue = {
@@ -394,7 +386,6 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   }
   return (
     <WindowPanelShell panelId={props.api.id} className="workspace-window-browser">
-      <ProPanelBoundary feature="Browser">
         <ErrorBoundary label="Browser panel">
           <Suspense fallback={null}>
             <NativeBrowserContentPanel
@@ -409,7 +400,6 @@ function BrowserWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
             />
           </Suspense>
         </ErrorBoundary>
-      </ProPanelBoundary>
     </WindowPanelShell>
   )
 }
@@ -422,7 +412,7 @@ function WorkbenchContentPanel(props: WorkspaceContentPanelProps) {
     ...actions,
     openContent: (request) => actions.openContent({ ...request, targetGroupId: request.targetGroupId ?? targetGroupId }),
   } : null, [actions, targetGroupId])
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git"><ProPanelBoundary feature="Workbench"><ErrorBoundary label="Workbench panel"><WorkspaceContentActionsContext.Provider value={scopedActions}><WorkbenchPanel onWorkspaceInput={onWorkspaceInput} /></WorkspaceContentActionsContext.Provider></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git"><ErrorBoundary label="Workbench panel"><WorkspaceContentActionsContext.Provider value={scopedActions}><WorkbenchPanel onWorkspaceInput={onWorkspaceInput} /></WorkspaceContentActionsContext.Provider></ErrorBoundary></WindowPanelShell>
 }
 
 type ContextualExplorerContentPanelProps = WorkspaceContentPanelProps & { variant: 'explorer' | 'workspaceFiles' }
@@ -449,7 +439,7 @@ function ContextualExplorerContentPanel({ variant, ...props }: ContextualExplore
   const placeholder = workspaceFiles ? 'Select a workspace or worktree to browse its files.' : 'Select a workspace to browse files.'
   return (
     <WindowPanelShell panelId={props.api.id} className={panelClass}>
-      <ProPanelBoundary feature="Explorer"><ErrorBoundary label={errorLabel}><SidebarChromeContext.Provider value={!workspaceFiles}>{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><Sidebar sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">{placeholder}</div>}</SidebarChromeContext.Provider></ErrorBoundary></ProPanelBoundary>
+      <ErrorBoundary label={errorLabel}><SidebarChromeContext.Provider value={!workspaceFiles}>{sessionId && workspaceFolder ? <WorkspaceContentActionsContext.Provider value={scopedActions}><Sidebar sessionId={sessionId} workspaceFolder={workspaceFolder} onCollapse={() => props.api.group.api.collapse()} /></WorkspaceContentActionsContext.Provider> : sessionId ? <WorkspaceFolderPrompt sessionId={sessionId} /> : <div className="placeholder-panel">{placeholder}</div>}</SidebarChromeContext.Provider></ErrorBoundary>
     </WindowPanelShell>
   )
 }
@@ -469,7 +459,7 @@ function PreviewWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   if (!sessionId || !workspaceFolder || params?.kind !== 'preview') {
     return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Preview content metadata is missing.</div></WindowPanelShell>
   }
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-preview"><ProPanelBoundary feature="Preview"><ErrorBoundary label="Preview panel"><PreviewContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-preview"><ErrorBoundary label="Preview panel"><PreviewContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></ErrorBoundary></WindowPanelShell>
 }
 
 function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
@@ -479,9 +469,12 @@ function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   if (!sessionId || !workspaceFolder || params?.kind !== 'editor') {
     return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Editor content metadata is missing.</div></WindowPanelShell>
   }
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-editor"><ProPanelBoundary feature="Editor"><ErrorBoundary label="Editor panel"><Suspense fallback={null}><EditorContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></Suspense></ErrorBoundary></ProPanelBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-editor"><ErrorBoundary label="Editor panel"><Suspense fallback={null}><EditorContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
+// The registry belongs beside the panels it maps; splitting it into its own
+// module would only trade a Fast Refresh nicety for an import cycle.
+// eslint-disable-next-line react-refresh/only-export-components
 export const builtInContentComponents: Record<WorkspaceContentKind, WorkspaceContentPanelComponent> = {
   terminal: TerminalContentPanel,
   terminalWindow: TerminalWindowContentPanel,

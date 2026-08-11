@@ -1,12 +1,9 @@
 use super::to_string;
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use tauri::State;
 
 const DEFAULT_MAX_DEPTH: u32 = 2;
 const MIN_MAX_DEPTH: u32 = 1;
@@ -23,13 +20,9 @@ pub struct DiscoveredRepo {
 
 #[tauri::command]
 pub async fn git_discover_repos(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     root: String,
     max_depth: Option<u32>,
 ) -> Result<Vec<DiscoveredRepo>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || discover_repos_native(&root, max_depth))
         .await
         .map_err(to_string)?

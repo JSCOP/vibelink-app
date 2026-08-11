@@ -80,21 +80,19 @@ function Assert-LocalTauriCli {
   Write-Host 'Node dependencies installed.' -ForegroundColor Green
 }
 
-function Assert-ReleaseLicenseApiUrl {
-  if ([string]::IsNullOrWhiteSpace($env:VIBELINK_LICENSE_API_URL)) {
-    $env:VIBELINK_LICENSE_API_URL = 'https://vibelink.moobang.net'
-    Write-Host 'VIBELINK_LICENSE_API_URL was not set; defaulting to https://vibelink.moobang.net.' -ForegroundColor DarkGray
+function Assert-ReleaseApiUrl {
+  if ([string]::IsNullOrWhiteSpace($env:VIBELINK_API_URL)) {
+    $env:VIBELINK_API_URL = 'https://vibelink.moobang.net'
+    Write-Host 'VIBELINK_API_URL was not set; defaulting to https://vibelink.moobang.net.' -ForegroundColor DarkGray
   }
   try {
-    $uri = [System.Uri]$env:VIBELINK_LICENSE_API_URL
+    $uri = [System.Uri]$env:VIBELINK_API_URL
   } catch {
-    throw 'VIBELINK_LICENSE_API_URL must be a valid absolute HTTPS origin.'
+    throw 'VIBELINK_API_URL must be a valid absolute HTTPS origin.'
   }
+  # A fork builds against its own backend, so any clean HTTPS origin is accepted.
   if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($uri.UserInfo) -or $uri.AbsolutePath -ne '/' -or -not [string]::IsNullOrEmpty($uri.Query) -or -not [string]::IsNullOrEmpty($uri.Fragment)) {
-    throw 'VIBELINK_LICENSE_API_URL must be an HTTPS origin without credentials, path, query, or fragment.'
-  }
-  if ($uri.AbsoluteUri -ne 'https://vibelink.moobang.net/') {
-    throw 'VIBELINK_LICENSE_API_URL must be exactly https://vibelink.moobang.net for release builds.'
+    throw 'VIBELINK_API_URL must be an HTTPS origin without credentials, path, query, or fragment.'
   }
 }
 
@@ -382,7 +380,7 @@ function Invoke-ReleaseBuild {
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
   $env:VITE_VIBELINK_APP_FLAVOR = 'prod'
-  Assert-ReleaseLicenseApiUrl
+  Assert-ReleaseApiUrl
   Reset-ReleaseBuildArtifacts
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--no-bundle')
   Write-Host 'Release build complete: src-tauri\target\release\app.exe' -ForegroundColor Green
@@ -444,7 +442,7 @@ function Invoke-ReleaseInstaller([switch]$SkipVersionBump) {
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
   $env:VITE_VIBELINK_APP_FLAVOR = 'prod'
-  Assert-ReleaseLicenseApiUrl
+  Assert-ReleaseApiUrl
   if (-not $SkipVersionBump) { Invoke-InstallerVersionBump }
   Reset-ReleaseBuildArtifacts
   Invoke-Checked 'pnpm' @('exec', 'tauri', 'build', '--bundles', 'msi', 'nsis')
@@ -457,7 +455,7 @@ function Invoke-CiInstaller([switch]$IncrementalLocal) {
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
   $env:VITE_VIBELINK_APP_FLAVOR = 'prod'
-  Assert-ReleaseLicenseApiUrl
+  Assert-ReleaseApiUrl
   $packageVersion = Get-JsonVersion $PackageJson
   $cargoVersion = Get-CargoPackageVersion $CargoToml
   $tauriVersion = Get-JsonVersion $TauriConfig
@@ -508,7 +506,7 @@ function Invoke-AllInstallers {
   Enter-RepoRoot
   Assert-Tool 'pnpm'
   Assert-LocalTauriCli
-  Assert-ReleaseLicenseApiUrl
+  Assert-ReleaseApiUrl
   Invoke-InstallerVersionBump
   Invoke-DevInstaller -SkipVersionBump
   Invoke-ReleaseInstaller -SkipVersionBump
@@ -553,7 +551,7 @@ Versioning:
   Pass -Version x.y.z with installer actions to force a specific newer version.
 
 Release licensing:
-  Release actions default VIBELINK_LICENSE_API_URL to
+  Release actions default VIBELINK_API_URL to
   https://vibelink.moobang.net when it is not already set.
   Any explicitly supplied value must still be exactly that HTTPS origin.
 

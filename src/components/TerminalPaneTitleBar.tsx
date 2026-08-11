@@ -18,7 +18,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
   const actions = useWorkspaceContentActions()
   const content = parseWorkspaceContentParams(params)
   const paneId = content?.kind === 'terminal' ? content.paneId : null
-  const role = useWorkspaceStore((state) => paneId && state.license.ready && state.license.status?.entitled ? state.settings.paneRoles[paneId] : undefined)
+  const role = useWorkspaceStore((state) => paneId ? state.settings.paneRoles[paneId] : undefined)
   const hasCompletionHighlight = useWorkspaceStore((state) => paneId ? Boolean(state.paneCompletionHighlights[paneId]) : false)
   const reviewed = useWorkspaceStore((state) => paneId ? Boolean(state.paneReviewMarkers[paneId]) : false)
   const agentStatus = useAgentPaneStatus(paneId)

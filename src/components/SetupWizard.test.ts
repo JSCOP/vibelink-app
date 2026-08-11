@@ -1,6 +1,22 @@
-import { describe, expect, test } from 'vitest'
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createElement } from 'react'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { readAppStylesheet } from '../appStylesheet.test-support'
+import { defaultSettings, normalizeSettings } from '../state/profiles'
+import { useWorkspaceStore } from '../state/store'
+import { SetupWizard } from './SetupWizard'
 import { isSetupStepId, setupStepAutoPass, setupStepIds, setupStepTitle } from './setupWizardSteps'
+// TerminalManager's module-level singleton invokes at import time, before any
+// `beforeEach` runs, so the hoisted mock has to resolve from creation.
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue([]) }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel: class MockChannel<T> { onmessage: ((event: T) => void) | null = null } }))
+
+beforeEach(() => {
+  cleanup()
+  invoke.mockReset().mockResolvedValue([])
+  useWorkspaceStore.setState({ settings: normalizeSettings(defaultSettings) })
+})
 
 describe('setup wizard steps', () => {
   test('uses the simplified first-run flow', () => {
@@ -13,9 +29,27 @@ describe('setup wizard steps', () => {
     expect(['agents', 'appearance', 'mcp', 'finish'].filter(isSetupStepId)).toEqual(['appearance', 'finish'])
   })
 
-  test('auto-passes only an already-entitled account step', () => {
-    expect(setupStepAutoPass({ entitled: true })).toEqual({ account: true })
-    expect(setupStepAutoPass({ entitled: false })).toEqual({ account: false })
+  test('does not auto-pass the optional account step', () => {
+    expect(setupStepAutoPass()).toEqual({})
+  })
+
+  test('completes without signing in to an account', async () => {
+    const onComplete = vi.fn()
+    render(createElement(SetupWizard, { onComplete }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('list_installed_fonts'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start setup' }))
+    expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy()
+    const accountContinue = screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement
+    expect(accountContinue.disabled).toBe(false)
+    fireEvent.click(accountContinue)
+    expect(screen.getByRole('heading', { name: 'Appearance' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(screen.getByText('Account sign-in is optional for bug reports.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Finish' }))
+
+    expect(onComplete).toHaveBeenCalledOnce()
+    expect(useWorkspaceStore.getState().settings.setupWizard.completedAt).not.toBeNull()
   })
 
   test('keeps the setup backdrop below the draggable topbar', () => {

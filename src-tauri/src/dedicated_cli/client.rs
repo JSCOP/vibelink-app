@@ -318,7 +318,7 @@ fn map_daemon_error(message: String) -> CliError {
         || folded.contains("elevation_required")
         || folded.contains("elevationrequired")
     {
-        ErrorCode::DeniedCapability
+        ErrorCode::PermissionDenied
     } else if folded.contains("conflict") || folded.contains("revision") {
         ErrorCode::Conflict
     } else if folded.contains("timeout") || folded.contains("timed out") {
@@ -365,14 +365,14 @@ mod tests {
         );
         assert_eq!(
             map_daemon_error("capability denied".to_string()).code,
-            ErrorCode::DeniedCapability
+            ErrorCode::PermissionDenied
         );
         assert_eq!(
             map_daemon_error(
                 "AppBlocked: computer use is blocked for this sensitive application".to_string()
             )
             .code,
-            ErrorCode::DeniedCapability
+            ErrorCode::PermissionDenied
         );
         assert_eq!(
             map_daemon_error(
@@ -380,7 +380,7 @@ mod tests {
                     .to_string()
             )
             .code,
-            ErrorCode::DeniedCapability
+            ErrorCode::PermissionDenied
         );
         assert_eq!(
             map_daemon_error("ambiguous window selector: Notepad".to_string()).code,

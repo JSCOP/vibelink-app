@@ -95,12 +95,6 @@ pub(super) fn resolve_browser_host_response(
     Ok(())
 }
 
-#[derive(Clone)]
-pub(super) struct ConnectionControl {
-    pub(super) sender: Sender<DaemonToClient>,
-    pub(super) cancelled: Arc<AtomicBool>,
-}
-
 pub(super) fn handle_connection(
     mut stream: LocalSocketStream,
     state: SharedState,
@@ -116,7 +110,6 @@ pub(super) fn handle_connection(
     computer: SharedComputerHost,
     boot_id: Uuid,
     ipc_secret: Arc<[u8; 32]>,
-    policy_heartbeat: Arc<Mutex<PolicyHeartbeat>>,
     connections: SharedConnections,
 ) {
     if let Err(err) = stream.set_send_timeout(Some(CLIENT_WRITE_TIMEOUT)) {
@@ -135,24 +128,13 @@ pub(super) fn handle_connection(
     if let Err(err) = stream.set_recv_timeout(Some(Duration::from_secs(1))) {
         warn!(?err, "failed to set daemon client read timeout");
     }
-    if authenticated.client_kind == ClientKind::App {
-        lock_mutex(&policy_heartbeat).note_app_connection();
-    }
-
     let client_id = authenticated.client_id;
-    let client_kind = authenticated.client_kind;
     let (mut reader, mut writer) = stream.split();
     let (tx, rx) = bounded::<DaemonToClient>(CLIENT_QUEUE_CAPACITY);
     let cancelled = Arc::new(AtomicBool::new(false));
 
     lock_state(&state).add_client(client_id, tx.clone());
-    lock_mutex(&connections).insert(
-        client_id,
-        ConnectionControl {
-            sender: tx.clone(),
-            cancelled: Arc::clone(&cancelled),
-        },
-    );
+    lock_mutex(&connections).insert(client_id);
     let writer_thread = thread::Builder::new()
         .name("vibelink-daemon-client-writer".to_string())
         .spawn(move || {
@@ -166,20 +148,6 @@ pub(super) fn handle_connection(
 
     loop {
         if cancelled.load(Ordering::Acquire) {
-            break;
-        }
-        if let Some((code, epoch, terminate_daemon)) =
-            heartbeat_revocation(&policy_heartbeat, Instant::now())
-        {
-            revoke_daemon_authorization(
-                &state,
-                &sessions_path,
-                &connections,
-                &shutdown,
-                code,
-                epoch,
-                terminate_daemon,
-            );
             break;
         }
 
@@ -205,63 +173,6 @@ pub(super) fn handle_connection(
         };
 
         let request_id = request_id(&msg);
-        if let Err(code) = authorize_daemon_message(&msg, client_kind) {
-            let _ = tx.send(DaemonToClient::Error {
-                req: request_id,
-                message: code.as_str().to_string(),
-            });
-            if matches!(
-                code,
-                AuthorizationErrorCode::EntitlementRequired
-                    | AuthorizationErrorCode::AuthorizationStale
-            ) {
-                let epoch = lock_mutex(&policy_heartbeat).policy_epoch;
-                revoke_daemon_authorization(
-                    &state,
-                    &sessions_path,
-                    &connections,
-                    &shutdown,
-                    code,
-                    epoch,
-                    false,
-                );
-            } else {
-                cancelled.store(true, Ordering::Release);
-            }
-            break;
-        }
-
-        if let ClientToDaemon::AuthorizationHeartbeat { snapshot } = &msg {
-            if client_kind != ClientKind::App {
-                let _ = tx.send(DaemonToClient::Error {
-                    req: request_id,
-                    message: DAEMON_AUTH_REQUIRED.to_string(),
-                });
-                break;
-            }
-            let authorization_snapshot: AuthorizationSnapshot = snapshot.clone().into();
-            if let Err(error) = remote.update_authorization(authorization_snapshot.clone()) {
-                warn!(?error, "remote authorization update failed");
-            }
-            let mut heartbeat = lock_mutex(&policy_heartbeat);
-            heartbeat.update(authorization_snapshot);
-            let revoked = heartbeat.revoked;
-            let epoch = heartbeat.policy_epoch;
-            drop(heartbeat);
-            if revoked {
-                revoke_daemon_authorization(
-                    &state,
-                    &sessions_path,
-                    &connections,
-                    &shutdown,
-                    AuthorizationErrorCode::EntitlementRequired,
-                    epoch,
-                    false,
-                );
-                break;
-            }
-        }
-
         if let Err(err) = dispatch_message(
             Arc::clone(&state),
             &sessions_path,

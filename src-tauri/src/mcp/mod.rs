@@ -1,12 +1,10 @@
 use crate::app::agents::agent_cli_status_native;
-use crate::app::authorization::Capability;
 use crate::app::board::{
     board_brief_get_native, board_brief_set_native, board_doc_native, board_read_native,
     board_task_create_native, board_task_done_native, board_task_note_native,
     board_task_update_native, TaskPatch, TaskStatus,
 };
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
-use crate::app::license::HeadlessLicenseCache;
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
 };
@@ -43,7 +41,6 @@ fn serve() -> Result<()> {
     let session_id =
         std::env::var("VIBELINK_SESSION_ID").context("VIBELINK_SESSION_ID is required")?;
     let session_id = parse_uuid(&session_id)?;
-    require_mcp_call()?;
     let stream = crate::app::spawn_daemon::ensure_daemon_for(ClientKind::Mcp)
         .context("connect to daemon")?;
     let client = DaemonClient::new_with_kind(stream, ClientKind::Mcp);
@@ -54,9 +51,7 @@ fn serve() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) =
-            handle_line_with_authorizer(&client, session_id, &line, Some(&require_mcp_call))
-        {
+        if let Some(response) = handle_line(&client, session_id, &line) {
             serde_json::to_writer(&mut stdout, &response)?;
             stdout.write_all(b"\n")?;
             stdout.flush()?;
@@ -66,12 +61,7 @@ fn serve() -> Result<()> {
 }
 
 /// Returns Some(response_value) to write to stdout, or None when no reply is due.
-fn handle_line_with_authorizer(
-    client: &DaemonClient,
-    session_id: Uuid,
-    line: &str,
-    authorize: Option<&dyn Fn() -> Result<()>>,
-) -> Option<Value> {
+fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
@@ -87,29 +77,17 @@ fn handle_line_with_authorizer(
         return None;
     }
     Some(
-        handle_message_with_authorizer(client, session_id, &request, authorize).unwrap_or_else(
-            |err| {
-                error_response(
-                    request.get("id").cloned().unwrap_or(Value::Null),
-                    -32000,
-                    err.to_string(),
-                )
-            },
-        ),
+        handle_message(client, session_id, &request).unwrap_or_else(|err| {
+            error_response(
+                request.get("id").cloned().unwrap_or(Value::Null),
+                -32000,
+                err.to_string(),
+            )
+        }),
     )
 }
 
-#[cfg(test)]
-fn handle_line(client: &DaemonClient, session_id: Uuid, line: &str) -> Option<Value> {
-    handle_line_with_authorizer(client, session_id, line, None)
-}
-
-fn handle_message_with_authorizer(
-    client: &DaemonClient,
-    session_id: Uuid,
-    request: &Value,
-    authorize: Option<&dyn Fn() -> Result<()>>,
-) -> Result<Value> {
+fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     match request.get("method").and_then(Value::as_str) {
         Some("initialize") => Ok(json!({
@@ -131,9 +109,6 @@ fn handle_message_with_authorizer(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            if let Some(authorize) = authorize {
-                authorize()?;
-            }
             match call_tool(client, session_id, name, &args) {
                 Ok(text) => Ok(json!({
                     "jsonrpc": "2.0", "id": id,
@@ -161,15 +136,6 @@ fn handle_message_with_authorizer(
         )),
         None => Ok(error_response(id, -32600, "missing method")),
     }
-}
-
-#[cfg(test)]
-fn handle_message(client: &DaemonClient, session_id: Uuid, request: &Value) -> Result<Value> {
-    handle_message_with_authorizer(client, session_id, request, None)
-}
-
-fn require_mcp_call() -> Result<()> {
-    HeadlessLicenseCache::load()?.require_capability(Capability::McpCall)
 }
 
 fn call_tool(client: &DaemonClient, session_id: Uuid, name: &str, args: &Value) -> Result<String> {
@@ -413,7 +379,7 @@ fn scope_mcp_invocation(
             if let Some(workspace) = $command.selectors.workspace.as_deref() {
                 if workspace != session_id.to_string() {
                     return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
-                        crate::dedicated_cli::ErrorCode::DeniedCapability,
+                        crate::dedicated_cli::ErrorCode::PermissionDenied,
                         "MCP tools cannot target a different workspace",
                     )));
                 }
@@ -433,7 +399,7 @@ fn scope_mcp_invocation(
                     | crate::dedicated_cli::WorktreeAction::Move
             ) {
                 return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
-                    crate::dedicated_cli::ErrorCode::DeniedCapability,
+                    crate::dedicated_cli::ErrorCode::PermissionDenied,
                     "worktree current and move are CLI-only",
                 )));
             }
@@ -442,7 +408,7 @@ fn scope_mcp_invocation(
             } else if let Some(workspace) = value.selectors.workspace.as_deref() {
                 if workspace != session_id.to_string() {
                     return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
-                        crate::dedicated_cli::ErrorCode::DeniedCapability,
+                        crate::dedicated_cli::ErrorCode::PermissionDenied,
                         "MCP tools cannot target a different workspace",
                     )));
                 }
@@ -831,7 +797,7 @@ fn call_cli_contract(session_id: Uuid, contract: CommandContract, args: &Value) 
         if let Some(workspace) = object.get("workspace").and_then(Value::as_str) {
             if workspace != session_id.to_string() {
                 return Err(anyhow::Error::new(crate::dedicated_cli::CliError::new(
-                    crate::dedicated_cli::ErrorCode::DeniedCapability,
+                    crate::dedicated_cli::ErrorCode::PermissionDenied,
                     "MCP tools cannot target a different workspace",
                 )));
             }
@@ -1593,7 +1559,6 @@ fn error_response(id: Value, code: i64, message: impl Into<String>) -> Value {
 mod tests {
     use super::*;
     use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
-    use std::cell::Cell;
 
     #[test]
     fn tools_list_contains_pane_task_and_skill_tools() {
@@ -1854,44 +1819,6 @@ mod tests {
 
         assert_eq!(response["id"], 7);
         assert_eq!(response["error"]["code"], -32601);
-    }
-
-    #[test]
-    fn mcp_reloads_authorization_for_each_tool_call() {
-        let calls = Cell::new(0_u32);
-        let authorize = || {
-            let call = calls.get();
-            calls.set(call + 1);
-            if call == 0 {
-                Ok(())
-            } else {
-                bail!("ENTITLEMENT_REQUIRED")
-            }
-        };
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": { "name": "unknown_tool", "arguments": {} }
-        });
-        let client = placeholder_client();
-
-        // A tool-level failure is a protocol-level SUCCESS carrying isError,
-        // so only the authorization denial escapes as a transport error.
-        let first =
-            handle_message_with_authorizer(&client, Uuid::nil(), &request, Some(&authorize))
-                .expect("first call reaches tool dispatch");
-        assert_eq!(first["result"]["isError"], true);
-        assert!(first["result"]["content"][0]["text"]
-            .as_str()
-            .expect("tool error text")
-            .contains("unknown tool"));
-
-        let second =
-            handle_message_with_authorizer(&client, Uuid::nil(), &request, Some(&authorize))
-                .expect_err("revoked second call fails closed");
-        assert_eq!(second.to_string(), "ENTITLEMENT_REQUIRED");
-        assert_eq!(calls.get(), 2);
     }
 
     fn placeholder_client() -> DaemonClient {

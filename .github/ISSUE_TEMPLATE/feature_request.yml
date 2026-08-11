@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest a concrete improvement to VibeLink.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem first. A proposed solution is easier to evaluate once the underlying need is clear.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What problem, limitation, or user need should this address? Who is affected?
+      placeholder: Describe the problem and its impact before suggesting an implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: What change would you like to see?
+      placeholder: Describe the behavior or outcome you propose.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other approaches did you consider? If none, say so.
+      placeholder: List alternatives, workarounds, or reasons they do not meet the need.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: implementation
+    attributes:
+      label: Will you help implement this?
+      options:
+        - Yes
+        - Maybe
+        - No
+    validations:
+      required: true

@@ -59,7 +59,10 @@ afterEach(() => {
   cleanup()
   vi.clearAllMocks()
   useGitStore.setState({ sessions: {} })
-  useWorkspaceStore.setState({ activeSessionId: undefined })
+  useWorkspaceStore.setState((state) => ({
+    activeSessionId: undefined,
+    settings: { ...state.settings, paneRoles: {} },
+  }))
 })
 
 describe('WorkspaceContentTab', () => {
@@ -270,6 +273,25 @@ describe('WorkspaceContentTab', () => {
       'Close terminal',
     ])
     expect(screen.queryByRole('button', { name: /Arrange/ })).toBeNull()
+  })
+
+  it('shows pane roles without an entitlement precondition', () => {
+    useWorkspaceStore.setState((state) => ({
+      settings: { ...state.settings, paneRoles: { 'pane-a': 'reviewer' } },
+    }))
+    const params = createTerminalContentParams({ id: 'pane-a', config: { paneId: 'pane-a', args: [], env: [], title: 'Shell', icon: 'terminal', cols: 80, rows: 24 } })
+
+    renderWithActions(createElement(WorkspaceContentTab, {
+      api: panelApi('content:terminal:pane-a', 'Shell'),
+      containerApi,
+      params,
+    } as never))
+    renderWithActions(createElement(TerminalPaneTitleBar, {
+      api: panelApi('content:terminal:pane-a', 'Shell'),
+      params,
+    } as never))
+
+    expect(screen.getAllByText('reviewer')).toHaveLength(2)
   })
 
   it('starts pane renaming from any non-action title bar area', () => {

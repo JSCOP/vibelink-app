@@ -1,10 +1,10 @@
 [package]
 name = "app"
-version = "0.4.18"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+version = "0.6.0"
+description = "Agentic workspace terminal for Windows"
+authors = ["JSCOP"]
+license = "GPL-3.0-only"
+repository = "https://github.com/JSCOP/vibelink-app"
 edition = "2021"
 rust-version = "1.85"
 default-run = "app"
@@ -76,6 +76,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
+winreg = "0.55"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Credentials", "Win32_System_LibraryLoader", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows = { version = "=0.61.3", features = [
   "Win32_Foundation",

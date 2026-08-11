@@ -3517,7 +3517,6 @@ pub(super) fn dispatch_message(
         ClientToDaemon::Hello { .. } | ClientToDaemon::Authenticate { .. } => {
             bail!(DAEMON_AUTH_REQUIRED)
         }
-        ClientToDaemon::AuthorizationHeartbeat { .. } => Ok(()),
         ClientToDaemon::RegisterBrowserHost => {
             register_browser_host(client_id, tx.clone());
             Ok(())
@@ -4714,7 +4713,6 @@ pub(super) fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::Shutdown { req, .. } => Some(*req),
         ClientToDaemon::Hello { .. }
         | ClientToDaemon::Authenticate { .. }
-        | ClientToDaemon::AuthorizationHeartbeat { .. }
         | ClientToDaemon::RegisterBrowserHost
         | ClientToDaemon::RemoteBrowserResponse { .. }
         | ClientToDaemon::DetachSession { .. }

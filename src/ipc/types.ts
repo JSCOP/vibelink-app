@@ -258,37 +258,7 @@ export type SkillApplyInput = {
   enabled?: boolean
 }
 
-export type LicenseState = 'development' | 'unlicensed' | 'core' | 'trial' | 'trialExpired' | 'validOnline' | 'validOffline' | 'activationLimit' | 'reviewRequired' | 'invalid' | 'revoked' | 'configurationError'
-
-export type LicenseDevice = {
-  activationId: string
-  deviceId: string
-  deviceName: string
-  appVersion: string
-  status: 'pending' | 'active' | 'review_required' | 'deactivated'
-  activatedAt: string | null
-  lastValidatedAt: string | null
-  current: boolean
-}
-
-export type LicenseStatus = {
-  state: LicenseState
-  entitled: boolean
-  provider: 'vibelink' | 'lemonsqueezy' | 'moobang' | null
-  plan?: 'core' | 'pro' | 'trial' | 'none' | null
-  email?: string | null
-  maskedKey: string | null
-  activationId: string | null
-  deviceId: string
-  deviceName: string
-  maxDevices: number
-  devices: LicenseDevice[]
-  validatedAt: string | null
-  offlineGraceUntil: string | null
-  trialEndsAt?: string | null
-  purchaseUrl: string
-  message: string
-}
+export type AccountStatus = { signedIn: boolean; email: string | null }
 
 export type GitDiffArea = 'unstaged' | 'staged' | 'review'
 export type GitHunkAction = 'stage' | 'unstage' | 'discard'

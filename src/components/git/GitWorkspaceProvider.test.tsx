@@ -62,7 +62,7 @@ beforeEach(() => {
     return null
   })
   useGitStore.setState({ sessions: {} })
-  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], worktreeProjections: [], license: { ready: true, status: { state: 'development', entitled: true } as never } })
+  useWorkspaceStore.setState({ activeSessionId: 'session-1', sessions: [{ id: 'session-1', name: 'Repo', paneCount: 0, createdAt: 1, workspaceFolder: 'C:/repo' }], worktreeProjections: [] })
 })
 
 test('mounts one interval and one focus listener regardless of consumer count', async () => {
@@ -93,12 +93,15 @@ test('polling refresh does not restart the selected-file contents request', asyn
   await vi.advanceTimersByTimeAsync(0)
 })
 
-test('does not schedule or invoke Git while entitlement is locked', () => {
-  useWorkspaceStore.setState({ license: { ready: true, status: { state: 'trialExpired', entitled: false } as never } })
+test('loads and polls Git without account state', async () => {
   const interval = vi.spyOn(window, 'setInterval')
   render(<WorkspaceContentActionsContext.Provider value={actions}><GitWorkspaceProvider><Probe /></GitWorkspaceProvider></WorkspaceContentActionsContext.Provider>)
-  expect(interval.mock.calls.filter(([, delay]) => delay === 3_000)).toHaveLength(0)
-  expect(invoke).not.toHaveBeenCalled()
+  await waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith('git_discover_repos', { root: 'C:/repo', maxDepth: 4 })
+    expect(invoke).toHaveBeenCalledWith('git_repo_info', { workspaceFolder: 'C:/repo' })
+    expect(invoke).toHaveBeenCalledWith('git_working_status', { workspaceFolder: 'C:/repo' })
+  })
+  expect(interval.mock.calls.filter(([, delay]) => delay === 30_000)).toHaveLength(1)
 })
 
 test('falls back to the imported head when a legacy worktree base ref is empty', async () => {

@@ -29,12 +29,7 @@ pub(crate) mod query_filter;
 pub(crate) mod scrollback;
 pub mod session;
 mod terminal_history;
-#[cfg(test)]
-use auth::authorize_daemon_message_with;
-use auth::{
-    authenticate_connection, authorize_daemon_message, heartbeat_revocation,
-    revoke_daemon_authorization, spawn_policy_monitor,
-};
+use auth::{authenticate_connection, AdmissionError};
 pub use bootstrap::run;
 use bootstrap::{
     cleanup_dispatch_target, cleanup_run_resources, exit_daemon_process,
@@ -45,7 +40,7 @@ use bootstrap::{
 use bootstrap::{reconstruct_sessions, rotate_daemon_log, PidFileGuard, DAEMON_LOG_ROTATE_LIMIT};
 use connection::{
     dispatch_browser_host_request, handle_connection, register_browser_host,
-    resolve_browser_host_response, BrowserHostRouter, ConnectionControl,
+    resolve_browser_host_response, BrowserHostRouter,
 };
 #[cfg(test)]
 use dispatch::{
@@ -70,7 +65,6 @@ use panes::{
 
 use crate::agent_runtime::WorktreeManager;
 use crate::app::{
-    authorization::{AuthorizationErrorCode, AuthorizationSnapshot, Capability},
     git::worktree::{WorktreeStorage, WorktreeStorageMode},
     git::worktree_lifecycle::{WorktreeCreateResult, WorktreeLifecycleService},
     git::worktree_registry::{
@@ -86,7 +80,6 @@ use crate::app::{
         WORKTREE_METHOD_REVIEW_COMMENTS, WORKTREE_METHOD_REVIEW_COMMENT_PUT,
         WORKTREE_METHOD_REVIEW_COMMENT_STATE, WORKTREE_METHOD_SET,
     },
-    license::HeadlessLicenseCache,
     spawn_daemon::load_or_create_ipc_secret,
 };
 use crate::computer_use::{
@@ -131,11 +124,11 @@ use crate::protocol::{
     constant_time_eq, daemon_auth_proof, read_frame, write_frame, ClientKind, ClientToDaemon,
     DaemonToClient, PaneCommandOrigin, PaneConfig, RemoteBrowserHostRequest,
     RemoteBrowserHostResponse, RemoteConnectionCleanupRequest, RemotePaneLeaseResult,
-    RemotePaneLeaseStatusRequest, ReplyResult, Req, DAEMON_AUTH_REQUIRED, DAEMON_PROTOCOL_VERSION,
+    RemotePaneLeaseStatusRequest, ReplyResult, Req, DAEMON_AUTH_REQUIRED, DAEMON_PROTOCOL_MISMATCH,
+    DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::{RemotePaneLeaseStatus, RemoteServer};
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
 use crossbeam_channel::{bounded, Sender, TrySendError};
 use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
 use rand::{rngs::OsRng, RngCore};
@@ -167,14 +160,13 @@ struct ComputerHostCall {
     reply: Sender<std::result::Result<HostResponseBody, ProviderError>>,
 }
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
-type SharedConnections = Arc<Mutex<std::collections::HashMap<Uuid, ConnectionControl>>>;
+type SharedConnections = Arc<Mutex<std::collections::HashSet<Uuid>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 256;
 const PERSIST_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
 const REMOTE_PANE_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const AUTOMATION_SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 const AUTOMATION_SCHEDULER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const AUTH_CHALLENGE_TTL: Duration = Duration::from_secs(3);
-const POLICY_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 static PERSISTENCE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static DEBOUNCED_PERSISTER: LazyLock<Mutex<Option<DebouncedPersister>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -210,13 +202,13 @@ impl PendingChallenge {
         client_id: Uuid,
         proof: &[u8; 32],
         now: Instant,
-    ) -> std::result::Result<(), AuthorizationErrorCode> {
+    ) -> std::result::Result<(), AdmissionError> {
         if self.consumed {
-            return Err(AuthorizationErrorCode::AuthRequired);
+            return Err(AdmissionError::AuthRequired);
         }
         self.consumed = true;
         if now > self.expires_at || client_id != self.client_id {
-            return Err(AuthorizationErrorCode::AuthRequired);
+            return Err(AdmissionError::AuthRequired);
         }
         let expected = daemon_auth_proof(
             secret,
@@ -227,42 +219,9 @@ impl PendingChallenge {
             self.client_kind,
         );
         if !constant_time_eq(&expected, proof) {
-            return Err(AuthorizationErrorCode::AuthRequired);
+            return Err(AdmissionError::AuthRequired);
         }
         Ok(())
-    }
-}
-
-#[derive(Default)]
-struct PolicyHeartbeat {
-    deadline: Option<Instant>,
-    policy_epoch: u64,
-    revoked: bool,
-}
-
-impl PolicyHeartbeat {
-    fn note_app_connection(&mut self) {
-        self.deadline = Some(Instant::now() + POLICY_HEARTBEAT_TTL);
-        self.revoked = false;
-    }
-
-    fn update(&mut self, snapshot: AuthorizationSnapshot) {
-        let now_wall = Utc::now();
-        let remaining = snapshot
-            .lease_until
-            .signed_duration_since(now_wall)
-            .to_std()
-            .unwrap_or_default()
-            .min(POLICY_HEARTBEAT_TTL);
-        self.deadline = Some(Instant::now() + remaining);
-        self.policy_epoch = snapshot.policy_epoch;
-        self.revoked = snapshot
-            .authorize(Capability::WorkspaceRead, now_wall)
-            .is_err();
-    }
-
-    fn stale(&self, now: Instant) -> bool {
-        self.deadline.is_some_and(|deadline| now > deadline)
     }
 }
 

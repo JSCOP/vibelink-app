@@ -11,9 +11,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use uuid::Uuid;
 
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
-use tauri::State;
-
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LOGCAT_LINES: usize = 20_000;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -1344,12 +1341,6 @@ fn now_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn entitled(supervisor: &State<'_, Arc<EntitlementSupervisor>>) -> Result<(), DeviceLabFailure> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(|error| DeviceLabFailure::new("denied_capability", error.to_string(), false))
-}
-
 async fn blocking<T, F>(operation: F) -> Result<T, DeviceLabFailure>
 where
     T: Send + 'static,
@@ -1362,118 +1353,91 @@ where
 
 #[tauri::command]
 pub async fn device_lab_sdk_discover(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     sdk_root: Option<String>,
 ) -> Result<SdkDiscovery, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || Ok(discover_sdk(sdk_root.as_deref()))).await
 }
 
 #[tauri::command]
 pub async fn device_lab_adb_devices(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: OperationRequest,
 ) -> Result<Vec<AdbDevice>, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || adb_devices(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_avd_list(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: OperationRequest,
 ) -> Result<Vec<String>, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || avd_list(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_avd_start(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: AvdStartRequest,
 ) -> Result<OwnedProcessInfo, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || avd_start(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_apk_install(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: InstallRequest,
 ) -> Result<CommandOutput, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || apk_install(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_app_launch(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: LaunchRequest,
 ) -> Result<CommandOutput, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || app_launch(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_permission_change(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: PermissionRequest,
 ) -> Result<CommandOutput, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || permission_change(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_accessibility_status(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: DeviceRequest,
 ) -> Result<AccessibilityStatus, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || accessibility_status(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_logcat(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: LogcatRequest,
 ) -> Result<CommandOutput, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || logcat(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_scrcpy_start(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: ScrcpyStartRequest,
 ) -> Result<OwnedProcessInfo, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || scrcpy_start(request)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_process_status(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     operation_id: String,
     expected_pid: u32,
 ) -> Result<OwnedProcessInfo, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || process_status(&operation_id, expected_pid)).await
 }
 
 #[tauri::command]
 pub async fn device_lab_process_cancel(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     request: CancelProcessRequest,
 ) -> Result<OwnedProcessInfo, DeviceLabFailure> {
-    entitled(&supervisor)?;
     blocking(move || cancel_process(request)).await
 }
 
 #[tauri::command]
-pub async fn device_lab_owned_processes(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
-) -> Result<Vec<OwnedProcessInfo>, DeviceLabFailure> {
-    entitled(&supervisor)?;
+pub async fn device_lab_owned_processes() -> Result<Vec<OwnedProcessInfo>, DeviceLabFailure> {
     blocking(|| Ok(owned_processes())).await
 }
 

@@ -3,7 +3,6 @@ import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { agentActivityTracker } from '../terminal/agentActivity'
 
-
 type TaskSignal =
   | { kind: 'done'; taskId: string; commitMsg?: string | null; resultSummary?: string | null; paneId?: string | null }
   | { kind: 'note'; taskId: string; message: string; paneId?: string | null }
@@ -18,7 +17,6 @@ type TerminalEvent =
   | { kind: 'task'; sessionId: string; signal: TaskSignal }
   | { kind: 'connectionLost'; message: string }
   | { kind: 'connectionRestored' }
-  | { kind: 'authorizationChanged'; code: string; policyEpoch: number }
 
 let registration: Promise<void> | undefined
 const sessionReloadTimers = new Map<string, number>()
@@ -56,10 +54,6 @@ export async function startTerminalOutputStream(options: { force?: boolean } = {
       } else {
         void reloadBoard(event.sessionId)
       }
-    } else if (event.kind === 'authorizationChanged') {
-      const store = useWorkspaceStore.getState()
-      store.setError(event.code)
-      void store.refreshLicense()
     } else if (event.kind === 'connectionLost') {
       useWorkspaceStore.getState().setError(`Daemon connection lost: ${event.message}`)
     } else {
@@ -149,8 +143,6 @@ async function reloadSession(sessionId: string): Promise<void> {
 }
 
 async function reloadBoard(sessionId: string): Promise<void> {
-  const license = useWorkspaceStore.getState().license
-  if (!license.ready || !license.status?.entitled) return
   const json = await invoke<string>('board_read', { sessionId })
   useWorkspaceStore.getState().applyBoardSnapshot(sessionId, json)
 }

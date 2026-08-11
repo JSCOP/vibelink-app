@@ -1,5 +1,4 @@
 use super::git::{git_output, paths::contain_path, split_nul};
-use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -8,9 +7,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
 use uuid::Uuid;
 
 const TEXT_LIMIT: usize = 2 * 1024 * 1024;
@@ -99,11 +96,10 @@ enum ConditionalWriteOutcome {
 
 #[tauri::command]
 pub async fn fs_list_dir(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<Vec<DirEntryInfo>, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         list_dir_native(&workspace_folder, &rel_path)
     })
     .await
@@ -111,10 +107,9 @@ pub async fn fs_list_dir(
 
 #[tauri::command]
 pub async fn fs_list_workspace_files(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
 ) -> Result<Vec<String>, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         list_workspace_files_native(&workspace_folder)
     })
     .await
@@ -122,11 +117,10 @@ pub async fn fs_list_workspace_files(
 
 #[tauri::command]
 pub async fn fs_read_text(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextFile, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         read_text_native(&workspace_folder, &rel_path)
     })
     .await
@@ -134,11 +128,10 @@ pub async fn fs_read_text(
 
 #[tauri::command]
 pub async fn fs_path_kind(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<FsPathKind, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         path_kind_native(&workspace_folder, &rel_path)
     })
     .await
@@ -146,11 +139,10 @@ pub async fn fs_path_kind(
 
 #[tauri::command]
 pub async fn fs_read_image(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<String, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         read_base64_native(&workspace_folder, &rel_path)
     })
     .await
@@ -158,11 +150,10 @@ pub async fn fs_read_image(
 
 #[tauri::command]
 pub async fn fs_open_text_document(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextDocument, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         open_text_document_native(&workspace_folder, &rel_path)
     })
     .await
@@ -170,11 +161,10 @@ pub async fn fs_open_text_document(
 
 #[tauri::command]
 pub async fn fs_text_document_revision(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextDocumentRevision, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceRead, move || {
+    spawn_blocking(move || {
         text_document_revision_native(&workspace_folder, &rel_path)
     })
     .await
@@ -182,7 +172,6 @@ pub async fn fs_text_document_revision(
 
 #[tauri::command]
 pub async fn fs_save_text_document(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
     content: String,
@@ -190,7 +179,7 @@ pub async fn fs_save_text_document(
     encoding: TextDocumentEncoding,
     line_ending: TextDocumentLineEnding,
 ) -> Result<SaveTextDocumentResult, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         save_text_document_native(
             &workspace_folder,
             &rel_path,
@@ -206,7 +195,6 @@ pub async fn fs_save_text_document(
 
 #[tauri::command]
 pub async fn fs_save_text_document_as(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
     content: String,
@@ -214,7 +202,7 @@ pub async fn fs_save_text_document_as(
     encoding: TextDocumentEncoding,
     line_ending: TextDocumentLineEnding,
 ) -> Result<SaveTextDocumentResult, String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         save_text_document_native(
             &workspace_folder,
             &rel_path,
@@ -230,11 +218,10 @@ pub async fn fs_save_text_document_as(
 
 #[tauri::command]
 pub async fn fs_create_file(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<(), String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         create_file_native(&workspace_folder, &rel_path)
     })
     .await
@@ -242,11 +229,10 @@ pub async fn fs_create_file(
 
 #[tauri::command]
 pub async fn fs_create_dir(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
 ) -> Result<(), String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         create_dir_native(&workspace_folder, &rel_path)
     })
     .await
@@ -254,12 +240,11 @@ pub async fn fs_create_dir(
 
 #[tauri::command]
 pub async fn fs_rename(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     from_rel: String,
     to_rel: String,
 ) -> Result<(), String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         rename_native(&workspace_folder, &from_rel, &to_rel)
     })
     .await
@@ -267,11 +252,10 @@ pub async fn fs_rename(
 
 #[tauri::command]
 pub async fn fs_delete(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_paths: Vec<String>,
 ) -> Result<(), String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         delete_native(&workspace_folder, &rel_paths)
     })
     .await
@@ -279,12 +263,11 @@ pub async fn fs_delete(
 
 #[tauri::command]
 pub async fn open_in_editor(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     rel_path: String,
     editor_command: String,
 ) -> Result<(), String> {
-    authorized_spawn(supervisor, Capability::WorkspaceMutate, move || {
+    spawn_blocking(move || {
         open_in_editor_native(&workspace_folder, &rel_path, &editor_command)
     })
     .await
@@ -1461,16 +1444,11 @@ fn resolve_windows_launcher(program: &str) -> std::ffi::OsString {
     program.into()
 }
 
-async fn authorized_spawn<T, F>(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
-    capability: Capability,
-    operation: F,
-) -> Result<T, String>
+async fn spawn_blocking<T, F>(operation: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    supervisor.authorize(capability).map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(to_string)?

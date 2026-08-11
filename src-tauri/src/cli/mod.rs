@@ -1,6 +1,4 @@
-use crate::app::authorization::Capability;
 use crate::app::daemon_client::{parse_uuid, DaemonClient};
-use crate::app::license::HeadlessLicenseCache;
 use crate::app::skills::{
     apply_skill, delete_skill, get_skill, list_skills, SkillApplyInput, SkillScope,
 };
@@ -78,7 +76,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         print_usage(io::stdout())?;
         return Ok(());
     }
-    require_cli_control()?;
     if is_skill_command(&command) {
         return execute_skill(command);
     }
@@ -87,12 +84,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         .context("connect to daemon")?;
     let client = DaemonClient::new_with_kind(stream, ClientKind::Cli);
     execute(&client, command)
-}
-
-fn require_cli_control() -> Result<()> {
-    HeadlessLicenseCache::load()
-        .context("load license cache")?
-        .require_capability(Capability::CliControl)
 }
 
 fn execute(client: &DaemonClient, command: CliCommand) -> Result<()> {

@@ -1,11 +1,8 @@
 use super::exec::{git_read, git_read_output};
 use super::paths::{validate_base_ref, validate_repo_relative_path};
 use super::{merge_numstat, parse_name_status, to_string, ChangedFile};
-use crate::app::{authorization::Capability, entitlement::EntitlementSupervisor};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tauri::State;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,13 +50,9 @@ pub struct CommitDetail {
 
 #[tauri::command]
 pub async fn git_log(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     options: LogOptions,
 ) -> Result<LogPage, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || git_log_native(&workspace_folder, options))
         .await
         .map_err(to_string)?
@@ -68,13 +61,9 @@ pub async fn git_log(
 
 #[tauri::command]
 pub async fn git_commit_detail(
-    supervisor: State<'_, Arc<EntitlementSupervisor>>,
     workspace_folder: String,
     sha: String,
 ) -> Result<CommitDetail, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     tauri::async_runtime::spawn_blocking(move || git_commit_detail_native(&workspace_folder, &sha))
         .await
         .map_err(to_string)?

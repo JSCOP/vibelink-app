@@ -1,4 +1,3 @@
-use super::{authorization::Capability, entitlement::EntitlementSupervisor};
 use std::{
     borrow::Cow,
     fs,
@@ -520,36 +519,23 @@ fn read_capture_file_native(dir: &str, path: &str) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
-pub async fn default_capture_dir(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
-) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
+pub async fn default_capture_dir() -> Result<String, String> {
     Ok(default_capture_root().to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn check_ffmpeg(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     ffmpeg_path: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     resolve_ffmpeg(&ffmpeg_path).map(|_| ())
 }
 
 #[tauri::command]
 pub async fn ensure_ffmpeg(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
     ffmpeg_path: String,
 ) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     if let Ok(program) = resolve_ffmpeg(&ffmpeg_path) {
         return Ok(program);
     }
@@ -571,12 +557,8 @@ pub async fn ensure_ffmpeg(
 
 #[tauri::command]
 pub async fn open_path(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     path: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     let target = normalize_open_target(&path)?;
 
     // Windows: call ShellExecuteW directly from this process instead of
@@ -630,12 +612,8 @@ pub async fn open_path(
 
 #[tauri::command]
 pub async fn reveal_path(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     path: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     let target = normalize_local_target(&path)?;
 
     // `explorer.exe` parses its own command line and only understands backslash
@@ -756,15 +734,11 @@ pub fn is_capture_overlay_label(label: &str) -> bool {
 
 #[tauri::command]
 pub async fn open_capture_overlay(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     mode: String,
     dir: String,
     ffmpeg_path: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     // Close every live or leaked overlay from the generated label family.
     for (label, window) in app.webview_windows() {
         if is_capture_overlay_label(&label) {
@@ -864,7 +838,6 @@ fn monitor_crop(region: CaptureMonitorRect, monitor: CaptureMonitorRect) -> Opti
 
 #[tauri::command]
 pub async fn capture_region_image(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     dir: String,
     file_name: String,
     x: i32,
@@ -872,9 +845,6 @@ pub async fn capture_region_image(
     w: u32,
     h: u32,
 ) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     if w == 0 || h == 0 {
         return Err("empty region".to_string());
     }
@@ -927,23 +897,15 @@ pub async fn capture_region_image(
 
 #[tauri::command]
 pub async fn clipboard_write_image(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     png_bytes: Vec<u8>,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     copy_png_to_clipboard(&png_bytes)
 }
 
 #[tauri::command]
 pub async fn clipboard_write_text(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     text: String,
 ) -> Result<(), String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     // Native clipboard access remains focus-independent for embedded WebView2 pages.
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
@@ -951,12 +913,7 @@ pub async fn clipboard_write_text(
 }
 
 #[tauri::command]
-pub async fn clipboard_read_text(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
-) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
+pub async fn clipboard_read_text() -> Result<String, String> {
     // `navigator.clipboard.readText()` needs both a secure context and Win32
     // focus; neither holds for the terminal paste menu item.
     arboard::Clipboard::new()
@@ -966,13 +923,9 @@ pub async fn clipboard_read_text(
 
 #[tauri::command]
 pub fn read_capture_file(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     dir: String,
     path: String,
 ) -> Result<Vec<u8>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     read_capture_file_native(&dir, &path)
 }
 
@@ -995,7 +948,6 @@ pub(crate) fn store_capture_image(
 
 #[tauri::command]
 pub async fn start_video_capture(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
     dir: String,
@@ -1006,9 +958,6 @@ pub async fn start_video_capture(
     w: u32,
     h: u32,
 ) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     let w = w & !1;
     let h = h & !1;
     if w < 16 || h < 16 {
@@ -1120,12 +1069,8 @@ pub async fn start_video_capture(
 
 #[tauri::command]
 pub fn capture_recording_state(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<Option<CaptureRecordingState>, String> {
-    supervisor
-        .authorize(Capability::WorkspaceRead)
-        .map_err(to_string)?;
     let recording = state
         .recording
         .lock()
@@ -1154,13 +1099,9 @@ pub fn capture_recording_state(
 
 #[tauri::command]
 pub async fn stop_video_capture(
-    supervisor: tauri::State<'_, Arc<EntitlementSupervisor>>,
     app: tauri::AppHandle,
     state: tauri::State<'_, CaptureState>,
 ) -> Result<String, String> {
-    supervisor
-        .authorize(Capability::WorkspaceMutate)
-        .map_err(to_string)?;
     let recording = {
         let mut slot = state
             .recording
