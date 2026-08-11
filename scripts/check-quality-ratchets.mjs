@@ -8,7 +8,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceBudgets = {
   // Tracked hotspots: current non-growth baselines; lower them when files shrink.
   'src/layout/WorkspaceView.tsx': 2_530,
-  'src/terminal/TerminalManager.ts': 2_363,
+  // The rendered-buffer snapshot policy itself lives in paneSnapshotCapture.ts;
+  // what stayed here is the `Clear pane` action plus the capture call sites.
+  'src/terminal/TerminalManager.ts': 2_386,
   'src/state/store.ts': 2_197,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
   'src-tauri/src/remote/bridge.rs': 5_568,
@@ -16,7 +18,8 @@ const sourceBudgets = {
   'src-tauri/src/app/git/worktree_registry.rs': 3_149,
   // Keeps pending download records joinable after the manager tests moved out.
   'src-tauri/src/browser/manager.rs': 3_147,
-  'src-tauri/src/daemon/session.rs': 3_072,
+  // Rebasing a pane's scrollback onto a GUI-rendered snapshot.
+  'src-tauri/src/daemon/session.rs': 3_086,
   'src-tauri/src/browser/provider.rs': 2_834,
   'src-tauri/src/app/hermes.rs': 2_706,
   'src-tauri/src/control_plane.rs': 2_471,
@@ -32,7 +35,8 @@ const sourceBudgets = {
   'src-tauri/src/app/capture.rs': 1_435,
   'src-tauri/src/app/daemon_client.rs': 1_210,
   'src-tauri/src/app/fsops.rs': 1_704,
-  'src-tauri/src/daemon/dispatch.rs': 4_766,
+  // One arm per protocol message, so SetPaneSnapshot costs ten lines here.
+  'src-tauri/src/daemon/dispatch.rs': 4_776,
   'src-tauri/src/daemon/tests.rs': 1_580,
   'src-tauri/src/app/git/worktree_lifecycle.rs': 2_396,
   'src-tauri/src/app/license.rs': 1_882,
@@ -45,7 +49,7 @@ const sourceBudgets = {
   // One entry per CLI action, so the `browser new-tab` spec costs twelve lines here.
   'src-tauri/src/dedicated_cli/contract.rs': 2_034,
   'src-tauri/src/mcp/mod.rs': 2_046,
-  'src-tauri/src/protocol.rs': 1_227,
+  'src-tauri/src/protocol.rs': 1_237,
   'src-tauri/src/remote/server.rs': 1_273,
 }
 

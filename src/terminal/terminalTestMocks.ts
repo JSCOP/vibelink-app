@@ -147,3 +147,16 @@ export function webglAddonModule() {
 export function clipboardAddonModule() { return { ClipboardAddon: class {} } }
 export function searchAddonModule() { return { SearchAddon: class {} } }
 export function unicode11AddonModule() { return { Unicode11Addon: class {} } }
+/** Stands in for the real serializer: tests care about WHEN a snapshot is sent
+ *  and what wraps it, not about xterm's cell-to-ANSI rendering. */
+export function serializeAddonModule() {
+  class MockSerializeAddon {
+    private terminal: { cols: number; rows: number } | undefined
+    activate(terminal: { cols: number; rows: number }): void { this.terminal = terminal }
+    serialize(options?: { scrollback?: number }): string {
+      return `rendered ${this.terminal?.cols ?? 0}x${this.terminal?.rows ?? 0} scrollback=${options?.scrollback ?? 'all'}`
+    }
+    dispose(): void {}
+  }
+  return { SerializeAddon: MockSerializeAddon }
+}

@@ -121,6 +121,7 @@ fn request_capability(
         | ClientToDaemon::SpawnPane { .. }
         | ClientToDaemon::CancelPaneSpawn { .. }
         | ClientToDaemon::ResizePane { .. }
+        | ClientToDaemon::SetPaneSnapshot { .. }
         | ClientToDaemon::NotifySessionChanged { .. }
         | ClientToDaemon::SetPaneTitle { .. }
         | ClientToDaemon::SetPaneRole { .. }

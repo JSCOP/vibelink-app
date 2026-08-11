@@ -6,6 +6,7 @@ import { PaneFitAddon, showPaneScrollbar } from './scrollbar'
 import { SearchAddon } from '@xterm/addon-search'
 import type { ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { terminalThemeById } from '../state/terminalThemes'
 import { terminalFontStack } from '../state/fonts'
@@ -20,6 +21,7 @@ import { agentActivityTracker, type AgentActivityActions } from './agentActivity
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
 import { PaneTitleCoalescer } from './titleCoalescing'
+import { cancelSnapshotCapture, captureSnapshot, HARD_CLEAR, scheduleSnapshotCapture } from './paneSnapshotCapture'
 import { forceRepaintThroughRenderPause } from './renderPauseRelease'
 
 const MAX_FIT_ATTEMPTS = 120
@@ -175,6 +177,8 @@ type Entry = {
   term: Terminal
   fit: PaneFitAddon
   search: SearchAddon
+  serialize: SerializeAddon
+  snapshotTimer?: number
   opened: boolean
   daemonAttached: boolean
   dataWired: boolean
@@ -544,8 +548,10 @@ class TerminalManagerImpl {
     const term = new Terminal(createTerminalOptions(this.settings))
     const fit = new PaneFitAddon()
     const search = new SearchAddon()
+    const serialize = new SerializeAddon()
     term.loadAddon(fit)
     term.loadAddon(search)
+    term.loadAddon(serialize)
     term.loadAddon(new Unicode11Addon())
     term.loadAddon(new ClipboardAddon())
     term.unicode.activeVersion = '11'
@@ -581,7 +587,7 @@ class TerminalManagerImpl {
       return true
     })
 
-    const entry: Entry = { paneId, term, fit, search, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false, lastUsedAt: Date.now() }
+    const entry: Entry = { paneId, term, fit, search, serialize, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false, lastUsedAt: Date.now() }
     this.entries.set(paneId, entry)
     entry.linkDisposables = [
       term.registerLinkProvider(createPathLinkProvider(term, () => this.linkActions)),
@@ -655,6 +661,7 @@ class TerminalManagerImpl {
         entry.lastSentPtyRows = rows
         entry.lastPtySyncAt = Date.now()
         void invoke('resize_pane', { sessionId, paneId, cols, rows })
+        scheduleSnapshotCapture(entry)
       })
       entry.dataWired = true
     }
@@ -1415,6 +1422,20 @@ class TerminalManagerImpl {
     this.scheduleLayoutPass({ syncPty: true })
   }
 
+  /** Wipe this pane's viewport AND scrollback, here and in the daemon, so the
+   *  clear survives a restart instead of returning with the next replay. The
+   *  program is untouched: nothing is written to the PTY, so an agent keeps
+   *  running and simply redraws on its next output. */
+  clearPane(paneId: string): void {
+    const entry = this.entries.get(paneId)
+    if (!entry?.opened || entry.remoteLease) return
+    entry.term.write(HARD_CLEAR, () => {
+      if (this.entries.get(paneId) !== entry) return
+      cancelSnapshotCapture(entry)
+      captureSnapshot(entry)
+    })
+  }
+
   repairAfterPointerActivation(paneId: string): void {
     const entry = this.entries.get(paneId)
     if (!entry?.opened || !entry.container) return
@@ -1634,6 +1655,7 @@ class TerminalManagerImpl {
     clearTimeout(entry.rendererReloadTimer)
     entry.rendererReloadPending = false
     clearTimeout(entry.clickRepairTimer)
+    cancelSnapshotCapture(entry)
     clearTimeout(entry.webglPromotionTimer)
     entry.webglPromotionTimer = undefined
     this.cancelHiddenOutputParking(entry)
@@ -2284,6 +2306,7 @@ class TerminalManagerImpl {
     entry.lastSentPtyRows = rows
     entry.lastPtySyncAt = Date.now()
     void invoke('resize_pane', { sessionId, paneId: entry.paneId, cols, rows })
+    scheduleSnapshotCapture(entry)
   }
 
   private observeMeasureState(entry: Entry, rect: { width: number; height: number } | null | undefined): { measurable: boolean; forceFitForMeasure: boolean } {

@@ -531,6 +531,16 @@ pub enum ClientToDaemon {
         #[serde(default)]
         origin: PaneCommandOrigin,
     },
+    /// A snapshot of a pane's RENDERED screen, serialized by the desktop GUI's
+    /// terminal emulator, replacing the raw scrollback the daemon accumulated.
+    /// Only the GUI knows what the pane actually looks like; the daemon holds
+    /// bytes, and bytes stop being replayable once the pane's width changes.
+    SetPaneSnapshot {
+        req: Req,
+        session_id: Uuid,
+        pane_id: Uuid,
+        data: Vec<u8>,
+    },
     NotifySessionChanged {
         session_id: Uuid,
     },

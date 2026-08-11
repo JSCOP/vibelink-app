@@ -449,6 +449,7 @@ pub fn run() {
             commands::set_exit_behavior,
             commands::hide_to_tray,
             commands::resize_pane,
+            commands::set_pane_snapshot,
             commands::save_layout,
             commands::set_pane_title,
             commands::spawn_pane,

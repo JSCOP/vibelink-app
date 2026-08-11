@@ -10,6 +10,7 @@ vi.mock('@xterm/addon-webgl', async () => (await import('./terminalTestMocks')).
 vi.mock('@xterm/addon-clipboard', async () => (await import('./terminalTestMocks')).clipboardAddonModule())
 vi.mock('@xterm/addon-search', async () => (await import('./terminalTestMocks')).searchAddonModule())
 vi.mock('@xterm/addon-unicode11', async () => (await import('./terminalTestMocks')).unicode11AddonModule())
+vi.mock('@xterm/addon-serialize', async () => (await import('./terminalTestMocks')).serializeAddonModule())
 import {
   TerminalManager,
   emitTerminalData,
@@ -18,6 +19,18 @@ import {
   makeContainer,
   paneWriteData,
 } from './terminalTestHarness'
+
+describe('TerminalManager clipboard keyboard routing', () => {
+  it('lets WebView handle Ctrl+V instead of forwarding ^V to the PTY', () => {
+    const paneId = 'pane-clipboard-paste'
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      term: { customKeyEventHandler?: (event: KeyboardEvent) => boolean }
+    }
+
+    expect(entry.term.customKeyEventHandler?.(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true }))).toBe(false)
+    expect(entry.term.customKeyEventHandler?.(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }))).toBe(true)
+  })
+})
 
 describe('TerminalManager pre-session input buffering', () => {
   it('holds emulator input while the pane has no session and flushes it on the session-bound attach', async () => {

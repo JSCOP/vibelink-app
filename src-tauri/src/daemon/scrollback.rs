@@ -18,6 +18,10 @@ pub struct ScrollbackRing {
     cap: usize,
     pending_clear_prefix: Vec<u8>,
     protected_prefix_len: usize,
+    /// Set by `rebase`, consumed by `take_rebased`. Raw PTY output is appended to
+    /// the on-disk history, so a rebase has to tell the reader thread that the
+    /// file must be rewritten from the new base instead of grown from the old one.
+    rebased: bool,
 }
 
 impl ScrollbackRing {
@@ -27,6 +31,7 @@ impl ScrollbackRing {
             cap,
             pending_clear_prefix: Vec::new(),
             protected_prefix_len: 0,
+            rebased: false,
         }
     }
 
@@ -80,6 +85,25 @@ impl ScrollbackRing {
         self.clear();
         self.push(bytes);
         self.protected_prefix_len = self.buf.len();
+    }
+
+    /// Replace the whole ring with a snapshot of the pane's RENDERED screen,
+    /// produced by the desktop GUI's terminal emulator.
+    ///
+    /// Raw PTY bytes carry no geometry, so replaying them into a terminal of a
+    /// different width re-wraps every full-width rule and lands every absolute
+    /// cursor move in the wrong cell — the stacked, half-overwritten agent frames
+    /// users see after a restart. A rendered snapshot is plain text plus SGR, so
+    /// it reflows gracefully at any width, and the bytes recorded after it were
+    /// all produced at the geometry they will be replayed at.
+    pub fn rebase(&mut self, snapshot: &[u8]) {
+        self.clear();
+        self.push(snapshot);
+        self.rebased = true;
+    }
+
+    pub fn take_rebased(&mut self) -> bool {
+        std::mem::take(&mut self.rebased)
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
@@ -276,6 +300,40 @@ mod tests {
         ring.push(b"\x1b[2Jafter");
 
         assert_eq!(ring.snapshot(), b"\x1b[2Jafter");
+    }
+
+    #[test]
+    fn rebase_replaces_raw_bytes_and_reports_the_rewrite_once() {
+        let mut ring = ScrollbackRing::new(128);
+        ring.push(b"raw frame drawn at the old width");
+
+        ring.rebase(b"\x1b[3J\x1b[2J\x1b[Hrendered");
+
+        let snapshot = ring.snapshot();
+        assert!(
+            !find_subslice(&snapshot, b"raw frame").is_some(),
+            "bytes produced at a geometry that no longer exists must not survive a rebase"
+        );
+        assert!(snapshot.ends_with(b"rendered"));
+        assert!(
+            ring.take_rebased(),
+            "the reader thread must rewrite the on-disk history from the new base"
+        );
+        assert!(
+            !ring.take_rebased(),
+            "and must not rewrite it again for every later chunk"
+        );
+    }
+
+    #[test]
+    fn output_recorded_after_a_rebase_is_appended_to_the_snapshot() {
+        let mut ring = ScrollbackRing::new(128);
+        ring.push(b"stale");
+
+        ring.rebase(b"\x1b[2Jrendered");
+        ring.push(b" live tail");
+
+        assert_eq!(ring.snapshot(), b"\x1b[2Jrendered live tail");
     }
 
     #[test]

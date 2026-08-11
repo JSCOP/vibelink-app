@@ -3748,6 +3748,15 @@ pub(super) fn dispatch_message(
             resize_pane_authorized(&state, session_id, pane_id, cols, rows, &origin)?;
             Ok(())
         }
+        ClientToDaemon::SetPaneSnapshot {
+            req,
+            session_id,
+            pane_id,
+            data,
+        } => {
+            lock_state(&state).rebase_pane_scrollback(session_id, pane_id, &data)?;
+            send_ok(tx, req)
+        }
         ClientToDaemon::NotifySessionChanged { session_id } => {
             notify_session_changed(&state, session_id)
         }
@@ -4701,6 +4710,7 @@ pub(super) fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::RemoteConnectionCleanup { req, .. }
         | ClientToDaemon::ResourceSnapshot { req }
         | ClientToDaemon::AttentionSnapshot { req }
+        | ClientToDaemon::SetPaneSnapshot { req, .. }
         | ClientToDaemon::Shutdown { req, .. } => Some(*req),
         ClientToDaemon::Hello { .. }
         | ClientToDaemon::Authenticate { .. }

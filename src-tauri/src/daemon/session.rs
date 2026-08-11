@@ -1110,6 +1110,20 @@ impl DaemonState {
         Ok(pane.scrollback_snapshot())
     }
 
+    /// Replace a pane's raw scrollback with a rendered-screen snapshot from the
+    /// desktop GUI. See `ScrollbackRing::rebase` for why raw bytes cannot be
+    /// replayed faithfully once the pane's geometry has changed.
+    pub fn rebase_pane_scrollback(
+        &self,
+        session_id: Uuid,
+        pane_id: Uuid,
+        snapshot: &[u8],
+    ) -> anyhow::Result<()> {
+        self.pane_in_session(session_id, pane_id)?
+            .rebase_scrollback(snapshot);
+        Ok(())
+    }
+
     pub fn terminal_snapshot(
         &self,
         session_id: Uuid,

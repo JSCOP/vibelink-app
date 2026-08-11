@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ClipboardCopy, ClipboardPaste, Copy, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, SquareTerminal, TextSelect, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ClipboardCopy, ClipboardPaste, Copy, Eraser, FolderOpen, LayoutGrid, Play, Plus, Sparkles, SplitSquareHorizontal, SplitSquareVertical, SquareTerminal, TextSelect, X } from 'lucide-react'
 import { useWorkspaceStore } from '../state/store'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { TerminalSearchBar } from '../components/TerminalSearchBar'
@@ -266,6 +266,11 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
     void actions.requestCloseContent(props.api.id)
   }
 
+  const clearTerminal = () => {
+    closeContextMenu()
+    if (paneId) TerminalManager.clearPane(paneId)
+  }
+
   const takeBackControl = async () => {
     if (!paneId || !remoteLease || reclaimingLease) return
     setReclaimingLease(true)
@@ -477,6 +482,10 @@ export const TerminalPanePanel = memo(function TerminalPanePanel(props: IDockvie
             </button>
             <button type="button" role="menuitem" onClick={arrangeTerminals}>
               <LayoutGrid size={13} /> Arrange panes <span style={CONTEXT_MENU_SHORTCUT_STYLE}>{formatKeyChord(keybindings.arrangePanes)}</span>
+            </button>
+            <div className="terminal-context-separator" role="separator" />
+            <button type="button" role="menuitem" onClick={clearTerminal}>
+              <Eraser size={13} /> Clear pane
             </button>
             <div className="terminal-context-separator" role="separator" />
             <button type="button" role="menuitem" onClick={closeTerminal}>

@@ -987,6 +987,30 @@ pub async fn resize_pane(
         .map_err(to_string)
 }
 
+/// Hand the daemon a snapshot of what this pane's terminal actually renders, so
+/// a later reattach restores that screen instead of re-parsing raw PTY bytes at
+/// a geometry they were never produced at.
+#[tauri::command]
+pub async fn set_pane_snapshot(
+    supervisor: State<'_, Arc<EntitlementSupervisor>>,
+    client: State<'_, DaemonClient>,
+    session_id: String,
+    pane_id: String,
+    data: String,
+) -> Result<(), String> {
+    supervisor
+        .authorize(Capability::TerminalWrite)
+        .map_err(to_string)?;
+    let session_id = parse_uuid(&session_id).map_err(to_string)?;
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    expect_ok(client.request_reply(|req| ClientToDaemon::SetPaneSnapshot {
+        req,
+        session_id,
+        pane_id,
+        data: data.into_bytes(),
+    }))
+}
+
 #[tauri::command]
 pub async fn set_pane_title(
     supervisor: State<'_, Arc<EntitlementSupervisor>>,

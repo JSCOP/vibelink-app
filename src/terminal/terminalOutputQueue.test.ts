@@ -10,6 +10,7 @@ vi.mock('@xterm/addon-webgl', async () => (await import('./terminalTestMocks')).
 vi.mock('@xterm/addon-clipboard', async () => (await import('./terminalTestMocks')).clipboardAddonModule())
 vi.mock('@xterm/addon-search', async () => (await import('./terminalTestMocks')).searchAddonModule())
 vi.mock('@xterm/addon-unicode11', async () => (await import('./terminalTestMocks')).unicode11AddonModule())
+vi.mock('@xterm/addon-serialize', async () => (await import('./terminalTestMocks')).serializeAddonModule())
 import { TerminalManager, invokeMock, makeContainer, terminalSnapshot, webglMock } from './terminalTestHarness'
 
 describe('TerminalManager output scheduling', () => {

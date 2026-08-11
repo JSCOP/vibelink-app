@@ -272,8 +272,22 @@ impl Pane {
         lock_scrollback(&self.scrollback).snapshot()
     }
 
+    /// Rebase this pane's scrollback onto a snapshot of its rendered screen.
+    /// Deliberately does NOT advance the output sequence: nothing was streamed to
+    /// attached clients, and an invented sequence would make every viewer see a
+    /// gap and re-subscribe.
+    pub fn rebase_scrollback(&self, snapshot: &[u8]) {
+        lock_scrollback(&self.scrollback).rebase(snapshot);
+    }
+
     pub(crate) fn record_output(&mut self, bytes: &[u8]) -> PaneOutputRecord {
-        let reset = lock_scrollback(&self.scrollback).push(bytes);
+        let reset = {
+            let mut scrollback = lock_scrollback(&self.scrollback);
+            // `take_rebased` reports a rebase exactly once, so the next recorded
+            // output rewrites the on-disk history from the snapshot instead of
+            // appending to the raw bytes it replaced.
+            scrollback.push(bytes) || scrollback.take_rebased()
+        };
         self.output_sequence = self.output_sequence.saturating_add(1);
         self.last_output_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -917,6 +931,24 @@ mod tests {
 
         assert_eq!(pane.output_cursor(), (generation, 1));
         assert!(pane.last_output_at() > 0);
+    }
+
+    /// A rebase must not look like streamed output: attached viewers track a
+    /// sequence, and an invented one makes every one of them see a gap and
+    /// re-subscribe. It must still tell the reader thread to rewrite the
+    /// on-disk history, or the file keeps growing from the bytes it replaced.
+    #[test]
+    fn rebasing_scrollback_rewrites_history_once_without_advancing_the_sequence() {
+        let mut pane = Pane::for_test(test_config(None), true);
+        pane.record_output(b"raw frame drawn at the old width");
+        let cursor = pane.output_cursor();
+
+        pane.rebase_scrollback(b"\x1b[2Jrendered screen");
+
+        assert_eq!(pane.output_cursor(), cursor);
+        assert!(pane.record_output(b" tail").reset);
+        assert!(!pane.record_output(b" more").reset);
+        assert_eq!(pane.scrollback_snapshot(), b"\x1b[2Jrendered screen tail more");
     }
 
     #[test]
