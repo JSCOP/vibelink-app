@@ -1,0 +1,23 @@
+# Line endings must be identical on every checkout. Several text files are
+# compiled into the binary with `include_str!` (the bundled agent skills, the
+# browser-extension sources, the remote contract), and a test asserts that the
+# embedded copy still matches the file the app writes to disk. Without this,
+# a CRLF checkout embeds CRLF while the writer emits LF and the test fails on
+# a contributor's machine but not on the maintainer's.
+* text=auto eol=lf
+
+# Windows shells are launched by path, so these stay CRLF for hand-editing.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Never touched by the text filter.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary
+*.dll binary
+*.exe binary
+*.msi binary
+*.mp4 binary
+*.wav binary
