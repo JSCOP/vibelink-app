@@ -28,9 +28,7 @@ pub struct TagInfo {
 }
 
 #[tauri::command]
-pub async fn git_branches(
-    workspace_folder: String,
-) -> Result<Vec<BranchInfo>, String> {
+pub async fn git_branches(workspace_folder: String) -> Result<Vec<BranchInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || branches_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -63,23 +61,17 @@ unit_command!(git_tag_create, (name: String, ref_name: Option<String>, message: 
 unit_command!(git_tag_delete, (name: String), tag_delete_native);
 
 #[tauri::command]
-pub async fn git_merge_abort(
-    workspace_folder: String,
-) -> Result<(), String> {
+pub async fn git_merge_abort(workspace_folder: String) -> Result<(), String> {
     spawn_simple(workspace_folder, vec!["merge".into(), "--abort".into()]).await
 }
 
 #[tauri::command]
-pub async fn git_rebase_abort(
-    workspace_folder: String,
-) -> Result<(), String> {
+pub async fn git_rebase_abort(workspace_folder: String) -> Result<(), String> {
     spawn_simple(workspace_folder, vec!["rebase".into(), "--abort".into()]).await
 }
 
 #[tauri::command]
-pub async fn git_rebase_continue(
-    workspace_folder: String,
-) -> Result<(), String> {
+pub async fn git_rebase_continue(workspace_folder: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         ensure_success(git_write_output_with_env(
             &workspace_folder,
@@ -94,9 +86,7 @@ pub async fn git_rebase_continue(
 }
 
 #[tauri::command]
-pub async fn git_tag_list(
-    workspace_folder: String,
-) -> Result<Vec<TagInfo>, String> {
+pub async fn git_tag_list(workspace_folder: String) -> Result<Vec<TagInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || tag_list_native(&workspace_folder))
         .await
         .map_err(to_string)?

@@ -45,7 +45,8 @@ pub(super) const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // Every element operation runs as a `this`-bound function on a resolved CDP
 // remote object, so a snapshot ref and a CSS selector share one execution path
 // and no caller string is ever spliced into page script.
-pub(super) const ELEMENT_IS_LIVE: &str = "function(){return !!this.isConnected&&this.ownerDocument===document}";
+pub(super) const ELEMENT_IS_LIVE: &str =
+    "function(){return !!this.isConnected&&this.ownerDocument===document}";
 pub(super) const ELEMENT_CENTER: &str = "function(){if(!this.isConnected||this.ownerDocument!==document)return {live:false};this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();const x=r.left+r.width/2,y=r.top+r.height/2;const root=this.getRootNode(),hit=(root.elementFromPoint?root:document).elementFromPoint(x,y);return {live:true,x,y,width:r.width,height:r.height,hit:!!hit&&(hit===this||this.contains(hit))}}";
 // Classifies the text-input surface AND leaves the selection where the caller
 // needs it. A React controlled input reverts a plain `value` assignment and a
@@ -622,10 +623,7 @@ pub(super) fn element_center(cdp: &mut CdpConnection, object_id: &str) -> Result
         value.get("y").and_then(Value::as_f64).unwrap_or(f64::NAN),
     );
     let width = value.get("width").and_then(Value::as_f64).unwrap_or(0.0);
-    let height = value
-        .get("height")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
+    let height = value.get("height").and_then(Value::as_f64).unwrap_or(0.0);
     if value.get("live").and_then(Value::as_bool) != Some(true)
         || value.get("hit").and_then(Value::as_bool) != Some(true)
         || !point.0.is_finite()
@@ -711,7 +709,8 @@ pub(super) fn wait_for_condition(
         if now >= deadline {
             bail!("browser wait for '{condition}' timed out after {timeout_ms}ms");
         }
-        let result = cdp.evaluate_with_timeout(&expression, deadline.saturating_duration_since(now));
+        let result =
+            cdp.evaluate_with_timeout(&expression, deadline.saturating_duration_since(now));
         let finished = Instant::now();
         match result {
             Ok(Value::Bool(true)) if finished <= deadline => {

@@ -1134,9 +1134,7 @@ pub async fn hermes_stop(
 }
 
 #[tauri::command]
-pub async fn hermes_cli_command(
-    command_override: Option<String>,
-) -> Result<String, String> {
+pub async fn hermes_cli_command(command_override: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || resolve_hermes_command(command_override))
         .await
         .map_err(to_string)?

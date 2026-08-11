@@ -110,9 +110,7 @@ const LEGACY_BUILTIN_SKILLS: &[LegacyBuiltinSkill] = &[
 ];
 
 #[tauri::command]
-pub async fn vibelink_skill_list(
-    session_id: Option<String>,
-) -> Result<Vec<SkillEntry>, String> {
+pub async fn vibelink_skill_list(session_id: Option<String>) -> Result<Vec<SkillEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || list_skills(session_id.as_deref()))
         .await
         .map_err(to_string)?
@@ -132,9 +130,7 @@ pub async fn vibelink_skill_get(
 }
 
 #[tauri::command]
-pub async fn vibelink_skill_apply(
-    input: SkillApplyInput,
-) -> Result<SkillEntry, String> {
+pub async fn vibelink_skill_apply(input: SkillApplyInput) -> Result<SkillEntry, String> {
     tauri::async_runtime::spawn_blocking(move || apply_skill(input))
         .await
         .map_err(to_string)?

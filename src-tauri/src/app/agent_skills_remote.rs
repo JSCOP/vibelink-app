@@ -31,7 +31,6 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// a published wording fix lands the same day without an app update.
 const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
-
 /// Kept under the same `home` the skill installer already receives, so nothing
 /// new has to be threaded through and a test temp root isolates the cache for
 /// free.
@@ -136,7 +135,6 @@ fn validate(skill: &str, text: &str) -> Result<()> {
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 #[path = "agent_skills_remote_tests.rs"]

@@ -500,14 +500,12 @@ impl RotatingLogWriter {
     fn write_event(&self, event: &[u8]) {
         let event_len = event.len() as u64;
         let mut file = lock_mutex(&self.file);
-        if self
-            .len
-            .load(Ordering::Relaxed)
-            .saturating_add(event_len)
-            > DAEMON_LOG_ROTATE_LIMIT
-        {
+        if self.len.load(Ordering::Relaxed).saturating_add(event_len) > DAEMON_LOG_ROTATE_LIMIT {
             if let Err(error) = self.rotate(&mut file) {
-                eprintln!("failed to rotate daemon log {}: {error}", self.path.display());
+                eprintln!(
+                    "failed to rotate daemon log {}: {error}",
+                    self.path.display()
+                );
                 return;
             }
         }
@@ -519,7 +517,10 @@ impl RotatingLogWriter {
                     self.len.store(len, Ordering::Relaxed);
                 }
                 Err(error) => {
-                    eprintln!("failed to reopen daemon log {}: {error}", self.path.display());
+                    eprintln!(
+                        "failed to reopen daemon log {}: {error}",
+                        self.path.display()
+                    );
                     return;
                 }
             }
@@ -532,7 +533,10 @@ impl RotatingLogWriter {
             if let Ok(metadata) = current.metadata() {
                 self.len.store(metadata.len(), Ordering::Relaxed);
             }
-            eprintln!("failed to write daemon log {}: {error}", self.path.display());
+            eprintln!(
+                "failed to write daemon log {}: {error}",
+                self.path.display()
+            );
             return;
         }
         self.len.fetch_add(event_len, Ordering::Relaxed);
@@ -540,7 +544,12 @@ impl RotatingLogWriter {
 
     fn rotate(&self, file: &mut Option<std::fs::File>) -> io::Result<()> {
         // Verify that the current path is still writable before releasing the live handle.
-        drop(OpenOptions::new().create(true).append(true).open(&self.path)?);
+        drop(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?,
+        );
         if let Some(current) = file.as_mut() {
             current.flush()?;
         }

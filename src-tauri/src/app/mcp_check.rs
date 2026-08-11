@@ -27,9 +27,7 @@ pub struct McpCheckReport {
 }
 
 #[tauri::command]
-pub async fn mcp_self_check(
-    session_id: String,
-) -> Result<McpCheckReport, String> {
+pub async fn mcp_self_check(session_id: String) -> Result<McpCheckReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let executable = super::cli_path::dedicated_cli_path()?;
         Ok::<_, anyhow::Error>(mcp_self_check_native(

@@ -524,9 +524,7 @@ pub async fn default_capture_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn check_ffmpeg(
-    ffmpeg_path: String,
-) -> Result<(), String> {
+pub async fn check_ffmpeg(ffmpeg_path: String) -> Result<(), String> {
     resolve_ffmpeg(&ffmpeg_path).map(|_| ())
 }
 
@@ -556,9 +554,7 @@ pub async fn ensure_ffmpeg(
 }
 
 #[tauri::command]
-pub async fn open_path(
-    path: String,
-) -> Result<(), String> {
+pub async fn open_path(path: String) -> Result<(), String> {
     let target = normalize_open_target(&path)?;
 
     // Windows: call ShellExecuteW directly from this process instead of
@@ -611,9 +607,7 @@ pub async fn open_path(
 }
 
 #[tauri::command]
-pub async fn reveal_path(
-    path: String,
-) -> Result<(), String> {
+pub async fn reveal_path(path: String) -> Result<(), String> {
     let target = normalize_local_target(&path)?;
 
     // `explorer.exe` parses its own command line and only understands backslash
@@ -896,16 +890,12 @@ pub async fn capture_region_image(
 }
 
 #[tauri::command]
-pub async fn clipboard_write_image(
-    png_bytes: Vec<u8>,
-) -> Result<(), String> {
+pub async fn clipboard_write_image(png_bytes: Vec<u8>) -> Result<(), String> {
     copy_png_to_clipboard(&png_bytes)
 }
 
 #[tauri::command]
-pub async fn clipboard_write_text(
-    text: String,
-) -> Result<(), String> {
+pub async fn clipboard_write_text(text: String) -> Result<(), String> {
     // Native clipboard access remains focus-independent for embedded WebView2 pages.
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
@@ -922,10 +912,7 @@ pub async fn clipboard_read_text() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn read_capture_file(
-    dir: String,
-    path: String,
-) -> Result<Vec<u8>, String> {
+pub fn read_capture_file(dir: String, path: String) -> Result<Vec<u8>, String> {
     read_capture_file_native(&dir, &path)
 }
 

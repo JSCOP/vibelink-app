@@ -15,47 +15,32 @@ pub struct StashInfo {
 }
 
 #[tauri::command]
-pub async fn git_init(
-    workspace_folder: String,
-) -> Result<(), String> {
+pub async fn git_init(workspace_folder: String) -> Result<(), String> {
     spawn_unit(move || git_write(&workspace_folder, ["init"]).map(|_| ())).await
 }
 
 #[tauri::command]
-pub async fn git_stage(
-    workspace_folder: String,
-    paths: Vec<String>,
-) -> Result<(), String> {
+pub async fn git_stage(workspace_folder: String, paths: Vec<String>) -> Result<(), String> {
     spawn_unit(move || stage_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
-pub async fn git_unstage(
-    workspace_folder: String,
-    paths: Vec<String>,
-) -> Result<(), String> {
+pub async fn git_unstage(workspace_folder: String, paths: Vec<String>) -> Result<(), String> {
     spawn_unit(move || unstage_native(&workspace_folder, &paths)).await
 }
 
 #[tauri::command]
-pub async fn git_stage_all(
-    workspace_folder: String,
-) -> Result<(), String> {
+pub async fn git_stage_all(workspace_folder: String) -> Result<(), String> {
     spawn_unit(move || git_write(&workspace_folder, ["add", "-A"]).map(|_| ())).await
 }
 
 #[tauri::command]
-pub async fn git_unstage_all(
-    workspace_folder: String,
-) -> Result<(), String> {
+pub async fn git_unstage_all(workspace_folder: String) -> Result<(), String> {
     spawn_unit(move || unstage_all_native(&workspace_folder)).await
 }
 
 #[tauri::command]
-pub async fn git_discard(
-    workspace_folder: String,
-    paths: Vec<String>,
-) -> Result<(), String> {
+pub async fn git_discard(workspace_folder: String, paths: Vec<String>) -> Result<(), String> {
     spawn_unit(move || discard_native(&workspace_folder, &paths)).await
 }
 
@@ -84,9 +69,7 @@ pub async fn git_stash_save(
 }
 
 #[tauri::command]
-pub async fn git_stash_list(
-    workspace_folder: String,
-) -> Result<Vec<StashInfo>, String> {
+pub async fn git_stash_list(workspace_folder: String) -> Result<Vec<StashInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || stash_list_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -96,10 +79,7 @@ pub async fn git_stash_list(
 macro_rules! stash_command {
     ($name:ident, $verb:literal) => {
         #[tauri::command]
-        pub async fn $name(
-            workspace_folder: String,
-            index: u32,
-        ) -> Result<(), String> {
+        pub async fn $name(workspace_folder: String, index: u32) -> Result<(), String> {
             spawn_unit(move || {
                 let stash_ref = format!("stash@{{{index}}}");
                 git_write(&workspace_folder, ["stash", $verb, &stash_ref]).map(|_| ())

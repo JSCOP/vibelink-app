@@ -223,9 +223,7 @@ pub fn terminal_ws_port(client: State<'_, DaemonClient>) -> u16 {
 }
 
 #[tauri::command]
-pub fn terminal_ws_token(
-    client: State<'_, DaemonClient>,
-) -> Result<String, String> {
+pub fn terminal_ws_token(client: State<'_, DaemonClient>) -> Result<String, String> {
     Ok(client.ws_token())
 }
 
@@ -235,9 +233,7 @@ pub fn webview_render_mode() -> &'static str {
 }
 
 #[tauri::command]
-pub fn remote_get_status(
-    client: State<'_, DaemonClient>,
-) -> Result<RemoteStatus, String> {
+pub fn remote_get_status(client: State<'_, DaemonClient>) -> Result<RemoteStatus, String> {
     remote_request(&client, json!({ "action": "status" }))
 }
 
@@ -427,9 +423,7 @@ fn remote_request<T: DeserializeOwned>(client: &DaemonClient, request: Value) ->
 }
 
 #[tauri::command]
-pub async fn list_sessions(
-    client: State<'_, DaemonClient>,
-) -> Result<Vec<SessionMeta>, String> {
+pub async fn list_sessions(client: State<'_, DaemonClient>) -> Result<Vec<SessionMeta>, String> {
     match client
         .request_reply(|req| ClientToDaemon::ListSessions { req })
         .map_err(to_string)?
@@ -633,9 +627,7 @@ pub async fn kill_pane_process(
 }
 
 #[tauri::command]
-pub async fn restart_daemon(
-    client: State<'_, DaemonClient>,
-) -> Result<(), String> {
+pub async fn restart_daemon(client: State<'_, DaemonClient>) -> Result<(), String> {
     let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || client.restart())
         .await
@@ -941,8 +933,7 @@ pub async fn clear_session(
 }
 
 #[tauri::command]
-pub async fn list_installed_fonts(
-) -> Result<Vec<String>, String> {
+pub async fn list_installed_fonts() -> Result<Vec<String>, String> {
     list_fonts_native().map_err(to_string)
 }
 

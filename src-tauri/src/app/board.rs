@@ -11,9 +11,7 @@ use uuid::Uuid;
 pub use crate::control_plane::{BoardDoc, Brief, Task, TaskPatch, TaskStatus};
 
 #[tauri::command]
-pub async fn board_read(
-    session_id: String,
-) -> Result<String, String> {
+pub async fn board_read(session_id: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || board_read_native(&session_id))
         .await
         .map_err(to_string)?
@@ -124,9 +122,7 @@ pub async fn board_task_note(
 }
 
 #[tauri::command]
-pub async fn board_brief_get(
-    session_id: String,
-) -> Result<Option<Brief>, String> {
+pub async fn board_brief_get(session_id: String) -> Result<Option<Brief>, String> {
     tauri::async_runtime::spawn_blocking(move || board_brief_get_native(&session_id))
         .await
         .map_err(to_string)?

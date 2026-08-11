@@ -212,10 +212,7 @@ pub async fn hosting_pr_create(
 }
 
 #[tauri::command]
-pub async fn hosting_pr_detail(
-    workspace_folder: String,
-    number: u64,
-) -> Result<PrDetail, String> {
+pub async fn hosting_pr_detail(workspace_folder: String, number: u64) -> Result<PrDetail, String> {
     tauri::async_runtime::spawn_blocking(move || {
         with_client(&workspace_folder, |client| client.pr_detail(number))
     })
@@ -365,7 +362,6 @@ where
     operation(client.as_ref())
         .map_err(|error| anyhow::anyhow!(auth::redact_error(&host, &error.to_string())))
 }
-
 
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()

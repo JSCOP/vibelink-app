@@ -279,11 +279,11 @@ fn refresh_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
     let status = skill_status_at(home)?;
     for skill in &BUNDLED_SKILLS {
         let installed_somewhere = status.targets.iter().any(|target| {
-            target
-                .skills
-                .iter()
-                .any(|entry| entry.name == skill.name && entry.state != AgentSkillState::AgentAbsent
-                    && entry.state != AgentSkillState::Missing)
+            target.skills.iter().any(|entry| {
+                entry.name == skill.name
+                    && entry.state != AgentSkillState::AgentAbsent
+                    && entry.state != AgentSkillState::Missing
+            })
         });
         if !installed_somewhere {
             continue;
@@ -291,7 +291,11 @@ fn refresh_installed_skills_at(home: &Path) -> Result<AgentSkillStatus> {
         if let Err(error) = super::agent_skills_remote::refresh(home, skill.name) {
             // Offline, unpublished, or rejected by validation: the bundled copy
             // stays authoritative and the user sees nothing break.
-            tracing::debug!(?error, skill_name = skill.name, "published agent skill unavailable");
+            tracing::debug!(
+                ?error,
+                skill_name = skill.name,
+                "published agent skill unavailable"
+            );
         }
     }
     let status = skill_status_at(home)?;
@@ -807,7 +811,10 @@ mod tests {
         for skill in &BUNDLED_SKILLS {
             fs::write(
                 cache.join(format!("{}.md", skill.name)),
-                format!("---\nname: {}\ndescription: published\n---\n\n# Body\n", skill.name),
+                format!(
+                    "---\nname: {}\ndescription: published\n---\n\n# Body\n",
+                    skill.name
+                ),
             )
             .expect("cache published skill");
         }
@@ -938,7 +945,11 @@ mod tests {
 
         let error = install_skill_at(
             &root,
-            &["claude".to_string(), "agents".to_string(), "codex".to_string()],
+            &[
+                "claude".to_string(),
+                "agents".to_string(),
+                "codex".to_string(),
+            ],
         )
         .expect_err("blocked targets should be reported");
 

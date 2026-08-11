@@ -7,9 +7,9 @@ use url::form_urlencoded;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use tauri::AppHandle;
 #[cfg(windows)]
 use tauri::Manager;
-use tauri::AppHandle;
 
 const MAX_DISCOVERY_RESULTS: usize = 100;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;

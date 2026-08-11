@@ -311,7 +311,7 @@ mod tests {
 
         let snapshot = ring.snapshot();
         assert!(
-            !find_subslice(&snapshot, b"raw frame").is_some(),
+            find_subslice(&snapshot, b"raw frame").is_none(),
             "bytes produced at a geometry that no longer exists must not survive a rebase"
         );
         assert!(snapshot.ends_with(b"rendered"));

@@ -4,9 +4,7 @@ use crate::dedicated_cli::{
 use serde_json::Value;
 
 #[tauri::command]
-pub async fn cli_request(
-    args: Vec<String>,
-) -> Result<Value, String> {
+pub async fn cli_request(args: Vec<String>) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let invocation = parse_app_invocation(args).map_err(to_string)?;
         let mut executor = SocketExecutor;

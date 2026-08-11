@@ -352,13 +352,10 @@ pub fn parse_args(
             AutomationAction::parse,
         )
         .map(Command::Automation)?,
-        "browser" => parse_action_command(
-            &tokens,
-            "browser",
-            BrowserAction::ALL,
-            BrowserAction::parse,
-        )
-        .map(Command::Browser)?,
+        "browser" => {
+            parse_action_command(&tokens, "browser", BrowserAction::ALL, BrowserAction::parse)
+                .map(Command::Browser)?
+        }
         "computer" => parse_action_command(
             &tokens,
             "computer",

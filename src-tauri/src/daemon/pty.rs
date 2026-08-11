@@ -948,7 +948,10 @@ mod tests {
         assert_eq!(pane.output_cursor(), cursor);
         assert!(pane.record_output(b" tail").reset);
         assert!(!pane.record_output(b" more").reset);
-        assert_eq!(pane.scrollback_snapshot(), b"\x1b[2Jrendered screen tail more");
+        assert_eq!(
+            pane.scrollback_snapshot(),
+            b"\x1b[2Jrendered screen tail more"
+        );
     }
 
     #[test]

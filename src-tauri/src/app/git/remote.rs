@@ -31,10 +31,7 @@ pub async fn git_fetch(
 }
 
 #[tauri::command]
-pub async fn git_pull(
-    workspace_folder: String,
-    rebase: bool,
-) -> Result<(), String> {
+pub async fn git_pull(workspace_folder: String, rebase: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_sync(
             &workspace_folder,

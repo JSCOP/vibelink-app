@@ -59,7 +59,10 @@ fn cached_returns_the_document_once_it_is_valid() {
     let root = temp_root("skill-remote-valid");
     let doc = valid_doc("vibelink-memory");
     write_cache(&root, "vibelink-memory", &doc);
-    assert_eq!(cached(&root, "vibelink-memory").as_deref(), Some(doc.as_str()));
+    assert_eq!(
+        cached(&root, "vibelink-memory").as_deref(),
+        Some(doc.as_str())
+    );
     let _ = fs::remove_dir_all(root);
 }
 

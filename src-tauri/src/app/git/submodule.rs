@@ -4,10 +4,7 @@ use super::to_string;
 use anyhow::Result;
 
 #[tauri::command]
-pub async fn git_submodule_update(
-    workspace_folder: String,
-    path: String,
-) -> Result<(), String> {
+pub async fn git_submodule_update(workspace_folder: String, path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || submodule_update_native(&workspace_folder, &path))
         .await
         .map_err(to_string)?
@@ -15,10 +12,7 @@ pub async fn git_submodule_update(
 }
 
 #[tauri::command]
-pub async fn git_submodule_sync(
-    workspace_folder: String,
-    path: String,
-) -> Result<(), String> {
+pub async fn git_submodule_sync(workspace_folder: String, path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || submodule_sync_native(&workspace_folder, &path))
         .await
         .map_err(to_string)?

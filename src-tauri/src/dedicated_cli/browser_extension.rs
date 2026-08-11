@@ -57,7 +57,6 @@ impl Drop for UnauthenticatedConnectionPermit {
     }
 }
 
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionTab {
@@ -120,7 +119,11 @@ impl BridgeState {
         let (event, next_sequence, empty) = {
             let queue = self.events.get_mut(&tab_id)?;
             let event = queue.pop_front()?;
-            (event, queue.front().map(|event| event.sequence), queue.is_empty())
+            (
+                event,
+                queue.front().map(|event| event.sequence),
+                queue.is_empty(),
+            )
         };
         self.event_fronts.remove(&(event.sequence, tab_id));
         if let Some(sequence) = next_sequence {
@@ -177,7 +180,6 @@ impl BridgeState {
         self.event_bytes = 0;
     }
 }
-
 
 pub struct ExtensionBridge {
     port: u16,
@@ -522,9 +524,7 @@ impl ExtensionBridge {
                 Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                     return Ok(())
                 }
-                Err(error) => {
-                    return Err(error).context("read VibeLink browser extension hello")
-                }
+                Err(error) => return Err(error).context("read VibeLink browser extension hello"),
             }
         };
         let hello: HelloFrame = match serde_json::from_str(hello_text.as_ref()) {
@@ -623,8 +623,7 @@ impl ExtensionBridge {
                                 let _ = websocket.send(Message::Close(None));
                                 bail!("VibeLink browser extension text frame exceeds 8 MiB");
                             }
-                            if let Err(error) =
-                                self.handle_text_frame(connection_id, text.as_ref())
+                            if let Err(error) = self.handle_text_frame(connection_id, text.as_ref())
                             {
                                 let _ = websocket.send(Message::Close(None));
                                 return Err(error);
@@ -876,8 +875,7 @@ fn read_trust(path: &Path) -> Option<String> {
 }
 
 fn extension_id_from_origin_bare(id: &str) -> Option<String> {
-    (id.len() == 32 && id.bytes().all(|byte| matches!(byte, b'a'..=b'p')))
-        .then(|| id.to_string())
+    (id.len() == 32 && id.bytes().all(|byte| matches!(byte, b'a'..=b'p'))).then(|| id.to_string())
 }
 
 fn write_trust(path: &Path, extension_id: Option<&str>) -> Result<()> {

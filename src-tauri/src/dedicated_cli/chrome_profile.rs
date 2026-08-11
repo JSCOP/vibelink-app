@@ -98,7 +98,6 @@ impl Default for ChromeRegistry {
     }
 }
 
-
 struct PortReservation {
     port: u16,
     listener: Option<TcpListener>,
@@ -109,8 +108,6 @@ struct CopyStats {
     copied_files: u64,
     copied_bytes: u64,
 }
-
-
 
 impl CopyStats {
     fn note_file(&mut self, expected_bytes: u64) -> Result<()> {
@@ -123,7 +120,6 @@ impl CopyStats {
         }
         Ok(())
     }
-
 
     fn note_copied(&mut self, copied_bytes: u64) -> Result<()> {
         let total = self
@@ -170,7 +166,10 @@ pub fn ensure(
         registry = ChromeRegistry::default();
     }
     chrome_profile_windows::sweep(
-        registry.profiles.iter().map(|profile| profile.profile_id.as_str()),
+        registry
+            .profiles
+            .iter()
+            .map(|profile| profile.profile_id.as_str()),
     )?;
     if sweep_managed_root(&managed_root, &mut registry)? {
         write_registry(&registry_path, &managed_root, &registry)?;
@@ -184,7 +183,12 @@ pub fn ensure(
             validate_user_data_dir(&managed_root, &profile.user_data_dir)?;
             if is_plain_directory(&profile.user_data_dir) {
                 if managed_profile_ready(profile)? {
-                    return Ok(profile_status(profile.clone(), false, false, available_sources));
+                    return Ok(profile_status(
+                        profile.clone(),
+                        false,
+                        false,
+                        available_sources,
+                    ));
                 }
                 if chrome_profile_windows::managed_process_pid(&profile.profile_id)?.is_some() {
                     bail!("managed Chrome is running but its CDP identity could not be verified");
@@ -208,7 +212,12 @@ pub fn ensure(
                 launched.commit_to_daemon(|| {
                     write_registry(&registry_path, &managed_root, &registry)
                 })?;
-                return Ok(profile_status(profile.clone(), false, true, available_sources));
+                return Ok(profile_status(
+                    profile.clone(),
+                    false,
+                    true,
+                    available_sources,
+                ));
             }
         }
     }
@@ -266,9 +275,8 @@ pub fn ensure(
         }
         next_registry.pending_cleanup.sort();
         next_registry.pending_cleanup.dedup();
-        launched.commit_to_daemon(|| {
-            write_registry(&registry_path, &managed_root, &next_registry)
-        })?;
+        launched
+            .commit_to_daemon(|| write_registry(&registry_path, &managed_root, &next_registry))?;
         if sweep_pending_cleanup(&managed_root, &mut next_registry)? {
             if let Err(error) = write_registry(&registry_path, &managed_root, &next_registry) {
                 tracing::warn!(%error, "deferred Chrome profile cleanup registry update failed");
@@ -427,7 +435,9 @@ fn select_source(sources: &[ChromeSource], requested: Option<&str>) -> Result<Ch
             .collect::<Vec<_>>();
         return match matches.as_slice() {
             [source] => Ok((*source).clone()),
-            [] => Err(anyhow!("Google Chrome source profile was not found: {requested}")),
+            [] => Err(anyhow!(
+                "Google Chrome source profile was not found: {requested}"
+            )),
             _ => bail!(
                 "Google Chrome source profile name is ambiguous: {requested}; candidates: {}",
                 matches
@@ -567,18 +577,25 @@ fn copy_profile_tree(
     for entry in fs::read_dir(source)
         .with_context(|| format!("failed to read Google Chrome profile directory {label}"))?
     {
-        let entry = entry
-            .with_context(|| format!("failed to read an entry in Chrome profile directory {label}"))?;
+        let entry = entry.with_context(|| {
+            format!("failed to read an entry in Chrome profile directory {label}")
+        })?;
         let name = entry.file_name();
         let relative_path = relative.join(&name);
         let source_path = entry.path();
         let destination_path = destination.join(&name);
         let metadata = fs::symlink_metadata(&source_path).with_context(|| {
-            format!("failed to inspect Chrome profile path {}", relative_path.display())
+            format!(
+                "failed to inspect Chrome profile path {}",
+                relative_path.display()
+            )
         })?;
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
-            bail!("Chrome profile path {} is a symbolic link", relative_path.display());
+            bail!(
+                "Chrome profile path {} is a symbolic link",
+                relative_path.display()
+            );
         }
         if file_type.is_dir() {
             if should_skip_directory(&relative_path) {
@@ -588,7 +605,10 @@ fn copy_profile_tree(
                 bail!("Google Chrome profile copy exceeds the 32-level recursion limit");
             }
             fs::create_dir_all(&destination_path).with_context(|| {
-                format!("failed to create VibeLink Chrome profile directory {}", relative_path.display())
+                format!(
+                    "failed to create VibeLink Chrome profile directory {}",
+                    relative_path.display()
+                )
             })?;
             copy_profile_tree(
                 &source_path,
@@ -601,17 +621,27 @@ fn copy_profile_tree(
             continue;
         }
         if !file_type.is_file() {
-            bail!("Chrome profile path {} is not a plain file", relative_path.display());
+            bail!(
+                "Chrome profile path {} is not a plain file",
+                relative_path.display()
+            );
         }
         if should_skip_file(&name.to_string_lossy()) {
             continue;
         }
         stats.note_file(metadata.len())?;
-        let copied = copy_source_file(&source_path, &destination_path, locks).with_context(|| {
-            format!("failed to copy Chrome profile file {}", relative_path.display())
-        })?;
+        let copied =
+            copy_source_file(&source_path, &destination_path, locks).with_context(|| {
+                format!(
+                    "failed to copy Chrome profile file {}",
+                    relative_path.display()
+                )
+            })?;
         if copied != metadata.len() {
-            bail!("Chrome profile file changed while copying: {}", relative_path.display());
+            bail!(
+                "Chrome profile file changed while copying: {}",
+                relative_path.display()
+            );
         }
         stats.note_copied(copied)?;
     }
@@ -635,10 +665,7 @@ fn should_skip_file(name: &str) -> bool {
         .any(|skipped| name.eq_ignore_ascii_case(skipped))
 }
 
-fn lock_source_profile(
-    chrome_root: &Path,
-    source: &Path,
-) -> Result<HashMap<PathBuf, File>> {
+fn lock_source_profile(chrome_root: &Path, source: &Path) -> Result<HashMap<PathBuf, File>> {
     let files = [
         (chrome_root.join("Local State"), true),
         (source.join("Preferences"), true),
@@ -662,7 +689,10 @@ fn lock_source_profile(
             Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
         };
         if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            bail!("critical Chrome profile path is not a plain file: {}", path.display());
+            bail!(
+                "critical Chrome profile path is not a plain file: {}",
+                path.display()
+            );
         }
         locks.insert(
             path.clone(),
@@ -782,7 +812,8 @@ fn validate_registry(registry: &ChromeRegistry, managed_root: &Path) -> bool {
         .map(|profile| profile.user_data_dir.as_path())
         .collect::<HashSet<_>>();
     let mut cleanup = HashSet::new();
-    profiles_valid && registry.pending_cleanup.iter().all(|path| {
+    profiles_valid
+        && registry.pending_cleanup.iter().all(|path| {
             path.parent() == Some(profiles_root.as_path())
                 && !active.contains(path.as_path())
                 && cleanup.insert(path.as_path())
@@ -921,10 +952,14 @@ fn require_managed_copy_stopped(profile_id: Option<&str>, path: &Path) -> Result
     Ok(())
 }
 
-
 fn responder_belongs_to_process(user_data_dir: &Path, port: u16, pid: u32) -> Result<bool> {
     if let Ok(value) = fs::read_to_string(user_data_dir.join("DevToolsActivePort")) {
-        if value.lines().next().and_then(|line| line.parse::<u16>().ok()) != Some(port) {
+        if value
+            .lines()
+            .next()
+            .and_then(|line| line.parse::<u16>().ok())
+            != Some(port)
+        {
             return Ok(false);
         }
     }
@@ -941,12 +976,16 @@ fn listener_pid(port: u16) -> Result<Option<u32>> {
         bail!("netstat failed while confirming Chrome CDP process identity");
     }
     let suffix = format!(":{port}");
-    Ok(String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        (fields.len() >= 5 && fields[0].eq_ignore_ascii_case("TCP") && fields[1].ends_with(&suffix))
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.len() >= 5
+                && fields[0].eq_ignore_ascii_case("TCP")
+                && fields[1].ends_with(&suffix))
             .then(|| fields[4].parse().ok())
             .flatten()
-    }))
+        }))
 }
 
 #[cfg(not(windows))]
@@ -1045,7 +1084,8 @@ fn sweep_managed_root(managed_root: &Path, registry: &mut ChromeRegistry) -> Res
     for entry in fs::read_dir(&profiles_root).context("scan managed Chrome profiles")? {
         let entry = entry.context("read a managed Chrome profile entry")?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).context("inspect a managed Chrome profile entry")?;
+        let metadata =
+            fs::symlink_metadata(&path).context("inspect a managed Chrome profile entry")?;
         if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
             bail!("managed Chrome profile root contains a non-directory entry");
         }

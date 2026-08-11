@@ -578,7 +578,10 @@ mod tests {
             session_token: String::new(),
             email: Some("a@b.test".to_string()),
         };
-        assert_eq!(status_from_cache(Some(&stored)), AccountStatusDto::default());
+        assert_eq!(
+            status_from_cache(Some(&stored)),
+            AccountStatusDto::default()
+        );
     }
 
     #[test]

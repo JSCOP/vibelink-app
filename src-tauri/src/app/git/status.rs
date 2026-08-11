@@ -89,9 +89,7 @@ pub struct GitDirEntry {
 }
 
 #[tauri::command]
-pub async fn git_repo_info(
-    workspace_folder: String,
-) -> Result<RepoInfo, String> {
+pub async fn git_repo_info(workspace_folder: String) -> Result<RepoInfo, String> {
     tauri::async_runtime::spawn_blocking(move || git_repo_info_native(&workspace_folder))
         .await
         .map_err(to_string)?
@@ -99,9 +97,7 @@ pub async fn git_repo_info(
 }
 
 #[tauri::command]
-pub async fn git_working_status(
-    workspace_folder: String,
-) -> Result<WorkingStatus, String> {
+pub async fn git_working_status(workspace_folder: String) -> Result<WorkingStatus, String> {
     tauri::async_runtime::spawn_blocking(move || git_working_status_native(&workspace_folder))
         .await
         .map_err(to_string)?

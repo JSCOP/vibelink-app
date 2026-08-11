@@ -1408,9 +1408,7 @@ pub async fn device_lab_accessibility_status(
 }
 
 #[tauri::command]
-pub async fn device_lab_logcat(
-    request: LogcatRequest,
-) -> Result<CommandOutput, DeviceLabFailure> {
+pub async fn device_lab_logcat(request: LogcatRequest) -> Result<CommandOutput, DeviceLabFailure> {
     blocking(move || logcat(request)).await
 }
 

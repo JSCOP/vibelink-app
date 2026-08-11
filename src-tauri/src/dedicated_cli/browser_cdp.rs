@@ -1,9 +1,10 @@
 use super::browser_page::{
     call_on, clear_element, compress_ax_tree, current_page_url, element_action, element_center,
-    element_id, element_target, next_snapshot_ref, read_snapshot_state, resolve_element, show_cursor,
-    wait_for_condition, write_snapshot_state, BrowserJpegCaptureOptions, BrowserJpegFrame,
-    BrowserKeyInput, BrowserPageScale, BrowserPointerInput, BrowserViewport, MAX_TEXT_INPUT_BYTES,
-    PREPARE_TEXT_INPUT, SELECT_ALL_TEXT, SET_CHECKED, SET_NATIVE_VALUE, SET_SELECT_VALUE,
+    element_id, element_target, next_snapshot_ref, read_snapshot_state, resolve_element,
+    show_cursor, wait_for_condition, write_snapshot_state, BrowserJpegCaptureOptions,
+    BrowserJpegFrame, BrowserKeyInput, BrowserPageScale, BrowserPointerInput, BrowserViewport,
+    MAX_TEXT_INPUT_BYTES, PREPARE_TEXT_INPUT, SELECT_ALL_TEXT, SET_CHECKED, SET_NATIVE_VALUE,
+    SET_SELECT_VALUE,
 };
 use crate::{
     browser::{BrowserDeviceMetrics, BrowserPolicy, BrowserRiskCapability},
@@ -158,6 +159,9 @@ struct BrowserCdpPage {
     workspace_id: String,
 }
 
+#[cfg(test)]
+pub(super) type ScriptedCalls = Arc<Mutex<Vec<(String, Value)>>>;
+
 /// Two transports, one command surface. A VibeLink-owned WebView2 page is a
 /// loopback CDP websocket; a tab in the user's running Chrome is reached
 /// through the extension bridge. Every element action funnels through `call`,
@@ -173,7 +177,7 @@ pub(super) enum CdpConnection {
     },
     #[cfg(test)]
     Scripted {
-        calls: Arc<Mutex<Vec<(String, Value)>>>,
+        calls: ScriptedCalls,
         responses: VecDeque<std::result::Result<Value, String>>,
     },
 }
@@ -265,11 +269,8 @@ impl CdpConnection {
         expression: &str,
         timeout: Duration,
     ) -> Result<Value> {
-        let result = self.call_with_timeout(
-            "Runtime.evaluate",
-            evaluate_params(expression),
-            timeout,
-        )?;
+        let result =
+            self.call_with_timeout("Runtime.evaluate", evaluate_params(expression), timeout)?;
         evaluated_value(result)
     }
 
@@ -320,10 +321,11 @@ impl CdpConnection {
         Ok(events)
     }
 
+    /// Ordered `(method, params)` log of every call a scripted connection saw.
     #[cfg(test)]
     pub(super) fn scripted(
         responses: Vec<std::result::Result<Value, String>>,
-    ) -> (Self, Arc<Mutex<Vec<(String, Value)>>>) {
+    ) -> (Self, ScriptedCalls) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         (
             Self::Scripted {
@@ -1151,12 +1153,7 @@ fn dispatch_pointer_input(cdp: &mut CdpConnection, input: BrowserPointerInput) -
     }
 }
 
-fn dispatch_click(
-    cdp: &mut CdpConnection,
-    x: f64,
-    y: f64,
-    click_count: u8,
-) -> Result<()> {
+fn dispatch_click(cdp: &mut CdpConnection, x: f64, y: f64, click_count: u8) -> Result<()> {
     for count in 1..=click_count {
         let press_result = cdp.call(
             "Input.dispatchMouseEvent",
@@ -1264,29 +1261,28 @@ fn resolve_key_definition(input: &str) -> Result<Option<CdpKeyDefinition>> {
         };
     }
     let normalized = name.to_ascii_lowercase();
-    let (key, code, virtual_key_code, own_modifier) = if let Some(definition) =
-        named_key_definition(&normalized)
-    {
-        let (key, code, virtual_key_code, own_modifier) = definition;
-        (
-            key.to_string(),
-            code.to_string(),
-            virtual_key_code,
-            own_modifier,
-        )
-    } else if let Some(number) = normalized
-        .strip_prefix('f')
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|number| (1..=24).contains(number))
-    {
-        let key = format!("F{number}");
-        (key.clone(), key, 111 + number, 0)
-    } else if name.chars().count() == 1 {
-        ascii_key_definition(name.chars().next().unwrap(), modifiers)
-            .context("unsupported browser key chord")?
-    } else {
-        bail!("unsupported browser key: {name}");
-    };
+    let (key, code, virtual_key_code, own_modifier) =
+        if let Some(definition) = named_key_definition(&normalized) {
+            let (key, code, virtual_key_code, own_modifier) = definition;
+            (
+                key.to_string(),
+                code.to_string(),
+                virtual_key_code,
+                own_modifier,
+            )
+        } else if let Some(number) = normalized
+            .strip_prefix('f')
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|number| (1..=24).contains(number))
+        {
+            let key = format!("F{number}");
+            (key.clone(), key, 111 + number, 0)
+        } else if name.chars().count() == 1 {
+            ascii_key_definition(name.chars().next().unwrap(), modifiers)
+                .context("unsupported browser key chord")?
+        } else {
+            bail!("unsupported browser key: {name}");
+        };
     Ok(Some(CdpKeyDefinition {
         key,
         code,
@@ -1322,10 +1318,7 @@ fn named_key_definition(name: &str) -> Option<(&'static str, &'static str, u32, 
     })
 }
 
-fn ascii_key_definition(
-    value: char,
-    modifiers: u8,
-) -> Option<(String, String, u32, u8)> {
+fn ascii_key_definition(value: char, modifiers: u8) -> Option<(String, String, u32, u8)> {
     let value = value.to_ascii_lowercase();
     if value.is_ascii_alphabetic() {
         let key = if modifiers & CDP_MODIFIER_SHIFT != 0 {
@@ -1341,12 +1334,7 @@ fn ascii_key_definition(
         ));
     }
     if value.is_ascii_digit() {
-        return Some((
-            value.to_string(),
-            format!("Digit{value}"),
-            value as u32,
-            0,
-        ));
+        return Some((value.to_string(), format!("Digit{value}"), value as u32, 0));
     }
     let (code, virtual_key_code) = match value {
         '-' => ("Minus", 189),
@@ -1362,12 +1350,7 @@ fn ascii_key_definition(
         '`' => ("Backquote", 192),
         _ => return None,
     };
-    Some((
-        value.to_string(),
-        code.to_string(),
-        virtual_key_code,
-        0,
-    ))
+    Some((value.to_string(), code.to_string(), virtual_key_code, 0))
 }
 
 pub fn dispatch_key_input_for_page(

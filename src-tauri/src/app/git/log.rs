@@ -49,10 +49,7 @@ pub struct CommitDetail {
 }
 
 #[tauri::command]
-pub async fn git_log(
-    workspace_folder: String,
-    options: LogOptions,
-) -> Result<LogPage, String> {
+pub async fn git_log(workspace_folder: String, options: LogOptions) -> Result<LogPage, String> {
     tauri::async_runtime::spawn_blocking(move || git_log_native(&workspace_folder, options))
         .await
         .map_err(to_string)?

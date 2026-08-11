@@ -303,9 +303,7 @@ pub fn worktree_review_comments_list(
 }
 
 #[tauri::command]
-pub async fn git_is_available(
-    workspace_folder: String,
-) -> Result<bool, String> {
+pub async fn git_is_available(workspace_folder: String) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         git_exit_status(&workspace_folder, ["rev-parse", "--is-inside-work-tree"])
             .map(|status| status.success())
@@ -316,9 +314,7 @@ pub async fn git_is_available(
 }
 
 #[tauri::command]
-pub async fn git_snapshot_baseline(
-    workspace_folder: String,
-) -> Result<String, String> {
+pub async fn git_snapshot_baseline(workspace_folder: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || snapshot_baseline_native(&workspace_folder))
         .await
         .map_err(to_string)?

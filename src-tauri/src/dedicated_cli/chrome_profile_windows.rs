@@ -31,7 +31,6 @@ impl ManagedProcess {
     }
 }
 
-
 #[cfg(windows)]
 static MANAGED_PROCESSES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, ManagedProcess>>,
@@ -59,18 +58,21 @@ impl LaunchedChrome {
         Ok(false)
     }
 
-    pub(super) fn commit_to_daemon(
-        &mut self,
-        commit: impl FnOnce() -> Result<()>,
-    ) -> Result<()> {
+    pub(super) fn commit_to_daemon(&mut self, commit: impl FnOnce() -> Result<()>) -> Result<()> {
         #[cfg(windows)]
         {
             let mut processes = MANAGED_PROCESSES
                 .lock()
                 .map_err(|_| anyhow!("managed Chrome process registry lock was poisoned"))?;
             let process = ManagedProcess {
-                process: self.process.take().context("managed Chrome process handle is missing")?,
-                job: self.job.take().context("managed Chrome job handle is missing")?,
+                process: self
+                    .process
+                    .take()
+                    .context("managed Chrome process handle is missing")?,
+                job: self
+                    .job
+                    .take()
+                    .context("managed Chrome job handle is missing")?,
                 pid: self.pid,
             };
             if let Err(error) = commit() {
@@ -78,7 +80,7 @@ impl LaunchedChrome {
                 return Err(error);
             }
             processes.insert(self.profile_id.clone(), process);
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(windows))]
         {
@@ -92,9 +94,7 @@ impl Drop for LaunchedChrome {
     fn drop(&mut self) {
         #[cfg(windows)]
         if let Some(job) = self.job.as_ref() {
-            let _ = unsafe {
-                windows::Win32::System::JobObjects::TerminateJobObject(job.0, 1)
-            };
+            let _ = unsafe { windows::Win32::System::JobObjects::TerminateJobObject(job.0, 1) };
             if let Some(process) = self.process.as_ref() {
                 let _ = wait_for_process_handle(process.0, PROCESS_EXIT_TIMEOUT);
             }
@@ -132,10 +132,10 @@ pub(super) fn lock_creation(port: u16) -> Result<CreationLock> {
                     .context("create the Chrome profile creation lock")?,
             ),
         };
-        return match unsafe { WaitForSingleObject(lock.handle.0, INFINITE) } {
+        match unsafe { WaitForSingleObject(lock.handle.0, INFINITE) } {
             WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(lock),
             status => bail!("wait for the Chrome profile creation lock failed: {status:?}"),
-        };
+        }
     }
     #[cfg(not(windows))]
     {
@@ -154,7 +154,18 @@ pub(super) fn launch(
 ) -> Result<LaunchedChrome> {
     #[cfg(windows)]
     {
-        return launch_windows(
+        launch_windows(
+            artifact_root,
+            chrome,
+            profile_id,
+            user_data_dir,
+            port,
+            reservation,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
             artifact_root,
             chrome,
             profile_id,
@@ -162,10 +173,6 @@ pub(super) fn launch(
             port,
             reservation,
         );
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (artifact_root, chrome, profile_id, user_data_dir, port, reservation);
         bail!("managed copied-profile Chrome is supported only on Windows")
     }
 }
@@ -185,7 +192,6 @@ pub(super) fn managed_process_pid(profile_id: &str) -> Result<Option<u32>> {
     Ok(None)
 }
 
-
 pub(super) fn terminate(profile_id: &str) -> Result<()> {
     #[cfg(windows)]
     if let Some(process) = MANAGED_PROCESSES
@@ -202,7 +208,9 @@ pub(super) fn terminate(profile_id: &str) -> Result<()> {
 pub(super) fn sweep<'a>(registered: impl IntoIterator<Item = &'a str>) -> Result<()> {
     #[cfg(windows)]
     {
-        let registered = registered.into_iter().collect::<std::collections::HashSet<_>>();
+        let registered = registered
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
         let stale = MANAGED_PROCESSES
             .lock()
             .map_err(|_| anyhow!("managed Chrome process registry lock was poisoned"))?
@@ -213,7 +221,7 @@ pub(super) fn sweep<'a>(registered: impl IntoIterator<Item = &'a str>) -> Result
         for profile_id in stale {
             terminate(&profile_id)?;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -238,9 +246,8 @@ fn launch_windows(
             Foundation::HANDLE,
             System::{
                 JobObjects::{
-                    CreateJobObjectW, SetInformationJobObject,
-                    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
                     CreateProcessW, DeleteProcThreadAttributeList,
@@ -253,7 +260,9 @@ fn launch_windows(
     };
 
     verify_current_daemon(artifact_root)?;
-    let executable = chrome.canonicalize().context("resolve the Google Chrome executable")?;
+    let executable = chrome
+        .canonicalize()
+        .context("resolve the Google Chrome executable")?;
     let job = OwnedHandle(
         unsafe { CreateJobObjectW(None, PCWSTR::null()) }
             .context("create the managed Chrome job object")?,
@@ -276,8 +285,7 @@ fn launch_windows(
         bail!("size the managed Chrome process attribute list");
     }
     let mut attributes = vec![0_usize; attribute_bytes.div_ceil(size_of::<usize>())];
-    let attribute_list =
-        LPPROC_THREAD_ATTRIBUTE_LIST(attributes.as_mut_ptr().cast::<c_void>());
+    let attribute_list = LPPROC_THREAD_ATTRIBUTE_LIST(attributes.as_mut_ptr().cast::<c_void>());
     unsafe {
         InitializeProcThreadAttributeList(Some(attribute_list), 1, None, &mut attribute_bytes)
     }

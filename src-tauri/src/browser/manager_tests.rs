@@ -67,21 +67,17 @@ fn lifecycle_events_keep_the_latest_bounded_sequence() {
         MAX_LIFECYCLE_EVENTS as u64 + 1
     );
     assert_eq!(state.event_sequence, MAX_LIFECYCLE_EVENTS as u64 + 1);
-    assert!(
-        state
-            .events
-            .iter()
-            .zip(state.events.iter().skip(1))
-            .all(|(left, right)| left.sequence < right.sequence)
-    );
+    assert!(state
+        .events
+        .iter()
+        .zip(state.events.iter().skip(1))
+        .all(|(left, right)| left.sequence < right.sequence));
 }
 
 #[test]
 fn download_record_cap_preserves_pending_records() {
-    let root = std::env::temp_dir().join(format!(
-        "vibelink-browser-manager-test-{}",
-        Uuid::new_v4()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("vibelink-browser-manager-test-{}", Uuid::new_v4()));
     let provider = Arc::new(TestProvider::default());
     let manager = BrowserManager::new(
         provider.clone(),
@@ -119,8 +115,8 @@ fn download_record_cap_preserves_pending_records() {
 
     {
         let mut events = lock(&provider.events).unwrap();
-        events.extend((1..=MAX_DOWNLOAD_RECORDS as u64).map(|sequence| {
-            BrowserLifecycleEvent {
+        events.extend(
+            (1..=MAX_DOWNLOAD_RECORDS as u64).map(|sequence| BrowserLifecycleEvent {
                 sequence,
                 page_id: "page".to_string(),
                 navigation_generation: 0,
@@ -128,8 +124,8 @@ fn download_record_cap_preserves_pending_records() {
                 url: Some(format!("https://example.test/{sequence}")),
                 detail: Some(format!("download-{sequence}.bin")),
                 timestamp_ms: sequence,
-            }
-        }));
+            }),
+        );
         events.push_back(BrowserLifecycleEvent {
             sequence: MAX_DOWNLOAD_RECORDS as u64 + 1,
             page_id: "page".to_string(),
@@ -160,11 +156,9 @@ fn download_record_cap_preserves_pending_records() {
         downloads.last().unwrap().url,
         format!("https://example.test/{MAX_DOWNLOAD_RECORDS}")
     );
-    assert!(
-        downloads
-            .iter()
-            .all(|download| download.url != "https://example.test/overflow")
-    );
+    assert!(downloads
+        .iter()
+        .all(|download| download.url != "https://example.test/overflow"));
 
     lock(&provider.events)
         .unwrap()

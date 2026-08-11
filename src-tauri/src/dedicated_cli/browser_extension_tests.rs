@@ -171,10 +171,7 @@ fn firefox_and_invalid_chrome_extension_origins_are_refused() {
 #[test]
 fn a_websocket_handshake_without_hello_does_not_claim_trust() {
     let bridge = test_bridge();
-    let _handshake_only = open(
-        &bridge,
-        Some(&format!("chrome-extension://{EXTENSION_ID}")),
-    );
+    let _handshake_only = open(&bridge, Some(&format!("chrome-extension://{EXTENSION_ID}")));
     thread::sleep(Duration::from_millis(20));
     assert!(bridge.status().trusted_extension_id.is_none());
 
@@ -272,14 +269,26 @@ fn event_buffer_preserves_per_tab_order_and_global_byte_eviction() {
     state.push_event(7, MAX_EVENT_BUFFER_BYTES, json!({"sequence": 1}));
     state.push_event(8, 1, json!({"sequence": 2}));
     assert!(state.pop_event(7).is_none());
-    assert_eq!(state.pop_event(8).expect("tab 8 event").value["sequence"], 2);
+    assert_eq!(
+        state.pop_event(8).expect("tab 8 event").value["sequence"],
+        2
+    );
 
     state.push_event(7, 1, json!({"sequence": 3}));
     state.push_event(8, 1, json!({"sequence": 4}));
     state.push_event(7, 1, json!({"sequence": 5}));
-    assert_eq!(state.pop_event(7).expect("first tab 7 event").value["sequence"], 3);
-    assert_eq!(state.pop_event(7).expect("second tab 7 event").value["sequence"], 5);
-    assert_eq!(state.pop_event(8).expect("tab 8 event").value["sequence"], 4);
+    assert_eq!(
+        state.pop_event(7).expect("first tab 7 event").value["sequence"],
+        3
+    );
+    assert_eq!(
+        state.pop_event(7).expect("second tab 7 event").value["sequence"],
+        5
+    );
+    assert_eq!(
+        state.pop_event(8).expect("tab 8 event").value["sequence"],
+        4
+    );
 }
 
 #[test]
@@ -295,8 +304,7 @@ fn install_writes_the_selected_bridge_port() {
     let installed = install(&data_root, 19_399).expect("install extension");
     assert_eq!(installed.ports, vec![19_399]);
     assert_eq!(
-        fs::read_to_string(installed.directory.join("bridge-port.json"))
-            .expect("read bridge port"),
+        fs::read_to_string(installed.directory.join("bridge-port.json")).expect("read bridge port"),
         r#"{"port": 19399}"#
     );
     fs::remove_dir_all(data_root).expect("remove installed extension");

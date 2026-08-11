@@ -37,8 +37,7 @@ fn conpty_bundle_is_copied_into_fresh_daemon_bin() {
     let destination_root = tempdir().expect("create destination root");
     let destination = destination_root.path().join(DAEMON_BIN_DIR);
     fs::write(source.path().join(CONPTY_FILES[0]), b"dll bytes").expect("write dll");
-    fs::write(source.path().join(CONPTY_FILES[1]), b"console bytes")
-        .expect("write console host");
+    fs::write(source.path().join(CONPTY_FILES[1]), b"console bytes").expect("write console host");
 
     copy_conpty_bundle_from_candidates([source.path().to_path_buf()], &destination)
         .expect("copy bundle");
@@ -93,11 +92,8 @@ fn missing_conpty_source_is_a_successful_noop() {
     let missing = tempdir().expect("create missing source parent");
     let destination = tempdir().expect("create destination dir");
 
-    copy_conpty_bundle_from_candidates(
-        [missing.path().join("not-present")],
-        destination.path(),
-    )
-    .expect("missing source must not block daemon startup");
+    copy_conpty_bundle_from_candidates([missing.path().join("not-present")], destination.path())
+        .expect("missing source must not block daemon startup");
 
     for file_name in CONPTY_FILES {
         assert!(!destination.path().join(file_name).exists());
@@ -205,13 +201,9 @@ fn authenticated_client_sends_valid_current_proof() {
     let authenticated = DaemonToClient::Authenticated;
     let mut stream = ScriptedStream::with_responses(&[challenge, authenticated]);
 
-    let result = authenticate_daemon_stream_with_client_id(
-        &mut stream,
-        ClientKind::Cli,
-        &secret,
-        client_id,
-    )
-    .expect("valid proof accepted");
+    let result =
+        authenticate_daemon_stream_with_client_id(&mut stream, ClientKind::Cli, &secret, client_id)
+            .expect("valid proof accepted");
     let messages = stream.written_messages();
 
     assert_eq!(result, AuthenticatedDaemon);
@@ -294,8 +286,7 @@ fn ping_probe_rejects_non_matching_response() {
         req: STARTUP_PING_REQ + 1,
     });
 
-    let err =
-        ping_daemon_io(&mut stream).expect_err("mismatched pong must reject stale daemon");
+    let err = ping_daemon_io(&mut stream).expect_err("mismatched pong must reject stale daemon");
 
     assert!(err.to_string().contains("unexpected startup ping response"));
 }
@@ -548,8 +539,7 @@ fn daemon_executable_copy_uses_data_dir_instead_of_source_exe() {
     fs::create_dir_all(source.parent().expect("source parent")).expect("create source dir");
     fs::write(&source, b"fake exe bytes").expect("write source exe");
 
-    let daemon_exe =
-        prepare_daemon_executable_in(&source, &data_dir).expect("prepare daemon exe");
+    let daemon_exe = prepare_daemon_executable_in(&source, &data_dir).expect("prepare daemon exe");
 
     assert!(daemon_exe.starts_with(daemon_bin_dir(&data_dir)));
     assert_ne!(daemon_exe, source);

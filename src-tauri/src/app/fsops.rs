@@ -99,31 +99,17 @@ pub async fn fs_list_dir(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<Vec<DirEntryInfo>, String> {
-    spawn_blocking(move || {
-        list_dir_native(&workspace_folder, &rel_path)
-    })
-    .await
+    spawn_blocking(move || list_dir_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
-pub async fn fs_list_workspace_files(
-    workspace_folder: String,
-) -> Result<Vec<String>, String> {
-    spawn_blocking(move || {
-        list_workspace_files_native(&workspace_folder)
-    })
-    .await
+pub async fn fs_list_workspace_files(workspace_folder: String) -> Result<Vec<String>, String> {
+    spawn_blocking(move || list_workspace_files_native(&workspace_folder)).await
 }
 
 #[tauri::command]
-pub async fn fs_read_text(
-    workspace_folder: String,
-    rel_path: String,
-) -> Result<TextFile, String> {
-    spawn_blocking(move || {
-        read_text_native(&workspace_folder, &rel_path)
-    })
-    .await
+pub async fn fs_read_text(workspace_folder: String, rel_path: String) -> Result<TextFile, String> {
+    spawn_blocking(move || read_text_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
@@ -131,21 +117,12 @@ pub async fn fs_path_kind(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<FsPathKind, String> {
-    spawn_blocking(move || {
-        path_kind_native(&workspace_folder, &rel_path)
-    })
-    .await
+    spawn_blocking(move || path_kind_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
-pub async fn fs_read_image(
-    workspace_folder: String,
-    rel_path: String,
-) -> Result<String, String> {
-    spawn_blocking(move || {
-        read_base64_native(&workspace_folder, &rel_path)
-    })
-    .await
+pub async fn fs_read_image(workspace_folder: String, rel_path: String) -> Result<String, String> {
+    spawn_blocking(move || read_base64_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
@@ -153,10 +130,7 @@ pub async fn fs_open_text_document(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextDocument, String> {
-    spawn_blocking(move || {
-        open_text_document_native(&workspace_folder, &rel_path)
-    })
-    .await
+    spawn_blocking(move || open_text_document_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
@@ -164,10 +138,7 @@ pub async fn fs_text_document_revision(
     workspace_folder: String,
     rel_path: String,
 ) -> Result<TextDocumentRevision, String> {
-    spawn_blocking(move || {
-        text_document_revision_native(&workspace_folder, &rel_path)
-    })
-    .await
+    spawn_blocking(move || text_document_revision_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
@@ -217,25 +188,13 @@ pub async fn fs_save_text_document_as(
 }
 
 #[tauri::command]
-pub async fn fs_create_file(
-    workspace_folder: String,
-    rel_path: String,
-) -> Result<(), String> {
-    spawn_blocking(move || {
-        create_file_native(&workspace_folder, &rel_path)
-    })
-    .await
+pub async fn fs_create_file(workspace_folder: String, rel_path: String) -> Result<(), String> {
+    spawn_blocking(move || create_file_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
-pub async fn fs_create_dir(
-    workspace_folder: String,
-    rel_path: String,
-) -> Result<(), String> {
-    spawn_blocking(move || {
-        create_dir_native(&workspace_folder, &rel_path)
-    })
-    .await
+pub async fn fs_create_dir(workspace_folder: String, rel_path: String) -> Result<(), String> {
+    spawn_blocking(move || create_dir_native(&workspace_folder, &rel_path)).await
 }
 
 #[tauri::command]
@@ -244,21 +203,12 @@ pub async fn fs_rename(
     from_rel: String,
     to_rel: String,
 ) -> Result<(), String> {
-    spawn_blocking(move || {
-        rename_native(&workspace_folder, &from_rel, &to_rel)
-    })
-    .await
+    spawn_blocking(move || rename_native(&workspace_folder, &from_rel, &to_rel)).await
 }
 
 #[tauri::command]
-pub async fn fs_delete(
-    workspace_folder: String,
-    rel_paths: Vec<String>,
-) -> Result<(), String> {
-    spawn_blocking(move || {
-        delete_native(&workspace_folder, &rel_paths)
-    })
-    .await
+pub async fn fs_delete(workspace_folder: String, rel_paths: Vec<String>) -> Result<(), String> {
+    spawn_blocking(move || delete_native(&workspace_folder, &rel_paths)).await
 }
 
 #[tauri::command]
@@ -267,10 +217,8 @@ pub async fn open_in_editor(
     rel_path: String,
     editor_command: String,
 ) -> Result<(), String> {
-    spawn_blocking(move || {
-        open_in_editor_native(&workspace_folder, &rel_path, &editor_command)
-    })
-    .await
+    spawn_blocking(move || open_in_editor_native(&workspace_folder, &rel_path, &editor_command))
+        .await
 }
 
 fn list_workspace_files_native(workspace_folder: &str) -> Result<Vec<String>> {

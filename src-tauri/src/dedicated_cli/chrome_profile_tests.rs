@@ -141,15 +141,23 @@ fn source_selection_prefers_directory_and_rejects_ambiguous_names() {
         },
     ];
 
-    assert_eq!(select_source(&sources, None).unwrap().directory, "Profile 20");
+    assert_eq!(
+        select_source(&sources, None).unwrap().directory,
+        "Profile 20"
+    );
     assert_eq!(
         select_source(&sources, Some("profile 20"))
             .unwrap()
             .directory,
         "Profile 20"
     );
-    assert_eq!(select_source(&sources, Some("work")).unwrap().directory, "Profile 20");
-    let error = select_source(&sources, Some("shared")).unwrap_err().to_string();
+    assert_eq!(
+        select_source(&sources, Some("work")).unwrap().directory,
+        "Profile 20"
+    );
+    let error = select_source(&sources, Some("shared"))
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("Profile 1"), "{error}");
     assert!(error.contains("Profile 2"), "{error}");
 }
@@ -165,8 +173,8 @@ fn refresh_does_not_delete_a_live_managed_profile() {
     let error = remove_managed_copy_with(&managed_root, &profile, |_| {
         Err::<(), _>(anyhow!("managed Chrome process is still running"))
     })
-        .unwrap_err()
-        .to_string();
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("still running"), "{error}");
     assert!(profile.join("sentinel").is_file());
 
