@@ -47,3 +47,6 @@ src-tauri/binaries/*.exe
 
 # Local dev/verify build outputs
 src-tauri/target/codex-verify/
+
+# Private operational memory repository, mounted here for maintainers.
+docs/memory/
