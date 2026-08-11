@@ -21,7 +21,10 @@ import { useHermesSessionController } from './useHermesSessionController'
 import './AgentSessionsSidebar.css'
 
 export type AgentSessionsSidebarProps = {
+  /** Dockview focus — header accent only. */
   active?: boolean
+  /** Selected tab in its edge group. Content gating uses this, not `active`. */
+  visible?: boolean
   collapsed?: boolean
   onCollapse?: () => void
 }
@@ -31,8 +34,8 @@ const paneRevealTimers = new WeakMap<HTMLElement, number>()
 const AGENT_SESSION_ROW_HEIGHT = 44
 const AGENT_SESSION_INITIAL_ROWS = 30
 
-export function AgentSessionsSidebar({ active = true, collapsed = false, onCollapse }: AgentSessionsSidebarProps) {
-  const enabled = active && !collapsed
+export function AgentSessionsSidebar({ active = true, visible = true, collapsed = false, onCollapse }: AgentSessionsSidebarProps) {
+  const enabled = visible && !collapsed
   const controller = useHermesSessionController(enabled)
   const contentActions = useWorkspaceContentActions()
   const setError = useWorkspaceStore((state) => state.setError)

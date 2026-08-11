@@ -5,18 +5,21 @@ import { useGitWorkspace } from './GitWorkspaceProvider'
 import { BranchesNavigatorView, StashDialog } from './BranchesTabView'
 
 export type GitBranchesSidebarProps = {
+  /** Dockview focus — header accent only. */
   active?: boolean
+  /** Selected tab in its edge group. Loading is gated on this, not `active`. */
+  visible?: boolean
   collapsed?: boolean
   onCollapse?: () => void
 }
 
-export function GitBranchesSidebar({ active = true, collapsed = false, onCollapse }: GitBranchesSidebarProps) {
+export function GitBranchesSidebar({ active = true, visible = true, collapsed = false, onCollapse }: GitBranchesSidebarProps) {
   const git = useGitWorkspace()
   const branches = git.branches
 
   useEffect(() => {
-    if (active && git.repoInfo?.isRepo) branches.activate()
-  }, [active, branches, git.activeRepoRoot, git.repoInfo?.isRepo])
+    if (visible && git.repoInfo?.isRepo) branches.activate()
+  }, [visible, branches, git.activeRepoRoot, git.repoInfo?.isRepo])
 
   const state = !git.workspaceFolder
     ? { kind: 'empty' as const, message: 'No workspace folder', detail: 'Set a local workspace folder to manage branches.' }

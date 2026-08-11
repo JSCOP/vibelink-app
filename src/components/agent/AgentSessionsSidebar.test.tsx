@@ -173,10 +173,21 @@ describe('AgentSessionsSidebar', () => {
     expect(list).not.toHaveClass('is-collapsed')
   })
 
-  test('does not render or load conversation rows while its edge panel is inactive', () => {
+  test('keeps rendering conversation rows while its edge panel is visible but unfocused', () => {
     render(
       <WorkspaceContentActionsContext.Provider value={actions}>
-        <AgentSessionsSidebar active={false} collapsed={false} />
+        <AgentSessionsSidebar active={false} visible collapsed={false} />
+      </WorkspaceContentActionsContext.Provider>,
+    )
+
+    expect(mocks.loadConversationHistory).toHaveBeenLastCalledWith(true)
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+  })
+
+  test('does not render or load conversation rows while its edge panel is hidden', () => {
+    render(
+      <WorkspaceContentActionsContext.Provider value={actions}>
+        <AgentSessionsSidebar active={false} visible={false} collapsed={false} />
       </WorkspaceContentActionsContext.Provider>,
     )
 

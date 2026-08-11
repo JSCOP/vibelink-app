@@ -5,18 +5,21 @@ import { useGitWorkspace } from './GitWorkspaceProvider'
 import { HistoryNavigatorView } from './HistoryTabView'
 
 export type GitHistorySidebarProps = {
+  /** Dockview focus — header accent only. */
   active?: boolean
+  /** Selected tab in its edge group. Loading is gated on this, not `active`. */
+  visible?: boolean
   collapsed?: boolean
   onCollapse?: () => void
 }
 
-export function GitHistorySidebar({ active = true, collapsed = false, onCollapse }: GitHistorySidebarProps) {
+export function GitHistorySidebar({ active = true, visible = true, collapsed = false, onCollapse }: GitHistorySidebarProps) {
   const git = useGitWorkspace()
   const history = git.history
 
   useEffect(() => {
-    if (active && git.repoInfo?.isRepo) history.activate()
-  }, [active, git.activeRepoRoot, git.repoInfo?.isRepo, history])
+    if (visible && git.repoInfo?.isRepo) history.activate()
+  }, [visible, git.activeRepoRoot, git.repoInfo?.isRepo, history])
 
   const state = !git.workspaceFolder
     ? { kind: 'empty' as const, message: 'No workspace folder', detail: 'Set a local workspace folder to browse history.' }
