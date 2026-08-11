@@ -77,9 +77,9 @@ describe('workspace content model', () => {
     expect(salvageWorkspaceContentParams(raw)).toEqual([editor])
   })
 
-  it('salvages content out of the nested window layout a real save actually uses', () => {
-    // Shape taken from a real persisted workspace: the outer tree carries only
-    // the sidebars plus one workspaceWindow, and every tab the user opened sits
+  it('salvages content out of a pre-cutover nested Window Group save that no longer parses', () => {
+    // Shape a pre-cutover workspace persisted: the outer tree carried only the
+    // sidebars plus one `workspaceWindow`, and every tab the user opened sat
     // inside that window's own serialized Dockview. Salvaging only the outer
     // panels would find nothing here.
     const preview: WorkspaceContentParams = { schema: 1, kind: 'preview', instanceId: 'preview', title: 'preview-smoke.md', icon: 'file-search', relPath: 'preview-smoke.md' }
@@ -87,13 +87,13 @@ describe('workspace content model', () => {
     const innerTerminals: WorkspaceContentParams = { schema: 1, kind: 'terminalWindow', instanceId: 'win-1', title: 'Terminals', icon: 'terminal', inner: null, titlesHidden: false }
     const sidebar: WorkspaceContentParams = { schema: 1, kind: 'workspaces', instanceId: 'workspaces', title: 'Workspaces', icon: 'layout-grid' }
     const inner = dockview(Object.fromEntries([innerTerminals, preview, editor].map((params) => [workspaceContentPanelId(params), panel(params)])))
-    const workspaceWindow: WorkspaceContentParams = { schema: 1, kind: 'workspaceWindow', instanceId: 'ws-1', title: 'Workspace', icon: 'layout-grid', inner: inner as never }
-    // The corruption is on the window itself, so its own params no longer parse
-    // — its contents must still come back.
-    const brokenWindow = { ...panel(workspaceWindow), params: { ...workspaceWindow, collapsed: false } }
+    // `workspaceWindow` is no longer a parseable kind, so it is built as a raw
+    // literal — that is exactly how it now arrives from an old persisted save.
+    const wrapperParams = { schema: 1, kind: 'workspaceWindow', instanceId: 'ws-1', title: 'Workspace', icon: 'layout-grid', inner, collapsed: false }
+    const wrapperId = 'content:workspaceWindow:ws-1'
     const panels = {
       [workspaceContentPanelId(sidebar)]: panel(sidebar),
-      [workspaceContentPanelId(workspaceWindow)]: brokenWindow,
+      [wrapperId]: { id: wrapperId, contentComponent: 'workspaceWindow', tabComponent: 'workspaceContentTab', params: wrapperParams, title: 'Workspace', renderer: 'always' },
     }
     const raw = JSON.stringify({ version: 3, dockview: dockview(panels) })
 

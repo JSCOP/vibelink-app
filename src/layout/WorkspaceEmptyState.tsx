@@ -6,7 +6,6 @@ import type { WorkspaceContentActions } from './contentActions'
 type WorkspaceEmptyStateProps = {
   api: DockviewApi | null
   actions: WorkspaceContentActions | null
-  variant: 'no-workspace' | 'empty-window'
 }
 
 /** Ctrl+N is handled in `WorkspaceView` before panel-scoped bindings, so it
@@ -31,7 +30,7 @@ function edgeInsets(api: DockviewApi): { left: number; right: number } {
   return { left: width('left'), right: width('right') }
 }
 
-export function WorkspaceEmptyState({ api, actions, variant }: WorkspaceEmptyStateProps) {
+export function WorkspaceEmptyState({ api, actions }: WorkspaceEmptyStateProps) {
   const [revision, setRevision] = useState(0)
 
   useEffect(() => {
@@ -56,30 +55,24 @@ export function WorkspaceEmptyState({ api, actions, variant }: WorkspaceEmptySta
   return (
     <div className="workspace-empty-state" style={{ left: state.left, right: state.right }}>
       <div className="workspace-empty-state-card">
-        <h2>{variant === 'empty-window' ? 'Empty workspace window' : 'No workspace open'}</h2>
-        <p>{variant === 'empty-window'
-          ? 'Add a terminal pane or terminal window to this workspace.'
-          : 'Create or open a workspace to start working.'}</p>
-        {variant === 'empty-window' ? (
-          <>
-            <div className="workspace-empty-state-actions">
-              <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminal' })}>
-                <SquareTerminal size={15} aria-hidden="true" /> New terminal
-              </button>
-              <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminalWindow' })}>
-                <LayoutGrid size={15} aria-hidden="true" /> New terminal window
-              </button>
+        <h2>Nothing open in this workspace</h2>
+        <p>Add a terminal pane or terminal window to this workspace.</p>
+        <div className="workspace-empty-state-actions">
+          <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminal' })}>
+            <SquareTerminal size={15} aria-hidden="true" /> New terminal
+          </button>
+          <button type="button" disabled={!actions} onClick={() => void actions?.openContent({ kind: 'terminalWindow' })}>
+            <LayoutGrid size={15} aria-hidden="true" /> New terminal window
+          </button>
+        </div>
+        <dl className="workspace-empty-state-shortcuts">
+          {shortcuts.map((shortcut) => (
+            <div key={shortcut.label}>
+              <dt>{shortcut.label}</dt>
+              <dd>{shortcut.keys.map((key) => <kbd key={key}>{key}</kbd>)}</dd>
             </div>
-            <dl className="workspace-empty-state-shortcuts">
-              {shortcuts.map((shortcut) => (
-                <div key={shortcut.label}>
-                  <dt>{shortcut.label}</dt>
-                  <dd>{shortcut.keys.map((key) => <kbd key={key}>{key}</kbd>)}</dd>
-                </div>
-              ))}
-            </dl>
-          </>
-        ) : null}
+          ))}
+        </dl>
       </div>
     </div>
   )

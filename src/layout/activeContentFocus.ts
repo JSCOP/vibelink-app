@@ -1,19 +1,11 @@
-import type { DockviewApi, IDockviewPanel } from 'dockview-react'
+import type { DockviewApi } from 'dockview-react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { TerminalManager } from '../terminal/TerminalManager'
 import { getTerminalWindow } from './terminalWindowRegistry'
-import { getWorkspaceWindow } from './workspaceWindowRegistry'
 import { parseWorkspaceContentParams } from './workspaceContentModel'
 
-export function activeWorkspacePanel(api: DockviewApi): IDockviewPanel | null {
-  const outerPanel = api.activePanel
-  const content = parseWorkspaceContentParams(outerPanel?.params)
-  return content?.kind === 'workspaceWindow'
-    ? getWorkspaceWindow(content.instanceId)?.getInnerApi()?.activePanel ?? null
-    : outerPanel ?? null
-}
 
 const KEYBOARD_CONTROL_SELECTOR = 'input, select, textarea, [contenteditable=""], [contenteditable="true"]'
 const MAIN_WINDOW_ACTIVATED_EVENT = 'vibelink://main-window-activated'
@@ -34,7 +26,7 @@ function keyboardControlFocused(): boolean {
 }
 
 function activeTerminalContent(api: DockviewApi) {
-  const content = parseWorkspaceContentParams(activeWorkspacePanel(api)?.params)
+  const content = parseWorkspaceContentParams(api.activePanel?.params)
   return content?.kind === 'terminal' || content?.kind === 'terminalWindow' ? content : null
 }
 

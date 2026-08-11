@@ -22,7 +22,7 @@ export type OpenContentRequest = WorkspaceContentOwnership & (
   | { kind: 'browser'; targetGroupId?: string; profileId?: string | null; private?: boolean }
   | { kind: 'editor'; targetGroupId?: string; relPath: string }
   | { kind: 'preview'; targetGroupId?: string; relPath: string; activate?: boolean }
-  | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'terminalWindow' | 'workspaceWindow' | 'browser' | 'editor' | 'preview'>; targetGroupId?: string }
+  | { kind: Exclude<WorkspaceContentKind, 'terminal' | 'terminalWindow' | 'browser' | 'editor' | 'preview'>; targetGroupId?: string }
 )
 
 export type WorkspaceContentActions = {

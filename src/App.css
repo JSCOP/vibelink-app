@@ -962,22 +962,3 @@ button {
   min-height: 0;
   position: relative;
 }
-.workspace-window-container {
-  background: var(--vibelink-bg);
-  display: grid;
-  grid-template-rows: 1fr;
-  height: 100%;
-  min-height: 0;
-  min-width: 0;
-  overflow: hidden;
-  position: relative;
-}
-
-.workspace-window-inner-dock,
-.workspace-window-inner-dock > .dv-dockview {
-  height: 100%;
-  min-height: 0;
-  min-width: 0;
-  width: 100%;
-}
-

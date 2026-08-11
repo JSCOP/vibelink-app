@@ -30,22 +30,6 @@ export function shouldRevealTabForDrag(
   return dragged.viewId === tab.viewId && dragged.panelId !== tab.panelId
 }
 
-export type WorkspaceWindowDropPosition = 'top' | 'bottom' | 'left' | 'right' | 'center'
-
-export function workspaceWindowDropPosition(
-  rect: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
-  clientX: number,
-  clientY: number,
-): WorkspaceWindowDropPosition {
-  const x = clientX - rect.left
-  const y = clientY - rect.top
-  if (x < rect.width / 4) return 'left'
-  if (x > rect.width * 3 / 4) return 'right'
-  if (y < rect.height / 4) return 'top'
-  if (y > rect.height * 3 / 4) return 'bottom'
-  return 'center'
-}
-
 /**
  * Placement for the tab strip's `+` palette. It opens rightward from the
  * trigger and slides back left only when the right edge has no room, so a

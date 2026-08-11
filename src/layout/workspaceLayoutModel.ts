@@ -4,10 +4,8 @@ import type { GridSize } from './templatePlan'
 import { occupiedGridForPaneCount } from './paneGridPlan'
 import {
   freshWorkspaceLayoutEnvelope,
-  isStructuralWorkspaceContentKind,
   normalizeWorkspaceLayoutEnvelope,
   normalizeWorkspaceRelativePath,
-  parseWorkspaceContentParams,
   serializeWorkspaceLayoutEnvelope,
   workspaceContentPanelId,
   type WorkspaceContentKind,
@@ -27,7 +25,6 @@ export type WorkspaceContentDescriptor = {
 export const workspaceContentDescriptors: Record<WorkspaceContentKind, WorkspaceContentDescriptor> = {
   terminal: { kind: 'terminal', component: 'terminal', title: 'Terminal', icon: 'terminal' },
   terminalWindow: { kind: 'terminalWindow', component: 'terminalWindow', title: 'Terminal', icon: 'terminal' },
-  workspaceWindow: { kind: 'workspaceWindow', component: 'workspaceWindow', title: 'Window Group', icon: 'layout-grid' },
   browser: { kind: 'browser', component: 'browser', title: 'Browser', icon: 'globe' },
   editor: { kind: 'editor', component: 'editor', title: 'Editor', icon: 'file-code' },
   preview: { kind: 'preview', component: 'preview', title: 'Preview', icon: 'file-search' },
@@ -86,7 +83,7 @@ export function createTerminalContentParams(pane: Pick<PaneMeta, 'id' | 'config'
   }
 }
 
-export function createSingletonContentParams(kind: Exclude<WorkspaceContentKind, 'terminal' | 'terminalWindow' | 'workspaceWindow' | 'browser' | 'editor' | 'preview'>): WorkspaceContentParams {
+export function createSingletonContentParams(kind: Exclude<WorkspaceContentKind, 'terminal' | 'terminalWindow' | 'browser' | 'editor' | 'preview'>): WorkspaceContentParams {
   const descriptor = workspaceContentDescriptors[kind]
   return { schema: 1, kind, instanceId: kind, title: descriptor.title, icon: descriptor.icon }
 }
@@ -157,91 +154,6 @@ export function createTerminalWindowParams(
   }
 }
 
-export type WorkspaceWindowTabGroup = {
-  id: string
-  panelIds: string[]
-  activePanelId: string | null
-}
-
-function collectWorkspaceWindowTabGroups(node: unknown, groups: WorkspaceWindowTabGroup[]) {
-  if (!node || typeof node !== 'object') return
-  const { type, data } = node as { type?: unknown; data?: unknown }
-  if (type === 'branch' && Array.isArray(data)) {
-    for (const child of data) collectWorkspaceWindowTabGroups(child, groups)
-    return
-  }
-  if (type !== 'leaf' || !data || typeof data !== 'object') return
-  const leaf = data as { id?: unknown; views?: unknown; activeView?: unknown }
-  const panelIds = Array.isArray(leaf.views) ? leaf.views.filter((value): value is string => typeof value === 'string') : []
-  if (panelIds.length === 0) return
-  const activePanelId = typeof leaf.activeView === 'string' && panelIds.includes(leaf.activeView) ? leaf.activeView : panelIds[0]
-  groups.push({
-    id: typeof leaf.id === 'string' ? leaf.id : `workspace-window-group-${groups.length}`,
-    panelIds,
-    activePanelId,
-  })
-}
-
-export function workspaceWindowTabGroups(inner: SerializedDockview | null): WorkspaceWindowTabGroup[] {
-  const groups: WorkspaceWindowTabGroup[] = []
-  collectWorkspaceWindowTabGroups(inner?.grid.root, groups)
-  return groups
-}
-
-export function workspaceWindowGroupCount(inner: SerializedDockview | null): number {
-  return workspaceWindowTabGroups(inner).length
-}
-
-export function workspaceWindowTitle(inner: SerializedDockview | null): string {
-  if (!inner) return 'Window Group'
-  const titles = workspaceWindowTabGroups(inner).flatMap((group) => group.panelIds).flatMap((panelId) => {
-    const panel = inner.panels[panelId]
-    const params = parseWorkspaceContentParams(panel?.params)
-    return panel ? [params?.title ?? panel.title ?? 'Window'] : []
-  })
-  if (titles.length === 0) return 'Window Group'
-  if (titles.length <= 2) return titles.join(' + ')
-  return `${titles[0]} +${titles.length - 1}`
-}
-
-export function createWorkspaceWindowParams(
-  inner: SerializedDockview | null,
-  instanceId: string = crypto.randomUUID(),
-): Extract<WorkspaceContentParams, { kind: 'workspaceWindow' }> {
-  return { schema: 1, kind: 'workspaceWindow', instanceId, title: workspaceWindowTitle(inner), icon: 'layout-grid', inner }
-}
-
-/** Legacy layouts placed every split directly in the outer Dockview, which
- * made one top-level workspace tab per split. Move that entire central tree
- * unchanged into one workspace-window panel; structural edge groups stay out. */
-export function wrapWorkspaceWindowLayout(layout: SerializedDockview): SerializedDockview {
-  const centralEntries = Object.entries(layout.panels).filter(([, panel]) => {
-    const params = parseWorkspaceContentParams(panel.params)
-    return params && !isStructuralWorkspaceContentKind(params.kind)
-  })
-  if (centralEntries.some(([, panel]) => parseWorkspaceContentParams(panel.params)?.kind === 'workspaceWindow')) return layout
-  const structuralPanels = Object.fromEntries(Object.entries(layout.panels).filter(([, panel]) => {
-    const params = parseWorkspaceContentParams(panel.params)
-    return params && isStructuralWorkspaceContentKind(params.kind)
-  }))
-  const { edgeGroups, ...centralLayout } = layout
-  const inner: SerializedDockview = { ...centralLayout, panels: Object.fromEntries(centralEntries) }
-  const windowParams = createWorkspaceWindowParams(inner)
-  const windowPanelId = workspaceContentPanelId(windowParams)
-  return {
-    panels: { ...structuralPanels, [windowPanelId]: createWorkspaceContentPanel(windowParams) },
-    grid: {
-      ...layout.grid,
-      root: {
-        type: 'branch',
-        data: [{ type: 'leaf', data: { views: [windowPanelId], activeView: windowPanelId, id: 'workspace-window-group' }, size: layout.grid.root.size }],
-        size: layout.grid.root.size,
-      },
-    },
-    activeGroup: 'workspace-window-group',
-    ...(edgeGroups ? { edgeGroups } : {}),
-  }
-}
 
 export function createPreviewContentParams(relPathValue: string): Extract<WorkspaceContentParams, { kind: 'preview' }> {
   const relPath = normalizePreviewPath(relPathValue)
@@ -268,7 +180,6 @@ export function createDefaultWorkspaceDockviewLayout(panes: Array<Pick<PaneMeta,
  * can omit panels added later; complete those entries before Dockview restores
  * so `reuseExistingPanels` can retain their mounted React trees. */
 export function completeWorkspaceStructuralLayout(layout: SerializedDockview, rootWidth: number): SerializedDockview {
-  layout = wrapWorkspaceWindowLayout(layout)
   const leftParams = workspaceLeftStructuralKinds.map(createSingletonContentParams)
   const rightParams = workspaceRightStructuralKinds.map(createSingletonContentParams)
   const panels = { ...layout.panels }
@@ -349,10 +260,10 @@ function createWorkspaceDockview(terminalParams: Array<Extract<WorkspaceContentP
   const panels: SerializedDockview['panels'] = {}
   for (const entry of structuralParams) panels[workspaceContentPanelId(entry)] = createWorkspaceContentPanel(entry)
 
-  // Terminals live INSIDE one terminal window (nested pane grid). The outer grid
-  // always holds that single window panel — even with zero panes — so a
+  // Terminals live INSIDE one terminal window (nested pane grid). The workspace
+  // grid always holds that single window panel — even with zero panes — so a
   // workspace always has a terminal window (and its + New button), and editors/
-  // browser open as sibling window tabs instead of wedging into the pane grid.
+  // browser open as sibling content tabs instead of wedging into the pane grid.
   const grid = occupiedGridForPaneCount(terminalCount) satisfies GridSize
   const firstTerminalGroupId = 'content-group-0'
   const windowParams = createTerminalWindowParams(crypto.randomUUID(), terminalParams, grid.cols > 0 ? grid : { cols: 1, rows: 1 })
@@ -367,7 +278,7 @@ function createWorkspaceDockview(terminalParams: Array<Extract<WorkspaceContentP
   const collapsed = workspaceDefaultEdgeCollapse(rootWidth)
   const workspacesId = workspaceContentPanelId(leftParams[0])
   const workspaceFilesId = workspaceContentPanelId(rightParams[0])
-  return wrapWorkspaceWindowLayout({
+  return {
     panels,
     grid: {
       root: { type: 'branch', data: columns, size: centerWidth },
@@ -398,7 +309,7 @@ function createWorkspaceDockview(terminalParams: Array<Extract<WorkspaceContentP
         },
       },
     },
-  })
+  }
 }
 
 function normalizePreviewPath(value: string): string {

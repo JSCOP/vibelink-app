@@ -11,9 +11,6 @@ export function buildWorkspaceContentTabContextMenu(
 ): ReactContextMenuItemConfig[] {
   const content = parseWorkspaceContentParams(params.panel.params)
   if (content && isStructuralWorkspaceContentKind(content.kind)) return []
-  if (content?.kind === 'workspaceWindow') {
-    return [{ label: 'Reset workspace layout', action: () => { void actions.resetLayout() } }]
-  }
   if (content?.kind === 'terminalWindow') {
     return [
       { label: 'New terminal in this window', action: () => { void actions.openContent({ kind: 'terminal', windowId: content.instanceId }) } },

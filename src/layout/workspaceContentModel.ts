@@ -12,7 +12,6 @@ export const workspaceContentSchema = 1 as const
 export type WorkspaceContentKind =
   | 'terminal'
   | 'terminalWindow'
-  | 'workspaceWindow'
   | 'browser'
   | 'editor'
   | 'preview'
@@ -35,7 +34,6 @@ export type WorkspaceContentKind =
 export type WorkspaceContentParams =
   | { schema: 1; kind: 'terminal'; instanceId: string; title: string; icon: string; paneId: string }
   | { schema: 1; kind: 'terminalWindow'; instanceId: string; title: string; icon: string; inner: SerializedDockview | null; titlesHidden: boolean }
-  | { schema: 1; kind: 'workspaceWindow'; instanceId: string; title: string; icon: string; inner: SerializedDockview | null }
   | { schema: 1; kind: 'browser'; instanceId: string; title: string; icon: string; pageId: string; profileId: string }
   | { schema: 1; kind: 'editor'; instanceId: string; title: string; icon: string; relPath: string }
   | { schema: 1; kind: 'preview'; instanceId: 'preview'; title: string; icon: 'file-search'; relPath: string }
@@ -51,7 +49,6 @@ export type WorkspaceContentInstancePolicy = 'multi-resource' | 'one-per-resourc
 export const workspaceContentInstancePolicies: Record<WorkspaceContentKind, WorkspaceContentInstancePolicy> = {
   terminal: 'one-per-resource',
   terminalWindow: 'multi-resource',
-  workspaceWindow: 'multi-resource',
   browser: 'one-per-resource',
   editor: 'one-per-resource',
   preview: 'singleton',
@@ -92,7 +89,6 @@ const singletonKinds: Partial<Record<WorkspaceContentKind, true>> = {
 const contentKinds: Record<WorkspaceContentKind, true> = {
   terminal: true,
   terminalWindow: true,
-  workspaceWindow: true,
   browser: true,
   editor: true,
   preview: true,
@@ -151,7 +147,6 @@ export function workspaceContentPanelId(params: Pick<WorkspaceContentParams, 'ki
 export function workspaceContentResourceKey(params: WorkspaceContentParams): string {
   if (params.kind === 'terminal') return `terminal:${params.paneId}`
   if (params.kind === 'terminalWindow') return `terminalWindow:${params.instanceId}`
-  if (params.kind === 'workspaceWindow') return `workspaceWindow:${params.instanceId}`
   if (params.kind === 'browser') return `browser:${params.pageId}`
   if (params.kind === 'editor') return `editor:${params.relPath}`
   if (params.kind === 'preview') return 'preview'
@@ -188,11 +183,6 @@ export function parseWorkspaceContentParams(value: unknown): WorkspaceContentPar
     if (inner === undefined) return null
     return { schema: 1, kind, instanceId, title, icon, inner, titlesHidden: value.titlesHidden }
   }
-  if (kind === 'workspaceWindow') {
-    if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon', 'inner'])) return null
-    const inner = value.inner === null || isRecord(value.inner) ? (value.inner as SerializedDockview | null) : undefined
-    return inner === undefined ? null : { schema: 1, kind, instanceId, title, icon, inner }
-  }
   if (kind === 'browser') {
     if (!hasExactKeys(value, ['schema', 'kind', 'instanceId', 'title', 'icon', 'pageId', 'profileId'])) return null
     const pageId = readIdentifier(value.pageId)
@@ -216,13 +206,41 @@ export function parseWorkspaceContentParams(value: unknown): WorkspaceContentPar
   return { schema: 1, kind, instanceId, title, icon }
 }
 
+/** Layouts saved between 2026-08-03 and the removal of the Window Group wrapper
+ *  nested the whole central tree inside one `workspaceWindow` panel. That kind no
+ *  longer parses, so without this the entire envelope would be rejected and every
+ *  user's split geometry would reset once. The wrapper stored the pre-wrap central
+ *  layout verbatim in `params.inner`, so hoisting it back is the exact inverse:
+ *  keep the structural edge panels, adopt the inner grid/panels/activeGroup.
+ *  More than one wrapper was never producible, so that shape is left to fail. */
+function hoistLegacyWorkspaceWindow(dockview: Record<string, unknown>): Record<string, unknown> {
+  const panels = dockview.panels
+  if (!isRecord(panels)) return dockview
+  const legacy = Object.entries(panels).filter(([, panel]) => (
+    isRecord(panel) && isRecord(panel.params) && panel.params.kind === 'workspaceWindow'
+  ))
+  if (legacy.length !== 1) return dockview
+  const [wrapperId, wrapper] = legacy[0]
+  const inner = (wrapper as Record<string, unknown>).params
+  const innerLayout = isRecord(inner) ? inner.inner : null
+  const outerGrid = dockview.grid
+  const survivors = Object.fromEntries(Object.entries(panels).filter(([panelId]) => panelId !== wrapperId))
+  const edge = isRecord(dockview.edgeGroups) ? { edgeGroups: dockview.edgeGroups } : {}
+  if (!isRecord(innerLayout) || !isRecord(innerLayout.panels) || !isRecord(innerLayout.grid)) {
+    if (!isRecord(outerGrid) || !isRecord(outerGrid.root)) return dockview
+    return { panels: survivors, grid: { ...outerGrid, root: { type: 'branch', data: [], size: outerGrid.root.size } }, ...edge }
+  }
+  return { ...innerLayout, panels: { ...survivors, ...innerLayout.panels }, ...edge }
+}
+
 export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined): WorkspaceLayoutEnvelope {
   const parsed = parseJson(raw)
   if (!isRecord(parsed) || parsed.version !== 3 || !(parsed.dockview === null || isRecord(parsed.dockview))) return freshWorkspaceLayoutEnvelope()
   if (parsed.dockview === null) return freshWorkspaceLayoutEnvelope()
 
-  const panels = parsed.dockview.panels
-  const grid = parsed.dockview.grid
+  const dockview = hoistLegacyWorkspaceWindow(parsed.dockview)
+  const panels = dockview.panels
+  const grid = dockview.grid
   if (!isRecord(panels) || !isRecord(grid) || !isRecord(grid.root)) return freshWorkspaceLayoutEnvelope()
 
   const rootIsEmpty = grid.root.type === 'branch' && Array.isArray(grid.root.data) && grid.root.data.length === 0
@@ -248,22 +266,21 @@ export function normalizeWorkspaceLayoutEnvelope(raw: string | null | undefined)
   const referencedPanels = new Set<string>()
   const groupIds = new Set<string>()
   if (!validateGridNode(grid.root, panelIds, referencedPanels, groupIds, true)) return freshWorkspaceLayoutEnvelope()
-  if (!validateAdditionalGroups(parsed.dockview, panelIds, referencedPanels, groupIds)) return freshWorkspaceLayoutEnvelope()
+  if (!validateAdditionalGroups(dockview, panelIds, referencedPanels, groupIds)) return freshWorkspaceLayoutEnvelope()
   if (referencedPanels.size !== panelIds.size || [...panelIds].some((panelId) => !referencedPanels.has(panelId))) return freshWorkspaceLayoutEnvelope()
   if (grid.maximizedNode !== undefined && (rootIsEmpty || !validateMaximizedNode(grid.root, grid.maximizedNode))) return freshWorkspaceLayoutEnvelope()
-  if (parsed.dockview.activeGroup !== undefined && (rootIsEmpty || typeof parsed.dockview.activeGroup !== 'string' || !groupIds.has(parsed.dockview.activeGroup))) return freshWorkspaceLayoutEnvelope()
+  if (dockview.activeGroup !== undefined && (rootIsEmpty || typeof dockview.activeGroup !== 'string' || !groupIds.has(dockview.activeGroup))) return freshWorkspaceLayoutEnvelope()
 
-  return { version: 3, dockview: parsed.dockview as unknown as SerializedDockview }
+  return { version: 3, dockview: dockview as unknown as SerializedDockview }
 }
 
 /** Kinds the restore path rebuilds itself, so salvaging them would duplicate or
  *  fight that work: outer `terminal` panels are closed as strays by
- *  `closeStrayTerminalPanels`, and the two window kinds are recreated by
+ *  `closeStrayTerminalPanels`, and terminal windows are recreated by
  *  `createDefaultWorkspaceDockviewLayout` plus `reconcileTerminalPanels`. */
 const layoutOwnedKinds: Partial<Record<WorkspaceContentKind, true>> = {
   terminal: true,
   terminalWindow: true,
-  workspaceWindow: true,
 }
 
 /** Content panels still recoverable from a layout `normalizeWorkspaceLayoutEnvelope`
@@ -274,11 +291,10 @@ const layoutOwnedKinds: Partial<Record<WorkspaceContentKind, true>> = {
  *  re-added individually. Structural sidebars are skipped; the default layout
  *  recreates them.
  *
- *  Walks nested `params.inner` layouts too: in a real save the outer tree holds
- *  only the sidebars plus one `workspaceWindow`, and every tab the user actually
- *  opened lives inside that window's own serialized Dockview. Recursion is done
- *  on the RAW params so a window whose own params fail to parse still yields its
- *  contents. */
+ *  Walks nested `params.inner` layouts too: a terminal window serializes its whole
+ *  pane grid there, and a pre-cutover save nested every central tab inside a
+ *  `workspaceWindow` wrapper. Recursion is done on the RAW params so a panel whose
+ *  own params fail to parse still yields its contents. */
 export function salvageWorkspaceContentParams(raw: string | null | undefined): WorkspaceContentParams[] {
   const parsed = parseJson(raw)
   if (!isRecord(parsed) || !isRecord(parsed.dockview)) return []

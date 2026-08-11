@@ -49,34 +49,25 @@ describe('tab action rail reveal', () => {
   })
 })
 
-/** Window-tab drops rely on a CSS rule and a TSX attribute agreeing on one
- * name. Rename either alone and the split overlays silently stop appearing. */
-describe('workspace window chrome', () => {
-  it('drops renderer overlays out of hit-testing only during an inner window drag', () => {
+/* Content-tab drops rely on a CSS rule and a TSX attribute agreeing on one name.
+   Rename either alone and every split silently stops working over a browser or
+   terminal window, because its render overlay keeps winning the hit test. */
+describe('content tab drag hit-testing', () => {
+  it('drops render overlays out of hit-testing only while the workspace dock is dragging', () => {
     const css = readAppStylesheet()
     const rule = css.match(/([^{}]*\.dv-render-overlay\s*)\{\s*pointer-events:\s*none/)
-    if (!rule) throw new Error('no window-drag hit-testing rule in the app stylesheet')
+    if (!rule) throw new Error('no drag hit-testing rule in the app stylesheet')
     const selector = rule[1].trim()
 
-    document.body.innerHTML = '<div class="workspace-window-container"><div class="dv-render-overlay"></div></div>'
-    const container = document.querySelector('.workspace-window-container') as HTMLElement
+    document.body.innerHTML = '<div class="workspace-dock"><div class="dv-render-overlay"></div></div>'
+    const dock = document.querySelector('.workspace-dock') as HTMLElement
     const overlay = document.querySelector('.dv-render-overlay') as HTMLElement
     expect(overlay.matches(selector)).toBe(false)
-    container.setAttribute('data-vl-window-drag', 'true')
+    dock.setAttribute('data-vl-window-drag', 'true')
     expect(overlay.matches(selector)).toBe(true)
 
-    const panel = readFileSync(join(process.cwd(), 'src/layout/WorkspaceWindowPanel.tsx'), 'utf8')
-    expect(panel).toContain("setAttribute('data-vl-window-drag', 'true')")
-    expect(panel).toContain("removeAttribute('data-vl-window-drag')")
-  })
-
-  it('uses the outer combined tab as the only window-tab row', () => {
-    const css = readAppStylesheet().replace(/\r\n/g, '\n')
-    const panel = readFileSync(join(process.cwd(), 'src/layout/WorkspaceWindowPanel.tsx'), 'utf8')
-
-    expect(panel).toContain('className="workspace-window-inner-dock"')
-    expect(css).toContain('.workspace-window-inner-dock .dv-tabs-and-actions-container {\n  display: none;')
-    expect(css).toContain('.workspace-window-inner-dock .terminal-window-panel .dv-tabs-and-actions-container {\n  display: flex;')
-    expect(css).not.toContain("[data-workspace-window-grouped='false']")
+    const view = readFileSync(join(process.cwd(), 'src/layout/WorkspaceView.tsx'), 'utf8')
+    expect(view).toContain("setAttribute('data-vl-window-drag', 'true')")
+    expect(view).toContain("removeAttribute('data-vl-window-drag')")
   })
 })

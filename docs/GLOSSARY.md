@@ -33,21 +33,21 @@ OS 창 (native window)                       getCurrentWindow() — Tauri 창. �
    │     ├─ 왼쪽 사이드 패널  edge group `workspace-left-tools`
    │     │   └─ 엣지 레일 탭  .workspace-edge-rail-tab (세로 38px 아이콘 띠)
    │     │      kinds: workspaces | explorer | automation
-   │     ├─ 중앙 영역
-   │     │  └─ 워크스페이스 윈도우  kind `workspaceWindow` (내부 Dockview)   ← 창들을 담는 그릇
-   │     │     └─ 콘텐츠 윈도우 = 콘텐츠 탭 1개  WorkspaceContentTab × N     ← 사용자가 말하는 "창"
-   │     │        ├─ 터미널 윈도우  kind `terminalWindow` (내부 Dockview)
-   │     │        │  └─ 터미널 페인  kind `terminal`, paneId
-   │     │        │     └─ 페인 타이틀바  TerminalPaneTitleBar
-   │     │        ├─ 에디터        kind `editor`
-   │     │        ├─ 브라우저      kind `browser`
-   │     │        └─ 프리뷰 / 칸반 / Diff / Workbench / Orchestration …
+   │     ├─ 중앙 영역 = 탭 그룹들의 분할 트리                        ← 여기서 바로 분할한다
+   │     │  └─ 콘텐츠 윈도우 = 콘텐츠 탭 1개  WorkspaceContentTab × N     ← 사용자가 말하는 "창"
+   │     │     ├─ 터미널 윈도우  kind `terminalWindow` (내부 Dockview)
+   │     │     │  └─ 터미널 페인  kind `terminal`, paneId
+   │     │     │     └─ 페인 타이틀바  TerminalPaneTitleBar
+   │     │     ├─ 에디터        kind `editor`
+   │     │     ├─ 브라우저      kind `browser`
+   │     │     └─ 프리뷰 / 칸반 / Diff / Workbench / Orchestration …
    │     └─ 오른쪽 사이드 패널 edge group `workspace-right-tools`
    │         kinds: workspaceFiles | sourceControl | gitHistory | gitBranches | agentSessions
    └─ 상태 표시줄            StatusBar (App.tsx 최하단)
 ```
 
-핵심: **컨테이너 3단계는 `워크스페이스 윈도우 > 콘텐츠 윈도우(터미널 윈도우 등) > 터미널 페인`이고, 셋 다 OS 창이 아니다.**
+핵심: **컨테이너 2단계는 `콘텐츠 윈도우(터미널 윈도우 등) > 터미널 페인`이고, 둘 다 OS 창이 아니다.**
+콘텐츠 탭을 중앙 영역의 가장자리로 드래그하면 루트 Dockview가 바로 분할되고, 탭 위로 드롭하면 같은 탭 그룹으로 합쳐진다 (Orca 동작과 동일). 콘텐츠 윈도우들을 한 탭으로 묶던 `workspaceWindow`(`Window Group`) 계층은 제거되었다.
 현재 콘텐츠 윈도우를 실제 OS 창으로 분리(detach)하는 기능은 없다. Tauri 창은 `tauri.conf.json`의 `VibeLink` 1개와 동적 `capture-overlay`뿐이다.
 
 ## 1. 앱 셸 / 사이드 영역
@@ -72,22 +72,21 @@ OS 창 (native window)                       getCurrentWindow() — Tauri 창. �
 
 | 표준 용어 | 한국어 | 코드 식별자 | 정의 |
 | --- | --- | --- | --- |
-| content window | 콘텐츠 윈도우 | `WorkspaceContentKind` 중 중앙 배치 종류(terminalWindow / editor / browser / preview / kanban / diff …) | 사용자가 "창"이라 부르는 것의 총칭. 워크스페이스 윈도우 안에 들어가는 개별 창 하나. 코드에 전용 타입은 없고 **콘텐츠 탭 1개 = 콘텐츠 윈도우 1개**로 표현된다 |
-| workspace window | 워크스페이스 윈도우 | kind `workspaceWindow`, `WorkspaceWindowPanel`, `workspaceWindowRegistry` | 중앙에 놓이는 **앱 내부 컨테이너**. 내부에 자체 Dockview를 갖고 콘텐츠 탭들을 담는다. 디스크립터 제목은 `Window Group` |
+| content window | 콘텐츠 윈도우 | `WorkspaceContentKind` 중 중앙 배치 종류(terminalWindow / editor / browser / preview / kanban / diff …) | 사용자가 "창"이라 부르는 것의 총칭. 중앙 분할 트리에 놓이는 개별 창 하나. 코드에 전용 타입은 없고 **콘텐츠 탭 1개 = 콘텐츠 윈도우 1개**로 표현된다 |
 | terminal window | 터미널 윈도우 | kind `terminalWindow`, `TerminalWindowPanel`, `terminalWindowRegistry` | 터미널 페인들만 담는 **앱 내부 컨테이너**. 페인 그리드/분할/맞춤을 소유 |
-| content tab | 콘텐츠 탭 | `WorkspaceContentTab`, `WorkspaceContentParams`, `workspaceContentPanelId` | 워크스페이스 윈도우 내부 패널 1개의 탭 헤더 |
+| content tab | 콘텐츠 탭 | `WorkspaceContentTab`, `WorkspaceContentParams`, `workspaceContentPanelId` | 루트 Dockview 중앙 패널 1개의 탭 헤더 |
 | terminal pane | 터미널 페인 | kind `terminal`, `TerminalPanePanel`, `paneId`, `.terminal-panel-shell[data-pane-id]` | PTY 하나에 대응하는 최소 단위 터미널 |
 | pane title bar | 페인 타이틀바 | `TerminalPaneTitleBar` | 터미널 페인의 탭/제목 줄. 콘텐츠 탭과 **다른 컴포넌트** |
 | dockview panel | 도크뷰 패널 | `IDockviewPanel`, `createWorkspaceContentPanel` | Dockview의 배치 단위(id + 컴포넌트 + params) |
-| tab group | 탭 그룹 | Dockview leaf, `data.views`, `activeView`, `workspaceWindowTabGroups` | 탭들이 겹쳐 있는 한 칸. **워크스페이스 그룹과 무관** |
+| tab group | 탭 그룹 | Dockview leaf, `data.views`, `activeView` | 탭들이 겹쳐 있는 한 칸. 중앙 영역은 이 탭 그룹들의 분할 트리다. **워크스페이스 그룹과 무관** |
 | grid | 그리드 | `SerializedDockview.grid.root`, `arrangeTerminalPaneGrid`, `liveGridSizes` | 분할 트리(행/열 트랙). 터미널 그리드는 행 우선, 페인마다 leaf 1개 |
-| split | 분할 | `splitTerminal(paneId, 'right'|'below')`, `localSplitSizing` | 기준 페인을 반으로 나눠 새 페인을 만든다. 윈도우는 새로 만들지 않는다 |
-| inner dock | 내부 도크 | `inner`, `getInnerApi()`, `.workspace-window-inner-dock` | 컨테이너 안에 중첩된 Dockview 레벨 |
+| split | 분할 | 콘텐츠 탭: Dockview 네이티브 DnD(가장자리 드롭); 터미널 페인: `splitTerminal(paneId, 'right'|'below')`, `localSplitSizing` | 콘텐츠 탭을 중앙 영역 가장자리로 끌면 그 자리에서 탭 그룹이 갈라지고, 탭 위로 끌면 합쳐진다. 터미널 분할은 기준 페인을 반으로 나눠 페인 1개를 추가한다 |
+| inner dock | 내부 도크 | `inner`, `getInnerApi()`, `.terminal-window-panel` | 터미널 윈도우 안에 중첩된 Dockview 레벨(페인 그리드). 중앙 콘텐츠는 더 이상 중첩되지 않는다 |
 | overlay | 오버레이 | `settleDockviewOverlayLayout`, `dockviewOverlaysSettled` | 드래그/드롭 중의 일시적 렌더 레이어. 계층 노드가 아님 |
 | memory graph | 메모리 그래프 | kind `memory`, `MemoryGraphPanel`, 디스크립터 제목 `Memory Graph`, 아이콘 `brain` | `+ → Memory Graph`로 여는 **중앙 싱글턴 콘텐츠 탭**(→ `content tab`). 활성 `workspace` 또는 전체 워크스페이스의 `workspace → memory document → memory entry → 태그/파일/에이전트` 관계를 그래프로 렌더링한다. 워크스페이스당 1개만 존재하며 사이드 패널이 아니다. `knowledge graph`·`memory window`로 부르지 않는다 |
 
 **콘텐츠 종류 리터럴** (`WorkspaceContentKind`, `workspaceContentModel.ts:13-36`):
-`terminal`, `terminalWindow`, `workspaceWindow`, `browser`, `editor`, `preview`, `workspaces`, `explorer`, `workspaceFiles`, `sourceControl`, `gitHistory`, `gitBranches`, `automation`, `workbench`, `agent`, `orchestration`, `kanban`, `todo`, `diff`, `agentSessions`, `memory`.
+`terminal`, `terminalWindow`, `browser`, `editor`, `preview`, `workspaces`, `explorer`, `workspaceFiles`, `sourceControl`, `gitHistory`, `gitBranches`, `automation`, `workbench`, `agent`, `orchestration`, `kanban`, `todo`, `diff`, `agentSessions`, `memory`.
 
 ## 3. 도메인 엔티티
 
@@ -160,7 +159,7 @@ PTY 환경변수: VIBELINK_SESSION_ID = workspace id, VIBELINK_PANE_ID = pane id
 
 | 모호어 | 가능한 의미 | 규칙 |
 | --- | --- | --- |
-| window | OS 창 / `workspaceWindow` / 콘텐츠 윈도우(`terminalWindow`·에디터·브라우저…) | 단독 사용 금지. `OS 창`, `워크스페이스 윈도우`, `콘텐츠 윈도우`, `터미널 윈도우` 중 하나로 명시. 사용자가 그냥 "창"이라고 하면 기본값은 **콘텐츠 윈도우** |
+| window | OS 창 / 콘텐츠 윈도우(`terminalWindow`·에디터·브라우저…) | 단독 사용 금지. `OS 창`, `콘텐츠 윈도우`, `터미널 윈도우` 중 하나로 명시. 사용자가 그냥 "창"이라고 하면 기본값은 **콘텐츠 윈도우** |
 | session | 워크스페이스(`SessionMeta`) / 에이전트 ACP 세션 / 데몬 접속 | `워크스페이스` 또는 `에이전트 세션`으로 명시. `sessionId`는 항상 워크스페이스 id |
 | tab | 콘텐츠 탭(`WorkspaceContentTab`) / 페인 타이틀바(`TerminalPaneTitleBar`) / 엣지 레일 탭 | 세 가지를 구분해서 말한다 |
 | group | Dockview 탭 그룹 / 워크스페이스 그룹 / 사이드바 터미널 윈도우 그룹 행 | `탭 그룹` vs `워크스페이스 그룹`으로 구분 |

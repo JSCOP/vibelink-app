@@ -2,7 +2,6 @@ import type { DockviewApi } from 'dockview-react'
 import { profileById, profileIconForPane } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 import { getTerminalWindow } from './terminalWindowRegistry'
-import { getWorkspaceWindow } from './workspaceWindowRegistry'
 import { workspaceContentDescriptors } from './workspaceLayoutModel'
 import {
   isStructuralWorkspaceContentKind,
@@ -51,28 +50,14 @@ export function clearOpenContentSnapshot(): boolean {
 
 export function publishOpenContentFromDockview(api: DockviewApi): boolean {
   const state = useWorkspaceStore.getState()
-  const activeOuterPanelId = api.activePanel?.id ?? null
+  const activePanelId = api.activePanel?.id ?? null
   const items: OpenContentItem[] = []
-  const visiblePanels: Array<{ panel: typeof api.panels[number]; active: boolean; split: boolean }> = []
+  const split = (api.groups ?? []).filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
 
-  for (const outerPanel of api.panels) {
-    const outerContent = parseWorkspaceContentParams(outerPanel.params)
-    if (outerContent?.kind !== 'workspaceWindow') {
-      const split = (api.groups ?? []).filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
-      visiblePanels.push({ panel: outerPanel, active: outerPanel.id === activeOuterPanelId, split })
-      continue
-    }
-    const innerApi = getWorkspaceWindow(outerContent.instanceId)?.getInnerApi()
-    if (!innerApi) continue
-    const split = innerApi.groups.filter((group) => group.api.location.type === 'grid' && group.panels.length > 0).length > 1
-    for (const panel of innerApi.panels) {
-      visiblePanels.push({ panel, active: outerPanel.id === activeOuterPanelId && panel.id === innerApi.activePanel?.id, split })
-    }
-  }
-
-  for (const { panel, active, split } of visiblePanels) {
+  for (const panel of api.panels) {
+    const active = panel.id === activePanelId
     const content = parseWorkspaceContentParams(panel.params)
-    if (!content || content.kind === 'workspaceWindow' || isStructuralWorkspaceContentKind(content.kind)) continue
+    if (!content || isStructuralWorkspaceContentKind(content.kind)) continue
     const terminalWindow = content.kind === 'terminalWindow' ? getTerminalWindow(content.instanceId) : undefined
     const paneIds = terminalWindow?.paneIds() ?? []
     items.push({

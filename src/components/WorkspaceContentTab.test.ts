@@ -2,16 +2,13 @@
 import { createElement, type ReactElement } from 'react'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Orientation } from 'dockview-core'
-import { shouldRevealTabForDrag, workspaceAgentTabStatus, workspaceWindowDropPosition } from './workspaceContentTabModel'
+import { shouldRevealTabForDrag, workspaceAgentTabStatus } from './workspaceContentTabModel'
 import { WorkspaceContentTab } from './WorkspaceContentTab'
 import { TerminalPaneTitleBar } from './TerminalPaneTitleBar'
 import { buildWorkspaceContentTabContextMenu } from '../layout/workspaceContentTabMenu'
-import { createSingletonContentParams, createTerminalContentParams, createTerminalWindowParams, createWorkspaceContentPanel, createWorkspaceWindowParams } from '../layout/workspaceLayoutModel'
-import { workspaceContentPanelId } from '../layout/workspaceContentModel'
+import { createSingletonContentParams, createTerminalContentParams, createTerminalWindowParams } from '../layout/workspaceLayoutModel'
 import { WorkspaceContentActionsContext, type WorkspaceContentActions } from '../layout/contentActions'
 import { registerTerminalWindow } from '../layout/terminalWindowRegistry'
-import { beginWorkspaceWindowDrag, endWorkspaceWindowDrag, moveWorkspaceWindowPanelFromContentDrop, registerWorkspaceWindow, workspaceWindowDragPanelId } from '../layout/workspaceWindowRegistry'
 import { emptyGitRepositoryState, emptyGitSessionState, useGitStore } from '../state/git'
 import { useWorkspaceStore } from '../state/store'
 
@@ -83,176 +80,6 @@ describe('WorkspaceContentTab', () => {
     } as never, actions)
 
     expect(items).toEqual([])
-  })
-
-  it('renders split windows as child segments inside one outer tab', () => {
-    const terminal = createTerminalWindowParams('terminal-a', [], { cols: 1, rows: 1 })
-    const browser = { schema: 1 as const, kind: 'browser' as const, instanceId: 'page-a', title: 'Browser', icon: 'globe', pageId: 'page-a', profileId: 'default' }
-    const terminalId = workspaceContentPanelId(terminal)
-    const browserId = workspaceContentPanelId(browser)
-    const inner = {
-      panels: {
-        [terminalId]: createWorkspaceContentPanel(terminal),
-        [browserId]: createWorkspaceContentPanel(browser),
-      },
-      grid: {
-        width: 1000,
-        height: 640,
-        orientation: Orientation.HORIZONTAL,
-        root: {
-          type: 'branch' as const,
-          size: 1000,
-          data: [
-            { type: 'leaf' as const, size: 500, data: { views: [terminalId], activeView: terminalId, id: 'terminal-group' } },
-            { type: 'leaf' as const, size: 500, data: { views: [browserId], activeView: browserId, id: 'browser-group' } },
-          ],
-        },
-      },
-      activeGroup: 'terminal-group',
-    }
-    const childApis = {
-      [terminalId]: panelApi(terminalId, 'Terminal'),
-      [browserId]: panelApi(browserId, 'Browser'),
-    }
-    const childPanels = {
-      [terminalId]: { id: terminalId, params: terminal, api: childApis[terminalId] },
-      [browserId]: { id: browserId, params: browser, api: childApis[browserId] },
-    }
-    const unregister = registerWorkspaceWindow({
-      windowId: 'window-a',
-      outerPanelId: 'content:workspaceWindow:window-a',
-      getInnerApi: () => ({ id: 'workspace-window-a', getPanel: (id: string) => childPanels[id], toJSON: () => inner } as never),
-      settle: async () => undefined,
-      persist: () => undefined,
-      panelIds: () => [terminalId, browserId],
-      activePanelId: () => terminalId,
-      focusActive: () => undefined,
-    })
-    try {
-      const params = { ...createWorkspaceWindowParams(inner, 'window-a'), title: 'Group 1' }
-      const api = panelApi('content:workspaceWindow:window-a', params.title)
-      renderWithActions(createElement(WorkspaceContentTab, { api, containerApi, params } as never))
-
-      const combined = screen.getByRole('tablist', { name: 'Terminal + Browser' })
-      expect(within(combined).getAllByRole('tab').map((tab) => tab.getAttribute('aria-label'))).toEqual(['Terminal', 'Browser'])
-      expect(within(screen.getByRole('tab', { name: 'Terminal' })).getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual([
-        'Add panes',
-        'Arrange panes',
-        'Clear panes',
-        'Hide pane titles',
-        'Close content',
-      ])
-      const terminalTab = screen.getByRole('tab', { name: 'Terminal' })
-      const browserTab = screen.getByRole('tab', { name: 'Browser' })
-      fireEvent.click(browserTab)
-      expect(actions.activateContent).toHaveBeenCalledWith(browserId)
-      actions.activateContent.mockClear()
-      fireEvent.pointerDown(terminalTab, { button: 0 })
-      expect(actions.activateContent).not.toHaveBeenCalled()
-
-      const browserSegment = browserTab.closest<HTMLElement>('.workspace-window-combined-segment')
-      expect(browserSegment?.draggable).toBe(true)
-      Object.defineProperty(browserSegment, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, right: 100, bottom: 20, width: 100, height: 20 }) })
-      const dataTransfer = { effectAllowed: 'none', dropEffect: 'none', setData: vi.fn(), getData: vi.fn(() => terminalId) }
-      fireEvent.dragStart(terminalTab, { dataTransfer })
-      fireEvent.dragOver(browserSegment as HTMLElement, { dataTransfer, clientX: 95, clientY: 10 })
-      fireEvent.drop(browserSegment as HTMLElement, { dataTransfer, clientX: 95, clientY: 10 })
-      expect(childApis[terminalId].moveTo).toHaveBeenCalledWith({ group: childApis[browserId].group, position: 'center' })
-      expect(workspaceWindowDropPosition({ left: 0, top: 0, width: 100, height: 20 } as DOMRect, 95, 10)).toBe('right')
-      expect(combined.textContent).not.toContain('Group 1')
-      expect(combined.getAttribute('data-dockview-dnd-disabled')).toBe('true')
-      const menu = buildWorkspaceContentTabContextMenu({ panel: { id: api.id, params }, group: { id: 'workspace-window-group' } } as never, actions)
-      expect(menu.map((item) => item.label)).toEqual(['Reset workspace layout'])
-    } finally {
-      unregister()
-    }
-  })
-
-  it('splits a stacked browser when it is dropped over terminal content', () => {
-    const terminal = createTerminalWindowParams('terminal-drop', [], { cols: 1, rows: 1 })
-    const browser = { schema: 1 as const, kind: 'browser' as const, instanceId: 'page-drop', title: 'Browser', icon: 'globe', pageId: 'page-drop', profileId: 'default' }
-    const terminalId = workspaceContentPanelId(terminal)
-    const browserId = workspaceContentPanelId(browser)
-    const terminalPanel = { id: terminalId, api: panelApi(terminalId, 'Terminal') }
-    const browserPanel = { id: browserId, api: panelApi(browserId, 'Browser') }
-    const group = {
-      id: 'stacked-group',
-      panels: [terminalPanel, browserPanel],
-      element: { getBoundingClientRect: () => ({ left: 0, right: 1000, top: 0, bottom: 640, width: 1000, height: 640 }) },
-    }
-    const innerApi = {
-      groups: [group],
-      getPanel: (id: string) => id === browserId ? browserPanel : id === terminalId ? terminalPanel : undefined,
-    }
-
-    beginWorkspaceWindowDrag(browserId)
-    try {
-      expect(workspaceWindowDragPanelId()).toBe(browserId)
-      expect(moveWorkspaceWindowPanelFromContentDrop(innerApi as never, browserId, 800, 320)).toEqual({ groupId: 'stacked-group', position: 'right' })
-      expect(browserPanel.api.moveTo).toHaveBeenCalledWith({ group, position: 'right' })
-    } finally {
-      endWorkspaceWindowDrag()
-    }
-  })
-
-  it('reveals the hovered window while another window tab is dragged over it', () => {
-    const terminal = createTerminalWindowParams('terminal-b', [], { cols: 1, rows: 1 })
-    const browser = { schema: 1 as const, kind: 'browser' as const, instanceId: 'page-b', title: 'Browser', icon: 'globe', pageId: 'page-b', profileId: 'default' }
-    const terminalId = workspaceContentPanelId(terminal)
-    const browserId = workspaceContentPanelId(browser)
-    // Both windows stacked in ONE inner group, so the browser is hidden behind
-    // the terminal — the state where the split target was invisible mid-drag.
-    const inner = {
-      activeGroup: 'stacked-group',
-      panels: {
-        [terminalId]: createWorkspaceContentPanel(terminal),
-        [browserId]: createWorkspaceContentPanel(browser),
-      },
-      grid: {
-        width: 1000,
-        height: 640,
-        orientation: Orientation.HORIZONTAL,
-        root: {
-          type: 'branch' as const,
-          size: 1000,
-          data: [{ type: 'leaf' as const, size: 1000, data: { views: [terminalId, browserId], activeView: terminalId, id: 'stacked-group' } }],
-        },
-      },
-    }
-    const childApis = {
-      [terminalId]: panelApi(terminalId, 'Terminal'),
-      [browserId]: panelApi(browserId, 'Browser'),
-    }
-    const childPanels = {
-      [terminalId]: { id: terminalId, params: terminal, api: childApis[terminalId] },
-      [browserId]: { id: browserId, params: browser, api: childApis[browserId] },
-    }
-    const unregister = registerWorkspaceWindow({
-      windowId: 'window-b',
-      outerPanelId: 'content:workspaceWindow:window-b',
-      getInnerApi: () => ({ id: 'workspace-window-b', getPanel: (id: string) => childPanels[id], toJSON: () => inner } as never),
-      settle: async () => undefined,
-      persist: () => undefined,
-      panelIds: () => [terminalId, browserId],
-      activePanelId: () => terminalId,
-      focusActive: () => undefined,
-    })
-    try {
-      const params = createWorkspaceWindowParams(inner, 'window-b')
-      const api = panelApi('content:workspaceWindow:window-b', params.title)
-      renderWithActions(createElement(WorkspaceContentTab, { api, containerApi, params } as never))
-
-      const browserSegment = screen.getByRole('tab', { name: 'Browser' }).closest<HTMLElement>('.workspace-window-combined-segment')
-      Object.defineProperty(browserSegment, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, right: 100, bottom: 20, width: 100, height: 20 }) })
-      const dataTransfer = { effectAllowed: 'none', dropEffect: 'none', setData: vi.fn(), getData: vi.fn(() => terminalId) }
-      fireEvent.dragStart(screen.getByRole('tab', { name: 'Terminal' }), { dataTransfer })
-      fireEvent.dragOver(browserSegment as HTMLElement, { dataTransfer, clientX: 50, clientY: 10 })
-
-      expect(childApis[browserId].setActive).toHaveBeenCalled()
-      expect(childApis[terminalId].setActive).not.toHaveBeenCalled()
-    } finally {
-      unregister()
-    }
   })
 
   it('aggregates the Source Control badge across repositories in the active workspace group', () => {

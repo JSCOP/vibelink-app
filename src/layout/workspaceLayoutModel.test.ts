@@ -17,8 +17,6 @@ import {
   workspaceRightEdgeGroupId,
   workspaceRightStructuralKinds,
   createTerminalWindowParams,
-  workspaceWindowGroupCount,
-  workspaceWindowTitle,
 } from './workspaceLayoutModel'
 import { isStructuralWorkspaceContentKind, parseWorkspaceContentParams, workspaceContentPanelId, workspaceContentResourceKey } from './workspaceContentModel'
 
@@ -35,7 +33,7 @@ describe('workspaceLayoutModel v3', () => {
     expect(normalizeWorkspaceLayoutState(JSON.stringify({ version: 2, pages: [] }))).toEqual({ version: 3, dockview: null })
   })
 
-  it('wraps the complete central window tree in one outer workspace tab', () => {
+  it('places the terminal window directly in the workspace grid with no wrapper tab', () => {
     const panes = [pane('pane-a', 'Alpha'), pane('pane-b', 'Beta')]
     const layout = createDefaultWorkspaceDockviewLayout(panes, 1600)
     const leftIds = workspaceLeftStructuralKinds.map((kind) => workspaceContentPanelId(createSingletonContentParams(kind)))
@@ -43,17 +41,10 @@ describe('workspaceLayoutModel v3', () => {
 
     const panelIds = Object.keys(layout.panels)
     expect(panelIds.slice(0, leftIds.length + rightIds.length)).toEqual([...leftIds, ...rightIds])
-    const workspaceWindowIds = panelIds.filter((id) => id.startsWith('content:workspaceWindow:'))
-    expect(workspaceWindowIds).toHaveLength(1)
-    const workspaceWindowPanel = layout.panels[workspaceWindowIds[0]]
-    expect(workspaceWindowPanel.contentComponent).toBe('workspaceWindow')
-    const workspaceWindowParams = parseWorkspaceContentParams(workspaceWindowPanel.params)
-    expect(workspaceWindowParams?.kind).toBe('workspaceWindow')
-    if (workspaceWindowParams?.kind !== 'workspaceWindow' || !workspaceWindowParams.inner) throw new Error('Missing grouped workspace layout')
-    const groupedLayout = workspaceWindowParams.inner
-    const terminalWindowIds = Object.keys(groupedLayout.panels).filter((id) => id.startsWith('content:terminalWindow:'))
+    expect(panelIds.filter((id) => id.startsWith('content:workspaceWindow:'))).toHaveLength(0)
+    const terminalWindowIds = panelIds.filter((id) => id.startsWith('content:terminalWindow:'))
     expect(terminalWindowIds).toHaveLength(1)
-    const terminalWindowParams = parseWorkspaceContentParams(groupedLayout.panels[terminalWindowIds[0]].params)
+    const terminalWindowParams = parseWorkspaceContentParams(layout.panels[terminalWindowIds[0]].params)
     expect(terminalWindowParams?.kind).toBe('terminalWindow')
     if (terminalWindowParams?.kind !== 'terminalWindow' || !terminalWindowParams.inner) throw new Error('Missing terminal window layout')
     const paneIds = Object.values(terminalWindowParams.inner.panels).flatMap((entry) => {
@@ -77,72 +68,66 @@ describe('workspaceLayoutModel v3', () => {
       },
     })
     expect(layout.grid.root.type).toBe('branch')
-    expect(JSON.stringify(layout.grid.root)).toContain(workspaceWindowIds[0])
-    expect(JSON.stringify(layout.grid.root)).not.toContain(terminalWindowIds[0])
-    expect(JSON.stringify(groupedLayout.grid.root)).toContain(terminalWindowIds[0])
-    expect(layout.activeGroup).toBe('workspace-window-group')
-    expect(groupedLayout.activeGroup).toMatch(/^content-group-/)
+    // The terminal window is a leaf of the WORKSPACE grid now, so a second
+    // content tab splits that same grid instead of a nested one.
+    expect(JSON.stringify(layout.grid.root)).toContain(terminalWindowIds[0])
+    expect(layout.activeGroup).toMatch(/^content-group-/)
   })
 
-  it('summarizes every window inside the combined outer tab', () => {
-    const layout = createDefaultWorkspaceDockviewLayout([pane('pane-a')], 1600)
-    const params = Object.values(layout.panels).flatMap((panel) => {
-      const content = parseWorkspaceContentParams(panel.params)
-      return content?.kind === 'workspaceWindow' ? [content] : []
-    })[0]
-    if (!params?.inner) throw new Error('Missing workspace window layout')
-    expect(workspaceWindowGroupCount(params.inner)).toBe(1)
-    expect(workspaceWindowTitle(params.inner)).toBe('Terminal')
-
-    const split = structuredClone(params.inner)
-    const editor = { schema: 1 as const, kind: 'editor' as const, instanceId: 'README.md', title: 'README.md', icon: 'file-code', relPath: 'README.md' }
-    const editorId = workspaceContentPanelId(editor)
-    split.panels[editorId] = createWorkspaceContentPanel(editor)
-    split.grid.root = {
-      type: 'branch',
-      data: [split.grid.root, { type: 'leaf', data: { views: [editorId], activeView: editorId, id: 'editor-group' }, size: 500 }],
-      size: split.grid.width,
-    }
-
-    expect(workspaceWindowGroupCount(split)).toBe(2)
-    expect(workspaceWindowTitle(split)).toBe('Terminal + README.md')
-  })
-
-  it('moves a legacy editor and terminal split under one grouped outer tab without changing the split tree', () => {
+  it('hoists a pre-cutover Window Group layout back into the workspace grid instead of resetting it', () => {
+    // Exactly the shape the removed `wrapWorkspaceWindowLayout` used to save:
+    // sidebars outside, every central tab nested in one `workspaceWindow`.
     const current = createDefaultWorkspaceDockviewLayout([pane('pane-a')], 1600)
-    const workspaceParams = Object.values(current.panels).flatMap((panel) => {
-      const params = parseWorkspaceContentParams(panel.params)
-      return params?.kind === 'workspaceWindow' ? [params] : []
-    })[0]
-    if (!workspaceParams?.inner) throw new Error('Missing source workspace layout')
-    const legacyInner = structuredClone(workspaceParams.inner)
-    const editorParams = { schema: 1 as const, kind: 'editor' as const, instanceId: 'AGENTS.md', title: 'AGENTS.md', icon: 'file-code', relPath: 'AGENTS.md' }
-    const editorId = workspaceContentPanelId(editorParams)
-    legacyInner.panels[editorId] = createWorkspaceContentPanel(editorParams)
-    legacyInner.grid.root = {
-      type: 'branch',
-      data: [legacyInner.grid.root, { type: 'leaf', data: { views: [editorId], activeView: editorId, id: 'legacy-editor-group' }, size: 500 }],
-      size: legacyInner.grid.width,
-    }
-    legacyInner.activeGroup = 'legacy-editor-group'
     const structuralPanels = Object.fromEntries(Object.entries(current.panels).filter(([, panel]) => {
       const params = parseWorkspaceContentParams(panel.params)
       return params && isStructuralWorkspaceContentKind(params.kind)
     }))
-    const legacy = { ...legacyInner, panels: { ...structuralPanels, ...legacyInner.panels }, edgeGroups: current.edgeGroups }
+    const editorParams = { schema: 1 as const, kind: 'editor' as const, instanceId: 'AGENTS.md', title: 'AGENTS.md', icon: 'file-code', relPath: 'AGENTS.md' }
+    const editorId = workspaceContentPanelId(editorParams)
+    const terminalWindowId = Object.keys(current.panels).find((id) => id.startsWith('content:terminalWindow:'))
+    if (!terminalWindowId) throw new Error('Missing terminal window panel')
+    const inner = {
+      panels: { [terminalWindowId]: current.panels[terminalWindowId], [editorId]: createWorkspaceContentPanel(editorParams) },
+      grid: {
+        root: {
+          type: 'branch' as const,
+          data: [
+            { type: 'leaf' as const, data: { views: [terminalWindowId], activeView: terminalWindowId, id: 'content-group-0' }, size: 800 },
+            { type: 'leaf' as const, data: { views: [editorId], activeView: editorId, id: 'legacy-editor-group' }, size: 800 },
+          ],
+          size: 1600,
+        },
+        width: 1600,
+        height: 640,
+        orientation: 'HORIZONTAL',
+      },
+      activeGroup: 'legacy-editor-group',
+    }
+    const wrapperParams = { schema: 1, kind: 'workspaceWindow', instanceId: 'legacy-window', title: 'Terminal + AGENTS.md', icon: 'layout-grid', inner }
+    const wrapperId = 'content:workspaceWindow:legacy-window'
+    const legacy = {
+      panels: {
+        ...structuralPanels,
+        [wrapperId]: { id: wrapperId, contentComponent: 'workspaceWindow', tabComponent: 'workspaceContentTab', params: wrapperParams, title: wrapperParams.title, renderer: 'always' },
+      },
+      grid: {
+        root: { type: 'branch', data: [{ type: 'leaf', data: { views: [wrapperId], activeView: wrapperId, id: 'workspace-window-group' }, size: 1600 }], size: 1600 },
+        width: 1600,
+        height: 640,
+        orientation: 'HORIZONTAL',
+      },
+      activeGroup: 'workspace-window-group',
+      edgeGroups: current.edgeGroups,
+    }
 
-    const completed = completeWorkspaceStructuralLayout(legacy, 1600)
-    const groupedParams = Object.values(completed.panels).flatMap((panel) => {
-      const params = parseWorkspaceContentParams(panel.params)
-      return params?.kind === 'workspaceWindow' ? [params] : []
-    })[0]
-    if (!groupedParams?.inner) throw new Error('Missing migrated workspace layout')
-    expect(groupedParams.inner.grid.root).toEqual(legacyInner.grid.root)
-    expect(Object.keys(groupedParams.inner.panels)).toEqual(expect.arrayContaining([editorId]))
-    expect(Object.values(completed.panels).flatMap((panel) => {
-      const params = parseWorkspaceContentParams(panel.params)
-      return params && !isStructuralWorkspaceContentKind(params.kind) ? [params.kind] : []
-    })).toEqual(['workspaceWindow'])
+    const restored = normalizeWorkspaceLayoutState(JSON.stringify({ version: 3, dockview: legacy })).dockview
+    if (!restored) throw new Error('Legacy Window Group layout was rejected instead of migrated')
+    expect(Object.keys(restored.panels)).not.toContain(wrapperId)
+    expect(Object.keys(restored.panels)).toEqual(expect.arrayContaining([...Object.keys(structuralPanels), terminalWindowId, editorId]))
+    // The split geometry the user arranged survives verbatim.
+    expect(restored.grid.root).toEqual(inner.grid.root)
+    expect(restored.activeGroup).toBe('legacy-editor-group')
+    expect(restored.edgeGroups).toEqual(current.edgeGroups)
   })
 
   it('completes older edge layouts before reuse without replacing their active tab', () => {
@@ -177,15 +162,10 @@ describe('workspaceLayoutModel v3', () => {
     expect(createDefaultWorkspaceDockviewLayout([], 1100).edgeGroups?.right).toMatchObject({ size: 340, collapsed: true })
   })
 
-  it('round-trips grouped layouts with populated and empty terminal windows', () => {
+  it('round-trips layouts with populated and empty terminal windows', () => {
     const empty = createDefaultWorkspaceDockviewLayout([], 1600)
-    const emptyWorkspaceIds = Object.keys(empty.panels).filter((id) => id.startsWith('content:workspaceWindow:'))
-    expect(emptyWorkspaceIds).toHaveLength(1)
-    const emptyParams = parseWorkspaceContentParams(empty.panels[emptyWorkspaceIds[0]].params)
-    expect(emptyParams?.kind).toBe('workspaceWindow')
-    if (emptyParams?.kind !== 'workspaceWindow' || !emptyParams.inner) throw new Error('Missing empty grouped workspace layout')
-    expect(Object.keys(emptyParams.inner.panels).filter((id) => id.startsWith('content:terminalWindow:'))).toHaveLength(1)
-    expect(empty.activeGroup).toBe('workspace-window-group')
+    expect(Object.keys(empty.panels).filter((id) => id.startsWith('content:terminalWindow:'))).toHaveLength(1)
+    expect(empty.activeGroup).toMatch(/^content-group-/)
     expect(normalizeWorkspaceLayoutState(JSON.stringify({ version: 3, dockview: empty })).dockview).toEqual(empty)
 
     const withTerminal = createDefaultWorkspaceDockviewLayout([pane('pane-a')], 1600)
@@ -194,7 +174,7 @@ describe('workspaceLayoutModel v3', () => {
 
   it('defines every built-in content descriptor and Preview singleton identity', () => {
     expect(Object.keys(workspaceContentDescriptors)).toEqual([
-      'terminal', 'terminalWindow', 'workspaceWindow', 'browser', 'editor', 'preview', 'workspaces', 'explorer', 'workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'automation', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions', 'memory',
+      'terminal', 'terminalWindow', 'browser', 'editor', 'preview', 'workspaces', 'explorer', 'workspaceFiles', 'sourceControl', 'gitHistory', 'gitBranches', 'automation', 'workbench', 'agent', 'orchestration', 'kanban', 'todo', 'diff', 'agentSessions', 'memory',
     ])
     expect(createSingletonContentParams('workspaces')).toEqual({
       schema: 1,
