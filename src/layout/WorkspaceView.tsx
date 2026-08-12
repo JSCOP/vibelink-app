@@ -1433,12 +1433,15 @@ export function WorkspaceView({
     persistLayoutSoon()
   }, [persistLayoutSoon])
 
-  const renameTerminal = useCallback(async (paneId: string, title: string) => {
-    await renamePaneTitle(paneId, title, 'manual')
-    const handle = findTerminalWindowForPane(paneId)
-    const panel = handle?.getInnerApi()?.getPanel(workspaceContentPanelId({ kind: 'terminal', instanceId: paneId }))
+  const renameContent = useCallback(async (panelId: string, title: string) => {
+    const paneId = panelId.startsWith(TERMINAL_PANEL_ID_PREFIX) ? panelId.slice(TERMINAL_PANEL_ID_PREFIX.length) : null
+    if (paneId) await renamePaneTitle(paneId, title, 'manual')
+    // Panes live in a nested window's own Dockview; every other content tab is
+    // an outer panel. Both persist the title into `params` so a restore keeps it.
+    const handle = paneId ? findTerminalWindowForPane(paneId) : null
+    const panel = paneId ? handle?.getInnerApi()?.getPanel(panelId) : apiRef.current?.getPanel(panelId)
     const params = parseWorkspaceContentParams(panel?.params)
-    if (!panel || params?.kind !== 'terminal') return
+    if (!panel || !params) return
     panel.update({ params: { ...params, title } })
     panel.api.setTitle(title)
     handle?.persist()
@@ -1492,10 +1495,10 @@ export function WorkspaceView({
     toggleMaximizeContent,
     toggleZoomContent,
     toggleTerminalWindowTitles,
-    renameTerminal,
+    renameContent,
     resetLayout,
     getContentParams,
-  }), [activateContent, arrangeTerminals, clearTerminals, getContentParams, openContent, renameTerminal, requestCloseContent, resetLayout, splitTerminal, toggleMaximizeContent, toggleTerminalWindowTitles, toggleZoomContent])
+  }), [activateContent, arrangeTerminals, clearTerminals, getContentParams, openContent, renameContent, requestCloseContent, resetLayout, splitTerminal, toggleMaximizeContent, toggleTerminalWindowTitles, toggleZoomContent])
 
   const loadActiveSessionLayout = useCallback(() => {
     const run = async () => {

@@ -18,7 +18,7 @@ import { GitWorkspaceProvider } from './GitWorkspaceProvider'
 import { HistoryTab } from './HistoryTab'
 import { AppDialogHost } from '../AppDialog'
 
-const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
+const actions: WorkspaceContentActions = { openContent, activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const), splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined), toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameContent: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null) }
 const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, headSha: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
 const status: WorkingStatus = { staged: [], unstaged: [], untracked: [], conflicted: [], truncated: false }
 const commit: CommitInfo = { sha: 'a'.repeat(40), parents: [], refs: ['HEAD -> main'], authorName: 'VibeLink', authorEmail: 'test@example.com', authorDate: '2026-07-18T00:00:00Z', subject: 'Initial commit' }

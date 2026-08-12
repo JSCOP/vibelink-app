@@ -22,7 +22,7 @@ const actions = {
   toggleMaximizeContent: vi.fn(),
   toggleZoomContent: vi.fn(),
   toggleTerminalWindowTitles: vi.fn(),
-  renameTerminal: vi.fn(async () => undefined),
+  renameContent: vi.fn(async () => undefined),
   resetLayout: vi.fn(async () => undefined),
   getContentParams: vi.fn(() => null),
 } satisfies WorkspaceContentActions
@@ -305,7 +305,30 @@ describe('WorkspaceContentTab', () => {
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(api.setActive).toHaveBeenCalled()
-    expect(actions.renameTerminal).toHaveBeenCalledWith('pane-a', 'Build logs')
+    expect(actions.renameContent).toHaveBeenCalledWith('content:terminal:pane-a', 'Build logs')
+  })
+
+  it('renames a window tab by double-clicking its title, except resource-backed tabs', () => {
+    const view = renderWithActions(createElement(WorkspaceContentTab, {
+      api: panelApi('content:terminalWindow:window-a', 'Terminal'),
+      containerApi,
+      params: createTerminalWindowParams('window-a', [], { cols: 1, rows: 1 }),
+    } as never))
+
+    fireEvent.doubleClick(view.container.querySelector('.terminal-tab-title') as HTMLElement)
+    const input = screen.getByRole('textbox', { name: 'Tab title' })
+    fireEvent.change(input, { target: { value: 'Build logs' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(actions.renameContent).toHaveBeenCalledWith('content:terminalWindow:window-a', 'Build logs')
+
+    // A browser tab title tracks the live page, so renaming it would revert.
+    const browser = renderWithActions(createElement(WorkspaceContentTab, {
+      api: panelApi('content:browser:page-1', 'Docs'),
+      containerApi,
+      params: { schema: 1, kind: 'browser', instanceId: 'page-1', title: 'Docs', icon: 'globe', pageId: 'page-1', profileId: 'default' },
+    } as never))
+    fireEvent.doubleClick(browser.container.querySelector('.terminal-tab-title') as HTMLElement)
+    expect(browser.container.querySelector('.terminal-tab-title-input')).toBeNull()
   })
 
   it('reveals a hovered tab only for a same-instance drag onto a different inactive tab', () => {

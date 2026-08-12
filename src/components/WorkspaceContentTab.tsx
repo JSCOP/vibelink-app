@@ -90,7 +90,7 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   const commitTitle = () => {
     const nextTitle = draftTitle.trim()
     setIsEditing(false)
-    if (paneId && nextTitle && nextTitle !== title) void actions.renameTerminal(paneId, nextTitle)
+    if (nextTitle && nextTitle !== title) void actions.renameContent(api.id, nextTitle)
   }
   const onTitleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
@@ -119,6 +119,9 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
   }
   const agentStatus = workspaceAgentTabStatus(hermesStatus, hermesPendingPermissions)
   const displaysAgentStatus = content?.kind === 'agent' || content?.kind === 'agentSessions'
+  // Browser and preview titles track a live page/file, so a manual rename there
+  // would silently revert on the next navigation or path change.
+  const isRenamable = content !== null && content.kind !== 'browser' && content.kind !== 'preview'
   const isEdge = location.type === 'edge'
   const railBadge = content?.kind === 'sourceControl' && gitRailState.changed > 0 ? gitRailState.changed : null
   const accessibleTitle = [title, railBadge ? `${railBadge} changed paths` : '', displaysAgentStatus ? agentStatus.label : ''].filter(Boolean).join(' · ')
@@ -178,9 +181,10 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
           not information — both chips only made every tab wider. Show the role
           chip when a role actually exists. */}
       {paneId && role ? <span className="terminal-tab-role" title={`Pane role: ${role}`}>{role}</span> : null}
-      {isEditing && paneId ? (
+      {isEditing ? (
         <input
           className="terminal-tab-title-input"
+          aria-label="Tab title"
           value={draftTitle}
           autoFocus
           onBlur={commitTitle}
@@ -192,9 +196,9 @@ export function WorkspaceContentTab({ api, containerApi, params }: WorkspaceCont
       ) : (
         <span
           className="terminal-tab-title"
-          title={paneId ? 'Terminal content. Drag with Dockview to move; double-click to rename.' : 'Workspace content. Drag with Dockview to move.'}
+          title={isRenamable ? 'Drag with Dockview to move; double-click to rename.' : 'Workspace content. Drag with Dockview to move.'}
           onDoubleClick={() => {
-            if (!paneId) return
+            if (!isRenamable) return
             setDraftTitle(title)
             setIsEditing(true)
           }}

@@ -98,7 +98,7 @@ const actions: WorkspaceContentActions = {
   toggleMaximizeContent: vi.fn(),
   toggleZoomContent: vi.fn(),
   toggleTerminalWindowTitles: vi.fn(),
-  renameTerminal: vi.fn(async () => undefined),
+  renameContent: vi.fn(async () => undefined),
   resetLayout: vi.fn(async () => undefined),
   getContentParams: vi.fn(() => null),
 }

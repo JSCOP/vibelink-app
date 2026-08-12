@@ -17,7 +17,7 @@ import { sourceControlPrimaryAction } from './gitWorkspaceModel'
 const actions: WorkspaceContentActions = {
   openContent: vi.fn(async () => 'content:workbench:workbench'), activateContent: vi.fn(), requestCloseContent: vi.fn(async () => 'closed' as const),
   splitTerminal: vi.fn(async () => undefined), arrangeTerminals: vi.fn(async () => undefined), clearTerminals: vi.fn(async () => undefined),
-  toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameTerminal: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null),
+  toggleMaximizeContent: vi.fn(), toggleZoomContent: vi.fn(), toggleTerminalWindowTitles: vi.fn(), renameContent: vi.fn(async () => undefined), resetLayout: vi.fn(async () => undefined), getContentParams: vi.fn(() => null),
 }
 const repoInfo: RepoInfo = { isRepo: true, root: 'C:/repo', branch: 'main', detachedSha: null, headSha: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, state: 'clean', remotes: [] }
 const status: WorkingStatus = { staged: [], unstaged: [{ path: 'file.ts', oldPath: null, changeType: 'modified' }], untracked: [], conflicted: [], truncated: false }

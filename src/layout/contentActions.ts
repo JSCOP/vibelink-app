@@ -38,7 +38,9 @@ export type WorkspaceContentActions = {
   /** Zoom the focused terminal pane inside its window; other content maximizes. */
   toggleZoomContent(panelId: string): void
   toggleTerminalWindowTitles(windowId: string): void
-  renameTerminal(paneId: string, title: string): Promise<void>
+  /** Rename a content tab or terminal pane by its Dockview panel id. A pane also
+   *  gets its PTY title marked manual so auto-titling stops overwriting it. */
+  renameContent(panelId: string, title: string): Promise<void>
   resetLayout(): Promise<void>
   getContentParams(panelId: string): WorkspaceContentParams | null
 }

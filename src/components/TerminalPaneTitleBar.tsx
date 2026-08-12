@@ -49,7 +49,7 @@ export function TerminalPaneTitleBar({ api, params }: TerminalPaneTitleBarProps)
   const commitTitle = () => {
     setIsEditing(false)
     const next = draftTitle.trim()
-    if (paneId && next && next !== title) void actions.renameTerminal(paneId, next)
+    if (paneId && next && next !== title) void actions.renameContent(api.id, next)
   }
 
   const startEditing = (event: ReactMouseEvent<HTMLDivElement>) => {
