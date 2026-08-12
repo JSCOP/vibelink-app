@@ -153,8 +153,8 @@ export function serializeAddonModule() {
   class MockSerializeAddon {
     private terminal: { cols: number; rows: number } | undefined
     activate(terminal: { cols: number; rows: number }): void { this.terminal = terminal }
-    serialize(options?: { scrollback?: number }): string {
-      return `rendered ${this.terminal?.cols ?? 0}x${this.terminal?.rows ?? 0} scrollback=${options?.scrollback ?? 'all'}`
+    serialize(options?: { scrollback?: number; excludeAltBuffer?: boolean }): string {
+      return `rendered ${this.terminal?.cols ?? 0}x${this.terminal?.rows ?? 0} scrollback=${options?.scrollback ?? 'all'} altExcluded=${options?.excludeAltBuffer === true}`
     }
     dispose(): void {}
   }

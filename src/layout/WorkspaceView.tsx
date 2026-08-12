@@ -984,9 +984,23 @@ export function WorkspaceView({
     if (!ownsLayout(owner)) return ''
     const handle = await ensureTerminalWindow(owner, { windowId: options.windowId, targetGroupId: options.targetGroupId, forceNew: options.forceNewWindow })
     if (!handle || !ownsLayout(owner)) return ''
-    const entry = addPendingPane(handle, owner, { referencePaneId: options.referencePaneId, direction: options.direction, inactive: options.inactive, profileId: options.profileId })
+    // Placing the panel and letting Dockview settle walks every sibling through
+    // geometry it never lands on — measured on a split of a 306x62 pane running
+    // an inline agent TUI: 306x3, forwarded to the PTY, then 306x30 65 ms later.
+    // Three rows is a real measurement of a real mid-split host, so `safeFit`'s
+    // degenerate-size guard does not catch it; the pane's program repaints its
+    // whole frame into 3 rows and again at the final size, which is the stacked
+    // duplicate banner and the stranded blank half users report after adding a
+    // pane. Hold the passes exactly as Arrange and grid creation do. The
+    // measure-and-spawn step stays OUTSIDE, because `measureForSpawn` fits and
+    // `safeFit` deliberately refuses to fit while a topology command is open.
+    const entry = await TerminalManager.runLayoutTransaction(async () => {
+      const pending = addPendingPane(handle, owner, { referencePaneId: options.referencePaneId, direction: options.direction, inactive: options.inactive, profileId: options.profileId })
+      if (!pending) return null
+      await handle.settle()
+      return pending
+    })
     if (!entry) return ''
-    await handle.settle()
     return spawnIntoPendingPane(handle, owner, entry, options)
   }, [addPendingPane, ensureTerminalWindow, ownsLayout, spawnIntoPendingPane])
 

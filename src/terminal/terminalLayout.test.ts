@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 // Async factories must load the cycle-free mock module lazily because vi.mock is hoisted per test file.
@@ -643,5 +645,30 @@ describe('TerminalManager whole-grid layout transactions', () => {
       ['resize_pane', { sessionId: 'session-transaction', paneId, cols: 87, rows: 24 }],
     ])
     TerminalManager.dispose(paneId)
+  })
+
+  /** The transaction above only helps where the topology paths actually hold it.
+   *  Adding a pane is one and was missing it: measured live on DEV, splitting a
+   *  306x62 pane running an inline agent TUI fitted it to 306x3 and forwarded
+   *  that to the PTY before landing on 306x30 65 ms later, so the agent repainted
+   *  its whole banner into three rows and again at the final size — the stacked
+   *  duplicate frame and stranded blank half users reported. `safeFit`'s
+   *  degenerate-size guard cannot catch it, because 3 rows is a true measurement
+   *  of a real mid-split host. */
+  it('adds a pane inside a layout transaction, and measures for spawn outside it', () => {
+    const source = readFileSync(join(process.cwd(), 'src/layout/WorkspaceView.tsx'), 'utf8')
+    const start = source.indexOf('const spawnTerminal =')
+    const spawnTerminal = source.slice(start, source.indexOf('const replaceTerminalProcess ='))
+    expect(start).toBeGreaterThan(-1)
+
+    const transaction = spawnTerminal.indexOf('TerminalManager.runLayoutTransaction')
+    const settle = spawnTerminal.indexOf('await handle.settle()')
+    expect(transaction).toBeGreaterThan(-1)
+    expect(spawnTerminal.indexOf('addPendingPane(')).toBeGreaterThan(transaction)
+    expect(settle).toBeGreaterThan(transaction)
+    // Outside, because `measureForSpawn` fits and `safeFit` deliberately refuses
+    // to fit while a topology command is open — inside, every PTY would spawn at
+    // the daemon's default geometry instead of the pane's.
+    expect(spawnTerminal.indexOf('spawnIntoPendingPane(handle')).toBeGreaterThan(settle)
   })
 })

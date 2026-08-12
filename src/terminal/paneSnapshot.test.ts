@@ -57,6 +57,9 @@ describe('pane snapshot rebase', () => {
     expect(snapshot.data.startsWith('\x1b[3J\x1b[2J\x1b[H')).toBe(true)
     // Row-capped: serializing the full 50,000-row default measured 1.3 s and 14 MiB.
     expect(snapshot.data).toContain('scrollback=2000')
+    // A fixed-grid alternate-buffer frame cannot be repainted at another width
+    // without clipping, so it is never captured; the live application repaints it.
+    expect(snapshot.data).toContain('altExcluded=true')
 
     TerminalManager.dispose(paneId)
   })

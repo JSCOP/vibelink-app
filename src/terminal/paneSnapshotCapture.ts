@@ -47,7 +47,16 @@ export function captureSnapshot(target: SnapshotTarget): void {
   if (!sessionId || !target.opened || !target.daemonAttached || target.remoteLease || target.replayPending) return
   let rendered: string
   try {
-    rendered = target.serialize.serialize({ scrollback: SCROLLBACK_ROWS })
+    // `excludeAltBuffer` deliberately drops the full-screen frame. An alternate
+    // buffer has no scrollback and does not reflow, so a captured frame stays at
+    // its capture layout: paint it through a narrower grid and the user gets
+    // clipped gutters and mid-word holes until the application repaints. Orca
+    // hit exactly this and now skips a too-wide alt frame while still entering
+    // and clearing the alt buffer (`f2984e22`, 2026-08-10). Excluding it always
+    // is the same conclusion without the width bookkeeping: the serialized MODES
+    // still re-enter the alt buffer, so the app lands on a clean screen, and
+    // `nudgeAlternateBuffer` already makes it repaint after a replay.
+    rendered = target.serialize.serialize({ scrollback: SCROLLBACK_ROWS, excludeAltBuffer: true })
   } catch {
     // A pane whose emulator is mid-teardown has nothing worth persisting.
     return
