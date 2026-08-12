@@ -38,6 +38,30 @@ describe('TerminalManager atomic snapshot replay', () => {
     TerminalManager.dispose(paneId)
   })
 
+  it('pins a rebuilt pane to the bottom instead of leaving it where the replay cursor stopped', async () => {
+    const paneId = 'pane-replay-scroll'
+    const container = makeContainer()
+    invokeMock.mockImplementation((command: string) => (
+      command === 'subscribe_pane'
+        ? Promise.resolve(terminalSnapshot(paneId, 1n, 'snapshot', 'session-replay-scroll'))
+        : Promise.resolve(undefined)
+    ))
+
+    TerminalManager.attach(paneId, container, { sessionId: 'session-replay-scroll' })
+    await TerminalManager.waitForReplay('session-replay-scroll', [paneId])
+
+    const manager = TerminalManager as unknown as {
+      entries: Map<string, { term: { resetCalls: number; scrollToBottomCalls: number } }>
+    }
+    const entry = manager.entries.get(paneId)
+    // reset() empties the buffer, so the replay re-parses from row 0 and the
+    // viewport ends wherever its cursor stopped. Without the restore the pane
+    // stays parked at the top of the rebuilt scrollback.
+    expect(entry?.term.resetCalls).toBe(1)
+    expect(entry?.term.scrollToBottomCalls).toBeGreaterThan(0)
+    TerminalManager.dispose(paneId)
+  })
+
   it('answers a cold-snapshot cursor query when the emulator emits no CPR', async () => {
     const paneId = 'pane-cold-dsr'
     invokeMock.mockImplementation((command) => command === 'subscribe_pane'

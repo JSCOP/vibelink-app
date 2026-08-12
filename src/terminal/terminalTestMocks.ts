@@ -84,7 +84,9 @@ export function xtermModule() {
     }
     focus(): void { this.focusCalls += 1 }
     refresh(start: number, end: number): void { this.refreshCalls.push([start, end]) }
-    scrollToBottom(): void {}
+    scrollToBottomCalls = 0
+    scrollToBottom(): void { this.scrollToBottomCalls += 1 }
+    scrollToLine(line: number): void { this.buffer.active.viewportY = line }
     write(data: unknown, callback?: () => void): void { this.writes.push(data); callback?.() }
     reset(): void { this.resetCalls += 1; this.writes = [] }
     hasSelection(): boolean { return false }

@@ -39,14 +39,22 @@ export function terminalScrollAnchor(term: TerminalScrollView): number {
  *  toward the top of the buffer and the pane reads as "scrolled back to the
  *  start". Restoring the distance from the bottom keeps that line in place.
  *  A viewport already at the bottom (anchor <= 0) still pins to the bottom, so
- *  a live pane never strands itself above new output. */
+ *  a live pane never strands itself above new output.
+ *
+ *  The anchor can also outlive its rows: widening a pane unwraps lines, a
+ *  snapshot replay resets the buffer, and the scrollback cap trims from the
+ *  top, so `baseY` can end up SMALLER than the captured distance. Clamping
+ *  that to line 0 is what leaves panes parked at the very top of their
+ *  scrollback after a zoom or a workspace return. The row is gone either way;
+ *  follow output instead of inventing a position at the start of the buffer. */
 export function restoreTerminalScrollAnchor(term: TerminalScrollView, anchor: number): void {
-  if (anchor <= 0) {
+  const { baseY, viewportY } = term.buffer.active
+  if (anchor <= 0 || anchor > baseY) {
     term.scrollToBottom()
     return
   }
-  const target = Math.max(0, term.buffer.active.baseY - anchor)
-  if (target !== term.buffer.active.viewportY) term.scrollToLine(target)
+  const target = baseY - anchor
+  if (target !== viewportY) term.scrollToLine(target)
 }
 
 export async function waitForStableTerminalGrid(

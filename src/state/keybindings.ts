@@ -145,6 +145,11 @@ export function handleCapturedKeybindingEvent(
   shouldHandleAction?: (action: KeybindingActionId) => boolean,
 ): boolean {
   if (event.defaultPrevented) return false
+  // Windows IME composition reports every keystroke as `keyCode` 229 with
+  // `isComposing` set, and the chord it produces is whatever physical key the
+  // user pressed. Preventing or stopping one of those events cancels the
+  // composition, which is a Korean syllable silently disappearing mid-word.
+  if (event.isComposing || event.keyCode === 229) return false
   // Ctrl+1..9 is a fixed workspace navigation contract. Keep configurable
   // pane actions from consuming those chords before App selects the workspace.
   if (workspaceShortcutIndex(event) !== null) return false

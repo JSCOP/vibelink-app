@@ -956,6 +956,11 @@ class TerminalManagerImpl {
       entry.paneGeneration = paneGeneration
       entry.outputSequence = outputSequence
       entry.daemonAttached = true
+      // A rebuild throws away the viewport: `reset()` empties the buffer and the
+      // snapshot is re-parsed from row 0, so a reader who was scrolled up ends
+      // wherever the replay's cursor stopped — usually the top of a short
+      // rebuilt buffer. Keep the distance from the bottom across the rebuild.
+      const rebuildAnchor = retainedSnapshotCurrent ? 0 : terminalScrollAnchor(entry.term)
       if (!retainedSnapshotCurrent) {
         // Parse the replay at the PTY's grid. A RETAINED buffer must not be
         // resized here: nothing is rewritten, so this only reflows live
@@ -965,6 +970,7 @@ class TerminalManagerImpl {
         }
         entry.term.reset()
         await this.writeReplayBytes(entry, decodeBase64Bytes(snapshot.dataBase64))
+        restoreTerminalScrollAnchor(entry.term, rebuildAnchor)
       }
 
       for (;;) {
@@ -1318,9 +1324,22 @@ class TerminalManagerImpl {
     if (!entry) return
     if (entry.remoteLease) return
     this.resumeOutputConsumption(entry)
-    entry.term.focus()
+    // Layout settles, pane activation and OS window activation all re-focus the
+    // active pane from a LATER frame, so this lands at an arbitrary moment
+    // while the user is typing. Re-entering xterm's helper textarea while a
+    // Windows IME is composing cancels the composition and the in-flight
+    // Korean syllable is lost. A pane that already owns DOM focus has nothing
+    // to restore, so skip the call entirely.
+    if (!this.ownsDocumentFocus(entry)) entry.term.focus()
     if (entry.pendingOutput?.length) this.enqueueOutput(entry, true)
     this.scheduleLayoutPass({ paneIds: [paneId] })
+  }
+
+  /** xterm's helper textarea lives inside the pane container, so DOM focus
+   *  anywhere in it means this pane already owns the keyboard. */
+  private ownsDocumentFocus(entry: Entry): boolean {
+    return typeof document !== 'undefined'
+      && entry.container?.contains(document.activeElement) === true
   }
 
   reflow(paneId: string): void {

@@ -10,7 +10,9 @@ const sourceBudgets = {
   'src/layout/WorkspaceView.tsx': 2_530,
   // The rendered-buffer snapshot policy itself lives in paneSnapshotCapture.ts;
   // what stayed here is the `Clear pane` action plus the capture call sites.
-  'src/terminal/TerminalManager.ts': 2_386,
+  // +19: replay now restores the reader's scroll intent across a rebuild, and
+  // focus() no longer re-enters an xterm that already owns the keyboard.
+  'src/terminal/TerminalManager.ts': 2_405,
   'src/state/store.ts': 2_197,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
   'src-tauri/src/remote/bridge.rs': 5_568,

@@ -75,7 +75,7 @@ describe('terminal scroll anchor', () => {
     term.dispose()
   })
 
-  it('clamps to the top instead of scrolling past the start of a trimmed buffer', () => {
+  it('follows output instead of stranding the pane at the top when the anchor outlived its rows', () => {
     const scrolls: number[] = []
     const term = {
       buffer: { active: { baseY: 4, viewportY: 4 } },
@@ -83,8 +83,11 @@ describe('terminal scroll anchor', () => {
       scrollToLine: (line: number) => scrolls.push(line),
     }
 
+    // Widening unwraps lines, a replay resets the buffer, and the scrollback
+    // cap trims: baseY can fall below the captured distance. Clamping that to
+    // line 0 is the "every pane is scrolled back to the start" report.
     restoreTerminalScrollAnchor(term, 900)
 
-    expect(scrolls).toEqual([0])
+    expect(scrolls).toEqual([-1])
   })
 })
