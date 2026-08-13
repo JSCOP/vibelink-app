@@ -795,4 +795,73 @@ describe('TerminalManager output scheduling', () => {
       vi.useRealTimers()
     }
   })
+
+  // xterm buffers row refreshes for a DEC 2026 span but force-paints after 1 s,
+  // so a write that ends mid-frame shows a half-drawn screen as soon as the rest
+  // is behind that — the torn opencode splash. A frame is one write.
+  it('delivers a synchronized frame as one write instead of splitting it at the byte budget', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-sync-frame'
+    const frames = new Map<number, FrameRequestCallback>()
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.set(1, callback)
+      return 1
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => { frames.clear() })
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      term: { writes: Uint8Array[] }
+    }
+    entry.opened = true
+    // 40 KiB: two and a half times MAX_OUTPUT_BYTES_PER_WRITE.
+    const frame = new TextEncoder().encode(`\x1b[?2026h${'F'.repeat(40 * 1024)}\x1b[?2026l`)
+
+    try {
+      TerminalManager.write(paneId, frame, { foreground: false })
+      vi.advanceTimersByTime(50)
+      frames.get(1)?.(performance.now())
+
+      expect(entry.term.writes).toHaveLength(1)
+      expect(entry.term.writes[0].byteLength).toBe(frame.byteLength)
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('holds a frame whose end has not arrived, then releases it rather than stalling', () => {
+    vi.useFakeTimers()
+    const paneId = 'pane-sync-hold'
+    const frames = new Map<number, FrameRequestCallback>()
+    const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.set(1, callback)
+      return 1
+    })
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => { frames.clear() })
+    const entry = TerminalManager.getOrCreate(paneId) as unknown as {
+      opened: boolean
+      term: { writes: Uint8Array[] }
+    }
+    entry.opened = true
+    const partial = new TextEncoder().encode(`\x1b[?2026h${'F'.repeat(20 * 1024)}`)
+
+    try {
+      TerminalManager.write(paneId, partial, { foreground: false })
+      vi.advanceTimersByTime(50)
+      frames.get(1)?.(performance.now())
+      expect(entry.term.writes).toHaveLength(0)
+
+      // The app never closed the frame; the bounded hold must still deliver it.
+      vi.advanceTimersByTime(400)
+      frames.get(1)?.(performance.now())
+      expect(entry.term.writes).toHaveLength(1)
+    } finally {
+      TerminalManager.dispose(paneId)
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+      vi.useRealTimers()
+    }
+  })
 })

@@ -23,6 +23,7 @@ import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, ty
 import { PaneTitleCoalescer } from './titleCoalescing'
 import { cancelSnapshotCapture, captureSnapshot, HARD_CLEAR, scheduleSnapshotCapture } from './paneSnapshotCapture'
 import { forceRepaintThroughRenderPause } from './renderPauseRelease'
+import { syncSafeWriteLength } from './syncOutputFrames'
 
 const MAX_FIT_ATTEMPTS = 120
 const MAX_OUTPUT_BYTES_PER_WRITE = 16 * 1024
@@ -41,6 +42,15 @@ const HIDDEN_OUTPUT_PARK_DELAY_MS = 30_000
 const OUTPUT_DRAIN_TIME_BUDGET_MS = 8
 const OUTPUT_FLUSH_FALLBACK_MS = 250
 const INSTANT_OUTPUT_BYTES = 4 * 1024
+// One synchronized frame (DEC 2026) must reach xterm as ONE write, so the byte
+// budget above is a floor, not a ceiling, while a frame is open. Past this size
+// the app is not doing per-frame synchronization and the guarantee is dropped
+// rather than buffered without bound.
+const MAX_SYNC_FRAME_BYTES = 1024 * 1024
+// How long a pane waits for the end of an open frame before delivering it torn.
+// Well under xterm's own 1 s synchronized-output watchdog, so a TUI that dies
+// mid-frame costs one late repaint instead of a stalled pane.
+const SYNC_FRAME_HOLD_MS = 250
 const MAX_REPLAY_BYTES_PER_FRAME = 64 * 1024
 // Parse budget before a replay hands the frame back. Matches xterm's own
 // WriteBuffer timeout, so a pane yields at the same cadence it would anyway.
@@ -237,6 +247,8 @@ type Entry = {
   titleDisposable?: { dispose: () => void }
   linkDisposables?: { dispose(): void }[]
   outputTrimNoticeWritten?: boolean
+  /** Deadline for holding an unterminated synchronized frame; see flushOutput. */
+  syncHoldUntil?: number
   /** Whether this pane's xterm scrollbar was switched to always-visible. */
   scrollbarPersistent?: boolean
   webgl?: WebglAddon
@@ -1185,6 +1197,9 @@ class TerminalManagerImpl {
         entry.pendingOutput.push(bytes)
         entry.pendingOutputBytes = pendingOutputBytes + bytes.byteLength
         this.flushOutput(entry, INSTANT_OUTPUT_BYTES)
+        // A held synchronized frame leaves bytes behind on this path, which
+        // otherwise never re-enters the drain queue and would strand them.
+        if (entry.pendingOutput?.length) this.enqueueOutput(entry, true)
       } else {
         this.writeTerminalOutput(entry, bytes)
       }
@@ -2133,6 +2148,7 @@ class TerminalManagerImpl {
   }
 
   private removeQueuedOutput(entry: Entry): void {
+    entry.syncHoldUntil = undefined
     if (!this.queuedOutputPaneIds.delete(entry.paneId)) return
     this.outputQueue = this.outputQueue.filter((queued) => queued !== entry)
     entry.outputHighPriority = false
@@ -2162,14 +2178,22 @@ class TerminalManagerImpl {
       const completedAt = Date.now()
       if (!foreground) entry.lastBackgroundOutputAt = completedAt
       if (entry.pendingOutput?.length) {
-        // Do not let one resume flood consume both writes in this drain. Keep
-        // the remaining slot available to another pane, then revisit this pane
-        // only after the active pane has yielded, or the inactive cadence is due.
-        entry.outputHighPriority = this.isForegroundOutput(entry)
-        if (!entry.outputHighPriority) {
-          entry.outputNextDrainAt = completedAt + (entry.visible
-            ? this.inactiveVisibleOutputIntervalMs
-            : HIDDEN_OUTPUT_INTERVAL_MS)
+        // A pane holding an unterminated synchronized frame has nothing to
+        // write yet: wake at the hold deadline instead of spinning every frame.
+        // Newly arriving bytes still re-enqueue it immediately.
+        if (entry.syncHoldUntil !== undefined) {
+          entry.outputHighPriority = false
+          entry.outputNextDrainAt = entry.syncHoldUntil
+        } else {
+          // Do not let one resume flood consume both writes in this drain. Keep
+          // the remaining slot available to another pane, then revisit this pane
+          // only after the active pane has yielded, or the inactive cadence is due.
+          entry.outputHighPriority = this.isForegroundOutput(entry)
+          if (!entry.outputHighPriority) {
+            entry.outputNextDrainAt = completedAt + (entry.visible
+              ? this.inactiveVisibleOutputIntervalMs
+              : HIDDEN_OUTPUT_INTERVAL_MS)
+          }
         }
         this.queuedOutputPaneIds.add(entry.paneId)
         requeueAfterDrain.push(entry)
@@ -2257,11 +2281,27 @@ class TerminalManagerImpl {
     // whole frame therefore creates a 25-30 ms renderer-thread task for dense
     // ANSI resume output. Split even a single incoming frame so pointermove,
     // Dockview layout, paint, and input regain control between parser chunks.
+    //
+    // A synchronized frame (DEC 2026) is the one span that must NOT be split:
+    // xterm buffers its row refreshes for the frame but force-paints after 1 s,
+    // so a write ending mid-frame tears as soon as the rest is behind that —
+    // which the 333 ms inactive / 1 s hidden cadence makes routine. Cut on the
+    // frame boundary instead of the raw budget.
+    const now = Date.now()
+    let writeLimit = syncSafeWriteLength(pending, writeBudget, MAX_SYNC_FRAME_BYTES)
+    if (writeLimit === 0) {
+      // Everything queued is one unterminated frame. Wait for its end, bounded.
+      entry.syncHoldUntil ??= now + SYNC_FRAME_HOLD_MS
+      if (now < entry.syncHoldUntil) return
+      writeLimit = writeBudget
+    }
+    entry.syncHoldUntil = undefined
+
     const chunks: Uint8Array[] = []
     let bytesToWrite = 0
-    while (pending.length > 0 && bytesToWrite < writeBudget) {
+    while (pending.length > 0 && bytesToWrite < writeLimit) {
       const next = pending[0]
-      const remaining = writeBudget - bytesToWrite
+      const remaining = writeLimit - bytesToWrite
       if (next.byteLength <= remaining) {
         chunks.push(next)
         pending.shift()

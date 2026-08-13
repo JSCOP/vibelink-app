@@ -12,7 +12,9 @@ const sourceBudgets = {
   // what stayed here is the `Clear pane` action plus the capture call sites.
   // +19: replay now restores the reader's scroll intent across a rebuild, and
   // focus() no longer re-enters an xterm that already owns the keyboard.
-  'src/terminal/TerminalManager.ts': 2_405,
+  // +37: writes cut on DEC 2026 synchronized-frame boundaries instead of the raw
+  // byte budget, with a bounded hold for a frame whose end has not arrived.
+  'src/terminal/TerminalManager.ts': 2_445,
   'src/state/store.ts': 2_197,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
   'src-tauri/src/remote/bridge.rs': 5_568,
