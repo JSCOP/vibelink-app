@@ -35,7 +35,7 @@ describe('Hermes ACP startup', () => {
 
   test('marks ACP starting and waits for the backend started event before resolving', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_start') {
+      if (command === 'agent_chat_start') {
         queueMicrotask(() => emitHermesEvent?.({ generation: 1, kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
         return { generation: 1 }
       }
@@ -45,14 +45,14 @@ describe('Hermes ACP startup', () => {
 
     await startHermesAgent({ sessionId: 'session-a', workspaceFolder: 'E:/repo', commandOverride: 'hermes-acp', timeoutMs: 100 })
 
-    expect(invoke).toHaveBeenCalledWith('init_hermes_output', expect.any(Object))
-    expect(invoke).toHaveBeenCalledWith('hermes_start', { sessionId: 'session-a', commandOverride: 'hermes-acp', workspaceFolder: 'E:/repo' })
+    expect(invoke).toHaveBeenCalledWith('init_agent_chat_output', expect.any(Object))
+    expect(invoke).toHaveBeenCalledWith('agent_chat_start', { sessionId: 'session-a', commandOverride: 'hermes-acp', workspaceFolder: 'E:/repo' })
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
   })
 
   test('ACP replay restores transcript and session list from backend', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_start') {
+      if (command === 'agent_chat_start') {
         queueMicrotask(() => {
           emitHermesEvent?.({ generation: 1, kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-a' })
           emitHermesEvent?.({ generation: 1, kind: 'userMessage', sessionId: 'session-a', text: 'hello' })
@@ -60,7 +60,7 @@ describe('Hermes ACP startup', () => {
         })
         return { generation: 1 }
       }
-      if (command === 'hermes_list_sessions') return [{ id: 'acp-a', title: null, updatedAt: '2026-07-18T00:00:00.000Z', cwd: 'E:/repo' }]
+      if (command === 'agent_chat_list_sessions') return [{ id: 'acp-a', title: null, updatedAt: '2026-07-18T00:00:00.000Z', cwd: 'E:/repo' }]
       return null
     })
     const { startHermesAgent } = await import('./hermes')
@@ -75,7 +75,7 @@ describe('Hermes ACP startup', () => {
 
   test('explicit resume replaces transcript from replay events', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_resume_session') {
+      if (command === 'agent_chat_resume_session') {
         emitHermesEvent?.({ generation: 1, kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-b' })
         emitHermesEvent?.({ generation: 1, kind: 'userMessage', sessionId: 'session-a', text: 'restored prompt' })
         emitHermesEvent?.({ generation: 1, kind: 'message', sessionId: 'session-a', text: 'restored answer' })
@@ -92,7 +92,7 @@ describe('Hermes ACP startup', () => {
 
     await hermesResumeSession({ sessionId: 'session-a', timeoutMs: 100 }, 'acp-b')
 
-    expect(invoke).toHaveBeenCalledWith('hermes_resume_session', { sessionId: 'session-a', generation: 1, acpSessionId: 'acp-b' })
+    expect(invoke).toHaveBeenCalledWith('agent_chat_resume_session', { sessionId: 'session-a', generation: 1, acpSessionId: 'acp-b' })
     expect(useWorkspaceStore.getState().hermesCurrentSession['session-a']).toBe('acp-b')
     expect(useWorkspaceStore.getState().hermesTranscript['session-a']).toEqual([
       { role: 'user', text: 'restored prompt', thoughts: '', toolCalls: [] },
@@ -102,8 +102,8 @@ describe('Hermes ACP startup', () => {
 
   test('successful new session clears prior transcript, permissions, and usage', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_new_session') return 'acp-new'
-      if (command === 'hermes_list_sessions') return [{ id: 'acp-new', title: 'New', updatedAt: null, cwd: 'E:/repo' }]
+      if (command === 'agent_chat_new_session') return 'acp-new'
+      if (command === 'agent_chat_list_sessions') return [{ id: 'acp-new', title: 'New', updatedAt: null, cwd: 'E:/repo' }]
       return null
     })
     useWorkspaceStore.setState({
@@ -127,7 +127,7 @@ describe('Hermes ACP startup', () => {
   test('dedupes concurrent session-list refreshes for one workspace', async () => {
     let releaseList: (() => void) | undefined
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_list_sessions') await new Promise<void>((resolve) => { releaseList = resolve })
+      if (command === 'agent_chat_list_sessions') await new Promise<void>((resolve) => { releaseList = resolve })
       return []
     })
     useWorkspaceStore.setState({ hermesGenerations: { 'session-a': 1 } })
@@ -139,13 +139,13 @@ describe('Hermes ACP startup', () => {
     releaseList?.()
     await Promise.all([first, second])
 
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'hermes_list_sessions')).toHaveLength(1)
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'agent_chat_list_sessions')).toHaveLength(1)
   })
 
   test('dedupes concurrent startup requests for one workspace', async () => {
     let releaseStart: (() => void) | undefined
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_start') {
+      if (command === 'agent_chat_start') {
         await new Promise<void>((resolve) => { releaseStart = resolve })
         queueMicrotask(() => emitHermesEvent?.({ generation: 1, kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
         return { generation: 1 }
@@ -159,7 +159,7 @@ describe('Hermes ACP startup', () => {
     releaseStart?.()
     await Promise.all([first, second])
 
-    const startCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'hermes_start')
+    const startCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'agent_chat_start')
     expect(startCalls).toHaveLength(1)
   })
 
@@ -192,7 +192,7 @@ describe('Hermes ACP startup', () => {
   test('stops and retries a stuck ACP startup once', async () => {
     let startAttempts = 0
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_start') {
+      if (command === 'agent_chat_start') {
         startAttempts += 1
         const generation = startAttempts
         if (startAttempts === 2) {
@@ -205,15 +205,15 @@ describe('Hermes ACP startup', () => {
 
     await startHermesAgent({ sessionId: 'session-a', timeoutMs: 1 })
 
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'hermes_start')).toHaveLength(2)
-    expect(invoke).toHaveBeenCalledWith('hermes_stop', { sessionId: 'session-a' })
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'agent_chat_start')).toHaveLength(2)
+    expect(invoke).toHaveBeenCalledWith('agent_chat_stop', { sessionId: 'session-a' })
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
   })
 
   test('releases a failed prompt and acknowledges exactly one retry', async () => {
     let sendAttempts = 0
     vi.mocked(invoke).mockImplementation(async (command: string) => {
-      if (command === 'hermes_send') {
+      if (command === 'agent_chat_send') {
         sendAttempts += 1
         if (sendAttempts === 1) throw new Error('write failed')
       }
@@ -234,9 +234,9 @@ describe('Hermes ACP startup', () => {
     await dispatchHermesPrompt('session-a', retry)
 
     expect(useWorkspaceStore.getState().hermesPendingPrompts['session-a']).toEqual([])
-    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'hermes_send')).toEqual([
-      ['hermes_send', { sessionId: 'session-a', generation: 3, text: 'retry me' }],
-      ['hermes_send', { sessionId: 'session-a', generation: 3, text: 'retry me' }],
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'agent_chat_send')).toEqual([
+      ['agent_chat_send', { sessionId: 'session-a', generation: 3, text: 'retry me' }],
+      ['agent_chat_send', { sessionId: 'session-a', generation: 3, text: 'retry me' }],
     ])
   })
 

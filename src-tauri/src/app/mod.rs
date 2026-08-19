@@ -1,4 +1,5 @@
 pub mod account;
+pub mod acp;
 pub mod agent_history;
 pub mod agent_hooks;
 pub mod agent_skills;
@@ -137,7 +138,7 @@ pub fn run() {
                 boxed
             })?;
             app.manage(DaemonClient::new_with_app(stream, app.handle().clone()));
-            app.manage(Arc::new(hermes::HermesManager::new()));
+            app.manage(Arc::new(acp::AcpManager::new()));
             let account = Arc::new(account::AccountService::new().map_err(|error| {
                 let boxed: Box<dyn std::error::Error> = error.into();
                 boxed
@@ -280,22 +281,22 @@ pub fn run() {
             commands::remote_setup_firewall,
             commands::set_remote_appearance,
             commands::set_desktop_selection,
-            hermes::hermes_cancel,
-            hermes::hermes_respond_permission,
-            hermes::hermes_send,
-            hermes::hermes_set_mode,
-            hermes::hermes_set_model,
-            hermes::hermes_start,
-            hermes::hermes_stop,
-            hermes::hermes_new_session,
-            hermes::hermes_resume_session,
-            hermes::hermes_list_sessions,
-            hermes::init_hermes_output,
+            acp::agent_chat_cancel,
+            acp::agent_chat_respond_permission,
+            acp::agent_chat_send,
+            acp::agent_chat_set_mode,
+            acp::agent_chat_set_model,
+            acp::agent_chat_start,
+            acp::agent_chat_stop,
+            acp::agent_chat_new_session,
+            acp::agent_chat_resume_session,
+            acp::agent_chat_list_sessions,
+            acp::init_agent_chat_output,
             hermes::hermes_auth_list,
             hermes::hermes_cli_command,
             mcp_check::mcp_self_check,
             hermes::hermes_workspace_state,
-            hermes::agent_workspace_cleanup,
+            acp::agent_workspace_cleanup,
             hermes::hermes_runtime_status,
             account::account_status,
             account::account_sign_in_start,
@@ -453,7 +454,7 @@ pub fn run() {
             if let Some(relay) = app.try_state::<system_wake::SystemWakeRelay>() {
                 relay.shutdown();
             }
-            if let Some(manager) = app.try_state::<Arc<hermes::HermesManager>>() {
+            if let Some(manager) = app.try_state::<Arc<acp::AcpManager>>() {
                 manager.shutdown_all();
             }
             let stop_on_exit = app

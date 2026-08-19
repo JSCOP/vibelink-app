@@ -11,7 +11,7 @@ type HermesPermissionPromptProps = {
 export function HermesPermissionPrompt({ sessionId, permission }: HermesPermissionPromptProps) {
   const resolveHermesPermission = useWorkspaceStore((state) => state.resolveHermesPermission)
   const respond = async (optionId: string) => {
-    await invoke('hermes_respond_permission', { sessionId, generation: permission.generation, requestId: permission.requestId, optionId })
+    await invoke('agent_chat_respond_permission', { sessionId, generation: permission.generation, requestId: permission.requestId, optionId })
     resolveHermesPermission(sessionId, permission.requestId)
   }
 

@@ -101,7 +101,7 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
     }
   })
 
-  const nextRegistration = invoke<void>('init_hermes_output', { channel }).catch((error) => {
+  const nextRegistration = invoke<void>('init_agent_chat_output', { channel }).catch((error) => {
     if (registration === nextRegistration) registration = undefined
     throw error
   })
@@ -118,7 +118,7 @@ export async function startHermesAgent({ sessionId, commandOverride = null, work
   const task = startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs })
     .catch(async (error) => {
       if (!restartOnTimeout || !isStartTimeout(error)) throw error
-      await invoke('hermes_stop', { sessionId }).catch(() => undefined)
+      await invoke('agent_chat_stop', { sessionId }).catch(() => undefined)
       return startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs })
     })
     .finally(() => {
@@ -135,11 +135,11 @@ export function getHermesRuntimeStatus(commandOverride?: string | null): Promise
 }
 
 export function setHermesModel(sessionId: string, modelId: string): Promise<void> {
-  return invoke('hermes_set_model', { sessionId, generation: requiredHermesGeneration(sessionId), modelId })
+  return invoke('agent_chat_set_model', { sessionId, generation: requiredHermesGeneration(sessionId), modelId })
 }
 export async function dispatchHermesPrompt(sessionId: string, prompt: HermesPendingPrompt): Promise<void> {
   try {
-    await invoke('hermes_send', {
+    await invoke('agent_chat_send', {
       sessionId,
       generation: requiredHermesGeneration(sessionId),
       text: prompt.text,
@@ -155,7 +155,7 @@ export async function dispatchHermesPrompt(sessionId: string, prompt: HermesPend
 export async function hermesNewSession(input: StartHermesAgentInput): Promise<string> {
   await startHermesAgent(input)
   const generation = requiredHermesGeneration(input.sessionId)
-  const acpId = await invoke<string>('hermes_new_session', { sessionId: input.sessionId, generation })
+  const acpId = await invoke<string>('agent_chat_new_session', { sessionId: input.sessionId, generation })
   if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   const store = useWorkspaceStore.getState()
   store.setHermesCurrentSession(input.sessionId, acpId)
@@ -167,7 +167,7 @@ export async function hermesNewSession(input: StartHermesAgentInput): Promise<st
 export async function hermesResumeSession(input: StartHermesAgentInput, acpSessionId: string): Promise<void> {
   await startHermesAgent(input)
   const generation = requiredHermesGeneration(input.sessionId)
-  await invoke('hermes_resume_session', { sessionId: input.sessionId, generation, acpSessionId })
+  await invoke('agent_chat_resume_session', { sessionId: input.sessionId, generation, acpSessionId })
   if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   useWorkspaceStore.getState().setHermesCurrentSession(input.sessionId, acpSessionId)
 }
@@ -176,7 +176,7 @@ export function hermesRefreshSessions(sessionId: string): Promise<void> {
   const existing = sessionRefreshPromises.get(sessionId)
   if (existing) return existing
   const generation = requiredHermesGeneration(sessionId)
-  const task = invoke<HermesSessionInfo[]>('hermes_list_sessions', { sessionId, generation })
+  const task = invoke<HermesSessionInfo[]>('agent_chat_list_sessions', { sessionId, generation })
     .then((list) => {
       if (useWorkspaceStore.getState().hermesGenerations[sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
       useWorkspaceStore.getState().setHermesSessions(sessionId, list)
@@ -192,7 +192,7 @@ async function startHermesAgentOnce({ sessionId, commandOverride, workspaceFolde
   const store = useWorkspaceStore.getState()
   await startHermesOutputStream({ force: true })
   store.setHermesStatus(sessionId, 'starting')
-  const result = await invoke<HermesStartResult>('hermes_start', { sessionId, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
+  const result = await invoke<HermesStartResult>('agent_chat_start', { sessionId, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
   store.setHermesGeneration(sessionId, result.generation)
   await waitForHermesReady(sessionId, result.generation, timeoutMs)
 }

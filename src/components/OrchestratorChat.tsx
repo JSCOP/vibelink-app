@@ -196,11 +196,11 @@ export function OrchestratorChat() {
     await startHermesOutputStream({ force: true })
     const generation = useWorkspaceStore.getState().hermesGenerations[sessionId]
     if (generation === undefined) return
-    await invoke('hermes_cancel', { sessionId, generation })
+    await invoke('agent_chat_cancel', { sessionId, generation })
   }
 
   const restart = async () => {
-    await invoke('hermes_stop', { sessionId }).catch(() => undefined)
+    await invoke('agent_chat_stop', { sessionId }).catch(() => undefined)
     await startHermesAgent({ sessionId, commandOverride: controller.commandOverride, workspaceFolder: controller.workspaceFolder })
   }
 

@@ -1242,7 +1242,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const session = get().sessions.find((item) => item.id === sessionId)
       get().setHermesStatus(sessionId, 'starting')
       try {
-        const started = await invoke<{ generation: number }>('hermes_start', {
+        const started = await invoke<{ generation: number }>('agent_chat_start', {
           sessionId,
           commandOverride: get().settings.hermesCommand || null,
           workspaceFolder: session?.workspaceFolder ?? null,

@@ -26,7 +26,10 @@ const sourceBudgets = {
   // Rebasing a pane's scrollback onto a GUI-rendered snapshot.
   'src-tauri/src/daemon/session.rs': 3_086,
   'src-tauri/src/browser/provider.rs': 2_834,
-  'src-tauri/src/app/hermes.rs': 2_706,
+  // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
+  // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
+  'src-tauri/src/app/acp.rs': 2_248,
+  'src-tauri/src/app/hermes.rs': 439,
   'src-tauri/src/control_plane.rs': 2_471,
   // Over-cap baseline: split or justify before raising.
   'src/components/SettingsDialog.tsx': 1_483,
