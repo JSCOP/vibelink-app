@@ -28,9 +28,7 @@ import { WorkspaceAddMenu } from '../components/WorkspaceAddMenu'
 import { QuickPick } from '../components/QuickPick'
 import { isAppDialogOpen, promptDialog } from '../components/appDialogStore'
 import type { PickerEntry } from '../components/pickerModel'
-import { WorkbenchContentPanel as WorkbenchPanel } from '../components/git/GitWindow'
 import { ExplorerSidebarPanel, WorkspaceFilesSidebarPanel } from '../components/explorer/ExplorerWindow'
-import { PreviewContentPanel } from '../components/explorer/PreviewContentPanel'
 import { SourceControlSidebar } from '../components/git/SourceControlSidebar'
 import { WorkspacesSidebar } from '../components/workspaces/WorkspacesSidebar'
 import { GitHistorySidebar } from '../components/git/GitHistorySidebar'
@@ -138,6 +136,8 @@ const OrchestrationWorkspacePanel = lazy(() => import('../components/Orchestrati
 const MemoryGraphPanel = lazy(() => import('../components/memory/MemoryGraphPanel').then((module) => ({ default: module.MemoryGraphPanel })))
 const NativeBrowserContentPanel = lazy(() => import('../browser/BrowserDockPanel').then((module) => ({ default: module.BrowserContentPanel })))
 const EditorContentPanel = lazy(() => import('../editor/EditorContentPanel').then((module) => ({ default: module.EditorContentPanel })))
+const WorkbenchPanel = lazy(() => import('../components/git/GitWindow').then((module) => ({ default: module.WorkbenchContentPanel })))
+const PreviewContentPanel = lazy(() => import('../components/explorer/PreviewContentPanel').then((module) => ({ default: module.PreviewContentPanel })))
 
 
 type WorkspaceContentPanelProps = IDockviewPanelProps<WorkspaceContentParams>
@@ -412,7 +412,7 @@ function WorkbenchContentPanel(props: WorkspaceContentPanelProps) {
     ...actions,
     openContent: (request) => actions.openContent({ ...request, targetGroupId: request.targetGroupId ?? targetGroupId }),
   } : null, [actions, targetGroupId])
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git"><ErrorBoundary label="Workbench panel"><WorkspaceContentActionsContext.Provider value={scopedActions}><WorkbenchPanel onWorkspaceInput={onWorkspaceInput} /></WorkspaceContentActionsContext.Provider></ErrorBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-git"><ErrorBoundary label="Workbench panel"><WorkspaceContentActionsContext.Provider value={scopedActions}><Suspense fallback={null}><WorkbenchPanel onWorkspaceInput={onWorkspaceInput} /></Suspense></WorkspaceContentActionsContext.Provider></ErrorBoundary></WindowPanelShell>
 }
 
 type ContextualExplorerContentPanelProps = WorkspaceContentPanelProps & { variant: 'explorer' | 'workspaceFiles' }
@@ -459,7 +459,7 @@ function PreviewWorkspaceContentPanel(props: WorkspaceContentPanelProps) {
   if (!sessionId || !workspaceFolder || params?.kind !== 'preview') {
     return <WindowPanelShell panelId={props.api.id}><div className="placeholder-panel">Preview content metadata is missing.</div></WindowPanelShell>
   }
-  return <WindowPanelShell panelId={props.api.id} className="workspace-window-preview"><ErrorBoundary label="Preview panel"><PreviewContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></ErrorBoundary></WindowPanelShell>
+  return <WindowPanelShell panelId={props.api.id} className="workspace-window-preview"><ErrorBoundary label="Preview panel"><Suspense fallback={null}><PreviewContentPanel sessionId={sessionId} workspaceFolder={workspaceFolder} relPath={params.relPath} /></Suspense></ErrorBoundary></WindowPanelShell>
 }
 
 function EditorWorkspaceContentPanel(props: WorkspaceContentPanelProps) {

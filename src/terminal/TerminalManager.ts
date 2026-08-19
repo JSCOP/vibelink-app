@@ -101,6 +101,8 @@ const RENDERER_RESET_SETTLE_MS = 1000
 // with a black pane. Cap the buffer so an orphaned panel cannot grow it.
 const MAX_PENDING_INPUT_CHUNKS = 256
 const MAX_PENDING_INPUT_BYTES = 256 * 1024
+// Cap for one coalesced write_pane payload; large pastes still stream in bounded writes.
+const MAX_INPUT_WRITE_BYTES = 4 * 1024
 const inputEncoder = new TextEncoder()
 // Pointer activation performs one lightweight renderer repair and, for full-
 // screen TUIs, one temporary PTY row nudge. This reproduces the repaint effect
@@ -886,9 +888,23 @@ class TerminalManagerImpl {
   private async flushInputLoop(entry: Entry, sessionId: string, generation: number): Promise<void> {
     while (entry.pendingInput?.length) {
       if (this.entries.get(entry.paneId) !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId || !entry.daemonAttached) return
-      const chunk = entry.pendingInput[0]
+      // One IPC round trip per queued chunk serializes a typing burst behind
+      // N invokes. Coalesce whatever queued up while the previous round trip
+      // was in flight into a single write; a lone keystroke still goes out
+      // immediately as its own write.
+      const head = entry.pendingInput[0]
+      let batchCount = 1
+      let batchBytes = head.bytes
+      while (
+        batchCount < entry.pendingInput.length
+        && batchBytes + entry.pendingInput[batchCount].bytes <= MAX_INPUT_WRITE_BYTES
+      ) {
+        batchBytes += entry.pendingInput[batchCount].bytes
+        batchCount += 1
+      }
+      const batch = entry.pendingInput.slice(0, batchCount)
       try {
-        await invoke('write_pane', { sessionId, paneId: entry.paneId, data: chunk.data })
+        await invoke('write_pane', { sessionId, paneId: entry.paneId, data: batch.map((chunk) => chunk.data).join('') })
       } catch {
         if (this.entries.get(entry.paneId) === entry && entry.daemonGeneration === generation && entry.sessionId === sessionId) {
           entry.daemonAttached = false
@@ -900,9 +916,9 @@ class TerminalManagerImpl {
         }
         return
       }
-      if (this.entries.get(entry.paneId) !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId || entry.pendingInput[0] !== chunk) return
-      entry.pendingInput.shift()
-      entry.pendingInputBytes = Math.max(0, (entry.pendingInputBytes ?? 0) - chunk.bytes)
+      if (this.entries.get(entry.paneId) !== entry || entry.daemonGeneration !== generation || entry.sessionId !== sessionId || entry.pendingInput[0] !== head) return
+      entry.pendingInput.splice(0, batchCount)
+      entry.pendingInputBytes = Math.max(0, (entry.pendingInputBytes ?? 0) - batchBytes)
       if (entry.pendingInput.length === 0) entry.pendingInput = undefined
     }
   }

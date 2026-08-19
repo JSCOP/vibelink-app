@@ -94,3 +94,9 @@ windows = { version = "=0.61.3", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Release binary: thin LTO + single codegen unit measurably shrink and speed the 694-crate build output; strip removes symbols from the shipped exe.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

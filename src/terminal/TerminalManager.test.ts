@@ -48,17 +48,17 @@ describe('TerminalManager pre-session input buffering', () => {
     // spawn_pane resolved; the store update re-renders the panel with a session.
     TerminalManager.attach(paneId, container, { sessionId: 'session-1' })
     await TerminalManager.waitForReplay('session-1', [paneId])
+    // Chunks queued before attach flush as one coalesced write.
     await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toEqual([
-      ['write_pane', { sessionId: 'session-1', paneId, data: '\x1b[O' }],
-      ['write_pane', { sessionId: 'session-1', paneId, data: '\x1b[1;1R' }],
+      ['write_pane', { sessionId: 'session-1', paneId, data: '\x1b[O\x1b[1;1R' }],
     ]))
     expect(invokeMock).toHaveBeenCalledWith('subscribe_pane', { sessionId: 'session-1', paneId })
 
     // The buffer must not replay on later input.
     emitTerminalData(paneId, 'x')
     const writesAfter = invokeMock.mock.calls.filter(([command]) => command === 'write_pane')
-    expect(writesAfter).toHaveLength(3)
-    expect(writesAfter[2]).toEqual(['write_pane', { sessionId: 'session-1', paneId, data: 'x' }])
+    expect(writesAfter).toHaveLength(2)
+    expect(writesAfter[1]).toEqual(['write_pane', { sessionId: 'session-1', paneId, data: 'x' }])
 
     TerminalManager.dispose(paneId)
   })
@@ -130,11 +130,12 @@ describe('TerminalManager pre-session input buffering', () => {
     await vi.waitFor(() => expect(writeAttempts).toBe(1))
 
     TerminalManager.reattachToDaemon('session-write-retry', [paneId])
-    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(3))
+    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === 'write_pane')).toHaveLength(2))
     const payloads = invokeMock.mock.calls
       .filter(([command]) => command === 'write_pane')
       .map(paneWriteData)
-    expect(payloads).toEqual(['first', 'first', 'second'])
+    // The failed coalesced batch is retained whole and re-sent in order.
+    expect(payloads).toEqual(['firstsecond', 'firstsecond'])
     TerminalManager.dispose(paneId)
   })
 

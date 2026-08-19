@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react'
-import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement } from 'react'
+import type { ReactDiffViewerProps } from 'react-diff-viewer-continued'
+// Keep the diff renderer out of the startup bundle; every sidebar that shows a diff routes through here.
+const ReactDiffViewer = lazy(() => import('react-diff-viewer-continued'))
 import type { ChangedFile, FileContents, GitDiffArea, GitHunkAction, UnifiedFileDiff } from '../../ipc/types'
 import { buildDiffHighlightMap, expandDiffTabs, type DiffHighlightMap } from './diffSyntaxHighlight'
 import { gitChangeMeta } from '../../state/gitChangeMeta'
@@ -202,7 +204,7 @@ export function DiffPane({ files, selectedPath, onSelect, contents, loading, spl
           // noise. WORDS_WITH_SPACE keeps whitespace in the chunks, so the
           // reconstructed line is byte-identical to the source and the
           // syntax-highlight overlay stays aligned.
-          <ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} compareMethod={DiffMethod.WORDS_WITH_SPACE} useDarkTheme styles={diffStyles} renderContent={renderContent} />
+          <Suspense fallback={null}><ReactDiffViewer oldValue={normalizedContents.old} newValue={normalizedContents.new} splitView={effectiveSplitView} compareMethod={'diffWordsWithSpace' as ReactDiffViewerProps['compareMethod']} useDarkTheme styles={diffStyles} renderContent={renderContent} /></Suspense>
         ) : null}
       </main>
     </div>
