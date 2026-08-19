@@ -50,7 +50,10 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
 
   const channel = new Channel<HermesEvent>((event) => {
     const store = useWorkspaceStore.getState()
-    if (event.chatId) store.setHermesChatId(event.sessionId, event.chatId)
+    // Events fill the mapping only when nothing owns it yet: with one chat per
+    // provider per workspace, a background chat's events must not steal the
+    // panel's outgoing-command target.
+    if (event.chatId && !store.hermesChatIds[event.sessionId]) store.setHermesChatId(event.sessionId, event.chatId)
     const currentGeneration = store.hermesGenerations[event.sessionId]
     if (currentGeneration !== undefined && event.generation < currentGeneration) return
     if (currentGeneration !== event.generation) store.setHermesGeneration(event.sessionId, event.generation)

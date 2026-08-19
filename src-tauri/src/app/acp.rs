@@ -75,12 +75,27 @@ fn resolve_claude_code_acp(command_override: Option<String>) -> Result<(String, 
             .ok_or_else(|| anyhow!("Claude Code ACP override not found: {command}"))?;
         return Ok((resolved, Vec::new()));
     }
-    if let Some(command) = crate::daemon::pty::resolve_program("claude-code-acp") {
+    // npm installs Windows bins as extensionless sh scripts plus .cmd shims;
+    // only the .cmd is spawnable, so prefer it explicitly.
+    let global = if cfg!(windows) {
+        crate::daemon::pty::resolve_program("claude-code-acp.cmd")
+            .or_else(|| crate::daemon::pty::resolve_program("claude-code-acp.exe"))
+    } else {
+        crate::daemon::pty::resolve_program("claude-code-acp")
+    };
+    if let Some(command) = global {
         return Ok((command, Vec::new()));
     }
-    // Fall back to npx so the adapter works without a global install.
-    let npx = crate::daemon::pty::resolve_program("npx")
-        .ok_or_else(|| anyhow!("Claude Code ACP requires `claude-code-acp` or `npx` on PATH"))?;
+    // Fall back to npx so the adapter works without a global install. On
+    // Windows the runnable shim is npx.cmd; the bare `npx` file is a shell
+    // script CreateProcess cannot start (os error 193).
+    let npx = if cfg!(windows) {
+        crate::daemon::pty::resolve_program("npx.cmd")
+            .or_else(|| crate::daemon::pty::resolve_program("npx"))
+    } else {
+        crate::daemon::pty::resolve_program("npx")
+    }
+    .ok_or_else(|| anyhow!("Claude Code ACP requires `claude-code-acp` or `npx` on PATH"))?;
     Ok((
         npx,
         vec![
@@ -362,6 +377,18 @@ impl AcpManager {
 
         let result = (|| -> Result<()> {
             let (command_path, command_args) = (provider.resolve)(command_override)?;
+            // Windows CreateProcess cannot spawn .cmd/.bat shims (npm installs
+            // its bins as .cmd); route those through cmd.exe explicitly.
+            let (command_path, command_args) =
+                if command_path.to_ascii_lowercase().ends_with(".cmd")
+                    || command_path.to_ascii_lowercase().ends_with(".bat")
+                {
+                    let mut wrapped = vec!["/C".to_string(), command_path];
+                    wrapped.extend(command_args);
+                    ("cmd.exe".to_string(), wrapped)
+                } else {
+                    (command_path, command_args)
+                };
             let agent_dir = agent_workspace_dir(&chat_id)?;
             std::fs::create_dir_all(&agent_dir)?;
             let cwd = resolve_workspace_cwd(workspace_folder.as_deref(), &agent_dir)?;

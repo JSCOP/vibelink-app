@@ -159,6 +159,8 @@ type WorkspaceState = {
   paneScreenStates: Record<string, PaneScreenState>
   /** Durable chat id per workspace for the active provider chat. */
   hermesChatIds: Record<string, string>
+  /** The provider the agent panel currently targets, per workspace. */
+  agentProviders: Record<string, 'hermes' | 'claude-code'>
   hermesCurrentSession: Record<string, string>
   hermesSessions: Record<string, HermesSessionInfo[]>
   selectedTaskId: Record<string, string | null>
@@ -263,6 +265,7 @@ type WorkspaceState = {
   setHermesGeneration: (sessionId: string, generation: number) => void
   setPaneScreenState: (paneId: string, state: PaneScreenState | null) => void
   setHermesChatId: (sessionId: string, chatId: string) => void
+  setAgentProvider: (sessionId: string, provider: 'hermes' | 'claude-code') => void
   hydrateHermesTranscript: (sessionId: string, turns: HermesTurn[]) => void
   enqueueHermesPrompt: (sessionId: string, text: string) => void
   claimHermesPrompt: (sessionId: string) => HermesPendingPrompt | undefined
@@ -306,6 +309,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   hermesGenerations: {},
   paneScreenStates: {},
   hermesChatIds: {},
+  agentProviders: {},
   hermesModels: {},
   hermesPendingPrompts: {},
   hermesCurrentSession: {},
@@ -1251,10 +1255,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const session = get().sessions.find((item) => item.id === sessionId)
       get().setHermesStatus(sessionId, 'starting')
       try {
+        const provider = get().agentProviders[sessionId] ?? 'hermes'
         const started = await invoke<{ generation: number; chatId: string }>('agent_chat_start', {
           sessionId,
-          provider: 'hermes',
-          commandOverride: get().settings.hermesCommand || null,
+          provider,
+          commandOverride: provider === 'hermes' ? (get().settings.hermesCommand || null) : null,
           workspaceFolder: session?.workspaceFolder ?? null,
         })
         get().setHermesChatId(sessionId, started.chatId)
@@ -1356,6 +1361,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if ((state.hermesTranscript[sessionId]?.length ?? 0) > 0) return state
       return { hermesTranscript: { ...state.hermesTranscript, [sessionId]: turns } }
     })
+  },
+  setAgentProvider: (sessionId: string, provider: 'hermes' | 'claude-code') => {
+    set((state) => state.agentProviders[sessionId] === provider ? state : ({
+      agentProviders: { ...state.agentProviders, [sessionId]: provider },
+    }))
   },
   setHermesChatId: (sessionId: string, chatId: string) => {
     set((state) => state.hermesChatIds[sessionId] === chatId ? state : ({

@@ -38,7 +38,9 @@ export function OrchestratorChat() {
   const [activeSince, setActiveSince] = useState<number | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [agentSection, setAgentSection] = useState<AgentSection>('chat')
-  const [provider, setProvider] = useState<'hermes' | 'claude-code'>('hermes')
+  const provider = useWorkspaceStore((state) => (sessionId ? state.agentProviders[sessionId] : undefined) ?? 'hermes')
+  const setAgentProvider = useWorkspaceStore((state) => state.setAgentProvider)
+  const setProvider = (next: 'hermes' | 'claude-code') => { if (sessionId) setAgentProvider(sessionId, next) }
   const isClaude = provider === 'claude-code'
 
   const workspaceFolderLabel = controller.workspaceFolder || workspace?.workspaceFolder || 'VibeLink agent workspace'
@@ -83,7 +85,9 @@ export function OrchestratorChat() {
     let cancelled = false
     void loadAgentChatHistory(sessionId)
       .then((chat) => {
-        if (!cancelled && chat && (chat.provider === 'hermes' || chat.provider === 'claude-code')) setProvider(chat.provider)
+        if (!cancelled && chat && (chat.provider === 'hermes' || chat.provider === 'claude-code')) {
+          useWorkspaceStore.getState().setAgentProvider(sessionId, chat.provider)
+        }
       })
       .catch(() => undefined)
     return () => { cancelled = true }
